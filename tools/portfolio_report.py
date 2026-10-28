@@ -8914,6 +8914,30 @@ def _lifecycle_epoch_rows(
     return rows
 
 
+def _economic_end_fields(
+    strategy_id: str, manifest_rows: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """The day a retained strategy's capital left and how its end day is dated.
+
+    ``retired_on`` is the epoch's end, which can be the NAV recognition day after the exit
+    fill; the manifest row carries both, and this reads the latest exited epoch of the
+    strategy, never a date typed here.
+    """
+
+    exited = [
+        row
+        for row in manifest_rows
+        if row.get("strategy_id") == strategy_id and row.get("economic_end_date")
+    ]
+    if not exited:
+        return {"economic_end_date": None, "end_recognition_basis": None}
+    last = max(exited, key=lambda row: str(row["economic_end_date"]))
+    return {
+        "economic_end_date": last["economic_end_date"],
+        "end_recognition_basis": last.get("end_recognition_basis"),
+    }
+
+
 def _lifecycle_strategy_rows(
     summary: Sequence[Mapping[str, Any]],
     *,
@@ -8923,6 +8947,7 @@ def _lifecycle_strategy_rows(
     sleeves_by_strategy: Mapping[str, Mapping[str, Any]],
     strategy_names: Mapping[str, str],
     derived_epochs: Sequence[tuple[str, str, str, str | None]] = (),
+    manifest_rows: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Lifecycle fields for the current strategies and the retained records.
 
@@ -8985,6 +9010,7 @@ def _lifecycle_strategy_rows(
                 closed_ons=closed_ons(strategy_id),
                 link=sleeves_by_strategy.get(strategy_id),
             ),
+            **_economic_end_fields(strategy_id, manifest_rows),
         }
     for strategy_id, link in sleeves_by_strategy.items():
         if strategy_id in current_ids or strategy_id in retained:
@@ -9022,6 +9048,7 @@ def _lifecycle_strategy_rows(
                 closed_ons=closed,
                 link=link,
             ),
+            **_economic_end_fields(strategy_id, manifest_rows),
         }
     return current, [retained[key] for key in sorted(retained)]
 
@@ -10173,6 +10200,13 @@ def build_report_data(
                     if epoch_perimeter is not None
                     else ()
                 ),
+                manifest_rows=[
+                    row
+                    for row in (
+                        manifest_rows_raw if isinstance(manifest_rows_raw, list) else []
+                    )
+                    if isinstance(row, Mapping)
+                ],
                 strategy_names={
                     _text(item.get("strategy_id"), "strategy.strategy_id"): _text(
                         item.get("name"), "strategy.name"
@@ -10257,6 +10291,12 @@ def build_report_data(
                     invested_capital=invested_capital,
                     sleeve_accounts=sleeve_accounts,
                     product_strategies=derived_product,
+                    hwm_current_index=(
+                        None
+                        if governed_hwm_proof is None
+                        or governed_hwm_proof.get("current_index") is None
+                        else str(governed_hwm_proof["current_index"])
+                    ),
                     strategy_returns={
                         str(item["strategy_id"]): Decimal(
                             str(item["account_live_cumulative_return"])
@@ -12205,13 +12245,22 @@ def _apply_return_scope(
                 "account_live_max_drawdown",
                 "current_value",
                 "weekly_series",
+                "hwm_max_drawdown",
+                "hwm_current_drawdown",
+                "systematic_weight",
+                "cost_rate_denominator_usd",
+                "ytd_twr",
+                "calendar_year_twr",
+                "account_live_cagr",
             ],
             "includes_retired_sleeve_accounts": retired,
             "mwr_and_governed_capital_basis": "SLEEVE_EPOCH",
             "sleeve_epoch_accounts": sleeves,
         }
         item["return_scope_label"] = (
-            f"Return, drawdown, current value and weekly series: parent account "
+            f"Return (cumulative, year-to-date, calendar-year, annualised), drawdowns "
+            f"(account-live and HWM), current value, weight, cost-rate denominator and "
+            f"weekly series: parent account "
             f"{', '.join(parents)} (includes retired sleeves "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in retired) or 'none'} and its "
             f"unallocated cash and margin). MWR and governed capital: sleeve "

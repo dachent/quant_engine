@@ -5187,12 +5187,17 @@ def _period_periods_per_year(end_dates: Sequence[date]) -> tuple[int | None, str
 
 
 def _exited_epoch(row: Mapping[str, Any]) -> bool:
-    """An epoch whose capital is fully withdrawn: no return on net capital is meaningful."""
+    """An epoch whose capital is fully withdrawn: no return on net capital is meaningful.
+
+    Nothing is left, so the ratio of the gain to the net capital is -100% by identity when
+    the net capital is positive; when more came out than went in (negative net capital) the
+    ratio has no meaning at all.  Either way the basis says why the figure is absent.
+    """
 
     try:
         return (
             Decimal(str(row.get("current_value"))) == 0
-            and Decimal(str(row.get("net_capital"))) > 0
+            and Decimal(str(row.get("net_capital"))) != 0
         )
     except (InvalidOperation, ValueError):
         return False
@@ -5321,6 +5326,7 @@ def _period_return_fields(
             "return_on_net_capital": {
                 "reported_basis": (None if _exited_epoch(row) else "CUMULATIVE"),
                 "window_days": span_days,
+                "window_start_field": "opening_capital_date",
                 **(
                     {"status": "NOT_MEANINGFUL_EXITED_EPOCH"}
                     if _exited_epoch(row)
@@ -5334,6 +5340,7 @@ def _period_return_fields(
                     else None
                 ),
                 "window_days": span_days,
+                "window_start_field": "opening_capital_date",
                 "method": (
                     None
                     if span_days is None

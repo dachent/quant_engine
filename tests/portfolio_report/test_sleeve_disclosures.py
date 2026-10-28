@@ -242,6 +242,16 @@ def test_an_evidence_file_that_differs_from_its_pin_is_refused(tmp_path: Path) -
         )
 
 
+def _without_reconciliation(omitted: list[dict[str, str]]) -> list[dict[str, str]]:
+    """These fixtures carry no ledger, so the perimeter reconciliation is omitted by name."""
+
+    return [
+        o
+        for o in omitted
+        if not o["entry"].startswith(("perimeter reconciliation", "capital paid into"))
+    ]
+
+
 def _rows() -> list[dict[str, Any]]:
     def row(
         account: str, strategy: str, end: str | None, gain: str, twr: str
@@ -314,7 +324,9 @@ def test_every_disclosure_is_derived_from_the_sources_and_the_rows(
     timing = by_item["Flow timing bounds"]
     assert "p123-ai-factor on account-1b44c987969b9e47 (cumulative TWR 2.45%)" in timing
     assert "-0.19 and +0.00" in timing and "p123-eu" in timing
-    assert {entry["entry"] for entry in result["omitted"]} == set()
+    assert {
+        entry["entry"] for entry in _without_reconciliation(result["omitted"])
+    } == set()
 
 
 def test_a_bound_whose_committed_return_differs_from_the_row_is_omitted_with_the_reason(
@@ -323,7 +335,7 @@ def test_a_bound_whose_committed_return_differs_from_the_row_is_omitted_with_the
     rows = _rows()
     rows[3]["observation_linked_return"] = "0.0300"
     result = _compose(tmp_path, rows)
-    assert result["omitted"] == [
+    assert _without_reconciliation(result["omitted"]) == [
         {
             "entry": f"timestamp bound p123-ai-factor on {PARENT}",
             "reason": "COMMITTED_RETURN_DIFFERS_FROM_REPORT_ROW",
@@ -390,7 +402,7 @@ def test_the_predecessor_comparison_is_read_by_hash_and_pointer_or_omitted(
         _rows(),
         predecessor=disclosures._resolve_predecessor(entry, data_root),
     )["omitted"]
-    assert omitted == [
+    assert _without_reconciliation(omitted) == [
         {
             "entry": "predecessor capital comparison",
             "reason": "PREDECESSOR_GENERATION_HASH_DIFFERS",

@@ -186,6 +186,7 @@
       "properties": {
         "reported_basis": {"enum": ["CUMULATIVE", "ANNUALISED", "ANNUALISED_FROM_DAYS", null]},
         "window_days": {"type": ["integer", "null"], "minimum": 0},
+        "window_start_field": {"const": "opening_capital_date"},
         "annualised_field": {"type": "string"},
         "annualised_status": {"enum": ["AVAILABLE", "SUPPRESSED_UNDER_365D", "UNAVAILABLE"]},
         "annualised_method": {"enum": ["GEOMETRIC_ACT_365", null]},

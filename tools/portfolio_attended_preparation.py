@@ -1296,7 +1296,11 @@ def _sleeve_tag_map_path(section: object) -> Path | None:
 
 
 def _build_sleeve_disclosure_sources(
-    section: object, *, facts_paths: Sequence[Path], destination: Path
+    section: object,
+    *,
+    facts_paths: Sequence[Path],
+    destination: Path,
+    ledger_generation_dir: Path | None,
 ) -> Path | None:
     """Write the disclosure sources of the selected sleeve facts (None without sleeves)."""
 
@@ -1307,6 +1311,11 @@ def _build_sleeve_disclosure_sources(
     assert isinstance(section, Mapping)
     import sleeve_disclosures
 
+    if ledger_generation_dir is None:
+        raise AttendedPreparationError(
+            "sleeve disclosure sources need the provider ledger generation: the "
+            "perimeter reconciliation cannot be built without it"
+        )
     policy = _pin(section["policy_manifest"], "sleeve policy")
     manifest = _read(policy, "sleeve policy manifest")
     pin = manifest.get("disclosure-inputs")
@@ -1343,6 +1352,7 @@ def _build_sleeve_disclosure_sources(
             inputs_path=inputs_path,
             predecessor_data_root=None if root_text is None else Path(str(root_text)),
             declared_inputs_path=declared_path,
+            ledger_path=ledger_generation_dir / "provider-ledger.json",
         )
     except (OSError, sleeve_disclosures.DisclosureError) as exc:
         raise AttendedPreparationError(
@@ -2227,6 +2237,11 @@ def _prepare_attended_inputs(
             config.get("sleeve_facts"),
             facts_paths=sleeve_facts_paths,
             destination=sleeve_facts_root,
+            ledger_generation_dir=root
+            / "stages"
+            / "ledger"
+            / "generations"
+            / str(ledger_result["generation_id"]),
         )
         epoch = stage_current_epoch_manifest(
             provider_ledger_generation_root=root / "stages" / "ledger",

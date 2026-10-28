@@ -4803,6 +4803,37 @@ def test_a_malformed_sleeve_configuration_is_refused(
         )
 
 
+def _ledger_dir(tmp_path: Path) -> Path:
+    """A ledger generation directory holding an empty catalog (no parent account in it)."""
+
+    directory = tmp_path / "ledger-generation"
+    directory.mkdir(exist_ok=True)
+    (directory / "provider-ledger.json").write_text("{}", encoding="utf-8")
+    return directory
+
+
+def test_selected_sleeve_facts_without_a_ledger_generation_are_refused(
+    tmp_path: Path,
+) -> None:
+    """The perimeter reconciliation needs the ledger: no silent release without it."""
+
+    section = _sleeve_section(tmp_path)
+    facts = tmp_path / "facts.json"
+    facts.write_text(
+        '{"artifact_id": "sleeve-account-facts", "provider_id": "ibkr"}',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="need the provider ledger"
+    ):
+        preparation._build_sleeve_disclosure_sources(
+            section,
+            facts_paths=(facts,),
+            destination=tmp_path,
+            ledger_generation_dir=None,
+        )
+
+
 def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
     tmp_path: Path,
 ) -> None:
@@ -4838,7 +4869,10 @@ def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
     destination = tmp_path / "out"
     destination.mkdir()
     path = preparation._build_sleeve_disclosure_sources(
-        section, facts_paths=(facts,), destination=destination
+        section,
+        facts_paths=(facts,),
+        destination=destination,
+        ledger_generation_dir=_ledger_dir(tmp_path),
     )
     assert path == destination / "sleeve-disclosure-sources.json"
     written = json.loads(path.read_bytes())
@@ -4847,7 +4881,10 @@ def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
     # no sleeves selected: no sources; a pin that differs from the file is refused
     assert (
         preparation._build_sleeve_disclosure_sources(
-            None, facts_paths=(facts,), destination=destination
+            None,
+            facts_paths=(facts,),
+            destination=destination,
+            ledger_generation_dir=_ledger_dir(tmp_path),
         )
         is None
     )
@@ -4856,7 +4893,10 @@ def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
         preparation.AttendedPreparationError, match="differ from their pin"
     ):
         preparation._build_sleeve_disclosure_sources(
-            section, facts_paths=(facts,), destination=tmp_path / "again"
+            section,
+            facts_paths=(facts,),
+            destination=tmp_path / "again",
+            ledger_generation_dir=_ledger_dir(tmp_path),
         )
 
 
@@ -4894,7 +4934,10 @@ def test_disclosure_sources_read_the_pinned_declared_funding_events_or_refuse(
     out = tmp_path / "out"
     out.mkdir()
     path = preparation._build_sleeve_disclosure_sources(
-        section, facts_paths=(facts,), destination=out
+        section,
+        facts_paths=(facts,),
+        destination=out,
+        ledger_generation_dir=_ledger_dir(tmp_path),
     )
     assert path is not None
     written = json.loads(path.read_bytes())
@@ -4906,5 +4949,8 @@ def test_disclosure_sources_read_the_pinned_declared_funding_events_or_refuse(
         preparation.AttendedPreparationError, match="declared inputs differ"
     ):
         preparation._build_sleeve_disclosure_sources(
-            section, facts_paths=(facts,), destination=tmp_path / "again"
+            section,
+            facts_paths=(facts,),
+            destination=tmp_path / "again",
+            ledger_generation_dir=_ledger_dir(tmp_path),
         )

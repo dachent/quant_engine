@@ -2,8 +2,8 @@
   "artifact_id": "sleeve-policy-manifest",
   "disclosure-inputs": {
     "path": "disclosure-inputs.json",
-    "sha256": "baeabd7341255253a988e24ec47368c8e90acd7edee713f91ef17b21ae11e07a",
-    "size_bytes": 1240
+    "sha256": "7dcb49cbac1dd80cb5eaa39c36310cdc4ef37903b3a4181a1d6e41b68415cf2d",
+    "size_bytes": 1304
   },
   "quantbase-fund-facts": {
     "declared_inputs": {
