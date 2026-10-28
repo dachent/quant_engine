@@ -204,3 +204,58 @@ def test_workspace_with_no_checkable_provider_is_skipped_not_passed(
         encoding="utf-8",
     )
     assert gate.check_ledger_generation(ledger_file, tmp_path)["status"] == "SKIPPED"
+
+
+def _preflight_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "portfolio_qc_fact_admission", ROOT / "tools" / "portfolio_qc.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _preflight_spec(tmp_path: Path, ledger_file: Path | None):
+    from types import SimpleNamespace
+
+    qc = _preflight_module()
+    gates = ()
+    if ledger_file is not None:
+        gates = (SimpleNamespace(gate_id=qc.FACT_ADMISSION_GATE_ID, path=ledger_file),)
+    coordination = tmp_path / "dataPortfolio" / "releases"
+    coordination.mkdir(parents=True, exist_ok=True)
+    return qc, SimpleNamespace(coordination_root=coordination, gates=gates)
+
+
+def test_release_preflight_runs_the_gate_on_the_candidate_ledger(
+    tmp_path: Path,
+) -> None:
+    ledger_file = _workspace(tmp_path)
+    qc, spec = _preflight_spec(tmp_path, ledger_file)
+    assert qc._fact_admission(spec) == {"status": "PASS"}  # noqa: SLF001
+
+
+def test_release_preflight_fails_when_the_candidate_ledger_dropped_a_fact(
+    tmp_path: Path,
+) -> None:
+    ledger_file = _workspace(tmp_path, drop="commission")
+    qc, spec = _preflight_spec(tmp_path, ledger_file)
+    with pytest.raises(qc.QualityControlFailure, match="commission dropped"):
+        qc._fact_admission(spec)  # noqa: SLF001
+
+
+def test_release_preflight_records_skipped_and_not_applicable_never_pass(
+    tmp_path: Path,
+) -> None:
+    ledger_file = tmp_path / "provider-ledger.json"
+    ledger_file.write_text(
+        json.dumps({"as_of_date": "2026-09-17", "provider_generations": []}),
+        encoding="utf-8",
+    )
+    qc, spec = _preflight_spec(tmp_path, ledger_file)
+    assert qc._fact_admission(spec) == {"status": "SKIPPED"}  # noqa: SLF001
+    _, no_gate = _preflight_spec(tmp_path, None)
+    assert qc._fact_admission(no_gate) == {"status": "NOT_APPLICABLE"}  # noqa: SLF001

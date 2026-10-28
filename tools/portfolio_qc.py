@@ -620,6 +620,42 @@ def _retired_workstation(args: argparse.Namespace) -> Path:
     )
 
 
+FACT_ADMISSION_GATE_ID = "financial-mvp-provider-catalog-authority"
+
+
+def _fact_admission(spec: Any) -> dict[str, str]:
+    """Run the dropped-fact gate on the candidate provider ledger (#535).
+
+    The candidate ledger is the spec gate whose bytes ``_candidate_qa`` already
+    pinned. Provider catalogs are read from the workspace that holds the
+    coordination root (``<workspace>/dataPortfolio/<coordination>``). A provider
+    whose catalog is not on disk is SKIPPED, which is recorded and never reported
+    as a pass; any dropped or changed fact fails the preflight.
+    """
+
+    ledger = next(
+        (gate.path for gate in spec.gates if gate.gate_id == FACT_ADMISSION_GATE_ID),
+        None,
+    )
+    if ledger is None:
+        return {"status": "NOT_APPLICABLE"}
+    workspace = Path(spec.coordination_root).parents[1]
+    output = _run_checked(
+        (
+            sys.executable,
+            str(REPOSITORY_ROOT / "tools" / "check_fact_admission.py"),
+            "--workspace",
+            str(workspace),
+            "--ledger",
+            str(ledger),
+        )
+    )
+    status = output.strip().splitlines()[-1].removeprefix("fact-admission: ")
+    if status not in {"PASS", "SKIPPED"}:
+        raise QualityControlFailure(f"fact admission gate: unexpected result {status}")
+    return {"status": status}
+
+
 def _release_preflight(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")
@@ -627,6 +663,7 @@ def _release_preflight(args: argparse.Namespace) -> Path:
     evidence_dir = _evidence_directory(args.evidence_dir)
     before = _production_snapshot(spec)
     qa, plan = _candidate_qa(spec, proof), _expected_plan(spec)
+    qa["fact_admission"] = _fact_admission(spec)
     after = _production_snapshot(spec)
     if after != before:
         raise QualityControlFailure("production state changed during release preflight")
