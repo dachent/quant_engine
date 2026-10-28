@@ -64,28 +64,31 @@ def dropped_facts(
 
 
 def _catalog_filenames() -> dict[str, str]:
-    """Provider id -> catalog filename, read from provider_ledger's own table.
+    """Provider id -> catalog filename, read from provider_ledger's descriptors.
 
-    The table is parsed from source (no import of the large module and no private
-    reach-in), so the two cannot drift.
+    The ``ProviderDescriptor(...)`` declarations are parsed from source (no import
+    of the large module and no private reach-in), so the two cannot drift.
     """
 
     tree = ast.parse(
         (Path(__file__).with_name("provider_ledger.py")).read_text("utf-8")
     )
+    names: dict[str, str] = {}
     for node in ast.walk(tree):
         if (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "_PROVIDER_CATALOGS"
-            and isinstance(node.value, ast.Dict)
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "ProviderDescriptor"
         ):
-            return {
-                str(ast.literal_eval(key)): str(ast.literal_eval(value.elts[0]))
-                for key, value in zip(node.value.keys, node.value.values, strict=True)
-                if key is not None and isinstance(value, ast.Tuple)
+            fields = {
+                keyword.arg: ast.literal_eval(keyword.value)
+                for keyword in node.keywords
+                if keyword.arg in {"provider_id", "catalog_filename"}
             }
-    raise RuntimeError("provider_ledger._PROVIDER_CATALOGS not found")
+            names[str(fields["provider_id"])] = str(fields["catalog_filename"])
+    if not names:
+        raise RuntimeError("provider_ledger ProviderDescriptor declarations not found")
+    return names
 
 
 def _provider_layout(workspace: Path) -> dict[str, tuple[Path, str]]:

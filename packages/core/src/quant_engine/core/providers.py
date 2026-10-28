@@ -116,11 +116,55 @@ def contract_findings(adapter: object) -> list[str]:
     return findings
 
 
+@dataclass(frozen=True)
+class ProviderDescriptor:
+    """The static facts one provider contributes to the ledger (no behavior).
+
+    ``catalog_filename`` is the file a provider generation holds its catalog in,
+    ``catalog_schema_versions`` the catalog schema versions the ledger accepts,
+    ``account_facts`` the sorted source fact names the ledger projects, and
+    ``source_segment`` the contract source segment that governs the provider.
+    """
+
+    provider_id: str
+    catalog_filename: str
+    catalog_schema_versions: frozenset[int]
+    account_facts: tuple[str, ...]
+    source_segment: str
+
+    def __post_init__(self) -> None:
+        if _PROVIDER_ID.fullmatch(self.provider_id) is None:
+            raise ProviderContractError("provider_id is not a portable lowercase id")
+        if not self.catalog_filename or not self.source_segment:
+            raise ProviderContractError("descriptor needs a catalog and a segment")
+        if not self.catalog_schema_versions:
+            raise ProviderContractError("descriptor needs a catalog schema version")
+        if list(self.account_facts) != sorted(set(self.account_facts)):
+            raise ProviderContractError("account_facts must be sorted and unique")
+
+
 class ProviderRegistry:
     """Discover providers by id or capability; refuses duplicates and bad adapters."""
 
     def __init__(self) -> None:
         self._adapters: dict[str, Any] = {}
+        self._descriptors: dict[str, ProviderDescriptor] = {}
+
+    def register_descriptor(self, descriptor: ProviderDescriptor) -> None:
+        if descriptor.provider_id in self._descriptors:
+            raise ProviderContractError(
+                f"provider already described: {descriptor.provider_id}"
+            )
+        self._descriptors[descriptor.provider_id] = descriptor
+
+    def descriptor(self, provider_id: str) -> ProviderDescriptor:
+        try:
+            return self._descriptors[provider_id]
+        except KeyError:
+            raise ProviderContractError(f"unknown provider: {provider_id}") from None
+
+    def descriptors(self) -> tuple[ProviderDescriptor, ...]:
+        return tuple(item for _, item in sorted(self._descriptors.items()))
 
     def register(self, adapter: Any) -> None:
         findings = contract_findings(adapter)
