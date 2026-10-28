@@ -245,7 +245,11 @@ def test_an_evidence_file_that_differs_from_its_pin_is_refused(tmp_path: Path) -
 def _without_reconciliation(omitted: list[dict[str, str]]) -> list[dict[str, str]]:
     """These fixtures carry no ledger, so the perimeter reconciliation is omitted by name."""
 
-    return [o for o in omitted if not o["entry"].startswith("perimeter reconciliation")]
+    return [
+        o
+        for o in omitted
+        if not o["entry"].startswith(("perimeter reconciliation", "capital paid into"))
+    ]
 
 
 def _rows() -> list[dict[str, Any]]:

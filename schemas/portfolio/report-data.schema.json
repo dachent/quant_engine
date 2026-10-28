@@ -145,7 +145,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["strategy_id", "strategy_name", "record_kind", "lifecycle_status", "product_requirement", "source", "effective_start", "effective_end", "lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label"],
+        "required": ["strategy_id", "strategy_name", "record_kind", "lifecycle_status", "product_requirement", "source", "effective_start", "effective_end", "lifecycle_state", "retired_on", "closed_on", "parent_assignment_id", "sleeve_label", "economic_end_date", "end_recognition_basis"],
         "properties": {
           "strategy_id": {"type": "string", "minLength": 1},
           "strategy_name": {"type": "string", "minLength": 1},

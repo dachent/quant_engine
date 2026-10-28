@@ -314,3 +314,9 @@ def test_the_performance_tab_with_a_memo_remainder_and_a_hybrid_label_is_describ
     )
     schema = _schema("control-panel-data.schema.json")
     assert _errors(_def(schema, "performance_tab"), block) == []
+
+
+def test_the_retained_economic_end_fields_are_required() -> None:
+    schema = _schema("report-data.schema.json")
+    required = schema["properties"]["retained_strategies"]["items"]["required"]
+    assert {"economic_end_date", "end_recognition_basis"} <= set(required)

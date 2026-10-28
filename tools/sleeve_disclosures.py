@@ -296,8 +296,11 @@ def _account_reconciliation(
     ]
     if last_day not in nav:
         raise DisclosureError("the parent account has no NAV on the window's last day")
-    paid_in = opening + sum((amount for _day, amount in flows), Decimal(0))
-    account_gain = nav[last_day] - paid_in
+    # capital paid in is the inflows; withdrawals are kept apart, so a comparison with the
+    # capital an account was given is never lowered by money that later left it
+    paid_in = opening + sum((a for _day, a in flows if a > 0), Decimal(0))
+    withdrawn = -sum((a for _day, a in flows if a < 0), Decimal(0))
+    account_gain = nav[last_day] - (paid_in - withdrawn)
     sleeves = summary["perimeter_sleeves"]
     gains = sum((_dec(s["gain_from_first_day_nav"]) for s in sleeves), Decimal(0))
     entries = sum((_dec(s["entry_day_difference"]) for s in sleeves), Decimal(0))
@@ -333,6 +336,7 @@ def _account_reconciliation(
         "last_day": last_day,
         "opening_nav": str(opening),
         "paid_in_after_anchor": str(paid_in - opening),
+        "withdrawn_after_anchor": str(withdrawn),
         "paid_in": str(paid_in),
         "terminal_nav": str(nav[last_day]),
         "account_gain": str(account_gain),
@@ -664,13 +668,15 @@ def _perimeter_reconciliation(
     if abs(remainder - _dec(reconciliation["unattributed"])) >= _CENT:
         raise DisclosureError("the shown perimeter figures do not close")
     later = _dec(reconciliation["paid_in_after_anchor"])
+    withdrawn = _dec(reconciliation.get("withdrawn_after_anchor", "0"))
+    left = f", {_usd(withdrawn)} withdrawn" if withdrawn else ""
     return (
         " Sleeve gains are measured from each sleeve's first-day end-of-day NAV, not from "
         f"the amount allocated to it; the entry-day differences ({entries}; total "
         f"{entry_total:+,.2f}) belong to no sleeve. Parent account gain over "
         f"{reconciliation['anchor_day']}..{reconciliation['last_day']} is {gain:+,.2f} on "
         f"{_usd(_dec(reconciliation['paid_in']))} of external capital (opening NAV "
-        f"{_usd(_dec(reconciliation['opening_nav']))} plus {_usd(later)} paid in later); "
+        f"{_usd(_dec(reconciliation['opening_nav']))} plus {_usd(later)} paid in later{left}); "
         f"the sleeves sum to {sleeves:+,.2f}; the {difference:+,.2f} difference is the "
         f"entry-day differences ({entry_total:+,.2f}) and {remainder:+,.2f} not attributed "
         "(days before the first sleeve day and the parent remainder)."
@@ -898,17 +904,23 @@ def compose(
                 by_source=by_source,
                 margin_days=margin_days,
             )
-            reconciliation = next(
-                (
-                    item
-                    for item in sources.get("account_reconciliation", [])
-                    if sleeve_accounts.get(next(iter(product_accounts), ""))
-                    == item["parent_account_id"]
-                ),
-                None,
-            )
-            if reconciliation is not None:
-                paid_in = _dec(reconciliation["paid_in"])
+            parents = sorted({sleeve_accounts[a] for a in product_accounts})
+            known = {
+                item["parent_account_id"]: item
+                for item in sources.get("account_reconciliation", [])
+            }
+            for parent in parents:
+                if parent not in known:
+                    omitted.append(
+                        {
+                            "entry": f"capital paid into {parent}",
+                            "reason": "ACCOUNT_RECONCILIATION_NOT_IN_SOURCES",
+                        }
+                    )
+            if parents and all(parent in known for parent in parents):
+                paid_in = sum(
+                    (_dec(known[parent]["paid_in"]) for parent in parents), Decimal(0)
+                )
                 if capital[strategy] > paid_in:
                     text += (
                         f" Gross capital {_usd(capital[strategy])} exceeds all external "

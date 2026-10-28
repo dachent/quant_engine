@@ -518,3 +518,65 @@ def test_a_product_perimeter_without_a_reconciliation_says_so_in_the_report(
         "entry": f"perimeter reconciliation of {PARENT}",
         "reason": "ACCOUNT_RECONCILIATION_NOT_IN_SOURCES",
     } in result["omitted"]
+
+
+def test_a_withdrawal_after_the_anchor_does_not_lower_the_capital_paid_in(
+    tmp_path: Path,
+) -> None:
+    """Codex: net flows are not capital paid in; withdrawals are kept apart."""
+
+    ledger = _ledger(nav_last="981.2")
+    ledger["flows"].append(
+        {
+            "account_id": PARENT,
+            "nav_recognition_date": "2026-01-24",
+            "amount": {"value": "-20"},
+        }
+    )
+    # the NAV the closing ledger needs rises by the 20 that left
+    ledger["nav_observations"][0]["nav"]["value"] = "940"
+    ledger["nav_observations"][1]["nav"]["value"] = "961.2"
+    (reconciliation,) = _sources(tmp_path, _facts(), ledger)["account_reconciliation"]
+    assert Decimal(reconciliation["paid_in"]) == Decimal("950")
+    assert Decimal(reconciliation["withdrawn_after_anchor"]) == Decimal("20")
+    assert Decimal(reconciliation["account_gain"]) == Decimal("31.2")
+
+
+def test_every_parent_account_of_a_product_strategy_is_reconciled_or_named(
+    tmp_path: Path,
+) -> None:
+    """Codex: sleeves under two parents are not decided by an arbitrary pick."""
+
+    sources = _sources(tmp_path, _facts(), _closing_ledger())
+    other_parent, other_sleeve = "account-bbbb", "account-bbbb-s9"
+    rows = _rows() + [
+        {
+            "account_id": other_sleeve,
+            "strategy_id": "product",
+            "effective_start": "2026-01-27",
+            "effective_end": None,
+            "end": "2026-01-29",
+            "status": "OK",
+            "gain": "1",
+        }
+    ]
+    result = disclosures.compose(
+        sources,
+        rows=rows,
+        invested_capital={
+            "current_by_strategy": [
+                {"strategy_id": "product", "invested_capital_usd": "5000"}
+            ],
+            "current_aggregate_usd": "9000",
+        },
+        sleeve_accounts={S1: PARENT, S2: PARENT, other_sleeve: other_parent},
+        product_strategies=["product"],
+    )
+    assert {
+        "entry": f"capital paid into {other_parent}",
+        "reason": "ACCOUNT_RECONCILIATION_NOT_IN_SOURCES",
+    } in result["omitted"]
+    text = next(
+        i["value"] for i in result["items"] if i["item"] == "Sleeve capital basis"
+    )
+    assert "exceeds all external capital" not in text
