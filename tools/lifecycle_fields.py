@@ -40,6 +40,23 @@ RETAINED_HISTORY_ONLY: Final = "RETAINED_HISTORY_ONLY"
 _ISO_DATE: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def is_retained_history_only(row: object) -> bool:
+    """Whether a panel strategy row is a retained history-only record, by its marker."""
+
+    return isinstance(row, Mapping) and row.get("record_kind") == RETAINED_HISTORY_ONLY
+
+
+def product_strategy_rows(rows: Sequence[object]) -> list[object]:
+    """The strategy rows that are product strategies (not retained history-only records).
+
+    One rule for every consumer that compares the panel's ``strategies`` with the report's
+    ``strategy_summary``, the baseline or the plan: a retained history-only record is carried
+    for history and is never counted as, or required to match, a product strategy.
+    """
+
+    return [row for row in rows if not is_retained_history_only(row)]
+
+
 class LifecycleError(ValueError):
     """A lifecycle fact is malformed or a link cannot be proven."""
 

@@ -1729,3 +1729,26 @@ def test_failed_external_read_stops_only_its_dependents(tmp_path: Path) -> None:
     assert _receipt_bytes(spec, "a-independent") == finished
     assert not list(spec.state_root.rglob("c-dependent.json"))
     assert read_current(target).generation_id == previous.generation_id
+
+
+def test_governed_hwm_input_policy_loads_a_module_that_declares_dataclasses() -> None:
+    """D20: the invested-capital authority declares a frozen dataclass; it must be loadable.
+
+    Executing it from its file path without registering it in ``sys.modules`` raised
+    ``'NoneType' object has no attribute '__dict__'`` inside ``dataclasses`` and made every
+    release plan fail.  The policy bytes returned for a matching digest are the input bytes.
+    """
+
+    import hashlib
+    import sys
+
+    from quant_engine.core import pipeline
+
+    policy = b'{"policy":"synthetic"}'
+    name = "quant_engine_pipeline_invested_capital_policy"
+    assert name not in sys.modules
+    result = pipeline._governed_hwm_input_policy(
+        policy, b"{}", hashlib.sha256(policy).hexdigest()
+    )
+    assert result == policy
+    assert name not in sys.modules

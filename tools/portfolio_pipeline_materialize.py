@@ -36,6 +36,7 @@ from quant_engine.portfolio_ledger import (
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
+from lifecycle_fields import product_strategy_rows
 from portfolio_invested_capital import (
     CapitalValidationError,
     governed_hwm_input_policy,
@@ -4202,6 +4203,10 @@ def semantic(
         if isinstance(conformance_strategies, list)
         else None
     )
+    # A retained history-only strategy is a record the panel carries for history; it is not
+    # a product strategy, so the report/panel strategy equality and the required count are
+    # taken over the product strategies (one shared rule, lifecycle_fields).
+    panel_strategies = product_strategy_rows(panel.get("strategies", []))
     panel_meta = panel.get("meta")
     report_hwm = report.get("hwm_summary")
     panel_hwm = panel.get("hwm_summary")
@@ -4214,10 +4219,10 @@ def semantic(
         and all(panel_meta.get(key) == value for key, value in analytics_ids.items())
         and isinstance(report_hwm, dict)
         and report_hwm == panel_hwm
-        and len(report.get("strategy_summary", [])) == len(panel.get("strategies", []))
+        and len(report.get("strategy_summary", [])) == len(panel_strategies)
         and (
             required_strategy_count is None
-            or len(panel.get("strategies", [])) == required_strategy_count
+            or len(panel_strategies) == required_strategy_count
         )
     )
     _result(
@@ -4234,7 +4239,9 @@ def semantic(
         report_hwm=report_hwm,
         panel_hwm=panel_hwm,
         report_strategy_count=len(report.get("strategy_summary", [])),
-        panel_strategy_count=len(panel.get("strategies", [])),
+        panel_strategy_count=len(panel_strategies),
+        panel_retained_history_only_count=len(panel.get("strategies", []))
+        - len(panel_strategies),
     )
 
     freshness_path = output_root / "stages" / "ledger" / "freshness-health.json"

@@ -360,6 +360,11 @@
     ],
     [
       "portfolio_pipeline_materialize",
+      "lifecycle_fields",
+      1
+    ],
+    [
+      "portfolio_pipeline_materialize",
       "portfolio_attended_preparation",
       1
     ],

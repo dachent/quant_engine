@@ -1556,6 +1556,12 @@ def _epoch_covers_cutoff(row: Mapping[str, Any], cutoff: date) -> bool:
 
     if row.get("product_epoch_disposition") != "INCLUDED_PRODUCT_EPOCH":
         return False
+    return _interval_covers_cutoff(row, cutoff)
+
+
+def _interval_covers_cutoff(row: Mapping[str, Any], cutoff: date) -> bool:
+    """The interval half of the activity test (both ends inclusive; bad start fails closed)."""
+
     start = to_date(row.get("effective_start"))
     if start is None or start > cutoff:
         return False
@@ -4916,14 +4922,40 @@ _ACCOUNT_VIEWS: tuple[tuple[str, str, tuple[str, ...], str], ...] = (
 )
 
 
+def derived_product_accounts(ctx: Context, reference: Universe) -> set[str]:
+    """Derived sleeve accounts that are current product epochs (#567).
+
+    A derived account is in the current product universe when the panel's account manifest
+    names it, it hangs on an active provider account, the strategy of its epoch is an
+    active product strategy, and the epoch covers the release cutoff (the same interval
+    test as the provider universe).  A derived account of a retained history-only strategy is not.
+    """
+
+    parents = derived_account_parents(ctx)
+    active_strategies = set(reference.active_strategies)
+    active_accounts = set(reference.active_accounts)
+    return {
+        str(row.get("account_id"))
+        for _, row in manifest_rows(ctx)
+        if parents.get(str(row.get("account_id"))) in active_accounts
+        and str(row.get("strategy_id")) in active_strategies
+        and _interval_covers_cutoff(row, ctx.cutoff)
+    }
+
+
 def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
     """D6: inactive, retired or excluded accounts in current coverage/leverage."""
 
     reference = universe(ctx)
     if reference is None:
         return
+    derived_product = derived_product_accounts(ctx, reference)
     for label, file, path, key in _ACCOUNT_VIEWS:
-        allowed = set(reference.active_accounts) | reserve_accounts(ctx, label)
+        allowed = (
+            set(reference.active_accounts)
+            | reserve_accounts(ctx, label)
+            | derived_product
+        )
         ids = _view_ids(ctx, file, path, key)
         if ids is None:
             continue
