@@ -2865,6 +2865,379 @@ def _schwab_finality_values(
     return values
 
 
+class _FinalityContext(NamedTuple):
+    """Everything a provider's finality check reads, derived once by the dispatcher."""
+
+    selected: Mapping[str, Any]
+    path: Path
+    content: bytes
+    digest: str
+    size: int
+    manifest: GenerationManifest
+    catalog: Mapping[str, Any]
+    root: Path
+    end: date
+    result: dict[str, Any]
+    evidence: Mapping[str, Any]
+
+
+class _FinalityValidator(NamedTuple):
+    check: Callable[[_FinalityContext], dict[str, Any]]
+    json_evidence: bool
+
+
+def _finality_finite(ctx: _FinalityContext) -> dict[str, Any]:
+    """Finite static sources bind the selected manifest."""
+
+    selected, digest, result = ctx.selected, ctx.digest, ctx.result
+    if digest != selected["manifest_sha256"]:
+        raise ProviderLedgerError("finite finality must bind the selected manifest")
+    result["basis"] = "FINITE_SELECTED_MANIFEST_BOUNDARY"
+    return result
+
+
+def _finality_ibkr(ctx: _FinalityContext) -> dict[str, Any]:
+    """IBKR: the native Flex statement label."""
+
+    path, digest, size, manifest, catalog, end, result = (
+        ctx.path,
+        ctx.digest,
+        ctx.size,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.end,
+        ctx.result,
+    )
+    from quant_engine.ibkr.flex import parse_flex_file
+
+    artifacts = [
+        a for a in manifest.artifacts if a.sha256 == digest and a.size_bytes == size
+    ]
+    if len(artifacts) != 1:
+        raise ProviderLedgerError(
+            "ibkr finality statement is not a selected source artifact"
+        )
+    try:
+        document = parse_flex_file(path, artifact_id=artifacts[0].artifact_id)
+    except ValueError as exc:
+        raise ProviderLedgerError("ibkr finality native statement is invalid") from exc
+    statements = document.statements
+    rows = [
+        r
+        for r in _objects(catalog.get("nav_observations"), "ibkr NAV")
+        if r.get("source_artifact_id") == artifacts[0].artifact_id
+    ]
+    if (
+        not rows
+        or len({(s.raw_account_id, s.report_date) for s in statements})
+        != len(statements)
+        or any(s.report_date != end for s in statements)
+        or len({r.get("account_id") for r in rows}) != len(rows)
+        or any(_day(r.get("as_of_date"), "ibkr NAV date") != end for r in rows)
+    ):
+        raise ProviderLedgerError("ibkr finality statement account/date scope differs")
+    native = sorted((s.base_currency, s.nav) for s in statements)
+    normalized = sorted(
+        (str(r["nav"]["currency"]), _decimal(r["nav"]["value"], "ibkr NAV"))
+        for r in rows
+    )
+    source_accounts = {
+        r["account_id"] for r in _objects(catalog.get("accounts"), "ibkr accounts")
+    }
+    if native != normalized or not {r["account_id"] for r in rows}.issubset(
+        source_accounts
+    ):
+        raise ProviderLedgerError("ibkr finality native NAV/account binding differs")
+    result["basis"] = "NATIVE_FLEX_STATEMENT_LABEL"
+    return result
+
+
+def _finality_matrixport(ctx: _FinalityContext) -> dict[str, Any]:
+    """Matrixport: the selected run's extraction summary."""
+
+    content, manifest, catalog, root, end, result, evidence = (
+        ctx.content,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.end,
+        ctx.result,
+        ctx.evidence,
+    )
+    run_id = _run_id(catalog.get("source_run_id"), "matrixport source run")
+    run_root = root / "output" / run_id
+    if (
+        _bound_source_bytes(
+            manifest,
+            "reports/extraction_summary.json",
+            run_root / "reports/extraction_summary.json",
+        )
+        != content
+    ):
+        raise ProviderLedgerError(
+            "matrixport finality capture differs from selected run"
+        )
+    captured = datetime.fromtimestamp(
+        int(evidence["run_end_ms"]) / 1000, tz=timezone.utc
+    )
+    if (
+        evidence.get("status") != "COMPLETED"
+        or evidence.get("run_id") != run_id
+        or end >= captured.date()
+    ):
+        raise ProviderLedgerError(
+            "matrixport finality does not support prior UTC daily label"
+        )
+    nav_bytes = _bound_source_bytes(
+        manifest, "csv/nav_daily.csv", run_root / "csv/nav_daily.csv"
+    )
+    labels = set()
+    for row in csv.DictReader(io.StringIO(nav_bytes.decode("utf-8-sig"))):
+        timestamp = datetime.fromtimestamp(
+            int(row["day_timestamp_ms"]) / 1000, tz=timezone.utc
+        )
+        if timestamp.isoformat().replace("+00:00", "Z") != row[
+            "day_timestamp_utc"
+        ].replace("+00:00", "Z"):
+            raise ProviderLedgerError("matrixport native UTC label differs")
+        labels.add(timestamp.date())
+    if end not in labels:
+        raise ProviderLedgerError("matrixport selected finality daily label is absent")
+    result.update(
+        basis="PRIOR_UTC_DAILY_LABEL_SELECTION",
+        native_timezone="UTC",
+        native_calendar="ALWAYS_ON",
+    )
+    # run_end_ms freezes the request boundary; it is not capture finish time.
+    return result
+
+
+def _finality_quantbase(ctx: _FinalityContext) -> dict[str, Any]:
+    """Quantbase: the conversion-receipt policy label."""
+
+    path, manifest, catalog, root, end, result, evidence = (
+        ctx.path,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.end,
+        ctx.result,
+        ctx.evidence,
+    )
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase lineage")["run_id"],
+        "quantbase run",
+    )
+    datasets = _objects(catalog.get("datasets"), "quantbase datasets")
+    observed_paths = {str(r["relative_path"]) for r in datasets}
+    refreshed = _strings(
+        evidence.get("refreshed_datasets"), "quantbase refreshed datasets"
+    )
+    preserved = _strings(
+        evidence.get("preserved_companions"), "quantbase preserved datasets"
+    )
+    if (
+        len(set((*refreshed, *preserved))) != len(refreshed) + len(preserved)
+        or {"csv/" + name for name in (*refreshed, *preserved)} != observed_paths
+    ):
+        raise ProviderLedgerError(
+            "quantbase finality inventory differs from selected datasets"
+        )
+    # The conversion receipt's outputs must be the exact files selected by
+    # the generation. Its literal cutoff is disclosed policy, never native
+    # timezone or a provider finality guarantee.
+    for item in datasets:
+        relative = _relative(item["relative_path"], "quantbase dataset")
+        artifact_id = "source/" + relative.as_posix()
+        selected_bytes = _bound_source_bytes(
+            manifest,
+            artifact_id,
+            root / "source-runs" / run_id / "artifacts" / relative,
+        )
+        original_bytes = _bound_source_bytes(
+            manifest, artifact_id, path.parent / "artifacts" / relative
+        )
+        if (
+            selected_bytes != original_bytes
+            or hashlib.sha256(selected_bytes).hexdigest() != item["sha256"]
+            or len(selected_bytes) != item["bytes"]
+        ):
+            raise ProviderLedgerError("quantbase finality dataset binding differs")
+    daily = _bound_source_bytes(
+        manifest,
+        "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+        path.parent / "artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+    )
+    labels = {
+        _quantbase_day(r["time"], "Quantbase native label")
+        for r in csv.DictReader(io.StringIO(daily.decode("utf-8-sig")))
+    }
+    intraday = {
+        _day(d, "quantbase intraday label")
+        for d in _strings(
+            evidence.get("intraday_unfinalized_dates"), "quantbase intraday dates"
+        )
+    }
+    if (
+        not labels
+        or not intraday
+        or not intraday.issubset(labels)
+        or min(intraday) <= end
+        or not labels - intraday
+        or max(labels - intraday) != end
+        or evidence.get("latest_complete_daily_cutoff") != end.isoformat()
+    ):
+        raise ProviderLedgerError(
+            "quantbase finality selection differs from actual daily labels"
+        )
+    result["basis"] = "CONVERSION_RECEIPT_POLICY_SELECTED_NATIVE_LABEL"
+    return result
+
+
+def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
+    """Schwab: the recovered native NAV capture binding."""
+
+    manifest, catalog, end, result, evidence = (
+        ctx.manifest,
+        ctx.catalog,
+        ctx.end,
+        ctx.result,
+        ctx.evidence,
+    )
+    historical = {
+        a.artifact_id: a
+        for a in manifest.artifacts
+        if a.schema_name == "schwab-wch-historical-balance"
+    }
+    if not historical:
+        raise ProviderLedgerError(
+            "schwab finality lacks selected historical NAV sources"
+        )
+    if "receipt_path" in evidence:
+        # Existing recovered native NAV binding proof. Recheck its original
+        # receipt and histories; the proof's PASS string is not authority.
+        receipt_path = _absolute_regular_path(
+            evidence["receipt_path"], "Schwab NAV capture receipt"
+        )
+        receipt_bytes, _, receipt_size = _verified_evidence_bytes(
+            receipt_path, evidence["receipt_sha256"], "Schwab NAV capture receipt"
+        )
+        if receipt_size != evidence["receipt_size_bytes"]:
+            raise ProviderLedgerError("schwab capture receipt size differs")
+        captures = _objects(json.loads(receipt_bytes), "Schwab NAV captures")
+        checks = _objects(evidence.get("checks"), "Schwab native binding checks")
+        used: set[str] = set()
+        times = []
+        for capture in captures:
+            matches = [c for c in checks if c["native_sha256"] == capture["nav_sha256"]]
+            if capture.get("http_status") != 200 or len(matches) != 1:
+                raise ProviderLedgerError("schwab native capture binding differs")
+            artifacts = [
+                a
+                for a in historical.values()
+                if a.sha256 == matches[0]["normalized_sha256"]
+            ]
+            if len(artifacts) != 1 or artifacts[0].artifact_id in used:
+                raise ProviderLedgerError(
+                    "schwab capture selected account scope differs"
+                )
+            artifact_id = artifacts[0].artifact_id
+            used.add(artifact_id)
+            native_path = receipt_path.parent / (
+                _run_id(capture["alias"], "capture alias") + "-nav.json"
+            )
+            native_payload, _, _ = _verified_json(
+                _absolute_regular_path(str(native_path), "Schwab native NAV"),
+                capture["nav_sha256"],
+                "Schwab native NAV",
+            )
+            values = {
+                _quantbase_day(day, "Schwab native date"): _decimal(
+                    value["AccountValue"], "Schwab native NAV"
+                )
+                for day, value in _object(
+                    native_payload.get("histories"), "Schwab histories"
+                ).items()
+            }
+            selected_values = _schwab_finality_values(catalog, artifact_id)
+            if (
+                not values
+                or len(values) != capture["date_count"]
+                or any(
+                    selected_values.get(day) != value for day, value in values.items()
+                )
+                or end not in values
+                or max(values) != end
+            ):
+                raise ProviderLedgerError(
+                    "schwab native-to-selected NAV values or labels differ"
+                )
+            times.append(
+                _utc_timestamp(capture["captured_at_utc"], "Schwab NAV capture")
+            )
+        if used != set(historical) or len(checks) != len(captures):
+            raise ProviderLedgerError("schwab native capture inventory differs")
+        result.update(
+            capture_start_utc=min(times),
+            capture_end_utc=max(times),
+            basis="CAPTURED_NATIVE_HISTORICAL_NAV_LABEL",
+        )
+        return result
+    roots = _object(evidence.get("roots"), "Schwab source roots")
+    sources = [
+        r
+        for r in _objects(evidence.get("sources"), "Schwab sources")
+        if r.get("role") == "WCH_NAV_CSV"
+    ]
+    if {r.get("artifact_id") for r in sources} != set(historical) or len(
+        sources
+    ) != len(historical):
+        raise ProviderLedgerError("schwab source finality inventory differs")
+    account_ids = {
+        r["account_id"] for r in _objects(catalog.get("accounts"), "Schwab accounts")
+    }
+    if {r.get("account_id") for r in sources} != account_ids:
+        raise ProviderLedgerError("schwab source finality account scope differs")
+    for source in sources:
+        artifact_id = source["artifact_id"]
+        artifact = historical[artifact_id]
+        if (
+            source.get("expected_sha256") != artifact.sha256
+            or source.get("expected_size_bytes") != artifact.size_bytes
+        ):
+            raise ProviderLedgerError("schwab source finality artifact differs")
+        source_path = _absolute_path(
+            roots[source["root_id"]], "Schwab source root"
+        ) / _relative(source["relative_path"], "Schwab source path")
+        nav_bytes = _bound_source_bytes(manifest, artifact_id, source_path)
+        values = {
+            _day(r["date"], "Schwab historical label"): _decimal(
+                r["account_value"], "Schwab historical NAV"
+            )
+            for r in csv.DictReader(io.StringIO(nav_bytes.decode("utf-8-sig")))
+        }
+        if (
+            values
+            != _schwab_finality_values(catalog, artifact_id, source["account_id"])
+            or end not in values
+            or max(values) != end
+        ):
+            raise ProviderLedgerError("schwab source finality labels or values differ")
+    result["basis"] = "SELECTED_HISTORICAL_NAV_LABEL_CAPTURE_TIME_UNKNOWN"
+    return result
+
+
+_FINALITY_VALIDATORS: Final = {
+    "alpaca": _FinalityValidator(_finality_finite, False),
+    "fidelity": _FinalityValidator(_finality_finite, False),
+    "ibkr": _FinalityValidator(_finality_ibkr, False),
+    "matrixport": _FinalityValidator(_finality_matrixport, True),
+    "portfolio123": _FinalityValidator(_finality_finite, False),
+    "quantbase": _FinalityValidator(_finality_quantbase, True),
+    "schwab": _FinalityValidator(_finality_schwab, True),
+}
+
+
 def _validate_observed_finality_evidence(
     provider_id: str, selected: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -2898,313 +3271,37 @@ def _validate_observed_finality_evidence(
         "capture_start_utc": None,
         "capture_end_utc": None,
     }
-    if provider_id in {"alpaca", "fidelity", "portfolio123"}:
-        if digest != selected["manifest_sha256"]:
-            raise ProviderLedgerError("finite finality must bind the selected manifest")
-        result["basis"] = "FINITE_SELECTED_MANIFEST_BOUNDARY"
-        return result
-    if provider_id == "ibkr":
-        from quant_engine.ibkr.flex import parse_flex_file
-
-        artifacts = [
-            a for a in manifest.artifacts if a.sha256 == digest and a.size_bytes == size
-        ]
-        if len(artifacts) != 1:
-            raise ProviderLedgerError(
-                "ibkr finality statement is not a selected source artifact"
-            )
+    validator = _FINALITY_VALIDATORS.get(provider_id)
+    evidence: Mapping[str, Any] = {}
+    if validator is None or validator.json_evidence:
         try:
-            document = parse_flex_file(path, artifact_id=artifacts[0].artifact_id)
-        except ValueError as exc:
+            parsed = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ProviderLedgerError(
-                "ibkr finality native statement is invalid"
+                "native finality evidence is invalid JSON"
             ) from exc
-        statements = document.statements
-        rows = [
-            r
-            for r in _objects(catalog.get("nav_observations"), "ibkr NAV")
-            if r.get("source_artifact_id") == artifacts[0].artifact_id
-        ]
-        if (
-            not rows
-            or len({(s.raw_account_id, s.report_date) for s in statements})
-            != len(statements)
-            or any(s.report_date != end for s in statements)
-            or len({r.get("account_id") for r in rows}) != len(rows)
-            or any(_day(r.get("as_of_date"), "ibkr NAV date") != end for r in rows)
-        ):
+        if not isinstance(parsed, dict):
             raise ProviderLedgerError(
-                "ibkr finality statement account/date scope differs"
+                "native finality evidence must be a source object"
             )
-        native = sorted((s.base_currency, s.nav) for s in statements)
-        normalized = sorted(
-            (str(r["nav"]["currency"]), _decimal(r["nav"]["value"], "ibkr NAV"))
-            for r in rows
-        )
-        source_accounts = {
-            r["account_id"] for r in _objects(catalog.get("accounts"), "ibkr accounts")
-        }
-        if native != normalized or not {r["account_id"] for r in rows}.issubset(
-            source_accounts
-        ):
-            raise ProviderLedgerError(
-                "ibkr finality native NAV/account binding differs"
-            )
-        result["basis"] = "NATIVE_FLEX_STATEMENT_LABEL"
-        return result
-    try:
-        evidence = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ProviderLedgerError("native finality evidence is invalid JSON") from exc
-    if not isinstance(evidence, dict):
-        raise ProviderLedgerError("native finality evidence must be a source object")
-    if provider_id == "matrixport":
-        run_id = _run_id(catalog.get("source_run_id"), "matrixport source run")
-        run_root = root / "output" / run_id
-        if (
-            _bound_source_bytes(
-                manifest,
-                "reports/extraction_summary.json",
-                run_root / "reports/extraction_summary.json",
-            )
-            != content
-        ):
-            raise ProviderLedgerError(
-                "matrixport finality capture differs from selected run"
-            )
-        captured = datetime.fromtimestamp(
-            int(evidence["run_end_ms"]) / 1000, tz=timezone.utc
-        )
-        if (
-            evidence.get("status") != "COMPLETED"
-            or evidence.get("run_id") != run_id
-            or end >= captured.date()
-        ):
-            raise ProviderLedgerError(
-                "matrixport finality does not support prior UTC daily label"
-            )
-        nav_bytes = _bound_source_bytes(
-            manifest, "csv/nav_daily.csv", run_root / "csv/nav_daily.csv"
-        )
-        labels = set()
-        for row in csv.DictReader(io.StringIO(nav_bytes.decode("utf-8-sig"))):
-            timestamp = datetime.fromtimestamp(
-                int(row["day_timestamp_ms"]) / 1000, tz=timezone.utc
-            )
-            if timestamp.isoformat().replace("+00:00", "Z") != row[
-                "day_timestamp_utc"
-            ].replace("+00:00", "Z"):
-                raise ProviderLedgerError("matrixport native UTC label differs")
-            labels.add(timestamp.date())
-        if end not in labels:
-            raise ProviderLedgerError(
-                "matrixport selected finality daily label is absent"
-            )
-        result.update(
-            basis="PRIOR_UTC_DAILY_LABEL_SELECTION",
-            native_timezone="UTC",
-            native_calendar="ALWAYS_ON",
-        )
-        # run_end_ms freezes the request boundary; it is not capture finish time.
-        return result
-    if provider_id == "quantbase":
-        run_id = _run_id(
-            _object(catalog.get("legacy_lineage"), "quantbase lineage")["run_id"],
-            "quantbase run",
-        )
-        datasets = _objects(catalog.get("datasets"), "quantbase datasets")
-        observed_paths = {str(r["relative_path"]) for r in datasets}
-        refreshed = _strings(
-            evidence.get("refreshed_datasets"), "quantbase refreshed datasets"
-        )
-        preserved = _strings(
-            evidence.get("preserved_companions"), "quantbase preserved datasets"
-        )
-        if (
-            len(set((*refreshed, *preserved))) != len(refreshed) + len(preserved)
-            or {"csv/" + name for name in (*refreshed, *preserved)} != observed_paths
-        ):
-            raise ProviderLedgerError(
-                "quantbase finality inventory differs from selected datasets"
-            )
-        # The conversion receipt's outputs must be the exact files selected by
-        # the generation. Its literal cutoff is disclosed policy, never native
-        # timezone or a provider finality guarantee.
-        for item in datasets:
-            relative = _relative(item["relative_path"], "quantbase dataset")
-            artifact_id = "source/" + relative.as_posix()
-            selected_bytes = _bound_source_bytes(
-                manifest,
-                artifact_id,
-                root / "source-runs" / run_id / "artifacts" / relative,
-            )
-            original_bytes = _bound_source_bytes(
-                manifest, artifact_id, path.parent / "artifacts" / relative
-            )
-            if (
-                selected_bytes != original_bytes
-                or hashlib.sha256(selected_bytes).hexdigest() != item["sha256"]
-                or len(selected_bytes) != item["bytes"]
-            ):
-                raise ProviderLedgerError("quantbase finality dataset binding differs")
-        daily = _bound_source_bytes(
+        evidence = parsed
+    if validator is None:
+        raise ProviderLedgerError("provider finality convention is unsupported")
+    return validator.check(
+        _FinalityContext(
+            selected,
+            path,
+            content,
+            digest,
+            size,
             manifest,
-            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-            path.parent / "artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+            catalog,
+            root,
+            end,
+            result,
+            evidence,
         )
-        labels = {
-            _quantbase_day(r["time"], "Quantbase native label")
-            for r in csv.DictReader(io.StringIO(daily.decode("utf-8-sig")))
-        }
-        intraday = {
-            _day(d, "quantbase intraday label")
-            for d in _strings(
-                evidence.get("intraday_unfinalized_dates"), "quantbase intraday dates"
-            )
-        }
-        if (
-            not labels
-            or not intraday
-            or not intraday.issubset(labels)
-            or min(intraday) <= end
-            or not labels - intraday
-            or max(labels - intraday) != end
-            or evidence.get("latest_complete_daily_cutoff") != end.isoformat()
-        ):
-            raise ProviderLedgerError(
-                "quantbase finality selection differs from actual daily labels"
-            )
-        result["basis"] = "CONVERSION_RECEIPT_POLICY_SELECTED_NATIVE_LABEL"
-        return result
-    if provider_id == "schwab":
-        historical = {
-            a.artifact_id: a
-            for a in manifest.artifacts
-            if a.schema_name == "schwab-wch-historical-balance"
-        }
-        if not historical:
-            raise ProviderLedgerError(
-                "schwab finality lacks selected historical NAV sources"
-            )
-        if "receipt_path" in evidence:
-            # Existing recovered native NAV binding proof. Recheck its original
-            # receipt and histories; the proof's PASS string is not authority.
-            receipt_path = _absolute_regular_path(
-                evidence["receipt_path"], "Schwab NAV capture receipt"
-            )
-            receipt_bytes, _, receipt_size = _verified_evidence_bytes(
-                receipt_path, evidence["receipt_sha256"], "Schwab NAV capture receipt"
-            )
-            if receipt_size != evidence["receipt_size_bytes"]:
-                raise ProviderLedgerError("schwab capture receipt size differs")
-            captures = _objects(json.loads(receipt_bytes), "Schwab NAV captures")
-            checks = _objects(evidence.get("checks"), "Schwab native binding checks")
-            used: set[str] = set()
-            times = []
-            for capture in captures:
-                matches = [
-                    c for c in checks if c["native_sha256"] == capture["nav_sha256"]
-                ]
-                if capture.get("http_status") != 200 or len(matches) != 1:
-                    raise ProviderLedgerError("schwab native capture binding differs")
-                artifacts = [
-                    a
-                    for a in historical.values()
-                    if a.sha256 == matches[0]["normalized_sha256"]
-                ]
-                if len(artifacts) != 1 or artifacts[0].artifact_id in used:
-                    raise ProviderLedgerError(
-                        "schwab capture selected account scope differs"
-                    )
-                artifact_id = artifacts[0].artifact_id
-                used.add(artifact_id)
-                native_path = receipt_path.parent / (
-                    _run_id(capture["alias"], "capture alias") + "-nav.json"
-                )
-                native_payload, _, _ = _verified_json(
-                    _absolute_regular_path(str(native_path), "Schwab native NAV"),
-                    capture["nav_sha256"],
-                    "Schwab native NAV",
-                )
-                values = {
-                    _quantbase_day(day, "Schwab native date"): _decimal(
-                        value["AccountValue"], "Schwab native NAV"
-                    )
-                    for day, value in _object(
-                        native_payload.get("histories"), "Schwab histories"
-                    ).items()
-                }
-                selected_values = _schwab_finality_values(catalog, artifact_id)
-                if (
-                    not values
-                    or len(values) != capture["date_count"]
-                    or any(
-                        selected_values.get(day) != value
-                        for day, value in values.items()
-                    )
-                    or end not in values
-                    or max(values) != end
-                ):
-                    raise ProviderLedgerError(
-                        "schwab native-to-selected NAV values or labels differ"
-                    )
-                times.append(
-                    _utc_timestamp(capture["captured_at_utc"], "Schwab NAV capture")
-                )
-            if used != set(historical) or len(checks) != len(captures):
-                raise ProviderLedgerError("schwab native capture inventory differs")
-            result.update(
-                capture_start_utc=min(times),
-                capture_end_utc=max(times),
-                basis="CAPTURED_NATIVE_HISTORICAL_NAV_LABEL",
-            )
-            return result
-        roots = _object(evidence.get("roots"), "Schwab source roots")
-        sources = [
-            r
-            for r in _objects(evidence.get("sources"), "Schwab sources")
-            if r.get("role") == "WCH_NAV_CSV"
-        ]
-        if {r.get("artifact_id") for r in sources} != set(historical) or len(
-            sources
-        ) != len(historical):
-            raise ProviderLedgerError("schwab source finality inventory differs")
-        account_ids = {
-            r["account_id"]
-            for r in _objects(catalog.get("accounts"), "Schwab accounts")
-        }
-        if {r.get("account_id") for r in sources} != account_ids:
-            raise ProviderLedgerError("schwab source finality account scope differs")
-        for source in sources:
-            artifact_id = source["artifact_id"]
-            artifact = historical[artifact_id]
-            if (
-                source.get("expected_sha256") != artifact.sha256
-                or source.get("expected_size_bytes") != artifact.size_bytes
-            ):
-                raise ProviderLedgerError("schwab source finality artifact differs")
-            source_path = _absolute_path(
-                roots[source["root_id"]], "Schwab source root"
-            ) / _relative(source["relative_path"], "Schwab source path")
-            nav_bytes = _bound_source_bytes(manifest, artifact_id, source_path)
-            values = {
-                _day(r["date"], "Schwab historical label"): _decimal(
-                    r["account_value"], "Schwab historical NAV"
-                )
-                for r in csv.DictReader(io.StringIO(nav_bytes.decode("utf-8-sig")))
-            }
-            if (
-                values
-                != _schwab_finality_values(catalog, artifact_id, source["account_id"])
-                or end not in values
-                or max(values) != end
-            ):
-                raise ProviderLedgerError(
-                    "schwab source finality labels or values differ"
-                )
-        result["basis"] = "SELECTED_HISTORICAL_NAV_LABEL_CAPTURE_TIME_UNKNOWN"
-        return result
-    raise ProviderLedgerError("provider finality convention is unsupported")
+    )
 
 
 def _observed_provider_selection(
