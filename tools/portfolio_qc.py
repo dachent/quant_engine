@@ -620,6 +620,52 @@ def _retired_workstation(args: argparse.Namespace) -> Path:
     )
 
 
+FACT_ADMISSION_GATE_ID = "financial-mvp-provider-catalog-authority"
+
+
+def _fact_admission(spec: Any) -> dict[str, Any]:
+    """Run the dropped-fact gate on the candidate provider ledger (#535).
+
+    The candidate ledger is the spec gate whose bytes ``_candidate_qa`` already
+    pinned. Provider catalogs are read from the workspace that holds the
+    coordination root (``<workspace>/dataPortfolio/<coordination>``). Every
+    provider the ledger binds must be checked: a dropped or changed fact, a
+    provider whose catalog is not on disk, or a ledger with nothing checkable
+    fails the preflight, so an unchecked provider can never ride on another's PASS.
+    """
+
+    ledger = next(
+        (gate.path for gate in spec.gates if gate.gate_id == FACT_ADMISSION_GATE_ID),
+        None,
+    )
+    if ledger is None:
+        return {"status": "NOT_APPLICABLE"}
+    workspace = Path(spec.coordination_root).parents[1]
+    output = _run_checked(
+        (
+            sys.executable,
+            str(REPOSITORY_ROOT / "tools" / "check_fact_admission.py"),
+            "--workspace",
+            str(workspace),
+            "--ledger",
+            str(ledger),
+        )
+    )
+    lines = output.strip().splitlines()
+    providers = {
+        name: state.split(" ", 1)[0]
+        for name, _, state in (line.partition(": ") for line in lines[:-1])
+        if state
+    }
+    unchecked = sorted(name for name, state in providers.items() if state != "PASS")
+    if lines[-1] != "fact-admission: PASS" or unchecked or not providers:
+        raise QualityControlFailure(
+            "fact admission gate did not check every bound provider: "
+            + (", ".join(unchecked) or lines[-1])
+        )
+    return {"providers": dict(sorted(providers.items())), "status": "PASS"}
+
+
 def _release_preflight(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")
@@ -627,6 +673,7 @@ def _release_preflight(args: argparse.Namespace) -> Path:
     evidence_dir = _evidence_directory(args.evidence_dir)
     before = _production_snapshot(spec)
     qa, plan = _candidate_qa(spec, proof), _expected_plan(spec)
+    qa["fact_admission"] = _fact_admission(spec)
     after = _production_snapshot(spec)
     if after != before:
         raise QualityControlFailure("production state changed during release preflight")
