@@ -427,13 +427,53 @@ def _epoch_lifecycle_fields(
         state = "INACTIVE"
     else:
         state = "ACTIVE"
+    economic_end, recognition_basis = _economic_end(row, state)
     return {
         "lifecycle_state": state,
         "retired_on": end if state in {"RETIRED", "CLOSED"} else None,
         "closed_on": closed if state == "CLOSED" else None,
         "parent_assignment_id": None,
         "sleeve_label": None,
+        "economic_end_date": economic_end,
+        "end_recognition_basis": recognition_basis,
     }
+
+
+def _economic_end(
+    row: Mapping[str, object], state: str
+) -> tuple[str | None, str | None]:
+    """The day an exited epoch's capital left (its last outgoing leg) and how the end is dated.
+
+    The epoch ends on the NAV recognition day of its exit; the exit fill itself can be the day
+    before.  Only a retired or closed epoch that holds nothing at its end has one: the date is
+    the latest ``event_date`` of its outgoing legs, and the basis says whether the end shown is
+    that day or the NAV day recognising the exit.
+    """
+
+    if state not in {"RETIRED", "CLOSED"} or row.get("status") != "OK":
+        return None, None
+    try:
+        if Decimal(str(row.get("current_value"))) != 0:
+            return None, None
+    except (ArithmeticError, ValueError):
+        return None, None
+    trace = row.get("capital_flow_trace")
+    exits = [
+        leg
+        for leg in (trace if isinstance(trace, list) else [])
+        if isinstance(leg, Mapping)
+        and leg.get("class") in {"INTERNAL_OUT", "EXTERNAL_OUT"}
+    ]
+    if not exits:
+        return None, None
+    last = max(exits, key=lambda leg: str(leg.get("event_date")))
+    economic = str(last.get("event_date"))
+    end = row.get("effective_end")
+    if economic == end:
+        return economic, "EXIT_FILL_DAY_IS_END_DAY"
+    if str(last.get("nav_recognition_date")) == end:
+        return economic, "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL"
+    return economic, "END_DAY_DIFFERS_FROM_EXIT_FILL_AND_RECOGNITION"
 
 
 def _crosswalk_display_by_epoch(

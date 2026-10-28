@@ -105,11 +105,74 @@ def included_rows(
 # --------------------------------------------------------------- capital
 
 
+def _check_perimeter_remainder(
+    block: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    hwm_summary: Mapping[str, Any],
+    custody: Mapping[str, Any] | None,
+    cutoff: str,
+) -> None:
+    """The memo line between the governed perimeter value and the open epochs."""
+
+    memo = block.get("memo")
+    published = memo.get("perimeter_remainder") if isinstance(memo, Mapping) else None
+    perimeter = hwm_summary.get("governed_perimeter_value_usd")
+    open_by_strategy: dict[str, Decimal] = defaultdict(Decimal)
+    open_current = Decimal(0)
+    for r in rows:
+        if r["end"] == cutoff:
+            open_by_strategy[r["strategy_id"]] += _d(r["current_value"])
+            open_current += _d(r["current_value"])
+    amount = None if perimeter is None else _d(perimeter) - open_current
+    if amount is None or abs(amount) <= Decimal("1e-18"):
+        if published is not None:
+            raise _fail(
+                "capital_reconciliation names a perimeter remainder that is zero"
+            )
+        return
+    if not isinstance(published, Mapping):
+        raise _fail(
+            "capital_reconciliation does not name the "
+            f"{_text(amount)} USD between the governed perimeter value and the open epochs"
+        )
+    for field, expected in (
+        ("component_id", "RESIDUAL_PARENT_REMAINDER_NOT_IN_PRODUCT_EPOCHS"),
+        ("amount_usd", _text(amount)),
+        ("governed_perimeter_value_usd", _text(_d(perimeter))),
+        ("current_of_open_epochs_usd", _text(open_current)),
+        ("in_difference_usd", False),
+    ):
+        if published.get(field) != expected:
+            raise _fail(f"capital_reconciliation perimeter remainder {field} differs")
+    expected_lines: dict[str, Decimal] = {}
+    for item in (custody or {}).get("strategies") or []:
+        value = item.get("current_value") or {}
+        if item.get("scope") != "SYSTEMATIC" or value.get("status") != "AVAILABLE":
+            continue
+        strategy = item["strategy_id"]
+        gap = _d(value["value"]) - open_by_strategy.get(strategy, Decimal(0))
+        if abs(gap) > Decimal("1e-18"):
+            expected_lines[strategy] = gap
+    lines = published.get("lines")
+    if (
+        not isinstance(lines, list)
+        or {line.get("strategy_id"): _d(line.get("amount_usd")) for line in lines}
+        != expected_lines
+    ):
+        raise _fail("capital_reconciliation perimeter remainder lines differ")
+    if _d(published.get("unattributed_to_a_strategy_usd")) != amount - sum(
+        expected_lines.values(), Decimal(0)
+    ):
+        raise _fail("capital_reconciliation perimeter remainder unattributed differs")
+
+
 def _check_capital(
     block: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
     capital: Mapping[str, Any],
     cutoff: str,
+    hwm_summary: Mapping[str, Any] | None = None,
+    custody: Mapping[str, Any] | None = None,
 ) -> None:
     if block.get("status") != "RECONCILED":
         # Only the producer's named unavailability reasons may stand in for a
@@ -155,6 +218,7 @@ def _check_capital(
                 )
         if block.get("residual_usd") != "0":
             raise _fail("capital_reconciliation residual is not zero")
+        _check_perimeter_remainder(block, rows, hwm_summary or {}, custody, cutoff)
         if block.get("open_epoch_count") != sum(1 for r in rows if r["end"] == cutoff):
             raise _fail("capital_reconciliation open epoch count differs")
         if block.get("epoch_count") != len(rows):
@@ -316,6 +380,22 @@ def _check_mwr(
             (_d(r["current_value"]) for r in rows if r["end"] == cutoff), Decimal(0)
         )
         terminal = _d(perimeter) if perimeter is not None else None
+        if terminal is not None and abs(terminal - open_current) > Decimal("1e-18"):
+            # the perimeter and the open epochs are on different bases: the refusal
+            # names both values (the capital_reconciliation memo names the difference)
+            for field, expected in (
+                ("status", "UNAVAILABLE"),
+                ("reason", "PERIMETER_VALUE_BASIS_MISMATCH"),
+                ("governed_perimeter_value_usd", _text(terminal)),
+                ("current_of_open_epochs_usd", _text(open_current)),
+                ("difference_usd", _text(terminal - open_current)),
+            ):
+                if block.get(field) != expected:
+                    raise _fail(
+                        f"portfolio_mwr_annualised {field} differs for a perimeter "
+                        "value on a different basis than the open epochs"
+                    )
+            return
         justified = (
             not flows
             or terminal is None
@@ -474,7 +554,14 @@ def verify_portfolio_totals(
         return
     if len(present) != len(TOTAL_KEYS):
         raise _fail("totals are absent although governed capital and epoch rows exist")
-    _check_capital(report["capital_reconciliation"], rows, capital, cutoff)
+    _check_capital(
+        report["capital_reconciliation"],
+        rows,
+        capital,
+        cutoff,
+        report.get("hwm_summary") or {},
+        report.get("custody_current_capital"),
+    )
     _check_mwr(
         report["portfolio_mwr_annualised"],
         capital,

@@ -99,6 +99,14 @@ COMPONENT_LABELS: Final = {
         "transition"
     ),
 }
+COMPONENT_PERIMETER_REMAINDER: Final = "RESIDUAL_PARENT_REMAINDER_NOT_IN_PRODUCT_EPOCHS"
+PERIMETER_REMAINDER_LABEL: Final = (
+    "Governed perimeter value (the custody systematic total) minus the current value of "
+    "the epochs open at the cutoff: for a strategy whose product epoch is a derived "
+    "sleeve, the parent account's value outside that sleeve (unallocated cash, margin "
+    "debit and any other sleeve's remainder) is in the perimeter but in no open epoch. "
+    "It is a memo line: it is not part of difference_usd and does not enter the residual."
+)
 _KNOWN_EVENT_CLASSES: Final = frozenset(
     {
         "OPENING_CONTRIBUTED_BASIS",
@@ -277,11 +285,27 @@ def build_portfolio_mwr(
     invested_capital: Mapping[str, Any],
     terminal_value_usd: Decimal | None,
     cutoff: str,
+    perimeter_mismatch: Mapping[str, Decimal] | None = None,
 ) -> dict[str, Any]:
-    """One XIRR over the governed external flows and the governed perimeter value."""
+    """One XIRR over the governed external flows and the governed perimeter value.
+
+    ``perimeter_mismatch`` carries the governed perimeter value and the current value of
+    the open epochs when they differ: the XIRR is then refused for that named reason (the
+    two bases differ) rather than for a missing perimeter value.
+    """
 
     basis = "GOVERNED_EXTERNAL_FLOWS_TO_GOVERNED_PERIMETER_VALUE"
     events = invested_capital.get("events")
+    if terminal_value_usd is None and perimeter_mismatch is not None:
+        perimeter = perimeter_mismatch["governed_perimeter_value_usd"]
+        current = perimeter_mismatch["current_of_open_epochs_usd"]
+        return _unavailable(
+            "PERIMETER_VALUE_BASIS_MISMATCH",
+            basis=basis,
+            governed_perimeter_value_usd=_text(perimeter),
+            current_of_open_epochs_usd=_text(current),
+            difference_usd=_text(perimeter - current),
+        )
     if terminal_value_usd is None:
         return _unavailable("NO_GOVERNED_PERIMETER_VALUE", basis=basis)
     if not isinstance(events, list) or not events:
@@ -351,10 +375,77 @@ def _row_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def perimeter_remainder(
+    rows: Sequence[Mapping[str, Any]],
+    custody: Mapping[str, Any] | None,
+    perimeter_value: Decimal | None,
+    cutoff: str,
+) -> dict[str, Any] | None:
+    """The memo line between the governed perimeter value and the open epochs, or None.
+
+    The amount is the perimeter value minus the current value of the epochs open at the
+    cutoff; its lines are the strategies whose custody value differs from the sum of
+    their open epochs, taken from the report's own custody block.
+    """
+
+    if perimeter_value is None:
+        return None
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION
+        open_by_strategy: dict[str, Decimal] = defaultdict(Decimal)
+        open_current = Decimal(0)
+        for row in rows:
+            if row.get("status") == "OK" and row.get("end") == cutoff:
+                value = _decimal(row.get("current_value"), "current_value")
+                open_by_strategy[str(row.get("strategy_id"))] += value
+                open_current += value
+        amount = perimeter_value - open_current
+        if abs(amount) <= PERIMETER_TOLERANCE:
+            return None
+        lines: list[dict[str, str]] = []
+        attributed = Decimal(0)
+        strategies = custody.get("strategies") if isinstance(custody, Mapping) else None
+        for item in strategies if isinstance(strategies, list) else []:
+            custody_value = (
+                item.get("current_value") if isinstance(item, Mapping) else None
+            )
+            if (
+                not isinstance(item, Mapping)
+                or item.get("scope") != "SYSTEMATIC"
+                or not isinstance(custody_value, Mapping)
+                or custody_value.get("status") != "AVAILABLE"
+            ):
+                continue
+            strategy = str(item.get("strategy_id"))
+            governed = _decimal(custody_value.get("value"), "custody current value")
+            open_value = open_by_strategy.get(strategy, Decimal(0))
+            if abs(governed - open_value) > PERIMETER_TOLERANCE:
+                lines.append(
+                    {
+                        "strategy_id": strategy,
+                        "perimeter_value_usd": _text(governed),
+                        "open_epochs_current_usd": _text(open_value),
+                        "amount_usd": _text(governed - open_value),
+                    }
+                )
+                attributed += governed - open_value
+        return {
+            "component_id": COMPONENT_PERIMETER_REMAINDER,
+            "label": PERIMETER_REMAINDER_LABEL,
+            "amount_usd": _text(amount),
+            "governed_perimeter_value_usd": _text(perimeter_value),
+            "current_of_open_epochs_usd": _text(open_current),
+            "lines": sorted(lines, key=lambda line: line["strategy_id"]),
+            "unattributed_to_a_strategy_usd": _text(amount - attributed),
+            "in_difference_usd": False,
+        }
+
+
 def build_capital_reconciliation(
     rows: Sequence[Mapping[str, Any]],
     invested_capital: Mapping[str, Any],
     cutoff: str,
+    perimeter_remainder_memo: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Name every dollar between derived total net capital and governed capital."""
 
@@ -417,6 +508,11 @@ def build_capital_reconciliation(
                 )
         derived = current_open - gain_all
         difference = derived - governed_total
+        closed_at_cutoff = [
+            row
+            for row in rows
+            if not closed(row) and row.get("lifecycle_state") == "CLOSED"
+        ]
 
         # A closed epoch hands off to a successor on the same account that
         # opens the next day; only an unambiguous pair is a hand-off.
@@ -557,6 +653,29 @@ def build_capital_reconciliation(
                     "Post-liquidation income sits inside both Current and Gain, "
                     "so it does not enter the difference."
                 ),
+                **(
+                    {"perimeter_remainder": dict(perimeter_remainder_memo)}
+                    if perimeter_remainder_memo is not None
+                    else {}
+                ),
+                "open_epoch_scope": {
+                    "rule": "WINDOW_ENDS_AT_THE_CUTOFF",
+                    "closed_epoch_count": len(closed_at_cutoff),
+                    "closed_epoch_current_usd": _text(
+                        sum(
+                            (
+                                _decimal(row.get("current_value"), "current_value")
+                                for row in closed_at_cutoff
+                            ),
+                            Decimal(0),
+                        )
+                    ),
+                    "note": (
+                        "current_of_open_epochs_usd sums the epochs whose window ends at "
+                        "the cutoff; closed_epoch_count of them closed their capital inside "
+                        "the epoch (lifecycle CLOSED) and are included at their value."
+                    ),
+                },
             },
         }
 
@@ -568,12 +687,15 @@ def build_portfolio_totals(
     governed_hwm_proof: Mapping[str, Any] | None,
     hwm_summary: Mapping[str, Any] | None,
     calculation_cutoff_date: str | None,
+    custody_current_capital: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The three report blocks, or nothing when no epoch manifest or capital exists."""
 
     if invested_capital is None or calculation_cutoff_date is None or not rows:
         return {}
     terminal: Decimal | None = None
+    mismatch: dict[str, Decimal] | None = None
+    remainder: dict[str, Any] | None = None
     perimeter = (hwm_summary or {}).get("governed_perimeter_value_usd")
     with localcontext() as context:
         context.prec = DECIMAL_PRECISION
@@ -590,13 +712,20 @@ def build_portfolio_totals(
             # The summary rounds the perimeter value to 28 digits.
             terminal = _decimal(perimeter, "governed_perimeter_value_usd")
             if abs(terminal - open_current) > PERIMETER_TOLERANCE:
+                mismatch = {
+                    "governed_perimeter_value_usd": terminal,
+                    "current_of_open_epochs_usd": open_current,
+                }
+                remainder = perimeter_remainder(
+                    rows, custody_current_capital, terminal, calculation_cutoff_date
+                )
                 terminal = None
     return {
         "portfolio_twr_cumulative": build_portfolio_twr(governed_hwm_proof, rows),
         "portfolio_mwr_annualised": build_portfolio_mwr(
-            invested_capital, terminal, calculation_cutoff_date
+            invested_capital, terminal, calculation_cutoff_date, mismatch
         ),
         "capital_reconciliation": build_capital_reconciliation(
-            rows, invested_capital, calculation_cutoff_date
+            rows, invested_capital, calculation_cutoff_date, remainder
         ),
     }

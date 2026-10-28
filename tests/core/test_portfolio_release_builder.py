@@ -5249,6 +5249,7 @@ def test_build_report_routes_schema10_epoch_binding_to_data_only_publication(
         "hybrid_decomposition_plan_bundle": None,
         "source_clock_path": None,
         "nested_tag_map_path": None,
+        "sleeve_disclosure_sources_path": None,
     }
     report_calls = calls["tool_calls"]
     assert [call[1] for call in report_calls] == ["verify", "publish"]
@@ -5297,6 +5298,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_p
             "hybrid_decomposition_plan_bundle": None,
             "source_clock_path": None,
             "nested_tag_map_path": None,
+            "sleeve_disclosure_sources_path": None,
             "epoch_manifest_generation_root": epoch_root,
             "epoch_manifest_generation_id": "d" * 64,
         }

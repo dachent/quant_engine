@@ -1,0 +1,35 @@
+{
+  "artifact_id": "sleeve-disclosure-inputs",
+  "predecessor_comparison": {
+    "data_file": {
+      "relative_path": "dataPortfolio/control-panel/generations/85d0e609542c292b31dda87bd1925d9e580d854faf75a46004290abd716d6fbd/data/dashboard_data.json",
+      "sha256": "c955c2c4c66e750d5bd9333cd74ef1530911d901cb7cbadea7a99609769bc5d9"
+    },
+    "panel_generation_id": "85d0e609542c292b31dda87bd1925d9e580d854faf75a46004290abd716d6fbd",
+    "pointers": {
+      "aggregate": "/invested_capital/current_aggregate_usd",
+      "strategy_capital_field": "invested_capital_usd",
+      "strategy_capital_list": "/invested_capital/current_by_strategy",
+      "strategy_id": "p123-ai-factor"
+    },
+    "release_id": "aa40fc6d261e2017b4d62ff03d0ca152b22c82d59c5469a91e427adef59a07df"
+  },
+  "schema_version": 1,
+  "timestamp_bounds": {
+    "entries": [
+      {
+        "account_id": "account-1b44c987969b9e47",
+        "strategy_id": "p123-ai-factor"
+      },
+      {
+        "account_id": "account-d69701da9143c430",
+        "strategy_id": "p123-eu"
+      }
+    ],
+    "evidence": {
+      "path": "timestamp-delta-result.txt",
+      "sha256": "015f507449238451b4919b51457fdab3dbe2564a5ce36134874428deb7cc9fe9",
+      "size_bytes": 4573
+    }
+  }
+}

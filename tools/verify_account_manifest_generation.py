@@ -91,9 +91,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "membership_census",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "566d6eb791aa14a7c1afc336d8b53d81a785c6797afa3bc47ada8f8b68017d7c"
+    "bfe1032545ffe858dbb6246958ce8a40b00ddc8c9d751fdab33445f1d5e60b30"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 35719
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 36097
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -452,7 +452,10 @@ def _independent_crosswalk_dispositions_by_epoch(
 
 
 def _independent_epoch_lifecycle(
-    effective_end: object, closed_on: object, disposition: object
+    effective_end: object,
+    closed_on: object,
+    disposition: object,
+    numeric: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Re-derive an epoch's lifecycle from the assignment end, the epoch's own
     closing date and the crosswalk disposition (#592), with no shared code."""
@@ -465,12 +468,36 @@ def _independent_epoch_lifecycle(
         state = "INACTIVE"
     else:
         state = "ACTIVE"
+    economic_end: object = None
+    recognition_basis: object = None
+    if (
+        numeric is not None
+        and state in ("RETIRED", "CLOSED")
+        and Decimal(str(numeric["current_value"])) == 0
+    ):
+        outgoing = [
+            leg
+            for leg in numeric["capital_flow_trace"]  # type: ignore[attr-defined]
+            if leg["class"] in ("INTERNAL_OUT", "EXTERNAL_OUT")
+        ]
+        if outgoing:
+            latest = max(leg["event_date"] for leg in outgoing)
+            economic_end = latest
+            last_legs = [leg for leg in outgoing if leg["event_date"] == latest]
+            if latest == effective_end:
+                recognition_basis = "EXIT_FILL_DAY_IS_END_DAY"
+            elif any(leg["nav_recognition_date"] == effective_end for leg in last_legs):
+                recognition_basis = "NAV_RECOGNITION_DAY_AFTER_EXIT_FILL"
+            else:
+                recognition_basis = "END_DAY_DIFFERS_FROM_EXIT_FILL_AND_RECOGNITION"
     return {
         "lifecycle_state": state,
         "retired_on": effective_end if state in ("RETIRED", "CLOSED") else None,
         "closed_on": closed_on if state == "CLOSED" else None,
         "parent_assignment_id": None,
         "sleeve_label": None,
+        "economic_end_date": economic_end,
+        "end_recognition_basis": recognition_basis,
     }
 
 
@@ -1843,7 +1870,9 @@ def _derive_independent_epoch(
         ]
         xirr_rate = _xirr(cashflows)
         span_days = (closing.as_of_date - opening_date).days
-        return_on_net_capital = gain / net_capital if net_capital > 0 else None
+        return_on_net_capital = (
+            gain / net_capital if net_capital > 0 and current != 0 else None
+        )
         annualized = None
         if return_on_net_capital is not None:
             annualized = _annualize_return_on_net_capital(
@@ -2799,8 +2828,22 @@ def _period_ppy(days: list[date]) -> tuple[int | None, str]:
     return None, "UNCLASSIFIED_CADENCE"
 
 
+def _independent_exited(numeric: Mapping[str, object]) -> bool:
+    """A fully exited epoch (value zero, capital positive): no return on net capital."""
+
+    try:
+        return (
+            Decimal(str(numeric.get("current_value"))) == 0
+            and Decimal(str(numeric.get("net_capital"))) > 0
+        )
+    except (ArithmeticError, ValueError):
+        return False
+
+
 def _independent_period_fields(
-    numeric: Mapping[str, object], mwr: Mapping[str, object]
+    numeric: Mapping[str, object],
+    mwr: Mapping[str, object],
+    cutoff_year: int | None = None,
 ) -> dict[str, object]:
     """Derive the schema-10 period-return fields from the daily link path."""
 
@@ -2847,7 +2890,11 @@ def _independent_period_fields(
             str(year): _format_decimal(wealth_by_year[year] - 1)
             for year in sorted(wealth_by_year)
         }
-        key = None if close is None else str(close.year)
+        key = (
+            None
+            if close is None or (cutoff_year is not None and close.year != cutoff_year)
+            else str(close.year)
+        )
         ppy, ppy_basis = _period_ppy(ends)
         rate = _period_dec(mwr.get("mwr_xirr"))
         opened_text = mwr.get("mwr_opening_date")
@@ -2913,8 +2960,15 @@ def _independent_period_fields(
                     "method": "XIRR_TO_WINDOW_ACT_365",
                 },
                 "return_on_net_capital": {
-                    "reported_basis": "CUMULATIVE",
+                    "reported_basis": (
+                        None if _independent_exited(numeric) else "CUMULATIVE"
+                    ),
                     "window_days": span,
+                    **(
+                        {"status": "NOT_MEANINGFUL_EXITED_EPOCH"}
+                        if _independent_exited(numeric)
+                        else {}
+                    ),
                 },
                 "annualized_return_on_net_capital": {
                     "reported_basis": None if ronc_annual is None else label(span),
@@ -7865,6 +7919,7 @@ def _verify_mixed_output_and_state(
                 assignment["effective_end"],
                 candidate.get("performance_closed_on"),
                 epoch_disposition,
+                _independent_mixed_numeric_row(fact_form),
             )
             expected_base = {
                 **base,
@@ -7886,7 +7941,12 @@ def _verify_mixed_output_and_state(
             ):
                 _fail()
             expected_period = _independent_period_fields(
-                _independent_mixed_numeric_row(fact_form), expected_mwr
+                _independent_mixed_numeric_row(fact_form),
+                expected_mwr,
+                None
+                if (period_cutoff := _current_epoch_calculation_cutoff(selected))
+                is None
+                else period_cutoff.year,
             )
             if {field: candidate[field] for field in _PERIOD_FIELDS} != expected_period:
                 _fail()

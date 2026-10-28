@@ -154,6 +154,7 @@ _PATH_STAGES = {
     # change affects the report and the panel built from it.
     "tools/nested_strategy_tag_map.py": ["report", "panel"],
     "tools/lifecycle_fields.py": ["report", "panel"],
+    "tools/sleeve_disclosures.py": ["report", "panel"],
     # R2 (registry nine -> fifteen): the economic return-source registry and its
     # schema are read by tests and pinned by digest in the product contract (whose
     # own path carries the stage impact); no producer imports them.
@@ -547,6 +548,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "tools/build_sleeve_facts_release.py",
             "tools/build_sleeve_account_facts.py",
             "tools/build_quantbase_fund_facts.py",
+            "tools/sleeve_disclosures.py",
             "tools/nested_strategy_tag_map.py",
             "tools/sleeve_inputs.py",
             "tools/sleeve_ledger.py",
