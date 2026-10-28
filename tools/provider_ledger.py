@@ -34,6 +34,8 @@ from quant_engine.core import (
     CoverageClaim,
     CoverageStatus,
     GenerationManifest,
+    ProviderDescriptor,
+    ProviderRegistry,
     SourceArtifact,
     VerificationStatus,
     hash_file,
@@ -80,42 +82,79 @@ CATALOG_SCHEMA_VERSION: Final = 2
 ADMIT_OR_DECLARE_SCHEMA_VERSION: Final = 1
 ADAPTER_VERSION: Final = "5"
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
+_PROVIDER_REGISTRY: Final = ProviderRegistry()
+for _descriptor in (
+    ProviderDescriptor(
+        provider_id="alpaca",
+        catalog_filename="alpaca-generation.json",
+        catalog_schema_versions=frozenset({1}),
+        account_facts=("nav_observations", "positions", "transactions"),
+        source_segment="alpaca-account-generation",
+    ),
+    ProviderDescriptor(
+        provider_id="fidelity",
+        catalog_filename="fidelity-generation.json",
+        catalog_schema_versions=frozenset({1}),
+        account_facts=("cash_flows", "corporate_actions", "transactions"),
+        source_segment="fidelity-account-generation",
+    ),
+    ProviderDescriptor(
+        provider_id="ibkr",
+        catalog_filename="ibkr-catalog.json",
+        catalog_schema_versions=frozenset({3, 4, 5, 6, 7}),
+        account_facts=(
+            "capital_anchors",
+            "corporate_actions",
+            "financing_cost_observations",
+            "financing_liability_observations",
+            "flows",
+            "leverage_exposure_observations",
+            "nav_observations",
+            "positions",
+            "transactions",
+        ),
+        source_segment="ibkr-account-generation",
+    ),
+    ProviderDescriptor(
+        provider_id="matrixport",
+        catalog_filename="catalog.json",
+        catalog_schema_versions=frozenset({1, 2}),
+        account_facts=("capital_anchors", "nav_observations"),
+        source_segment="matrixport-account-generation",
+    ),
+    ProviderDescriptor(
+        provider_id="portfolio123",
+        catalog_filename="portfolio123-generation.json",
+        catalog_schema_versions=frozenset({1}),
+        account_facts=(),
+        source_segment="portfolio123-model-generation",
+    ),
+    ProviderDescriptor(
+        provider_id="quantbase",
+        catalog_filename="quantbase-generation.json",
+        catalog_schema_versions=frozenset({1}),
+        account_facts=("capital_anchors", "flows", "nav_observations", "transactions"),
+        source_segment="quantbase-account-generation",
+    ),
+    ProviderDescriptor(
+        provider_id="schwab",
+        catalog_filename="schwab-generation.json",
+        catalog_schema_versions=frozenset({1, 2, 3}),
+        account_facts=("nav_observations", "positions", "transactions"),
+        source_segment="schwab-account-generation",
+    ),
+):
+    _PROVIDER_REGISTRY.register_descriptor(_descriptor)
+# The three name-keyed tables below are views of the descriptors above.
 _PROVIDER_CATALOGS: Final = {
-    "alpaca": ("alpaca-generation.json", frozenset({1})),
-    "fidelity": ("fidelity-generation.json", frozenset({1})),
-    "ibkr": ("ibkr-catalog.json", frozenset({3, 4, 5, 6, 7})),
-    "matrixport": ("catalog.json", frozenset({1, 2})),
-    "portfolio123": ("portfolio123-generation.json", frozenset({1})),
-    "quantbase": ("quantbase-generation.json", frozenset({1})),
-    "schwab": ("schwab-generation.json", frozenset({1, 2, 3})),
+    item.provider_id: (item.catalog_filename, item.catalog_schema_versions)
+    for item in _PROVIDER_REGISTRY.descriptors()
 }
 _ACCOUNT_FACTS: Final = {
-    "alpaca": ("nav_observations", "positions", "transactions"),
-    "fidelity": ("cash_flows", "corporate_actions", "transactions"),
-    "ibkr": (
-        "capital_anchors",
-        "corporate_actions",
-        "financing_cost_observations",
-        "financing_liability_observations",
-        "flows",
-        "leverage_exposure_observations",
-        "nav_observations",
-        "positions",
-        "transactions",
-    ),
-    "matrixport": ("capital_anchors", "nav_observations"),
-    "portfolio123": (),
-    "quantbase": ("capital_anchors", "flows", "nav_observations", "transactions"),
-    "schwab": ("nav_observations", "positions", "transactions"),
+    item.provider_id: item.account_facts for item in _PROVIDER_REGISTRY.descriptors()
 }
 _PROVIDER_SOURCE_SEGMENTS: Final = {
-    "alpaca": "alpaca-account-generation",
-    "fidelity": "fidelity-account-generation",
-    "ibkr": "ibkr-account-generation",
-    "matrixport": "matrixport-account-generation",
-    "portfolio123": "portfolio123-model-generation",
-    "quantbase": "quantbase-account-generation",
-    "schwab": "schwab-account-generation",
+    item.provider_id: item.source_segment for item in _PROVIDER_REGISTRY.descriptors()
 }
 
 

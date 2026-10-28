@@ -108,6 +108,7 @@ from quant_engine.core.providers import (
     AdapterCapabilities,
     ProviderCapability,
     ProviderContractError,
+    ProviderDescriptor,
     ProviderRegistry,
     contract_findings,
 )
@@ -125,6 +126,7 @@ __all__ = [
     "AdapterCapabilities",
     "ProviderCapability",
     "ProviderContractError",
+    "ProviderDescriptor",
     "ProviderRegistry",
     "contract_findings",
     "AdmissionDecision",
