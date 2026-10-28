@@ -4858,3 +4858,53 @@ def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
         preparation._build_sleeve_disclosure_sources(
             section, facts_paths=(facts,), destination=tmp_path / "again"
         )
+
+
+def test_disclosure_sources_read_the_pinned_declared_funding_events_or_refuse(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    section = _sleeve_section(tmp_path)
+    declared = {
+        "funding_events": {"s2": {"2026-06-23": {"kind": "IN", "note": "plus margin"}}}
+    }
+    raw = json.dumps(declared).encode()
+    (tmp_path / "declared.json").write_bytes(raw)
+    manifest = json.loads((tmp_path / "sleeve-policy-manifest.json").read_bytes())
+    manifest["sleeve-account-facts"] = {
+        "declared_inputs": {
+            "path": "declared.json",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        }
+    }
+    (tmp_path / "sleeve-policy-manifest.json").write_bytes(
+        canonical_json_bytes(manifest)
+    )
+    section["policy_manifest"] = preparation._definition(
+        tmp_path / "sleeve-policy-manifest.json"
+    )
+    facts = tmp_path / "facts.json"
+    facts.write_bytes(
+        json.dumps(
+            {"artifact_id": "sleeve-account-facts", "provider_id": "ibkr"}
+        ).encode()
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    path = preparation._build_sleeve_disclosure_sources(
+        section, facts_paths=(facts,), destination=out
+    )
+    assert path is not None
+    written = json.loads(path.read_bytes())
+    assert written["margin_funding_events"] == [
+        {"sleeve_id": "s2", "day": "2026-06-23", "kind": "IN", "note": "plus margin"}
+    ]
+    (tmp_path / "declared.json").write_bytes(raw + b" ")
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="declared inputs differ"
+    ):
+        preparation._build_sleeve_disclosure_sources(
+            section, facts_paths=(facts,), destination=tmp_path / "again"
+        )

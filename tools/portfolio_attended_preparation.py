@@ -1321,11 +1321,28 @@ def _build_sleeve_disclosure_sources(
                 "sleeve disclosure inputs differ from their pin"
             )
     root_text = section.get("predecessor_data_root")
+    declared_path: Path | None = None
+    account_section = manifest.get("sleeve-account-facts")
+    declared_pin = (
+        account_section.get("declared_inputs")
+        if isinstance(account_section, Mapping)
+        else None
+    )
+    if isinstance(declared_pin, Mapping):
+        declared_path = policy.parent / str(declared_pin.get("path"))
+        declared_bytes = declared_path.read_bytes() if declared_path.is_file() else b""
+        if hashlib.sha256(declared_bytes).hexdigest() != declared_pin.get(
+            "sha256"
+        ) or len(declared_bytes) != declared_pin.get("size_bytes"):
+            raise AttendedPreparationError(
+                "sleeve declared inputs differ from their pin"
+            )
     try:
         sources = sleeve_disclosures.build_sources(
             facts_paths=tuple(facts_paths),
             inputs_path=inputs_path,
             predecessor_data_root=None if root_text is None else Path(str(root_text)),
+            declared_inputs_path=declared_path,
         )
     except (OSError, sleeve_disclosures.DisclosureError) as exc:
         raise AttendedPreparationError(

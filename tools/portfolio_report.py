@@ -10257,6 +10257,14 @@ def build_report_data(
                     invested_capital=invested_capital,
                     sleeve_accounts=sleeve_accounts,
                     product_strategies=derived_product,
+                    strategy_returns={
+                        str(item["strategy_id"]): Decimal(
+                            str(item["account_live_cumulative_return"])
+                        )
+                        for item in report.get("strategy_summary", [])
+                        if isinstance(item, Mapping)
+                        and item.get("account_live_cumulative_return") is not None
+                    },
                 )
             except sleeve_disclosures.DisclosureError as exc:
                 raise ReportValidationError(str(exc)) from exc

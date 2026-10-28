@@ -155,26 +155,41 @@ def _facts_summary(facts: Mapping[str, Any]) -> dict[str, Any]:
                 "days": len(dividends),
             }
     flows = facts.get("flows")
-    margin: list[dict[str, str]] = []
+    inflow: dict[str, dict[str, Decimal]] = {}
     for flow in flows if isinstance(flows, list) else []:
-        trace = flow.get("trace") if isinstance(flow, Mapping) else None
-        refs = trace.get("evidence_refs") if isinstance(trace, Mapping) else None
-        if isinstance(refs, list) and any(
-            isinstance(ref, str) and "margin" in ref.lower() for ref in refs
-        ):
-            margin.append(
-                {
-                    "account_id": str(flow.get("account_id")),
-                    "class": str(flow.get("class")),
-                    "event_date": str(flow.get("event_date")),
-                    "amount": str(flow.get("amount")),
-                    "pair_id": str(flow.get("pair_id")),
-                }
-            )
-    summary["margin_funded_flows"] = sorted(
-        margin, key=lambda item: (item["event_date"], item["pair_id"], item["class"])
-    )
+        if isinstance(flow, Mapping) and flow.get("class") == "INTERNAL_IN":
+            per_day = inflow.setdefault(str(flow.get("account_id")), {})
+            day = str(flow.get("event_date"))
+            per_day[day] = per_day.get(day, Decimal(0)) + _dec(flow.get("amount"))
+    summary["internal_in_by_day"] = {
+        account: {day: str(total) for day, total in sorted(days.items())}
+        for account, days in sorted(inflow.items())
+    }
     return summary
+
+
+def _margin_funding_events(declared: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The declared funding events whose note or evidence names account margin."""
+
+    events: list[dict[str, str]] = []
+    funding = declared.get("funding_events")
+    for sleeve, days in sorted(funding.items() if isinstance(funding, Mapping) else []):
+        for day, event in sorted(days.items() if isinstance(days, Mapping) else []):
+            if not isinstance(event, Mapping):
+                continue
+            text = " ".join(
+                str(event.get(key) or "") for key in ("note", "evidence_ref")
+            )
+            if "margin" in text.lower():
+                events.append(
+                    {
+                        "sleeve_id": str(sleeve),
+                        "day": str(day),
+                        "kind": str(event.get("kind")),
+                        "note": str(event.get("note") or ""),
+                    }
+                )
+    return events
 
 
 def _pointer(document: Any, pointer: str) -> Any:
@@ -249,6 +264,7 @@ def build_sources(
     facts_paths: Sequence[Path],
     inputs_path: Path | None,
     predecessor_data_root: Path | None,
+    declared_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     """The preparation-time document: every value read from pinned bytes."""
 
@@ -261,6 +277,13 @@ def build_sources(
         "artifact_id": "sleeve-disclosure-sources",
         "schema": SOURCES_SCHEMA,
         "facts": sorted(facts, key=lambda item: str(item["artifact_id"])),
+        "margin_funding_events": (
+            _margin_funding_events(
+                _object(declared_inputs_path.read_bytes(), "declared sleeve inputs")
+            )
+            if declared_inputs_path is not None
+            else []
+        ),
         "timestamp_bounds": None,
         "predecessor": None,
     }
@@ -330,6 +353,7 @@ def compose(
     invested_capital: Mapping[str, Any] | None,
     sleeve_accounts: Mapping[str, str],
     product_strategies: Sequence[str],
+    strategy_returns: Mapping[str, Decimal] | None = None,
 ) -> dict[str, Any]:
     """Methodology items from the sources and the report's own rows.
 
@@ -367,6 +391,21 @@ def compose(
                 None,
             )
             twr = None if row is None else _dec(row["observation_linked_return"]) * 100
+            basis_note = ""
+            if row is None and entry["account_id"] in set(sleeve_accounts.values()):
+                # the epoch of a residual parent is replaced by its sleeves: the
+                # strategy's own account-live return is that parent account's series
+                own = (strategy_returns or {}).get(entry["strategy_id"])
+                twr = None if own is None else own * 100
+                basis_note = ", the strategy's account-live series"
+            if row is None and twr is None:
+                omitted.append(
+                    {
+                        "entry": f"timestamp bound {label}",
+                        "reason": "NO_REPORT_ROW_FOR_THE_MEASURED_EPOCH",
+                    }
+                )
+                continue
             if twr is None or abs(twr - _dec(entry["committed_twr_pct"])) > Decimal(
                 "0.0001"
             ):
@@ -378,7 +417,8 @@ def compose(
                 )
                 continue
             parts.append(
-                f"{label} (cumulative TWR {_pct(twr)}%): beginning-of-day placement of every "
+                f"{label} (cumulative TWR {_pct(twr)}%{basis_note}): beginning-of-day "
+                "placement of every "
                 f"flow moves it by between {_signed_pt(entry['b_all_lower_pt'])} and "
                 f"{_signed_pt(entry['b_all_upper_pt'])} points (external flows only: "
                 f"{_signed_pt(entry['b_ext_lower_pt'])} / {_signed_pt(entry['b_ext_upper_pt'])})"
@@ -463,12 +503,18 @@ def compose(
                 if r.get("strategy_id") == strategy
                 and str(r.get("account_id")) in sleeve_accounts
             }
-            margin = [
-                flow
+            product_sleeves = {
+                account.rsplit("-", 1)[-1]: account for account in product_accounts
+            }
+            inflow = {
+                account: days
                 for item in facts.values()
-                for flow in item.get("margin_funded_flows", [])
-                if flow["account_id"] in product_accounts
-                and flow["class"] == "INTERNAL_IN"
+                for account, days in (item.get("internal_in_by_day") or {}).items()
+            }
+            margin = [
+                event
+                for event in sources.get("margin_funding_events", [])
+                if event["sleeve_id"] in product_sleeves and event["kind"] == "IN"
             ]
             text = (
                 f"Governed capital is measured gross: {strategy} is {_usd(capital[strategy])} "
@@ -477,14 +523,24 @@ def compose(
                 "(not netted)."
             )
             if margin:
-                listed = ", ".join(
-                    f"{flow['event_date']} {_usd(_dec(flow['amount']))}"
-                    for flow in margin
+                listed = "; ".join(
+                    event["day"]
+                    + (
+                        f" {_usd(_dec(amounts[event['day']]))}"
+                        if event["day"]
+                        in (
+                            amounts := inflow.get(
+                                product_sleeves[event["sleeve_id"]], {}
+                            )
+                        )
+                        else ""
+                    )
+                    + f" ({event['note']})"
+                    for event in margin
                 )
                 text += (
-                    f" Allocations whose declared evidence names account margin as funding "
-                    f"({len(margin)}): {listed}; the margin-funded part of each is stated "
-                    "only in the evidence note."
+                    " Allocations whose declared funding events name account margin "
+                    f"({len(margin)}): {listed}."
                 )
             predecessor = sources.get("predecessor")
             if isinstance(predecessor, Mapping):

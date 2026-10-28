@@ -141,6 +141,24 @@ def _facts(tmp_path: Path) -> list[Path]:
     return paths
 
 
+def _declared(tmp_path: Path) -> Path:
+    document = {
+        "funding_events": {
+            "s2": {
+                "2026-01-30": {
+                    "kind": "IN",
+                    "note": "S2 entry funded by account margin",
+                },
+                "2026-02-17": {"kind": "IN", "note": "funded by the sale of s1"},
+            },
+            "s1": {"2026-01-26": {"kind": "IN", "note": "entry, 224 margin"}},
+        }
+    }
+    path = tmp_path / "declared.json"
+    path.write_bytes(json.dumps(document).encode())
+    return path
+
+
 def _inputs(
     tmp_path: Path, *, evidence: str = EVIDENCE_TEXT, extra: bool = False
 ) -> Path:
@@ -178,14 +196,17 @@ def test_sources_are_read_from_the_facts_and_the_pinned_evidence(
         facts_paths=_facts(tmp_path),
         inputs_path=_inputs(tmp_path),
         predecessor_data_root=None,
+        declared_inputs_path=_declared(tmp_path),
     )
     quantbase = next(f for f in sources["facts"] if f["provider_id"] == "quantbase")
     assert quantbase["account_cash"]["residual"] == "36.49"
     ibkr = next(f for f in sources["facts"] if f["provider_id"] == "ibkr")
     assert ibkr["disclosure_counts"]["manual_assignments"] == 3
     assert Decimal(ibkr["unallocated_dividends"]["total"]) == Decimal("1.50")
-    assert [flow["event_date"] for flow in ibkr["margin_funded_flows"]] == [
-        "2026-01-30"
+    assert Decimal(ibkr["internal_in_by_day"][S2]["2026-01-30"]) == Decimal("9868.44")
+    assert [(e["sleeve_id"], e["day"]) for e in sources["margin_funding_events"]] == [
+        ("s1", "2026-01-26"),
+        ("s2", "2026-01-30"),
     ]
     assert len(sources["timestamp_bounds"]["entries"]) == 2
 
@@ -252,6 +273,7 @@ def _compose(
         facts_paths=_facts(tmp_path),
         inputs_path=_inputs(tmp_path),
         predecessor_data_root=None,
+        declared_inputs_path=_declared(tmp_path),
     )
     if predecessor is not None:
         sources["predecessor"] = predecessor
@@ -374,3 +396,48 @@ def test_the_predecessor_comparison_is_read_by_hash_and_pointer_or_omitted(
             "reason": "PREDECESSOR_GENERATION_HASH_DIFFERS",
         }
     ]
+
+
+def test_a_bound_measured_on_a_replaced_parent_epoch_is_read_against_the_strategys_series(
+    tmp_path: Path,
+) -> None:
+    """The residual parent's own epoch has no report row: the strategy's account-live
+    return is that parent account's series, and a bound is shown only when it equals the
+    committed return it was measured against."""
+
+    sources = disclosures.build_sources(
+        facts_paths=_facts(tmp_path),
+        inputs_path=_inputs(tmp_path),
+        predecessor_data_root=None,
+        declared_inputs_path=_declared(tmp_path),
+    )
+    rows = [row for row in _rows() if row["account_id"] != PARENT]
+
+    def compose(own: Decimal | None) -> dict[str, Any]:
+        return disclosures.compose(
+            sources,
+            rows=rows,
+            invested_capital=None,
+            sleeve_accounts={S1: PARENT, S2: PARENT},
+            product_strategies=["p123-ai-factor"],
+            strategy_returns={} if own is None else {"p123-ai-factor": own},
+        )
+
+    shown = compose(Decimal("0.02453178"))
+    timing = next(
+        i["value"] for i in shown["items"] if i["item"] == "Flow timing bounds"
+    )
+    assert (
+        "the strategy's account-live series" in timing and "-0.19 and +0.00" in timing
+    )
+    assert all("p123-ai-factor" not in o["entry"] for o in shown["omitted"])
+    differs = compose(Decimal("0.03"))
+    assert {
+        "entry": f"timestamp bound p123-ai-factor on {PARENT}",
+        "reason": "COMMITTED_RETURN_DIFFERS_FROM_REPORT_ROW",
+    } in differs["omitted"]
+    absent = compose(None)
+    assert {
+        "entry": f"timestamp bound p123-ai-factor on {PARENT}",
+        "reason": "NO_REPORT_ROW_FOR_THE_MEASURED_EPOCH",
+    } in absent["omitted"]
