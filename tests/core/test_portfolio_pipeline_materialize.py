@@ -7837,3 +7837,96 @@ def test_snapshot_sums_do_not_depend_on_the_callers_precision() -> None:
             )
 
     assert results[0] == results[1]
+
+
+def _add_panel_strategy_rows(root: Path, *rows: dict[str, object]) -> None:
+    panel = next((root / "stages" / "panel" / "generations").iterdir())
+    _mutate_json(
+        panel / "data" / "dashboard_data.json",
+        lambda payload: payload.update(
+            {"strategies": [*payload.get("strategies", []), *rows]}
+        ),
+    )
+
+
+def test_semantic_equality_ignores_retained_history_only_panel_rows(
+    tmp_path: Path,
+) -> None:
+    """D18: a retained history-only record is not a product strategy (one shared rule)."""
+
+    recipe, output_root = _fixture(tmp_path)
+    _add_panel_strategy_rows(
+        output_root,
+        {"strategy_id": "retired-one", "record_kind": "RETAINED_HISTORY_ONLY"},
+        {"strategy_id": "retired-two", "record_kind": "RETAINED_HISTORY_ONLY"},
+    )
+    _refresh_expected_generation(recipe, output_root, "panel")
+
+    result = materializer.semantic(
+        recipe, output_root / "evidence" / "post-build-semantic.json"
+    )
+
+    assert result["state"] == "PASS"
+    details = json.loads(
+        (output_root / "evidence" / "semantic-details.json").read_text()
+    )
+    equality = details["checks"]["analytics_report_panel_equality"]["evidence"]
+    assert equality["panel_retained_history_only_count"] == 2
+    assert equality["panel_strategy_count"] == equality["report_strategy_count"]
+
+
+def test_semantic_equality_still_refuses_a_product_panel_row_the_report_lacks(
+    tmp_path: Path,
+) -> None:
+    """A panel row without the retained marker must still match the report."""
+
+    recipe, output_root = _fixture(tmp_path)
+    _add_panel_strategy_rows(
+        output_root,
+        {"strategy_id": "retired-one", "record_kind": "RETAINED_HISTORY_ONLY"},
+        {"strategy_id": "not-in-the-report"},
+    )
+    _refresh_expected_generation(recipe, output_root, "panel")
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="analytics_report_panel_equality",
+    ):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
+
+
+def test_semantic_equality_still_refuses_a_report_row_the_panel_lacks(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root = _fixture(tmp_path)
+    panel = next((output_root / "stages" / "panel" / "generations").iterdir())
+    _mutate_json(
+        panel / "data" / "dashboard_data.json",
+        lambda payload: payload.update({"strategies": payload["strategies"][:-1]}),
+    )
+    _refresh_expected_generation(recipe, output_root, "panel")
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="analytics_report_panel_equality",
+    ):
+        materializer.semantic(
+            recipe, output_root / "evidence" / "post-build-semantic.json"
+        )
+
+
+def test_the_product_strategy_rule_is_one_shared_helper() -> None:
+    import lifecycle_fields
+
+    rows = [
+        {"strategy_id": "a"},
+        {"strategy_id": "b", "record_kind": "RETAINED_HISTORY_ONLY"},
+        {"strategy_id": "c", "record_kind": "SOMETHING_ELSE"},
+        "not a row",
+    ]
+    assert lifecycle_fields.product_strategy_rows(rows) == [rows[0], rows[2], rows[3]]
+    assert lifecycle_fields.is_retained_history_only(rows[1])
+    assert not lifecycle_fields.is_retained_history_only(rows[0])
+    assert not lifecycle_fields.is_retained_history_only(rows[3])

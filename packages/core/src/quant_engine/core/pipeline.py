@@ -1298,13 +1298,16 @@ def _governed_hwm_input_policy(
     path = tools_root / "portfolio_invested_capital.py"
     if path.is_symlink() or not path.is_file():
         raise PipelineValidationError("governed HWM policy authority is unavailable")
-    module_spec = importlib.util.spec_from_file_location(
-        "quant_engine_pipeline_invested_capital_policy", path
-    )
+    module_name = "quant_engine_pipeline_invested_capital_policy"
+    module_spec = importlib.util.spec_from_file_location(module_name, path)
     if module_spec is None or module_spec.loader is None:
         raise PipelineValidationError("governed HWM policy authority is unavailable")
     module = importlib.util.module_from_spec(module_spec)
     previous_path = list(sys.path)
+    previous_module = sys.modules.get(module_name)
+    # a module that declares dataclasses resolves its annotations through
+    # sys.modules[__module__] while it executes, so it is registered for the load
+    sys.modules[module_name] = module
     try:
         sys.path.insert(0, str(tools_root))
         module_spec.loader.exec_module(module)
@@ -1317,6 +1320,10 @@ def _governed_hwm_input_policy(
         ) from exc
     finally:
         sys.path[:] = previous_path
+        if previous_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous_module
     if not isinstance(retargeted, bytes):
         raise PipelineValidationError("governed HWM policy authority is invalid")
     return retargeted

@@ -174,3 +174,19 @@ def test_a_retained_epoch_is_checked_from_its_manifest_row() -> None:
         accounts={PARENT: "1"}, manifest=[{**row, "account_id": "x-s1"}], twr=[]
     )
     assert checks.resolve_metric(other, "twr.account", "x-s1") == []
+
+
+def test_a_derived_account_of_an_active_parent_and_strategy_is_in_the_product_universe() -> (
+    None
+):
+    manifest = [
+        _row(f"{PARENT}-s2", "product"),
+        _row(f"{PARENT}-s1", "retained", "2026-06-23"),
+        _row(f"{OTHER}-s9", "product"),  # hangs on no listed account
+    ]
+    ctx = _context(accounts={PARENT: "1"}, manifest=manifest, twr=[])
+    reference = SimpleNamespace(
+        active_accounts=frozenset({PARENT}),
+        active_strategies=frozenset({"product"}),
+    )
+    assert checks.derived_product_accounts(ctx, reference) == {f"{PARENT}-s2"}  # type: ignore[arg-type]
