@@ -623,14 +623,15 @@ def _retired_workstation(args: argparse.Namespace) -> Path:
 FACT_ADMISSION_GATE_ID = "financial-mvp-provider-catalog-authority"
 
 
-def _fact_admission(spec: Any) -> dict[str, str]:
+def _fact_admission(spec: Any) -> dict[str, Any]:
     """Run the dropped-fact gate on the candidate provider ledger (#535).
 
     The candidate ledger is the spec gate whose bytes ``_candidate_qa`` already
     pinned. Provider catalogs are read from the workspace that holds the
-    coordination root (``<workspace>/dataPortfolio/<coordination>``). A provider
-    whose catalog is not on disk is SKIPPED, which is recorded and never reported
-    as a pass; any dropped or changed fact fails the preflight.
+    coordination root (``<workspace>/dataPortfolio/<coordination>``). Every
+    provider the ledger binds must be checked: a dropped or changed fact, a
+    provider whose catalog is not on disk, or a ledger with nothing checkable
+    fails the preflight, so an unchecked provider can never ride on another's PASS.
     """
 
     ledger = next(
@@ -650,10 +651,19 @@ def _fact_admission(spec: Any) -> dict[str, str]:
             str(ledger),
         )
     )
-    status = output.strip().splitlines()[-1].removeprefix("fact-admission: ")
-    if status not in {"PASS", "SKIPPED"}:
-        raise QualityControlFailure(f"fact admission gate: unexpected result {status}")
-    return {"status": status}
+    lines = output.strip().splitlines()
+    providers = {
+        name: state.split(" ", 1)[0]
+        for name, _, state in (line.partition(": ") for line in lines[:-1])
+        if state
+    }
+    unchecked = sorted(name for name, state in providers.items() if state != "PASS")
+    if lines[-1] != "fact-admission: PASS" or unchecked or not providers:
+        raise QualityControlFailure(
+            "fact admission gate did not check every bound provider: "
+            + (", ".join(unchecked) or lines[-1])
+        )
+    return {"providers": dict(sorted(providers.items())), "status": "PASS"}
 
 
 def _release_preflight(args: argparse.Namespace) -> Path:

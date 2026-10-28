@@ -230,32 +230,57 @@ def _preflight_spec(tmp_path: Path, ledger_file: Path | None):
     return qc, SimpleNamespace(coordination_root=coordination, gates=gates)
 
 
+def _only_ibkr(ledger_file: Path) -> None:
+    value = json.loads(ledger_file.read_text(encoding="utf-8"))
+    value["provider_generations"] = [
+        row for row in value["provider_generations"] if row["provider_id"] == "ibkr"
+    ]
+    ledger_file.write_text(json.dumps(value), encoding="utf-8")
+
+
 def test_release_preflight_runs_the_gate_on_the_candidate_ledger(
     tmp_path: Path,
 ) -> None:
     ledger_file = _workspace(tmp_path)
+    _only_ibkr(ledger_file)
     qc, spec = _preflight_spec(tmp_path, ledger_file)
-    assert qc._fact_admission(spec) == {"status": "PASS"}  # noqa: SLF001
+    assert qc._fact_admission(spec) == {  # noqa: SLF001
+        "providers": {"ibkr": "PASS"},
+        "status": "PASS",
+    }
 
 
 def test_release_preflight_fails_when_the_candidate_ledger_dropped_a_fact(
     tmp_path: Path,
 ) -> None:
     ledger_file = _workspace(tmp_path, drop="commission")
+    _only_ibkr(ledger_file)
     qc, spec = _preflight_spec(tmp_path, ledger_file)
     with pytest.raises(qc.QualityControlFailure, match="commission dropped"):
         qc._fact_admission(spec)  # noqa: SLF001
 
 
-def test_release_preflight_records_skipped_and_not_applicable_never_pass(
+def test_release_preflight_fails_when_a_bound_provider_was_not_checked(
     tmp_path: Path,
 ) -> None:
+    # ibkr is checked and passes, but the bound schwab catalog is not on disk.
+    ledger_file = _workspace(tmp_path)
+    qc, spec = _preflight_spec(tmp_path, ledger_file)
+    with pytest.raises(qc.QualityControlFailure, match="schwab"):
+        qc._fact_admission(spec)  # noqa: SLF001
+
+
+def test_release_preflight_fails_when_nothing_is_checkable(tmp_path: Path) -> None:
     ledger_file = tmp_path / "provider-ledger.json"
     ledger_file.write_text(
         json.dumps({"as_of_date": "2026-09-17", "provider_generations": []}),
         encoding="utf-8",
     )
     qc, spec = _preflight_spec(tmp_path, ledger_file)
-    assert qc._fact_admission(spec) == {"status": "SKIPPED"}  # noqa: SLF001
-    _, no_gate = _preflight_spec(tmp_path, None)
-    assert qc._fact_admission(no_gate) == {"status": "NOT_APPLICABLE"}  # noqa: SLF001
+    with pytest.raises(qc.QualityControlFailure):
+        qc._fact_admission(spec)  # noqa: SLF001
+
+
+def test_release_preflight_without_the_gate_is_not_applicable(tmp_path: Path) -> None:
+    qc, spec = _preflight_spec(tmp_path, None)
+    assert qc._fact_admission(spec) == {"status": "NOT_APPLICABLE"}  # noqa: SLF001
