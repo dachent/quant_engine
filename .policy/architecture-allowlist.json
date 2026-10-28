@@ -321,14 +321,14 @@
       "quantbase": 12
     },
     "tools/provider_ledger.py": {
-      "alpaca": 4,
-      "fidelity": 8,
-      "ibkr": 18,
-      "matrixport": 39,
+      "alpaca": 2,
+      "fidelity": 6,
+      "ibkr": 16,
+      "matrixport": 37,
       "matrixport ": 2,
-      "portfolio123": 12,
-      "quantbase": 34,
-      "schwab": 21
+      "portfolio123": 10,
+      "quantbase": 32,
+      "schwab": 19
     },
     "tools/provider_security_quarantine.py": {
       "alpaca": 3,
