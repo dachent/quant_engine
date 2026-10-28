@@ -355,12 +355,12 @@ def test_freshness_finite_providers_match_the_ledger_finality_declaration() -> N
     ledger_source = (REPOSITORY_ROOT / "tools" / "provider_ledger.py").read_text(
         encoding="utf-8"
     )
-    match = re.search(
-        r"if provider_id in \{([^}]*)\}:\s*\n\s*if digest != selected\[\"manifest_sha256\"\]",
-        ledger_source,
+    declared = set(
+        re.findall(
+            r'"(\w+)": _FinalityValidator\(_finality_finite, False\)', ledger_source
+        )
     )
-    assert match is not None, "ledger finite finality declaration moved"
-    declared = {item.strip().strip('"') for item in match.group(1).split(",")}
+    assert declared, "ledger finite finality declaration moved"
 
     assert declared == set(freshness.FINITE_HISTORY_PROVIDER_IDS)
 
