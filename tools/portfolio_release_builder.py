@@ -70,8 +70,6 @@ class _ReportForwardedArguments(TypedDict, total=False):
     attribution_generation_id: str
 
 
-
-
 def _governed_hwm_arguments(
     *,
     result: Path | None,
@@ -185,34 +183,12 @@ def _write_exact(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
-
-
 def _sha(path: Path) -> tuple[str, int]:
     try:
         digest: tuple[str, int] = hash_file(path)
         return digest
     except (OSError, ValueError) as exc:
         raise VerticalBuildError(f"source artifact is unavailable: {path}") from exc
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _is_link_or_reparse_point(path: Path) -> bool:
@@ -1183,28 +1159,6 @@ def _run(
     return value
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class _CountedResult(dict[str, Any]):
     """A producer's JSON result, unchanged, plus the work its run was counted doing."""
 
@@ -1347,10 +1301,6 @@ def _published_generation(root: Path) -> tuple[str, Path]:
     if generation.is_symlink() or not generation.is_dir():
         raise VerticalBuildError("published generation directory is unavailable")
     return pointer.generation_id, generation
-
-
-
-
 
 
 def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
@@ -4910,8 +4860,6 @@ def build_report_candidate(
     )
     candidate = _path(built.get("candidate_dir"), "report candidate")
     return {**built, "candidate_dir": str(candidate), "root": str(output_root)}
-
-
 
 
 def build_report(
