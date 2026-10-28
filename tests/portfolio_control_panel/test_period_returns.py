@@ -296,3 +296,31 @@ def test_a_fully_exited_epoch_has_no_return_on_net_capital(
     basis = fields["annualisation_basis"]["return_on_net_capital"]
     assert basis["status"] == "NOT_MEANINGFUL_EXITED_EPOCH"
     assert basis["reported_basis"] is None
+
+
+def test_the_manifest_schema_accepts_the_published_basis_of_an_exited_epoch(
+    producer: Any,
+) -> None:
+    """D21: the basis block of an exited epoch carries a status the schema must allow."""
+
+    import json
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "schemas"
+            / "portfolio"
+            / "account-strategy-manifest.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    block = {"$ref": "#/$defs/annualisation_basis", "$defs": schema["$defs"]}
+    links = _links(date(2026, 8, 1), 40, weekends=False)
+    for current, status in (("0", "NOT_MEANINGFUL_EXITED_EPOCH"), ("5", None)):
+        row = {**_row(links), "current_value": current, "net_capital": "100"}
+        basis = producer.json_ready(producer._period_return_fields(row))[
+            "annualisation_basis"
+        ]
+        assert basis["return_on_net_capital"].get("status") == status
+        assert list(Draft202012Validator(block).iter_errors(basis)) == []

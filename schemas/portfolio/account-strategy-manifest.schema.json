@@ -191,7 +191,8 @@
         "annualised_method": {"enum": ["GEOMETRIC_ACT_365", null]},
         "method": {"enum": ["XIRR_ACT_365", "XIRR_TO_WINDOW_ACT_365", "GEOMETRIC_ACT_365", "LINEAR_ACT_365", null]},
         "window_equivalent_field": {"type": "string"},
-        "year_attribution": {"const": "LINK_END_DATE_YEAR"}
+        "year_attribution": {"const": "LINK_END_DATE_YEAR"},
+        "status": {"const": "NOT_MEANINGFUL_EXITED_EPOCH"}
       }
     },
     "annualisation_basis": {

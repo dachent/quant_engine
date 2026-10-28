@@ -2148,7 +2148,8 @@
         "definition": { "type": "string", "minLength": 1 },
         "source_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "LIVE_ONLY_FALLBACK", "WEEKLY_RETURNS_SINGLE_MODE"] },
         "tri": { "type": "array", "minItems": 1, "items": { "type": "number" } },
-        "origin": { "$ref": "#/$defs/performance_tab_origin_runs" }
+        "origin": { "$ref": "#/$defs/performance_tab_origin_runs" },
+        "return_scope_label": { "type": "string", "minLength": 1 }
       },
       "allOf": [
         {
