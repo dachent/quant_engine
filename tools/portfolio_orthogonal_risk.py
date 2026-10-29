@@ -54,7 +54,11 @@ SHARE_PLACES: Final = 12
 VARIANCE_SIGNIFICANT_DIGITS: Final = 15
 USABLE_SERIES_STATUSES: Final = frozenset({"AVAILABLE", "DIAGNOSTIC_ONLY"})
 CAPITAL_WEIGHTED: Final = "CAPITAL_WEIGHTED"
-TARGET_WEIGHTED: Final = "TARGET_WEIGHTED"
+TARGET_WEIGHTED: Final = "TARGET_WEIGHTED"  # reserved: no dated target history
+EQUAL_WEIGHT_DIAGNOSTIC: Final = "EQUAL_WEIGHT_DIAGNOSTIC"
+EQUAL_WEIGHT_DEFINITION: Final = (
+    "DAILY_REBALANCED_ONE_OVER_N_OVER_THE_COVERED_STRATEGIES_WITH_TRAIN_DATA_THAT_DAY"
+)
 CAPITAL_WEIGHT_DEFINITION: Final = "PRIOR_DAY_INVESTED_CAPITAL_SHARE_OF_PERIMETER"
 FEWER_THAN_TWO_FUNDED_REASON: Final = (
     "FEWER_THAN_TWO_COVERED_STRATEGIES_HELD_INVESTED_CAPITAL_ON_THESE_DATES"
@@ -509,6 +513,20 @@ def _strategy_ids(data: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _weighting_segments(days: Sequence[str], equal: set[str]) -> list[dict[str, Any]]:
+    """Contiguous runs of used dates by weighting basis."""
+
+    segments: list[dict[str, Any]] = []
+    for day in days:
+        basis = EQUAL_WEIGHT_DIAGNOSTIC if day in equal else CAPITAL_WEIGHTED
+        if segments and segments[-1]["basis"] == basis:
+            segments[-1]["end"] = day
+            segments[-1]["n"] += 1
+        else:
+            segments.append({"basis": basis, "start": day, "end": day, "n": 1})
+    return segments
+
+
 def _unweighted_ranges(
     common: Sequence[str],
     skipped: Sequence[str],
@@ -600,7 +618,10 @@ def _aggregate(
             (value for value in values.values() if value is not None), Fraction(0)
         )
         if any(value is None for value in values.values()) or total <= 0:
+            present = [sid for sid, dates in covered.items() if day in dates]
             skipped.append(day)
+            days.append(day)
+            weights[day] = {sid: Fraction(1, len(present)) for sid in present}
             continue
         funded = sum(
             1
@@ -615,8 +636,10 @@ def _aggregate(
             sid: value / total for sid, value in values.items() if value is not None
         }
     result["unweighted_ranges"] = _unweighted_ranges(
-        sorted(common), skipped, unfunded, capital
+        sorted(common), [], unfunded, capital
     )
+    equal = set(skipped)
+    days.sort()
     if len(days) < MINIMUM_OBSERVATIONS:
         result.update(
             {
@@ -630,6 +653,7 @@ def _aggregate(
     fitted = [Fraction(0)] * len(days)
     labels: dict[str, list[Fraction]] = {}
     coverage = [Fraction(0)] * len(days)
+    capital_days = [i for i, day in enumerate(days) if day not in equal]
     for cell, arrays in included_cells:
         sid = ids[cell["series_id"]]
         index = {day: i for i, day in enumerate(arrays["dates"])}
@@ -638,7 +662,8 @@ def _aggregate(
                 continue
             weight = weights[day][sid]
             source = index[day]
-            coverage[position] += weight
+            if day not in equal:
+                coverage[position] += weight
             response[position] += weight * arrays["response"][source]
             fitted[position] += weight * arrays["fitted"][source]
             for component, series in arrays["contributions"].items():
@@ -649,16 +674,13 @@ def _aggregate(
     result.update(
         {
             "status": "AVAILABLE",
-            "weighting": [
-                {
-                    "basis": CAPITAL_WEIGHTED,
-                    "start": days[0],
-                    "end": days[-1],
-                    "n": len(days),
-                }
-            ],
+            "weighting": _weighting_segments(days, equal),
             "included_series": sorted(cell["series_id"] for cell, _ in included_cells),
-            "capital_coverage": _share_value(_mean(coverage)),
+            "capital_coverage": (
+                _share_value(_mean([coverage[i] for i in capital_days]))
+                if capital_days
+                else None
+            ),
             "window": {"start": days[0], "end": days[-1], "n": len(days)},
             "variance": _variance_block(parts),
             "components": _components(parts, order),
@@ -755,7 +777,10 @@ def build_orthogonal_risk_attribution(data: Mapping[str, Any]) -> dict[str, Any]
             "reason": MODE_COEFFICIENT_UNAVAILABLE_REASON,
         },
         "aggregate_note": AGGREGATE_LABEL_NOTE,
-        "weighting_definitions": {CAPITAL_WEIGHTED: CAPITAL_WEIGHT_DEFINITION},
+        "weighting_definitions": {
+            CAPITAL_WEIGHTED: CAPITAL_WEIGHT_DEFINITION,
+            EQUAL_WEIGHT_DIAGNOSTIC: EQUAL_WEIGHT_DEFINITION,
+        },
         "definition": (
             "Euler share of the TRAIN-window sample variance of the anchor-adjusted "
             "target return, by orthogonal mode, with the unexplained residual and the "
@@ -944,29 +969,26 @@ def _verify_aggregate(
     total_response: dict[str, Fraction] = {}
     total_fitted: dict[str, Fraction] = {}
     labels: dict[str, dict[str, Fraction]] = {}
+    equal_days: set[str] = set()
     for day in sorted(common):
         values = {sid: _prior_day_capital(capital[sid], day) for sid in perimeter}
-        if any(value is None for value in values.values()):
-            continue
         denominator = sum((v for v in values.values() if v is not None), Fraction(0))
-        if denominator <= 0:
-            continue
-        if (
-            sum(
-                1
-                for cell in members
-                if day in positions[_key(cell)]
-                and (values[ids[cell["series_id"]]] or Fraction(0)) > 0
-            )
-            < 2
-        ):
-            continue
-        for cell in members:
-            dates, response, fitted, contributions = arrays[_key(cell)]
-            if day not in positions[_key(cell)]:
+        present = [cell for cell in members if day in positions[_key(cell)]]
+        if any(v is None for v in values.values()) or denominator <= 0:
+            equal_days.add(day)
+            shares = {_key(cell): Fraction(1, len(present)) for cell in present}
+        else:
+            if sum(1 for c in present if (values[ids[c["series_id"]]] or 0) > 0) < 2:
                 continue
+            shares = {
+                _key(cell): (values[ids[cell["series_id"]]] or Fraction(0))
+                / denominator
+                for cell in present
+            }
+        for cell in present:
+            dates, response, fitted, contributions = arrays[_key(cell)]
             at = positions[_key(cell)][day]
-            weight = (values[ids[cell["series_id"]]] or Fraction(0)) / denominator
+            weight = shares[_key(cell)]
             total_response[day] = (
                 total_response.get(day, Fraction(0)) + weight * response[at]
             )

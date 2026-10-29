@@ -2469,7 +2469,7 @@
             "additionalProperties": false,
             "required": ["basis", "start", "end", "n"],
             "properties": {
-              "basis": { "enum": ["CAPITAL_WEIGHTED", "TARGET_WEIGHTED"] },
+              "basis": { "enum": ["CAPITAL_WEIGHTED", "EQUAL_WEIGHT_DIAGNOSTIC", "TARGET_WEIGHTED"] },
               "start": { "type": "string", "format": "date" },
               "end": { "type": "string", "format": "date" },
               "n": { "type": "integer", "minimum": 1 }
@@ -2490,7 +2490,7 @@
             }
           }
         },
-        "capital_coverage": { "type": "number" },
+        "capital_coverage": { "type": ["number", "null"] },
         "window": {
           "type": "object",
           "additionalProperties": false,

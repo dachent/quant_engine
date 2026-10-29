@@ -346,17 +346,21 @@ def test_a_row_that_does_not_apply_is_unavailable_with_its_reason() -> None:
     risk.verify_orthogonal_risk_attribution(block, panel)
 
 
-def test_the_aggregate_is_capital_weighted_and_names_its_unweighted_range() -> None:
+def test_the_aggregate_is_capital_weighted_where_capital_exists_and_equal_weight_before() -> (
+    None
+):
     panel = _panel([_series_row("A"), _series_row("B", scale=3)], capital_from=4)
     block = risk.build_orthogonal_risk_attribution(panel)
     aggregate = block["modes"]["LIVE_ONLY"]["aggregates"][0]
     assert aggregate["status"] == "AVAILABLE"
-    assert aggregate["weighting"][0]["basis"] == "CAPITAL_WEIGHTED"
-    assert aggregate["unweighted_ranges"]
-    first = aggregate["unweighted_ranges"][0]
-    assert first["start"] == _day(0)
-    assert "NO_EFFECTIVE_DATED_TARGET_ALLOCATION_WEIGHTS" in first["reason"]
-    assert aggregate["window"]["start"] > first["end"]
+    bases = [segment["basis"] for segment in aggregate["weighting"]]
+    assert bases == ["EQUAL_WEIGHT_DIAGNOSTIC", "CAPITAL_WEIGHTED"]
+    assert aggregate["weighting"][0]["start"] == _day(0)
+    assert (
+        sum(segment["n"] for segment in aggregate["weighting"])
+        == aggregate["window"]["n"]
+    )
+    assert aggregate["unweighted_ranges"] == []
     assert Fraction(aggregate["capital_coverage"]) == 1
     closing = (
         sum(Fraction(v) for v in aggregate["components"]["share_of_total"])
@@ -368,18 +372,38 @@ def test_the_aggregate_is_capital_weighted_and_names_its_unweighted_range() -> N
     risk.verify_orthogonal_risk_attribution(block, panel)
 
 
-def test_an_aggregate_over_one_strategy_or_no_weighted_date_is_unavailable() -> None:
+def test_without_any_capital_the_aggregate_is_equal_weight_with_no_coverage_figure() -> (
+    None
+):
+    late = _panel([_series_row("A"), _series_row("B")], capital_from=DAYS + 1)
+    block = risk.build_orthogonal_risk_attribution(late)
+    aggregate = block["modes"]["LIVE_ONLY"]["aggregates"][0]
+    assert [s["basis"] for s in aggregate["weighting"]] == ["EQUAL_WEIGHT_DIAGNOSTIC"]
+    assert aggregate["capital_coverage"] is None
+    assert _errors(block) == []
+    risk.verify_orthogonal_risk_attribution(block, late)
+
+
+def test_one_covered_strategy_and_one_funded_strategy_stay_unavailable_or_named() -> (
+    None
+):
     one = risk.build_orthogonal_risk_attribution(_panel([_series_row("A")]))
     assert one["modes"]["LIVE_ONLY"]["aggregates"][0]["reason"] == (
         "FEWER_THAN_TWO_COVERED_STRATEGIES"
     )
-    late = _panel([_series_row("A"), _series_row("B")], capital_from=DAYS + 1)
-    block = risk.build_orthogonal_risk_attribution(late)
+    panel = _panel([_series_row("A"), _series_row("B")])
+    funded = panel["invested_capital"]["daily_by_strategy"]
+    for row in funded:
+        if row["strategy_id"] == "id-B":
+            row["invested_capital_usd"] = "0"
+    block = risk.build_orthogonal_risk_attribution(panel)
     aggregate = block["modes"]["LIVE_ONLY"]["aggregates"][0]
     assert aggregate["status"] == "UNAVAILABLE"
-    assert aggregate["unweighted_ranges"][0]["days"] == DAYS
+    assert aggregate["unweighted_ranges"][0]["reason"].startswith(
+        "FEWER_THAN_TWO_COVERED_STRATEGIES_HELD_INVESTED_CAPITAL"
+    )
     assert _errors(block) == []
-    risk.verify_orthogonal_risk_attribution(block, late)
+    risk.verify_orthogonal_risk_attribution(block, panel)
 
 
 def test_a_payload_without_lens_rows_is_an_explicit_unavailable_block() -> None:
