@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import importlib
 import re
 import subprocess
 from typing import Any, Protocol, runtime_checkable
@@ -171,7 +172,9 @@ class BitwardenSource:
 
 def _win32_reader(target: str) -> Mapping[str, Any]:
     try:
-        import win32cred  # type: ignore[import-untyped,import-not-found,unused-ignore]
+        # Optional dependency (Windows only), imported by name so that core does
+        # not declare pywin32; the provider packages that need it declare it.
+        win32cred = importlib.import_module("win32cred")
     except ImportError:
         raise CredentialError(
             "windows-credential-manager: pywin32 is not available"
