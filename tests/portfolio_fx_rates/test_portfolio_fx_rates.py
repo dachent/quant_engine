@@ -122,3 +122,161 @@ def test_stage_candidate_rejects_missing_required_currency_date(tmp_path: Path) 
             observed_start="2026-09-01",
             observed_end="2026-09-02",
         )
+
+
+def _chart(path: Path, *, symbol: str = "EURUSD=X") -> list[tuple[str, object]]:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    london = ZoneInfo("Europe/London")
+    # Session dates; bars sit at local midnight, so summer bars are 23:00 UTC of
+    # the previous calendar day.
+    sessions = [
+        ("2026-01-05", 1.1700),
+        ("2026-01-06", 1.1710),
+        ("2026-06-30", 1.1600),
+        ("2026-07-01", None),
+        ("2026-07-02", 1.1620),
+    ]
+    stamps = [
+        int(datetime.fromisoformat(day).replace(tzinfo=london).timestamp())
+        for day, _ in sessions
+    ]
+    path.write_text(
+        json.dumps(
+            {
+                "chart": {
+                    "result": [
+                        {
+                            "meta": {
+                                "currency": "USD",
+                                "symbol": symbol,
+                                "exchangeTimezoneName": "Europe/London",
+                                "dataGranularity": "1d",
+                                "instrumentType": "CURRENCY",
+                            },
+                            "timestamp": stamps,
+                            "indicators": {
+                                "quote": [{"close": [close for _, close in sessions]}]
+                            },
+                        }
+                    ],
+                    "error": None,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return sessions
+
+
+def _policy(path: Path, **overrides: object) -> Path:
+    policy: dict[str, object] = {
+        "policy_id": "fx-fiat-lookup-v1",
+        "session_date_convention": "LOCAL_DATE_IN_PROVIDER_DECLARED_EXCHANGE_TIMEZONE",
+        "null_close": "OMIT_ROW_NEVER_FILL",
+        "lookup_rule": "LAST_OBSERVED_CLOSE_ON_OR_BEFORE_DATE_WITHIN_MAX_AGE",
+        "max_lookup_age_days": 3,
+    }
+    policy.update(overrides)
+    path.write_text(json.dumps(policy), encoding="utf-8")
+    return path
+
+
+def test_fiat_candidate_uses_local_session_dates_and_never_fills_null_closes(
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "chart.json"
+    sessions = _chart(raw)
+    policy = _policy(tmp_path / "policy.json")
+    csv_path = tmp_path / "chart.csv"
+    # A CSV rendered from UTC dates shifts every summer bar back one day.
+    csv_path.write_text(
+        "date,close\n"
+        "2026-01-05,1.17\n2026-01-06,1.171\n2026-06-29,1.16\n2026-06-30,\n2026-07-01,1.162\n",
+        encoding="utf-8",
+    )
+    result = fx_rates.stage_fiat_candidate(
+        raw,
+        tmp_path / "out",
+        policy,
+        symbol="EURUSD=X",
+        currency="EUR",
+        observed_start="2026-01-01",
+        observed_end="2026-12-31",
+        chart_csv=csv_path,
+    )
+    assert result["published"] is False
+    assert result["null_close_dates"] == ["2026-07-01"]
+    assert result["rate_count"] == 4
+    assert result["chart_csv_check"]["csv_date_differs_from_session_date"] == 3
+    assert result["chart_csv_check"]["csv_close_differs_from_response"] == 0
+    assert not (tmp_path / "out" / "CURRENT.json").exists()
+    again = fx_rates.stage_fiat_candidate(
+        raw,
+        tmp_path / "out",
+        policy,
+        symbol="EURUSD=X",
+        currency="EUR",
+        observed_start="2026-01-01",
+        observed_end="2026-12-31",
+        chart_csv=csv_path,
+    )
+    assert again["generation_id"] == result["generation_id"]
+
+    root = tmp_path / "out" / "generations" / str(result["generation_id"])
+    rows = (root / "rates.csv").read_text(encoding="utf-8").splitlines()
+    assert [line.split(",")[0] for line in rows[1:]] == [
+        day for day, close in sessions if close is not None
+    ]
+    table = fx_rates.FiatRateTable(root)
+    from datetime import date
+
+    assert table.rate_on(date(2026, 6, 30))[1] == date(2026, 6, 30)
+    # the omitted 2026-07-01 carries the last observed close within the policy age
+    rate, observed = table.rate_on(date(2026, 7, 1))
+    assert observed == date(2026, 6, 30) and str(rate) == "1.16"
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="older than"):
+        table.rate_on(date(2026, 7, 20))
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="no fiat rate"):
+        table.rate_on(date(2025, 12, 31))
+
+
+def test_fiat_candidate_rejects_wrong_symbol_policy_and_tampered_artifacts(
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "chart.json"
+    _chart(raw)
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="symbol"):
+        fx_rates.stage_fiat_candidate(
+            raw,
+            tmp_path / "out",
+            _policy(tmp_path / "p.json"),
+            symbol="GBPUSD=X",
+            currency="GBP",
+            observed_start="2026-01-01",
+            observed_end="2026-12-31",
+        )
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="rule is unsupported"):
+        fx_rates.stage_fiat_candidate(
+            raw,
+            tmp_path / "out",
+            _policy(tmp_path / "bad.json", null_close="ZERO_FILL"),
+            symbol="EURUSD=X",
+            currency="EUR",
+            observed_start="2026-01-01",
+            observed_end="2026-12-31",
+        )
+    result = fx_rates.stage_fiat_candidate(
+        raw,
+        tmp_path / "out",
+        _policy(tmp_path / "ok.json"),
+        symbol="EURUSD=X",
+        currency="EUR",
+        observed_start="2026-01-01",
+        observed_end="2026-12-31",
+    )
+    root = tmp_path / "out" / "generations" / str(result["generation_id"])
+    (root / "rates.csv").write_bytes((root / "rates.csv").read_bytes() + b"x")
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="differs"):
+        fx_rates.FiatRateTable(root)
