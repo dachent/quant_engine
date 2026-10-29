@@ -2128,7 +2128,29 @@ def test_F25_the_builder_reads_the_stylesheet_through_the_selector() -> None:
     assert '"styles.css": legacy_styles_content,' in source
 
 
-def test_mockup_F_risk_shares_are_bars_and_contributions_are_one_stacked_chart(
+def _risk_attribution_payload() -> dict[str, Any]:
+    fixture = json.loads(
+        (
+            Path(__file__).parent / "fixtures" / "risk_attribution.fixture.json"
+        ).read_text(encoding="utf-8")
+    )
+    return base(
+        orthogonal_risk_attribution=fixture,
+        decomposition_lenses={
+            "default_lens": "ECONOMIC_FACTOR",
+            "default_evidence_mode": "LIVE_ONLY",
+            "modes": {"LIVE_ONLY": [{"lens_id": "ECONOMIC_FACTOR"}]},
+        },
+    )
+
+
+def _selected_row(**attribution: Any) -> dict[str, Any]:
+    row = _orthogonal_row(**attribution)
+    row.update(series_id="AI Factor [P123]", source_key="us-economic")
+    return row
+
+
+def test_mockup_F_risk_shares_are_the_producers_bars_with_a_closure_strip(
     tmp_path: Path,
 ) -> None:
     per_date = [
@@ -2141,24 +2163,21 @@ def test_mockup_F_risk_shares_are_bars_and_contributions_are_one_stacked_chart(
     ]
     markup = call(
         tmp_path,
-        base(),
+        _risk_attribution_payload(),
         "orthogonalAttributionMarkup",
-        _orthogonal_row(
-            mode_coefficients={"MKT_RF": 0.01, "HML": -0.002},
-            per_date=per_date,
-            train_fitted_risk_budget={
-                "euler_allocations": {"MKT_RF": 9.0e-05, "HML": 1.0e-05},
-                "interpretation": "SHARE_OF_FITTED_VARIANCE",
-            },
+        _selected_row(
+            mode_coefficients={"MKT_RF": 0.01, "HML": -0.002}, per_date=per_date
         ),
     )
     assert "Share of total risk (Euler allocation)" in markup
-    assert markup.count('class="risk-share-row"') == 2
-    assert "90.00%" in markup and "10.00%" in markup
+    assert 'class="risk-share-row"' in markup
+    assert "Closure of total variance" in markup and "Closes" in markup
+    assert "R² (train)" in markup
+    assert "mode t-statistics unavailable" in markup
+    assert "All covered strategies" in markup and "capital coverage" in markup
     assert "Mode loadings (training window)" in markup
     assert "Daily contribution by mode" in markup
     assert markup.count("<rect ") == 12
-    # the rows behind the chart sit in a closed disclosure that says how many there are
     disclosure = re.search(
         r"<details class=\"cell-details orthogonal-data\">.*?</details>",
         markup,
@@ -2166,5 +2185,15 @@ def test_mockup_F_risk_shares_are_bars_and_contributions_are_one_stacked_chart(
     )
     assert disclosure is not None
     assert "12 dated contribution rows" in disclosure[0]
-    assert 'id="orthogonal-risk-table"' in disclosure[0]
-    assert '<details class="cell-details orthogonal-data" open' not in markup
+    assert 'class="cell-details orthogonal-data" open' not in markup
+
+
+def test_mockup_F_missing_block_and_unavailable_cell_say_why(tmp_path: Path) -> None:
+    absent = call(tmp_path, base(), "orthogonalAttributionMarkup", _selected_row())
+    assert "orthogonal risk attribution is not in this snapshot" in absent
+
+    payload = _risk_attribution_payload()
+    row = _selected_row()
+    row["series_id"] = "EU [P123]"
+    unavailable = call(tmp_path, payload, "orthogonalAttributionMarkup", row)
+    assert "Unavailable: Not applicable method scope" in unavailable

@@ -1,0 +1,427 @@
+{
+ "schema_version": 1,
+ "status": "AVAILABLE",
+ "reason": null,
+ "basis": "TRAIN_FITTED_EXCESS_RETURN_SAMPLE_VARIANCE_EULER_ALLOCATION",
+ "response_label": "ANCHOR_ADJUSTED_TARGET_RETURN",
+ "variance_unit": "SAMPLE_VARIANCE_PER_PERIOD_UNANNUALISED",
+ "agreement_tolerance": "1e-09",
+ "definition": "Euler share of the TRAIN-window sample variance of the anchor-adjusted target return, by orthogonal mode, with the unexplained residual and the cross term between fitted and residual shown explicitly. Shares of total variance sum to one. Mode ids are mixed orthogonal coordinates, not raw factor betas, and the TRAIN window is not the holdout.",
+ "modes": {
+  "LIVE_ONLY": {
+   "status": "AVAILABLE",
+   "reason": null,
+   "available_count": 3,
+   "unavailable_count": 1,
+   "cells": [
+    {
+     "cell_id": "LIVE_ONLY|ECONOMIC_FACTOR|us-economic|STATIC|AI Factor [P123]",
+     "evidence_mode": "LIVE_ONLY",
+     "lens_id": "ECONOMIC_FACTOR",
+     "lens_label": "Economic factors",
+     "source_key": "us-economic",
+     "source_label": "U.S. economic factors",
+     "surface": "STATIC",
+     "series_id": "AI Factor [P123]",
+     "model_id": "p123-ai-factor-us-economic-02-static",
+     "status": "AVAILABLE",
+     "reason": null,
+     "window": {
+      "train_start": "2026-01-22",
+      "train_end": "2026-06-23",
+      "train_observations": 105,
+      "test_observations": 27,
+      "factor_as_of_date": "2026-07-31"
+     },
+     "fit": {
+      "r_squared_train": "0.690588462473",
+      "adjusted_r_squared_train": "0.681398020764",
+      "holdout_predicted_r_squared": "0.147063297928",
+      "holdout_observations": 27,
+      "periods_per_year": 252,
+      "alpha": {
+       "net_annualized": "-0.0655195544806",
+       "annualized_standard_error": "0.201898491349",
+       "t_stat": "-0.324517305914",
+       "t_status": "AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION_NO_CLASSICAL_CONFIDENCE"
+      },
+      "mode_t_stat_status": "UNAVAILABLE",
+      "mode_t_stat_reason": "NO_STANDARD_ERRORS_FOR_ORTHOGONAL_MODE_COEFFICIENTS"
+     },
+     "variance": {
+      "unit": "SAMPLE_VARIANCE_PER_PERIOD_UNANNUALISED",
+      "total": "1.82956506520112e-04",
+      "fitted": "1.26347652537195e-04",
+      "residual": "5.66088539829323e-05",
+      "cross_term": "-1.58598603860398e-17"
+     },
+     "components": [
+      {
+       "component_id": "symmetric_mode:HML",
+       "label": "HML",
+       "kind": "MODE",
+       "variance": "4.18279711775455e-06",
+       "share_of_total": "0.022862248505",
+       "share_of_explained": "0.033105459688"
+      },
+      {
+       "component_id": "symmetric_mode:MKT_RF",
+       "label": "MKT_RF",
+       "kind": "MODE",
+       "variance": "9.02663379906223e-05",
+       "share_of_total": "0.493375937853",
+       "share_of_explained": "0.714428295089"
+      },
+      {
+       "component_id": "symmetric_mode:SMB",
+       "label": "SMB",
+       "kind": "MODE",
+       "variance": "3.18985174288186e-05",
+       "share_of_total": "0.174350276115",
+       "share_of_explained": "0.252466245223"
+      }
+     ],
+     "closure": {
+      "explained_share": "0.690588462473",
+      "residual_share": "0.309411537527",
+      "cross_term_share": "0",
+      "shares_sum": "1.000000000000",
+      "euler_sum_minus_fitted": "0",
+      "tolerance": "1e-09",
+      "status": "CLOSES"
+     },
+     "method_id": "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1",
+     "cross_mode_covariance_present": false,
+     "intercept_time_varying": false,
+     "evidence": {
+      "evidence_layer": "ACCOUNT_LIVE",
+      "series_status": "AVAILABLE",
+      "model_decision_status": "PM_VALID",
+      "information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+      "interval_policy_id": "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1",
+      "cost_coverage": "INCOMPLETE",
+      "composition_status": "AVAILABLE_LIVE_ONLY",
+      "backtest_observations": 0,
+      "live_observations": 171,
+      "backtest_share": "0",
+      "return_basis": "EXCESS_AND_LONG_SHORT_FACTOR_RETURN",
+      "tags": [
+       "EVIDENCE_LAYER:ACCOUNT_LIVE",
+       "SERIES_STATUS:AVAILABLE",
+       "MODEL_DECISION:PM_VALID",
+       "INFORMATION_SET:RETROSPECTIVE_SELECTED_SNAPSHOT",
+       "COST_COVERAGE:INCOMPLETE",
+       "COMPOSITION:AVAILABLE_LIVE_ONLY"
+      ]
+     }
+    },
+    {
+     "cell_id": "LIVE_ONLY|ECONOMIC_FACTOR|us-economic|DYNAMIC_FLS|AI Factor [P123]",
+     "evidence_mode": "LIVE_ONLY",
+     "lens_id": "ECONOMIC_FACTOR",
+     "lens_label": "Economic factors",
+     "source_key": "us-economic",
+     "source_label": "U.S. economic factors",
+     "surface": "DYNAMIC_FLS",
+     "series_id": "AI Factor [P123]",
+     "model_id": "p123-ai-factor-us-economic-01-dynamic-fls",
+     "status": "AVAILABLE",
+     "reason": null,
+     "window": {
+      "train_start": "2026-01-22",
+      "train_end": "2026-06-23",
+      "train_observations": 105,
+      "test_observations": 27,
+      "factor_as_of_date": "2026-07-31"
+     },
+     "fit": {
+      "r_squared_train": "0.88734080533",
+      "adjusted_r_squared_train": "0.886247026741",
+      "holdout_predicted_r_squared": "-0.7146442283",
+      "holdout_observations": 27,
+      "periods_per_year": 252,
+      "alpha": {
+       "net_annualized": "-0.0442262527395",
+       "annualized_standard_error": null,
+       "t_stat": null,
+       "t_status": "UNAVAILABLE_NO_STANDARD_ERROR"
+      },
+      "mode_t_stat_status": "UNAVAILABLE",
+      "mode_t_stat_reason": "NO_STANDARD_ERRORS_FOR_ORTHOGONAL_MODE_COEFFICIENTS"
+     },
+     "variance": {
+      "unit": "SAMPLE_VARIANCE_PER_PERIOD_UNANNUALISED",
+      "total": "1.82956506520112e-04",
+      "fitted": "1.44149680456974e-04",
+      "residual": "2.06117326841624e-05",
+      "cross_term": "1.81950933789756e-05"
+     },
+     "components": [
+      {
+       "component_id": "symmetric_mode:MKT_RF",
+       "label": "MKT_RF",
+       "kind": "MODE",
+       "variance": "1.44118125732196e-04",
+       "share_of_total": "0.787717958073",
+       "share_of_explained": "0.999781097504"
+      },
+      {
+       "component_id": "orthogonal_intercept",
+       "label": "orthogonal_intercept",
+       "kind": "INTERCEPT",
+       "variance": "3.15547247781818e-08",
+       "share_of_total": "0.000172471181",
+       "share_of_explained": "0.000218902496"
+      }
+     ],
+     "closure": {
+      "explained_share": "0.787890429254",
+      "residual_share": "0.112659194670",
+      "cross_term_share": "0.099450376076",
+      "shares_sum": "1.000000000000",
+      "euler_sum_minus_fitted": "0",
+      "tolerance": "1e-09",
+      "status": "CLOSES"
+     },
+     "method_id": "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1",
+     "cross_mode_covariance_present": true,
+     "intercept_time_varying": true,
+     "evidence": {
+      "evidence_layer": "ACCOUNT_LIVE",
+      "series_status": "DIAGNOSTIC_ONLY",
+      "model_decision_status": "DIAGNOSTIC_ONLY",
+      "information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+      "interval_policy_id": "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1",
+      "cost_coverage": "INCOMPLETE",
+      "composition_status": "AVAILABLE_LIVE_ONLY",
+      "backtest_observations": 0,
+      "live_observations": 171,
+      "backtest_share": "0",
+      "return_basis": "EXCESS_AND_LONG_SHORT_FACTOR_RETURN",
+      "tags": [
+       "EVIDENCE_LAYER:ACCOUNT_LIVE",
+       "SERIES_STATUS:DIAGNOSTIC_ONLY",
+       "MODEL_DECISION:DIAGNOSTIC_ONLY",
+       "INFORMATION_SET:RETROSPECTIVE_SELECTED_SNAPSHOT",
+       "COST_COVERAGE:INCOMPLETE",
+       "COMPOSITION:AVAILABLE_LIVE_ONLY"
+      ]
+     }
+    },
+    {
+     "cell_id": "LIVE_ONLY|ETF_STYLE|multi-asset-style|STATIC|Robuxio Crypto (High Sharpe High Vol)",
+     "evidence_mode": "LIVE_ONLY",
+     "lens_id": "ETF_STYLE",
+     "lens_label": "ETF style",
+     "source_key": "multi-asset-style",
+     "source_label": "Multi-asset style",
+     "surface": "STATIC",
+     "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+     "model_id": "robuxio-crypto-multi-asset-style-03-static",
+     "status": "AVAILABLE",
+     "reason": null,
+     "window": {
+      "train_start": "2025-12-08",
+      "train_end": "2026-07-23",
+      "train_observations": 153,
+      "test_observations": 39,
+      "factor_as_of_date": "2026-09-17"
+     },
+     "fit": {
+      "r_squared_train": "-4.45312220318",
+      "adjusted_r_squared_train": "-4.52583049922",
+      "holdout_predicted_r_squared": "-2.19019960177",
+      "holdout_observations": 39,
+      "periods_per_year": 252,
+      "alpha": {
+       "net_annualized": "0.34116524829",
+       "annualized_standard_error": null,
+       "t_stat": null,
+       "t_status": "UNAVAILABLE_NO_STANDARD_ERROR"
+      },
+      "mode_t_stat_status": "UNAVAILABLE",
+      "mode_t_stat_reason": "NO_STANDARD_ERRORS_FOR_ORTHOGONAL_MODE_COEFFICIENTS"
+     },
+     "variance": {
+      "unit": "SAMPLE_VARIANCE_PER_PERIOD_UNANNUALISED",
+      "total": "1.61209814271551e-04",
+      "fitted": "7.43625334425758e-04",
+      "residual": "8.79096817575601e-04",
+      "cross_term": "-1.46151233772981e-03"
+     },
+     "components": [
+      {
+       "component_id": "symmetric_mode:BTC-USD",
+       "label": "BTC-USD",
+       "kind": "MODE",
+       "variance": "5.14807413093511e-04",
+       "share_of_total": "3.193399951608",
+       "share_of_explained": "0.692294075068"
+      },
+      {
+       "component_id": "symmetric_mode:ETH-USD",
+       "label": "ETH-USD",
+       "kind": "MODE",
+       "variance": "2.28817921332247e-04",
+       "share_of_total": "1.419379597738",
+       "share_of_explained": "0.307705924932"
+      }
+     ],
+     "closure": {
+      "explained_share": "4.612779549346",
+      "residual_share": "5.453122203185",
+      "cross_term_share": "-9.065901752532",
+      "shares_sum": "0.999999999999",
+      "euler_sum_minus_fitted": "0",
+      "tolerance": "1e-09",
+      "status": "CLOSES"
+     },
+     "method_id": "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1",
+     "cross_mode_covariance_present": false,
+     "intercept_time_varying": false,
+     "evidence": {
+      "evidence_layer": "ACCOUNT_LIVE",
+      "series_status": "DIAGNOSTIC_ONLY",
+      "model_decision_status": "DIAGNOSTIC_ONLY",
+      "information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+      "interval_policy_id": "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1",
+      "cost_coverage": "INCOMPLETE",
+      "composition_status": "AVAILABLE_LIVE_ONLY",
+      "backtest_observations": 0,
+      "live_observations": 281,
+      "backtest_share": "0",
+      "return_basis": "TOTAL_RETURN_ETF_PROXY",
+      "tags": [
+       "EVIDENCE_LAYER:ACCOUNT_LIVE",
+       "SERIES_STATUS:DIAGNOSTIC_ONLY",
+       "MODEL_DECISION:DIAGNOSTIC_ONLY",
+       "INFORMATION_SET:RETROSPECTIVE_SELECTED_SNAPSHOT",
+       "COST_COVERAGE:INCOMPLETE",
+       "COMPOSITION:AVAILABLE_LIVE_ONLY"
+      ]
+     }
+    },
+    {
+     "cell_id": "LIVE_ONLY|ECONOMIC_FACTOR|us-economic|STATIC|EU [P123]",
+     "evidence_mode": "LIVE_ONLY",
+     "lens_id": "ECONOMIC_FACTOR",
+     "lens_label": "Economic factors",
+     "source_key": "us-economic",
+     "source_label": "U.S. economic factors",
+     "surface": "STATIC",
+     "series_id": "EU [P123]",
+     "model_id": null,
+     "status": "UNAVAILABLE",
+     "reason": "NOT_APPLICABLE_METHOD_SCOPE"
+    }
+   ],
+   "aggregates": [
+    {
+     "aggregate_id": "LIVE_ONLY|ECONOMIC_FACTOR|us-economic|STATIC|AGGREGATE",
+     "evidence_mode": "LIVE_ONLY",
+     "lens_id": "ECONOMIC_FACTOR",
+     "source_key": "us-economic",
+     "surface": "STATIC",
+     "excluded_series": [
+      {
+       "series_id": "EU [P123]",
+       "reason": "NOT_APPLICABLE_METHOD_SCOPE"
+      },
+      {
+       "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+       "reason": "NOT_APPLICABLE_METHOD_SCOPE"
+      }
+     ],
+     "status": "AVAILABLE",
+     "reason": null,
+     "method_note": "Rolled up by component label over the covered strategies only. Each strategy whitens with its own training covariance, so a label names the anchor factor of the mode, not one shared coordinate system; the figure is a diagnostic.",
+     "weight_basis": "PRIOR_DAY_INVESTED_CAPITAL_SHARE_OF_PERIMETER",
+     "included_series": [
+      "AI Factor [P123]",
+      "GrizzlyBears VTMA",
+      "QSI",
+      "TT Portfolio",
+      "Volatis Strategy"
+     ],
+     "capital_coverage": "0.803534753916",
+     "window": {
+      "start": "2026-01-22",
+      "end": "2026-03-23",
+      "observations": 42
+     },
+     "variance": {
+      "unit": "SAMPLE_VARIANCE_PER_PERIOD_UNANNUALISED",
+      "total": "1.1223647211035e-04",
+      "fitted": "9.58487558305657e-05",
+      "residual": "8.77843008748365e-06",
+      "cross_term": "7.60928619230085e-06"
+     },
+     "components": [
+      {
+       "component_id": "symmetric_mode:CMA",
+       "label": "CMA",
+       "kind": "MODE",
+       "variance": "1.74654640638372e-07",
+       "share_of_total": "0.001556130885",
+       "share_of_explained": "0.001822189961"
+      },
+      {
+       "component_id": "symmetric_mode:HML",
+       "label": "HML",
+       "kind": "MODE",
+       "variance": "2.45171007745395e-06",
+       "share_of_total": "0.021844147730",
+       "share_of_explained": "0.025578945248"
+      },
+      {
+       "component_id": "symmetric_mode:MKT_RF",
+       "label": "MKT_RF",
+       "kind": "MODE",
+       "variance": "8.85162550245885e-05",
+       "share_of_total": "0.788658564905",
+       "share_of_explained": "0.923499259407"
+      },
+      {
+       "component_id": "symmetric_mode:MOM",
+       "label": "MOM",
+       "kind": "MODE",
+       "variance": "9.16413774763715e-07",
+       "share_of_total": "0.008165026551",
+       "share_of_explained": "0.009561039857"
+      },
+      {
+       "component_id": "symmetric_mode:RMW",
+       "label": "RMW",
+       "kind": "MODE",
+       "variance": "2.25822812528864e-06",
+       "share_of_total": "0.020120270023",
+       "share_of_explained": "0.023560327995"
+      },
+      {
+       "component_id": "symmetric_mode:SMB",
+       "label": "SMB",
+       "kind": "MODE",
+       "variance": "1.53149418783253e-06",
+       "share_of_total": "0.013645245249",
+       "share_of_explained": "0.015978237532"
+      }
+     ],
+     "closure": {
+      "explained_share": "0.853989385343",
+      "residual_share": "0.078213702929",
+      "cross_term_share": "0.067796911728",
+      "shares_sum": "1.000000000000",
+      "euler_sum_minus_fitted": "0",
+      "tolerance": "1e-09",
+      "status": "CLOSES"
+     }
+    }
+   ]
+  },
+  "LIVE_PLUS_BACKTEST": {
+   "status": "UNAVAILABLE",
+   "reason": "NO_DECOMPOSITION_LENS_ROWS_IN_MODE"
+  }
+ },
+ "_fixture_note": "Trimmed from committed generation b216a53e (read only) by tools/portfolio_orthogonal_risk.py: LIVE_ONLY, four cells (static, dynamic, ETF-style diagnostic with a nonzero cross term, an unavailable row) and one aggregate. Counts reflect the trimmed list. Shapes are final; the block carries all rows in the real payload (52 attributable cells per mode)."
+}

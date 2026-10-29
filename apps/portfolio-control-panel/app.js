@@ -1818,6 +1818,61 @@
     return `<div class="callout callout-neutral"><strong>Method boundary:</strong> Clean-room dynamic FLS is MPI-informed and non-equivalent. It implements only the openly described methodology and does not claim proprietary MPI production output.</div><div class="grid grid-12 dynamic-analysis-grid"><div class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Effective-dated factor betas</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(humanStatus(dynamic.validation || "UNAVAILABLE"))}</span></div><svg class="dynamic-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Dynamic factor beta path for ${safe(row.series_id)}"><line class="zero-line" x1="${left}" x2="${width - right}" y1="${y(0)}" y2="${y(0)}"></line>${holdout}${lines}<text class="chart-label" x="${left}" y="${height - 10}">${safe(path[0].date)}</text><text class="chart-label" text-anchor="end" x="${width - right}" y="${height - 10}">${safe(path[path.length - 1].date)}</text><text class="chart-label" x="6" y="${top + 10}">${decimal(maximum)}</text><text class="chart-label" x="6" y="${height - bottom}">${decimal(minimum)}</text></svg><div class="chart-legend">${legend}<span><i style="background:var(--warning)"></i>Holdout boundary</span></div><div class="metric-list">${latestBetas}</div></div><div class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Dynamic validation</div><h3>Same-factor static benchmark</h3></div></div><div class="metric-list"><div><span>Latest beta date</span><strong>${safe(latest.date)}</strong></div><div><span>Selected smoothness</span><strong>${safe(dynamic.selected_smoothness || "—")}</strong></div><div><span>Train-only selection R²</span><strong>${pct(dynamic.selection_predicted_r_squared)}</strong></div><div><span>Dynamic holdout R²</span><strong>${pct(comparison.dynamic_predicted_r_squared)}</strong></div><div><span>Static holdout R²</span><strong>${pct(comparison.static_predicted_r_squared)}</strong></div><div><span>Dynamic minus static</span><strong>${pct(comparison.dynamic_minus_static_predicted_r_squared)}</strong></div><div><span>Comparison state</span><strong>${safe(humanStatus(comparison.status || "UNAVAILABLE"))}</strong></div></div></div>${replicationAnalysisMarkup(row.series_id)}</div>`;
   }
 
+  // ===== BEGIN orthogonal risk shares (mockup F, issues #355/#328) =====
+  // Reads `orthogonal_risk_attribution` (producer tools/portfolio_orthogonal_risk.py): one cell per lens series row and one
+  // aggregate per mode x lens x source x surface.  Bars are the published share_of_explained, the closure strip the
+  // published shares of total; nothing is recomputed here and a missing term prints its reason.
+  const oraBlock = () => (data.orthogonal_risk_attribution && Number.isInteger(data.orthogonal_risk_attribution.schema_version) ? data.orthogonal_risk_attribution : null);
+  const oraShare = (value) => (number(value) == null ? "—" : `${(Number(value) * 100).toFixed(2)}%`);
+  function oraComponentBars(components, field) {
+    const rows = (Array.isArray(components) ? components : []).filter((item) => number(item[field]) != null).sort((a, b) => Number(b[field]) - Number(a[field]));
+    const max = Math.max(...rows.map((item) => Math.abs(Number(item[field]))), 1e-9);
+    return rows.map((item, index) => `<div class="risk-share-row"><span>${safe(item.label || item.component_id)}${item.kind === "INTERCEPT" ? ' <small class="mva-note">intercept</small>' : ""}</span><div class="risk-share-track" role="img" aria-label="${safe(item.label || item.component_id)} ${oraShare(item[field])}"><i style="width:${(Math.abs(Number(item[field])) / max * 100).toFixed(1)}%;background:${PERF_COLORS[index % PERF_COLORS.length]}${Number(item[field]) < 0 ? ";opacity:.55" : ""}"></i></div><b>${oraShare(item[field])}</b></div>`).join("");
+  }
+  function oraClosureStrip(entry) {
+    const closure = entry.closure || {};
+    const parts = [...(entry.components || []).map((item) => [item.label || item.component_id, item.share_of_total]), ["Residual", closure.residual_share], ["Cross term", closure.cross_term_share]].filter(([, value]) => number(value) != null);
+    return `<p class="cell-secondary risk-closure">Closure of total variance: ${parts.map(([label, value]) => `${safe(label)} ${oraShare(value)}`).join(" + ")} = ${oraShare(parts.reduce((total, [, value]) => total + Number(value), 0))} (${safe(humanStatus(closure.status || "UNAVAILABLE"))}). Shares are never clamped: a negative share or cross term is printed as published.</p>`;
+  }
+  function oraEvidenceLine(entry) {
+    const window = entry.window || {};
+    const fit = entry.fit || {};
+    const evidence = entry.evidence || {};
+    const alpha = fit.alpha || {};
+    const parts = [
+      window.train_start ? `train ${formatDate(window.train_start)} to ${formatDate(window.train_end)} (${integer.format(window.train_observations)} obs)` : null,
+      number(fit.r_squared_train) != null ? `R² (train) ${decimal(fit.r_squared_train, 3)}` : null,
+      number(entry.closure?.explained_share) != null ? `explained ${oraShare(entry.closure.explained_share)}` : null,
+      number(evidence.backtest_share) != null ? `${pct(evidence.backtest_share, 0)} backtest` : null,
+      evidence.series_status ? humanStatus(evidence.series_status) : null,
+      number(alpha.t_stat) != null ? `alpha t ${decimal(alpha.t_stat, 2)}` : alpha.t_status ? `alpha t-statistic: ${humanStatus(alpha.t_status).toLowerCase()}` : null,
+      fit.mode_t_stat_status === "UNAVAILABLE" ? `mode t-statistics unavailable: ${humanStatus(fit.mode_t_stat_reason || "UNAVAILABLE").toLowerCase()}` : null,
+    ].filter(Boolean);
+    return `<p class="cell-secondary">${safe(parts.join(" · "))}</p>`;
+  }
+  function orthogonalRiskShareMarkup(row) {
+    const block = oraBlock();
+    if (!block) return `<div class="risk-share"><h4>Share of total risk (Euler allocation)</h4><div class="callout callout-neutral">The producer's orthogonal risk attribution is not in this snapshot, so the shares are not shown (the training-window allocations remain in the data tables below).</div></div>`;
+    const mode = block.modes && block.modes[selectedFactorEvidenceMode];
+    if (!mode || mode.status === "UNAVAILABLE") return `<div class="risk-share"><h4>Share of total risk (Euler allocation)</h4><div class="callout callout-neutral">Unavailable for this evidence mode: ${safe(humanStatus((mode && mode.reason) || block.reason || "UNAVAILABLE"))}.</div></div>`;
+    const sourceKey = row.source_key || selectedFactorSource;
+    const prefix = [selectedFactorEvidenceMode, selectedFactorLens, sourceKey, selectedFactorSurface].join("|");
+    const cell = (mode.cells || []).find((item) => item.cell_id === `${prefix}|${row.series_id}`);
+    const aggregate = (mode.aggregates || []).find((item) => item.aggregate_id === `${prefix}|AGGREGATE`);
+    const cellMarkup = !cell
+      ? '<div class="callout callout-neutral">No attribution cell was published for this series on this lens.</div>'
+      : cell.status !== "AVAILABLE"
+        ? `<div class="callout callout-neutral">Unavailable: ${safe(humanStatus(cell.reason || "UNAVAILABLE"))}.</div>`
+        : `${oraComponentBars(cell.components, "share_of_explained")}<p class="cell-secondary">Bars are shares of the explained variance (${safe(humanStatus(block.basis || ""))}).</p>${oraClosureStrip(cell)}${oraEvidenceLine(cell)}`;
+    const aggregateMarkup = !aggregate
+      ? ""
+      : aggregate.status !== "AVAILABLE"
+        ? `<h4>All covered strategies</h4><div class="callout callout-neutral">Unavailable: ${safe(humanStatus(aggregate.reason || "UNAVAILABLE"))}${(aggregate.excluded_series || []).length ? `. Excluded: ${safe(aggregate.excluded_series.map((item) => `${item.series_id} (${humanStatus(item.reason).toLowerCase()})`).join(", "))}` : ""}.</div>`
+        : `<h4>All covered strategies (${integer.format((aggregate.included_series || []).length)}, capital coverage ${pct(aggregate.capital_coverage, 0)})</h4>${oraComponentBars(aggregate.components, "share_of_explained")}${oraClosureStrip(aggregate)}<p class="cell-secondary">${safe(aggregate.method_note || "")} ${aggregate.window ? `Window ${formatDate(aggregate.window.start)} to ${formatDate(aggregate.window.end)} (${integer.format(aggregate.window.observations)} obs).` : ""}${(aggregate.excluded_series || []).length ? ` Excluded: ${safe(aggregate.excluded_series.map((item) => `${item.series_id} (${humanStatus(item.reason).toLowerCase()})`).join(", "))}.` : ""}</p>`;
+    return `<div class="risk-share"><h4>Share of total risk (Euler allocation)</h4>${cellMarkup}${aggregateMarkup}${Object.keys(row.orthogonal_attribution?.mode_coefficients || {}).length && !Array.isArray(row.orthogonal_attribution.mode_coefficients) ? `<h4>Mode loadings (training window)</h4><div class="risk-loadings">${Object.entries(row.orthogonal_attribution.mode_coefficients).map(([name, value]) => `<span><b>${safe(name)}</b> ${decimal(value)}</span>`).join("")}</div><p class="cell-secondary">Static fit: one loading per mode for the whole period.</p>` : ""}</div>`;
+  }
+  // ===== END orthogonal risk shares =====
+
   const ORTHOGONAL_DATED_ROW_CAP = 120;
 
   function orthogonalAttributionMarkup(row) {
@@ -1851,12 +1906,9 @@
       .map(([mode, value]) => `<tr><td>${safe(mode)}</td><td class="numeric">${eulerTotal > 0 && number(value) != null ? pct(Number(value) / eulerTotal, 2) : smallDecimal(value)}</td><td>${safe(humanStatus(riskBudget.interpretation || "UNAVAILABLE"))}</td></tr>`);
     // Mockup F: the share of risk is shown as bars, the dated contributions as one stacked chart, and the rows behind
     // them sit in a closed disclosure with their count.
-    const shareEntries = eulerTotal > 0 ? eulerEntries.filter(([, value]) => Number.isFinite(Number(value))).map(([mode, value]) => [mode, Number(value) / eulerTotal]).sort((a, b) => b[1] - a[1]) : [];
     const modeNames = [...new Set(perDate.flatMap((dated) => Object.keys(dated.mode_contributions || {})))].sort();
     const modeColor = (mode) => PERF_COLORS[Math.max(0, modeNames.indexOf(mode)) % PERF_COLORS.length];
-    const shareMarkup = shareEntries.length
-      ? `<div class="risk-share"><h4>Share of total risk (Euler allocation)</h4>${shareEntries.map(([mode, share]) => `<div class="risk-share-row"><span>${safe(mode)}</span><div class="risk-share-track" role="img" aria-label="${safe(mode)} ${pct(share, 2)}"><i style="width:${(share * 100).toFixed(1)}%;background:${modeColor(mode)}"></i></div><b>${pct(share, 2)}</b></div>`).join("")}<p class="cell-secondary">${safe(humanStatus(riskBudget.interpretation || "UNAVAILABLE"))}.</p>${staticCoefficients ? `<h4>Mode loadings (training window)</h4><div class="risk-loadings">${Object.entries(staticCoefficients).map(([mode, value]) => `<span><b>${safe(mode)}</b> ${decimal(value)}</span>`).join("")}</div><p class="cell-secondary">Static fit: one loading per mode for the whole period.</p>` : ""}</div>`
-      : "";
+    const shareMarkup = orthogonalRiskShareMarkup(row);
     const chartDates = perDate.filter((dated) => dated.mode_contributions && Object.keys(dated.mode_contributions).length);
     let chartMarkup = "";
     if (chartDates.length && modeNames.length) {
