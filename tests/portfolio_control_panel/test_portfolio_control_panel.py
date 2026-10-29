@@ -15044,7 +15044,54 @@ def test_the_governed_number_is_a_candidate_beside_the_unaccepted_status(
         "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
     }
 
-    candidate = panel._hwm_candidate(proof, summary)
+    receipts = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "receipt": {
+                "span_return_receipts": [
+                    {
+                        "missing_source_date": "2026-01-27",
+                        "span_start_date": "2026-01-26",
+                        "span_end_date": "2026-01-28",
+                        "return": "-0.0171",
+                    }
+                ]
+            },
+        }
+    ]
+    candidate = panel._hwm_candidate(proof, summary, receipts)
+    kpi = candidate.pop("kpi")
+    path = proof["index_path"]
+    assert kpi == {
+        "value": format(
+            Decimal(proof["current_index"]).quantize(Decimal("0.0001")), "f"
+        ),
+        "hwm": format(Decimal(proof["current_hwm"]).quantize(Decimal("0.0001")), "f"),
+        "drawdown": format(
+            Decimal(proof["current_drawdown"]).quantize(Decimal("0.0001")), "f"
+        ),
+        "label": "Governed PORT-HWM-4 candidate, pending owner acceptance",
+        "perimeter": "SYSTEMATIC_EX_RESERVE",
+        "return_basis": proof["return_basis"],
+        "index_points": len(path),
+        "window_start": path[0]["as_of"],
+        "window_end": path[-1]["as_of"],
+        "gated_status": {
+            "policy_id": None,
+            "hwm_numerical_status": "UNAVAILABLE",
+            "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+        },
+        "missing_daily_points": [
+            {
+                "strategy_id": "robuxio-crypto",
+                "date": "2026-01-27",
+                "span_start_date": "2026-01-26",
+                "span_end_date": "2026-01-28",
+                "span_return": "-0.0171",
+            }
+        ],
+    }
+    assert panel._hwm_candidate(proof, summary)["kpi"]["missing_daily_points"] == []
 
     assert candidate == {
         "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
