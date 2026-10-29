@@ -117,7 +117,7 @@ def test_producer_change_with_nothing_recomputed_is_suspicious(
     code: int,
 ) -> None:
     cb.promote(_overlay(tmp_path), tmp_path / "base", COMMIT)
-    monkeypatch.setattr(cb, "_affected_stages", lambda repo, a, b: stages)
+    monkeypatch.setattr(cb, "_affected_stages", lambda _g: stages)
     result, rc = cb.report(
         tmp_path / "base", _next_overlay(tmp_path, new), tmp_path, "b" * 40
     )
