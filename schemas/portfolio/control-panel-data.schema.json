@@ -218,7 +218,7 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["complete_through", "current_drawdown", "current_hwm", "current_index", "evaluated_on", "financial_acceptance", "label", "maximum_drawdown", "not_accepted_reason", "not_accepted_register", "policy_id", "receipt_sha256", "status"],
+              "required": ["complete_through", "current_drawdown", "current_hwm", "current_index", "evaluated_on", "financial_acceptance", "kpi", "label", "maximum_drawdown", "not_accepted_reason", "not_accepted_register", "policy_id", "receipt_sha256", "status"],
               "properties": {
                 "complete_through": { "type": "string", "format": "date" },
                 "current_drawdown": { "$ref": "#/$defs/decimal" },
@@ -226,6 +226,47 @@
                 "current_index": { "$ref": "#/$defs/decimal" },
                 "evaluated_on": { "type": "string", "format": "date" },
                 "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+                "kpi": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["value", "hwm", "drawdown", "label", "perimeter", "return_basis", "index_points", "window_start", "window_end", "gated_status", "missing_daily_points"],
+                  "properties": {
+                    "value": { "$ref": "#/$defs/decimal" },
+                    "hwm": { "$ref": "#/$defs/decimal" },
+                    "drawdown": { "$ref": "#/$defs/decimal" },
+                    "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
+                    "perimeter": { "type": "string", "minLength": 1 },
+                    "return_basis": { "type": "string", "minLength": 1 },
+                    "index_points": { "type": "integer", "minimum": 0 },
+                    "window_start": { "type": ["string", "null"] },
+                    "window_end": { "type": ["string", "null"] },
+                    "gated_status": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["policy_id", "hwm_numerical_status", "hwm_numerical_reason"],
+                      "properties": {
+                        "policy_id": { "type": ["string", "null"] },
+                        "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+                        "hwm_numerical_reason": { "type": ["string", "null"] }
+                      }
+                    },
+                    "missing_daily_points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["strategy_id", "date", "span_start_date", "span_end_date", "span_return"],
+                        "properties": {
+                          "strategy_id": { "type": ["string", "null"] },
+                          "date": { "type": ["string", "null"] },
+                          "span_start_date": { "type": ["string", "null"] },
+                          "span_end_date": { "type": ["string", "null"] },
+                          "span_return": { "type": ["string", "null"] }
+                        }
+                      }
+                    }
+                  }
+                },
                 "label": { "const": "Governed PORT-HWM-4 candidate, pending owner acceptance" },
                 "maximum_drawdown": { "$ref": "#/$defs/decimal" },
                 "not_accepted_reason": { "anyOf": [{ "type": "string", "minLength": 1 }, { "type": "null" }] },
