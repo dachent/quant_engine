@@ -39,21 +39,21 @@ HISTORICAL_V3_PATH = (
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
 )
-CURRENT_SUCCESSOR_HEAD = "74dc3fa65cf51d0b70d68c8f21f539f40688de5b"
+CURRENT_SUCCESSOR_HEAD = "9f16723214dc6ffd44e692c5416dd0a21edaf190"
 CURRENT_AGREE_COUNT = 165
 CURRENT_NOT_DERIVABLE_COUNT = 18
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "5a4c5f0369c09ac866d8b207f880093d0f362176eb4d2d0a8b4bd300c2371d32",
-    "b": "0cccd3abd50c003eb904f143039910a5618272914cac14dd2ec4bd30724e461b",
+    "a": "86865c8aad85ba02e5ba9f3539bdd26b6a15305c3f95ba4dcff7256026c13aad",
+    "b": "f2bca0cb6f14123448e726bc51de2bb409e9ce2ba36bf312bb873543f9db45ab",
 }
 CURRENT_ORACLE_MANIFEST_SHA256 = {
-    # R2: both derivers read the same acceptance-inputs manifest (oracle-manifest-r2.json).
-    "a": "1008ddea1f2dfeb84c84149e453c192d61043097c122b2700da920debb2cbabb",
-    "b": "1008ddea1f2dfeb84c84149e453c192d61043097c122b2700da920debb2cbabb",
+    # R2.1 (#468 repin): both derivers read the same acceptance-inputs manifest (evidence/releases/2026-10-26-r2/oracle-r2-1).
+    "a": "6409cf97a0423c9f26c84304a612c5a1064aa61b2de196501fbde71d3f6bb325",
+    "b": "6409cf97a0423c9f26c84304a612c5a1064aa61b2de196501fbde71d3f6bb325",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
-    "636e3954612975fccdc920d504a5637552761616fdd8293c8de220371ee5ca60",
+    "c3e3a721206ae26da6f728184a2d35172b414233747ac59806c6c1e5066a7c24",
 )
 CURRENT_AUDIT_AUTHORITY_POINTERS: frozenset[tuple[str, str]] = frozenset()
 
@@ -308,10 +308,10 @@ def test_current_successor_identity_and_authority_coverage() -> None:
         "75112945918983b311aff52a92a172fdfe7a3ca0348686e906933103898fe775"
     )
     assert doc["pointer_map_sha256"] == (
-        "81e00a815e5f3c83c75f5d84301f653dbeac405fb970806fe1d3249fe3567756"
+        "3527320b8527d40ea3436762e82bb2b5b1783fb745bb3587592d7808cba59c74"
     )
     assert doc["admission_decision_sha256"] == (
-        "5b71e04ab7e4bf321a294e5e4e0eb3d701ae8342285ebe64fb226f77f7dad272"
+        "374b0481a1090f20e0cabd90bc518be2ba1a2673d1da937a6dd30f0359621fb6"
     )
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
