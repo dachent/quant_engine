@@ -11,7 +11,7 @@ solved, never refused, and a key that includes a changed producer simply misses.
 ``verify``   prove a base is byte-for-byte what ``promote`` recorded.
 ``report``   after a run: per cache kind, entries inherited from the base vs new, and
              whether the producers changed between the base commit and HEAD
-             (via the controller graph). Exit 4 when producers of a cached stage changed
+             (the caller passes the controller graph's output for base..HEAD). Exit 4 when producers of a cached stage changed
              yet nothing new was computed: that means an undeclared producer
              dependency, so the result must not be trusted.
 
@@ -25,7 +25,6 @@ import hashlib
 import json
 import os
 import stat
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,19 +177,18 @@ def verify(base: Path) -> dict[str, Any]:
     return record
 
 
-def _affected_stages(repo: Path, base_commit: str, head: str) -> list[str]:
-    done = subprocess.run(
-        [sys.executable, str(repo / "tools" / "portfolio_controller_graph.py"), "--repo-root", str(repo),
-         "--changed-from", base_commit, "--changed-to", head],
-        capture_output=True, text=True, check=False,
-    )  # fmt: skip
-    if done.returncode != 0:
+def _affected_stages(graph_output: Path) -> list[str]:
+    """``affected_stages`` of ``portfolio_controller_graph.py --changed-from <base commit>
+    --changed-to HEAD`` (stdout saved to a file by the caller; this tool runs no tools)."""
+
+    try:
+        stages = json.loads(graph_output.read_bytes()).get("affected_stages")
+    except (OSError, ValueError) as exc:
         raise CacheBaseError(
-            f"controller graph refused {base_commit}..{head}: {done.stderr[-300:]}"
-        )
-    stages = json.loads(done.stdout).get("affected_stages")
+            f"controller graph output unreadable: {graph_output}"
+        ) from exc
     if not isinstance(stages, list):
-        raise CacheBaseError("controller graph reported no affected_stages")
+        raise CacheBaseError("controller graph output has no affected_stages")
     return [str(s) for s in stages]
 
 
@@ -209,11 +207,11 @@ def reuse_report(base: Path, overlay: Path) -> dict[str, Any]:
 
 
 def report(
-    base: Path, overlay: Path, repo: Path, head: str
+    base: Path, overlay: Path, graph_output: Path, head: str
 ) -> tuple[dict[str, Any], int]:
     record = read_provenance(base)
     result = reuse_report(base, overlay)
-    changed = _affected_stages(repo, record["source_commit"], head)
+    changed = _affected_stages(graph_output)
     result.update(
         {
             "affected_stages_since_base": changed,
@@ -250,7 +248,7 @@ def _parser() -> argparse.ArgumentParser:
     r = sub.add_parser("report")
     r.add_argument("--base", type=Path, required=True)
     r.add_argument("--overlay", type=Path, required=True)
-    r.add_argument("--repo-root", type=Path, required=True)
+    r.add_argument("--graph-output", type=Path, required=True)
     r.add_argument("--head", required=True)
     return parser
 
@@ -264,7 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif a.command == "verify":
             out, code = verify(a.base), 0
         else:
-            out, code = report(a.base, a.overlay, a.repo_root, a.head)
+            out, code = report(a.base, a.overlay, a.graph_output, a.head)
     except (CacheBaseError, OSError, ValueError) as exc:
         print(f"release-cache-base: FAIL: {exc}", file=sys.stderr)
         return 1
