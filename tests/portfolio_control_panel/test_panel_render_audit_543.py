@@ -2126,3 +2126,45 @@ def test_F25_the_builder_reads_the_stylesheet_through_the_selector() -> None:
         in source
     )
     assert '"styles.css": legacy_styles_content,' in source
+
+
+def test_mockup_F_risk_shares_are_bars_and_contributions_are_one_stacked_chart(
+    tmp_path: Path,
+) -> None:
+    per_date = [
+        {
+            "date": f"2026-01-{day:02d}",
+            "partition": "TRAIN",
+            "mode_contributions": {"MKT_RF": 0.001 * day, "HML": -0.0004 * day},
+        }
+        for day in range(2, 8)
+    ]
+    markup = call(
+        tmp_path,
+        base(),
+        "orthogonalAttributionMarkup",
+        _orthogonal_row(
+            mode_coefficients={"MKT_RF": 0.01, "HML": -0.002},
+            per_date=per_date,
+            train_fitted_risk_budget={
+                "euler_allocations": {"MKT_RF": 9.0e-05, "HML": 1.0e-05},
+                "interpretation": "SHARE_OF_FITTED_VARIANCE",
+            },
+        ),
+    )
+    assert "Share of total risk (Euler allocation)" in markup
+    assert markup.count('class="risk-share-row"') == 2
+    assert "90.00%" in markup and "10.00%" in markup
+    assert "Mode loadings (training window)" in markup
+    assert "Daily contribution by mode" in markup
+    assert markup.count("<rect ") == 12
+    # the rows behind the chart sit in a closed disclosure that says how many there are
+    disclosure = re.search(
+        r"<details class=\"cell-details orthogonal-data\">.*?</details>",
+        markup,
+        flags=re.S,
+    )
+    assert disclosure is not None
+    assert "12 dated contribution rows" in disclosure[0]
+    assert 'id="orthogonal-risk-table"' in disclosure[0]
+    assert '<details class="cell-details orthogonal-data" open' not in markup
