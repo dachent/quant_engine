@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any, Final, Mapping
@@ -333,6 +334,7 @@ def stage_candidate(
 # the gap rule that consumers apply when they look a rate up is policy data.
 
 _FIAT_CATALOG_SCHEMA_VERSION: Final = 1
+_FIAT_SYMBOL: Final = re.compile(r"([A-Z]{3})USD=X")
 _FIAT_ADAPTER: Final = "portfolio-fx-fiat-chart"
 _FIAT_POLICY_KEYS: Final = {
     "policy_id",
@@ -369,7 +371,7 @@ def _fiat_policy(path: Path) -> tuple[dict[str, Any], bytes]:
 
 
 def _fiat_observations(
-    raw_bytes: bytes, symbol: str
+    raw_bytes: bytes, symbol: str, currency: str
 ) -> tuple[list[tuple[date, Decimal | None]], dict[str, Any]]:
     try:
         document = json.loads(raw_bytes.decode("utf-8"), parse_float=Decimal)
@@ -390,6 +392,13 @@ def _fiat_observations(
         raise PortfolioFXRatesError("chart response shape differs") from exc
     if meta.get("symbol") != symbol or meta.get("dataGranularity") != "1d":
         raise PortfolioFXRatesError("chart response symbol or granularity differs")
+    pair = _FIAT_SYMBOL.fullmatch(symbol)
+    if pair is None or pair.group(1) != currency:
+        raise PortfolioFXRatesError(
+            "fiat symbol must be <CCY>USD=X and its currency must be that <CCY>"
+        )
+    if meta.get("currency") != "USD" or meta.get("instrumentType") != "CURRENCY":
+        raise PortfolioFXRatesError("chart response is not a currency quoted in USD")
     zone_name = meta.get("exchangeTimezoneName")
     if not isinstance(zone_name, str) or not zone_name:
         raise PortfolioFXRatesError("chart response declares no exchange timezone")
@@ -503,7 +512,13 @@ def stage_fiat_candidate(
             raise PortfolioFXRatesError("fiat inputs must be regular files")
     policy, policy_bytes = _fiat_policy(policy_path)
     raw_bytes = chart_raw.read_bytes()
-    observed, meta = _fiat_observations(raw_bytes, symbol)
+    observed, meta = _fiat_observations(raw_bytes, symbol, currency)
+    last_session = observed[-1][0]
+    if end > last_session:
+        raise PortfolioFXRatesError(
+            "declared boundary runs past the last session in the chart response: "
+            f"{last_session.isoformat()}"
+        )
     timing = f"SESSION_DAILY_CLOSE_{meta['exchange_timezone']}".upper().replace(
         "/", "_"
     )
@@ -654,12 +669,18 @@ class FiatRateTable:
         manifest_path = generation_root / "generation.json"
         if manifest_path.is_symlink() or not manifest_path.is_file():
             raise PortfolioFXRatesError("fiat generation manifest is missing")
-        manifest = json.loads(manifest_path.read_bytes())
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            parsed = GenerationManifest.from_json_bytes(manifest_bytes)
+        except ValueError as exc:
+            raise PortfolioFXRatesError("fiat generation manifest is invalid") from exc
         if (
-            manifest.get("verification") != "VERIFIED"
-            or str(manifest.get("generation_id")) != generation_root.name
+            parsed.verification is not VerificationStatus.VERIFIED
+            or parsed.generation_id != generation_root.name
+            or parsed.to_json_bytes() != manifest_bytes
         ):
             raise PortfolioFXRatesError("fiat generation identity differs")
+        manifest = json.loads(manifest_bytes)
         by_id = {str(a.get("artifact_id")): a for a in manifest.get("artifacts", [])}
         payloads: dict[str, bytes] = {}
         for name in ("catalog.json", "rates.csv", "policy.json"):

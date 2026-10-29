@@ -203,7 +203,7 @@ def test_fiat_candidate_uses_local_session_dates_and_never_fills_null_closes(
         symbol="EURUSD=X",
         currency="EUR",
         observed_start="2026-01-01",
-        observed_end="2026-12-31",
+        observed_end="2026-07-02",
         chart_csv=csv_path,
     )
     assert result["published"] is False
@@ -219,7 +219,7 @@ def test_fiat_candidate_uses_local_session_dates_and_never_fills_null_closes(
         symbol="EURUSD=X",
         currency="EUR",
         observed_start="2026-01-01",
-        observed_end="2026-12-31",
+        observed_end="2026-07-02",
         chart_csv=csv_path,
     )
     assert again["generation_id"] == result["generation_id"]
@@ -255,7 +255,7 @@ def test_fiat_candidate_rejects_wrong_symbol_policy_and_tampered_artifacts(
             symbol="GBPUSD=X",
             currency="GBP",
             observed_start="2026-01-01",
-            observed_end="2026-12-31",
+            observed_end="2026-07-02",
         )
     with pytest.raises(fx_rates.PortfolioFXRatesError, match="rule is unsupported"):
         fx_rates.stage_fiat_candidate(
@@ -265,7 +265,7 @@ def test_fiat_candidate_rejects_wrong_symbol_policy_and_tampered_artifacts(
             symbol="EURUSD=X",
             currency="EUR",
             observed_start="2026-01-01",
-            observed_end="2026-12-31",
+            observed_end="2026-07-02",
         )
     result = fx_rates.stage_fiat_candidate(
         raw,
@@ -274,9 +274,86 @@ def test_fiat_candidate_rejects_wrong_symbol_policy_and_tampered_artifacts(
         symbol="EURUSD=X",
         currency="EUR",
         observed_start="2026-01-01",
-        observed_end="2026-12-31",
+        observed_end="2026-07-02",
     )
     root = tmp_path / "out" / "generations" / str(result["generation_id"])
     (root / "rates.csv").write_bytes((root / "rates.csv").read_bytes() + b"x")
     with pytest.raises(fx_rates.PortfolioFXRatesError, match="differs"):
+        fx_rates.FiatRateTable(root)
+
+
+def test_fiat_candidate_refuses_a_currency_that_disagrees_with_the_symbol(
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "chart.json"
+    _chart(raw)
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="its currency must be"):
+        fx_rates.stage_fiat_candidate(
+            raw,
+            tmp_path / "out",
+            _policy(tmp_path / "p.json"),
+            symbol="EURUSD=X",
+            currency="GBP",
+            observed_start="2026-01-01",
+            observed_end="2026-07-02",
+        )
+    document = json.loads(raw.read_text(encoding="utf-8"))
+    document["chart"]["result"][0]["meta"]["currency"] = "EUR"
+    raw.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="not a currency quoted"):
+        fx_rates.stage_fiat_candidate(
+            raw,
+            tmp_path / "out",
+            _policy(tmp_path / "q.json"),
+            symbol="EURUSD=X",
+            currency="EUR",
+            observed_start="2026-01-01",
+            observed_end="2026-07-02",
+        )
+
+
+def test_fiat_candidate_refuses_a_boundary_past_the_response(tmp_path: Path) -> None:
+    raw = tmp_path / "chart.json"
+    _chart(raw)
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="runs past the last"):
+        fx_rates.stage_fiat_candidate(
+            raw,
+            tmp_path / "out",
+            _policy(tmp_path / "p.json"),
+            symbol="EURUSD=X",
+            currency="EUR",
+            observed_start="2026-01-01",
+            observed_end="2026-12-31",
+        )
+
+
+def test_fiat_table_rejects_a_manifest_edited_to_match_altered_bytes(
+    tmp_path: Path,
+) -> None:
+    raw = tmp_path / "chart.json"
+    _chart(raw)
+    result = fx_rates.stage_fiat_candidate(
+        raw,
+        tmp_path / "out",
+        _policy(tmp_path / "p.json"),
+        symbol="EURUSD=X",
+        currency="EUR",
+        observed_start="2026-01-01",
+        observed_end="2026-07-02",
+    )
+    root = tmp_path / "out" / "generations" / str(result["generation_id"])
+    altered = (root / "rates.csv").read_bytes().replace(b"1.17", b"9.99")
+    (root / "rates.csv").write_bytes(altered)
+    manifest = json.loads((root / "generation.json").read_bytes())
+    for artifact in manifest["artifacts"]:
+        if artifact["artifact_id"] == "rates.csv":
+            import hashlib
+
+            artifact["sha256"] = hashlib.sha256(altered).hexdigest()
+    (root / "generation.json").write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    # the stale generation id still matches the directory name, but is no longer the
+    # identity of the edited manifest
+    with pytest.raises(fx_rates.PortfolioFXRatesError, match="identity|invalid"):
         fx_rates.FiatRateTable(root)
