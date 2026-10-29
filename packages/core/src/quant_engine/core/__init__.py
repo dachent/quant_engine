@@ -23,6 +23,14 @@ from quant_engine.core.authority import (
     local_freshness_alerts,
 )
 
+from quant_engine.core.retained_cache_base import (
+    CacheBaseError,
+    iter_cache_files,
+    promote_cache_base,
+    read_cache_base_provenance,
+    verify_cache_base,
+    verify_if_promoted,
+)
 from quant_engine.core.replica_gate import (
     REPLICA_MARKER_KIND,
     REPLICA_MARKER_NAME,
@@ -132,6 +140,12 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "CacheBaseError",
+    "iter_cache_files",
+    "promote_cache_base",
+    "read_cache_base_provenance",
+    "verify_cache_base",
+    "verify_if_promoted",
     "REPLICA_MARKER_KIND",
     "REPLICA_MARKER_NAME",
     "ReplicaGateError",
