@@ -619,3 +619,24 @@ def test_the_schema_admits_the_labels_at_four_only_and_closes_their_shape(
     target = next(r for r in extra if r["account_live_cagr_annualization"])
     target["account_live_cagr_annualization"]["note"] = "x"
     assert _summary_errors(5, extra)
+
+
+def test_cost_evidence_and_execution_cost_reach_the_merged_strategy_row() -> None:
+    """R2.1 Q1: declared basis, corroborating charges and execution cost are published."""
+
+    extra = {
+        "cost_class": "SUBSCRIPTION",
+        "corroboration": [{"kind": "CARD_FEED_OBSERVED_CHARGES"}],
+        "declared": {"amount": "50", "period": "MONTH"},
+        "execution_cost": {"status": "AVAILABLE", "usd_total": "2"},
+    }
+    retained = _retained_robuxio_rows()
+    retained["costs"][0].update(extra)
+
+    merged = reporter._merge_attribution([{"strategy_id": ROBUXIO}], retained)[0]
+    assert {key: merged[key] for key in reporter.COST_EVIDENCE_KEYS} == extra
+
+    plain = reporter._merge_attribution(
+        [{"strategy_id": ROBUXIO}], _retained_robuxio_rows()
+    )[0]
+    assert all(key not in plain for key in extra)

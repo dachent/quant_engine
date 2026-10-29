@@ -70,7 +70,7 @@ CATALOG_SCHEMA_VERSION: Final = 1
 # A catalog that carries custody-derived cash publishes version 2: each cash line is dated
 # by the coverage that proves it and names its last event and its coverage end.
 CUSTODY_CASH_CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.3.0"
+BUILDER_VERSION: Final = "1.4.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 # The provenance registry binds fifteen strategy identities: the seven current
 # strategies, the retained excluded ones, and six retired history-only records
@@ -104,6 +104,28 @@ _SOURCE_KEYS: Final = {
     "schwab-nav",
     "strategy-live-metrics",
 }
+
+# Optional governed cost evidence (R2.1 Q1).  The cost-economics CSV states the
+# annual amount and its status; this source states where the amount comes from
+# (the provider's own declaration or observed charges) and the observed charges
+# that corroborate it, so a cost row carries its evidence instead of a bare number.
+# A position row captured after the New York close of its as-of date and stored under
+# the later native UTC date (Schwab's holdings capture): the row is that day's
+# end-of-day book, and says so beside its capture date.
+POSITION_AS_OF_BASIS_CAPTURED_AFTER_CLOSE: Final = (
+    "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE"
+)
+_COST_EVIDENCE_SOURCE_KEY: Final = "cost-evidence"
+COST_EVIDENCE_SCHEMA: Final = "portfolio-cost-evidence/1"
+_COST_EVIDENCE_BASES: Final = frozenset({"PROVIDER_DECLARED", "OBSERVED_CHARGES"})
+_COST_CORROBORATION_ROLE: Final = "CORROBORATING_OBSERVED_EVIDENCE"
+# Billing periods per year: a calendar definition, not a cost figure.
+_PERIODS_PER_YEAR: Final = {"MONTH": 12, "QUARTER": 4, "YEAR": 1}
+EXECUTION_COST_BASIS: Final = "LEDGER_TRANSACTION_COMMISSIONS_NATIVE_CURRENCY"
+EXECUTION_COST_AVAILABLE: Final = "AVAILABLE"
+EXECUTION_COST_NO_FACT: Final = "UNAVAILABLE_NO_COMMISSION_FACT_IN_LEDGER"
+EXECUTION_COST_USD_ONLY: Final = "AVAILABLE_ALL_AMOUNTS_USD"
+EXECUTION_COST_NOT_CONVERTED: Final = "UNAVAILABLE_NON_USD_AMOUNTS_NOT_CONVERTED"
 
 # Optional governed HWM evidence sources.  Each key, when present, is admitted
 # as a hash-bound source artifact whose schema_name MUST equal the key — the
@@ -952,7 +974,10 @@ def _sources(
             f"source keys missing: {sorted(_SOURCE_KEYS - actual)}"
         )
     unknown = (
-        actual - _SOURCE_KEYS - {_HWM_INPUTS_SOURCE_KEY} - _HWM_GOVERNED_SOURCE_KEYS
+        actual
+        - _SOURCE_KEYS
+        - {_HWM_INPUTS_SOURCE_KEY, _COST_EVIDENCE_SOURCE_KEY}
+        - _HWM_GOVERNED_SOURCE_KEYS
     )
     if unknown:
         raise BaselineValidationError(f"source keys unexpected: {sorted(unknown)}")
@@ -2058,6 +2083,18 @@ def _provider_ledger_facts(
                     "source_key": "provider-ledger",
                 }
             )
+            if financial_fact_date != fact_date:
+                # R2.1 Q2: authority was checked against the native UTC row date
+                # above.  The held position is the New York end-of-day book the
+                # provider captured (Schwab priced every row 09/17 in a capture
+                # taken 23:59 New York time 09-17, which is 2026-09-18 UTC), so
+                # the baseline row states that financial day as its as-of date
+                # and keeps the native date it was captured under.  Left as the
+                # UTC date, the row postdates the cutoff and every report
+                # consumer drops a position that is in fact held at the cutoff.
+                record["as_of_date"] = financial_fact_date.isoformat()
+                record["capture_date"] = fact_date.isoformat()
+                record["as_of_basis"] = POSITION_AS_OF_BASIS_CAPTURED_AFTER_CLOSE
             accepted.append(record)
         return accepted
 
@@ -2303,6 +2340,11 @@ def _allocations_and_coverage(
                 "strategy_id": strategy_id,
             }
         )
+    evidence_path = paths.get(_COST_EVIDENCE_SOURCE_KEY)
+    if evidence_path is not None:
+        costs = _attach_cost_evidence(
+            costs, evidence_path, strategy_aliases, publication_date
+        )
     # The audit snapshot is sealed: these totals are compared with the audit's reported
     # total and with the materializer's own sum, so they are added as the audit added
     # them (see ``_snapshot_sum``), never exactly.
@@ -2315,6 +2357,244 @@ def _allocations_and_coverage(
         systematic_total,
         nav_covered,
     )
+
+
+def _evidence_source(value: object, name: str) -> dict[str, Any]:
+    source = _object(value, name)
+    _strict_keys(source, {"artifact", "field", "sha256"}, name)
+    if _SHA256.fullmatch(_text(source["sha256"], f"{name}.sha256")) is None:
+        raise BaselineValidationError(f"{name} sha256 is invalid")
+    return {
+        "artifact": _text(source["artifact"], f"{name}.artifact"),
+        "field": _text(source["field"], f"{name}.field"),
+        "sha256": source["sha256"],
+    }
+
+
+def _attach_cost_evidence(
+    costs: Sequence[Mapping[str, Any]],
+    path: Path,
+    strategy_aliases: Mapping[str, str],
+    as_of: date,
+) -> list[dict[str, Any]]:
+    """Carry each cost row's declared basis and corroborating observed charges.
+
+    The annual amount in the cost row must be exactly the declared amount times the
+    billing periods per year, and every corroborating observed charge must equal
+    the declared amount: evidence that disagrees with the number it supports is
+    refused, never reconciled.  The currency is USD or the row is refused (no
+    conversion is invented).
+    """
+
+    document = _load_json(path, "cost-evidence")
+    _strict_keys(document, {"rows", "schema"}, "cost-evidence")
+    if document["schema"] != COST_EVIDENCE_SCHEMA:
+        raise BaselineValidationError("cost-evidence schema is not recognised")
+    evidence: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(_objects(document["rows"], "cost-evidence.rows")):
+        name = f"cost-evidence.rows[{index}]"
+        _strict_keys(
+            raw, {"component", "corroboration", "cost_class", "declared"}, name
+        )
+        strategy_id = _resolve_strategy(
+            strategy_aliases, _text(raw["component"], f"{name}.component")
+        )
+        if strategy_id in evidence:
+            raise BaselineValidationError(f"{name} repeats a strategy")
+        declared = _object(raw["declared"], f"{name}.declared")
+        _strict_keys(
+            declared,
+            {"amount", "basis", "currency", "period", "source"},
+            f"{name}.declared",
+        )
+        amount = _decimal(declared["amount"], f"{name}.declared.amount")
+        assert amount is not None
+        if amount <= 0:
+            raise BaselineValidationError(f"{name} declared amount must be positive")
+        if declared["basis"] not in _COST_EVIDENCE_BASES:
+            raise BaselineValidationError(f"{name} declared basis is not recognised")
+        if declared["currency"] != "USD":
+            raise BaselineValidationError(
+                f"{name} declared currency must be USD (no conversion is admitted)"
+            )
+        if declared["period"] not in _PERIODS_PER_YEAR:
+            raise BaselineValidationError(f"{name} declared period is not recognised")
+        corroboration: list[dict[str, Any]] = []
+        for position, item in enumerate(
+            _objects(raw["corroboration"], f"{name}.corroboration")
+        ):
+            label = f"{name}.corroboration[{position}]"
+            _strict_keys(
+                item,
+                {
+                    "artifact",
+                    "descriptor",
+                    "feed_last_date",
+                    "kind",
+                    "observations",
+                    "role",
+                    "sha256",
+                },
+                label,
+            )
+            if item["role"] != _COST_CORROBORATION_ROLE:
+                raise BaselineValidationError(f"{label} role is not corroborating")
+            if _SHA256.fullmatch(_text(item["sha256"], f"{label}.sha256")) is None:
+                raise BaselineValidationError(f"{label} sha256 is invalid")
+            observed: list[dict[str, str]] = []
+            for charge in _objects(item["observations"], f"{label}.observations"):
+                _strict_keys(charge, {"amount", "currency", "date"}, label)
+                day = _date(charge["date"], f"{label}.date")
+                value = _decimal(charge["amount"], f"{label}.amount")
+                assert value is not None
+                if day > as_of:
+                    raise BaselineValidationError(f"{label} charge is after the cutoff")
+                if charge["currency"] != "USD" or abs(value) != amount:
+                    raise BaselineValidationError(
+                        f"{label} charge differs from the declared amount"
+                    )
+                observed.append(
+                    {
+                        "amount": charge["amount"],
+                        "currency": "USD",
+                        "date": day.isoformat(),
+                    }
+                )
+            if not observed:
+                raise BaselineValidationError(f"{label} has no observed charge")
+            feed_end = _date(item["feed_last_date"], f"{label}.feed_last_date")
+            if feed_end < max(_date(o["date"], label) for o in observed):
+                raise BaselineValidationError(f"{label} feed ends before its charges")
+            corroboration.append(
+                {
+                    "artifact": _text(item["artifact"], f"{label}.artifact"),
+                    "descriptor": _text(item["descriptor"], f"{label}.descriptor"),
+                    "feed_last_date": feed_end.isoformat(),
+                    "kind": _text(item["kind"], f"{label}.kind"),
+                    "observations": observed,
+                    "role": _COST_CORROBORATION_ROLE,
+                    "sha256": item["sha256"],
+                }
+            )
+        evidence[strategy_id] = {
+            "corroboration": corroboration,
+            "cost_class": _text(raw["cost_class"], f"{name}.cost_class"),
+            "declared": {
+                "amount": decimal_text(amount),
+                "basis": declared["basis"],
+                "currency": "USD",
+                "period": declared["period"],
+                "source": _evidence_source(declared["source"], f"{name}.source"),
+            },
+        }
+    carried: list[dict[str, Any]] = []
+    for row in costs:
+        item = dict(row)
+        found = evidence.pop(str(item["strategy_id"]), None)
+        if found is not None:
+            annual = item["annual_external_cost_usd"]
+            declared = found["declared"]
+            periods = _PERIODS_PER_YEAR[declared["period"]]
+            expected = Decimal(declared["amount"]) * periods
+            if annual is None or Decimal(annual) != expected:
+                raise BaselineValidationError(
+                    "cost row amount differs from its declared amount "
+                    f"for {item['strategy_id']}"
+                )
+            if not str(item["cost_status"]).startswith("known"):
+                raise BaselineValidationError(
+                    f"declared cost for {item['strategy_id']} is not a known cost"
+                )
+            item.update(found)
+        carried.append(item)
+    if evidence:
+        raise BaselineValidationError(
+            f"cost evidence names strategies without a cost row: {sorted(evidence)}"
+        )
+    return carried
+
+
+def _execution_cost_block(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Commissions a strategy's ledger transactions state, per native currency.
+
+    A cost is positive.  IBKR states ``commission`` signed as Flex signs it (a cost
+    is negative); Schwab states ``fees_and_commission`` as the positive charge.
+    Nothing is converted: a USD total exists only when every amount is USD.
+    """
+
+    totals: dict[str, Decimal] = {}
+    counts: dict[str, int] = {}
+    days: list[str] = []
+    for row in rows:
+        commission = row.get("commission")
+        fee = row.get("fees_and_commission")
+        if isinstance(commission, Mapping) and commission.get("status") == "AVAILABLE":
+            currency = _text(commission.get("currency"), "commission.currency")
+            parsed = _decimal(commission.get("value"), "commission.value")
+            assert parsed is not None
+            value = -parsed
+        elif isinstance(fee, str):
+            currency = "USD"
+            parsed = _decimal(fee, "fees_and_commission")
+            assert parsed is not None
+            value = parsed
+        else:
+            continue
+        totals[currency] = totals.get(currency, Decimal(0)) + value
+        counts[currency] = counts.get(currency, 0) + 1
+        days.append(_text(row.get("event_date"), "transaction.event_date"))
+    if not totals:
+        return {
+            "basis": EXECUTION_COST_BASIS,
+            "by_currency": [],
+            "record_count": 0,
+            "status": EXECUTION_COST_NO_FACT,
+            "usd_status": None,
+            "usd_total": None,
+            "window_end": None,
+            "window_start": None,
+        }
+    only_usd = set(totals) == {"USD"}
+    return {
+        "basis": EXECUTION_COST_BASIS,
+        "by_currency": [
+            {
+                "amount": decimal_text(totals[currency]),
+                "currency": currency,
+                "record_count": counts[currency],
+            }
+            for currency in sorted(totals)
+        ],
+        "record_count": sum(counts.values()),
+        "status": EXECUTION_COST_AVAILABLE,
+        "usd_status": (
+            EXECUTION_COST_USD_ONLY if only_usd else EXECUTION_COST_NOT_CONVERTED
+        ),
+        "usd_total": decimal_text(totals["USD"]) if only_usd else None,
+        "window_end": max(days),
+        "window_start": min(days),
+    }
+
+
+def _with_execution_costs(
+    costs: Sequence[Mapping[str, Any]], transactions: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Carry execution cost beside, never inside, the subscription amount."""
+
+    by_strategy: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in transactions:
+        strategy_id = row.get("strategy_id")
+        if isinstance(strategy_id, str):
+            by_strategy[strategy_id].append(row)
+    return [
+        {
+            **row,
+            "execution_cost": _execution_cost_block(
+                by_strategy.get(str(row["strategy_id"]), [])
+            ),
+        }
+        for row in costs
+    ]
 
 
 def _normalize_strategy_evidence(
@@ -5636,6 +5916,7 @@ def build_catalog(
             as_of,
         )
     )
+    costs = _with_execution_costs(costs, transactions)
     strategies, retired_strategy_ids = _split_tracker_registry(
         strategies,
         {

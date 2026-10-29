@@ -46,6 +46,13 @@ from portfolio_report import (
 
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
+# Cost-row keys carried from the baseline to the report unchanged.
+COST_EVIDENCE_KEYS: Final = (
+    "corroboration",
+    "cost_class",
+    "declared",
+    "execution_cost",
+)
 BUILDER_VERSION: Final = "1.2.1"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
@@ -1165,6 +1172,10 @@ def build_catalog(
                 "current_sleeve_value_usd": _decimal_text(current_value),
                 "fees_status": fees_status,
                 "strategy_id": strategy_id,
+                # R2.1 Q1: the declared basis, corroborating observed charges and
+                # the separate execution cost ride with the amount when the
+                # baseline states them; absent keys stay absent.
+                **{key: cost[key] for key in COST_EVIDENCE_KEYS if key in cost},
             }
         )
     catalog = {

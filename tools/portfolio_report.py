@@ -1603,6 +1603,15 @@ def _capital_coverage_bounds(
     }
 
 
+# Cost-row keys the attribution catalog carries from the baseline (declared basis,
+# corroborating observed charges, separate execution cost); equal to
+# portfolio_attribution.COST_EVIDENCE_KEYS, which a test enforces.
+COST_EVIDENCE_KEYS: Final = (
+    "corroboration",
+    "cost_class",
+    "declared",
+    "execution_cost",
+)
 FEES_STATUS_EVIDENCED: Final = "EVIDENCED_PRE_TAX"
 FEES_STATUS_UPPER_BOUND: Final = "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
 FEES_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
@@ -2310,6 +2319,9 @@ def _merge_attribution(
                 "attribution.benchmark_comparison.metrics",
             )
         )
+        cost_evidence: dict[str, Any] = {
+            key: cost[key] for key in COST_EVIDENCE_KEYS if key in cost
+        }
         result.append(
             {
                 **item,
@@ -2397,6 +2409,7 @@ def _merge_attribution(
                 "after_tax_annual_cost_rate": cost.get("after_tax_annual_cost_rate"),
                 "after_tax_status": cost.get("after_tax_status"),
                 "fees_status": cost.get("fees_status"),
+                **cost_evidence,
                 **(
                     {}
                     if cost_rate_at_cutoff is None
@@ -7029,6 +7042,13 @@ def _positions(
                 ),
                 "strategy_id": item.get("strategy_id"),
                 "symbol": item.get("symbol"),
+                # The capture the row was observed under, when its as-of date is
+                # the financial day of a later-dated native capture.
+                **{
+                    key: item[key]
+                    for key in ("as_of_basis", "capture_date", "observed_at")
+                    if item.get(key) is not None
+                },
             }
         )
     return sorted(
