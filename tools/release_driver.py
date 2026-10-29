@@ -101,9 +101,11 @@ class Run:
             if isinstance(value, (str, int))
         }
         self.config = config
-        for key in ("repo_root", "python", "cycle", "run", "code_commit"):
+        for key in ("repo_root", "python", "cycle", "run", "code_commit", "mode"):
             if key not in self.values:
                 raise Refusal(f"run config lacks {key!r}")
+        if self.values["mode"] not in ("probe", "release"):
+            raise Refusal("run config mode must be 'probe' or 'release'")
         self.repo = Path(self.values["repo_root"])
         self.cycle = Path(self.values["cycle"])
         self.state_path = self.cycle / STATE_NAME
@@ -228,10 +230,52 @@ def _outputs(run: Run, stage: Mapping[str, Any]) -> list[Path]:
     return [Path(run.expand(item)) for item in templates]
 
 
+def _inside(path: Path, root: Path) -> bool:
+    resolved, base = path.resolve(), root.resolve()
+    return resolved == base or base in resolved.parents
+
+
+def check_probe_guard(run: Run, stage: Mapping[str, Any]) -> None:
+    """A probe never reads or writes the live workspace: it runs on a scratch copy of the real roots."""
+
+    if run.values["mode"] != "probe":
+        return
+    keys, spec_template = stage.get("live_guard_keys", []), stage.get("guard_spec")
+    if not keys and spec_template is None:
+        return
+    if "live_workspace" not in run.values:
+        raise Refusal(
+            "probe mode needs live_workspace so it can refuse a spec bound to the real roots"
+        )
+    live = Path(run.values["live_workspace"])
+    offenders = [
+        f"{key}={run.values[key]}"
+        for key in keys
+        if _inside(Path(run.values[key]), live)
+    ]
+    if spec_template is not None:
+        spec = _read_json(Path(run.expand(spec_template)))
+        bound = [
+            ("coordination_root", spec["coordination_root"]),
+            ("state_root", spec.get("state_root", "")),
+        ]
+        bound += list(spec["roots"].items())
+        offenders += [
+            f"{name}={value}"
+            for name, value in bound
+            if value and _inside(Path(value), live)
+        ]
+    if offenders:
+        raise Refusal(
+            f"{stage['id']}: probe mode refuses paths inside the live workspace {live}: {offenders[:4]}"
+        )
+
+
 def check_ready(run: Run, stage: Mapping[str, Any], *, replace: bool) -> None:
     """Every refusal that applies before ``stage`` runs. Raises ``Refusal``; changes nothing."""
 
     run.require_frozen_repo()
+    check_probe_guard(run, stage)
     state = run.state["stages"]
     for required in stage.get("requires", []):
         record = state.get(required)

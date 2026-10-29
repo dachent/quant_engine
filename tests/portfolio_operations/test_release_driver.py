@@ -50,6 +50,7 @@ def world(tmp_path: Path) -> dict[str, Any]:
         "cycle": str(cycle),
         "run": str(run),
         "code_commit": _git(repo, "rev-parse", "HEAD"),
+        "mode": "release",
     }
     config_path = tmp_path / "run.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -476,3 +477,73 @@ def test_a_stage_that_omits_a_declared_output_fails(world: dict[str, Any]) -> No
     assert _drive(world, _graph(world, [stage])) == 1
     state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
     assert "b.txt" in state["stages"]["partial"]["failures"][0]
+
+
+def _guard_world(world: dict[str, Any], *, spec_under_live: bool) -> Path:
+    live = world["tmp"] / "live"
+    scratch = world["tmp"] / "scratch"
+    base = live if spec_under_live else scratch
+    (base / "dataPortfolio").mkdir(parents=True)
+    spec = world["tmp"] / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "coordination_root": str(base / "dataPortfolio" / "releases"),
+                "roots": {"r": str(base / "dataPortfolio" / "r")},
+                "companions": [],
+                "state_root": str(scratch),
+            }
+        ),
+        encoding="utf-8",
+    )
+    _config(world, mode="probe", live_workspace=str(live))
+    return spec
+
+
+GUARDED = {
+    "id": "guarded",
+    "guard_spec": "{spec_path}",
+    "outputs": ["{cycle}/g.txt"],
+    "argv": _write_stage("{cycle}/g.txt"),
+}
+
+
+def test_probe_refuses_a_spec_bound_to_the_live_workspace(
+    world: dict[str, Any],
+) -> None:
+    spec = _guard_world(world, spec_under_live=True)
+    _config(world, spec_path=str(spec))
+    assert _drive(world, _graph(world, [GUARDED])) == 2
+    assert not (world["cycle"] / "g.txt").exists()
+
+
+def test_probe_accepts_a_scratch_spec_and_release_mode_does_not_guard(
+    world: dict[str, Any],
+) -> None:
+    spec = _guard_world(world, spec_under_live=False)
+    _config(world, spec_path=str(spec))
+    assert _drive(world, _graph(world, [GUARDED])) == 0
+    live_spec = _guard_world(world, spec_under_live=True)
+    _config(world, spec_path=str(live_spec), mode="release")
+    assert (
+        _drive(world, _graph(world, [GUARDED]), "--only", "guarded", "--replace") == 0
+    )
+
+
+def test_probe_refuses_a_live_portfolio_root_argument(world: dict[str, Any]) -> None:
+    _guard_world(world, spec_under_live=False)
+    _config(world, portfolio_root=str(world["tmp"] / "live" / "dataPortfolio"))
+    stage = {
+        "id": "g",
+        "live_guard_keys": ["portfolio_root"],
+        "outputs": ["{cycle}/g.txt"],
+        "argv": _write_stage("{cycle}/g.txt"),
+    }
+    assert _drive(world, _graph(world, [stage])) == 2
+
+
+def test_mode_must_be_declared(world: dict[str, Any]) -> None:
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    del config["mode"]
+    world["config"].write_text(json.dumps(config), encoding="utf-8")
+    assert _drive(world, _graph(world, CHAIN)) == 2
