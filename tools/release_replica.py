@@ -28,8 +28,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from quant_engine.core import load_pipeline_spec, replica_gate
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import (
+    REPLICA_MARKER_KIND,
+    REPLICA_MARKER_NAME,
+    ReplicaGateError,
+    build_replica_receipt,
+    canonical_json_bytes,
+    is_replica_spec,
+    load_pipeline_spec,
+    verify_replica_receipt,
+)
 
 TOOLS = Path(__file__).resolve().parent
 PROVIDER_COPY_LIMIT_BYTES = 400_000_000
@@ -119,13 +127,11 @@ def copy_replica(
     marker = {
         "created_at": _now(),
         "extra_provider_bytes": extra_bytes,
-        "kind": replica_gate.REPLICA_MARKER_KIND,
-        "schema_version": replica_gate.SCHEMA_VERSION,
+        "kind": REPLICA_MARKER_KIND,
+        "schema_version": 1,
         "source_spec_sha256": _sha256_file(spec_path),
     }
-    (replica_root / replica_gate.REPLICA_MARKER_NAME).write_bytes(
-        canonical_json_bytes(marker)
-    )
+    (replica_root / REPLICA_MARKER_NAME).write_bytes(canonical_json_bytes(marker))
     return marker
 
 
@@ -233,7 +239,7 @@ def replica_ceremony(a: argparse.Namespace, runner: Runner = _subprocess_runner)
     out.mkdir(parents=True, exist_ok=True)
     spec = Path(a.replica_spec)
     replica_spec = load_pipeline_spec(spec)
-    if not replica_gate.is_replica_spec(replica_spec):
+    if not is_replica_spec(replica_spec):
         raise ReplicaToolError(
             "replica spec is not under a replica root marker; run `release_replica.py copy` first"
         )
@@ -247,7 +253,7 @@ def replica_ceremony(a: argparse.Namespace, runner: Runner = _subprocess_runner)
         return bool(step["rc"] == 0)
 
     def finish(commit_result: Mapping[str, Any]) -> int:
-        receipt = replica_gate.build_receipt(
+        receipt = build_replica_receipt(
             real_spec=real_spec,
             replica_spec=replica_spec,
             steps=steps,
@@ -256,8 +262,8 @@ def replica_ceremony(a: argparse.Namespace, runner: Runner = _subprocess_runner)
         )
         (out / "replica-receipt.json").write_bytes(canonical_json_bytes(receipt))
         try:
-            replica_gate.verify_receipt(out / "replica-receipt.json", real_spec)
-        except replica_gate.ReplicaGateError as exc:
+            verify_replica_receipt(out / "replica-receipt.json", real_spec)
+        except ReplicaGateError as exc:
             print(f"replica ceremony: NOT PASSED: {exc}", file=sys.stderr)
             return 1
         print("replica ceremony: PASSED")
@@ -458,7 +464,7 @@ def lanes(a: argparse.Namespace, runner: Runner = _subprocess_runner) -> int:
     """Both lanes at once. The replica copy must be complete (marker written) first."""
 
     replica_spec = load_pipeline_spec(Path(a.replica_spec))
-    if not replica_gate.is_replica_spec(replica_spec):
+    if not is_replica_spec(replica_spec):
         raise ReplicaToolError(
             "replica copy is incomplete: no replica root marker above the replica spec"
         )
@@ -539,7 +545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if a.command == "verify":
-            replica_gate.verify_receipt(a.receipt, load_pipeline_spec(a.real_spec))
+            verify_replica_receipt(a.receipt, load_pipeline_spec(a.real_spec))
             print("replica receipt: OK")
             return 0
         if a.command == "ceremony":
@@ -548,7 +554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         OSError,
         ReplicaToolError,
-        replica_gate.ReplicaGateError,
+        ReplicaGateError,
         ValueError,
     ) as exc:
         print(f"release-replica: FAIL: {exc}", file=sys.stderr)

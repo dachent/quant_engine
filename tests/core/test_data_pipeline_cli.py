@@ -49,7 +49,7 @@ def test_execute_commit_forwards_commit_authorization(
         return {"release_state": "COMMITTED"}
 
     monkeypatch.setattr(data_pipeline, "execute_pipeline", execute)
-    monkeypatch.setattr(data_pipeline.replica_gate, "is_replica_spec", lambda _s: True)
+    monkeypatch.setattr(data_pipeline, "is_replica_spec", lambda _s: True)
 
     return_code = data_pipeline.main(
         [
@@ -75,7 +75,7 @@ def test_real_roots_commit_without_replica_receipt_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(data_pipeline, "load_pipeline_spec", lambda _path: object())
-    monkeypatch.setattr(data_pipeline.replica_gate, "is_replica_spec", lambda _s: False)
+    monkeypatch.setattr(data_pipeline, "is_replica_spec", lambda _s: False)
     called: list[object] = []
     monkeypatch.setattr(
         data_pipeline, "execute_pipeline", lambda *a, **k: called.append(a)
@@ -97,10 +97,10 @@ def test_real_roots_commit_verifies_the_replica_receipt_then_executes(
     receipt = tmp_path / "receipt.json"
     seen: list[tuple[object, object]] = []
     monkeypatch.setattr(data_pipeline, "load_pipeline_spec", lambda _path: spec)
-    monkeypatch.setattr(data_pipeline.replica_gate, "is_replica_spec", lambda _s: False)
+    monkeypatch.setattr(data_pipeline, "is_replica_spec", lambda _s: False)
     monkeypatch.setattr(
-        data_pipeline.replica_gate,
-        "verify_receipt",
+        data_pipeline,
+        "verify_replica_receipt",
         lambda path, s: seen.append((path, s)) or {},
     )
     monkeypatch.setattr(

@@ -8,8 +8,10 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
-from quant_engine.core import replica_gate
 from quant_engine.core import (
+    ReplicaGateError,
+    is_replica_spec,
+    verify_replica_receipt,
     PipelineExecutionError,
     PipelineUnknownOutcomeError,
     PipelineValidationError,
@@ -66,8 +68,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     spec, clear_stale_lock=args.confirm_stale_lock
                 )
             else:
-                if args.commit and not replica_gate.is_replica_spec(spec):
-                    replica_gate.verify_receipt(args.replica_receipt, spec)
+                if args.commit and not is_replica_spec(spec):
+                    verify_replica_receipt(args.replica_receipt, spec)
                 result = execute_pipeline(
                     spec,
                     commit=args.commit,
@@ -79,7 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         PipelineExecutionError,
         PipelineUnknownOutcomeError,
         PipelineValidationError,
-        replica_gate.ReplicaGateError,
+        ReplicaGateError,
         RuntimeError,
         ValueError,
     ) as exc:
