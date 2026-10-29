@@ -210,6 +210,7 @@ _PATH_STAGES = {
     # Provider capability protocols and registry, re-exported by the package root:
     # a contract no producer imports yet, so no stage impact.
     "packages/core/src/quant_engine/core/providers.py": [],
+    "packages/core/src/quant_engine/core/credentials.py": [],
     "packages/core/src/quant_engine/core/__init__.py": [],
     # WS4 T1.4 (corrective program) scope note: this file is outside that
     # brief's literal write scope, but this one-line declaration for each new
