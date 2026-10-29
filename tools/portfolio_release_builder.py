@@ -683,6 +683,7 @@ def _recipe(path: Path) -> dict[str, Any]:
             "nested_tag_map",
             "sleeve_disclosure_sources",
             "source_clock",
+            "weekly_gap_fill_spec",
         }
         != required
     ):
@@ -751,6 +752,18 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("nested_tag_map identity differs")
+    if "weekly_gap_fill_spec" in recipe:
+        definition = recipe["weekly_gap_fill_spec"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("weekly_gap_fill_spec definition differs")
+        artifact = _path(definition["path"], "weekly_gap_fill_spec.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("weekly_gap_fill_spec identity differs")
     if "sleeve_disclosure_sources" in recipe:
         definition = recipe["sleeve_disclosure_sources"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -938,6 +951,7 @@ def create_recipe(
     evaluated_on: str | None = None,
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
+    weekly_gap_fill_spec_path: Path | None = None,
 ) -> dict[str, Any]:
     financial_cutoff = date.fromisoformat(as_of_date)
     normalized_evaluated_on: str | None = None
@@ -1048,6 +1062,10 @@ def create_recipe(
         payload["source_clock"] = _file_definition(source_clock_path.resolve())
     if nested_tag_map_path is not None:
         payload["nested_tag_map"] = _file_definition(nested_tag_map_path.resolve())
+    if weekly_gap_fill_spec_path is not None:
+        payload["weekly_gap_fill_spec"] = _file_definition(
+            weekly_gap_fill_spec_path.resolve()
+        )
     if sleeve_disclosure_sources_path is not None:
         payload["sleeve_disclosure_sources"] = _file_definition(
             sleeve_disclosure_sources_path.resolve()
@@ -4333,6 +4351,13 @@ def build_analytics(
     correlation_source = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
     )
+    gap_fill_arguments: tuple[str, ...] = ()
+    gap_fill_definition = recipe.get("weekly_gap_fill_spec")
+    if isinstance(gap_fill_definition, dict):
+        gap_fill_arguments = (
+            "--gap-fill-root",
+            str(_path(gap_fill_definition["path"], "weekly_gap_fill_spec.path").parent),
+        )
     current_dependence_receipt = correlation_source / "dependence-source.json"
     if current_dependence_receipt.is_file():
         correlation_identity = _load(
@@ -4627,6 +4652,7 @@ def build_analytics(
         str(attribution_bundle),
         "--output-root",
         str(weekly_root),
+        *gap_fill_arguments,
         timeout=7200,
     )
     candidate_dir = _path(built.get("candidate_dir"), "weekly candidate")
@@ -4641,6 +4667,7 @@ def build_analytics(
         str(attribution_bundle),
         "--candidate-dir",
         str(candidate_dir),
+        *gap_fill_arguments,
         timeout=7200,
     )
     weekly = _tool(
@@ -4656,6 +4683,7 @@ def build_analytics(
         str(weekly_root),
         "--candidate-dir",
         str(candidate_dir),
+        *gap_fill_arguments,
         timeout=7200,
     )
     weekly_generation_id = _generation_id(
@@ -6560,6 +6588,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
     recipe.add_argument("--dependence-selected-inputs", type=Path)
+    recipe.add_argument("--weekly-gap-fill-spec", type=Path)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
     recipe.add_argument("--as-of-date", required=True)
     recipe.add_argument("--pipeline-id", required=True)
@@ -6645,6 +6674,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.hybrid_decomposition_plan_bundle
                 ),
                 correlation_source_root=args.correlation_source_root,
+                weekly_gap_fill_spec_path=args.weekly_gap_fill_spec,
                 legacy_panel=args.legacy_panel,
                 as_of_date=args.as_of_date,
                 pipeline_id=args.pipeline_id,
