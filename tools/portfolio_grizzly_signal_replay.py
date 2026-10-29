@@ -32,6 +32,7 @@ import tempfile
 from typing import Any, Final, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from portfolio_strategy_history import excel_cell_date, xlsx_sheet_rows
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -41,7 +42,6 @@ from quant_engine.core import (
     VerificationStatus,
     rename_directory_with_retry,
 )
-from quant_engine.core.contracts import canonical_json_bytes
 
 
 ADAPTER_VERSION: Final = "1"
@@ -392,6 +392,15 @@ def _sha(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def canonical_json_bytes(value: Mapping[str, Any] | Sequence[Any]) -> bytes:
+    """Encode a catalog exactly as the core manifest encoding does (sorted, compact, LF)."""
+
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+
+
 def _returns_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=RETURN_FIELDS, lineterminator="\n")
@@ -403,18 +412,7 @@ def _returns_bytes(rows: Sequence[Mapping[str, str]]) -> bytes:
 def _reference_returns(path: Path) -> dict[date, Decimal]:
     """Read the vendor simulation sheet through the history builder's own reader."""
 
-    import importlib.util
-
-    module_path = Path(__file__).resolve().parent / "portfolio_strategy_history.py"
-    spec = importlib.util.spec_from_file_location(
-        "portfolio_strategy_history_for_replay", module_path
-    )
-    if spec is None or spec.loader is None:
-        raise SignalReplayError("history reader is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    rows = module._xlsx_rows(path, "Simulation")  # noqa: SLF001
+    rows = xlsx_sheet_rows(path, "Simulation")
     headers = {str(value).strip(): index for index, value in enumerate(rows[0])}
     if not {"date", "day_ret"} <= set(headers):
         raise SignalReplayError("vendor simulation headers differ")
@@ -424,7 +422,7 @@ def _reference_returns(path: Path) -> dict[date, Decimal]:
         raw_ret = row[headers["day_ret"]]
         if raw_day is None or raw_ret is None:
             continue
-        day = module._excel_date(raw_day, "vendor simulation date")  # noqa: SLF001
+        day = excel_cell_date(raw_day, "vendor simulation date")  # noqa: SLF001
         result[day] = _decimal(raw_ret, "vendor simulation day_ret")
     return result
 
