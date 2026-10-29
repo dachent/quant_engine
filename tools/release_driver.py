@@ -116,6 +116,7 @@ class Run:
         self.binding = hashlib.sha256(
             json.dumps([config, graph], sort_keys=True).encode()
         ).hexdigest()
+        self.confirmed_release_id: str | None = None
 
     # -- templates -------------------------------------------------------------------
     def expand(self, template: str) -> str:
@@ -271,11 +272,115 @@ def check_probe_guard(run: Run, stage: Mapping[str, Any]) -> None:
         )
 
 
+def spec_topology(spec_file: Path) -> str:
+    """Hash of what a release spec binds, independent of where the roots live.
+
+    A replica spec and the real spec of the same release differ only in paths: node ids,
+    dependencies, generation ids and manifest hashes, artifact hashes, companions, code
+    commit, as-of date and pipeline id are identical (checked on the R1 specs).
+    """
+
+    spec = _read_json(spec_file)
+    rows = []
+    for node in spec["nodes"]:
+        if node["kind"] == "GENERATION":
+            rows.append(
+                [
+                    node["node_id"],
+                    node["kind"],
+                    node["depends_on"],
+                    node["root_id"],
+                    node["generation_id"],
+                    node["manifest_sha256"],
+                    node["release_target"],
+                ]
+            )
+        else:
+            rows.append(
+                [node["node_id"], node["kind"], node["depends_on"], node["sha256"]]
+            )
+    rows.sort(key=str)
+    payload = {
+        "nodes": rows,
+        "companions": spec["companions"],
+        "code_commit": spec["code_commit"],
+        "as_of_date": spec["as_of_date"],
+        "pipeline_id": spec["pipeline_id"],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def check_commit_gate(run: Run, stage: Mapping[str, Any]) -> None:
+    """``execute --commit`` runs only for the exact release the owner confirmed, after a clean replica."""
+
+    gate = stage.get("commit_gate")
+    if gate is None:
+        return
+    if run.values["mode"] != "release":
+        raise Refusal(f"{stage['id']}: a commit needs mode 'release'")
+    release_id = run.derive("release_id")
+    if run.confirmed_release_id != release_id:
+        raise Refusal(
+            f"{stage['id']}: commit needs --confirm-release-id {release_id}, the exact release the owner confirmed"
+        )
+    real_spec, replica_spec = (
+        Path(run.expand(gate["spec"])),
+        Path(run.expand(gate["replica_spec"])),
+    )
+    if not replica_spec.is_file():
+        raise Refusal(
+            f"{stage['id']}: no replica spec at {replica_spec}; the replica ceremony has not run"
+        )
+    for replica_stage in gate["replica_stages"]:
+        record = run.state["stages"].get(replica_stage)
+        if (
+            not record
+            or record["status"] != "ok"
+            or record["code_commit"] != run.values["code_commit"]
+        ):
+            raise Refusal(
+                f"{stage['id']}: replica receipt {replica_stage} is missing, failed, or from another code identity"
+            )
+    real_topology, replica_topology = (
+        spec_topology(real_spec),
+        spec_topology(replica_spec),
+    )
+    if real_topology != replica_topology:
+        raise Refusal(
+            f"{stage['id']}: the replica spec binds a different topology than the real spec"
+        )
+    if _read_json(real_spec)["code_commit"] != run.values["code_commit"]:
+        raise Refusal(f"{stage['id']}: the real spec binds another code commit")
+    for real_input, replica_input in gate.get("inputs_same", []):
+        left, right = Path(run.expand(real_input)), Path(run.expand(replica_input))
+        if path_digest(left) is None or path_digest(left) != path_digest(right):
+            raise Refusal(
+                f"{stage['id']}: {left.name} differs between the real run and the replica"
+            )
+    prepared = (
+        Path(_read_json(real_spec)["coordination_root"]) / "releases" / release_id
+    )
+    if not prepared.is_dir():
+        raise Refusal(
+            f"{stage['id']}: release {release_id[:12]} is not prepared at {prepared}"
+        )
+    recorded = _read_json(Path(run.expand(gate["pointer_snapshot"])))
+    now = pointer_snapshot(real_spec)
+    moved = [
+        key
+        for key in sorted(recorded)
+        if key != "release_dirs" and recorded[key] != now.get(key)
+    ]
+    if moved:
+        raise Refusal(f"{stage['id']}: pointers moved since the dry run: {moved[:4]}")
+
+
 def check_ready(run: Run, stage: Mapping[str, Any], *, replace: bool) -> None:
     """Every refusal that applies before ``stage`` runs. Raises ``Refusal``; changes nothing."""
 
     run.require_frozen_repo()
     check_probe_guard(run, stage)
+    check_commit_gate(run, stage)
     state = run.state["stages"]
     for required in stage.get("requires", []):
         record = state.get(required)
@@ -549,9 +654,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="move colliding create-only outputs aside",
     )
+    parser.add_argument(
+        "--confirm-release-id",
+        help="the exact release id the owner confirmed (commit stage)",
+    )
     args = parser.parse_args(argv)
     try:
         run = load_run(args.config, args.graph)
+        run.confirmed_release_id = args.confirm_release_id
         selected = _select(run, args.only, args.through)
         if args.command == "plan":
             for stage_id in selected:
