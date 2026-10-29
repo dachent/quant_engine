@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Final, Mapping
 
@@ -51,18 +52,38 @@ class ReplicaGateError(ValueError):
     """The replica gate refuses; the message names the first failed condition."""
 
 
-def topology(spec: PipelineSpec) -> dict[str, Any]:
+def _normalize(value: Any, anchor: Path) -> Any:
+    """Spec value with every path under ``anchor`` replaced by ``<ROOT>``, slashes unified."""
+
+    pattern = re.compile(re.escape(anchor.as_posix().rstrip("/")), re.IGNORECASE)
+    if isinstance(value, str):
+        return pattern.sub("<ROOT>", value.replace("\\", "/"))
+    if isinstance(value, list):
+        return [_normalize(item, anchor) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize(item, anchor) for key, item in value.items()}
+    return value
+
+
+def topology(spec: PipelineSpec, anchor: Path) -> dict[str, Any]:
     """Everything about a spec that must be equal between the real run and its replica.
 
-    Paths differ by design (the replica lives elsewhere) and so does the spec digest;
-    the code commit, the proposed release generations and the node ids may not.
+    ``anchor`` is the workspace root of that spec (the replica root for the replica).
+    Paths below it are normalized away; the complete spec otherwise has to match (nodes,
+    dependency edges, command arguments, gates, companions, state and write paths), except
+    ``created_at``. The raw spec digest differs by design and is not compared.
     """
 
+    body = spec.to_dict()
+    body.pop("created_at", None)
+    normalized = _normalize(body, anchor)
     node_ids = sorted(node.node_id for node in spec.nodes)
     return {
         "code_commit": spec.code_commit,
         "node_count": len(node_ids),
-        "node_ids_sha256": hashlib.sha256(canonical_json_bytes(node_ids)).hexdigest(),
+        "normalized_spec_sha256": hashlib.sha256(
+            canonical_json_bytes(normalized)
+        ).hexdigest(),
         "release_generations": dict(sorted(spec.release_generations.items())),
         "target_count": len(spec.release_generations),
     }
@@ -101,21 +122,48 @@ def _marked_ancestor(path: Path) -> Path | None:
     return None
 
 
+def _under(path: Path, bases: list[Path]) -> bool:
+    resolved = path.resolve()
+    return any(resolved.is_relative_to(base) for base in bases)
+
+
 def is_replica_spec(spec: PipelineSpec) -> bool:
-    """True when the coordination root and every release root sit under one marker."""
+    """True only when every write-capable path is confined to one marked replica root.
+
+    The coordination root and every release root sit under the marker's directory; the
+    state root is under it or listed in the marker's ``allowed_state_roots``; every
+    command's declared write is under the marker's directory or the state root. Anything
+    else fails closed: such a spec needs a receipt like a real one.
+    """
 
     anchor = _marked_ancestor(spec.coordination_root)
     if anchor is None:
         return False
-    for root in spec.roots.values():
-        if not root.resolve().is_relative_to(anchor):
-            return False
+    marker = read_marker(anchor) or {}
+    allowed = [Path(item).resolve() for item in marker.get("allowed_state_roots", [])]
+    if not all(_under(root, [anchor]) for root in spec.roots.values()):
+        return False
+    if not _under(spec.state_root, [anchor, *allowed]):
+        return False
+    write_bases = [anchor, spec.state_root.resolve()]
+    for node in spec.nodes:
+        for write in getattr(node, "declared_writes", ()):
+            if not _under(Path(write), write_bases):
+                return False
     return True
+
+
+def replica_anchor(spec: PipelineSpec) -> Path:
+    anchor = _marked_ancestor(spec.coordination_root)
+    if anchor is None:
+        raise ReplicaGateError("spec is not under a replica root marker")
+    return anchor
 
 
 def build_receipt(
     *,
     real_spec: PipelineSpec,
+    real_anchor: Path,
     replica_spec: PipelineSpec,
     steps: list[dict[str, Any]],
     commit_result: Mapping[str, Any],
@@ -131,9 +179,10 @@ def build_receipt(
         },
         "harness_code_commit": harness_code_commit,
         "kind": RECEIPT_KIND,
-        "real_topology": topology(real_spec),
+        "real_anchor": real_anchor.as_posix(),
+        "real_topology": topology(real_spec, real_anchor),
         "replica_spec_sha256": replica_spec.spec_sha256,
-        "replica_topology": topology(replica_spec),
+        "replica_topology": topology(replica_spec, replica_anchor(replica_spec)),
         "schema_version": SCHEMA_VERSION,
         "steps": steps,
     }
@@ -177,11 +226,21 @@ def verify_receipt(path: Path | None, spec: PipelineSpec) -> dict[str, Any]:
         or commit_result.get("release_state") != "COMMITTED"
     ):
         raise ReplicaGateError("replica release is not COMMITTED")
-    wanted = topology(spec)
+    recorded_anchor = receipt.get("real_anchor")
+    if not isinstance(recorded_anchor, str):
+        raise ReplicaGateError("replica receipt names no real workspace anchor")
+    anchor = Path(recorded_anchor)
+    if not all(
+        _under(path, [anchor.resolve()])
+        for path in (spec.coordination_root, *spec.roots.values())
+    ):
+        raise ReplicaGateError("receipt anchor is not the workspace of the real spec")
+    wanted = topology(spec, anchor)
     if receipt.get("real_topology") != wanted:
         raise ReplicaGateError(
             "replica receipt was issued for a different real release "
-            "(code commit, release generations or node ids differ)"
+            "(code commit, release generations, nodes, edges, gates, companions or "
+            "paths differ after normalization)"
         )
     if receipt.get("replica_topology") != wanted:
         raise ReplicaGateError("replica ran a different topology than the real spec")

@@ -24,20 +24,33 @@ GEN = {"root-a": "a" * 64}
 
 
 def _spec(base: Path) -> Any:
-    return SimpleNamespace(
+    spec = SimpleNamespace(
         code_commit="c" * 40,
-        nodes=(SimpleNamespace(node_id="n1"),),
+        nodes=(SimpleNamespace(node_id="n1", declared_writes=(base / "out",)),),
         release_generations=GEN,
         coordination_root=base / "coord",
+        state_root=base / "state",
         roots={"root-a": base / "root-a"},
         spec_sha256="d" * 64,
     )
+    spec.to_dict = lambda: {
+        "code_commit": "c" * 40,
+        "arg": f"{base.as_posix()}/x",
+        "nodes": ["n1"],
+    }
+    return spec
 
 
-def _mark(base: Path) -> None:
+def _mark(base: Path, workspace: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     (base / replica_gate.REPLICA_MARKER_NAME).write_text(
-        json.dumps({"kind": replica_gate.REPLICA_MARKER_KIND, "schema_version": 1}),
+        json.dumps(
+            {
+                "kind": replica_gate.REPLICA_MARKER_KIND,
+                "schema_version": 1,
+                "source_workspace": workspace.as_posix(),
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -85,7 +98,7 @@ def _args(tmp: Path) -> argparse.Namespace:
 @pytest.fixture
 def specs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any]:
     real, replica = _spec(tmp_path / "real"), _spec(tmp_path / "replica")
-    _mark(tmp_path / "replica")
+    _mark(tmp_path / "replica", tmp_path / "real")
     monkeypatch.setattr(
         rr,
         "load_pipeline_spec",
