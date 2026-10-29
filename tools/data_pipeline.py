@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
+from quant_engine.core import replica_gate
 from quant_engine.core import (
     PipelineExecutionError,
     PipelineUnknownOutcomeError,
@@ -30,6 +31,10 @@ def _parser() -> argparse.ArgumentParser:
         if name == "execute":
             command.add_argument("--commit", action="store_true")
             command.add_argument("--commit-authorization", type=Path)
+            # A real-roots commit presents the receipt of a passed replica ceremony
+            # (tools/release_replica.py ceremony); a spec under a replica root marker
+            # (replica_gate.REPLICA_MARKER_NAME) is the replica itself and needs none.
+            command.add_argument("--replica-receipt", type=Path)
             command.add_argument("--allow-external-read", action="store_true")
             # Deliberately no CLI escape hatch for the release-validation
             # gate: a flag on the primary publish command is a friction-free
@@ -61,6 +66,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     spec, clear_stale_lock=args.confirm_stale_lock
                 )
             else:
+                if args.commit and not replica_gate.is_replica_spec(spec):
+                    replica_gate.verify_receipt(args.replica_receipt, spec)
                 result = execute_pipeline(
                     spec,
                     commit=args.commit,
@@ -72,6 +79,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         PipelineExecutionError,
         PipelineUnknownOutcomeError,
         PipelineValidationError,
+        replica_gate.ReplicaGateError,
         RuntimeError,
         ValueError,
     ) as exc:
