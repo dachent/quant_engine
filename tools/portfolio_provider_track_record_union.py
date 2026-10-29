@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import date
-from decimal import Decimal, getcontext
+from decimal import Decimal, localcontext
 import hashlib
 import io
 import json
@@ -50,7 +50,7 @@ from quant_engine.core import (
 )
 
 
-getcontext().prec = 40
+PRECISION: Final = 40
 
 CATALOG_SCHEMA_VERSION: Final = 2
 ADAPTER_VERSION: Final = "1"
@@ -489,7 +489,9 @@ def _build(
 
 
 def stage_candidate(spec_path: Path, output_root: Path, as_of: date) -> dict[str, Any]:
-    files, manifest, catalog = _build(_spec(spec_path), as_of)
+    with localcontext() as context:
+        context.prec = PRECISION
+        files, manifest, catalog = _build(_spec(spec_path), as_of)
     generations = output_root.resolve() / "generations"
     final = generations / manifest.generation_id
     if final.exists():

@@ -344,3 +344,11 @@ def test_refuses_a_series_that_is_not_the_declared_one(tmp_path: Path) -> None:
     spec.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(UnionError, match="foreign series"):
         union.stage_candidate(spec, tmp_path / "out", AS_OF)
+
+
+def test_staging_leaves_the_global_decimal_context_alone(tmp_path: Path) -> None:
+    import decimal
+
+    before = decimal.getcontext().prec
+    union.stage_candidate(_spec(tmp_path), tmp_path / "out", AS_OF)
+    assert decimal.getcontext().prec == before == 28
