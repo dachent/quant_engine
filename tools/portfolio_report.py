@@ -9285,6 +9285,7 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_manifest_rows: list[Mapping[str, Any]] = []
+    manifest_rows_raw: object = None
     epoch_included_rows: list[Mapping[str, Any]] = []
     epoch_perimeter: derived_epoch_perimeter.EffectivePerimeter | None = None
     epoch_crosswalk_rows: list[dict[str, Any]] = []
@@ -10269,6 +10270,11 @@ def build_report_data(
                     hwm_summary=hwm_summary,
                     calculation_cutoff_date=calculation_cutoff_date,
                     custody_current_capital=report.get("custody_current_capital"),
+                    manifest_rows=(
+                        manifest_rows_raw
+                        if isinstance(manifest_rows_raw, list)
+                        else None
+                    ),
                 )
             )
         except PortfolioTotalsError as exc:
