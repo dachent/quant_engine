@@ -259,6 +259,7 @@
     const parts = [`Provider capture ${formatDate(evidence.generation_as_of_date)}`];
     if (account) parts.push(`${providerName(account.provider_id || evidence.provider_id)} account-live TWR: ${formatDate(account.observed_start)}–${formatDate(account.observed_end)} · ${integer.format(account.return_observations || 0)} returns`);
     if (provider) parts.push(`${providerName(provider.provider_id || evidence.provider_id)} provider-live book: ${formatDate(provider.observed_start)}–${formatDate(provider.observed_end)} · ${integer.format(provider.return_observations || 0)} returns · governed provider-ledger classification, not brokerage-account authority`);
+    if (!provider && evidence.provider_live) parts.push(`Provider-live book: ${evidence.provider_live.status} · ${evidence.provider_live.reason_code}`);
     if (evidence.current_snapshot) parts.push(`${providerName(provider?.provider_id || evidence.provider_id)} account snapshot: ${formatDate(evidence.current_snapshot.observed_date)}`);
     return parts.join(" · ");
   };
