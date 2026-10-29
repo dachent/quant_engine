@@ -2174,14 +2174,14 @@
         "prefixItems": [
           { "type": "integer", "minimum": 0 },
           { "type": "integer", "minimum": 0 },
-          { "enum": ["LIVE", "BACKTEST", "MIXED"] }
+          { "enum": ["LIVE", "BACKTEST", "MIXED", "DERIVED", "PROVIDER_MODEL_LIVE"] }
         ]
       }
     },
     "performance_tab_line": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["series_id", "display_name", "kind", "basis", "definition", "source_mode", "tri"],
+      "required": ["series_id", "display_name", "kind", "basis", "definition", "source_mode", "first_week", "first_index", "last_index", "segments", "tri"],
       "properties": {
         "series_id": { "type": "string", "minLength": 1 },
         "display_name": { "type": ["string", "null"] },
@@ -2189,7 +2189,18 @@
         "basis": { "type": "string", "minLength": 1 },
         "definition": { "type": "string", "minLength": 1 },
         "source_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST", "LIVE_ONLY_FALLBACK", "WEEKLY_RETURNS_SINGLE_MODE"] },
-        "tri": { "type": "array", "minItems": 1, "items": { "type": "number" } },
+        "first_week": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "first_index": { "type": "integer", "minimum": 0 },
+        "last_index": { "type": "integer", "minimum": 0 },
+        "segments": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "integer", "minimum": 0 } }
+        },
+        "member_count": { "type": ["integer", "null"], "minimum": 1 },
+        "member_series_ids": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "member_counts": { "type": "array", "items": { "type": ["integer", "null"], "minimum": 1 } },
+        "tri": { "type": "array", "minItems": 1, "items": { "type": ["number", "null"] } },
         "origin": { "$ref": "#/$defs/performance_tab_origin_runs" },
         "return_scope_label": { "type": "string", "minLength": 1 }
       },
@@ -2216,11 +2227,16 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["status", "grid", "base_point", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "stale_before_current_week", "data_through_date", "benchmarks_unavailable", "lines"],
+          "required": ["status", "grid", "base_point", "union_start_date", "union_start_set_by", "group_anchor_date", "group_anchor_index", "group_anchor_set_by", "common_start_date", "common_start_set_by", "first_observation_common_start", "first_observation_set_by", "gaps_before_common_start", "dates", "week_end_dates", "last_week_partial", "stale_before_current_week", "data_through_date", "benchmarks_unavailable", "lines"],
           "properties": {
             "status": { "const": "AVAILABLE" },
             "grid": { "const": "ISO_WEEK_START_MONDAY" },
-            "base_point": { "const": "START_OF_FIRST_WEEK" },
+            "base_point": { "const": "START_OF_EACH_LINE_FIRST_WEEK" },
+            "union_start_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "union_start_set_by": { "type": "string" },
+            "group_anchor_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+            "group_anchor_index": { "type": "integer", "minimum": 0 },
+            "group_anchor_set_by": { "type": "string" },
             "common_start_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
             "common_start_set_by": { "type": "string" },
             "first_observation_common_start": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
@@ -2261,7 +2277,7 @@
     "performance_tab_benchmark": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["series_id", "ticker", "status", "reason", "substitute", "source", "required_pull"],
+      "required": ["series_id", "ticker", "status", "reason", "substitute", "source", "required_pull", "first_week", "last_week", "daily"],
       "properties": {
         "series_id": { "type": "string" },
         "ticker": { "type": "string" },
@@ -2269,7 +2285,21 @@
         "reason": { "type": ["string", "null"] },
         "substitute": { "type": "null" },
         "source": { "type": ["string", "null"] },
-        "required_pull": { "type": ["object", "null"] }
+        "required_pull": { "type": ["object", "null"] },
+        "first_week": { "type": ["string", "null"] },
+        "last_week": { "type": ["string", "null"] },
+        "daily": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "source_id", "first_date", "last_date", "reason"],
+          "properties": {
+            "status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+            "source_id": { "type": ["string", "null"] },
+            "first_date": { "type": ["string", "null"] },
+            "last_date": { "type": ["string", "null"] },
+            "reason": { "type": ["string", "null"] }
+          }
+        }
       },
       "allOf": [
         {
@@ -2279,13 +2309,120 @@
         }
       ]
     },
+    "performance_tab_flows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "definition", "net_flow_cents", "opening_cents", "closing_cents", "link_net_flow_cents", "total_contributed_cents", "implied_pnl_cents", "internal_cancellation", "residual_treatment", "report_crosscheck"],
+      "properties": {
+        "unit": { "const": "USD_CENTS" },
+        "definition": { "type": "string", "minLength": 1 },
+        "net_flow_cents": { "type": "array", "items": { "type": "integer" } },
+        "opening_cents": { "type": "array", "items": { "type": "integer" } },
+        "closing_cents": { "type": "array", "items": { "type": "integer" } },
+        "link_net_flow_cents": { "type": "array", "items": { "type": "integer" } },
+        "total_contributed_cents": { "type": "integer" },
+        "implied_pnl_cents": { "type": "integer" },
+        "internal_cancellation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "internal_in_cents", "internal_out_cents", "net_cents", "treatment"],
+          "properties": {
+            "status": { "enum": ["CANCELS_EXACTLY", "NET_INTERNAL_FLOW_CROSSES_PERIMETER"] },
+            "internal_in_cents": { "type": "integer" },
+            "internal_out_cents": { "type": "integer" },
+            "net_cents": { "type": "integer" },
+            "treatment": { "type": "string", "minLength": 1 }
+          }
+        },
+        "residual_treatment": { "type": "string", "minLength": 1 },
+        "report_crosscheck": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "report_net_capital_cents", "trace_contributed_cents", "contributed_minus_report_cents", "report_gain_cents", "trace_implied_pnl_cents", "pnl_minus_report_gain_cents", "report_epoch_count", "manifest_row_count", "retired_epoch_count", "components"],
+              "properties": {
+                "report_epoch_count": { "type": ["integer", "null"] },
+                "manifest_row_count": { "type": "integer", "minimum": 0 },
+                "retired_epoch_count": { "type": "integer", "minimum": 0 },
+                "components": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["component_id", "amount_cents", "explained", "note", "lines"],
+                    "properties": {
+                      "component_id": { "type": "string", "minLength": 1 },
+                      "amount_cents": { "type": "integer" },
+                      "explained": { "type": "boolean" },
+                      "note": { "type": "string", "minLength": 1 },
+                      "lines": { "type": "array", "items": { "type": "object" } }
+                    }
+                  }
+                },
+                "source": { "const": "capital_reconciliation" },
+                "report_net_capital_cents": { "type": "integer" },
+                "trace_contributed_cents": { "type": "integer" },
+                "contributed_minus_report_cents": { "type": "integer" },
+                "report_gain_cents": { "type": "integer" },
+                "trace_implied_pnl_cents": { "type": "integer" },
+                "pnl_minus_report_gain_cents": { "type": "integer" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "performance_tab_slice_benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["series_id", "ticker", "status", "reason", "method", "method_definition", "tri_basis", "flow_timing", "tri", "nav_cents", "end_value_cents", "portfolio_minus_benchmark_cents", "systematic_capital_minus_benchmark_cents", "trailing_since_start_date", "trailing"],
+      "properties": {
+        "series_id": { "type": "string" },
+        "ticker": { "type": "string" },
+        "status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "reason": { "type": ["string", "null"] },
+        "method": { "const": "FLOW_MATCHED" },
+        "method_definition": { "type": "string", "minLength": 1 },
+        "tri_basis": { "enum": ["DAILY_ADJUSTED_CLOSE", "WEEKLY_TOTAL_RETURN_INDEX", null] },
+        "flow_timing": { "enum": ["FLOW_DATE_CLOSE", "FLOW_WEEK_START", null] },
+        "tri": { "type": ["array", "null"], "items": { "type": ["number", "null"] } },
+        "nav_cents": { "type": ["array", "null"], "items": { "type": "integer" } },
+        "end_value_cents": { "type": ["integer", "null"] },
+        "portfolio_minus_benchmark_cents": { "type": ["integer", "null"] },
+        "systematic_capital_minus_benchmark_cents": { "type": ["integer", "null"] },
+        "trailing_since_start_date": { "type": ["string", "null"] },
+        "trailing": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["1w", "1m", "3m", "6m", "YTD", "1y", "SINCE_START"],
+          "properties": {
+            "1w": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+            "1m": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+            "3m": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+            "6m": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+            "YTD": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+            "1y": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+            "SINCE_START": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "AVAILABLE" } }, "required": ["status"] },
+          "then": { "properties": { "tri": { "type": "array" }, "nav_cents": { "type": "array" }, "trailing": { "type": "object" }, "tri_basis": { "type": "string" } } },
+          "else": { "properties": { "tri": { "type": "null" }, "nav_cents": { "type": "null" }, "trailing": { "type": "null" }, "reason": { "type": "string" } } }
+        }
+      ]
+    },
     "performance_tab_slices": {
       "oneOf": [
         { "$ref": "#/$defs/performance_tab_unavailable" },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["status", "scope", "unit", "grid", "dates", "carry_forward", "net_flow_definition", "reserve", "rows", "excluded_epochs", "reconciliation"],
+          "required": ["status", "scope", "unit", "grid", "dates", "carry_forward", "net_flow_definition", "reserve", "flows", "benchmarks", "rows", "excluded_epochs", "reconciliation"],
           "properties": {
             "status": { "const": "AVAILABLE" },
             "scope": { "const": "SYSTEMATIC_EX_RESERVE" },
@@ -2295,6 +2432,8 @@
             "carry_forward": { "type": "string" },
             "net_flow_definition": { "type": "string" },
             "reserve": { "const": "EXCLUDED" },
+            "flows": { "$ref": "#/$defs/performance_tab_flows" },
+            "benchmarks": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "$ref": "#/$defs/performance_tab_slice_benchmark" } },
             "rows": {
               "type": "array",
               "minItems": 1,
@@ -2575,7 +2714,7 @@
       "additionalProperties": false,
       "required": ["schema_version", "as_of", "scope", "modes", "benchmarks", "slices", "readout"],
       "properties": {
-        "schema_version": { "const": 2 },
+        "schema_version": { "const": 3 },
         "as_of": { "type": ["string", "null"] },
         "scope": { "const": "SYSTEMATIC_EX_RESERVE" },
         "modes": {

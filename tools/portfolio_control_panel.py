@@ -45,6 +45,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
 import sleeve_disclosures
 from portfolio_private_stage import validate_private_stage_target
@@ -762,6 +763,12 @@ def _validated_strategy_evidence(
             "generation_as_of_date": generation_as_of_date,
             "provider_id": provider_id,
         }
+    shared = shared_provider_live_blocks(list(by_id.values()))
+    if shared:
+        raise ControlPanelValidationError(
+            "strategy evidence provider-live block is shared by strategies: "
+            + ", ".join(f"{first}={second}" for first, second in shared)
+        )
     return by_id
 
 

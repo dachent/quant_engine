@@ -1119,6 +1119,11 @@ section[data-view="capital"] .callout-neutral {
 button.perf-legend-item { cursor: pointer; }
 button.perf-legend-item.is-off { opacity: .45; text-decoration: line-through; }
 .perf-legend-item.is-missing { opacity: .7; border-style: dashed; }
+.perf-legend-item { max-width: 100%; flex-wrap: wrap; border-radius: 14px; overflow-wrap: anywhere; }
+.perf-legend-item i.perf-dash-swatch { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed; background: none; }
+.perf-legend-item .cell-secondary { display: block; width: 100%; margin-left: 16px; }
+.alpha-basis-badge { display: inline-block; margin-bottom: 4px; white-space: normal; }
+.segmented .segment:disabled { opacity: .5; cursor: not-allowed; }
 .perf-readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-bottom: 8px; }
 .perf-readout > div { background: #0e1b28; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .perf-readout span { display: block; color: var(--text-soft); font-size: 11px; }
