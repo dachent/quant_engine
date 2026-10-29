@@ -228,6 +228,12 @@
   // F20/F12: `footer` is the markup of a <tfoot> body (total rows computed from the rows shown).
   const tableMarkup = (headers, rows, caption = null, footer = "") => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>${footer ? `<tfoot>${footer}</tfoot>` : ""}`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
+  // Q5: a retained-history record is lifecycle evidence of a closed or immaterial strategy, not a current strategy.
+  // ONE marker and ONE helper decide which strategy rows the register, comparison, provider and count surfaces show;
+  // the name lookups around it still resolve retained ids (slices and lifecycle rows name them).
+  const RETAINED_RECORD_KIND = "RETAINED_HISTORY_ONLY";
+  const isRetainedRecord = (row) => row?.record_kind === RETAINED_RECORD_KIND;
+  const currentStrategies = () => (Array.isArray(data.strategies) ? data.strategies : []).filter((row) => !isRetainedRecord(row));
   // F04: the operator sees a strategy's name, never its id slug, where the payload can map it.
   const strategyNameById = (strategyId) => (data.strategies || []).find((row) => row.strategy_id === strategyId)?.strategy_name || strategyId;
   const PROVIDER_NAMES = Object.freeze({
@@ -266,7 +272,7 @@
   // F26: one note per table, naming how many strategies carry a capture after the cutoff.
   const postCutoffCaptureNote = () => {
     const cutoffDate = String(data.meta?.portfolio_as_of || "").slice(0, 10);
-    const strategies = Array.isArray(data.strategies) ? data.strategies : [];
+    const strategies = currentStrategies();
     const late = strategies.filter((row) => cutoffDate !== "" && String(row.provider_evidence?.generation_as_of_date || "").slice(0, 10) > cutoffDate);
     if (!late.length) return "";
     // The through-date is the observed_end of each accepted evidence path, never the capture date.
@@ -314,6 +320,10 @@
     const providerAnnualizedLabel = row.provider_annualization?.label;
     return `${statusText(status)}<span class="cell-secondary">Exact common dates ${formatDateHtml(row.provider_comparison_observed_start)}–${formatDateHtml(row.provider_comparison_observed_end)} · ${integer.format(row.provider_comparison_observations || 0)} observations${staleSuffix(row.provider_comparison_observed_end)}</span><span class="cell-secondary">Account ${pct(row.provider_account_cumulative_return)} · reference ${pct(row.provider_reference_cumulative_return)} · cumulative gap ${pct(row.provider_cumulative_gap)} · active annualized ${pct(row.provider_active_return_annualized)}${annualizationSuffix(providerAnnualizedLabel)}</span><span class="cell-secondary">Tracking error ${pct(row.provider_tracking_error_annualized)} · information ratio ${decimal(row.provider_information_ratio)} · beta ${decimal(row.provider_beta)} · correlation ${decimal(row.provider_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.provider_upside_capture)} · down capture ${pct(row.provider_downside_capture)} · relative drawdown ${pct(row.provider_relative_drawdown)} · cash drag ${statusText(row.cash_drag_status)} · ${safe(row.cash_drag_reason)}</span><span class="cell-secondary">${safe(row.provider_comparison_disposition)}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
   };
+  // Q1: the cost label is the status AND the amount over its period, never the status slug alone.  The producer publishes
+  // one annual pre-tax external amount; an unpublished amount is said to be unpublished.
+  const costAmountText = (row) => (number(row.annual_external_cost_usd) == null ? "annual amount not published" : `${currencyExact(row.annual_external_cost_usd)} per year`);
+  const costLabel = (row) => `${humanStatus(row.cost_status)} · ${costAmountText(row)}`;
   const costDisclosure = (row) => {
     const amount = number(row.annual_external_cost_usd) == null ? "Pre-tax cost unavailable" : `${currencyExact(row.annual_external_cost_usd)} annually`;
     // N64: a rate divides by the sleeve value at the cutoff and says which date that value
@@ -329,7 +339,7 @@
     } else {
       rate = `${pct(row.annual_external_cost_rate_pre_tax, 2)} of sleeve value (denominator date not published by this report schema)`;
     }
-    return `<span class="cell-primary">${safe(humanStatus(row.cost_status))}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
+    return `<span class="cell-primary">${safe(costLabel(row))}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
   };
   // N55: who authorized the current benchmark assignment.  An owner-made override is
   // named explicitly; a row that has never been overridden retains the prior status quo
@@ -668,7 +678,7 @@
 
     $("#capital-ring").innerHTML = capitalRingMarkup();
 
-    $("#strategy-coverage-bars").innerHTML = data.strategies.map((row) => {
+    $("#strategy-coverage-bars").innerHTML = currentStrategies().map((row) => {
       const qualification = hwmQualification(row);
       if (performanceLineageMismatch) {
         return `<div class="coverage-status-row"><div class="bar-label"><span>${safe(row.strategy_name)}</span><span>Evidence UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · HWM UNAVAILABLE_SOURCE_LINEAGE_MISMATCH</span></div><div class="cell-secondary">— ${safe(performanceLineageReason)}</div></div>`;
@@ -702,9 +712,9 @@
       return `<li><div><strong>${safe(operatorLabels[item.item] || humanStatus(item.item))}</strong><span>${safe(note)}</span><button type="button" class="text-action" data-open-view="${safe(route.view)}"${focus} aria-label="${safe(route.label)} for ${safe(humanStatus(item.item))}">${safe(route.label)} →</button></div></li>`;
     }).join("");
     $("#operator-queue").innerHTML = Array.isArray(operatorItems) ? operatorItems.join("") : operatorItems;
-    const implementationRows = data.strategies.map((row) => {
+    const implementationRows = currentStrategies().map((row) => {
       const factor = factorModelSummary(row.strategy_name);
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(humanStatus(row.cost_status))}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(costLabel(row))}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
     });
     $("#portfolio-implementation-table").innerHTML = tableMarkup([["Strategy"], ["Source evidence"], ["Implementation gap (account vs model)"], ["Cost"], ["Factor model"]], implementationRows, evidenceCaption("Implementation, costs, and model readiness"));
     const constructionPoints = performanceLineageMismatch
@@ -826,21 +836,24 @@
     $("#lifecycle-table").innerHTML = tableMarkup([["Account"], ["Assignment"], ["Effective start"], ["Effective end"], ["Mapping state"], ["Evidence identity"]], rows.length ? rows : [emptyRow(6, "No lifecycle intervals match the selected context")]);
   }
 
-  // E1: the producer states why a position has no symbol.  A not-ready symbol says so in
-  // words (reason as the tooltip); a row that is not an accepted position claims nothing.
+  // E1/Q2: the symbol and its asset category come from the payload.  A row without a symbol says why in words (reason as
+  // the tooltip) using its own symbol_status; a row that is not an accepted position claims nothing.
+  const assetCategoryText = (row) => row.asset_category_label || (row.asset_category ? humanStatus(row.asset_category) : "");
   const symbolCell = (row) => {
     const identity = `<span class="cell-secondary">${safe(row.security_id || "—")}</span>`;
-    if (row.symbol_status === "NOT_READY") {
-      const reason = typeof row.symbol_reason === "string" && row.symbol_reason ? ` title="${safe(row.symbol_reason)}"` : "";
-      return `<span class="cell-primary symbol-not-ready"${reason}>Symbol not ready</span>${identity}`;
+    const reason = typeof row.symbol_reason === "string" && row.symbol_reason ? ` title="${safe(row.symbol_reason)}"` : "";
+    if (!row.symbol) {
+      const label = row.symbol_status === "NOT_READY" ? "Symbol not ready" : String(row.symbol_status || "").startsWith("UNAVAILABLE") ? `Symbol ${humanStatus(row.symbol_status).toLowerCase()}` : null;
+      if (label === null) return `<span class="cell-primary">—</span>${assetCategoryText(row) ? `<span class="cell-secondary">${safe(assetCategoryText(row))}</span>` : ""}${identity}`;
+      return `<span class="cell-primary symbol-not-ready"${reason}>${safe(label)}</span>${assetCategoryText(row) ? `<span class="cell-secondary">${safe(assetCategoryText(row))}</span>` : ""}${identity}`;
     }
-    return `<span class="cell-primary">${safe(row.symbol || "—")}</span>${identity}`;
+    return `<span class="cell-primary"${reason}>${safe(row.symbol)}</span>${assetCategoryText(row) ? `<span class="cell-secondary">${safe(assetCategoryText(row))}</span>` : ""}${identity}`;
   };
 
   function renderPositionTable() {
     const query = positionSearch.toLowerCase();
     const accepted = currentPositionRows().filter((row) => matchesContext(row)
-      && (!query || `${row.strategy_name || ""} ${row.symbol || ""} ${row.security_id || ""} ${accountLabel(row.account_id)}`.toLowerCase().includes(query)));
+      && (!query || `${row.strategy_name || ""} ${row.symbol || ""} ${assetCategoryText(row)} ${row.security_id || ""} ${accountLabel(row.account_id)}`.toLowerCase().includes(query)));
     // Largest positions first (the order the producer emits is by identifier hash, which says nothing).
     accepted.sort((a, b) => (number(b.market_value_usd) ?? -Infinity) - (number(a.market_value_usd) ?? -Infinity));
     const pageCount = Math.max(1, Math.ceil(accepted.length / positionPageSize));
@@ -856,7 +869,7 @@
     positionTable.innerHTML = tableMarkup([["Strategy / identity"], ["Security"], ["Account"], ["Quantity (units)", "numeric"], ["Market value", "numeric"], ["As of"], ["Status"]], positionRows.length ? positionRows : [emptyRow(7)], null, positionFooter);
     // One notice instead of one warning per row: the missing symbols are a data gap that is the same for every
     // affected row, so it is said once, with the producer's own reason.
-    const pending = accepted.filter((row) => row.symbol_status === "NOT_READY");
+    const pending = accepted.filter((row) => !row.symbol && (row.symbol_status === "NOT_READY" || String(row.symbol_status || "").startsWith("UNAVAILABLE")));
     const symbolNotice = $("#position-symbol-notice");
     if (symbolNotice) {
       const reason = pending.map((row) => row.symbol_reason).find((text) => typeof text === "string" && text);
@@ -914,7 +927,7 @@
     const providers = Object.entries(data.provider_counts).sort((a, b) => b[1] - a[1]);
     const maxCount = Math.max(...providers.map(([, count]) => count), 1);
     $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(providerName(provider))}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
-    const rows = data.strategies.map((row) => {
+    const rows = currentStrategies().map((row) => {
       const qualification = hwmQualification(row);
       const navStatus = performanceLineageMismatch ? "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" : row.nav_status;
       return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(navStatus)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
@@ -1160,9 +1173,9 @@
   const STRESS_LIMIT_POSITION = 0.375;
 
   function renderRisk() {
-    const includedHwm = data.strategies.filter((row) => row.hwm_scope === "INCLUDED").map((row) => ({ row, qualification: hwmQualification(row) }));
+    const includedHwm = currentStrategies().filter((row) => row.hwm_scope === "INCLUDED").map((row) => ({ row, qualification: hwmQualification(row) }));
     const unavailableHwm = includedHwm.filter(({ qualification }) => qualification.status !== "AVAILABLE_HWM_QUALIFIED");
-    const excludedNav = data.strategies.filter((row) => row.hwm_scope === "EXCLUDED_DE_MINIMIS").map((row) => row.strategy_name);
+    const excludedNav = currentStrategies().filter((row) => row.hwm_scope === "EXCLUDED_DE_MINIMIS").map((row) => row.strategy_name);
     const acceptedHwmEvidence = includedHwm.filter(({ qualification }) => qualification.status === "AVAILABLE_HWM_QUALIFIED").map(({ row }) => row);
     // N67: while the producer publishes a governed PORT-HWM-4 candidate the numeric HWM is
     // not accepted (its register reason says why) and the candidate is shown labelled; the
@@ -1176,6 +1189,24 @@
     const hwmKpiTone = data.advisory.hwm_numerical_status
       ? ({ danger: "danger", warning: "warning", positive: "positive" })[toneForStatus(data.advisory.hwm_numerical_status)] || ""
       : unavailableHwm.length ? "danger" : "positive";
+    // Q3: while the numeric HWM is refused by the legacy gate and the producer publishes a governed candidate, the headline
+    // KPI is the candidate (index, HWM, drawdown) labelled with its own acceptance state and the gate's reason, never the
+    // gate's bare "Unavailable".  `advisory.hwm_candidate.kpi` carries the printed values; a payload without it reads the
+    // candidate's own fields.  Acceptance is not changed here: the numeric status stays what the producer says.
+    const hwmCandidateKpi = (() => {
+      const candidate = hwmCandidate;
+      if (!candidate) return null;
+      const kpiBlock = candidate.kpi && typeof candidate.kpi === "object" ? candidate.kpi : {};
+      const index = kpiBlock.value ?? candidate.current_index;
+      if (number(index) == null) return null;
+      const hwmValue = kpiBlock.hwm ?? candidate.current_hwm;
+      const drawdown = kpiBlock.drawdown ?? candidate.current_drawdown;
+      const gated = kpiBlock.gated_status || { policy_id: data.hwm_summary?.policy_id, hwm_numerical_status: data.advisory.hwm_numerical_status, hwm_numerical_reason: data.advisory.hwm_numerical_reason };
+      const missing = (Array.isArray(kpiBlock.missing_daily_points) ? kpiBlock.missing_daily_points : []).map((point) => `${point.strategy} ${formatDate(point.date)}`);
+      const window = kpiBlock.window_start && kpiBlock.window_end ? ` over ${formatDate(kpiBlock.window_start)} to ${formatDate(kpiBlock.window_end)}${number(kpiBlock.index_points) == null ? "" : ` (${integer.format(kpiBlock.index_points)} daily points)`}` : candidate.complete_through ? ` through ${formatDate(candidate.complete_through)}` : "";
+      const gateText = `${gated.hwm_numerical_status ? ` Numeric HWM (${gated.policy_id || "legacy gate"}): ${humanStatus(gated.hwm_numerical_status).toLowerCase()}.` : ""}${missing.length ? ` Missing daily points: ${missing.join(", ")}.` : ""}`;
+      return ["Systematic HWM", decimal(index, 4), `${hwmNotAccepted}. HWM ${decimal(hwmValue, 4)} · drawdown ${pct(drawdown, 2)}${window}.${gateText}`, "warning"];
+    })();
     renderKpis("#risk-kpis", performanceLineageMismatch ? [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Stress scenario", "danger"],
       ["Systematic HWM", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
@@ -1183,7 +1214,7 @@
       ["MWR evidence", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
     ] : [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
-      ["Systematic HWM", humanStatus(data.advisory.hwm_numerical_status || data.advisory.hwm_status), `${currencyExact(data.hwm_summary.uncovered_value_usd)} across ${unavailableHwm.length} unqualified included sleeve${unavailableHwm.length === 1 ? "" : "s"}; ${hwmNumericSentence}.${data.advisory.hwm_numerical_status ? ` Governed perimeter: ${humanStatus(data.advisory.hwm_status)}.` : ""}`, hwmKpiTone],
+      hwmCandidateKpi || ["Systematic HWM", humanStatus(data.advisory.hwm_numerical_status || data.advisory.hwm_status), `${currencyExact(data.hwm_summary.uncovered_value_usd)} across ${unavailableHwm.length} unqualified included sleeve${unavailableHwm.length === 1 ? "" : "s"}; ${hwmNumericSentence}.${data.advisory.hwm_numerical_status ? ` Governed perimeter: ${humanStatus(data.advisory.hwm_status)}.` : ""}`, hwmKpiTone],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
       ["MWR available", `${data.counts.mwr_available}/${data.counts.twr_rows}`, typeof data.fact_status?.flows === "string" ? `Receipt-complete flows; flow fact ${humanStatus(data.fact_status.flows).toLowerCase()} (see rows)` : "Receipt-complete flows; flow-path completeness is not declared in this payload (see rows)", data.counts.mwr_available ? "positive" : "danger"],
     ]);
@@ -1468,8 +1499,8 @@
   const advisoryExecutionEffectNote = () => (underwritingEffects("execution_effect").length ? "Read-only advisory surface; declared by every underwriting row" : "Policy statement: read-only advisory surface; no row declares an execution effect");
 
   function renderSignals() {
-    const gapTested = data.strategies.filter((row) => row.implementation_gap_status === "tested").length;
-    const knownCost = data.strategies.filter((row) => String(row.cost_status).startsWith("known")).length;
+    const gapTested = currentStrategies().filter((row) => row.implementation_gap_status === "tested").length;
+    const knownCost = currentStrategies().filter((row) => String(row.cost_status).startsWith("known")).length;
     renderKpis("#signal-kpis", [
       ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, "Provider versus account evidence"],
       ["Known cost status", `${knownCost}/${data.counts.strategies}`, "Unknown stays disclosed", "warning"],
@@ -1484,7 +1515,7 @@
     // account-cumulative cell rather than being silently dropped.
     // F19: each strategy's account-live window starts on its own date; the header cannot, so the cell does.
     const accountWindowStart = (row) => row.provider_evidence?.account?.observed_start || null;
-    const implementationRows = data.strategies.map((row) => {
+    const implementationRows = currentStrategies().map((row) => {
       const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
       const cagrLabel = row.account_live_cagr_annualization?.label;
       const mwrLabel = row.mwr_annualization?.label;
@@ -1823,6 +1854,32 @@
     return `<div class="grid grid-12" style="margin-top:16px"><div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Orthogonal risk attribution</div><h3>Mixed modes, separate from raw factor betas</h3></div><span class="badge ${attribution.status === "AVAILABLE" ? "badge-positive" : "badge-warning"}">${safe(humanStatus(attribution.status || "UNAVAILABLE"))}</span></div><div class="callout callout-neutral"><strong>Named surface:</strong> ${safe(identityText)}. ${safe(attribution.method_id || "method not published")}. Mode IDs are mixed orthogonal coordinates, not raw factor betas. <strong>Information set:</strong> ${safe(interval.evaluation_information_set || "UNAVAILABLE")}. <strong>Holdout interpretation:</strong> ${safe(interval.holdout_display_claim || "UNAVAILABLE")}</div>${(modeRows.length || staticRows.length) ? `<div class="table-wrap wide"><table id="orthogonal-coefficient-table"><caption>Orthogonal mixed-mode coefficients and dated contributions</caption>${tableMarkup([["Date"], ["Partition"], ["Mixed mode"], ["Coefficient (mode loading)", "numeric"], ["Contribution (return per period)", "numeric"]], [...staticRows, ...modeRows])}</table></div>${allModeRows.length > modeRows.length ? `<p class="cell-secondary">Showing the first ${integer.format(modeRows.length)} of ${integer.format(allModeRows.length)} dated contribution rows${staticCoefficients ? "; the coefficients are the static fit listed once above" : ""}.</p>` : ""}` : `<div class="callout callout-warning">No orthogonal mode coefficients or contributions are available for this selected model.</div>`}${riskRows.length ? `<div class="table-wrap"><table id="orthogonal-risk-table"><caption>Train-fitted orthogonal risk allocation</caption>${tableMarkup([["Mixed mode"], ["Euler allocation (share of total)", "numeric"], ["Risk interpretation"]], riskRows)}</table></div>` : ""}</div></div>`;
   }
 
+  // Q6: every alpha figure is printed with the evidence that qualifies it.  `series[].alpha_context` (producer) carries the
+  // window, observation count, standard error / t-statistic, backtest share, the basis label and the annualisation
+  // basis; nothing here assumes a basis (the old fixed "observed basis" suffix is gone) and a missing context says so.
+  const alphaEvidence = (row) => {
+    const ctx = row.alpha_context && typeof row.alpha_context === "object" ? row.alpha_context : null;
+    const basisStatus = ctx?.basis_status || row.alpha?.net_status || null;
+    const mixedBasis = typeof basisStatus === "string" && basisStatus.startsWith("DIAGNOSTIC_ONLY_MIXED");
+    if (!ctx) return { basisStatus, mixedBasis, lines: [`${humanStatus(basisStatus || "UNAVAILABLE")} · window, observations, standard error and backtest share are not published for this alpha`], title: "" };
+    if (ctx.status !== "AVAILABLE") return { basisStatus, mixedBasis, lines: [`Alpha context unavailable: ${humanStatus(ctx.unavailable_reason || basisStatus || "UNAVAILABLE").toLowerCase()}`], title: "" };
+    const tText = number(ctx.t_stat) != null ? `t ${decimal(ctx.t_stat, 2)} (annualised SE ${pct(ctx.se, 1)})` : `no t-statistic: ${humanStatus(ctx.t_status || "UNAVAILABLE").toLowerCase()}`;
+    const share = number(ctx.backtest_share) == null ? "backtest share not published" : `${pct(ctx.backtest_share, 0)} backtest`;
+    const lines = [
+      ctx.basis_label || humanStatus(basisStatus),
+      `${integer.format(ctx.window_days)} days ${formatDate(ctx.window_start)} to ${formatDate(ctx.window_end)} · n ${integer.format(ctx.n_obs)} · ${share}`,
+      tText,
+    ];
+    if (ctx.factor_as_of_date) lines.push(`Factors as of ${formatDate(ctx.factor_as_of_date)}${number(ctx.factor_staleness_days) == null ? "" : ` (${integer.format(ctx.factor_staleness_days)} days before the cutoff)`}`);
+    const title = `Annualised: ${humanStatus(ctx.annualisation_basis || "UNAVAILABLE").toLowerCase()} · ${humanStatus(ctx.annualisation || "UNAVAILABLE").toLowerCase()} · ${number(ctx.periods_per_year) == null ? "periods per year not published" : `${integer.format(ctx.periods_per_year)} periods per year`}`;
+    return { basisStatus, mixedBasis, lines, title };
+  };
+  const alphaEvidenceHtml = (row, separator = "<br>") => {
+    const evidence = alphaEvidence(row);
+    const badge = evidence.mixedBasis ? `<span class="badge badge-warning alpha-basis-badge">${safe(humanStatus(evidence.basisStatus))}</span>${separator}` : "";
+    return `<span${evidence.title ? ` title="${safe(evidence.title)}"` : ""}>${badge}${evidence.lines.map(safe).join(separator)}</span>`;
+  };
+
   function renderFactorDetail() {
     const analysis = currentFactorAnalysis();
     const row = analysis.series.find((item) => item.series_id === selectedFactorSeries) || analysis.series[0];
@@ -1842,7 +1899,7 @@
         const diagnosticBetaRows = (row.exposures || []).map((item) => `<tr><td>${safe(item.factor_id)}</td><td class="numeric">${decimal(item.beta ?? item.exposure)}</td><td>${safe(item.standard_error == null ? "Coefficient SE unavailable" : `SE ${decimal(item.standard_error)}`)}</td></tr>`);
         const diagnosticBetas = diagnosticBetaRows.length ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic</div><h3>Computed beta / loading</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED</span></div><div class="table-wrap"><table id="factor-diagnostic-beta-table"><caption>Diagnostic factor betas</caption>${tableMarkup([["Factor"], ["Beta (return per unit factor return)", "numeric"], ["Uncertainty"]], diagnosticBetaRows)}</table></div></div>` : "";
         const diagnosticAlpha = row.alpha || {};
-        const diagnosticAlphaMarkup = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Diagnostic net alpha</div><div class="metric-value">${pct(diagnosticAlpha.net_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.net_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic gross alpha</div><div class="metric-value">${pct(diagnosticAlpha.gross_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.gross_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic periodic alpha</div><div class="metric-value">${pct(diagnosticAlpha.periodic_intercept, 3)}</div><div class="metric-note">${safe(diagnosticAlpha.confidence_status || "UNAVAILABLE")} · annualized SE ${pct(diagnosticAlpha.annualized_standard_error)}</div></div></div>`;
+        const diagnosticAlphaMarkup = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Diagnostic net alpha</div><div class="metric-value">${pct(diagnosticAlpha.net_annualized)}</div><div class="metric-note">${alphaEvidenceHtml(row)}</div></div><div class="metric-block"><div class="metric-label">Diagnostic gross alpha</div><div class="metric-value">${pct(diagnosticAlpha.gross_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.gross_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic periodic alpha</div><div class="metric-value">${pct(diagnosticAlpha.periodic_intercept, 3)}</div><div class="metric-note">${safe(diagnosticAlpha.confidence_status || "UNAVAILABLE")} · annualized SE ${pct(diagnosticAlpha.annualized_standard_error)}</div></div></div>`;
         const diagnosticSummary = row.contribution_summary;
         const diagnosticContributionRows = diagnosticSummary ? [
           ...Object.entries(diagnosticSummary.factor_means).map(([factor, value]) => `<tr><td>${safe(factor)}</td><td>Factor contribution</td><td class="numeric">${pct(value, 3)}</td></tr>`),
@@ -1889,7 +1946,7 @@
     const proxyTable = proxyRows.length
       ? `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Governed candidate universe</div><h3>Economic rationale and train-only disposition</h3></div><span class="badge">${integer.format(proxyRows.length)} proxies</span></div><div class="table-wrap wide"><table id="factor-proxy-table"><caption>Factor proxy governance</caption>${tableMarkup([["Proxy / family"], ["Source"], ["Effective interval"], ["Disposition"], ["Selection rationale"]], proxyRows)}</table></div></div>`
       : "";
-    $("#factor-detail").innerHTML = `${compositionMarkup}<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Estimator</div><div class="metric-value metric-value-compact">${statusText(row.estimator)}</div><div class="metric-note">${safe(analysis.method_label)}</div></div><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${safe(alpha.net_status)} · observed basis</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} sealed out-of-sample observations; above zero beats the training-mean baseline</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date model coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${safe(coverageText)}</div></div><div class="metric-block"><div class="metric-label">Training design</div><div class="metric-value">${integer.format(design.design_observations || 0)} obs.</div><div class="metric-note">Rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${safe(humanStatus(design.unregularized_status || "UNAVAILABLE"))}</div></div><div class="metric-block"><div class="metric-label">HAC inference state</div><div class="metric-value metric-value-compact">${statusText(inference.status || "UNAVAILABLE")}</div><div class="metric-note">Default lag ${safe(inference.default_lag ?? "—")} · no p-values or confidence intervals</div></div><div class="metric-block"><div class="metric-label">Train residual diagnostics</div><div class="metric-value">DW ${decimal(trainResiduals.durbin_watson)}</div><div class="metric-note">Lag-1 residual autocorrelation ${decimal(trainResiduals.autocorrelation?.["1"])}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(smallDecimal(summary.maximum_reconciliation_error))}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="callout callout-neutral"><strong>Model boundary:</strong> ${safe(methodBoundary)} ${safe(inference.post_selection_caveat || "")}</div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Latest accepted betas / loadings</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(humanStatus(row.evidence_layer))}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table id="factor-contribution-table"><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div>${proxyTable}</div>${orthogonalAttributionMarkup(row)}${dynamicAnalysisMarkup(row)}`;
+    $("#factor-detail").innerHTML = `${compositionMarkup}<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Estimator</div><div class="metric-value metric-value-compact">${statusText(row.estimator)}</div><div class="metric-note">${safe(analysis.method_label)}</div></div><div class="metric-block"><div class="metric-label">Net alpha</div><div class="metric-value">${pct(alpha.net_annualized)}</div><div class="metric-note">${alphaEvidenceHtml(row)}</div></div><div class="metric-block"><div class="metric-label">Gross alpha</div><div class="metric-value">${pct(alpha.gross_annualized)}</div><div class="metric-note">${safe(alpha.gross_status)}</div></div><div class="metric-block"><div class="metric-label">Holdout predicted R²</div><div class="metric-value">${pct(holdout.predicted_r_squared)}</div><div class="metric-note">${integer.format(holdout.observation_count)} sealed out-of-sample observations; above zero beats the training-mean baseline</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(holdout.tracking_error_annualized)}</div><div class="metric-note">Annualized holdout residual volatility</div></div><div class="metric-block"><div class="metric-label">Exact-date model coverage</div><div class="metric-value">${integer.format(row.coverage.aligned_observations)}</div><div class="metric-note">${safe(coverageText)}</div></div><div class="metric-block"><div class="metric-label">Training design</div><div class="metric-value">${integer.format(design.design_observations || 0)} obs.</div><div class="metric-note">Rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${safe(humanStatus(design.unregularized_status || "UNAVAILABLE"))}</div></div><div class="metric-block"><div class="metric-label">HAC inference state</div><div class="metric-value metric-value-compact">${statusText(inference.status || "UNAVAILABLE")}</div><div class="metric-note">Default lag ${safe(inference.default_lag ?? "—")} · no p-values or confidence intervals</div></div><div class="metric-block"><div class="metric-label">Train residual diagnostics</div><div class="metric-value">DW ${decimal(trainResiduals.durbin_watson)}</div><div class="metric-note">Lag-1 residual autocorrelation ${decimal(trainResiduals.autocorrelation?.["1"])}</div></div><div class="metric-block"><div class="metric-label">Reconciliation error</div><div class="metric-value">${safe(smallDecimal(summary.maximum_reconciliation_error))}</div><div class="metric-note">Maximum absolute return identity error</div></div></div><div class="callout callout-neutral"><strong>Model boundary:</strong> ${safe(methodBoundary)} ${safe(inference.post_selection_caveat || "")}</div><div class="grid grid-12" style="margin-top:16px"><div class="panel span-7"><div class="panel-heading"><div><div class="eyebrow">Latest accepted betas / loadings</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(humanStatus(row.evidence_layer))}</span></div><div class="exposure-list">${exposures}</div></div><div class="panel span-5"><div class="panel-heading"><div><div class="eyebrow">Holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge">n=${integer.format(summary.observations)}</span></div><div class="table-wrap"><table id="factor-contribution-table"><caption>Holdout factor contribution reconciliation</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], contributionRows)}</table></div></div>${proxyTable}</div>${orthogonalAttributionMarkup(row)}${dynamicAnalysisMarkup(row)}`;
     prepareScrollableTableRegions();
   }
 
@@ -1977,7 +2034,7 @@
         ? `${integer.format(composition.live_observations || 0)} live + ${integer.format(composition.backtest_observations_used || 0)} backtest<span class="cell-secondary">${safe(humanStatus(composition.status))} · inception ${formatDateHtml(composition.live_inception)}</span>`
         : row.status === "UNAVAILABLE" ? `No composition: series unavailable<span class="cell-secondary">No backtest-history claim</span>` : `Undeclared legacy composition<span class="cell-secondary">No backtest-history claim</span>`;
       const coverageText = factorCoverageText(row);
-      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(sourceState(row))}${providerCoverage}</td><td>${statusText(modelState(row))}<span class="cell-secondary">${statusText(decision)}</span></td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(betas)}</td><td>${compositionText}</td><td><span class="cell-primary">${safe(row.coverage?.observed_start || "—")}–${safe(row.coverage?.observed_end || "—")}</span><span class="cell-secondary">${safe(coverageText)}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}</td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · "))}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.series_id)}</span><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")}</span></td><td>${statusText(sourceState(row))}${providerCoverage}</td><td>${statusText(modelState(row))}<span class="cell-secondary">${statusText(decision)}</span></td><td>${safe(row.source_label || "—")}</td><td>${statusText(row.estimator || "UNAVAILABLE")}</td><td>${safe(betas)}</td><td>${compositionText}</td><td><span class="cell-primary">${safe(row.coverage?.observed_start || "—")}–${safe(row.coverage?.observed_end || "—")}</span><span class="cell-secondary">${safe(coverageText)}</span></td><td class="numeric">${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</td><td class="numeric">${pct(holdout?.predicted_r_squared)}</td><td class="numeric">${pct(row.alpha?.net_annualized)}<span class="cell-secondary">${alphaEvidenceHtml(row, " · ")}</span></td><td>${statusText(row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · "))}</td></tr>`;
     });
     // The same rows as the table below, one card per strategy: state, the four numbers that decide acceptance, the betas.
     const modelCards = $("#factor-model-cards");
@@ -1988,7 +2045,7 @@
         const betas = row.exposures.map((item) => `<span>${safe(item.factor_id)} β ${decimal(item.beta ?? item.exposure)}</span>`).join("");
         const window = row.coverage ? `${safe(row.coverage.observed_start || "—")} to ${safe(row.coverage.observed_end || "—")}` : "";
         const gate = row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · ");
-        return `<div class="model-card"><div class="model-card-head"><strong>${safe(row.series_id)}</strong>${statusText(modelState(row))}</div><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")} · ${safe(row.source_label || "—")} · ${safe(humanStatus(row.estimator || "UNAVAILABLE"))}</span><div class="model-tiles"><div><span>Aligned observations</span><b>${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</b><small>${window}</small></div><div><span>Sealed holdout R²</span><b>${pct(holdout?.predicted_r_squared)}</b></div><div><span>Accepted net alpha, annualised</span><b>${pct(row.alpha?.net_annualized)}</b></div><div><span>Alpha gate</span>${statusText(gate)}<small>${statusText(decision)}</small></div></div><div class="model-betas">${betas || "<span>No betas</span>"}</div></div>`;
+        return `<div class="model-card"><div class="model-card-head"><strong>${safe(row.series_id)}</strong>${statusText(modelState(row))}</div><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")} · ${safe(row.source_label || "—")} · ${safe(humanStatus(row.estimator || "UNAVAILABLE"))}</span><div class="model-tiles"><div><span>Aligned observations</span><b>${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</b><small>${window}</small></div><div><span>Sealed holdout R²</span><b>${pct(holdout?.predicted_r_squared)}</b></div><div><span>Accepted net alpha, annualised</span><b>${pct(row.alpha?.net_annualized)}</b><small>${alphaEvidenceHtml(row)}</small></div><div><span>Alpha gate</span>${statusText(gate)}<small>${statusText(decision)}</small></div></div><div class="model-betas">${betas || "<span>No betas</span>"}</div></div>`;
       }).join("");
     }
     $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Source returns"], ["Model state"], ["Model input source"], ["Estimator"], ["Beta / loading"], ["Evidence composition"], ["Aligned / source intervals"], ["Aligned (observations)", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);
@@ -2505,9 +2562,9 @@
   }
 
   // ---- Performance tab: rebased total-return lines and the stacked dollar value of the systematic book ----
-  // Chart 1 draws the weekly total-return series the payload already carries (weekly_returns); chart 2 sums the daily
-  // account NAV of each strategy's epochs (account_manifest observation traces).  Whatever the payload lacks (SPY, SPXL,
-  // a published equal-weight series, an explicit live/backtest flag) is derived here and labelled, or shown unavailable.
+  // Chart 1 is the weekly total-return lines; chart 2 is the stacked daily dollar value of the systematic book with the
+  // flow-matched benchmark dollars.  Both read the producer's performance_tab block only; whatever it does not publish is
+  // shown unavailable with the producer's reason.
   const PERF_COLORS = ["#5cc8c0", "#7cb7ff", "#f2bb62", "#f27b82", "#c4b5fd", "#86efac", "#f9a8d4"];
   const PERF_DAY = 86400000;
   const PERF_ZOOMS = [["1m", 30], ["3m", 91], ["6m", 183], ["1y", 365], ["3y", 1096], ["Max", null]];
@@ -2536,238 +2593,232 @@
     return ticks.length >= 2 ? ticks : [low, high];
   };
 
-  function perfReturnSeries() {
-    const weekly = data.weekly_returns;
-    const rows = Array.isArray(weekly?.series) ? weekly.series : [];
-    const strategies = rows.filter((row) => row.primary_group === "STRATEGY");
-    if (!strategies.length) return null;
-    const mode = strategies.some((row) => row.values_by_mode?.[perfMode]) ? perfMode : "LIVE_ONLY";
-    const series = strategies.map((row, index) => {
-      const values = row.values_by_mode?.[mode] || row.values_by_mode?.LIVE_ONLY || {};
-      return {
-        key: row.series_id,
-        name: row.display_name || row.series_id,
-        color: perfColor(index),
-        kind: "strategy",
-        values,
-        liveFirst: row.mode_coverage?.LIVE_ONLY?.first_week || null,
-        hybrid: Boolean(row.values_by_mode?.[mode]) && mode === "LIVE_PLUS_BACKTEST",
-      };
-    });
-    const benchmarks = [["market:SPY", "SPY", "#a8b7c5"], ["market:SPXL", "SPXL", "#e6c36a"]].map(([key, name, color]) => {
-      const row = rows.find((item) => item.series_id === key);
-      return { key, name, color, kind: "benchmark", values: row?.values || null, missing: !row };
-    });
-    return { mode, series, benchmarks };
-  }
-
-  function perfBuildLines(spec) {
-    const present = [...spec.series, ...spec.benchmarks.filter((item) => item.values)];
-    const firstWeek = (item) => Object.keys(item.values).filter((week) => number(item.values[week]) != null).sort()[0];
-    const starts = present.map((item) => ({ item, week: firstWeek(item) })).filter((entry) => entry.week);
-    if (!starts.length) return null;
-    const startEntry = starts.reduce((latest, entry) => (entry.week > latest.week ? entry : latest));
-    const startWeek = startEntry.week;
-    const weeks = [...new Set(present.flatMap((item) => Object.keys(item.values)))].filter((week) => week >= startWeek).sort();
-    const build = (item) => {
-      let level = 1;
-      const points = [{ time: perfTime(startWeek), value: 1, backtest: false }];
-      for (const week of weeks) {
-        const value = number(item.values[week]);
-        if (value == null) { points.push({ time: perfTime(week) + 6 * PERF_DAY, value: null, backtest: false }); continue; }
-        level *= 1 + value;
-        points.push({ time: perfTime(week) + 6 * PERF_DAY, value: level, backtest: Boolean(item.liveFirst) && week < item.liveFirst });
-      }
-      return { ...item, points };
-    };
-    const lines = present.map(build);
-    // Equal-weight portfolio of the strategies: weekly rebalanced, only on weeks where every strategy has a value.
-    const equal = { key: "portfolio:equal_weight", name: "Equal-weight portfolio", color: "#edf4f7", kind: "portfolio", points: [{ time: perfTime(startWeek), value: 1, backtest: false }] };
-    let equalLevel = 1;
-    for (const week of weeks) {
-      const parts = spec.series.map((item) => number(item.values[week]));
-      if (parts.some((value) => value == null)) { equal.points.push({ time: perfTime(week) + 6 * PERF_DAY, value: null, backtest: false }); continue; }
-      equalLevel *= 1 + parts.reduce((sum, value) => sum + value, 0) / parts.length;
-      const backtest = spec.series.some((item) => item.liveFirst && week < item.liveFirst);
-      equal.points.push({ time: perfTime(week) + 6 * PERF_DAY, value: equalLevel, backtest });
-    }
-    return { lines: [...lines.filter((line) => line.kind === "strategy"), equal, ...lines.filter((line) => line.kind === "benchmark")], startWeek, startName: startEntry.item.name };
-  }
-
-  function perfSegments(points, from, to) {
-    const out = [];
-    let current = null;
-    for (let index = 1; index < points.length; index += 1) {
-      const previous = points[index - 1];
-      const point = points[index];
-      if (point.value == null || previous.value == null || point.time < from || previous.time > to) { current = null; continue; }
-      if (!current || current.backtest !== point.backtest) { current = { backtest: point.backtest, points: [previous] }; out.push(current); }
-      current.points.push(point);
-    }
-    return out;
-  }
-
-  // When the producer publishes performance_tab (schema 1, tools/portfolio_performance_tab.py) the panel reads it as given:
-  // a weekly grid (dates are week starts, week_end_dates the week ends), per-mode lines whose tri[i] is the index at the end
-  // of week i (1.0 at the start of the first week), origin runs, the common start and its setter, the weeks missing before
-  // it, and benchmark entries that are UNAVAILABLE until a total-return series is admitted.  Snapshots that predate the
-  // block keep the derived charts above.
+  // The panel reads performance_tab schema 3 exactly as the producer publishes it (tools/portfolio_performance_tab.py): a
+  // weekly UNION grid (dates are week starts, week_end_dates the week ends) from the earliest line, per-mode lines whose
+  // tri[i] is the level at the end of week i (null before the line's own first week and across an unfilled gap; 1.0
+  // immediately before the line's own first week), origin runs over the non-null weeks, the group anchor (first week every
+  // strategy line has data), and the daily flow-matched benchmark dollars in slices.benchmarks.  Nothing is derived from
+  // weekly_returns or the epoch traces here: a snapshot without a schema-3 block says so.
+  const PERF_SCHEMA_VERSION = 3;
   const PERF_BENCHMARK_COLORS = { SPY: "#a8b7c5", SPXL: "#e6c36a" };
-  const perfSeriesName = (line) => line.display_name || (line.series_id === "portfolio:equal_weight" ? "Equal-weight portfolio" : String(line.series_id || "").replace(/^(strategy|market|portfolio):/, ""));
+  // A line's origin decides its stroke: live evidence is solid, every other origin is dashed in its own pattern.
+  const PERF_ORIGIN_STYLES = Object.freeze({
+    LIVE: { name: "solid", dash: null },
+    BACKTEST: { name: "dashed", dash: "5 4" },
+    MIXED: { name: "dashed", dash: "5 4" },
+    DERIVED: { name: "dotted", dash: "2 3" },
+    PROVIDER_MODEL_LIVE: { name: "dash-dot", dash: "9 3 2 3" },
+  });
+  const perfOriginStyle = (origin) => (origin == null ? PERF_ORIGIN_STYLES.LIVE : (PERF_ORIGIN_STYLES[origin] || { name: "dashed", dash: "5 4" }));
+  const perfSeriesName = (line) => line.display_name || String(line.series_id || "").replace(/^(strategy|market|portfolio):/, "");
   // The block counts only with an integer schema_version (an omitted key must not read as published).
   const perfTab = () => (data.performance_tab && Number.isInteger(data.performance_tab.schema_version) ? data.performance_tab : null);
+  const perfHiddenSeeded = new Set();
+
   function perfPublishedLines() {
     const tab = perfTab();
-    if (!tab || typeof tab.modes !== "object" || !tab.modes) return null;
+    if (!tab) return { unavailable: ["the producer published no performance block in this snapshot"] };
+    if (tab.schema_version !== PERF_SCHEMA_VERSION) return { unavailable: [`performance block schema ${tab.schema_version} is not the schema ${PERF_SCHEMA_VERSION} this panel reads`] };
+    if (typeof tab.modes !== "object" || !tab.modes) return { unavailable: ["no evidence mode is published"] };
     const usable = (key) => tab.modes[key] && tab.modes[key].status !== "UNAVAILABLE" && Array.isArray(tab.modes[key].lines) && Array.isArray(tab.modes[key].dates);
     const mode = usable(perfMode) ? perfMode : Object.keys(tab.modes).find(usable);
     if (!mode) return { unavailable: Object.entries(tab.modes).map(([key, value]) => `${key}: ${(value && value.reason) || "no lines published"}`) };
     const block = tab.modes[mode];
     const starts = block.dates.map((date) => perfTime(date));
-    const ends = (Array.isArray(block.week_end_dates) ? block.week_end_dates : block.dates).map((date, index) => (Array.isArray(block.week_end_dates) ? perfTime(date) : starts[index] + 6 * PERF_DAY));
+    const ends = Array.isArray(block.week_end_dates) && block.week_end_dates.length === starts.length ? block.week_end_dates.map((date) => perfTime(date)) : starts.map((time) => time + 6 * PERF_DAY);
     let strategyIndex = 0;
     const lines = [];
-    const missing = [];
     const definitions = [];
     for (const line of block.lines) {
       const name = perfSeriesName(line);
       const kind = String(line.kind || "STRATEGY").toLowerCase();
-      // Schema 2 carries benchmark lines inside lines[] (no origin: drawn solid, neutral).
-      const color = kind === "portfolio" ? "#edf4f7" : kind === "benchmark" ? (PERF_BENCHMARK_COLORS[name] || "#a8b7c5") : perfColor(strategyIndex++);
-      const tri = Array.isArray(line.tri) ? line.tri : [];
-      const dashed = tri.map(() => false);
-      for (const [from, to, origin] of Array.isArray(line.origin) ? line.origin : []) {
-        if (origin !== "LIVE") for (let index = from; index <= to && index < dashed.length; index += 1) dashed[index] = true;
+      const benchmark = kind === "benchmark" ? (Array.isArray(tab.benchmarks) ? tab.benchmarks.find((entry) => entry.series_id === line.series_id) : null) : null;
+      const color = kind === "portfolio" ? "#edf4f7" : kind === "benchmark" ? (PERF_BENCHMARK_COLORS[benchmark?.ticker || name] || "#a8b7c5") : perfColor(strategyIndex++);
+      const tri = (Array.isArray(line.tri) ? line.tri : []).map((value) => (number(value) == null ? null : Number(value)));
+      const origin = tri.map(() => null);
+      for (const [from, to, flag] of Array.isArray(line.origin) ? line.origin : []) {
+        for (let index = from; index <= to && index < origin.length; index += 1) origin[index] = flag;
       }
-      const points = [{ time: starts[0], value: 1, backtest: false }, ...tri.map((value, index) => ({ time: ends[index], value: number(value) == null ? null : Number(value), backtest: dashed[index] }))];
-      lines.push({ key: line.series_id, name, color, kind, points, definition: line.definition || "" });
+      const firstIndex = tri.findIndex((value) => value != null);
+      if (firstIndex < 0) continue;
+      // A line that carries member_counts is the available-members equal-weight line: drawn, but off until asked for.
+      const partialMembership = Array.isArray(line.member_counts);
+      lines.push({ key: line.series_id, name, color, kind, tri, origin, firstIndex, partialMembership, definition: line.definition || "" });
+      if (partialMembership && !perfHiddenSeeded.has(line.series_id)) { perfHiddenSeeded.add(line.series_id); perfHidden.add(line.series_id); }
       if (kind === "portfolio" && line.definition) definitions.push(`${name}: ${line.definition}`);
       if (line.return_scope_label) definitions.push(`${name}: ${line.return_scope_label}`);
       if (line.source_mode && line.source_mode !== mode) definitions.push(`${name}: ${humanStatus(line.source_mode).toLowerCase()}.`);
     }
-    for (const entry of Array.isArray(tab.benchmarks) ? tab.benchmarks : []) {
-      const name = entry.ticker || perfSeriesName(entry);
-      const color = PERF_BENCHMARK_COLORS[name] || "#a8b7c5";
-      if (lines.some((line) => line.key === entry.series_id)) continue;
-      const tri = Array.isArray(entry.tri) && entry.tri.length === block.dates.length ? entry.tri : null;
-      if (entry.status === "UNAVAILABLE" || !tri) { missing.push({ name, color, reason: entry.reason || "not published" }); continue; }
-      const dashed = tri.map(() => false);
-      for (const [from, to, origin] of Array.isArray(entry.origin) ? entry.origin : []) { if (origin !== "LIVE") for (let index = from; index <= to && index < dashed.length; index += 1) dashed[index] = true; }
-      lines.push({ key: entry.series_id, name, color, kind: "benchmark", points: [{ time: starts[0], value: 1, backtest: false }, ...tri.map((value, index) => ({ time: ends[index], value: number(value) == null ? null : Number(value), backtest: dashed[index] }))] });
-    }
+    // A benchmark without a line is named with the producer's reason, never drawn from another series.
+    const missing = (Array.isArray(tab.benchmarks) ? tab.benchmarks : []).filter((entry) => !lines.some((line) => line.key === entry.series_id))
+      .map((entry) => ({ name: entry.ticker || perfSeriesName(entry), color: PERF_BENCHMARK_COLORS[entry.ticker] || "#a8b7c5", reason: entry.reason || "not published" }));
     if (!lines.length) return { unavailable: ["no line carries values"] };
     const gaps = (Array.isArray(block.gaps_before_common_start) ? block.gaps_before_common_start : []).map((gap) => `${perfSeriesName({ series_id: gap.series_id })} ${integer.format(gap.missing_weeks)} weeks`);
+    const anchorIndex = Number.isInteger(block.group_anchor_index) ? block.group_anchor_index : null;
     return {
-      lines, missing, definitions, gaps, mode,
-      startWeek: block.common_start_date,
-      startName: perfSeriesName({ series_id: block.common_start_set_by || "the latest-starting series" }),
-      firstObservation: block.first_observation_common_start || null,
+      lines, missing, definitions, gaps, mode, starts, ends, anchorIndex,
+      anchorDate: block.group_anchor_date || null,
+      anchorName: perfSeriesName({ series_id: block.group_anchor_set_by || "the latest-starting strategy" }),
+      unionStart: block.union_start_date || null,
       dataThrough: block.data_through_date || null,
       partial: block.last_week_partial === true,
     };
   }
 
+  // Break the points where a value is missing; one polyline per run of one origin style.  A run that restarts after a gap
+  // carries its own base point, so a single week after a gap still draws.
+  function perfSegments(points) {
+    const out = [];
+    let current = null;
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const point = points[index];
+      if (point.value == null || previous.value == null) { current = null; continue; }
+      const style = perfOriginStyle(point.origin);
+      if (!current || current.style !== style) { current = { style, points: [previous] }; out.push(current); }
+      current.points.push(point);
+    }
+    return out;
+  }
+
+  // One line rebased at `baseIndex`: 1.00 at the start of that week (the level before it is the line's own prior level, or
+  // 1.0 when the line starts there), so the first week's return is inside the line.
+  function perfRebase(line, baseIndex, starts, ends) {
+    if (baseIndex == null || baseIndex < 0 || line.tri[baseIndex] == null) return null;
+    const before = baseIndex > 0 && line.tri[baseIndex - 1] != null ? line.tri[baseIndex - 1] : 1;
+    const points = [];
+    for (let index = baseIndex; index < ends.length; index += 1) {
+      const level = line.tri[index];
+      if (level == null) { points.push({ time: ends[index], value: null, origin: null }); continue; }
+      if (index === baseIndex || line.tri[index - 1] == null) points.push({ time: starts[index], value: (index === baseIndex ? before : 1) / before, origin: line.origin[index] });
+      points.push({ time: ends[index], value: level / before, origin: line.origin[index] });
+    }
+    return { ...line, points };
+  }
+
   function renderPerformanceReturns() {
     const host = $("#perf-returns-chart");
     if (!host) return;
-    const published = perfPublishedLines();
-    if (published?.unavailable) {
-      host.innerHTML = `<div class="callout callout-neutral">The producer published no usable return lines: ${safe(published.unavailable.join("; "))}.</div>`;
+    const built = perfPublishedLines();
+    if (built.unavailable) {
+      host.innerHTML = `<div class="callout callout-neutral">The producer published no usable return lines: ${safe(built.unavailable.join("; "))}.</div>`;
       $("#perf-returns-legend").innerHTML = "";
       $("#perf-returns-note").innerHTML = "";
       return;
     }
-    const spec = published ? null : perfReturnSeries();
-    const built = published || (spec ? perfBuildLines(spec) : null);
-    if (!built) {
-      host.innerHTML = '<div class="callout callout-neutral">Weekly total-return series are not in this snapshot, so the return chart is unavailable.</div>';
+    const { starts, ends, anchorIndex } = built;
+    const maxView = perfZoom === "Max";
+    const lastIndex = ends.length - 1;
+    const lastTime = ends[lastIndex];
+    const zoomDays = PERF_ZOOMS.find(([label]) => label === perfZoom)?.[1] ?? null;
+    // Windows rebase at the later of the window start and the group anchor; Max rebases each line at its own first week.
+    const windowStartIndex = zoomDays == null ? 0 : Math.max(0, starts.findIndex((time) => time >= lastTime - zoomDays * PERF_DAY));
+    const baseIndex = maxView ? null : Math.max(windowStartIndex, anchorIndex ?? 0);
+    const lines = built.lines.map((line) => perfRebase(line, maxView ? line.firstIndex : baseIndex, starts, ends));
+    const rebased = lines.filter(Boolean);
+    const absent = built.lines.filter((line, index) => !lines[index]);
+    if (!rebased.length) {
+      host.innerHTML = '<div class="callout callout-neutral">No line has data at the rebase week of this view.</div>';
       $("#perf-returns-legend").innerHTML = "";
+      $("#perf-returns-note").innerHTML = "";
       return;
     }
-    const { lines, startWeek, startName } = built;
-    const lastTime = Math.max(...lines.flatMap((line) => line.points.filter((point) => point.value != null).map((point) => point.time)));
-    const zoomDays = PERF_ZOOMS.find(([label]) => label === perfZoom)?.[1] ?? null;
-    const from = zoomDays == null ? perfTime(startWeek) : Math.max(perfTime(startWeek), lastTime - zoomDays * PERF_DAY);
-    const visibleLines = lines.filter((line) => !perfHidden.has(line.key));
-    const visibleValues = visibleLines.flatMap((line) => line.points.filter((point) => point.value != null && point.time >= from).map((point) => point.value));
+    const from = maxView ? Math.min(...rebased.map((line) => line.points[0].time)) : starts[baseIndex];
+    const effectiveAxis = maxView ? "log" : perfAxis;
+    const visibleLines = rebased.filter((line) => !perfHidden.has(line.key));
+    const visibleValues = visibleLines.flatMap((line) => line.points.filter((point) => point.value != null).map((point) => point.value));
     const low = Math.min(...(visibleValues.length ? visibleValues : [1]));
     const high = Math.max(...(visibleValues.length ? visibleValues : [1]));
     const width = 900, height = 340, left = 52, right = 14, top = 10, bottom = 28;
-    const logScale = perfAxis === "log";
+    const logScale = effectiveAxis === "log";
     const yLow = logScale ? Math.log(low * 0.98) : Math.min(low, 1) - (high - low) * 0.04;
     const yHigh = logScale ? Math.log(high * 1.02) : high + (high - low) * 0.04;
     const x = (time) => left + (time - from) / Math.max(1, lastTime - from) * (width - left - right);
     const y = (value) => top + (1 - ((logScale ? Math.log(value) : value) - yLow) / Math.max(1e-9, yHigh - yLow)) * (height - top - bottom);
     const yTicks = (logScale ? (high / low < 3 ? perfTicks(low * 0.98, high * 1.02) : perfLogTicks(low * 0.98, high * 1.02)) : perfTicks(Math.max(0, yLow), yHigh)).filter((tick) => tick > 0);
     const xTicks = perfTicks(from, lastTime, 5).map((tick) => Math.round(tick));
-    const grid = yTicks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity="${tick === 1 ? 0.4 : 0.14}"${tick === 1 ? ' stroke-dasharray="4 3"' : ""}></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${tick.toFixed(tick < 10 ? 2 : 0)}</text>`).join("")
+    const tickLabel = (tick) => (tick < 10 ? tick.toFixed(2) : integer.format(tick));
+    const grid = yTicks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity="${tick === 1 ? 0.4 : 0.14}"${tick === 1 ? ' stroke-dasharray="4 3"' : ""}></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${tickLabel(tick)}</text>`).join("")
       + xTicks.map((tick) => `<text class="chart-label axis-label" text-anchor="middle" x="${x(tick).toFixed(1)}" y="${height - 8}">${safe(perfShortDate(tick))}</text>`).join("");
-    const paths = visibleLines.map((line) => perfSegments(line.points, from, lastTime).map((segment) => `<polyline fill="none" stroke="${line.color}" stroke-width="${line.kind === "portfolio" ? 2.6 : 1.8}"${segment.backtest ? ' stroke-dasharray="5 4"' : ""}${line.kind === "benchmark" ? ' stroke-opacity=".85"' : ""} points="${segment.points.filter((point) => point.time >= from).map((point) => `${x(point.time).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ")}"></polyline>`).join("")).join("");
-    host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Rebased total return from ${perfDate(perfTime(startWeek))}: ${lines.map((line) => `${line.name} ${(((line.points.filter((point) => point.value != null).at(-1)?.value ?? 1) - 1) * 100).toFixed(1)}%`).join("; ")}`)}">${grid}${paths}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
+    const paths = visibleLines.map((line) => perfSegments(line.points).map((segment) => `<polyline fill="none" stroke="${line.color}" stroke-width="${line.kind === "portfolio" ? 2.6 : 1.8}"${segment.style.dash ? ` stroke-dasharray="${segment.style.dash}"` : ""}${line.kind === "benchmark" ? ' stroke-opacity=".85"' : ""} points="${segment.points.map((point) => `${x(point.time).toFixed(1)},${y(point.value).toFixed(1)}`).join(" ")}"></polyline>`).join("")).join("");
+    const latest = (line) => line.points.filter((point) => point.value != null).at(-1)?.value;
+    const rebaseSummary = maxView ? "each line rebased at its own first week, log axis" : `rebased at ${perfDate(starts[baseIndex])}`;
+    host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Rebased total return, ${rebaseSummary}: ${rebased.map((line) => `${line.name} ${(((latest(line) ?? 1) - 1) * 100).toFixed(1)}%`).join("; ")}`)}">${grid}${paths}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
     const plot = host.querySelector(".perf-plot");
     const svg = plot.querySelector("svg");
     const tip = plot.querySelector(".perf-tooltip");
     const cursor = svg.querySelector(".perf-cursor");
-    const times = [...new Set(lines.flatMap((line) => line.points.filter((point) => point.value != null && point.time >= from).map((point) => point.time)))].sort((a, b) => a - b);
+    const byTime = new Map(visibleLines.map((line) => [line.key, new Map(line.points.filter((point) => point.value != null).map((point) => [point.time, point]))]));
+    const times = [...new Set(visibleLines.flatMap((line) => line.points.filter((point) => point.value != null).map((point) => point.time)))].sort((a, b) => a - b);
     svg.addEventListener("mousemove", (event) => {
+      if (!times.length) return;
       const box = svg.getBoundingClientRect();
       const time = from + ((event.clientX - box.left) / box.width * width - left) / (width - left - right) * (lastTime - from);
       const nearest = times.reduce((best, candidate) => (Math.abs(candidate - time) < Math.abs(best - time) ? candidate : best), times[0]);
-      const rows = visibleLines.map((line) => ({ line, point: line.points.find((point) => point.time === nearest && point.value != null) })).filter((entry) => entry.point);
+      const rows = visibleLines.map((line) => ({ line, point: byTime.get(line.key).get(nearest) })).filter((entry) => entry.point);
       cursor.setAttribute("x1", x(nearest).toFixed(1)); cursor.setAttribute("x2", x(nearest).toFixed(1)); cursor.hidden = false;
       tip.hidden = false;
-      tip.innerHTML = `<strong>Week ending ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${point.value.toFixed(3)} · ${((point.value - 1) * 100).toFixed(1)}%${point.backtest ? " · backtest" : ""}</b></div>`).join("")}`;
-      const leftPx = Math.min(box.width - 240, Math.max(0, (x(nearest) / width) * box.width + 12));
-      tip.style.left = `${leftPx}px`;
+      tip.innerHTML = `<strong>Week ending ${safe(perfDate(nearest))}</strong>${rows.map(({ line, point }) => `<div><i style="background:${line.color}"></i>${safe(line.name)}<b>${point.value.toFixed(3)} · ${((point.value - 1) * 100).toFixed(1)}%${point.origin && point.origin !== "LIVE" ? ` · ${safe(humanStatus(point.origin).toLowerCase())}` : ""}</b></div>`).join("")}`;
+      tip.style.left = `${Math.min(box.width - 240, Math.max(0, (x(nearest) / width) * box.width + 12))}px`;
     });
     svg.addEventListener("mouseleave", () => { tip.hidden = true; cursor.hidden = true; });
-    const latest = (line) => line.points.filter((point) => point.value != null).at(-1)?.value;
-    $("#perf-returns-legend").innerHTML = lines.map((line) => `<button type="button" class="perf-legend-item${perfHidden.has(line.key) ? " is-off" : ""}" data-perf-series="${safe(line.key)}" aria-pressed="${!perfHidden.has(line.key)}"><i style="background:${line.color}"></i>${safe(line.name)} <b>${latest(line) != null ? `${((latest(line) - 1) * 100).toFixed(1)}%` : "—"}</b></button>`).join("")
-      + (published ? published.missing : spec.benchmarks.filter((item) => item.missing)).map((item) => `<span class="perf-legend-item is-missing" title="Not in this snapshot (${safe(item.reason || "no total-return series admitted yet")}); no other ETF is substituted"><i style="background:${item.color}"></i>${safe(item.name)} <b>not in this snapshot</b></span>`).join("");
+    $("#perf-returns-legend").innerHTML = rebased.map((line) => `<button type="button" class="perf-legend-item${perfHidden.has(line.key) ? " is-off" : ""}" data-perf-series="${safe(line.key)}" aria-pressed="${!perfHidden.has(line.key)}"><i style="background:${line.color}"></i>${safe(line.name)} <b>${latest(line) != null ? `${((latest(line) - 1) * 100).toFixed(1)}%` : "—"}</b></button>`).join("")
+      + absent.map((line) => `<span class="perf-legend-item is-missing" title="This line has no value at the rebase week of this view"><i style="background:${line.color}"></i>${safe(line.name)} <b>starts after this window</b></span>`).join("")
+      + built.missing.map((item) => `<span class="perf-legend-item is-missing" title="${safe(item.reason)}; no other ETF is substituted"><i style="background:${item.color}"></i>${safe(item.name)} <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`).join("");
     $$("[data-perf-series]").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.perfSeries; if (perfHidden.has(key)) perfHidden.delete(key); else perfHidden.add(key); renderPerformanceReturns(); }));
-    $("#perf-returns-note").innerHTML = published ? `Window starts <strong>${safe(formatDate(startWeek))}</strong>: the first week with data for every plotted series (set by ${safe(startName)}); every line is rebased to 1.00 at the start of that week. Total return, weekly points, as published by the producer. Dashed = backtest or mixed history, solid = live account evidence (flag published per segment).${published.gaps.length ? ` Weeks before the common start with no data (not zero): ${safe(published.gaps.join(", "))}.` : ""}${published.partial ? ` The last week is partial (data through ${safe(formatDate(published.dataThrough))}).` : ""} ${safe(published.definitions.join(" "))}` : `Window starts <strong>${safe(formatDate(startWeek))}</strong>: the first week with data for every plotted series (set by ${safe(startName)}); every line is rebased to 1.00 there. Total return, weekly points. Dashed = backtest history, solid = live account evidence (boundary derived from each strategy's first live week). The equal-weight line is weekly-rebalanced across the seven strategies and derived in the panel${spec.mode === "LIVE_ONLY" ? "" : "; Volatis has live history only"}.`;
+    const presentOrigins = [...new Set(rebased.flatMap((line) => line.points.map((point) => point.origin)).filter((origin) => origin != null && origin !== "LIVE"))];
+    const styleNote = presentOrigins.length
+      ? presentOrigins.map((origin) => `${perfOriginStyle(origin).name} = ${humanStatus(origin).toLowerCase()}`).join(", ")
+      : "";
+    const rebaseNote = maxView
+      ? `Max view, log axis: each line is rebased to 1.00 at the start of its own first week${built.unionStart ? ` (the grid begins ${safe(formatDate(built.unionStart))})` : ""}; the equal-weight portfolio starts at the group anchor.`
+      : `Every line is rebased to 1.00 at the start of <strong>${safe(formatDate(perfDate(starts[baseIndex])))}</strong>, the later of the window start and the group anchor.`;
+    const anchorNote = built.anchorDate ? ` Group anchor <strong>${safe(formatDate(built.anchorDate))}</strong>: the first week every strategy line has data (set by ${safe(built.anchorName)}).` : "";
+    $("#perf-returns-note").innerHTML = `${rebaseNote}${anchorNote} Total return, weekly points, as published by the producer; a line draws nothing before its own first week.${styleNote ? ` Line style: solid = live account evidence, ${safe(styleNote)}.` : ""}${built.gaps.length ? ` Weeks with no data inside a line (not zero): ${safe(built.gaps.join(", "))}.` : ""}${built.partial ? ` The last week is partial (data through ${safe(formatDate(built.dataThrough))}).` : ""} ${safe(built.definitions.join(" "))}`;
     $$("[data-perf-zoom]").forEach((button) => { const active = button.dataset.perfZoom === perfZoom; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
-    $$("[data-perf-axis]").forEach((button) => { const active = button.dataset.perfAxis === perfAxis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
-    $$("[data-perf-mode]").forEach((button) => { const active = button.dataset.perfMode === (published ? published.mode : spec.mode); button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
+    $$("[data-perf-axis]").forEach((button) => { const active = button.dataset.perfAxis === effectiveAxis; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); button.disabled = maxView; button.title = maxView ? "The Max view spans the full history and always uses a log axis" : ""; });
+    $$("[data-perf-mode]").forEach((button) => { const active = button.dataset.perfMode === built.mode; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
   }
 
   function perfPublishedValue() {
-    const slices = perfTab()?.slices;
-    if (!slices) return null;
+    const tab = perfTab();
+    if (!tab) return { unavailable: "the producer published no performance block in this snapshot" };
+    if (tab.schema_version !== PERF_SCHEMA_VERSION) return { unavailable: `performance block schema ${tab.schema_version} is not the schema ${PERF_SCHEMA_VERSION} this panel reads` };
+    const slices = tab.slices;
+    if (!slices) return { unavailable: "no slice block is published" };
     if (slices.status === "UNAVAILABLE" || !Array.isArray(slices.rows) || !slices.rows.length || !Array.isArray(slices.dates)) return { unavailable: slices.reason || "no slice rows published" };
     const ids = slices.rows.map((row) => row.slice_id);
     const names = Object.fromEntries(slices.rows.map((row) => [row.slice_id, `${strategyNameById(row.strategy_id)}${row.sleeve_id ? ` · ${row.sleeve_id}` : ""}`]));
     const divisor = slices.unit === "USD_CENTS" ? 100 : 1;
     const table = slices.dates.map((date, index) => {
       const values = Object.fromEntries(slices.rows.map((row) => [row.slice_id, (Number(row.nav_cents?.[index]) || 0) / divisor]));
-      return { date, time: perfTime(date), slices: values, total: Object.values(values).reduce((sum, value) => sum + value, 0) };
+      return { date, index, time: perfTime(date), slices: values, total: Object.values(values).reduce((sum, value) => sum + value, 0) };
     }).filter((row, index, all) => row.total > 0 || index === all.length - 1);
-    if (!table.length) return null;
+    if (!table.length) return { unavailable: "no slice carries a value" };
     const reconciliation = slices.reconciliation || {};
     const residual = number(reconciliation.residual_cents) == null ? null : Number(reconciliation.residual_cents) / divisor;
-    return { ids, names, table, reconciliation: residual == null ? (reconciliation.reason ? `Residual against systematic capital unavailable: ${reconciliation.reason}.` : "") : `Residual against systematic capital at ${formatDate(reconciliation.reference_date)}: ${currencyExact(residual)}${reconciliation.residual_label ? ` (${String(reconciliation.residual_label).split(" (")[0].toLowerCase().replaceAll("_", " ")})` : ""}.` };
-  }
-
-  function perfValueSeries() {
-    const published = perfPublishedValue();
-    if (published) return published;
-    const rows = (data.account_manifest?.rows || []).filter((row) => row.status === "OK" && Array.isArray(row.observation_trace?.links) && row.observation_trace.links.length);
-    if (!rows.length) return null;
-    const names = [...new Set(rows.map((row) => row.strategy_id))];
-    const order = (data.strategies || []).map((row) => row.strategy_id).filter((id) => names.includes(id));
-    const ids = [...order, ...names.filter((id) => !order.includes(id))];
-    const epochs = rows.map((row) => ({ id: row.strategy_id, points: new Map(row.observation_trace.links.map((link) => [String(link.end_date).slice(0, 10), Number(link.ending_nav)])), last: String(row.observation_trace.links.at(-1).end_date).slice(0, 10), first: String(row.observation_trace.links[0].end_date).slice(0, 10) }));
-    const dates = [...new Set(epochs.flatMap((epoch) => [...epoch.points.keys()]))].sort();
-    const carried = epochs.map(() => 0);
-    const table = dates.map((date) => {
-      const slices = Object.fromEntries(ids.map((id) => [id, 0]));
-      epochs.forEach((epoch, index) => {
-        if (epoch.points.has(date)) carried[index] = epoch.points.get(date);
-        if (date >= epoch.first && date <= epoch.last) slices[epoch.id] += carried[index];
-      });
-      return { date, time: perfTime(date), slices, total: Object.values(slices).reduce((sum, value) => sum + value, 0) };
+    // Flow-matched benchmark dollars (slices.benchmarks): the same deposits and withdrawals, each earning the benchmark's
+    // own return from its date.  An unavailable benchmark keeps its reason; nothing is recomputed here.
+    const benchmarkRows = Array.isArray(slices.benchmarks) ? slices.benchmarks : null;
+    const benchmarks = (benchmarkRows || []).map((entry) => {
+      const ticker = entry.ticker || perfSeriesName(entry);
+      const available = entry.status === "AVAILABLE" && Array.isArray(entry.nav_cents);
+      const dollars = available ? table.map((row) => ((Number(entry.nav_cents[row.index]) || 0) / divisor)) : null;
+      return {
+        key: entry.series_id, ticker, color: PERF_BENCHMARK_COLORS[ticker] || "#a8b7c5", available, reason: entry.reason || "not published",
+        dollars, end: available ? Number(entry.end_value_cents) / divisor : null,
+        difference: available && number(entry.portfolio_minus_benchmark_cents) != null ? Number(entry.portfolio_minus_benchmark_cents) / divisor : null,
+        trailing: entry.trailing || null, methodDefinition: entry.method_definition || "", triBasis: entry.tri_basis || null, flowTiming: entry.flow_timing || null,
+      };
     });
-    return { ids, table };
+    const flows = slices.flows && typeof slices.flows === "object" ? slices.flows : null;
+    const flowText = flows && number(flows.total_contributed_cents) != null
+      ? `Net contributed ${currencyExact(Number(flows.total_contributed_cents) / divisor)}, implied profit ${number(flows.implied_pnl_cents) == null ? "unavailable" : currencyExact(Number(flows.implied_pnl_cents) / divisor)}${flows.internal_cancellation && flows.internal_cancellation.status !== "PROVED" ? `; internal transfers ${humanStatus(flows.internal_cancellation.status || "UNAVAILABLE").toLowerCase()} (residual ${currencyExact(Number(flows.internal_cancellation.residual_cents || 0) / divisor)})` : ""}.`
+      : "";
+    return {
+      ids, names, table, benchmarks, benchmarksPublished: benchmarkRows !== null, flowText,
+      reconciliation: residual == null ? (reconciliation.reason ? `Residual against systematic capital unavailable: ${reconciliation.reason}.` : "") : `Residual against systematic capital at ${formatDate(reconciliation.reference_date)}: ${currencyExact(residual)}${reconciliation.residual_label ? ` (${String(reconciliation.residual_label).split(" (")[0].toLowerCase().replaceAll("_", " ")})` : ""}.`,
+    };
   }
 
   function perfIndexReturn(path, fromTime, toTime) {
@@ -2780,21 +2831,16 @@
   function renderPerformanceValue() {
     const host = $("#perf-value-chart");
     if (!host) return;
-    const spec = perfValueSeries();
-    if (spec?.unavailable) {
+    const spec = perfPublishedValue();
+    if (spec.unavailable) {
       host.innerHTML = `<div class="callout callout-neutral">The producer published no slice values: ${safe(String(spec.unavailable))}.</div>`;
       $("#perf-value-readout").innerHTML = "";
       $("#perf-trailing-table").innerHTML = "";
       $("#perf-value-legend").innerHTML = "";
       return;
     }
-    if (!spec) {
-      host.innerHTML = '<div class="callout callout-neutral">The daily account NAV traces are not in this snapshot, so the stacked value chart is unavailable.</div>';
-      $("#perf-value-readout").innerHTML = "";
-      $("#perf-trailing-table").innerHTML = "";
-      return;
-    }
-    const { ids, table } = spec;
+    const { ids, table, benchmarks } = spec;
+    const drawnBenchmarks = benchmarks.filter((item) => item.available);
     const readoutBlock = perfTab()?.readout;
     const published = readoutBlock?.hwm_governed_index?.status === "AVAILABLE" ? readoutBlock.hwm_governed_index : null;
     const lastTime = table.at(-1).time;
@@ -2802,7 +2848,8 @@
     const from = zoomDays == null ? table[0].time : Math.max(table[0].time, lastTime - zoomDays * PERF_DAY);
     const rows = table.filter((row) => row.time >= from);
     const width = 900, height = 320, left = 62, right = 14, top = 10, bottom = 28;
-    const peak = Math.max(...rows.map((row) => row.total), 1);
+    const benchmarkPeak = Math.max(0, ...drawnBenchmarks.flatMap((item) => table.map((row, position) => (row.time >= from ? item.dollars[position] : 0))));
+    const peak = Math.max(...rows.map((row) => row.total), benchmarkPeak, 1);
     const ticks = perfTicks(0, peak * 1.05, 5);
     if (ticks.length > 1 && ticks[ticks.length - 1] < peak * 1.02) ticks.push(Number((ticks[ticks.length - 1] + (ticks[1] - ticks[0])).toFixed(10)));
     const yMax = Math.max(...ticks);
@@ -2817,9 +2864,20 @@
       return `<polygon fill="${perfColor(index)}" fill-opacity=".78" stroke="${perfColor(index)}" stroke-width=".6" points="${[...forward, ...backward].join(" ")}"></polygon>`;
     }).join("");
     const totalLine = `<polyline fill="none" stroke="#edf4f7" stroke-width="1.6" points="${rows.map((row) => `${x(row.time).toFixed(1)},${y(row.total).toFixed(1)}`).join(" ")}"></polyline>`;
+    const benchmarkLines = drawnBenchmarks.map((item) => {
+      const runs = [];
+      let run = null;
+      table.forEach((row, position) => {
+        if (row.time < from || !(item.dollars[position] > 0)) { run = null; return; }
+        if (!run) { run = []; runs.push(run); }
+        run.push(`${x(row.time).toFixed(1)},${y(item.dollars[position]).toFixed(1)}`);
+      });
+      return runs.filter((run) => run.length > 1).map((run) => `<polyline fill="none" stroke="${item.color}" stroke-width="2" stroke-dasharray="6 3" points="${run.join(" ")}"></polyline>`).join("");
+    }).join("");
     const grid = ticks.map((tick) => `<line x1="${left}" x2="${width - right}" y1="${y(tick).toFixed(1)}" y2="${y(tick).toFixed(1)}" stroke="currentColor" stroke-opacity=".14"></line><text class="chart-label axis-label" x="2" y="${(y(tick) + 4).toFixed(1)}">${currency(tick)}</text>`).join("")
       + perfTicks(from, lastTime, 5).map((tick) => `<text class="chart-label axis-label" text-anchor="middle" x="${x(Math.round(tick)).toFixed(1)}" y="${height - 8}">${safe(perfShortDate(Math.round(tick)))}</text>`).join("");
-    host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Value of the systematic portfolio by strategy, ${perfDate(from)} to ${perfDate(lastTime)}. Latest total ${currency(table.at(-1).total)}: ${ids.map((id) => `${(spec.names?.[id] || strategyNameById(id))} ${currency(table.at(-1).slices[id])}`).join("; ")}.`)}">${grid}${areas}${totalLine}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
+    const benchmarkAria = drawnBenchmarks.map((item) => ` ${item.ticker} flow-matched ${currency(item.end)}`).join(";");
+    host.innerHTML = `<div class="perf-plot"><svg class="perf-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="${safe(`Value of the systematic portfolio by strategy, ${perfDate(from)} to ${perfDate(lastTime)}. Latest total ${currency(table.at(-1).total)}: ${ids.map((id) => `${(spec.names?.[id] || strategyNameById(id))} ${currency(table.at(-1).slices[id])}`).join("; ")}.${benchmarkAria ? ` Benchmarks on the same cash flows:${benchmarkAria}.` : ""}`)}">${grid}${areas}${totalLine}${benchmarkLines}<line class="perf-cursor" x1="0" x2="0" y1="${top}" y2="${height - bottom}" hidden></line></svg><div class="perf-tooltip" hidden></div></div>`;
     const plot = host.querySelector(".perf-plot");
     const svg = plot.querySelector("svg");
     const tip = plot.querySelector(".perf-tooltip");
@@ -2828,9 +2886,10 @@
       const box = svg.getBoundingClientRect();
       const time = from + ((event.clientX - box.left) / box.width * width - left) / (width - left - right) * (lastTime - from);
       const row = rows.reduce((best, candidate) => (Math.abs(candidate.time - time) < Math.abs(best.time - time) ? candidate : best), rows[0]);
+      const position = table.indexOf(row);
       cursor.setAttribute("x1", x(row.time).toFixed(1)); cursor.setAttribute("x2", x(row.time).toFixed(1)); cursor.hidden = false;
       tip.hidden = false;
-      tip.innerHTML = `<strong>${safe(formatDate(row.date))}</strong>${ids.map((id, index) => `<div><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))}<b>${currency(row.slices[id])}</b></div>`).join("")}<div class="perf-tip-total">Total<b>${currency(row.total)}</b></div>`;
+      tip.innerHTML = `<strong>${safe(formatDate(row.date))}</strong>${ids.map((id, index) => `<div><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))}<b>${currency(row.slices[id])}</b></div>`).join("")}<div class="perf-tip-total">Total<b>${currency(row.total)}</b></div>${drawnBenchmarks.map((item) => `<div><i style="background:${item.color}"></i>${safe(item.ticker)}, same cash flows<b>${item.dollars[position] > 0 ? currency(item.dollars[position]) : "—"}</b></div>`).join("")}`;
       tip.style.left = `${Math.min(box.width - 240, Math.max(0, (x(row.time) / width) * box.width + 12))}px`;
     });
     svg.addEventListener("mouseleave", () => { tip.hidden = true; cursor.hidden = true; });
@@ -2847,8 +2906,13 @@
       : readoutBlock ? `Summed-epoch TWR unavailable: ${String(readoutBlock.summed_epoch_unavailable_reason || (summed && summed.reason) || "not published").toLowerCase().replaceAll("_", " ")}` : "";
     const windowReturn = perfValueZoom === "Max" && published && number(published.cumulative_return) != null ? Number(published.cumulative_return) : !path.length ? null : perfValueZoom === "Max" ? perfIndexReturn(path, perfTime(path[0].as_of), lastTime) : perfIndexReturn(path, from, lastTime);
     $("#perf-value-readout").innerHTML = `<div class="perf-readout"><div><span>Systematic portfolio value</span><b>${currency(end.total)}</b><small>${safe(formatDate(end.date))}, reserve excluded</small></div><div><span>Change in value, ${safe(perfValueZoom)}</span><b>${currency(end.total - first.total)}</b><small>includes deposits and withdrawals</small></div><div><span>Time-weighted return, ${safe(perfValueZoom)}</span><b>${windowReturn == null ? "—" : pct(windowReturn)}</b><small>${windowReturn == null ? "no governed index in this snapshot" : `${safe(proofLabel)}, levered net NAV basis`}${summedText ? `<br>${safe(summedText)}` : ""}</small></div></div>`;
-    $("#perf-value-legend").innerHTML = ids.map((id, index) => `<span class="perf-legend-item"><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>`).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}`;
-    const trailing = [["1w", 7], ["1m", 30], ["3m", 91], ["6m", 183], ["YTD", null], ["1y", 365], ["Since start", "start"]];
+    const benchmarkLegend = benchmarks.map((item) => (item.available
+      ? `<span class="perf-legend-item" title="${safe(item.methodDefinition)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>${currency(item.end)}</b>${item.difference == null ? "" : `<span class="cell-secondary">portfolio ${item.difference >= 0 ? "ahead by" : "behind by"} ${currency(Math.abs(item.difference))}</span>`}</span>`
+      : `<span class="perf-legend-item is-missing" title="${safe(item.reason)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`)).join("");
+    const methodNote = drawnBenchmarks.length ? `${safe(drawnBenchmarks[0].methodDefinition)}${drawnBenchmarks.some((item) => item.triBasis) ? ` Index basis: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.triBasis).toLowerCase()))].join(", "))}${drawnBenchmarks.some((item) => item.flowTiming) ? `; flow timing: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.flowTiming).toLowerCase()))].join(", "))}` : ""}.` : ""}` : "";
+    const benchmarkMissingNote = spec.benchmarksPublished ? "" : `<span class="cell-secondary">Benchmark dollar series unavailable: the producer published no slices.benchmarks in this snapshot.</span>`;
+    $("#perf-value-legend").innerHTML = ids.map((id, index) => `<span class="perf-legend-item"><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>`).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${benchmarkLegend}${benchmarkMissingNote}${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}${spec.flowText ? `<span class="cell-secondary">${safe(spec.flowText)}</span>` : ""}${methodNote ? `<span class="cell-secondary">${methodNote}</span>` : ""}`;
+    const trailing = [["1w", 7, "1w"], ["1m", 30, "1m"], ["3m", 91, "3m"], ["6m", 183, "6m"], ["YTD", null, "YTD"], ["1y", 365, "1y"], ["Since start", "start", "SINCE_START"]];
     const endTime = lastTime;
     const ytdStart = perfTime(`${new Date(endTime).getUTCFullYear() - 1}-12-31`);
     const periodReturn = (days) => {
@@ -2857,9 +2921,13 @@
       const start = days == null ? ytdStart : endTime - days * PERF_DAY;
       return start < perfTime(path[0].as_of) ? null : perfIndexReturn(path, start, endTime);
     };
+    const benchmarkTrailingRows = benchmarks.length
+      ? benchmarks.map((item) => (item.available && item.trailing
+        ? `<tr><th scope="row">${safe(item.ticker)}, total return<span class="cell-secondary">Benchmark's own total return over the same calendar windows; the dollar line above is flow-matched</span></th>${trailing.map(([, , key]) => `<td class="numeric">${pct(item.trailing[key])}</td>`).join("")}</tr>`
+        : `<tr><th scope="row">${safe(item.ticker)}, total return<span class="cell-secondary">Unavailable</span></th><td colspan="${trailing.length}" class="cell-secondary">${item.available ? "No trailing returns are published for this benchmark" : safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</td></tr>`))
+      : [`<tr><th scope="row">SPY, SPXL<span class="cell-secondary">Unavailable</span></th><td colspan="${trailing.length}" class="cell-secondary">The producer published no benchmark series for this view</td></tr>`];
     $("#perf-trailing-table").innerHTML = tableMarkup([["Trailing return (time-weighted)"], ...trailing.map(([label]) => [label, "numeric"])],
-      [`<tr><th scope="row">Systematic portfolio<span class="cell-secondary">${safe(proofLabel)}, levered net NAV basis</span></th>${trailing.map(([, days]) => `<td class="numeric">${pct(periodReturn(days))}</td>`).join("")}</tr>`,
-        `<tr><th scope="row">SPY, SPXL<span class="cell-secondary">not in this snapshot</span></th>${trailing.map(() => '<td class="numeric">—</td>').join("")}</tr>`]);
+      [`<tr><th scope="row">Systematic portfolio<span class="cell-secondary">${safe(proofLabel)}, levered net NAV basis</span></th>${trailing.map(([, days]) => `<td class="numeric">${pct(periodReturn(days))}</td>`).join("")}</tr>`, ...benchmarkTrailingRows]);
     $$("[data-perf-value-zoom]").forEach((button) => { const active = button.dataset.perfValueZoom === perfValueZoom; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
   }
 
@@ -3001,7 +3069,7 @@
     const accountSelect = $("#context-account");
     accountSelect.innerHTML = `<option value="ALL">All accounts</option>${[...accountLabels.entries()].sort((left, right) => left[1].localeCompare(right[1])).map(([accountId, label]) => `<option value="${safe(accountId)}">${safe(label)}</option>`).join("")}`;
     const strategySelect = $("#context-strategy");
-    strategySelect.innerHTML = `<option value="ALL">All strategies</option>${data.strategies.map((row) => `<option value="${safe(row.strategy_name)}">${safe(row.strategy_name)}</option>`).join("")}`;
+    strategySelect.innerHTML = `<option value="ALL">All strategies</option>${currentStrategies().map((row) => `<option value="${safe(row.strategy_name)}">${safe(row.strategy_name)}</option>`).join("")}`;
     $("#context-as-of").textContent = formatDate(data.meta.portfolio_as_of);
   }
 
