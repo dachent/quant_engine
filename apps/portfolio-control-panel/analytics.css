@@ -1311,3 +1311,14 @@ tfoot td {
   .mva-sub > span:first-child { grid-column: 1 / -1; }
 }
 /* ===== END model-vs-actual ===== */
+
+/* ===== BEGIN orthogonal risk shares and contribution chart (mockup F) ===== */
+.risk-share h4, .risk-contrib h4 { margin: 12px 0 6px; font-size: 14px; }
+.risk-share-row { display: grid; grid-template-columns: 90px 1fr 70px; gap: 8px; align-items: center; margin: 3px 0; }
+.risk-share-track { height: 12px; background: #1d2a3d; border-radius: 3px; position: relative; overflow: hidden; }
+.risk-share-track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+.risk-share-row b { text-align: right; font-variant-numeric: tabular-nums; }
+.risk-loadings { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.risk-loadings span { font-variant-numeric: tabular-nums; }
+details.orthogonal-data { margin-top: 12px; }
+/* ===== END orthogonal risk shares and contribution chart ===== */
