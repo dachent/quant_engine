@@ -1064,3 +1064,32 @@ def test_without_a_daily_series_the_flow_matched_dollars_are_refused_not_weekly(
         )
     tab.verify_performance_tab(block, panel)
     assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_the_daily_block_of_the_weekly_returns_generation_is_read_in_its_own_shape() -> (
+    None
+):
+    panel = _panel_with_benchmarks()
+    daily = {
+        "market:SPY": _daily_returns("0.01"),
+        "market:SPXL": _daily_returns("0.02"),
+    }
+    panel["weekly_returns"]["daily_benchmark_returns"] = {
+        "status": "AVAILABLE",
+        "source_id": "yahoo-adjusted-etf-daily",
+        "series": [
+            {
+                "series_id": series_id,
+                "dates": sorted(item["returns"]),
+                "returns": [item["returns"][d] for d in sorted(item["returns"])],
+            }
+            for series_id, item in daily.items()
+        ],
+    }
+    block = tab.build_performance_tab(panel)
+    assert [b["tri_basis"] for b in block["slices"]["benchmarks"]] == [
+        "DAILY_ADJUSTED_CLOSE"
+    ] * 2
+    assert block["benchmarks"][0]["daily"]["source_id"] == "yahoo-adjusted-etf-daily"
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []

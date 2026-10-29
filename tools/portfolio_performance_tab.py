@@ -1209,6 +1209,30 @@ def _qualified_label(label: str, line: Mapping[str, Any], dates: object) -> str:
     )
 
 
+def _daily_from_weekly(weekly: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``weekly_returns.daily_benchmark_returns`` as series id -> source and returns.
+
+    The weekly-returns generation carries parallel ``dates`` and ``returns`` arrays
+    per series; an unavailable or malformed block is not used.
+    """
+
+    block = _mapping(weekly.get("daily_benchmark_returns"))
+    if block.get("status") != "AVAILABLE":
+        return None
+    out: dict[str, Any] = {}
+    for item in _sequence(block.get("series")):
+        if not isinstance(item, Mapping):
+            continue
+        dates, returns = _sequence(item.get("dates")), _sequence(item.get("returns"))
+        if not dates or len(dates) != len(returns):
+            continue
+        out[str(item.get("series_id"))] = {
+            "source_id": block.get("source_id"),
+            "returns": dict(zip((str(d) for d in dates), returns)),
+        }
+    return out or None
+
+
 def build_performance_tab(
     panel: Mapping[str, Any],
     daily_benchmarks: Mapping[str, Any] | None = None,
@@ -1219,8 +1243,8 @@ def build_performance_tab(
     ``daily_benchmarks`` optionally maps a benchmark series id to
     ``{"source_id": ..., "returns": {ISO date: daily total return}}`` from the
     admitted daily adjusted-close series, or is read from
-    ``weekly_returns.daily_benchmark_returns`` when the weekly generation carries
-    it.  Without either the flow-matched dollars are UNAVAILABLE with the reason
+    ``weekly_returns.daily_benchmark_returns`` (parallel dates/returns arrays per
+    series) when the weekly generation carries it.  Without either the flow-matched dollars are UNAVAILABLE with the reason
     (``DAILY_SERIES_REQUIRED``): the release path never ships the weekly index.
     ``allow_weekly_fallback`` is for fixtures and development only; it labels the
     weekly basis.
@@ -1228,7 +1252,7 @@ def build_performance_tab(
 
     weekly = _mapping(panel.get("weekly_returns"))
     if daily_benchmarks is None:
-        daily_benchmarks = _mapping(weekly.get("daily_benchmark_returns")) or None
+        daily_benchmarks = _daily_from_weekly(weekly)
     modes: dict[str, Any] = {}
     for mode in MODES:
         if not weekly.get("series"):
@@ -2255,7 +2279,7 @@ def verify_performance_tab(
         raise _fail("schema_version or scope differs")
     weekly = _mapping(panel.get("weekly_returns"))
     if daily_benchmarks is None:
-        daily_benchmarks = _mapping(weekly.get("daily_benchmark_returns")) or None
+        daily_benchmarks = _daily_from_weekly(weekly)
     if block.get("as_of") != weekly.get("as_of_date"):
         raise _fail("as_of differs from the weekly returns")
     modes = _mapping(block.get("modes"))
