@@ -749,3 +749,23 @@ def test_commit_refuses_a_spec_bound_to_another_code_commit(
     for name, base in (("spec.json", "real"), ("replica-spec.json", "replica")):
         _spec(world["cycle"] / name, world["tmp"] / base, "f" * 40)
     assert _commit(world, gate) == 2
+
+
+def test_commit_gate_without_driver_replica_checks_needs_only_receipt_and_confirmation(
+    world: dict[str, Any],
+) -> None:
+    gate = _gate_world(world)
+    stage = {
+        "id": "commit",
+        "commit_gate": {
+            "spec": "{cycle}/spec.json",
+            "replica_receipt": "{cycle}/replica-receipt.json",
+            "pointer_snapshot": "{cycle}/after.json",
+        },
+        "outputs": ["{cycle}/committed.txt"],
+        "argv": _write_stage("{cycle}/committed.txt"),
+    }
+    gate["graph"] = _graph(world, [stage], derive=GATE_DERIVE)
+    assert _commit(world, gate) == 2
+    (world["cycle"] / "replica-receipt.json").write_text("{}", encoding="utf-8")
+    assert _commit(world, gate) == 0

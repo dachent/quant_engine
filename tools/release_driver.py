@@ -310,8 +310,40 @@ def spec_topology(spec_file: Path) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+def _check_replica_agrees(
+    run: Run, stage: Mapping[str, Any], gate: Mapping[str, Any], real_spec: Path
+) -> None:
+    """Optional: the driver's own replica checks (core's replica gate is the authority on the receipt)."""
+
+    replica_spec = Path(run.expand(gate["replica_spec"]))
+    if not replica_spec.is_file():
+        raise Refusal(
+            f"{stage['id']}: no replica spec at {replica_spec}; the replica ceremony has not run"
+        )
+    for replica_stage in gate.get("replica_stages", []):
+        record = run.state["stages"].get(replica_stage)
+        if (
+            not record
+            or record["status"] != "ok"
+            or record["code_commit"] != run.values["code_commit"]
+        ):
+            raise Refusal(
+                f"{stage['id']}: replica receipt {replica_stage} is missing, failed, or from another code identity"
+            )
+    if spec_topology(real_spec) != spec_topology(replica_spec):
+        raise Refusal(
+            f"{stage['id']}: the replica spec binds a different topology than the real spec"
+        )
+    for real_input, replica_input in gate.get("inputs_same", []):
+        left, right = Path(run.expand(real_input)), Path(run.expand(replica_input))
+        if path_digest(left) is None or path_digest(left) != path_digest(right):
+            raise Refusal(
+                f"{stage['id']}: {left.name} differs between the real run and the replica"
+            )
+
+
 def check_commit_gate(run: Run, stage: Mapping[str, Any]) -> None:
-    """``execute --commit`` runs only for the exact release the owner confirmed, after a clean replica."""
+    """``execute --commit`` runs only for the exact release the owner confirmed, from a prepared, unmoved state."""
 
     gate = stage.get("commit_gate")
     if gate is None:
@@ -323,40 +355,18 @@ def check_commit_gate(run: Run, stage: Mapping[str, Any]) -> None:
         raise Refusal(
             f"{stage['id']}: commit needs --confirm-release-id {release_id}, the exact release the owner confirmed"
         )
-    real_spec, replica_spec = (
-        Path(run.expand(gate["spec"])),
-        Path(run.expand(gate["replica_spec"])),
-    )
-    if not replica_spec.is_file():
-        raise Refusal(
-            f"{stage['id']}: no replica spec at {replica_spec}; the replica ceremony has not run"
-        )
-    for replica_stage in gate["replica_stages"]:
-        record = run.state["stages"].get(replica_stage)
-        if (
-            not record
-            or record["status"] != "ok"
-            or record["code_commit"] != run.values["code_commit"]
-        ):
-            raise Refusal(
-                f"{stage['id']}: replica receipt {replica_stage} is missing, failed, or from another code identity"
-            )
-    real_topology, replica_topology = (
-        spec_topology(real_spec),
-        spec_topology(replica_spec),
-    )
-    if real_topology != replica_topology:
-        raise Refusal(
-            f"{stage['id']}: the replica spec binds a different topology than the real spec"
-        )
+    real_spec = Path(run.expand(gate["spec"]))
     if _read_json(real_spec)["code_commit"] != run.values["code_commit"]:
         raise Refusal(f"{stage['id']}: the real spec binds another code commit")
-    for real_input, replica_input in gate.get("inputs_same", []):
-        left, right = Path(run.expand(real_input)), Path(run.expand(replica_input))
-        if path_digest(left) is None or path_digest(left) != path_digest(right):
-            raise Refusal(
-                f"{stage['id']}: {left.name} differs between the real run and the replica"
-            )
+    if (
+        "replica_receipt" in gate
+        and not Path(run.expand(gate["replica_receipt"])).is_file()
+    ):
+        raise Refusal(
+            f"{stage['id']}: no replica receipt at {run.expand(gate['replica_receipt'])}"
+        )
+    if "replica_spec" in gate:
+        _check_replica_agrees(run, stage, gate, real_spec)
     prepared = (
         Path(_read_json(real_spec)["coordination_root"]) / "releases" / release_id
     )
