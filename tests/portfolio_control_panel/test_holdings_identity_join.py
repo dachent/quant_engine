@@ -8,7 +8,6 @@ refuses when a position and its sidecar row disagree.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -134,55 +133,9 @@ def test_a_row_that_is_not_an_accepted_position_claims_nothing() -> None:
     )
 
 
-# ---- R2.1 Q1: cost evidence and execution cost render from payload fields ---------
-
-
-def test_cost_cell_renders_declared_basis_corroboration_and_execution_cost(
-    tmp_path: Path,
-) -> None:
-    from test_shell_qc1_labels import _capital_payload, _cost_strategy, _run
-
-    strategy = _cost_strategy(
-        cost_status="known_subscription_provider_declared",
-        annual_external_cost_usd="600",
-        cost_class="SUBSCRIPTION",
-        declared={
-            "amount": "50",
-            "basis": "PROVIDER_DECLARED",
-            "currency": "USD",
-            "period": "MONTH",
-        },
-        corroboration=[
-            {
-                "kind": "CARD_FEED_OBSERVED_CHARGES",
-                "role": "CORROBORATING_OBSERVED_EVIDENCE",
-                "feed_last_date": "2026-06-08",
-                "observations": [
-                    {"amount": "-50", "currency": "USD", "date": "2025-09-30"},
-                    {"amount": "-50", "currency": "USD", "date": "2026-05-28"},
-                ],
-            }
-        ],
-        execution_cost={
-            "status": "AVAILABLE",
-            "by_currency": [
-                {"amount": "172", "currency": "EUR", "record_count": 65},
-                {"amount": "123", "currency": "GBP", "record_count": 98},
-            ],
-            "record_count": 163,
-            "usd_total": None,
-            "usd_status": "UNAVAILABLE_NON_USD_AMOUNTS_NOT_CONVERTED",
-            "window_start": "2025-11-27",
-            "window_end": "2026-09-02",
-        },
-    )
-    payload = _capital_payload(strategy)
-    payload["reconciliation_checks"] = []
-    dom = _run(tmp_path, payload, "renderSignals")
-    text = dom["#implementation-table"]["innerHTML"]
-
-    assert "Known subscription provider declared" in text
-    assert "per month" in text
-    assert "2 Corroborating observed evidence" in text
-    assert "EUR 172 (65)" in text and "GBP 123 (98)" in text
-    assert "Unavailable non usd amounts not converted" in text
+def test_asset_category_label_is_plain_words_and_never_guessed() -> None:
+    assert panel.asset_category_label("STK") == "Stock"
+    assert panel.asset_category_label("FOP") == "Futures option"
+    assert panel.asset_category_label("NEW_KIND") == "New Kind"
+    assert panel.asset_category_label(None) is None
+    assert panel.asset_category_label("  ") is None

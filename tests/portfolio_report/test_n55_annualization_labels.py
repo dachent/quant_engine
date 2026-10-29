@@ -640,3 +640,69 @@ def test_cost_evidence_and_execution_cost_reach_the_merged_strategy_row() -> Non
         [{"strategy_id": ROBUXIO}], _retained_robuxio_rows()
     )[0]
     assert all(key not in plain for key in extra)
+
+
+def test_cost_components_are_structured_and_every_word_comes_from_data() -> None:
+    """R2.1 Q1 (renderer request R2): period, currency and labels ride the payload."""
+
+    retained = _retained_robuxio_rows()
+    retained["costs"][0].update(
+        annual_external_cost_usd="600",
+        cost_status="known_subscription_provider_declared",
+        corroboration=[
+            {
+                "feed_last_date": "2026-06-08",
+                "kind": "CARD_FEED_OBSERVED_CHARGES",
+                "observations": [
+                    {"amount": "-50", "currency": "USD", "date": "2025-09-30"},
+                    {"amount": "-50", "currency": "USD", "date": "2026-05-28"},
+                ],
+            }
+        ],
+        declared={
+            "amount": "50",
+            "basis": "PROVIDER_DECLARED",
+            "currency": "USD",
+            "period": "MONTH",
+        },
+        execution_cost={
+            "basis": "LEDGER_TRANSACTION_COMMISSIONS_NATIVE_CURRENCY",
+            "by_currency": [
+                {"amount": "172", "currency": "EUR", "record_count": 65},
+                {"amount": "96", "currency": "USD", "record_count": 68},
+            ],
+            "status": "AVAILABLE",
+            "window_end": "2026-09-02",
+            "window_start": "2025-11-27",
+        },
+    )
+    merged = reporter._merge_attribution([{"strategy_id": ROBUXIO}], retained)[0]
+    subscription, euro, dollar = merged["cost_components"]
+
+    assert subscription == {
+        "amount": "50",
+        "annual_equivalent_usd": "600",
+        "corroboration_label": (
+            "card feed observed charges 2025-09-30..2026-05-28 "
+            "(2 charges, feed through 2026-06-08)"
+        ),
+        "currency": "USD",
+        "kind": "SUBSCRIPTION",
+        "period": "MONTH",
+        "source_label": "provider declared",
+        "status": "known_subscription_provider_declared",
+        "window_end": None,
+        "window_start": None,
+    }
+    assert (euro["kind"], euro["currency"], euro["amount"]) == (
+        "EXECUTION",
+        "EUR",
+        "172",
+    )
+    assert (euro["period"], euro["annual_equivalent_usd"]) == ("PERIOD_TO_DATE", None)
+    assert (euro["window_start"], euro["window_end"]) == ("2025-11-27", "2026-09-02")
+    assert dollar["currency"] == "USD"
+    plain = reporter._merge_attribution(
+        [{"strategy_id": ROBUXIO}], _retained_robuxio_rows()
+    )[0]
+    assert "cost_components" not in plain

@@ -328,25 +328,7 @@
     } else {
       rate = `${pct(row.annual_external_cost_rate_pre_tax, 2)} of sleeve value (denominator date not published by this report schema)`;
     }
-    // R2.1 Q1: the declared basis with its corroborating observed charges, and the execution
-    // cost (commissions) beside, never inside, the subscription amount.  Every word and
-    // number below is a payload field; a row that publishes neither adds nothing.
-    const declared = row.declared;
-    const declaredLine = declared && typeof declared === "object"
-      ? `<span class="cell-secondary">${safe(humanStatus(row.cost_class || "COST"))} · ${safe(humanStatus(declared.basis))}: ${currencyExact(declared.amount)} ${safe(String(declared.currency || ""))} per ${safe(String(declared.period || "").toLowerCase())}${(row.corroboration || []).map((item) => ` · ${integer.format((item.observations || []).length)} ${safe(humanStatus(item.role))} (${safe(humanStatus(item.kind))}) ${formatDate((item.observations || [])[0]?.date)}–${formatDate((item.observations || []).slice(-1)[0]?.date)}, feed through ${formatDate(item.feed_last_date)}`).join("")}</span>`
-      : "";
-    const execution = row.execution_cost;
-    let executionLine = "";
-    if (execution && typeof execution === "object") {
-      if (execution.status === "AVAILABLE") {
-        const parts = (execution.by_currency || []).map((item) => `${safe(item.currency)} ${safe(item.amount)} (${integer.format(item.record_count)})`).join(" · ");
-        const usd = execution.usd_total == null ? safe(humanStatus(execution.usd_status)) : `USD total ${currencyExact(execution.usd_total)}`;
-        executionLine = `<span class="cell-secondary">Execution cost (commissions, ${formatDate(execution.window_start)}–${formatDate(execution.window_end)}, ${integer.format(execution.record_count)} records): ${parts} · ${usd}</span>`;
-      } else {
-        executionLine = `<span class="cell-secondary">Execution cost: ${safe(humanStatus(execution.status))}</span>`;
-      }
-    }
-    return `<span class="cell-primary">${safe(humanStatus(row.cost_status))}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span>${declaredLine}${executionLine}<span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
+    return `<span class="cell-primary">${safe(humanStatus(row.cost_status))}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
   };
   // N55: who authorized the current benchmark assignment.  An owner-made override is
   // named explicitly; a row that has never been overridden retains the prior status quo

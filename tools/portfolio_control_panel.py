@@ -9215,6 +9215,34 @@ def _identity_row_for(
     return identity
 
 
+# IBKR Flex ``assetCategory`` codes in plain words.  A code outside this documented
+# vocabulary is shown as its own words, never guessed.
+_ASSET_CATEGORY_WORDS: Final = {
+    "BILL": "Treasury bill",
+    "BOND": "Bond",
+    "CASH": "Cash or currency",
+    "CFD": "Contract for difference",
+    "CMDTY": "Commodity",
+    "CRYPTO": "Cryptocurrency",
+    "FOP": "Futures option",
+    "FUND": "Fund",
+    "FUT": "Future",
+    "OPT": "Option",
+    "STK": "Stock",
+    "WAR": "Warrant",
+}
+
+
+def asset_category_label(category: object) -> str | None:
+    """A plain-words label for an asset category code, or None without a code."""
+
+    if not isinstance(category, str) or not category.strip():
+        return None
+    return _ASSET_CATEGORY_WORDS.get(
+        category.strip().upper(), category.strip().replace("_", " ").lower().title()
+    )
+
+
 def _position_symbol_status_and_reason(
     row: Mapping[str, Any],
     identity_index: Mapping[tuple[str, str, str], Mapping[str, Any]] | None,
@@ -10225,6 +10253,7 @@ def _panel_data(
             {
                 **row,
                 "asset_category": asset_category,
+                "asset_category_label": asset_category_label(asset_category),
                 "symbol": symbol,
                 "strategy_name": (
                     None
@@ -13196,6 +13225,7 @@ def verify_candidate(
             {
                 **row,
                 "asset_category": asset_category,
+                "asset_category_label": asset_category_label(asset_category),
                 "symbol": symbol,
                 "strategy_name": (
                     None
