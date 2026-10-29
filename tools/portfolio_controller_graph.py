@@ -118,6 +118,7 @@ _PATH_STAGES = {
     "tools/release_replica.py": [],
     "tools/release_cache_base.py": [],
     "tools/release_measurements.py": [],
+    "tools/release_validation.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
     # The implementation reconciliation and return-attribution builders write the
