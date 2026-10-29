@@ -250,3 +250,65 @@ def test_stage_is_create_only_validated_and_never_publishes(tmp_path: Path) -> N
         replay_tool.build(**{**arguments, "window_end": date(2026, 1, 12)})
     again = replay_tool.build(**arguments)
     assert again[1].generation_id == manifest.generation_id
+
+
+def _stage_arguments(tmp_path: Path) -> dict[str, object]:
+    policy_path = _write_policy(tmp_path / "p.json")
+    prices = _prices(tmp_path / "prices.csv")
+    log = _log(
+        tmp_path / "log.csv",
+        [("2026-01-05 07:00", "Buy"), ("2026-01-09 13:00", "Sell")],
+    )
+    policy, _ = replay_tool.load_policy(policy_path)
+    signals = replay_tool.load_signals(log.read_bytes(), policy)
+    bars = replay_tool.load_bars(prices.read_bytes(), policy)
+    reference = {
+        day: value for day, value, _, _ in replay_tool.replay(signals, bars, policy)
+    }
+    return {
+        "trade_log": log,
+        "prices": prices,
+        "policy_path": policy_path,
+        "reference": reference,
+        "reference_identity": {"name": "fixture", "sha256": "0" * 64},
+        "window_start": date(2026, 1, 6),
+        "window_end": date(2026, 1, 9),
+        "as_of": date(2026, 1, 12),
+    }
+
+
+def test_window_may_not_pass_the_declared_as_of_date(tmp_path: Path) -> None:
+    arguments = _stage_arguments(tmp_path)
+    with pytest.raises(replay_tool.SignalReplayError, match="as-of"):
+        replay_tool.build(**{**arguments, "as_of": date(2026, 1, 8)})
+
+
+def test_price_file_must_cover_the_window(tmp_path: Path) -> None:
+    arguments = _stage_arguments(tmp_path)
+    prices = arguments["prices"]
+    assert isinstance(prices, Path)
+    kept = [
+        line
+        for line in prices.read_text().splitlines()
+        if "2026-01-08" not in line and "2026-01-07" not in line
+    ]
+    prices.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    with pytest.raises(replay_tool.SignalReplayError, match="consecutive weekdays"):
+        replay_tool.build(**arguments)
+
+
+def test_signal_times_are_converted_into_the_policy_zone(tmp_path: Path) -> None:
+    log = _log(tmp_path / "log.csv", [("2026-01-05 08:00", "Buy")])
+    new_york, _ = replay_tool.load_policy(_write_policy(tmp_path / "ny.json"))
+    utc, _ = replay_tool.load_policy(
+        _write_policy(
+            tmp_path / "utc.json",
+            time_zone="UTC",
+            session_open="14:30",
+            session_close="21:00",
+        )
+    )
+    local = replay_tool.load_signals(log.read_bytes(), new_york)[0][0]
+    converted = replay_tool.load_signals(log.read_bytes(), utc)[0][0]
+    assert local.hour == 8
+    assert converted.hour == 13

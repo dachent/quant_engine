@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
@@ -44,6 +44,8 @@ from quant_engine.core import (
 )
 
 
+#: The trade-log column header ("Date (ET)") declares its own zone.
+TRADE_LOG_ZONE: Final = ZoneInfo("America/New_York")
 ADAPTER_VERSION: Final = "1"
 CATALOG_SCHEMA_VERSION: Final = 1
 RETURN_FIELDS: Final = (
@@ -214,6 +216,11 @@ def load_signals(content: bytes, policy: Policy) -> list[tuple[datetime, str]]:
             observed = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
         except ValueError as exc:
             raise SignalReplayError("trade log timestamp is invalid") from exc
+        observed = (
+            observed.replace(tzinfo=TRADE_LOG_ZONE)
+            .astimezone(policy.zone)
+            .replace(tzinfo=None)
+        )
         action = _text(row.get("Action"), "trade log action").upper()
         if action not in policy.action_states:
             raise SignalReplayError(f"trade log action is not in the policy: {action}")
@@ -446,6 +453,28 @@ def build(
     price_bytes = prices.read_bytes()
     signals = load_signals(log_bytes, policy)
     bars = load_bars(price_bytes, policy)
+    if window_end > as_of:
+        raise SignalReplayError("replay window ends after the declared as-of date")
+    bar_days = sorted(bars)
+    if bar_days[0] > window_start or bar_days[-1] < window_end:
+        raise SignalReplayError(
+            "price file does not cover the replay window: "
+            f"{bar_days[0].isoformat()}..{bar_days[-1].isoformat()}"
+        )
+    # A single missing weekday is a market holiday; two or more in a row are a hole
+    # in the price file, not a closure, and would silently drop returns.
+    present = set(bar_days)
+    cursor, run = window_start, 0
+    while cursor <= window_end:
+        if cursor.weekday() < 5 and cursor not in present:
+            run += 1
+            if run >= 2:
+                raise SignalReplayError(
+                    f"price file has consecutive weekdays missing near {cursor.isoformat()}"
+                )
+        elif cursor.weekday() < 5:
+            run = 0
+        cursor += timedelta(days=1)
     replayed = replay(signals, bars, policy)
     # The log only constrains the state from its first signal, so the comparison
     # starts at the first trading day after it.
