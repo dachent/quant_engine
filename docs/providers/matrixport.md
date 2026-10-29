@@ -24,9 +24,35 @@ permission. In particular, the following remain blocked even though they use
 - the private-portfolio access-code bind endpoint;
 - every endpoint whose semantic safety class is not `read_only`.
 
-All `POST` and `PUT` requests are rejected. The only supported credential
-source is the Windows Generic Credential `BIT.com-API`; values remain in memory
-and are never accepted through arguments, environment variables, or files.
+All `POST` and `PUT` requests are rejected. Credentials come from an ordered
+list of sources, never from arguments, environment variables, or files, and values
+remain in memory (redacted representation, sanitized errors). By default the
+source is the Windows Generic Credential `BIT.com-API`. `--credentials-config
+PATH` (a TOML file holding references, never values) selects a plan instead:
+
+```toml
+[credentials.sources.azure-keyvault]
+command = ["<the sanctioned read-only Key Vault helper and its fixed arguments>"]
+
+[credentials.matrixport]
+access_key = [
+  {source = "azure-keyvault", name = "<vault secret name>"},
+  {source = "windows-credential-manager", name = "BIT.com-API", field = "username"},
+]
+signing_secret = [
+  {source = "azure-keyvault", name = "<vault secret name>"},
+  {source = "windows-credential-manager", name = "BIT.com-API", field = "password"},
+]
+```
+
+Sources are `azure-keyvault` (the configured helper is run with the secret name
+as its only argument and its stdout is the value), `bitwarden` (`bw get` with a
+session the operator has already unlocked; the adapter never handles a master
+password or session key) and `windows-credential-manager`. Each field tries its
+candidates in order; a candidate may carry only `source`, `name` and `field`, so a
+plan cannot hold a literal value. The same plan feeds the secret needles that the
+verifiers scan for. Run metadata records only a label (`BIT.com-API`,
+`configured-credential-plan` or `injected-credentials`), never a secret or its name.
 Live reads require separate, current authority in the governing GitHub issue.
 Before the adapter constructs a production transport, the operator must supply
 one reviewed JSON evidence file with a current authority record and an issue
