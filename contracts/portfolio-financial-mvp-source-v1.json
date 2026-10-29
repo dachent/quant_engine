@@ -3309,10 +3309,8 @@
    "outcome_id": "DECOMPOSITION",
    "owner_issue": 328,
    "product_requirement": "REQUIRED",
-   "readiness": "REQUIRED_NOT_READY",
-   "blockers": [
-    328
-   ],
+   "readiness": "READY",
+   "blockers": [],
    "accepted_statuses": [
     "AVAILABLE",
     "DIAGNOSTIC_ONLY",
