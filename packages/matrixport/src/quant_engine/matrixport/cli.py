@@ -23,6 +23,16 @@ def _parser() -> argparse.ArgumentParser:
         prog="quant-engine-matrixport",
         description="Read-only Matrixport/BIT data extraction and export",
     )
+    parser.add_argument(
+        "--credentials-config",
+        type=Path,
+        help=(
+            "TOML file with a [credentials.matrixport] plan naming where the "
+            "keys are read from (Azure Key Vault, Bitwarden, Windows Credential "
+            "Manager); the file holds references, never values. Without it the "
+            "Windows generic credential BIT.com-API is used."
+        ),
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     auth_test = subcommands.add_parser(
@@ -66,8 +76,8 @@ def _report(message: str) -> None:
     print(f"[matrixport] {message}", file=sys.stderr, flush=True)
 
 
-def _secret_needles() -> list[bytes]:
-    credentials = load_credentials()
+def _secret_needles(config_path: Path | None = None) -> list[bytes]:
+    credentials = load_credentials(config_path)
     values = (credentials.key_identifier, credentials.signing_material)
     needles: list[bytes] = []
     for value in values:
@@ -82,6 +92,7 @@ def _extract(args: argparse.Namespace) -> int:
         mode=mode,
         run_id=args.resume,
         resume=bool(args.resume),
+        credentials_config=args.credentials_config,
         governance_evidence=args.governance_evidence,
         reporter=_report,
     )
@@ -103,10 +114,10 @@ def _extract(args: argparse.Namespace) -> int:
     return 0
 
 
-def _verify(run_id: str) -> tuple[int, dict[str, Any]]:
+def _verify(run_id: str, config_path: Path | None = None) -> tuple[int, dict[str, Any]]:
     validate_run_id(run_id)
     run_dir = _workspace() / "output" / run_id
-    result = verify_run(run_dir, _secret_needles())
+    result = verify_run(run_dir, _secret_needles(config_path))
     release_path = run_dir / "reports" / "release_status.json"
     try:
         release = json.loads(release_path.read_text(encoding="utf-8"))
@@ -131,7 +142,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "auth-test":
             print(
-                canonical_json(live_auth_test(_workspace(), args.governance_evidence))
+                canonical_json(
+                    live_auth_test(
+                        _workspace(),
+                        args.governance_evidence,
+                        credentials_config=args.credentials_config,
+                    )
+                )
             )
             return 0
         if args.command == "catalog":
@@ -160,9 +177,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "verify":
-            return _verify(args.run_id)[0]
+            return _verify(args.run_id, args.credentials_config)[0]
         if args.command == "run":
-            credentials = load_credentials()
+            credentials = load_credentials(args.credentials_config)
             extractor = MatrixportExtractor(
                 _workspace(),
                 mode="full",
