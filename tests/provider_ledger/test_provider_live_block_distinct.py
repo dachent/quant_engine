@@ -207,3 +207,51 @@ def test_panel_verifier_refuses_the_copied_block() -> None:
         )
     own = {**EU_COPIED_BLOCK, "cumulative_return": "0.5"}
     assert set(panel._validated_strategy_evidence(_panel_payload(own), ids)) == ids
+
+
+def test_series_digest_distinguishes_equal_aggregates() -> None:
+    first = {**AI_PROVIDER_BLOCK, "return_series_sha256": "1" * 64}
+    second = {**EU_COPIED_BLOCK, "return_series_sha256": "2" * 64}
+    rows = [
+        {"strategy_id": "p123-ai-factor", "provider": first},
+        {"strategy_id": "p123-eu", "provider": second},
+    ]
+    assert shared_provider_live_blocks(rows) == []
+    rows[1]["provider"]["return_series_sha256"] = "1" * 64
+    assert shared_provider_live_blocks(rows) == [("p123-ai-factor", "p123-eu")]
+
+
+def test_admitted_provider_path_clears_a_prior_unavailable_declaration() -> None:
+    generation = ProviderGenerationIdentity(
+        provider_id="portfolio123",
+        generation_id="d" * 64,
+        manifest_sha256="b" * 64,
+        catalog_sha256="c" * 64,
+        qualification=GenerationQualification.PUBLISHED_COMPLETE,
+    )
+    prior = [
+        {
+            "strategy_id": "p123-eu",
+            "strategy_name": "EU [P123]",
+            "provider_id": "portfolio123",
+            "provider_live": {"status": "UNAVAILABLE", "reason_code": "X"},
+        }
+    ]
+    returns = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "PROVIDER_LIVE",
+            "provider_id": "portfolio123",
+            "return": "0.01",
+            "strategy_id": "p123-eu",
+        }
+    ]
+    refreshed = ledger._refresh_strategy_evidence(
+        returns,
+        prior,
+        {"p123-eu": "EU [P123]"},
+        {"portfolio123": generation},
+        {"portfolio123": DAY},
+    )
+    assert "provider_live" not in refreshed[0]
+    assert refreshed[0]["provider"]["return_observations"] == 1

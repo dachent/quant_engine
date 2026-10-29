@@ -1468,11 +1468,17 @@ def shared_provider_live_blocks(
         block = row.get("provider")
         if not isinstance(block, Mapping):
             continue
-        measured = {
-            key: value
-            for key, value in block.items()
-            if key not in PROVIDER_LIVE_BLOCK_IDENTITY_KEYS
-        }
+        series_digest = block.get("return_series_sha256")
+        if isinstance(series_digest, str) and series_digest:
+            # A digest of the ordered returns is path-specific; aggregate statistics
+            # are only the fallback for blocks that carry no series digest.
+            measured: dict[str, Any] = {"return_series_sha256": series_digest}
+        else:
+            measured = {
+                key: value
+                for key, value in block.items()
+                if key not in PROVIDER_LIVE_BLOCK_IDENTITY_KEYS
+            }
         if not measured:
             continue
         fingerprint = _canonical_json_value_bytes(measured)

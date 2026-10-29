@@ -7472,6 +7472,9 @@ def _refresh_strategy_evidence(
             refreshed_row.pop("account", None)
         if accepted_provider_rows or prior_provider:
             provider_generation = provider_generations.get(provider_provider_id)
+            if accepted_provider_rows:
+                # An admitted path supersedes a prior declaration that none existed.
+                refreshed_row.pop("provider_live", None)
             refreshed_row["provider"] = {
                 **prior_provider,
                 **(
