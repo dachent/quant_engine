@@ -77,6 +77,46 @@ def canonical_json_bytes(value: Mapping[str, Any] | Sequence[Any]) -> bytes:
     ).encode("utf-8")
 
 
+# Identity keys name which entity or generation a provider-live block was read from. The
+# remaining keys are the measured path itself; two strategies cannot honestly measure the
+# same path, so a shared path is a copied block, whatever identity it carries.
+PROVIDER_LIVE_BLOCK_IDENTITY_KEYS = frozenset(
+    {
+        "entity_id",
+        "generation_as_of_date",
+        "generation_id",
+        "model_entity_id",
+        "provider_id",
+    }
+)
+
+
+def shared_provider_live_blocks(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str]]:
+    """Return strategy id pairs whose provider-live blocks carry the same measured path."""
+
+    owners: dict[bytes, str] = {}
+    shared: list[tuple[str, str]] = []
+    for row in rows:
+        block = row.get("provider")
+        if not isinstance(block, Mapping) or not block:
+            continue
+        measured = {
+            key: value
+            for key, value in block.items()
+            if key not in PROVIDER_LIVE_BLOCK_IDENTITY_KEYS
+        }
+        if not measured:
+            continue
+        fingerprint = canonical_json_bytes(measured)
+        strategy_id = str(row.get("strategy_id"))
+        owner = owners.setdefault(fingerprint, strategy_id)
+        if owner != strategy_id:
+            shared.append((owner, strategy_id))
+    return shared
+
+
 # A payload that is hashed for embedding or pinning travels to machines that have never
 # seen this filesystem. An absolute locator inside one is inert at best and a disclosure at
 # worst, and the repository's stated pattern is to anchor by hash without disclosing the

@@ -49,7 +49,10 @@ from quant_engine.core import (
     read_generation_bundle,
     stage_generation,
 )
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core.contracts import (
+    canonical_json_bytes,
+    shared_provider_live_blocks,
+)
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     HwmInputsContractError,
@@ -5226,6 +5229,12 @@ def _strategy_provider_evidence(
                 "return_series_sha256": canonical["return_series_sha256"],
             }
         rows.append(row)
+    shared = shared_provider_live_blocks(rows)
+    if shared:
+        raise ReportValidationError(
+            "strategy provider evidence provider-live block is shared by strategies: "
+            + ", ".join(f"{first}={second}" for first, second in shared)
+        )
     return rows
 
 
