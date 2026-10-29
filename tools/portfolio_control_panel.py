@@ -5010,6 +5010,129 @@ def _schema_three_orthogonal_surface(
     return orthogonal, identities, interval
 
 
+ALPHA_ANNUALISATION: Final = "ARITHMETIC_PERIODIC_INTERCEPT_TIMES_PERIODS_PER_YEAR"
+_ALPHA_RATIO_QUANTUM: Final = Decimal("0.000000000001")
+
+
+def _alpha_decimal(value: object) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
+
+
+def _optional_mapping(value: object) -> Mapping[str, Any] | None:
+    return value if isinstance(value, Mapping) else None
+
+
+def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
+    """What a reader needs next to an alpha tile: window, n, SE, t, backtest share, basis.
+
+    Derived only from fields the analytics already carry (alpha, coverage,
+    series_composition, interval_association); nothing is added to ``alpha``.  The
+    annualisation multiplier is the governed ``periods_per_year`` the model used, and
+    the basis says when it was applied to a window shorter than a year.
+    """
+
+    alpha: Mapping[str, Any] | None = _optional_mapping(row.get("alpha"))
+    coverage: Mapping[str, Any] = _optional_mapping(row.get("coverage")) or {}
+    composition: Mapping[str, Any] = (
+        _optional_mapping(row.get("series_composition")) or {}
+    )
+    association: Mapping[str, Any] = (
+        _optional_mapping(row.get("interval_association")) or {}
+    )
+    net = _alpha_decimal(alpha.get("net_annualized")) if alpha else None
+    gross = _alpha_decimal(alpha.get("gross_annualized")) if alpha else None
+    available = alpha is not None and (net is not None or gross is not None)
+    reasons = row.get("unavailable_reasons")
+    unavailable_reason = (
+        None
+        if available
+        else (
+            str(alpha.get("net_status"))
+            if alpha is not None and alpha.get("net_status") is not None
+            else str(reasons[0])
+            if isinstance(reasons, list) and reasons
+            else str(row.get("status"))
+        )
+    )
+    start, end = coverage.get("observed_start"), coverage.get("observed_end")
+    days = (
+        (date.fromisoformat(end) - date.fromisoformat(start)).days
+        if isinstance(start, str) and isinstance(end, str)
+        else None
+    )
+    se_text = alpha.get("annualized_standard_error") if alpha else None
+    se = _alpha_decimal(se_text)
+    t_stat = net / se if net is not None and se is not None and se != 0 else None
+    backtest = composition.get("backtest_observations_used")
+    live = composition.get("live_observations")
+    used = composition.get("calculation_observations_used")
+    share = (
+        Decimal(backtest) / Decimal(used)
+        if isinstance(backtest, int)
+        and isinstance(used, int)
+        and not isinstance(used, bool)
+        and used > 0
+        else None
+    )
+    basis_status = alpha.get("net_status") if alpha else None
+    cost_coverage = row.get("cost_coverage")
+    label_parts = [
+        str(basis_status if basis_status is not None else row.get("status")),
+        None if share is None else f"{share * 100:.0f}% backtest",
+        None if cost_coverage is None else f"cost coverage {cost_coverage}",
+    ]
+    factor_end = coverage.get("factor_observed_end")
+    history_end = composition.get("accepted_history_complete_through")
+    staleness = (
+        (date.fromisoformat(history_end) - date.fromisoformat(factor_end)).days
+        if isinstance(factor_end, str) and isinstance(history_end, str)
+        else None
+    )
+    periods = association.get("periods_per_year")
+    return {
+        "status": "AVAILABLE" if available else "UNAVAILABLE",
+        "unavailable_reason": unavailable_reason,
+        "window_start": start,
+        "window_end": end,
+        "window_days": days,
+        "n_obs": coverage.get("aligned_observations"),
+        "train_observations": coverage.get("train_observations"),
+        "se": None if se is None else se_text,
+        "t_stat": None if t_stat is None else format(t_stat, "f"),
+        "t_status": (
+            "AVAILABLE_" + str(alpha.get("confidence_status"))
+            if t_stat is not None and alpha is not None
+            else "UNAVAILABLE_NO_STANDARD_ERROR"
+        ),
+        "backtest_observations": backtest if isinstance(backtest, int) else None,
+        "live_observations": live if isinstance(live, int) else None,
+        "backtest_share": (
+            None if share is None else format(share.quantize(_ALPHA_RATIO_QUANTUM), "f")
+        ),
+        "basis_status": basis_status,
+        "basis_label": " \u00b7 ".join(part for part in label_parts if part),
+        "cost_coverage": cost_coverage,
+        "periods_per_year": periods if isinstance(periods, int) else None,
+        "annualisation": ALPHA_ANNUALISATION,
+        "annualisation_basis": (
+            None
+            if days is None
+            else "ANNUALISED_FROM_DAYS"
+            if days < 365
+            else "ANNUALISED"
+        ),
+        "alternatives": [],
+        "factor_as_of_date": factor_end if isinstance(factor_end, str) else None,
+        "factor_staleness_days": staleness,
+    }
+
+
 def _factor_analysis(
     decomposition: Mapping[str, Any],
     identity: Mapping[str, str],
@@ -5313,7 +5436,7 @@ def _factor_analysis(
         "methodology_version": methodology_version,
         "proxy_governance": accepted_proxy_governance,
         "series_composition": series_composition,
-        "series": rows,
+        "series": [{**row, "alpha_context": _alpha_context(row)} for row in rows],
         "source_sha256": identity["sha256"],
         "sources": _object(decomposition.get("sources"), "factor.sources"),
         "unavailable_count": sum(row["status"] == "UNAVAILABLE" for row in rows),
@@ -5323,6 +5446,9 @@ def _factor_analysis(
 def _unavailable_factor_row(series_id: str, reason: str) -> dict[str, Any]:
     return {
         "alpha": None,
+        "alpha_context": _alpha_context(
+            {"status": "UNAVAILABLE", "unavailable_reasons": [reason]}
+        ),
         "contribution_summary": None,
         "cost_coverage": "INCOMPLETE",
         "coverage": None,
@@ -5729,6 +5855,48 @@ def _group_decomposition_lens_sources(
     }
 
 
+def _attach_alpha_alternatives(grouped: Sequence[Mapping[str, Any]]) -> None:
+    """Point an inapplicable series at the lenses where the same series has an alpha.
+
+    A series whose method scope excludes a lens (a crypto strategy on the equity
+    factor sources) carries the lenses, sources and surface where the analytics do
+    give it an alpha, so the tile can say where to look instead of only "not
+    applicable".  The row dicts are shared with the lens-level series list, so the
+    change is made in place.
+    """
+
+    found: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for lens in grouped:
+        surfaces = lens.get("surfaces")
+        for surface, node in surfaces.items() if isinstance(surfaces, Mapping) else []:
+            for row in _objects(node.get("series"), "lens surface series"):
+                context = row.get("alpha_context")
+                if (
+                    isinstance(context, dict)
+                    and context.get("status") == "AVAILABLE"
+                    and row.get("status") in {"AVAILABLE", "DIAGNOSTIC_ONLY"}
+                ):
+                    found.setdefault((str(row.get("series_id")), surface), []).append(
+                        {
+                            "lens_id": lens.get("lens_id"),
+                            "lens_label": lens.get("lens_label"),
+                            "source_key": row.get("source_key"),
+                            "surface": surface,
+                            "series_status": row.get("status"),
+                            "basis_status": context.get("basis_status"),
+                        }
+                    )
+    for lens in grouped:
+        surfaces = lens.get("surfaces")
+        for surface, node in surfaces.items() if isinstance(surfaces, Mapping) else []:
+            for row in _objects(node.get("series"), "lens surface series"):
+                context = row.get("alpha_context")
+                if isinstance(context, dict) and context.get("status") == "UNAVAILABLE":
+                    context["alternatives"] = list(
+                        found.get((str(row.get("series_id")), surface), [])
+                    )
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -6033,6 +6201,7 @@ def _decomposition_lenses_for_mode(
                 "surfaces": surfaces,
             }
         )
+    _attach_alpha_alternatives(grouped)
     return (
         {
             "default_lens": "ECONOMIC_FACTOR",
@@ -9112,8 +9281,58 @@ def _lens_is_source_qualified(rows: Sequence[Mapping[str, Any]]) -> bool:
 HWM_CANDIDATE_LABEL: Final = "Governed PORT-HWM-4 candidate, pending owner acceptance"
 
 
+HWM_CANDIDATE_PERIMETER: Final = "SYSTEMATIC_EX_RESERVE"
+_HWM_KPI_QUANTUM: Final = Decimal("0.0001")
+
+
+def _hwm_kpi_text(value: object, name: str) -> str:
+    """A governed index value as 4-decimal text for the KPI tile."""
+
+    if not isinstance(value, str):
+        raise ControlPanelValidationError(f"{name} must be decimal text")
+    try:
+        number = Decimal(value)
+    except InvalidOperation as exc:
+        raise ControlPanelValidationError(f"{name} must be decimal text") from exc
+    if not number.is_finite():
+        raise ControlPanelValidationError(f"{name} must be finite")
+    return format(number.quantize(_HWM_KPI_QUANTUM), "f")
+
+
+def _hwm_missing_daily_points(
+    epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The source dates the epoch HPR receipts declare missing, from the receipts."""
+
+    points: list[dict[str, Any]] = []
+    for outer in epoch_hpr_receipts or []:
+        receipt = outer.get("receipt")
+        spans = (
+            receipt.get("span_return_receipts")
+            if isinstance(receipt, Mapping)
+            else None
+        )
+        for span in spans if isinstance(spans, list) else []:
+            if not isinstance(span, Mapping):
+                continue
+            points.append(
+                {
+                    "strategy_id": outer.get("strategy_id"),
+                    "date": span.get("missing_source_date"),
+                    "span_start_date": span.get("span_start_date"),
+                    "span_end_date": span.get("span_end_date"),
+                    "span_return": span.get("return"),
+                }
+            )
+    return sorted(
+        points, key=lambda item: (str(item["strategy_id"]), str(item["date"]))
+    )
+
+
 def _hwm_candidate(
-    proof: Mapping[str, Any] | None, hwm_summary: Mapping[str, Any]
+    proof: Mapping[str, Any] | None,
+    hwm_summary: Mapping[str, Any],
+    epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """The governed number as a labelled candidate beside the numeric status.
 
@@ -9121,6 +9340,8 @@ def _hwm_candidate(
     two-day spans can hide a peak) keeps it unaccepted, and the governed PORT-HWM-4
     receipt is pending owner acceptance.  The panel shows that number under its own
     label instead of hiding it, so no "no number is calculated" text sits beside it.
+    ``kpi`` carries what the Risk-tab KPI prints, so the renderer composes no text of
+    its own; acceptance is not changed by it.
     """
 
     if proof is None or proof.get("status") != "AVAILABLE":
@@ -9130,6 +9351,8 @@ def _hwm_candidate(
             "governed HWM proof carries an unexpected financial acceptance state"
         )
     unaccepted = hwm_summary.get("hwm_numerical_status", "UNAVAILABLE") == "UNAVAILABLE"
+    path = proof.get("index_path")
+    index_path = path if isinstance(path, list) else []
     return {
         "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
         "policy_id": proof["policy_id"],
@@ -9146,6 +9369,27 @@ def _hwm_candidate(
         "not_accepted_register": "E2",
         "receipt_sha256": proof["receipt_sha256"],
         "label": HWM_CANDIDATE_LABEL,
+        "kpi": {
+            "value": _hwm_kpi_text(proof["current_index"], "HWM current index"),
+            "hwm": _hwm_kpi_text(proof["current_hwm"], "HWM current high-water mark"),
+            "drawdown": _hwm_kpi_text(
+                proof["current_drawdown"], "HWM current drawdown"
+            ),
+            "label": HWM_CANDIDATE_LABEL,
+            "perimeter": HWM_CANDIDATE_PERIMETER,
+            "return_basis": proof["return_basis"],
+            "index_points": len(index_path),
+            "window_start": index_path[0].get("as_of") if index_path else None,
+            "window_end": index_path[-1].get("as_of") if index_path else None,
+            "gated_status": {
+                "policy_id": hwm_summary.get("policy_id"),
+                "hwm_numerical_status": hwm_summary.get(
+                    "hwm_numerical_status", "UNAVAILABLE"
+                ),
+                "hwm_numerical_reason": hwm_summary.get("hwm_numerical_reason"),
+            },
+            "missing_daily_points": _hwm_missing_daily_points(epoch_hpr_receipts),
+        },
     }
 
 
@@ -10498,7 +10742,18 @@ def _panel_data(
                 if hwm_summary.get("hwm_numerical_status") == "AVAILABLE"
                 else {}
             ),
-            "hwm_candidate": _hwm_candidate(governed_hwm_proof, hwm_summary),
+            "hwm_candidate": _hwm_candidate(
+                governed_hwm_proof,
+                hwm_summary,
+                (
+                    list(epoch_hpr_receipts)
+                    if epoch_hpr_receipts is not None
+                    else _objects(
+                        current_product_catalog.get("epoch_hpr_receipts", []),
+                        "epoch_hpr_receipts",
+                    )
+                ),
+            ),
             "nav_coverage": hwm_summary["nav_coverage"],
             "readiness": (
                 _summary_value(summary, "Advisory readiness")
