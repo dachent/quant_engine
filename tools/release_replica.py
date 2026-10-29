@@ -36,6 +36,7 @@ from quant_engine.core import (
     canonical_json_bytes,
     is_replica_spec,
     load_pipeline_spec,
+    replica_anchor,
     verify_replica_receipt,
 )
 
@@ -72,7 +73,10 @@ def _rebase(path: Path, workspace: Path, replica: Path) -> Path:
 
 
 def copy_replica(
-    spec_path: Path, workspace_root: Path, replica_root: Path
+    spec_path: Path,
+    workspace_root: Path,
+    replica_root: Path,
+    allowed_state_roots: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """Copy CURRENT + current generation per root, small provider generations, and the
     whole coordination root. The source is only read. The marker is written last, so a
@@ -129,7 +133,11 @@ def copy_replica(
         "extra_provider_bytes": extra_bytes,
         "kind": REPLICA_MARKER_KIND,
         "schema_version": 1,
+        "allowed_state_roots": sorted(
+            Path(p).resolve().as_posix() for p in allowed_state_roots
+        ),
         "source_spec_sha256": _sha256_file(spec_path),
+        "source_workspace": workspace.as_posix(),
     }
     (replica_root / REPLICA_MARKER_NAME).write_bytes(canonical_json_bytes(marker))
     return marker
@@ -157,6 +165,13 @@ def snapshot_pointers(spec_path: Path, out_path: Path) -> dict[str, Any]:
     )
     out_path.write_bytes(json.dumps(snap, indent=1, sort_keys=True).encode("utf-8"))
     return snap
+
+
+def _read_marker_file(anchor: Path) -> dict[str, Any]:
+    marker = json.loads((anchor / REPLICA_MARKER_NAME).read_bytes())
+    if not isinstance(marker.get("source_workspace"), str):
+        raise ReplicaToolError("replica marker records no source_workspace; copy again")
+    return dict(marker)
 
 
 # -- steps ---------------------------------------------------------------------------
@@ -258,6 +273,7 @@ def _replica_ceremony(a: argparse.Namespace, runner: Runner) -> int:
             "replica spec is not under a replica root marker; run `release_replica.py copy` first"
         )
     real_spec = load_pipeline_spec(Path(a.real_spec))
+    replica_marker = _read_marker_file(replica_anchor(replica_spec))
     authorization = out / "commit-authorization.json"
     evidence = out / "evidence"
     steps: list[dict[str, Any]] = []
@@ -269,6 +285,7 @@ def _replica_ceremony(a: argparse.Namespace, runner: Runner) -> int:
     def finish(commit_result: Mapping[str, Any]) -> int:
         receipt = build_replica_receipt(
             real_spec=real_spec,
+            real_anchor=Path(str(replica_marker["source_workspace"])),
             replica_spec=replica_spec,
             steps=steps,
             commit_result=commit_result,
@@ -527,6 +544,13 @@ def _parser() -> argparse.ArgumentParser:
     copy.add_argument("--spec", type=Path, required=True, help="real production spec")
     copy.add_argument("--workspace-root", type=Path, required=True)
     copy.add_argument("--replica-root", type=Path, required=True)
+    copy.add_argument(
+        "--allow-state-root",
+        type=Path,
+        action="append",
+        default=[],
+        help="state root outside the replica that the replica spec may write (recorded in the marker)",
+    )
     verify = sub.add_parser("verify")
     verify.add_argument("--receipt", type=Path, required=True)
     verify.add_argument("--real-spec", type=Path, required=True)
@@ -553,7 +577,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if a.command == "copy":
             print(
                 json.dumps(
-                    copy_replica(a.spec, a.workspace_root, a.replica_root),
+                    copy_replica(
+                        a.spec, a.workspace_root, a.replica_root, a.allow_state_root
+                    ),
                     sort_keys=True,
                 )
             )
