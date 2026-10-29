@@ -4548,6 +4548,126 @@ def _schwab_position_observation(
     )
 
 
+class _CsvFactContext(NamedTuple):
+    """The shared inputs of one CSV-derived (Matrixport / Quantbase) fact builder."""
+
+    provider_id: str
+    generation_id: str
+    manifest: GenerationManifest
+    catalog: Mapping[str, Any]
+    root: Path
+    accounts: set[str]
+    strategies: set[str]
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]]
+    fx_rates: (
+        tuple[
+            str,
+            Mapping[tuple[str, date], Decimal],
+            tuple[SourceArtifact, SourceArtifact],
+        ]
+        | None
+    )
+    financial_cutoff: date | None
+    exceptions: list[dict[str, Any]]
+
+
+def _csv_matrixport_capital_anchors(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _matrixport_capital_anchors(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        fx_rates=ctx.fx_rates,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
+def _csv_matrixport_nav_observations(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _matrixport_nav_observations(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        fx_rates=ctx.fx_rates,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
+def _csv_quantbase_flows(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _quantbase_flows(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
+def _csv_quantbase_capital_anchors(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _quantbase_capital_anchors(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
+def _csv_quantbase_nav_observations(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _quantbase_nav_observations(
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
+def _csv_quantbase_cash_activity(ctx: _CsvFactContext) -> list[dict[str, Any]]:
+    return _quantbase_cash_activity(
+        ctx.provider_id,
+        ctx.generation_id,
+        ctx.manifest,
+        ctx.catalog,
+        ctx.root,
+        ctx.accounts,
+        ctx.strategies,
+        ctx.assignments,
+        financial_cutoff=ctx.financial_cutoff,
+        cutoff_findings=ctx.exceptions,
+    )
+
+
+_CSV_FACT_BUILDERS: Final = {
+    ("matrixport", "capital_anchors"): _csv_matrixport_capital_anchors,
+    ("matrixport", "nav_observations"): _csv_matrixport_nav_observations,
+    ("quantbase", "capital_anchors"): _csv_quantbase_capital_anchors,
+    ("quantbase", "flows"): _csv_quantbase_flows,
+    ("quantbase", "nav_observations"): _csv_quantbase_nav_observations,
+    ("quantbase", "transactions"): _csv_quantbase_cash_activity,
+}
+
+
 def _project_account_facts(
     provider_id: str,
     generation_id: str,
@@ -4644,72 +4764,13 @@ def _project_account_facts(
                 raise ProviderLedgerError(
                     f"{provider_id} CSV facts require a manifest and root"
                 )
-            if provider_id == "matrixport":
-                rows = (
-                    _matrixport_capital_anchors(
-                        generation_id,
-                        manifest,
-                        catalog,
-                        root,
-                        accounts,
-                        strategies,
-                        assignments,
-                        fx_rates=fx_rates,
-                        financial_cutoff=financial_cutoff,
-                        cutoff_findings=exceptions,
-                    )
-                    if source_fact == "capital_anchors"
-                    else _matrixport_nav_observations(
-                        generation_id,
-                        manifest,
-                        catalog,
-                        root,
-                        accounts,
-                        strategies,
-                        assignments,
-                        fx_rates=fx_rates,
-                        financial_cutoff=financial_cutoff,
-                        cutoff_findings=exceptions,
-                    )
+            builder = _CSV_FACT_BUILDERS.get((provider_id, source_fact))
+            if builder is None:
+                raise ProviderLedgerError(
+                    f"unsupported CSV fact mapping: {provider_id}.{source_fact}"
                 )
-            elif source_fact == "flows":
-                rows = _quantbase_flows(
-                    generation_id,
-                    manifest,
-                    catalog,
-                    root,
-                    accounts,
-                    strategies,
-                    assignments,
-                    financial_cutoff=financial_cutoff,
-                    cutoff_findings=exceptions,
-                )
-            elif source_fact == "capital_anchors":
-                rows = _quantbase_capital_anchors(
-                    generation_id,
-                    manifest,
-                    catalog,
-                    root,
-                    accounts,
-                    strategies,
-                    assignments,
-                    financial_cutoff=financial_cutoff,
-                    cutoff_findings=exceptions,
-                )
-            elif source_fact == "nav_observations":
-                rows = _quantbase_nav_observations(
-                    generation_id,
-                    manifest,
-                    catalog,
-                    root,
-                    accounts,
-                    strategies,
-                    assignments,
-                    financial_cutoff=financial_cutoff,
-                    cutoff_findings=exceptions,
-                )
-            elif source_fact == "transactions":
-                rows = _quantbase_cash_activity(
+            rows = builder(
+                _CsvFactContext(
                     provider_id,
                     generation_id,
                     manifest,
@@ -4718,13 +4779,11 @@ def _project_account_facts(
                     accounts,
                     strategies,
                     assignments,
-                    financial_cutoff=financial_cutoff,
-                    cutoff_findings=exceptions,
+                    fx_rates,
+                    financial_cutoff,
+                    exceptions,
                 )
-            else:
-                raise ProviderLedgerError(
-                    f"unsupported CSV fact mapping: {provider_id}.{source_fact}"
-                )
+            )
             projections[target_fact].extend(rows)
             for row in rows:
                 if row["mapping_status"] == "UNMAPPED":
