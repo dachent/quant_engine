@@ -2965,6 +2965,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         {
             "account_id": "account-00",
             "as_of_date": "2026-07-30",
+            "asset_category": None,
             "evidence_class": "WCH_CURRENT",
             "market_value_usd": "30",
             "quantity": "3",
