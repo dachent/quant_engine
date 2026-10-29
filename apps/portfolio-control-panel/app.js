@@ -548,6 +548,7 @@
     dependence: "Dependence",
     weekly: "Weekly returns",
     performance: "Performance charts",
+    modelvsactual: "Model vs actual",
     candidates: "Frozen candidate appendix",
     data: "Data health",
   };
@@ -1817,6 +1818,78 @@
     return `<div class="callout callout-neutral"><strong>Method boundary:</strong> Clean-room dynamic FLS is MPI-informed and non-equivalent. It implements only the openly described methodology and does not claim proprietary MPI production output.</div><div class="grid grid-12 dynamic-analysis-grid"><div class="panel span-8"><div class="panel-heading"><div><div class="eyebrow">Effective-dated factor betas</div><h3>${safe(row.series_id)}</h3></div><span class="badge badge-positive">${safe(humanStatus(dynamic.validation || "UNAVAILABLE"))}</span></div><svg class="dynamic-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Dynamic factor beta path for ${safe(row.series_id)}"><line class="zero-line" x1="${left}" x2="${width - right}" y1="${y(0)}" y2="${y(0)}"></line>${holdout}${lines}<text class="chart-label" x="${left}" y="${height - 10}">${safe(path[0].date)}</text><text class="chart-label" text-anchor="end" x="${width - right}" y="${height - 10}">${safe(path[path.length - 1].date)}</text><text class="chart-label" x="6" y="${top + 10}">${decimal(maximum)}</text><text class="chart-label" x="6" y="${height - bottom}">${decimal(minimum)}</text></svg><div class="chart-legend">${legend}<span><i style="background:var(--warning)"></i>Holdout boundary</span></div><div class="metric-list">${latestBetas}</div></div><div class="panel span-4"><div class="panel-heading"><div><div class="eyebrow">Dynamic validation</div><h3>Same-factor static benchmark</h3></div></div><div class="metric-list"><div><span>Latest beta date</span><strong>${safe(latest.date)}</strong></div><div><span>Selected smoothness</span><strong>${safe(dynamic.selected_smoothness || "—")}</strong></div><div><span>Train-only selection R²</span><strong>${pct(dynamic.selection_predicted_r_squared)}</strong></div><div><span>Dynamic holdout R²</span><strong>${pct(comparison.dynamic_predicted_r_squared)}</strong></div><div><span>Static holdout R²</span><strong>${pct(comparison.static_predicted_r_squared)}</strong></div><div><span>Dynamic minus static</span><strong>${pct(comparison.dynamic_minus_static_predicted_r_squared)}</strong></div><div><span>Comparison state</span><strong>${safe(humanStatus(comparison.status || "UNAVAILABLE"))}</strong></div></div></div>${replicationAnalysisMarkup(row.series_id)}</div>`;
   }
 
+  // ===== BEGIN orthogonal risk shares (mockup F, issues #355/#328) =====
+  // Reads `orthogonal_risk_attribution` (producer tools/portfolio_orthogonal_risk.py, contract v2): one cell per lens
+  // series row (found by lens, source, surface and series) and one aggregate per mode x lens x source x surface.
+  // Bars are the published share_of_explained, the closure strip the published shares of total; nothing is recomputed
+  // here and a missing term prints its reason.  Components are parallel arrays; a label is the text after the colon.
+  const oraBlock = () => (data.orthogonal_risk_attribution && Number.isInteger(data.orthogonal_risk_attribution.schema_version) ? data.orthogonal_risk_attribution : null);
+  const oraShare = (value) => (number(value) == null ? "—" : `${(Number(value) * 100).toFixed(2)}%`);
+  const oraLabel = (id) => (id === "orthogonal_intercept" ? "Intercept" : String(id).split(":").pop());
+  const oraComponents = (components, field) => {
+    const ids = Array.isArray(components?.ids) ? components.ids : [];
+    const values = Array.isArray(components?.[field]) ? components[field] : [];
+    return ids.map((id, index) => ({ id, label: oraLabel(id), value: values[index], total: components.share_of_total?.[index], explained: components.share_of_explained?.[index] }));
+  };
+  function oraComponentBars(components) {
+    const rows = oraComponents(components, "share_of_explained").filter((item) => number(item.value) != null).sort((a, b) => Number(b.value) - Number(a.value));
+    const max = Math.max(...rows.map((item) => Math.abs(Number(item.value))), 1e-9);
+    return rows.map((item, index) => `<div class="risk-share-row" title="${safe(item.label)}: ${oraShare(item.total)} of total variance"><span>${safe(item.label)}</span><div class="risk-share-track" role="img" aria-label="${safe(item.label)} ${oraShare(item.value)} of explained variance"><i style="width:${(Math.abs(Number(item.value)) / max * 100).toFixed(1)}%;background:${PERF_COLORS[index % PERF_COLORS.length]}${Number(item.value) < 0 ? ";opacity:.55" : ""}"></i></div><b>${oraShare(item.value)}</b></div>`).join("");
+  }
+  function oraClosureStrip(entry) {
+    const closure = entry.closure || {};
+    const parts = [...oraComponents(entry.components, "share_of_total").map((item) => [item.label, item.value]), ["Residual", closure.residual_share], ["Cross term", closure.cross_term_share]].filter(([, value]) => number(value) != null);
+    return `<p class="cell-secondary risk-closure">Share of total variance: ${parts.map(([label, value]) => `${safe(label)} ${oraShare(value)}`).join(" + ")} = ${oraShare(parts.reduce((total, [, value]) => total + Number(value), 0))}. Explained ${oraShare(closure.explained_share)}. A negative share or cross term is printed as published, never clamped or folded into the residual.</p>`;
+  }
+  function oraEvidenceLine(entry, block) {
+    const window = entry.window || {};
+    const fit = entry.fit || {};
+    const evidence = entry.evidence || {};
+    const alpha = fit.alpha || {};
+    const parts = [
+      window.start ? `train ${formatDate(window.start)} to ${formatDate(window.end)} (${integer.format(window.n)} obs${number(window.test_n) != null ? `, ${integer.format(window.test_n)} holdout` : ""})` : null,
+      window.as_of ? `factors as of ${formatDate(window.as_of)}` : null,
+      number(fit.r2) != null ? `R² (train) ${decimal(fit.r2, 3)}` : null,
+      evidence.series_status ? humanStatus(evidence.series_status) : null,
+      number(evidence.backtest_share) != null ? `${pct(evidence.backtest_share, 0)} backtest` : null,
+      evidence.information_set ? humanStatus(evidence.information_set) : null,
+      number(alpha.t) != null ? `alpha t ${decimal(alpha.t, 2)}` : alpha.t_status ? `alpha t-statistic: ${humanStatus(alpha.t_status).toLowerCase()}` : null,
+      block.mode_t_stat && block.mode_t_stat.status === "UNAVAILABLE" ? `mode t-statistics unavailable: ${humanStatus(block.mode_t_stat.reason || "UNAVAILABLE").toLowerCase()}` : null,
+    ].filter(Boolean);
+    return `<p class="cell-secondary">${safe(parts.join(" · "))}</p>`;
+  }
+  function oraAggregateMarkup(aggregate, block) {
+    const excluded = (aggregate.excluded_series || []).map((item) => `${item.series_id} (${humanStatus(item.reason).toLowerCase()})`).join(", ");
+    const unweighted = (aggregate.unweighted_ranges || []).map((item) => `${formatDate(item.start)} to ${formatDate(item.end)} (${integer.format(item.days)} d): ${humanStatus(item.reason).toLowerCase()}`);
+    const ranges = unweighted.length ? `<p class="cell-secondary">Dates with no weight, named and not filled: ${safe(unweighted.join("; "))}.</p>` : "";
+    if (aggregate.status !== "AVAILABLE") return `<h4>All covered strategies</h4><div class="callout callout-neutral">Unavailable: ${safe(humanStatus(aggregate.reason || "UNAVAILABLE"))}${excluded ? `. Excluded: ${safe(excluded)}` : ""}.</div>${ranges}`;
+    const weighting = (aggregate.weighting || []).map((item) => `${humanStatus(item.basis)} ${formatDate(item.start)} to ${formatDate(item.end)} (${integer.format(item.n)} d)`).join("; ");
+    return `<h4>All covered strategies (${integer.format((aggregate.included_series || []).length)}, capital coverage ${pct(aggregate.capital_coverage, 0)})</h4>${oraComponentBars(aggregate.components)}${oraClosureStrip(aggregate)}<p class="cell-secondary">${safe(block.aggregate_note || "")} ${weighting ? `Weighting: ${safe(weighting)}.` : ""}${excluded ? ` Excluded: ${safe(excluded)}.` : ""}</p>${ranges}`;
+  }
+  function orthogonalRiskShareMarkup(row) {
+    const heading = "<h4>Share of total risk (Euler allocation)</h4>";
+    const block = oraBlock();
+    if (!block) return `<div class="risk-share">${heading}<div class="callout callout-neutral">The producer's orthogonal risk attribution is not in this snapshot, so the shares are not shown (the training-window allocations remain in the data tables below).</div></div>`;
+    if (block.status === "UNAVAILABLE") return `<div class="risk-share">${heading}<div class="callout callout-neutral">Unavailable: ${safe(humanStatus(block.reason || "UNAVAILABLE"))}.</div></div>`;
+    const mode = block.modes && block.modes[selectedFactorEvidenceMode];
+    if (!mode || mode.status === "UNAVAILABLE") return `<div class="risk-share">${heading}<div class="callout callout-neutral">Unavailable for this evidence mode: ${safe(humanStatus((mode && mode.reason) || block.reason || "UNAVAILABLE"))}.</div></div>`;
+    const sourceKey = row.source_key || selectedFactorSource;
+    const sameLens = (item) => item.lens_id === selectedFactorLens && item.source_key === sourceKey && item.surface === selectedFactorSurface;
+    const cell = (mode.cells || []).find((item) => sameLens(item) && item.series_id === row.series_id);
+    const aggregate = (mode.aggregates || []).find(sameLens);
+    const cellMarkup = !cell
+      ? '<div class="callout callout-neutral">No attribution cell was published for this series on this lens.</div>'
+      : cell.status !== "AVAILABLE"
+        ? `<div class="callout callout-neutral">Unavailable: ${safe(humanStatus(cell.reason || "UNAVAILABLE"))}.</div>`
+        : `${oraComponentBars(cell.components)}<p class="cell-secondary">Bars are shares of the explained variance. ${safe(block.definition || "")}</p>${oraClosureStrip(cell)}${oraEvidenceLine(cell, block)}`;
+    const coefficients = row.orthogonal_attribution?.mode_coefficients;
+    const loadings = coefficients && !Array.isArray(coefficients) && Object.keys(coefficients).length
+      ? `<h4>Mode loadings (training window)</h4><div class="risk-loadings">${Object.entries(coefficients).map(([name, value]) => `<span><b>${safe(name)}</b> ${decimal(value)}</span>`).join("")}</div><p class="cell-secondary">Static fit: one loading per mode for the whole period.</p>`
+      : "";
+    return `<div class="risk-share">${heading}${cellMarkup}${aggregate ? oraAggregateMarkup(aggregate, block) : ""}${loadings}</div>`;
+  }
+  // ===== END orthogonal risk shares =====
+
   const ORTHOGONAL_DATED_ROW_CAP = 120;
 
   function orthogonalAttributionMarkup(row) {
@@ -1848,10 +1921,38 @@
     const eulerTotal = sumOf(eulerEntries.map(([, value]) => Number(value)).filter(Number.isFinite));
     const riskRows = eulerEntries
       .map(([mode, value]) => `<tr><td>${safe(mode)}</td><td class="numeric">${eulerTotal > 0 && number(value) != null ? pct(Number(value) / eulerTotal, 2) : smallDecimal(value)}</td><td>${safe(humanStatus(riskBudget.interpretation || "UNAVAILABLE"))}</td></tr>`);
+    // Mockup F: the share of risk is shown as bars, the dated contributions as one stacked chart, and the rows behind
+    // them sit in a closed disclosure with their count.
+    const modeNames = [...new Set(perDate.flatMap((dated) => Object.keys(dated.mode_contributions || {})))].sort();
+    const modeColor = (mode) => PERF_COLORS[Math.max(0, modeNames.indexOf(mode)) % PERF_COLORS.length];
+    const shareMarkup = orthogonalRiskShareMarkup(row);
+    const chartDates = perDate.filter((dated) => dated.mode_contributions && Object.keys(dated.mode_contributions).length);
+    let chartMarkup = "";
+    if (chartDates.length && modeNames.length) {
+      const width = 760;
+      const height = 200;
+      const left = 48;
+      const stacks = chartDates.map((dated) => {
+        let up = 0;
+        let down = 0;
+        return modeNames.map((mode) => {
+          const value = number(dated.mode_contributions[mode]) ?? 0;
+          const from = value >= 0 ? up : down;
+          if (value >= 0) up += value; else down += value;
+          return { mode, value, from, to: value >= 0 ? up : down };
+        });
+      });
+      const top = Math.max(...stacks.map((stack) => Math.max(0, ...stack.map((item) => Math.max(item.from, item.to)))), 1e-9);
+      const bottom = Math.min(...stacks.map((stack) => Math.min(0, ...stack.map((item) => Math.min(item.from, item.to)))), -1e-9);
+      const y = (value) => 8 + ((top - value) / (top - bottom)) * (height - 24);
+      const step = (width - left) / chartDates.length;
+      const bars = chartDates.map((dated, index) => `<g><title>${safe(formatDate(dated.date))}: ${modeNames.map((mode) => `${safe(mode)} ${pct(dated.mode_contributions[mode], 3)}`).join(", ")}</title>${stacks[index].filter((item) => item.value !== 0).map((item) => `<rect x="${(left + index * step).toFixed(2)}" y="${y(Math.max(item.from, item.to)).toFixed(2)}" width="${Math.max(step - 0.4, 0.5).toFixed(2)}" height="${Math.max(y(Math.min(item.from, item.to)) - y(Math.max(item.from, item.to)), 0.4).toFixed(2)}" fill="${modeColor(item.mode)}"></rect>`).join("")}</g>`).join("");
+      chartMarkup = `<div class="risk-contrib"><h4>Daily contribution by mode</h4><svg class="perf-svg" viewBox="0 0 ${width} ${height}" role="img" aria-label="Stacked daily contribution by mode, ${safe(formatDate(chartDates[0].date))} to ${safe(formatDate(chartDates[chartDates.length - 1].date))}"><line x1="${left}" x2="${width}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" stroke="currentColor" stroke-opacity=".4"></line>${bars}<text class="axis-label chart-label" x="2" y="${(y(top) + 4).toFixed(1)}">${pct(top, 2)}</text><text class="axis-label chart-label" x="2" y="${(y(bottom) - 2).toFixed(1)}">${pct(bottom, 2)}</text><text class="axis-label chart-label" x="${left}" y="${height - 2}">${safe(formatDate(chartDates[0].date))}</text><text class="axis-label chart-label" text-anchor="end" x="${width}" y="${height - 2}">${safe(formatDate(chartDates[chartDates.length - 1].date))}</text></svg><div class="perf-legend">${modeNames.map((mode) => `<span class="perf-legend-item"><i style="background:${modeColor(mode)}"></i>${safe(mode)}</span>`).join("")}</div><p class="cell-secondary">Hover a day for its date and per-mode contribution (return per period).</p></div>`;
+    }
     const identityText = identity.surface === "ORTHOGONAL_RISK_ATTRIBUTION"
       ? `${humanStatus(identity.surface)} · ${identity.model_id || "model id not published"} · ${identity.methodology_manifest_sha256 || "methodology id not published"}`
       : "orthogonal identity not published";
-    return `<div class="grid grid-12" style="margin-top:16px"><div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Orthogonal risk attribution</div><h3>Mixed modes, separate from raw factor betas</h3></div><span class="badge ${attribution.status === "AVAILABLE" ? "badge-positive" : "badge-warning"}">${safe(humanStatus(attribution.status || "UNAVAILABLE"))}</span></div><div class="callout callout-neutral"><strong>Named surface:</strong> ${safe(identityText)}. ${safe(attribution.method_id || "method not published")}. Mode IDs are mixed orthogonal coordinates, not raw factor betas. <strong>Information set:</strong> ${safe(interval.evaluation_information_set || "UNAVAILABLE")}. <strong>Holdout interpretation:</strong> ${safe(interval.holdout_display_claim || "UNAVAILABLE")}</div>${(modeRows.length || staticRows.length) ? `<div class="table-wrap wide"><table id="orthogonal-coefficient-table"><caption>Orthogonal mixed-mode coefficients and dated contributions</caption>${tableMarkup([["Date"], ["Partition"], ["Mixed mode"], ["Coefficient (mode loading)", "numeric"], ["Contribution (return per period)", "numeric"]], [...staticRows, ...modeRows])}</table></div>${allModeRows.length > modeRows.length ? `<p class="cell-secondary">Showing the first ${integer.format(modeRows.length)} of ${integer.format(allModeRows.length)} dated contribution rows${staticCoefficients ? "; the coefficients are the static fit listed once above" : ""}.</p>` : ""}` : `<div class="callout callout-warning">No orthogonal mode coefficients or contributions are available for this selected model.</div>`}${riskRows.length ? `<div class="table-wrap"><table id="orthogonal-risk-table"><caption>Train-fitted orthogonal risk allocation</caption>${tableMarkup([["Mixed mode"], ["Euler allocation (share of total)", "numeric"], ["Risk interpretation"]], riskRows)}</table></div>` : ""}</div></div>`;
+    return `<div class="grid grid-12" style="margin-top:16px"><div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Orthogonal risk attribution</div><h3>Mixed modes, separate from raw factor betas</h3></div><span class="badge ${attribution.status === "AVAILABLE" ? "badge-positive" : "badge-warning"}">${safe(humanStatus(attribution.status || "UNAVAILABLE"))}</span></div><div class="callout callout-neutral"><strong>Named surface:</strong> ${safe(identityText)}. ${safe(attribution.method_id || "method not published")}. Mode IDs are mixed orthogonal coordinates, not raw factor betas. <strong>Information set:</strong> ${safe(interval.evaluation_information_set || "UNAVAILABLE")}. <strong>Holdout interpretation:</strong> ${safe(interval.holdout_display_claim || "UNAVAILABLE")}</div>${shareMarkup}${chartMarkup}<details class="cell-details orthogonal-data"><summary>Data tables: ${integer.format(allModeRows.length)} dated contribution rows${riskRows.length ? ` and ${integer.format(riskRows.length)} risk-allocation rows` : ""}</summary>${(modeRows.length || staticRows.length) ? `<div class="table-wrap wide"><table id="orthogonal-coefficient-table"><caption>Orthogonal mixed-mode coefficients and dated contributions</caption>${tableMarkup([["Date"], ["Partition"], ["Mixed mode"], ["Coefficient (mode loading)", "numeric"], ["Contribution (return per period)", "numeric"]], [...staticRows, ...modeRows])}</table></div>${allModeRows.length > modeRows.length ? `<p class="cell-secondary">Showing the first ${integer.format(modeRows.length)} of ${integer.format(allModeRows.length)} dated contribution rows${staticCoefficients ? "; the coefficients are the static fit listed once above" : ""}.</p>` : ""}` : `<div class="callout callout-warning">No orthogonal mode coefficients or contributions are available for this selected model.</div>`}${riskRows.length ? `<div class="table-wrap"><table id="orthogonal-risk-table"><caption>Train-fitted orthogonal risk allocation</caption>${tableMarkup([["Mixed mode"], ["Euler allocation (share of total)", "numeric"], ["Risk interpretation"]], riskRows)}</table></div>` : ""}</details></div></div>`;
   }
 
   // Q6: every alpha figure is printed with the evidence that qualifies it.  `series[].alpha_context` (producer) carries the
@@ -2954,6 +3055,181 @@
     renderPerformanceValue();
   }
 
+  // ===== BEGIN model-vs-actual (mockup C, issue #595 PANEL-VIS-004) =====
+  // Presentation of the producer's `model_vs_actual` block (tools/portfolio_model_vs_actual.py): per strategy a primary
+  // window, aligned windows and epochs in one item shape, a bridge of signed components that sums with an always-printed
+  // residual to the gap, memo lines outside the closure, a dollar-weighted portfolio bridge and the pulls that replace
+  // audit-derived terms.  Every label, tag, window and number is read from the payload; AUDIT_DERIVED and ESTIMATED rows
+  // are never presented as evidenced, and a missing or unavailable term prints its reason and the pull that replaces it.
+  const mvaBlock = () => (data.model_vs_actual && Number.isInteger(data.model_vs_actual.schema_version) ? data.model_vs_actual : null);
+  const mvaState = { scope: "portfolio", strategyId: null, windowId: null };
+  const mvaSigned = (value, digits, suffix) => (number(value) == null ? "—" : `${Number(value) > 0 ? "+" : Number(value) < 0 ? "−" : ""}${Math.abs(Number(value)).toFixed(digits)}${suffix}`);
+  const mvaPp = (value) => mvaSigned(value, 2, " pp");
+  const mvaPercent = (value) => (number(value) == null ? "—" : `${Number(value).toFixed(2)}%`);
+  const mvaUsd = (value) => (number(value) == null ? "—" : `${Number(value) < 0 ? "−" : "+"}${currency(Math.abs(Number(value)))}`);
+  const mvaSide = (value) => (number(value) == null ? "none" : Number(value) < 0 ? "neg" : "pos");
+  const mvaPullTitle = (block, pullId) => {
+    const pull = (Array.isArray(block.pulls) ? block.pulls : []).find((item) => item.pull_id === pullId);
+    return pull ? pull.title : pullId;
+  };
+  const mvaSource = (block, item) => {
+    const source = Number.isInteger(item?.source_id) && Array.isArray(block.sources) ? block.sources.find((entry) => entry.source_id === item.source_id) : null;
+    return source ? ` title="${safe(`source: ${source.file}${source.sha256 ? ` (sha256 ${source.sha256.slice(0, 12)}…)` : ""}`)}"` : "";
+  };
+  const mvaReplaced = (block, pullId) => (pullId ? `<span class="mva-reason">replaced by: ${safe(mvaPullTitle(block, pullId))}</span>` : "");
+  function mvaTag(item, block) {
+    const tag = item && item.evidence_tag;
+    if (!tag) return '<span class="mva-tag is-missing" title="No evidence tag published">—</span>';
+    const definition = (Array.isArray(block.evidence_tags) ? block.evidence_tags : []).find((entry) => entry.tag === tag);
+    const origin = item.origin_tag ? `<span class="mva-origin" title="Origin tag in the audit analysis">${safe(item.origin_tag)}</span>` : "";
+    return `<span class="mva-tag mva-tag-${safe(String(tag).toLowerCase().replaceAll("_", "-"))}" title="${safe(definition ? definition.definition : "evidence tag")}">${safe(humanStatus(tag))}</span>${origin}`;
+  }
+  const mvaPrimaryWindow = (strategy) => {
+    const windows = Array.isArray(strategy.windows) ? strategy.windows : [];
+    return windows.find((item) => item.window_id === strategy.primary_window_id) || windows[0] || null;
+  };
+  const mvaWindowText = (window) => (window ? `${formatDate(window.start)} → ${formatDate(window.end)}${number(window.days) != null ? ` (${integer.format(window.days)} d)` : ""}` : "window not published");
+  const mvaComponent = (window, componentId) => (Array.isArray(window?.bridge) ? window.bridge.find((item) => item.component_id === componentId) || null : null);
+
+  function mvaUnavailableTerms(strategy, block) {
+    const terms = Array.isArray(strategy.unavailable) ? strategy.unavailable : [];
+    return terms.map((item) => `<div class="mva-unavailable"><strong>${safe(humanStatus(item.term))}</strong> ${mvaTag(item, block)} <span class="mva-reason">${safe(humanStatus(item.reason))}${item.window_end ? ` · to ${safe(formatDate(item.window_end))}` : ""}</span>${mvaReplaced(block, item.replacing_pull)}</div>`).join("");
+  }
+
+  // Signed bars on a shared zero line: width is |value| over the largest |value| in the set; direction by side AND sign text.
+  function mvaBars(rows, block, field, formatter, extra) {
+    if (!rows.length) return '<p class="cell-secondary">No bridge components were published for this window.</p>';
+    const max = Math.max(...rows.map((item) => Math.abs(number(item[field]) ?? 0)), 1e-9);
+    const body = rows.map((item) => {
+      const value = number(item[field]);
+      const width = value == null ? 0 : Math.min(100, (Math.abs(value) / max) * 100);
+      const side = mvaSide(value);
+      const subs = Array.isArray(item.sub_components) && item.sub_components.length
+        ? `<div class="mva-subs">${item.sub_components.map((sub) => `<div class="mva-sub"><span>${safe(sub.label || humanStatus(sub.component_id))}</span><b class="mva-${mvaSide(sub.pp)}">${mvaPp(sub.pp)}${number(sub.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(sub.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : ""}</b><span class="mva-usd"></span><span>${mvaTag(sub, block)}</span></div>`).join("")}</div>`
+        : "";
+      const usdText = item.usd_basis === "ESTIMATED_PP_TIMES_CAPITAL_BASE" ? `${mvaUsd(item.usd)}<small class="mva-note">estimated dollars</small>` : mvaUsd(item.usd);
+      return `<div class="mva-bar-row"><div class="mva-bar-label"${mvaSource(block, item)}>${safe(item.label || humanStatus(item.component_id))}${item.unavailable_reason ? `<span class="mva-reason">${safe(humanStatus(item.unavailable_reason))}</span>` : ""}${mvaReplaced(block, item.replacing_pull)}</div><div class="mva-bar-track" role="img" aria-label="${safe(item.label || item.component_id)} ${safe(formatter(value))}"><i class="mva-bar mva-bar-${side}" style="width:${(width / 2).toFixed(1)}%"></i></div><b class="mva-${side}">${formatter(value)}${number(item.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(item.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : ""}</b><span class="mva-usd">${extra ? extra(item) : usdText}</span><span>${mvaTag(item, block)}</span></div>${subs}`;
+    }).join("");
+    return `<div class="mva-bars">${body}</div>`;
+  }
+
+  function mvaClosure(window) {
+    const residual = window.residual || {};
+    return `<p class="cell-secondary mva-closure">Components sum to ${mvaPp(window.bridge_sum_pp)}${number(window.bridge_sum_usd) != null ? ` (${mvaUsd(window.bridge_sum_usd)})` : ""}; residual ${mvaPp(residual.pp)}${number(residual.usd) != null ? ` (${mvaUsd(residual.usd)})` : ""}; the gap is ${mvaPp(window.account_gap_pp)}. ${window.closure_ok ? `Closes within ±${decimal(window.closure_tolerance_pp, 2)} pp.` : `<strong>Does not close</strong> within ±${decimal(window.closure_tolerance_pp, 2)} pp.`}${window.gap_matches_audit_gap === false ? " The gap differs from the audit's own figure." : ""}</p>`;
+  }
+
+  function mvaTotals(block) {
+    const strategies = Array.isArray(block.strategies) ? block.strategies : [];
+    const cell = (value, extra) => (number(value) == null ? '<td class="numeric">—</td>' : `<td class="numeric mva-${mvaSide(value)}">${mvaPp(value)}${extra || ""}</td>`);
+    const rows = strategies.map((strategy) => {
+      const window = mvaPrimaryWindow(strategy);
+      const name = `<button type="button" class="mva-link" data-mva-open="${safe(strategy.strategy_id)}">${safe(strategy.display_name || strategy.strategy_id)}</button>`;
+      if (!window) return `<tr><th scope="row">${name}</th><td colspan="8"><span class="mva-reason">No aligned window within the cutoff</span>${mvaUnavailableTerms(strategy, block)}</td></tr>`;
+      const leverage = mvaComponent(window, "leverage");
+      const fx = mvaComponent(window, "fx");
+      const band = (component) => (component && number(component.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(component.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : "");
+      return `<tr><th scope="row">${name}<span class="cell-secondary">${safe(mvaWindowText(window))}${window.view ? ` · ${safe(humanStatus(window.view))}` : ""}</span></th><td class="numeric">${mvaPercent(window.account_return_pct)}<small class="mva-note">${safe(window.account_currency || "")}</small></td><td class="numeric">${mvaPercent(window.model_return_pct)}<small class="mva-note">${safe(window.model_currency || "")}</small></td>${cell(window.account_gap_pp)}${cell(leverage?.pp, band(leverage))}${cell(window.leverage_neutral_gap_pp)}${cell(fx?.pp, band(fx))}${cell(window.gap_neutral_of_leverage_and_fx_pp)}<td>${mvaTag(window, block)}</td></tr>`;
+    }).join("");
+    const bridge = block.portfolio_bridge;
+    const component = (id) => (Array.isArray(bridge?.components) ? bridge.components.find((item) => item.component_id === id) : null);
+    const totalRow = bridge && number(bridge.account_gap_usd) != null
+      ? `<tr class="mva-total"><th scope="row">Portfolio, dollar-weighted<span class="cell-secondary">dollars, each strategy over its own window</span></th><td class="numeric">—</td><td class="numeric">—</td><td class="numeric mva-${mvaSide(bridge.account_gap_usd)}">${mvaUsd(bridge.account_gap_usd)}</td><td class="numeric">${mvaUsd(component("leverage")?.usd)}</td><td class="numeric">—</td><td class="numeric">${mvaUsd(component("fx")?.usd)}</td><td class="numeric">—</td><td>${bridge.closure_ok === false ? '<span class="mva-reason">does not close</span>' : ""}</td></tr>`
+      : `<tr class="mva-total"><th scope="row">Portfolio, dollar-weighted</th><td colspan="8"><span class="mva-reason">The dollar-weighted portfolio bridge is not published in this snapshot</span></td></tr>`;
+    return `<thead><tr><th>Strategy · primary window</th><th class="numeric">Account return</th><th class="numeric">Model return</th><th class="numeric">As-is gap</th><th class="numeric">Leverage line</th><th class="numeric">Leverage-neutral gap</th><th class="numeric">FX line</th><th class="numeric">Gap neutral of leverage and FX</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody><tfoot>${totalRow}</tfoot>`;
+  }
+
+  function mvaPortfolio(block) {
+    const bridge = block.portfolio_bridge;
+    if (!bridge || !Array.isArray(bridge.components)) return `<div class="callout callout-neutral"><strong>Portfolio bridge not published.</strong> The producer carries no dollar-weighted bridge for this snapshot.</div>`;
+    const included = (bridge.strategies_included || []).map((item) => `${safe(item.strategy_id)} ${safe(formatDate(item.start))} → ${safe(formatDate(item.end))} (${mvaUsd(item.account_gap_usd)})`).join("; ");
+    const excluded = (bridge.strategies_excluded || []).map((item) => `${safe(item.strategy_id)}: ${safe(humanStatus(item.reason))}`).join("; ");
+    const rows = [...bridge.components, { component_id: "residual", label: "Residual (gap minus components)", usd: bridge.residual?.usd, evidence_tag: null }];
+    return `<p class="cell-secondary">${safe(humanStatus(bridge.window_basis))}. ${safe(bridge.dollar_basis || "")}</p>${mvaBars(rows, block, "usd", mvaUsd, (item) => "")}<p class="cell-secondary mva-closure">Gap ${mvaUsd(bridge.account_gap_usd)}; components ${mvaUsd(bridge.components_sum_usd)}; ${bridge.closure_ok ? `closes within ±${currency(bridge.closure_tolerance_usd)}` : "<strong>does not close</strong>"}.</p><p class="cell-secondary">Windows: ${included}${excluded ? `. Excluded: ${excluded}` : ""}</p>`;
+  }
+
+  function mvaTiles(window, block) {
+    const tile = (label, value, tagItem) => `<div class="mva-tile"><span>${safe(label)}</span><b>${value}</b>${tagItem ? mvaTag(tagItem, block) : ""}</div>`;
+    const leverage = mvaComponent(window, "leverage");
+    const fx = mvaComponent(window, "fx");
+    return `<div class="mva-tiles">${tile("Account return", `${mvaPercent(window.account_return_pct)} <small class="mva-note">${safe(window.account_currency || "")}</small>`)}${tile("Model return", `${mvaPercent(window.model_return_pct)} <small class="mva-note">${safe(window.model_currency || "")}</small>`)}${tile("Gap", `${mvaPp(window.account_gap_pp)}${number(window.account_gap_usd) != null ? ` <small class="mva-note">${mvaUsd(window.account_gap_usd)}</small>` : ""}`, window)}${leverage ? tile("Leverage line", mvaPp(leverage.pp), leverage) : ""}${fx ? tile("FX line", mvaPp(fx.pp), fx) : ""}${tile("Leverage-neutral gap", `${mvaPp(window.leverage_neutral_gap_pp)}${number(window.gap_neutral_of_leverage_and_fx_pp) != null ? ` · ${mvaPp(window.gap_neutral_of_leverage_and_fx_pp)}` : ""}`)}</div>`;
+  }
+
+  function mvaMemoAndTerms(window, block) {
+    const memo = Array.isArray(window.memo) ? window.memo : [];
+    const terms = Array.isArray(window.governed_terms) ? window.governed_terms : [];
+    const memoMarkup = memo.length ? `<h4>Memo lines (outside the closure)</h4><ul>${memo.map((item) => `<li>${safe(item.label)}: ${mvaPp(item.pp)}${number(item.usd) != null ? ` (${mvaUsd(item.usd)})` : ""} ${mvaTag(item, block)}</li>`).join("")}</ul>` : "";
+    const termMarkup = terms.length ? `<h4>Governed terms</h4><ul>${terms.map((item) => `<li>${safe(humanStatus(item.term))}: ${number(item.usd) != null ? mvaUsd(item.usd) : Object.entries(item.by_currency || {}).map(([code, amount]) => `${safe(code)} ${decimal(amount, 2)}`).join(", ") || safe(humanStatus(item.reason || "UNAVAILABLE"))} ${mvaTag(item, block)}<span class="cell-secondary">${safe(item.source || "")}${number(item.row_count) != null ? ` · ${integer.format(item.row_count)} rows` : ""}</span></li>`).join("")}</ul>` : "";
+    return memoMarkup + termMarkup;
+  }
+
+  function mvaNotes(strategy, block) {
+    const comparator = strategy.comparator || {};
+    const reference = strategy.governed_reference || {};
+    const notes = Array.isArray(strategy.notes) ? strategy.notes : [];
+    return `<div class="mva-notes"><h4>${safe(strategy.display_name || strategy.strategy_id)}: how to read this row</h4>
+      <div class="mva-note-part"><strong>Comparator</strong><p>${safe(comparator.description || "Not published")}${comparator.publisher ? ` Published by ${safe(comparator.publisher)}${comparator.provider_published === false ? " (reconstructed, not provider-published)" : ""}.` : ""}${comparator.gross_or_net ? ` ${safe(humanStatus(comparator.gross_or_net))}.` : ""}</p></div>
+      <div class="mva-note-part"><strong>Governed reference</strong><p>${safe(humanStatus(reference.status || "UNAVAILABLE"))}${reference.reason ? ` · ${safe(humanStatus(reference.reason))}` : ""}${number(reference.account_cumulative_return) != null ? ` · account ${pct(reference.account_cumulative_return, 2)}` : ""}${reference.note ? ` · ${safe(reference.note)}` : ""}</p></div>
+      ${notes.length ? `<div class="mva-note-part"><strong>Notes</strong><ul>${notes.map((item) => `<li>${safe(item)}</li>`).join("")}</ul></div>` : ""}
+      ${(strategy.unavailable || []).length ? `<div class="mva-note-part"><strong>Not available</strong>${mvaUnavailableTerms(strategy, block)}</div>` : ""}</div>`;
+  }
+
+  function mvaEpochTable(strategy, block) {
+    const epochs = Array.isArray(strategy?.epochs) ? strategy.epochs : [];
+    if (!epochs.length) return `<p class="cell-secondary">No per-epoch rows were published for this strategy.</p>`;
+    const rows = epochs.map((epoch) => {
+      const drivers = (epoch.bridge || []).filter((item) => number(item.pp) != null).sort((a, b) => Math.abs(b.pp) - Math.abs(a.pp)).slice(0, 2).map((item) => `${safe(item.label || humanStatus(item.component_id))} ${mvaPp(item.pp)}`).join(" · ");
+      return `<tr><th scope="row">${safe(epoch.label || epoch.window_id)}<span class="cell-secondary">${safe(mvaWindowText(epoch))}</span></th><td class="numeric">${mvaPercent(epoch.account_return_pct)}</td><td class="numeric">${mvaPercent(epoch.model_return_pct)}</td><td class="numeric mva-${mvaSide(epoch.account_gap_pp)}">${mvaPp(epoch.account_gap_pp)}</td><td>${drivers || "—"}</td><td>${mvaTag(epoch, block)}</td></tr>`;
+    }).join("");
+    return `<div class="table-wrap wide"><table id="mva-epoch-table"><caption>${safe(strategy.display_name || strategy.strategy_id)} · per epoch</caption><thead><tr><th>Epoch</th><th class="numeric">Account return</th><th class="numeric">Model return</th><th class="numeric">Gap</th><th>Main drivers</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  function mvaDetail(block, strategy, window, scope) {
+    let detail = "";
+    if (scope === "portfolio") detail = mvaPortfolio(block);
+    else if (!strategy) detail = `<div class="callout callout-neutral">No strategies were published.</div>`;
+    else if (scope === "epoch") detail = mvaEpochTable(strategy, block);
+    else if (!window) detail = `<div class="callout callout-neutral"><strong>No aligned window within the cutoff.</strong> The per-epoch rows are still available under By epoch.</div>${mvaNotes(strategy, block)}`;
+    else detail = `<p class="cell-secondary">${safe(window.label || "")} · ${safe(mvaWindowText(window))}${window.view ? ` · ${safe(humanStatus(window.view))}` : ""}${number(window.capital_base_usd) != null ? ` · capital base ${currency(window.capital_base_usd)}${window.capital_base_basis ? ` (${safe(humanStatus(window.capital_base_basis))})` : ""}` : ""}</p>${mvaTiles(window, block)}${mvaBars(window.bridge || [], block, "pp", mvaPp)}${mvaClosure(window)}${mvaMemoAndTerms(window, block)}${mvaNotes(strategy, block)}`;
+    return detail;
+  }
+
+  function renderModelVsActual() {
+    const host = $("#mva-root");
+    if (!host) return;
+    const block = mvaBlock();
+    if (!block || block.status !== "AVAILABLE") {
+      host.innerHTML = `<div class="callout callout-neutral"><strong>Model vs actual is not in this snapshot.</strong> ${block ? safe(humanStatus(block.unavailable_reason || block.reason || block.status || "UNAVAILABLE")) : "The producer has not published the model_vs_actual block for this generation."}</div>`;
+      return;
+    }
+    const strategies = Array.isArray(block.strategies) ? block.strategies : [];
+    if (!strategies.some((item) => item.strategy_id === mvaState.strategyId)) { mvaState.strategyId = strategies[0]?.strategy_id || null; mvaState.windowId = null; }
+    const strategy = strategies.find((item) => item.strategy_id === mvaState.strategyId) || null;
+    const windows = Array.isArray(strategy?.windows) ? strategy.windows : [];
+    const window = windows.find((item) => item.window_id === mvaState.windowId) || (strategy ? mvaPrimaryWindow(strategy) : null);
+    const scopes = [["portfolio", "Portfolio"], ["strategy", "By strategy"], ["epoch", "By epoch"]];
+    const scopeButtons = scopes.map(([id, label]) => `<button type="button" class="segment" data-mva-scope="${id}" aria-pressed="${id === mvaState.scope}">${label}</button>`).join("");
+    const strategyButtons = strategies.map((item) => `<button type="button" class="segment" data-mva-open="${safe(item.strategy_id)}" aria-pressed="${item.strategy_id === mvaState.strategyId}">${safe(item.display_name || item.strategy_id)}</button>`).join("");
+    const windowButtons = windows.length > 1 ? `<div class="segmented" aria-label="Window">${windows.map((item) => `<button type="button" class="segment" data-mva-window="${safe(item.window_id)}" aria-pressed="${window && item.window_id === window.window_id}">${safe(item.label || item.window_id)}</button>`).join("")}</div>` : "";
+    const detail = mvaDetail(block, strategy, window, mvaState.scope);
+    host.innerHTML = `<p class="cell-secondary">${safe(block.sign_convention || "")}</p>
+      <div class="table-wrap wide"><table id="mva-total-table"><caption>All strategies · total effect</caption>${mvaTotals(block)}</table></div>
+      <h3 class="mva-h">Where the gap came from</h3>
+      <div class="perf-controls"><div class="segmented" aria-label="Drill down">${scopeButtons}</div>${mvaState.scope !== "portfolio" ? `<div class="segmented" aria-label="Strategy">${strategyButtons}</div>${mvaState.scope === "strategy" ? windowButtons : ""}` : ""}</div>
+      <div id="mva-detail">${detail}</div>
+      ${Array.isArray(block.evidence_tags) ? `<p class="cell-secondary mva-legend">${block.evidence_tags.map((entry) => `${mvaTag({ evidence_tag: entry.tag }, block)} ${safe(entry.definition)}`).join(" · ")}</p>` : ""}
+      ${Array.isArray(block.notes) && block.notes.length ? `<ul class="mva-legend">${block.notes.map((item) => `<li>${safe(item)}</li>`).join("")}</ul>` : ""}
+      ${Array.isArray(block.pulls) && block.pulls.length ? `<details class="cell-details"><summary>${integer.format(block.pulls.length)} data pulls replace audit-derived terms</summary><ul>${block.pulls.map((pull) => `<li><strong>${safe(pull.title)}</strong> · ${safe(humanStatus(pull.status))}<span class="cell-secondary">${safe(pull.source || "")} · ${safe(pull.entities || "")} · ${safe(pull.date_range || "")} · ${safe(pull.access || "")} · ${safe(pull.estimated_size || "")}</span></li>`).join("")}</ul></details>` : ""}`;
+    host.querySelectorAll("[data-mva-scope]").forEach((button) => button.addEventListener("click", () => { mvaState.scope = button.dataset.mvaScope; renderModelVsActual(); }));
+    host.querySelectorAll("[data-mva-window]").forEach((button) => button.addEventListener("click", () => { mvaState.windowId = button.dataset.mvaWindow; renderModelVsActual(); }));
+    host.querySelectorAll("[data-mva-open]").forEach((button) => button.addEventListener("click", () => {
+      if (mvaState.strategyId !== button.dataset.mvaOpen) mvaState.windowId = null;
+      mvaState.strategyId = button.dataset.mvaOpen;
+      if (mvaState.scope === "portfolio") mvaState.scope = "strategy";
+      renderModelVsActual();
+    }));
+  }
+  // ===== END model-vs-actual =====
+
   const viewRenderers = {
     command: renderCommand,
     capital: renderCapital,
@@ -2963,6 +3239,7 @@
     dependence: renderDependence,
     weekly: renderWeekly,
     performance: renderPerformance,
+    modelvsactual: renderModelVsActual,
     candidates: renderCandidates,
     data: renderData,
   };
