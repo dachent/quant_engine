@@ -152,6 +152,12 @@ _PATH_STAGES = {
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],
+    # Assembles the pinned attribution return-source CSV; the attribution stage reads
+    # only the file and manifest the spec pins, never this tool.
+    "tools/portfolio_attribution_returns.py": [],
+    # Stages an unpublished provider track-record union from verified source
+    # generations; consumers read only the generation they are handed.
+    "tools/portfolio_provider_track_record_union.py": [],
     # The nested-strategy tag map (#567 stage 1): policy validation and tag
     # resolution.  The report reads it for sleeve lifecycle links (#592), so a
     # change affects the report and the panel built from it.
