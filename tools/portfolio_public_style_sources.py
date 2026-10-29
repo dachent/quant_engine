@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, cast, Mapping, Sequence
 
 
-BUILDER_VERSION = "0.3.0"
+BUILDER_VERSION = "0.4.0"
 OUTPUT_NAME = "etf_style_returns_daily.csv"
 SECTOR_OUTPUT_NAME = "us_sector_returns_daily.csv"
 CRYPTO_TICKERS = frozenset({"BTC-USD", "ETH-USD"})
@@ -86,7 +86,7 @@ def _integer(value: object, name: str) -> int:
 
 def _catalog_tickers(
     catalog: Mapping[str, Any], universe_ids: Sequence[str] | None
-) -> tuple[tuple[str, ...], str, tuple[str, ...], str, str]:
+) -> tuple[tuple[str, ...], str, tuple[str, ...], str, str, str | None]:
     sources = catalog.get("sources")
     universes = catalog.get("universes")
     prior = catalog.get("prior_baseline")
@@ -146,6 +146,16 @@ def _catalog_tickers(
         tickers.append(cash)
     if len(tickers) < 2:
         raise StyleSourceError("catalog has no usable ETF return universe")
+    extension_raw = prior.get("calendar_extension_proxy")
+    extension = (
+        None
+        if extension_raw is None
+        else _text(extension_raw, "prior calendar_extension_proxy")
+    )
+    if extension is not None and (extension not in tickers or extension == cash):
+        raise StyleSourceError(
+            "catalog calendar extension proxy must be a requested non-cash ticker"
+        )
     lens = next(iter(selected_lenses))
     output_name = (
         SECTOR_OUTPUT_NAME
@@ -153,7 +163,7 @@ def _catalog_tickers(
         else OUTPUT_NAME
     )
     role = "SECTOR_RETURN_PROXY" if lens == "RETURN_SECTOR" else "ETF_STYLE"
-    return tuple(tickers), cash, tuple(selected_ids), output_name, role
+    return tuple(tickers), cash, tuple(selected_ids), output_name, role, extension
 
 
 def _verify_source(
@@ -229,6 +239,7 @@ def _return_output(
     source: Mapping[str, Any],
     tickers: Sequence[str],
     calendar_proxy: str | None = None,
+    calendar_extension: str | None = None,
 ) -> tuple[bytes, dict[str, object]]:
     rows = source.get("rows")
     if not isinstance(rows, list):
@@ -268,11 +279,21 @@ def _return_output(
             "return_start": min(values).isoformat(),
             "return_end": max(values).isoformat(),
         }
-    output_dates = (
-        sorted(daily[calendar_proxy])
-        if calendar_proxy is not None
-        else sorted(all_dates)
-    )
+    if calendar_proxy is not None:
+        proxy_dates = set(daily[calendar_proxy])
+        if calendar_extension is not None:
+            # Before the cash proxy's first observation, the extension ticker's own
+            # observed trading dates stand in for the exchange calendar so that
+            # longer-history series are not truncated to the cash proxy's start.
+            first_proxy = min(proxy_dates)
+            proxy_dates |= {
+                observed
+                for observed in daily[calendar_extension]
+                if observed < first_proxy
+            }
+        output_dates = sorted(proxy_dates)
+    else:
+        output_dates = sorted(all_dates)
     stream = io.StringIO(newline="")
     writer = csv.writer(stream, lineterminator="\n")
     writer.writerow(("date", *tickers))
@@ -318,15 +339,23 @@ def build_bundle(
     catalog, catalog_content = _load_json(catalog_path, "source catalog")
     source, source_content = _load_json(source_path, "Yahoo source")
     manifest, manifest_content = _load_json(manifest_path, "Yahoo manifest")
-    tickers, cash_proxy, selected_ids, output_name, series_role = _catalog_tickers(
-        catalog, universe_ids
-    )
+    (
+        tickers,
+        cash_proxy,
+        selected_ids,
+        output_name,
+        series_role,
+        calendar_extension,
+    ) = _catalog_tickers(catalog, universe_ids)
     _verify_source(source, source_content, manifest, manifest_path, tickers)
     contains_crypto = not CRYPTO_TICKERS.isdisjoint(tickers)
     if contains_crypto and cash_proxy != "BIL":
         raise StyleSourceError("crypto candidate normalization requires BIL calendar")
     output, coverage = _return_output(
-        source, tickers, calendar_proxy="BIL" if contains_crypto else None
+        source,
+        tickers,
+        calendar_proxy="BIL" if contains_crypto else None,
+        calendar_extension=calendar_extension if contains_crypto else None,
     )
     per_ticker = cast(dict[str, dict[str, object]], coverage["per_ticker"])
     outputs = {output_name: output}
@@ -365,7 +394,12 @@ def build_bundle(
         },
         "policies": {
             "calendar": (
-                "BIL_OBSERVED_RETURN_DATE_INTERSECTION_NO_FILL"
+                (
+                    "BIL_OBSERVED_RETURN_DATES_EXTENDED_BEFORE_FIRST_BY_"
+                    f"{calendar_extension}_NO_FILL"
+                    if calendar_extension is not None
+                    else "BIL_OBSERVED_RETURN_DATE_INTERSECTION_NO_FILL"
+                )
                 if contains_crypto
                 else "PROVIDER_OBSERVED_EXACT_DATE_NO_FILL"
             ),
