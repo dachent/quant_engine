@@ -1,0 +1,53 @@
+{
+  "basis": "R2 panel generation b216a53e (committed 2026-10-28, release 01fbe4d8): evidence/releases/2026-10-26-r2/final/evidence/measurements/sizes21.txt and final/README.md. committed_bytes is the measured figure; budgets allow 3% growth, rounded up to 1000 B. Raise a budget only in the change that grows the block, with the reason in the change description.",
+  "committed_bytes": {
+    "total_physical": 381364971,
+    "index_html": 47528130,
+    "dashboard_data_json": 265454755,
+    "dashboard_data_js": 43397571,
+    "blocks": {
+      "decomposition_lenses": 216106053,
+      "weekly_returns": 27317555,
+      "leverage_disclosures": 15993665,
+      "factor_analysis": 2129845,
+      "account_manifest": 1557310,
+      "invested_capital": 903747,
+      "positions": 300980,
+      "dependence_modes": 271278,
+      "dependence_analysis": 134096,
+      "coverage": 129325,
+      "strategies": 121117,
+      "hwm_governed_proof": 112859,
+      "performance_tab": 101836,
+      "strategy_underwriting": 76811
+    }
+  },
+  "blocks": {
+    "decomposition_lenses": 222590000,
+    "weekly_returns": 28138000,
+    "leverage_disclosures": 16474000,
+    "factor_analysis": 2194000,
+    "account_manifest": 1605000,
+    "invested_capital": 931000,
+    "positions": 311000,
+    "dependence_modes": 280000,
+    "dependence_analysis": 139000,
+    "coverage": 134000,
+    "strategies": 125000,
+    "hwm_governed_proof": 117000,
+    "performance_tab": 105000,
+    "strategy_underwriting": 80000
+  },
+  "unlisted_block_max_bytes": 50000,
+  "other_blocks_max_bytes": 400000,
+  "physical": {
+    "total_bytes": 392806000,
+    "index_html_bytes": 48954000,
+    "dashboard_data_json_bytes": 273419000,
+    "dashboard_data_js_bytes": 44700000
+  },
+  "fixture": {
+    "basis": "performance_tab built from the eight-week panel of tests/portfolio_control_panel/test_performance_tab.py measured 9549 B at R2; guards block shape in CI, where no real generation exists",
+    "performance_tab_max_bytes": 10000
+  }
+}
