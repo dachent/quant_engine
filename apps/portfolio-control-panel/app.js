@@ -3124,7 +3124,7 @@
     const rows = strategies.map((strategy) => {
       const window = mvaPrimaryWindow(strategy);
       const name = `<button type="button" class="mva-link" data-mva-open="${safe(strategy.strategy_id)}">${safe(strategy.display_name || strategy.strategy_id)}</button>`;
-      if (!window) return `<tr><th scope="row">${name}</th><td colspan="7">${mvaUnavailableTerms(strategy, block) || '<span class="mva-reason">No window published</span>'}</td></tr>`;
+      if (!window) return `<tr><th scope="row">${name}</th><td colspan="8"><span class="mva-reason">No aligned window within the cutoff</span>${mvaUnavailableTerms(strategy, block)}</td></tr>`;
       const leverage = mvaComponent(window, "leverage");
       const fx = mvaComponent(window, "fx");
       const band = (component) => (component && number(component.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(component.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : "");
@@ -3188,7 +3188,7 @@
     if (scope === "portfolio") detail = mvaPortfolio(block);
     else if (!strategy) detail = `<div class="callout callout-neutral">No strategies were published.</div>`;
     else if (scope === "epoch") detail = mvaEpochTable(strategy, block);
-    else if (!window) detail = `${mvaNotes(strategy, block)}`;
+    else if (!window) detail = `<div class="callout callout-neutral"><strong>No aligned window within the cutoff.</strong> The per-epoch rows are still available under By epoch.</div>${mvaNotes(strategy, block)}`;
     else detail = `<p class="cell-secondary">${safe(window.label || "")} · ${safe(mvaWindowText(window))}${window.view ? ` · ${safe(humanStatus(window.view))}` : ""}${number(window.capital_base_usd) != null ? ` · capital base ${currency(window.capital_base_usd)}${window.capital_base_basis ? ` (${safe(humanStatus(window.capital_base_basis))})` : ""}` : ""}</p>${mvaTiles(window, block)}${mvaBars(window.bridge || [], block, "pp", mvaPp)}${mvaClosure(window)}${mvaMemoAndTerms(window, block)}${mvaNotes(strategy, block)}`;
     return detail;
   }

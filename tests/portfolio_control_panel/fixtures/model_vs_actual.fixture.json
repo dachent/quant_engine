@@ -5097,174 +5097,8 @@
     "status": "UNAVAILABLE",
     "reason": "NO_IMPLEMENTATION_RECONCILIATION_CONTRACT"
    },
-   "primary_window_id": "WINDOW",
-   "windows": [
-    {
-     "window_id": "WINDOW",
-     "label": "WINDOW 01-02..09-18 (vendor ref)",
-     "kind": "ALIGNED",
-     "start": "2026-01-02",
-     "end": "2026-09-18",
-     "days": 260,
-     "view": "ACCOUNT_VS_VENDOR_3X_GROSS",
-     "account_return_pct": 17.823,
-     "model_return_pct": 17.932,
-     "model_currency": "USD",
-     "account_currency": "USD",
-     "account_gap_pp": -0.109,
-     "account_gap_usd": -61.33,
-     "capital_base_usd": 56265.18,
-     "capital_base_basis": "AUDIT_MEAN_OF_START_AND_END_NAV",
-     "leverage_neutral_gap_pp": -0.224,
-     "gap_neutral_of_leverage_and_fx_pp": -0.224,
-     "bridge": [
-      {
-       "component_id": "model_reference",
-       "label": "Comparator source (independent minus vendor series)",
-       "pp": 2.041,
-       "usd": 1148.37,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 22
-      },
-      {
-       "component_id": "composition",
-       "label": "Held names vs model (substitution, rounding/drift)",
-       "pp": 1.439,
-       "usd": 809.66,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": "QSI-P1",
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 23
-      },
-      {
-       "component_id": "timing",
-       "label": "Execution timing and skipped legs",
-       "pp": -0.949,
-       "usd": -533.96,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": "QSI-P1",
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 24
-      },
-      {
-       "component_id": "execution",
-       "label": "Fill slippage vs open",
-       "pp": -1.705,
-       "usd": -959.32,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": "QSI-P1",
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 25
-      },
-      {
-       "component_id": "commissions",
-       "label": "Fees",
-       "pp": -0.014,
-       "usd": -7.88,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "O",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 26
-      },
-      {
-       "component_id": "leverage",
-       "label": "Cash (invested share below target)",
-       "pp": 0.115,
-       "usd": 64.7,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 27
-      },
-      {
-       "component_id": "linking",
-       "label": "Compounding interaction (weekly sums vs chained)",
-       "pp": -0.301,
-       "usd": -169.36,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 28
-      },
-      {
-       "component_id": "unattributed",
-       "label": "Audit residual (dividend timing, intraday, price source, NAV timing)",
-       "pp": -0.736,
-       "usd": -414.11,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "I",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 29
-      }
-     ],
-     "bridge_sum_pp": -0.11,
-     "bridge_sum_usd": -61.9,
-     "residual": {
-      "pp": 0.001,
-      "usd": 0.57
-     },
-     "closure_tolerance_pp": 0.02,
-     "closure_ok": true,
-     "gap_matches_audit_gap": true,
-     "evidence_tag": "AUDIT_DERIVED",
-     "memo": [
-      {
-       "memo_id": "vendor_net_gap",
-       "label": "Gap against the vendor net series (0.058%/wk slippage layer)",
-       "pp": 2.405,
-       "usd": null,
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "source_id": 30
-      }
-     ],
-     "governed_terms": [
-      {
-       "term": "financing_interest",
-       "evidence_tag": "UNAVAILABLE",
-       "usd": null,
-       "by_currency": {},
-       "row_count": 0,
-       "reason": "NO_GOVERNED_INTEREST_ROWS_FOR_THIS_STRATEGY_IN_WINDOW",
-       "source": "leverage_disclosures"
-      }
-     ]
-    }
-   ],
+   "primary_window_id": null,
+   "windows": [],
    "epochs": [
     {
      "window_id": "E1",
@@ -5760,174 +5594,24 @@
        "source": "leverage_disclosures"
       }
      ]
-    },
-    {
-     "window_id": "E4",
-     "label": "E4_post",
-     "kind": "EPOCH",
-     "start": "2026-09-04",
-     "end": "2026-09-18",
-     "days": 15,
-     "view": "ACCOUNT_VS_VENDOR_3X_GROSS",
-     "account_return_pct": -3.648,
-     "model_return_pct": -3.17,
-     "model_currency": "USD",
-     "account_currency": "USD",
-     "account_gap_pp": -0.478,
-     "account_gap_usd": -296.46,
-     "capital_base_usd": 62021.25,
-     "capital_base_basis": "AUDIT_MEAN_OF_START_AND_END_NAV",
-     "leverage_neutral_gap_pp": -0.449,
-     "gap_neutral_of_leverage_and_fx_pp": -0.449,
-     "bridge": [
-      {
-       "component_id": "model_reference",
-       "label": "Comparator source (independent minus vendor series)",
-       "pp": 0.291,
-       "usd": 180.48,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 22
-      },
-      {
-       "component_id": "composition",
-       "label": "Held names vs model (substitution, rounding/drift)",
-       "pp": -0.515,
-       "usd": -319.41,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": "QSI-P1",
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 23
-      },
-      {
-       "component_id": "timing",
-       "label": "Execution timing and skipped legs",
-       "pp": -0.12,
-       "usd": -74.43,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": "QSI-P1",
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 24
-      },
-      {
-       "component_id": "execution",
-       "label": "Fill slippage vs open",
-       "pp": 0.0,
-       "usd": 0.0,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": "QSI-P1",
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 25
-      },
-      {
-       "component_id": "commissions",
-       "label": "Fees",
-       "pp": 0.0,
-       "usd": 0.0,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "O",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 26
-      },
-      {
-       "component_id": "leverage",
-       "label": "Cash (invested share below target)",
-       "pp": -0.029,
-       "usd": -17.99,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 27
-      },
-      {
-       "component_id": "linking",
-       "label": "Compounding interaction (weekly sums vs chained)",
-       "pp": -0.01,
-       "usd": -6.2,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 28
-      },
-      {
-       "component_id": "unattributed",
-       "label": "Audit residual (dividend timing, intraday, price source, NAV timing)",
-       "pp": -0.094,
-       "usd": -58.3,
-       "usd_basis": "ESTIMATED_PP_TIMES_CAPITAL_BASE",
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "I",
-       "unavailable_reason": null,
-       "replacing_pull": null,
-       "uncertainty_pp_1sigma": null,
-       "sub_components": [],
-       "source_id": 29
-      }
-     ],
-     "bridge_sum_pp": -0.477,
-     "bridge_sum_usd": -295.85,
-     "residual": {
-      "pp": -0.001,
-      "usd": -0.61
-     },
-     "closure_tolerance_pp": 0.02,
-     "closure_ok": true,
-     "gap_matches_audit_gap": true,
-     "evidence_tag": "AUDIT_DERIVED",
-     "memo": [
-      {
-       "memo_id": "vendor_net_gap",
-       "label": "Gap against the vendor net series (0.058%/wk slippage layer)",
-       "pp": -0.3651,
-       "usd": null,
-       "evidence_tag": "AUDIT_DERIVED",
-       "origin_tag": "D",
-       "source_id": 30
-      }
-     ],
-     "governed_terms": [
-      {
-       "term": "financing_interest",
-       "evidence_tag": "UNAVAILABLE",
-       "usd": null,
-       "by_currency": {},
-       "row_count": 0,
-       "reason": "NO_GOVERNED_INTEREST_ROWS_FOR_THIS_STRATEGY_IN_WINDOW",
-       "source": "leverage_disclosures"
-      }
-     ]
     }
    ],
-   "unavailable": [],
+   "unavailable": [
+    {
+     "term": "window:E4",
+     "evidence_tag": "UNAVAILABLE",
+     "reason": "WINDOW_ENDS_AFTER_CUTOFF:2026-09-18",
+     "window_end": "2026-09-18",
+     "replacing_pull": null
+    },
+    {
+     "term": "window:WINDOW",
+     "evidence_tag": "UNAVAILABLE",
+     "reason": "WINDOW_ENDS_AFTER_CUTOFF:2026-09-18",
+     "window_end": "2026-09-18",
+     "replacing_pull": null
+    }
+   ],
    "notes": [
     "Gap is small in total but made of large offsetting terms; the weekly-sum basis needs a compounding line."
    ]
@@ -6283,13 +5967,6 @@
     "account_gap_usd": -5905.94
    },
    {
-    "strategy_id": "qsi",
-    "window_id": "WINDOW",
-    "start": "2026-01-02",
-    "end": "2026-09-18",
-    "account_gap_usd": -61.33
-   },
-   {
     "strategy_id": "volatis-strategy",
     "window_id": "ALL",
     "start": "2024-10-14",
@@ -6304,36 +5981,35 @@
     "account_gap_usd": -1213.25
    }
   ],
-  "strategies_excluded": [],
-  "components": [
+  "strategies_excluded": [
    {
-    "component_id": "model_reference",
-    "label": "Comparator source difference",
-    "usd": 1148.37,
-    "evidence_tag": "ESTIMATED"
-   },
+    "strategy_id": "qsi",
+    "reason": "NO_PRIMARY_WINDOW"
+   }
+  ],
+  "components": [
    {
     "component_id": "composition",
     "label": "Held names versus the model",
-    "usd": -7755.19,
+    "usd": -8564.85,
     "evidence_tag": "ESTIMATED"
    },
    {
     "component_id": "timing",
     "label": "Timing: start, delay, missed legs, early exits",
-    "usd": -6267.44,
+    "usd": -5733.48,
     "evidence_tag": "ESTIMATED"
    },
    {
     "component_id": "execution",
     "label": "Execution: fills versus the model price",
-    "usd": -9475.03,
+    "usd": -8515.71,
     "evidence_tag": "ESTIMATED"
    },
    {
     "component_id": "commissions",
     "label": "Commissions",
-    "usd": -3648.43,
+    "usd": -3640.55,
     "evidence_tag": "ESTIMATED"
    },
    {
@@ -6357,7 +6033,7 @@
    {
     "component_id": "leverage",
     "label": "Leverage, cash and financing",
-    "usd": -2851.01,
+    "usd": -2915.71,
     "evidence_tag": "ESTIMATED"
    },
    {
@@ -6367,30 +6043,18 @@
     "evidence_tag": "ESTIMATED"
    },
    {
-    "component_id": "linking",
-    "label": "Compounding of the linked periods",
-    "usd": -169.36,
-    "evidence_tag": "ESTIMATED"
-   },
-   {
     "component_id": "other",
     "label": "Other",
     "usd": 149.0,
     "evidence_tag": "ESTIMATED"
-   },
-   {
-    "component_id": "unattributed",
-    "label": "Unattributed in the audit analysis",
-    "usd": -414.11,
-    "evidence_tag": "ESTIMATED"
    }
   ],
-  "account_gap_usd": -31754.43,
-  "components_sum_usd": -31750.51,
+  "account_gap_usd": -31693.1,
+  "components_sum_usd": -31688.61,
   "residual": {
-   "usd": -3.92
+   "usd": -4.49
   },
-  "closure_tolerance_usd": 74.57,
+  "closure_tolerance_usd": 63.31,
   "closure_ok": true
  },
  "pulls": [

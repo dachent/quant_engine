@@ -145,3 +145,29 @@ def test_missing_and_unavailable_block_are_explicit(tmp_path: Path) -> None:
     block = {"schema_version": 1, "status": "UNAVAILABLE", "reason": "NO_AUDIT_INPUT"}
     text = _plain(_root(tmp_path, base(model_vs_actual=block)))
     assert "No audit input" in text
+
+
+def _windowless(block: dict[str, Any]) -> int:
+    return next(
+        index
+        for index, strategy in enumerate(block["strategies"])
+        if not strategy["windows"]
+    )
+
+
+def test_a_strategy_without_an_aligned_window_still_renders_its_epochs(
+    tmp_path: Path,
+) -> None:
+    block = _block()
+    index = _windowless(block)
+    assert block["strategies"][index]["primary_window_id"] is None
+
+    root = _plain(_root(tmp_path, base(model_vs_actual=block)))
+    assert "No aligned window within the cutoff" in root
+    assert "Window ends after cutoff" in root
+
+    detail = _plain(_detail(tmp_path, block, index, "strategy"))
+    assert "No aligned window within the cutoff." in detail
+
+    epochs = _detail(tmp_path, block, index, "epoch")
+    assert 'id="mva-epoch-table"' in epochs
