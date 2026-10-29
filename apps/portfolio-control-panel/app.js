@@ -3107,7 +3107,7 @@
       const leverage = mvaComponent(window, "leverage");
       const fx = mvaComponent(window, "fx");
       const band = (component) => (component && number(component.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(component.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : "");
-      return `<tr><th scope="row">${name}<span class="cell-secondary">${safe(mvaWindowText(window))}${window.view ? ` · ${safe(window.view)}` : ""}</span></th><td class="numeric">${mvaPercent(window.account_return_pct)}<small class="mva-note">${safe(window.account_currency || "")}</small></td><td class="numeric">${mvaPercent(window.model_return_pct)}<small class="mva-note">${safe(window.model_currency || "")}</small></td>${cell(window.account_gap_pp)}${cell(leverage?.pp, band(leverage))}${cell(window.leverage_neutral_gap_pp)}${cell(fx?.pp, band(fx))}${cell(window.gap_neutral_of_leverage_and_fx_pp)}<td>${mvaTag(window, block)}</td></tr>`;
+      return `<tr><th scope="row">${name}<span class="cell-secondary">${safe(mvaWindowText(window))}${window.view ? ` · ${safe(humanStatus(window.view))}` : ""}</span></th><td class="numeric">${mvaPercent(window.account_return_pct)}<small class="mva-note">${safe(window.account_currency || "")}</small></td><td class="numeric">${mvaPercent(window.model_return_pct)}<small class="mva-note">${safe(window.model_currency || "")}</small></td>${cell(window.account_gap_pp)}${cell(leverage?.pp, band(leverage))}${cell(window.leverage_neutral_gap_pp)}${cell(fx?.pp, band(fx))}${cell(window.gap_neutral_of_leverage_and_fx_pp)}<td>${mvaTag(window, block)}</td></tr>`;
     }).join("");
     const bridge = block.portfolio_bridge;
     const component = (id) => (Array.isArray(bridge?.components) ? bridge.components.find((item) => item.component_id === id) : null);
@@ -3168,7 +3168,7 @@
     else if (!strategy) detail = `<div class="callout callout-neutral">No strategies were published.</div>`;
     else if (scope === "epoch") detail = mvaEpochTable(strategy, block);
     else if (!window) detail = `${mvaNotes(strategy, block)}`;
-    else detail = `<p class="cell-secondary">${safe(window.label || "")} · ${safe(mvaWindowText(window))}${window.view ? ` · ${safe(window.view)}` : ""}${number(window.capital_base_usd) != null ? ` · capital base ${currency(window.capital_base_usd)}${window.capital_base_basis ? ` (${safe(humanStatus(window.capital_base_basis))})` : ""}` : ""}</p>${mvaTiles(window, block)}${mvaBars(window.bridge || [], block, "pp", mvaPp)}${mvaClosure(window)}${mvaMemoAndTerms(window, block)}${mvaNotes(strategy, block)}`;
+    else detail = `<p class="cell-secondary">${safe(window.label || "")} · ${safe(mvaWindowText(window))}${window.view ? ` · ${safe(humanStatus(window.view))}` : ""}${number(window.capital_base_usd) != null ? ` · capital base ${currency(window.capital_base_usd)}${window.capital_base_basis ? ` (${safe(humanStatus(window.capital_base_basis))})` : ""}` : ""}</p>${mvaTiles(window, block)}${mvaBars(window.bridge || [], block, "pp", mvaPp)}${mvaClosure(window)}${mvaMemoAndTerms(window, block)}${mvaNotes(strategy, block)}`;
     return detail;
   }
 

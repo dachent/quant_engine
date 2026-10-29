@@ -1268,6 +1268,9 @@ tfoot td {
 
 /* ===== BEGIN model-vs-actual (mockup C) ===== */
 .mva-h { margin: 18px 0 6px; font-size: 16px; }
+#mva-total-table { min-width: 1080px; }
+#mva-total-table tbody th[scope=row], #mva-total-table tfoot th[scope=row] { min-width: 230px; text-transform: none; }
+#mva-total-table .cell-secondary { text-transform: none; }
 .mva-tag { display: inline-block; padding: 1px 7px; border-radius: 4px; border: 1px solid var(--border); font-size: 11px; font-weight: 800; color: var(--text-soft); white-space: nowrap; }
 .mva-tag-evidenced { color: #4ade80; border-color: #2f7a4c; }
 .mva-tag-derived { color: #7cb7ff; border-color: #35618f; }
@@ -1284,7 +1287,7 @@ tfoot td {
 .mva-link { background: none; border: 0; padding: 0; color: var(--accent, #5eead4); font: inherit; font-weight: 700; cursor: pointer; text-align: left; }
 .mva-total th, .mva-total td { border-top: 2px solid var(--border); font-weight: 700; background: #0e1b28; }
 .mva-bars { display: grid; gap: 4px; margin: 8px 0 14px; }
-.mva-bar-row { display: grid; grid-template-columns: minmax(150px, 1.3fr) minmax(120px, 2fr) 84px 84px 32px; gap: 8px; align-items: center; }
+.mva-bar-row { display: grid; grid-template-columns: minmax(150px, 1.3fr) minmax(100px, 2fr) 96px 96px minmax(110px, auto); gap: 8px; align-items: center; }
 .mva-bar-label { overflow-wrap: anywhere; }
 .mva-bar-track { position: relative; height: 12px; background: #1d2a3d; border-radius: 3px; }
 .mva-bar-track::before { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; border-left: 1px solid var(--text-soft); }
@@ -1294,7 +1297,7 @@ tfoot td {
 .mva-bar-row b { text-align: right; font-variant-numeric: tabular-nums; }
 .mva-usd { text-align: right; color: var(--text-soft); font-variant-numeric: tabular-nums; }
 .mva-subs { margin: 0 0 6px 18px; display: grid; gap: 2px; font-size: 12.5px; }
-.mva-sub { display: grid; grid-template-columns: minmax(150px, 1.3fr) 84px 84px 32px; gap: 8px; align-items: center; }
+.mva-sub { display: grid; grid-template-columns: minmax(150px, 1.3fr) 96px 96px minmax(110px, auto); gap: 8px; align-items: center; }
 .mva-sub b { text-align: right; font-variant-numeric: tabular-nums; }
 .mva-robust { margin: 0 0 8px 18px; }
 .mva-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 8px 0; }
@@ -1308,10 +1311,11 @@ tfoot td {
 .mva-legend { margin-top: 12px; }
 .mva-badge { margin-left: 6px; }
 @media (max-width: 760px) {
-  .mva-bar-row { grid-template-columns: 1fr 1fr 32px; }
+  #mva-total-table tbody th[scope=row], #mva-total-table tfoot th[scope=row] { min-width: 150px; }
+  .mva-bar-row { grid-template-columns: 1fr 1fr auto; }
   .mva-bar-label { grid-column: 1 / -1; }
   .mva-bar-track { grid-column: 1 / -1; }
-  .mva-sub { grid-template-columns: 1fr 1fr 32px; }
+  .mva-sub { grid-template-columns: 1fr 1fr auto; }
   .mva-sub > span:first-child { grid-column: 1 / -1; }
 }
 /* ===== END model-vs-actual ===== */
