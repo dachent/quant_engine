@@ -449,3 +449,40 @@ def test_a_date_counts_when_two_strategies_are_train_on_it() -> None:
     assert aggregate["window"]["n"] == DAYS - 3
     assert _errors(block) == []
     risk.verify_orthogonal_risk_attribution(block, panel)
+
+
+def test_the_verifier_checks_the_block_metadata_and_all_unavailable_modes() -> None:
+    panel = _panel([_series_row("A"), _series_row("B")])
+    good = risk.build_orthogonal_risk_attribution(panel)
+    for field in ("definition", "aggregate_note", "reason", "agreement_tolerance"):
+        changed = deepcopy(good)
+        changed[field] = "changed" if field != "agreement_tolerance" else 0.5
+        with pytest.raises(risk.OrthogonalRiskError):
+            risk.verify_orthogonal_risk_attribution(changed, panel)
+    changed = deepcopy(good)
+    changed["weighting_definitions"]["CAPITAL_WEIGHTED"] = "changed"
+    with pytest.raises(risk.OrthogonalRiskError):
+        risk.verify_orthogonal_risk_attribution(changed, panel)
+
+    unavailable = _panel([_unavailable_row("C"), _unavailable_row("D")])
+    block = risk.build_orthogonal_risk_attribution(unavailable)
+    assert block["modes"]["LIVE_ONLY"]["unavailable_count"] == 2
+    risk.verify_orthogonal_risk_attribution(block, unavailable)
+    dropped = deepcopy(block)
+    dropped["modes"]["LIVE_ONLY"]["cells"].pop()
+    with pytest.raises(risk.OrthogonalRiskError):
+        risk.verify_orthogonal_risk_attribution(dropped, unavailable)
+    reasoned = deepcopy(block)
+    reasoned["modes"]["LIVE_ONLY"]["cells"][0]["reason"] = "OTHER"
+    with pytest.raises(risk.OrthogonalRiskError):
+        risk.verify_orthogonal_risk_attribution(reasoned, unavailable)
+
+
+def test_a_panel_without_invested_capital_never_names_a_none_capital_date() -> None:
+    panel = _panel([_series_row("A"), _series_row("B")])
+    del panel["invested_capital"]
+    block = risk.build_orthogonal_risk_attribution(panel)
+    aggregate = block["modes"]["LIVE_ONLY"]["aggregates"][0]
+    assert "None" not in json.dumps(aggregate["unweighted_ranges"])
+    assert [s["basis"] for s in aggregate["weighting"]] == ["EQUAL_WEIGHT_DIAGNOSTIC"]
+    risk.verify_orthogonal_risk_attribution(block, panel)

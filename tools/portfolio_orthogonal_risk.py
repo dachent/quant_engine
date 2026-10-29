@@ -63,9 +63,6 @@ CAPITAL_WEIGHT_DEFINITION: Final = "PRIOR_DAY_INVESTED_CAPITAL_SHARE_OF_PERIMETE
 FEWER_THAN_TWO_FUNDED_REASON: Final = (
     "FEWER_THAN_TWO_COVERED_STRATEGIES_HELD_INVESTED_CAPITAL_ON_THESE_DATES"
 )
-NO_TARGET_WEIGHTS_REASON: Final = (
-    "NO_EFFECTIVE_DATED_TARGET_ALLOCATION_WEIGHTS_ADMITTED_FOR_THIS_RANGE"
-)
 MODE_COEFFICIENT_UNAVAILABLE_REASON: Final = (
     "NO_STANDARD_ERRORS_FOR_ORTHOGONAL_MODE_COEFFICIENTS"
 )
@@ -528,42 +525,30 @@ def _weighting_segments(days: Sequence[str], equal: set[str]) -> list[dict[str, 
 
 
 def _unweighted_ranges(
-    common: Sequence[str],
-    skipped: Sequence[str],
-    unfunded: Sequence[str],
-    capital: Mapping[str, Sequence[tuple[str, Fraction]]],
+    common: Sequence[str], unfunded: Sequence[str]
 ) -> list[dict[str, Any]]:
-    """Name each run of aggregate dates that no weight source covers, and why."""
+    """Name each run of aggregate dates on which fewer than two covered strategies
+    hold invested capital, so no capital weight exists; dates without any capital
+    record take the equal-weight diagnostic and are not listed here."""
 
-    first_capital = min(
-        (entries[0][0] for entries in capital.values() if entries), default=None
-    )
-    reasons = (
-        (
-            skipped,
-            f"NO_INVESTED_CAPITAL_BEFORE_{first_capital}_AND_{NO_TARGET_WEIGHTS_REASON}",
-        ),
-        (unfunded, FEWER_THAN_TWO_FUNDED_REASON),
-    )
+    missing = set(unfunded)
     ranges: list[dict[str, Any]] = []
-    for dates, reason in reasons:
-        missing = set(dates)
-        run: list[str] = []
-        for day in list(common) + [""]:
-            if day in missing:
-                run.append(day)
-                continue
-            if run:
-                ranges.append(
-                    {
-                        "start": run[0],
-                        "end": run[-1],
-                        "days": len(run),
-                        "reason": reason,
-                    }
-                )
-                run = []
-    return sorted(ranges, key=lambda row: (row["start"], row["reason"]))
+    run: list[str] = []
+    for day in list(common) + [""]:
+        if day in missing:
+            run.append(day)
+            continue
+        if run:
+            ranges.append(
+                {
+                    "start": run[0],
+                    "end": run[-1],
+                    "days": len(run),
+                    "reason": FEWER_THAN_TWO_FUNDED_REASON,
+                }
+            )
+            run = []
+    return ranges
 
 
 def _aggregate(
@@ -635,9 +620,7 @@ def _aggregate(
         weights[day] = {
             sid: value / total for sid, value in values.items() if value is not None
         }
-    result["unweighted_ranges"] = _unweighted_ranges(
-        sorted(common), [], unfunded, capital
-    )
+    result["unweighted_ranges"] = _unweighted_ranges(sorted(common), unfunded)
     equal = set(skipped)
     days.sort()
     if len(days) < MINIMUM_OBSERVATIONS:
@@ -869,7 +852,11 @@ def verify_orthogonal_risk_attribution(
         "orthogonal risk schema_version differs",
     )
     rebuilt = build_orthogonal_risk_attribution(data)
-    _expect(block.get("status") == rebuilt["status"], "block status differs")
+    _expect(
+        {key: value for key, value in block.items() if key != "modes"}
+        == {key: value for key, value in rebuilt.items() if key != "modes"},
+        "block metadata differs from the re-derivation",
+    )
     capital = _capital_by_strategy(data)
     ids = _strategy_ids(data)
     for mode in MODES:
@@ -879,10 +866,7 @@ def verify_orthogonal_risk_attribution(
             raise OrthogonalRiskError(f"{mode} block absent")
         _expect(published.get("status") == expected["status"], f"{mode} status differs")
         if expected["status"] != "AVAILABLE":
-            _expect(
-                published.get("reason") == expected.get("reason"),
-                f"{mode} reason differs",
-            )
+            _expect(published == expected, f"{mode} differs from the re-derivation")
             continue
         rows = _iter_rows(data, mode)
         _expect(
