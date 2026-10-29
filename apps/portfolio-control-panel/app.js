@@ -3039,89 +3039,137 @@
   }
 
   // ===== BEGIN model-vs-actual (mockup C, issue #595 PANEL-VIS-004) =====
-  // Presentation of `model_vs_actual`: one window per strategy (aligned / account), a bridge of signed components, a
-  // dollar-weighted portfolio bridge, a per-epoch table and the five-part notes.  Every label, status, window and
-  // number is read from the payload; a missing block or term is shown with its reason and the pull that replaces it.
+  // Presentation of the producer's `model_vs_actual` block (tools/portfolio_model_vs_actual.py): per strategy a primary
+  // window, aligned windows and epochs in one item shape, a bridge of signed components that sums with an always-printed
+  // residual to the gap, memo lines outside the closure, a dollar-weighted portfolio bridge and the pulls that replace
+  // audit-derived terms.  Every label, tag, window and number is read from the payload; AUDIT_DERIVED and ESTIMATED rows
+  // are never presented as evidenced, and a missing or unavailable term prints its reason and the pull that replaces it.
   const mvaBlock = () => (data.model_vs_actual && Number.isInteger(data.model_vs_actual.schema_version) ? data.model_vs_actual : null);
-  const mvaState = { scope: "portfolio", strategyId: null, window: null };
+  const mvaState = { scope: "portfolio", strategyId: null, windowId: null };
   const mvaSigned = (value, digits, suffix) => (number(value) == null ? "—" : `${Number(value) > 0 ? "+" : Number(value) < 0 ? "−" : ""}${Math.abs(Number(value)).toFixed(digits)}${suffix}`);
   const mvaPp = (value) => mvaSigned(value, 2, " pp");
+  const mvaPercent = (value) => (number(value) == null ? "—" : `${Number(value).toFixed(2)}%`);
   const mvaUsd = (value) => (number(value) == null ? "—" : `${Number(value) < 0 ? "−" : "+"}${currency(Math.abs(Number(value)))}`);
-  const mvaReason = (term) => (term && (term.unavailable_reason || term.reason)
-    ? `<span class="mva-reason">${safe(humanStatus(term.unavailable_reason || term.reason))}${term.required_pull ? ` · replaced by: ${safe(term.required_pull)}` : ""}</span>`
-    : "");
-  function mvaTag(evidence, note, legend) {
-    if (!evidence) return '<span class="mva-tag is-missing" title="No evidence tag published">—</span>';
-    const meaning = legend && legend[evidence] ? legend[evidence] : "evidence tag";
-    return `<span class="mva-tag mva-tag-${safe(String(evidence).toLowerCase())}" title="${safe(meaning)}">${safe(evidence)}</span>${note ? `<small class="mva-note">${safe(humanStatus(note))}</small>` : ""}`;
-  }
-  const mvaBadges = (item) => (Array.isArray(item?.badges) ? item.badges.map((badge) => `<span class="badge badge-warning mva-badge">${safe(humanStatus(badge))}</span>`).join("") : "");
-  const mvaWindowKey = (block) => {
-    const keys = Array.isArray(block.window_keys) ? block.window_keys : [];
-    return keys.includes(mvaState.window) ? mvaState.window : keys[0] || null;
+  const mvaSide = (value) => (number(value) == null ? "none" : Number(value) < 0 ? "neg" : "pos");
+  const mvaPullTitle = (block, pullId) => {
+    const pull = (Array.isArray(block.pulls) ? block.pulls : []).find((item) => item.pull_id === pullId);
+    return pull ? pull.title : pullId;
   };
-  const mvaWindowOf = (strategy, key) => (strategy && strategy.windows && key ? strategy.windows[key] || null : null);
-  const mvaWindowText = (window) => (window ? `${formatDate(window.window_start)} → ${formatDate(window.window_end)}${number(window.window_days) != null ? ` (${integer.format(window.window_days)} d)` : ""}` : "window not published");
+  const mvaReplaced = (block, pullId) => (pullId ? `<span class="mva-reason">replaced by: ${safe(mvaPullTitle(block, pullId))}</span>` : "");
+  function mvaTag(item, block) {
+    const tag = item && item.evidence_tag;
+    if (!tag) return '<span class="mva-tag is-missing" title="No evidence tag published">—</span>';
+    const definition = (Array.isArray(block.evidence_tags) ? block.evidence_tags : []).find((entry) => entry.tag === tag);
+    const origin = item.origin_tag ? `<span class="mva-origin" title="Origin tag in the audit analysis">${safe(item.origin_tag)}</span>` : "";
+    return `<span class="mva-tag mva-tag-${safe(String(tag).toLowerCase().replaceAll("_", "-"))}" title="${safe(definition ? definition.definition : "evidence tag")}">${safe(humanStatus(tag))}</span>${origin}`;
+  }
+  const mvaPrimaryWindow = (strategy) => {
+    const windows = Array.isArray(strategy.windows) ? strategy.windows : [];
+    return windows.find((item) => item.window_id === strategy.primary_window_id) || windows[0] || null;
+  };
+  const mvaWindowText = (window) => (window ? `${formatDate(window.start)} → ${formatDate(window.end)}${number(window.days) != null ? ` (${integer.format(window.days)} d)` : ""}` : "window not published");
+  const mvaComponent = (window, componentId) => (Array.isArray(window?.bridge) ? window.bridge.find((item) => item.component_id === componentId) || null : null);
 
-  // Signed bars on a shared zero line: width is |pp| over the largest |pp| in the set, direction by side AND sign text.
-  function mvaBars(components, legend, scaleMax) {
-    const rows = Array.isArray(components) ? components : [];
+  function mvaUnavailableTerms(strategy, block) {
+    const terms = Array.isArray(strategy.unavailable) ? strategy.unavailable : [];
+    return terms.map((item) => `<div class="mva-unavailable"><strong>${safe(humanStatus(item.term))}</strong> ${mvaTag(item, block)} <span class="mva-reason">${safe(humanStatus(item.reason))}${item.window_end ? ` · to ${safe(formatDate(item.window_end))}` : ""}</span>${mvaReplaced(block, item.replacing_pull)}</div>`).join("");
+  }
+
+  // Signed bars on a shared zero line: width is |value| over the largest |value| in the set; direction by side AND sign text.
+  function mvaBars(rows, block, field, formatter, extra) {
     if (!rows.length) return '<p class="cell-secondary">No bridge components were published for this window.</p>';
-    const max = scaleMax || Math.max(...rows.map((item) => Math.abs(number(item.pp) ?? 0)), 0.0001);
+    const max = Math.max(...rows.map((item) => Math.abs(number(item[field]) ?? 0)), 1e-9);
     const body = rows.map((item) => {
-      const value = number(item.pp);
+      const value = number(item[field]);
       const width = value == null ? 0 : Math.min(100, (Math.abs(value) / max) * 100);
-      const side = value == null ? "none" : value < 0 ? "neg" : "pos";
+      const side = mvaSide(value);
       const subs = Array.isArray(item.sub_components) && item.sub_components.length
-        ? `<div class="mva-subs">${item.sub_components.map((sub) => `<div class="mva-sub"><span>${safe(sub.label || humanStatus(sub.component))}${sub.in_leverage_line === false ? ' <small class="mva-note">memo, not in the line</small>' : ""}</span><b class="mva-${number(sub.pp) < 0 ? "neg" : "pos"}">${mvaPp(sub.pp)}</b><span class="mva-usd">${mvaUsd(sub.usd)}</span><span>${mvaTag(sub.evidence, sub.evidence_note, legend)}</span></div>`).join("")}</div>`
+        ? `<div class="mva-subs">${item.sub_components.map((sub) => `<div class="mva-sub"><span>${safe(sub.label || humanStatus(sub.component_id))}</span><b class="mva-${mvaSide(sub.pp)}">${mvaPp(sub.pp)}${number(sub.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(sub.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : ""}</b><span class="mva-usd"></span><span>${mvaTag(sub, block)}</span></div>`).join("")}</div>`
         : "";
-      const robustness = item.robustness && item.robustness.note ? `<p class="cell-secondary mva-robust">${safe(item.robustness.note)}</p>` : "";
-      return `<div class="mva-bar-row"><div class="mva-bar-label">${safe(item.label || humanStatus(item.component))}${mvaBadges(item)}${mvaReason(item)}</div><div class="mva-bar-track" role="img" aria-label="${safe(item.label || item.component)} ${safe(mvaPp(value))}"><i class="mva-bar mva-bar-${side}" style="width:${(width / 2).toFixed(1)}%"></i></div><b class="mva-${side}">${mvaPp(value)}</b><span class="mva-usd">${mvaUsd(item.usd)}</span><span>${mvaTag(item.evidence, item.evidence_note, legend)}</span></div>${subs}${robustness}`;
+      const usdText = item.usd_basis === "ESTIMATED_PP_TIMES_CAPITAL_BASE" ? `${mvaUsd(item.usd)}<small class="mva-note">estimated dollars</small>` : mvaUsd(item.usd);
+      return `<div class="mva-bar-row"><div class="mva-bar-label">${safe(item.label || humanStatus(item.component_id))}${item.unavailable_reason ? `<span class="mva-reason">${safe(humanStatus(item.unavailable_reason))}</span>` : ""}${mvaReplaced(block, item.replacing_pull)}</div><div class="mva-bar-track" role="img" aria-label="${safe(item.label || item.component_id)} ${safe(formatter(value))}"><i class="mva-bar mva-bar-${side}" style="width:${(width / 2).toFixed(1)}%"></i></div><b class="mva-${side}">${formatter(value)}${number(item.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(item.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : ""}</b><span class="mva-usd">${extra ? extra(item) : usdText}</span><span>${mvaTag(item, block)}</span></div>${subs}`;
     }).join("");
     return `<div class="mva-bars">${body}</div>`;
   }
 
-  function mvaTotals(block, key) {
+  function mvaClosure(window) {
+    const residual = window.residual || {};
+    return `<p class="cell-secondary mva-closure">Components sum to ${mvaPp(window.bridge_sum_pp)}${number(window.bridge_sum_usd) != null ? ` (${mvaUsd(window.bridge_sum_usd)})` : ""}; residual ${mvaPp(residual.pp)}${number(residual.usd) != null ? ` (${mvaUsd(residual.usd)})` : ""}; the gap is ${mvaPp(window.account_gap_pp)}. ${window.closure_ok ? `Closes within ±${decimal(window.closure_tolerance_pp, 2)} pp.` : `<strong>Does not close</strong> within ±${decimal(window.closure_tolerance_pp, 2)} pp.`}${window.gap_matches_audit_gap === false ? " The gap differs from the audit's own figure." : ""}</p>`;
+  }
+
+  function mvaTotals(block) {
     const strategies = Array.isArray(block.strategies) ? block.strategies : [];
-    const legend = block.evidence_legend || {};
+    const cell = (value, extra) => (number(value) == null ? '<td class="numeric">—</td>' : `<td class="numeric mva-${mvaSide(value)}">${mvaPp(value)}${extra || ""}</td>`);
     const rows = strategies.map((strategy) => {
-      const window = mvaWindowOf(strategy, key);
-      if (!window) return `<tr><th scope="row">${safe(strategy.display_name || strategy.strategy_id)}</th><td colspan="6">${mvaReason(strategy.windows?.[key] || strategy) || '<span class="mva-reason">Window not published for this strategy</span>'}</td></tr>`;
-      const cell = (value, term) => (number(value) == null ? `<td class="numeric">${term ? mvaReason(term) : "—"}</td>` : `<td class="numeric mva-${Number(value) < 0 ? "neg" : "pos"}">${mvaPp(value)}${number(term?.uncertainty_pp) != null ? `<small class="mva-note">±${decimal(term.uncertainty_pp, 1)}</small>` : ""}</td>`);
-      return `<tr><th scope="row" data-mva-strategy="${safe(strategy.strategy_id)}"><button type="button" class="mva-link" data-mva-open="${safe(strategy.strategy_id)}">${safe(strategy.display_name || strategy.strategy_id)}</button><span class="cell-secondary">${safe(mvaWindowText(window))}${window.comparator_label ? ` · ${safe(window.comparator_label)}` : ""}</span></th>${cell(window.as_is_gap_pp)}${cell(window.leverage_line_pp, window.leverage_term)}${cell(window.leverage_neutral_gap_pp)}${cell(window.fx_line_pp, window.fx_term)}${cell(window.gap_neutral_pp)}<td>${mvaTag(window.evidence, window.evidence_note, legend)}</td></tr>`;
+      const window = mvaPrimaryWindow(strategy);
+      const name = `<button type="button" class="mva-link" data-mva-open="${safe(strategy.strategy_id)}">${safe(strategy.display_name || strategy.strategy_id)}</button>`;
+      if (!window) return `<tr><th scope="row">${name}</th><td colspan="7">${mvaUnavailableTerms(strategy, block) || '<span class="mva-reason">No window published</span>'}</td></tr>`;
+      const leverage = mvaComponent(window, "leverage");
+      const fx = mvaComponent(window, "fx");
+      const band = (component) => (component && number(component.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(component.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : "");
+      return `<tr><th scope="row">${name}<span class="cell-secondary">${safe(mvaWindowText(window))}${window.view ? ` · ${safe(window.view)}` : ""}</span></th><td class="numeric">${mvaPercent(window.account_return_pct)}<small class="mva-note">${safe(window.account_currency || "")}</small></td><td class="numeric">${mvaPercent(window.model_return_pct)}<small class="mva-note">${safe(window.model_currency || "")}</small></td>${cell(window.account_gap_pp)}${cell(leverage?.pp, band(leverage))}${cell(window.leverage_neutral_gap_pp)}${cell(fx?.pp, band(fx))}${cell(window.gap_neutral_of_leverage_and_fx_pp)}<td>${mvaTag(window, block)}</td></tr>`;
     }).join("");
-    const total = block.portfolio?.windows?.[key];
-    const totalRow = total && number(total.as_is_gap_pp) != null
-      ? `<tr class="mva-total"><th scope="row">${safe(block.portfolio.label || "Portfolio (dollar-weighted)")}<span class="cell-secondary">${safe(mvaWindowText(total))}</span></th><td class="numeric mva-${total.as_is_gap_pp < 0 ? "neg" : "pos"}">${mvaPp(total.as_is_gap_pp)}</td><td class="numeric">${mvaPp(total.leverage_line_pp)}</td><td class="numeric">${mvaPp(total.leverage_neutral_gap_pp)}</td><td class="numeric">${mvaPp(total.fx_line_pp)}</td><td class="numeric">${mvaPp(total.gap_neutral_pp)}</td><td>${mvaTag(total.evidence, total.evidence_note, legend)}</td></tr>`
-      : `<tr class="mva-total"><th scope="row">${safe(block.portfolio?.label || "Portfolio (dollar-weighted)")}</th><td colspan="6">${mvaReason(total || block.portfolio) || '<span class="mva-reason">The dollar-weighted portfolio total is not published</span>'}</td></tr>`;
-    return `<thead><tr><th>Strategy · window</th><th class="numeric">As-is gap</th><th class="numeric">Leverage line</th><th class="numeric">Leverage-neutral gap</th><th class="numeric">FX line</th><th class="numeric">Gap neutral of leverage and FX</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody><tfoot>${totalRow}</tfoot>`;
+    const bridge = block.portfolio_bridge;
+    const component = (id) => (Array.isArray(bridge?.components) ? bridge.components.find((item) => item.component_id === id) : null);
+    const totalRow = bridge && number(bridge.account_gap_usd) != null
+      ? `<tr class="mva-total"><th scope="row">Portfolio, dollar-weighted<span class="cell-secondary">dollars, each strategy over its own window</span></th><td class="numeric">—</td><td class="numeric">—</td><td class="numeric mva-${mvaSide(bridge.account_gap_usd)}">${mvaUsd(bridge.account_gap_usd)}</td><td class="numeric">${mvaUsd(component("leverage")?.usd)}</td><td class="numeric">—</td><td class="numeric">${mvaUsd(component("fx")?.usd)}</td><td class="numeric">—</td><td>${bridge.closure_ok === false ? '<span class="mva-reason">does not close</span>' : ""}</td></tr>`
+      : `<tr class="mva-total"><th scope="row">Portfolio, dollar-weighted</th><td colspan="8"><span class="mva-reason">The dollar-weighted portfolio bridge is not published in this snapshot</span></td></tr>`;
+    return `<thead><tr><th>Strategy · primary window</th><th class="numeric">Account return</th><th class="numeric">Model return</th><th class="numeric">As-is gap</th><th class="numeric">Leverage line</th><th class="numeric">Leverage-neutral gap</th><th class="numeric">FX line</th><th class="numeric">Gap neutral of leverage and FX</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody><tfoot>${totalRow}</tfoot>`;
   }
 
-  function mvaTiles(window, legend) {
-    const tile = (label, value, tag, note) => `<div class="mva-tile"><span>${safe(label)}</span><b>${value}</b>${tag ? mvaTag(tag, note, legend) : ""}</div>`;
-    const returns = (value, currencyLabel) => (number(value) == null ? "—" : `${pct(value, 2)}${currencyLabel ? ` <small class="mva-note">${safe(currencyLabel)}</small>` : ""}`);
-    return `<div class="mva-tiles">${tile("Account return", returns(window.account_return, window.account_currency), window.account_evidence)}${tile("Model return", returns(window.model_return, window.model_currency), window.model_evidence)}${tile("Gap", mvaPp(window.as_is_gap_pp), window.evidence, window.evidence_note)}${tile("Leverage line", mvaPp(window.leverage_line_pp), window.leverage_term?.evidence, window.leverage_term?.evidence_note)}${number(window.fx_line_pp) != null ? tile("FX line", mvaPp(window.fx_line_pp), window.fx_term?.evidence, window.fx_term?.evidence_note) : ""}${tile("Leverage-neutral gap", `${mvaPp(window.leverage_neutral_gap_pp)}${number(window.gap_neutral_pp) != null ? ` · ${mvaPp(window.gap_neutral_pp)}` : ""}`, window.evidence)}</div>`;
+  function mvaPortfolio(block) {
+    const bridge = block.portfolio_bridge;
+    if (!bridge || !Array.isArray(bridge.components)) return `<div class="callout callout-neutral"><strong>Portfolio bridge not published.</strong> The producer carries no dollar-weighted bridge for this snapshot.</div>`;
+    const included = (bridge.strategies_included || []).map((item) => `${safe(item.strategy_id)} ${safe(formatDate(item.start))} → ${safe(formatDate(item.end))} (${mvaUsd(item.account_gap_usd)})`).join("; ");
+    const excluded = (bridge.strategies_excluded || []).map((item) => `${safe(item.strategy_id)}: ${safe(humanStatus(item.reason))}`).join("; ");
+    const rows = [...bridge.components, { component_id: "residual", label: "Residual (gap minus components)", usd: bridge.residual?.usd, evidence_tag: null }];
+    return `<p class="cell-secondary">${safe(humanStatus(bridge.window_basis))}. ${safe(bridge.dollar_basis || "")}</p>${mvaBars(rows, block, "usd", mvaUsd, (item) => "")}<p class="cell-secondary mva-closure">Gap ${mvaUsd(bridge.account_gap_usd)}; components ${mvaUsd(bridge.components_sum_usd)}; ${bridge.closure_ok ? `closes within ±${currency(bridge.closure_tolerance_usd)}` : "<strong>does not close</strong>"}.</p><p class="cell-secondary">Windows: ${included}${excluded ? `. Excluded: ${excluded}` : ""}</p>`;
   }
 
-  function mvaNotes(strategy, legend) {
-    const notes = strategy.notes;
-    if (!notes) return `<p class="cell-secondary">Notes are not published for this strategy.</p>`;
-    const list = (items, render) => (Array.isArray(items) && items.length ? `<ul>${items.map(render).join("")}</ul>` : "<p>None published.</p>");
-    const comparator = notes.comparator || {};
-    return `<div class="mva-notes"><h4>${safe(strategy.display_name || strategy.strategy_id)} ${mvaTag(notes.evidence_level, null, legend)}</h4>
-      <div class="mva-note-part"><strong>Comparator</strong><p>${safe(comparator.description || "Not published")}${comparator.publisher ? ` Published by ${safe(comparator.publisher)}.` : ""} ${comparator.gross_or_net_of_fees ? safe(humanStatus(comparator.gross_or_net_of_fees)) + "." : ""} ${safe(comparator.reconstruction_basis || "")}</p></div>
-      <div class="mva-note-part"><strong>What the gap contains</strong><p>${safe(notes.gap_contents || "Not published")}</p></div>
-      <div class="mva-note-part"><strong>Artifact versus real cost</strong>${list(notes.artifact_vs_real, (item) => `<li><span class="badge ${item.kind === "REAL_COST" ? "badge-negative" : "badge-neutral"}">${safe(humanStatus(item.kind))}</span> ${safe(item.item)}${item.usd_or_pp ? ` · ${safe(item.usd_or_pp)}` : ""}</li>`)}</div>
-      <div class="mva-note-part"><strong>What you can act on</strong>${list(notes.actionable, (item) => `<li>${safe(item)}</li>`)}</div>
-      <div class="mva-note-part"><strong>Evidence and open items</strong>${list(notes.open_items, (item) => `<li>${safe(item)}</li>`)}</div>
-      ${strategy.analysis_ref ? `<p class="cell-secondary">Open analysis: ${safe(strategy.analysis_ref)}</p>` : ""}</div>`;
+  function mvaTiles(window, block) {
+    const tile = (label, value, tagItem) => `<div class="mva-tile"><span>${safe(label)}</span><b>${value}</b>${tagItem ? mvaTag(tagItem, block) : ""}</div>`;
+    const leverage = mvaComponent(window, "leverage");
+    const fx = mvaComponent(window, "fx");
+    return `<div class="mva-tiles">${tile("Account return", `${mvaPercent(window.account_return_pct)} <small class="mva-note">${safe(window.account_currency || "")}</small>`)}${tile("Model return", `${mvaPercent(window.model_return_pct)} <small class="mva-note">${safe(window.model_currency || "")}</small>`)}${tile("Gap", `${mvaPp(window.account_gap_pp)}${number(window.account_gap_usd) != null ? ` <small class="mva-note">${mvaUsd(window.account_gap_usd)}</small>` : ""}`, window)}${leverage ? tile("Leverage line", mvaPp(leverage.pp), leverage) : ""}${fx ? tile("FX line", mvaPp(fx.pp), fx) : ""}${tile("Leverage-neutral gap", `${mvaPp(window.leverage_neutral_gap_pp)}${number(window.gap_neutral_of_leverage_and_fx_pp) != null ? ` · ${mvaPp(window.gap_neutral_of_leverage_and_fx_pp)}` : ""}`)}</div>`;
   }
 
-  function mvaEpochTable(window, legend) {
-    const epochs = Array.isArray(window?.epochs) ? window.epochs : [];
-    if (!epochs.length) return `<p class="cell-secondary">No per-epoch rows were published for this window.${mvaReason(window?.epochs_term || null)}</p>`;
-    const rows = epochs.map((epoch) => `<tr><th scope="row">${safe(epoch.label || epoch.epoch_id)}${mvaBadges(epoch)}</th><td class="numeric">${pct(epoch.account_return, 1)}</td><td class="numeric">${pct(epoch.model_return, 1)}</td><td class="numeric mva-${number(epoch.gap_pp) < 0 ? "neg" : "pos"}">${mvaPp(epoch.gap_pp)}</td><td>${safe(epoch.main_driver || "—")}</td><td>${mvaTag(epoch.evidence, epoch.evidence_note, legend)}</td></tr>`).join("");
-    return `<div class="table-wrap wide"><table id="mva-epoch-table"><caption>Per epoch</caption><thead><tr><th>Epoch</th><th class="numeric">Account return</th><th class="numeric">Model return</th><th class="numeric">Gap</th><th>Main driver</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  function mvaMemoAndTerms(window, block) {
+    const memo = Array.isArray(window.memo) ? window.memo : [];
+    const terms = Array.isArray(window.governed_terms) ? window.governed_terms : [];
+    const memoMarkup = memo.length ? `<h4>Memo lines (outside the closure)</h4><ul>${memo.map((item) => `<li>${safe(item.label)}: ${mvaPp(item.pp)}${number(item.usd) != null ? ` (${mvaUsd(item.usd)})` : ""} ${mvaTag(item, block)}</li>`).join("")}</ul>` : "";
+    const termMarkup = terms.length ? `<h4>Governed terms</h4><ul>${terms.map((item) => `<li>${safe(humanStatus(item.term))}: ${number(item.usd) != null ? mvaUsd(item.usd) : Object.entries(item.by_currency || {}).map(([code, amount]) => `${safe(code)} ${decimal(amount, 2)}`).join(", ") || safe(humanStatus(item.reason || "UNAVAILABLE"))} ${mvaTag(item, block)}<span class="cell-secondary">${safe(item.source || "")}${number(item.row_count) != null ? ` · ${integer.format(item.row_count)} rows` : ""}</span></li>`).join("")}</ul>` : "";
+    return memoMarkup + termMarkup;
+  }
+
+  function mvaNotes(strategy, block) {
+    const comparator = strategy.comparator || {};
+    const reference = strategy.governed_reference || {};
+    const notes = Array.isArray(strategy.notes) ? strategy.notes : [];
+    return `<div class="mva-notes"><h4>${safe(strategy.display_name || strategy.strategy_id)}: how to read this row</h4>
+      <div class="mva-note-part"><strong>Comparator</strong><p>${safe(comparator.description || "Not published")}${comparator.publisher ? ` Published by ${safe(comparator.publisher)}${comparator.provider_published === false ? " (reconstructed, not provider-published)" : ""}.` : ""}${comparator.gross_or_net ? ` ${safe(humanStatus(comparator.gross_or_net))}.` : ""}</p></div>
+      <div class="mva-note-part"><strong>Governed reference</strong><p>${safe(humanStatus(reference.status || "UNAVAILABLE"))}${reference.reason ? ` · ${safe(humanStatus(reference.reason))}` : ""}${number(reference.account_cumulative_return) != null ? ` · account ${pct(reference.account_cumulative_return, 2)}` : ""}${reference.note ? ` · ${safe(reference.note)}` : ""}</p></div>
+      ${notes.length ? `<div class="mva-note-part"><strong>Notes</strong><ul>${notes.map((item) => `<li>${safe(item)}</li>`).join("")}</ul></div>` : ""}
+      ${(strategy.unavailable || []).length ? `<div class="mva-note-part"><strong>Not available</strong>${mvaUnavailableTerms(strategy, block)}</div>` : ""}</div>`;
+  }
+
+  function mvaEpochTable(strategy, block) {
+    const epochs = Array.isArray(strategy?.epochs) ? strategy.epochs : [];
+    if (!epochs.length) return `<p class="cell-secondary">No per-epoch rows were published for this strategy.</p>`;
+    const rows = epochs.map((epoch) => {
+      const drivers = (epoch.bridge || []).filter((item) => number(item.pp) != null).sort((a, b) => Math.abs(b.pp) - Math.abs(a.pp)).slice(0, 2).map((item) => `${safe(item.label || humanStatus(item.component_id))} ${mvaPp(item.pp)}`).join(" · ");
+      return `<tr><th scope="row">${safe(epoch.label || epoch.window_id)}<span class="cell-secondary">${safe(mvaWindowText(epoch))}</span></th><td class="numeric">${mvaPercent(epoch.account_return_pct)}</td><td class="numeric">${mvaPercent(epoch.model_return_pct)}</td><td class="numeric mva-${mvaSide(epoch.account_gap_pp)}">${mvaPp(epoch.account_gap_pp)}</td><td>${drivers || "—"}</td><td>${mvaTag(epoch, block)}</td></tr>`;
+    }).join("");
+    return `<div class="table-wrap wide"><table id="mva-epoch-table"><caption>${safe(strategy.display_name || strategy.strategy_id)} · per epoch</caption><thead><tr><th>Epoch</th><th class="numeric">Account return</th><th class="numeric">Model return</th><th class="numeric">Gap</th><th>Main drivers</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  function mvaDetail(block, strategy, window, scope) {
+    let detail = "";
+    if (scope === "portfolio") detail = mvaPortfolio(block);
+    else if (!strategy) detail = `<div class="callout callout-neutral">No strategies were published.</div>`;
+    else if (scope === "epoch") detail = mvaEpochTable(strategy, block);
+    else if (!window) detail = `${mvaNotes(strategy, block)}`;
+    else detail = `<p class="cell-secondary">${safe(window.label || "")} · ${safe(mvaWindowText(window))}${window.view ? ` · ${safe(window.view)}` : ""}${number(window.capital_base_usd) != null ? ` · capital base ${currency(window.capital_base_usd)}${window.capital_base_basis ? ` (${safe(humanStatus(window.capital_base_basis))})` : ""}` : ""}</p>${mvaTiles(window, block)}${mvaBars(window.bridge || [], block, "pp", mvaPp)}${mvaClosure(window)}${mvaMemoAndTerms(window, block)}${mvaNotes(strategy, block)}`;
+    return detail;
   }
 
   function renderModelVsActual() {
@@ -3129,43 +3177,31 @@
     if (!host) return;
     const block = mvaBlock();
     if (!block || block.status !== "AVAILABLE") {
-      host.innerHTML = `<div class="callout callout-neutral"><strong>Model vs actual is not in this snapshot.</strong> ${block ? `${safe(humanStatus(block.unavailable_reason || block.status || "UNAVAILABLE"))}${block.required_pull ? ` · replaced by: ${safe(block.required_pull)}` : ""}` : "The producer has not published the model_vs_actual block for this generation."}</div>`;
+      host.innerHTML = `<div class="callout callout-neutral"><strong>Model vs actual is not in this snapshot.</strong> ${block ? safe(humanStatus(block.unavailable_reason || block.reason || block.status || "UNAVAILABLE")) : "The producer has not published the model_vs_actual block for this generation."}</div>`;
       return;
     }
-    const legend = block.evidence_legend || {};
     const strategies = Array.isArray(block.strategies) ? block.strategies : [];
-    const key = mvaWindowKey(block);
-    mvaState.window = key;
-    if (!strategies.some((strategy) => strategy.strategy_id === mvaState.strategyId)) mvaState.strategyId = strategies[0]?.strategy_id || null;
+    if (!strategies.some((item) => item.strategy_id === mvaState.strategyId)) { mvaState.strategyId = strategies[0]?.strategy_id || null; mvaState.windowId = null; }
     const strategy = strategies.find((item) => item.strategy_id === mvaState.strategyId) || null;
-    const window = mvaWindowOf(strategy, key);
-    const windowButtons = (block.window_keys || []).map((windowKey) => `<button type="button" class="segment" data-mva-window="${safe(windowKey)}" aria-pressed="${windowKey === key}">${safe((block.window_labels && block.window_labels[windowKey]) || humanStatus(windowKey))}</button>`).join("");
+    const windows = Array.isArray(strategy?.windows) ? strategy.windows : [];
+    const window = windows.find((item) => item.window_id === mvaState.windowId) || (strategy ? mvaPrimaryWindow(strategy) : null);
     const scopes = [["portfolio", "Portfolio"], ["strategy", "By strategy"], ["epoch", "By epoch"]];
     const scopeButtons = scopes.map(([id, label]) => `<button type="button" class="segment" data-mva-scope="${id}" aria-pressed="${id === mvaState.scope}">${label}</button>`).join("");
     const strategyButtons = strategies.map((item) => `<button type="button" class="segment" data-mva-open="${safe(item.strategy_id)}" aria-pressed="${item.strategy_id === mvaState.strategyId}">${safe(item.display_name || item.strategy_id)}</button>`).join("");
-    let detail = "";
-    if (mvaState.scope === "portfolio") {
-      const total = block.portfolio?.windows?.[key];
-      detail = total && Array.isArray(total.bridge)
-        ? `${mvaTiles(total, legend)}<p class="cell-secondary">${safe(block.portfolio.method_note || "")} ${safe(mvaWindowText(total))}</p>${mvaBars(total.bridge, legend)}`
-        : `<div class="callout callout-neutral"><strong>Portfolio bridge not published.</strong> ${mvaReason(total || block.portfolio) || "The producer carries no dollar-weighted bridge for this window."}</div>`;
-    } else if (!strategy || !window) {
-      detail = `<div class="callout callout-neutral"><strong>No window for this strategy.</strong> ${mvaReason(strategy) || ""}</div>`;
-    } else if (mvaState.scope === "strategy") {
-      detail = `<p class="cell-secondary">${safe(mvaWindowText(window))}${window.comparator_label ? ` · ${safe(window.comparator_label)}` : ""}</p>${mvaTiles(window, legend)}${mvaBars(window.bridge, legend)}${mvaNotes(strategy, legend)}`;
-    } else {
-      detail = mvaEpochTable(window, legend);
-    }
-    host.innerHTML = `<div class="perf-controls"><div class="segmented" aria-label="Window">${windowButtons}</div></div>
-      <div class="table-wrap wide"><table id="mva-total-table"><caption>All strategies · total effect (${safe((block.window_labels && block.window_labels[key]) || humanStatus(key))})</caption>${mvaTotals(block, key)}</table></div>
-      <p class="cell-secondary">${safe(block.reading_note || "")}</p>
+    const windowButtons = windows.length > 1 ? `<div class="segmented" aria-label="Window">${windows.map((item) => `<button type="button" class="segment" data-mva-window="${safe(item.window_id)}" aria-pressed="${window && item.window_id === window.window_id}">${safe(item.label || item.window_id)}</button>`).join("")}</div>` : "";
+    const detail = mvaDetail(block, strategy, window, mvaState.scope);
+    host.innerHTML = `<p class="cell-secondary">${safe(block.sign_convention || "")}</p>
+      <div class="table-wrap wide"><table id="mva-total-table"><caption>All strategies · total effect</caption>${mvaTotals(block)}</table></div>
       <h3 class="mva-h">Where the gap came from</h3>
-      <div class="perf-controls"><div class="segmented" aria-label="Drill down">${scopeButtons}</div>${mvaState.scope !== "portfolio" ? `<div class="segmented" aria-label="Strategy">${strategyButtons}</div>` : ""}</div>
+      <div class="perf-controls"><div class="segmented" aria-label="Drill down">${scopeButtons}</div>${mvaState.scope !== "portfolio" ? `<div class="segmented" aria-label="Strategy">${strategyButtons}</div>${mvaState.scope === "strategy" ? windowButtons : ""}` : ""}</div>
       <div id="mva-detail">${detail}</div>
-      ${block.evidence_legend ? `<p class="cell-secondary mva-legend">${Object.entries(block.evidence_legend).map(([tag, meaning]) => `${mvaTag(tag, null, legend)} ${safe(meaning)}`).join(" · ")}</p>` : ""}`;
-    host.querySelectorAll("[data-mva-window]").forEach((button) => button.addEventListener("click", () => { mvaState.window = button.dataset.mvaWindow; renderModelVsActual(); }));
+      ${Array.isArray(block.evidence_tags) ? `<p class="cell-secondary mva-legend">${block.evidence_tags.map((entry) => `${mvaTag({ evidence_tag: entry.tag }, block)} ${safe(entry.definition)}`).join(" · ")}</p>` : ""}
+      ${Array.isArray(block.notes) && block.notes.length ? `<ul class="mva-legend">${block.notes.map((item) => `<li>${safe(item)}</li>`).join("")}</ul>` : ""}
+      ${Array.isArray(block.pulls) && block.pulls.length ? `<details class="cell-details"><summary>${integer.format(block.pulls.length)} data pulls replace audit-derived terms</summary><ul>${block.pulls.map((pull) => `<li><strong>${safe(pull.title)}</strong> · ${safe(humanStatus(pull.status))}<span class="cell-secondary">${safe(pull.source || "")} · ${safe(pull.entities || "")} · ${safe(pull.date_range || "")} · ${safe(pull.access || "")} · ${safe(pull.estimated_size || "")}</span></li>`).join("")}</ul></details>` : ""}`;
     host.querySelectorAll("[data-mva-scope]").forEach((button) => button.addEventListener("click", () => { mvaState.scope = button.dataset.mvaScope; renderModelVsActual(); }));
+    host.querySelectorAll("[data-mva-window]").forEach((button) => button.addEventListener("click", () => { mvaState.windowId = button.dataset.mvaWindow; renderModelVsActual(); }));
     host.querySelectorAll("[data-mva-open]").forEach((button) => button.addEventListener("click", () => {
+      if (mvaState.strategyId !== button.dataset.mvaOpen) mvaState.windowId = null;
       mvaState.strategyId = button.dataset.mvaOpen;
       if (mvaState.scope === "portfolio") mvaState.scope = "strategy";
       renderModelVsActual();

@@ -1,229 +1,144 @@
-"""Model vs actual (mockup C, #595): totals, bridge, notes, epochs and explicit unavailable states."""
+"""Model vs actual (mockup C, #595): the view reads the producer's real model_vs_actual block."""
 
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
 import re
 from typing import Any
 
-from test_shell_qc1_labels import _run
+from test_panel_render_audit_543 import base, call, run
 
-
-def _plain(dom: dict[str, Any], selector: str) -> str:
-    html = dom[selector]["innerHTML"]
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
-
-
-def _window(gap: float, lev: float, fx: float | None) -> dict[str, Any]:
-    neutral = round(gap - lev, 2)
-    return {
-        "window_start": "2025-11-21",
-        "window_end": "2026-09-11",
-        "window_days": 211,
-        "comparator_label": "P123 model, EUR",
-        "account_return": 0.316,
-        "account_currency": "USD",
-        "model_return": 0.451,
-        "model_currency": "EUR",
-        "as_is_gap_pp": gap,
-        "leverage_line_pp": lev,
-        "leverage_term": {
-            "evidence": "D",
-            "evidence_note": "COMPOSITION_UNVERIFIED",
-            "uncertainty_pp": 4.6,
-        },
-        "leverage_neutral_gap_pp": neutral,
-        "fx_line_pp": fx,
-        "gap_neutral_pp": None if fx is None else round(neutral - fx, 2),
-        "evidence": "D",
-        "bridge": [
-            {
-                "component": "execution",
-                "label": "Execution (fills vs same-day close)",
-                "pp": -8.17,
-                "usd": -1200.0,
-                "evidence": "D",
-            },
-            {
-                "component": "commissions",
-                "label": "Commissions",
-                "pp": -5.48,
-                "usd": -800.0,
-                "evidence": "D",
-                "badges": ["AUDIT_DERIVED"],
-            },
-            {
-                "component": "leverage",
-                "label": "Leverage line",
-                "pp": lev,
-                "usd": -821.0,
-                "evidence": "D",
-                "sub_components": [
-                    {
-                        "component": "borrowing",
-                        "label": "Stock weight above 1x",
-                        "pp": -1.24,
-                        "usd": -180.0,
-                        "evidence": "D",
-                    },
-                    {
-                        "component": "multiple",
-                        "label": "Product multiple",
-                        "pp": 0.01,
-                        "usd": 1.0,
-                        "evidence": "I",
-                        "in_leverage_line": False,
-                    },
-                ],
-                "robustness": {"note": "Cash drag is not independently robust."},
-            },
-        ],
-        "epochs": [
-            {
-                "epoch_id": "E1",
-                "label": "E1",
-                "account_return": None,
-                "model_return": None,
-                "gap_pp": -1.65,
-                "main_driver": "Execution -0.98",
-                "evidence": "D",
-            },
-        ],
-    }
+FIXTURE = Path(__file__).parent / "fixtures" / "model_vs_actual.fixture.json"
 
 
 def _block() -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "status": "AVAILABLE",
-        "window_keys": ["ALIGNED", "ACCOUNT"],
-        "window_labels": {"ALIGNED": "Aligned window", "ACCOUNT": "Account window"},
-        "evidence_legend": {
-            "O": "Observed in a file",
-            "D": "Derived by arithmetic",
-            "I": "Inferred",
-        },
-        "reading_note": "Gap = account minus model, percentage points.",
-        "strategies": [
-            {
-                "strategy_id": "eu",
-                "display_name": "EU [P123]",
-                "windows": {
-                    "ALIGNED": _window(-13.49, -5.39, 6.09),
-                    "ACCOUNT": _window(-12.0, -5.0, None),
-                },
-                "notes": {
-                    "evidence_level": "D",
-                    "comparator": {
-                        "description": "P123 Designer Model 1764562.",
-                        "publisher": "Portfolio123",
-                        "gross_or_net_of_fees": "GROSS",
-                        "reconstruction_basis": "Simulated.",
-                    },
-                    "gap_contents": "Execution -8.17 and commissions -5.48.",
-                    "artifact_vs_real": [
-                        {
-                            "item": "Subscription outside NAV",
-                            "kind": "REAL_COST",
-                            "usd_or_pp": "-5.19 pp",
-                        }
-                    ],
-                    "actionable": ["Use limit orders."],
-                    "open_items": ["Composition of currency of cash."],
-                },
-                "analysis_ref": "model-vs-actual/eu123/RESULT.md",
-            },
-            {
-                "strategy_id": "ai",
-                "display_name": "AI Factor [P123]",
-                "windows": {"ALIGNED": _window(-16.86, 0.71, None)},
-            },
-        ],
-        "portfolio": {
-            "label": "Portfolio (dollar-weighted)",
-            "method_note": "Sum of strategy bridges in dollars.",
-            "windows": {
-                "ALIGNED": {**_window(-9.0, -1.0, 0.5), "window_start": "2025-11-21"},
-                "ACCOUNT": {
-                    "unavailable_reason": "NEEDS_COMMON_WINDOW",
-                    "required_pull": "per-strategy USD on a common window",
-                },
-            },
-        },
-    }
+    return copy.deepcopy(json.loads(FIXTURE.read_text(encoding="utf-8")))
 
 
-def test_totals_table_shows_every_strategy_and_a_portfolio_total_row(
+def _plain(markup: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", markup)).strip()
+
+
+def _root(tmp_path: Path, payload: dict[str, Any]) -> str:
+    dom = run(tmp_path, payload, calls=[{"fn": "renderModelVsActual", "args": []}])[
+        "dom"
+    ]
+    return str(dom["#mva-root"]["innerHTML"])
+
+
+def _detail(tmp_path: Path, block: dict[str, Any], strategy: int, scope: str) -> str:
+    strategies = block["strategies"]
+    chosen = strategies[strategy]
+    window = next(
+        (w for w in chosen["windows"] if w["window_id"] == chosen["primary_window_id"]),
+        None,
+    )
+    return str(
+        call(
+            tmp_path,
+            base(model_vs_actual=block),
+            "mvaDetail",
+            block,
+            chosen,
+            window,
+            scope,
+        )
+    )
+
+
+def test_totals_table_lists_every_strategy_with_tags_and_a_dollar_total(
     tmp_path: Path,
 ) -> None:
-    dom = _run(tmp_path, {"model_vs_actual": _block()}, "renderModelVsActual")
-
-    text = _plain(dom, "#mva-root")
-    assert "EU [P123]" in text and "AI Factor [P123]" in text
-    assert "−13.49 pp" in text and "−5.39 pp" in text and "+6.09 pp" in text
-    assert "±4.6" in text
-    assert "Portfolio (dollar-weighted)" in text and "−9.00 pp" in text
-    assert "Window not published for this strategy" not in text
-
-
-def test_a_strategy_without_a_window_says_so(tmp_path: Path) -> None:
     block = _block()
-    block["strategies"][1]["windows"] = {}
-    dom = _run(tmp_path, {"model_vs_actual": block}, "renderModelVsActual")
+    root = _root(tmp_path, base(model_vs_actual=block))
+    text = _plain(root)
 
-    assert "Window not published for this strategy" in _plain(dom, "#mva-root")
+    for strategy in block["strategies"]:
+        assert strategy["display_name"] in text
+    assert "Portfolio, dollar-weighted" in text
+    gap = abs(round(block["portfolio_bridge"]["account_gap_usd"]))
+    assert f"{gap:,}" in text
+    assert "Audit derived" in text
+    assert block["sign_convention"] in text
+    assert "±4.6 pp (1σ)" in text
+    assert 'id="mva-total-table"' in root
 
 
-def test_missing_block_and_unavailable_block_name_their_reason_and_pull(
+def test_a_tagged_row_is_never_printed_as_evidenced(tmp_path: Path) -> None:
+    block = _block()
+    detail = _detail(tmp_path, block, 1, "strategy")
+
+    assert "Audit derived" in detail
+    # every bridge component row carries its own tag badge
+    assert detail.count("mva-tag-audit-derived") + detail.count(
+        "mva-tag-estimated"
+    ) >= len(block["strategies"][1]["windows"][0]["bridge"])
+
+
+def test_strategy_detail_prints_the_residual_closure_and_memo_lines(
     tmp_path: Path,
 ) -> None:
-    missing = _plain(_run(tmp_path, {}, "renderModelVsActual"), "#mva-root")
+    block = _block()
+    text = _plain(_detail(tmp_path, block, 1, "strategy"))
+
+    assert "Components sum to" in text and "residual" in text
+    assert "Memo lines (outside the closure)" in text
+    assert "Governed terms" in text and "Financing interest" in text
+
+
+def test_estimated_dollars_and_uncertainty_are_labelled(tmp_path: Path) -> None:
+    detail = _detail(tmp_path, _block(), 0, "strategy")
+
+    assert "estimated dollars" in detail
+    assert "±4.6 pp (1σ)" in detail
+
+
+def test_audit_derived_rows_name_the_pull_that_replaces_them(tmp_path: Path) -> None:
+    block = _block()
+    detail = _plain(_detail(tmp_path, block, 1, "strategy"))
+
+    titles = {pull["pull_id"]: pull["title"] for pull in block["pulls"]}
+    assert f"replaced by: {titles['PULL_P123_MODEL_TRADE_LISTS']}" in detail
+
+
+def test_unavailable_terms_print_reason_and_pull(tmp_path: Path) -> None:
+    block = _block()
+    text = _plain(_detail(tmp_path, block, 1, "strategy"))
+
+    assert "Gap to cutoff" in text
+    assert "No model leg after 2026 09 11" in text
+    assert "Not available" in text
+
+
+def test_portfolio_bridge_states_the_windows_and_closure(tmp_path: Path) -> None:
+    block = _block()
+    text = _plain(_detail(tmp_path, block, 0, "portfolio"))
+
+    assert "Each strategy primary window not a common window" in text
+    assert "Windows:" in text
+    assert "closes within" in text or "does not close" in text
+
+
+def test_epoch_table_lists_epochs_with_main_drivers(tmp_path: Path) -> None:
+    block = _block()
+    detail = _detail(tmp_path, block, 1, "epoch")
+
+    assert 'id="mva-epoch-table"' in detail
+    assert detail.count("<tr>") == len(block["strategies"][1]["epochs"]) + 1
+
+
+def test_a_strategy_without_epochs_says_so(tmp_path: Path) -> None:
+    text = _plain(_detail(tmp_path, _block(), 2, "epoch"))
+
+    assert "No per-epoch rows were published for this strategy." in text
+
+
+def test_missing_and_unavailable_block_are_explicit(tmp_path: Path) -> None:
+    missing = _plain(_root(tmp_path, base()))
     assert "not in this snapshot" in missing and "has not published" in missing
 
-    block = {
-        "schema_version": 1,
-        "status": "UNAVAILABLE",
-        "unavailable_reason": "NO_BRIDGE_INPUTS",
-        "required_pull": "IBKR Flex statements",
-    }
-    text = _plain(
-        _run(tmp_path, {"model_vs_actual": block}, "renderModelVsActual"), "#mva-root"
-    )
-    assert "No bridge inputs" in text and "IBKR Flex statements" in text
-
-
-def test_the_portfolio_drill_down_reads_the_dollar_weighted_bridge(
-    tmp_path: Path,
-) -> None:
-    dom = _run(tmp_path, {"model_vs_actual": _block()}, "renderModelVsActual")
-
-    detail = _plain(dom, "#mva-root")
-    assert "Where the gap came from" in detail
-    assert "Execution (fills vs same-day close)" in detail and "−8.17 pp" in detail
-    assert "Sum of strategy bridges in dollars." in detail
-    assert "AUDIT DERIVED" in detail or "Audit derived" in detail
-
-
-def test_bridge_shows_sub_components_robustness_and_memo_lines(tmp_path: Path) -> None:
-    dom = _run(tmp_path, {"model_vs_actual": _block()}, "renderModelVsActual")
-
-    html = dom["#mva-root"]["innerHTML"]
-    assert "Stock weight above 1x" in html
-    assert "memo, not in the line" in html
-    assert "Cash drag is not independently robust." in html
-
-
-def test_evidence_legend_comes_from_the_payload(tmp_path: Path) -> None:
-    dom = _run(tmp_path, {"model_vs_actual": _block()}, "renderModelVsActual")
-
-    assert "Derived by arithmetic" in _plain(dom, "#mva-root")
-
-
-def test_an_unavailable_portfolio_window_names_reason_and_pull(tmp_path: Path) -> None:
-    block = _block()
-    block["window_keys"] = ["ACCOUNT"]
-    dom = _run(tmp_path, {"model_vs_actual": block}, "renderModelVsActual")
-
-    text = _plain(dom, "#mva-root")
-    assert "Needs common window" in text
-    assert "per-strategy USD on a common window" in text
+    block = {"schema_version": 1, "status": "UNAVAILABLE", "reason": "NO_AUDIT_INPUT"}
+    text = _plain(_root(tmp_path, base(model_vs_actual=block)))
+    assert "No audit input" in text

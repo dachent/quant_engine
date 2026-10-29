@@ -1268,10 +1268,14 @@ tfoot td {
 
 /* ===== BEGIN model-vs-actual (mockup C) ===== */
 .mva-h { margin: 18px 0 6px; font-size: 16px; }
-.mva-tag { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 4px; border: 1px solid var(--border); font-size: 11px; font-weight: 800; color: var(--text-soft); }
-.mva-tag-o { color: #4ade80; border-color: #2f7a4c; }
-.mva-tag-d { color: #7cb7ff; border-color: #35618f; }
-.mva-tag-i { color: #fbbf24; border-color: #8a6a1f; }
+.mva-tag { display: inline-block; padding: 1px 7px; border-radius: 4px; border: 1px solid var(--border); font-size: 11px; font-weight: 800; color: var(--text-soft); white-space: nowrap; }
+.mva-tag-evidenced { color: #4ade80; border-color: #2f7a4c; }
+.mva-tag-derived { color: #7cb7ff; border-color: #35618f; }
+.mva-tag-audit-derived, .mva-tag-estimated { color: #fbbf24; border-color: #8a6a1f; border-style: dashed; }
+.mva-tag-unavailable { color: #ff8a80; border-color: #8a3b36; }
+.mva-origin { display: inline-block; margin-left: 4px; min-width: 16px; text-align: center; border: 1px solid var(--border); border-radius: 3px; font-size: 10px; color: var(--text-soft); }
+.mva-unavailable { margin: 4px 0; }
+.mva-closure { margin-top: 4px; }
 .mva-tag.is-missing { opacity: .6; }
 .mva-note { display: block; color: var(--text-soft); font-size: 11px; font-weight: 500; }
 .mva-reason { display: block; color: var(--text-soft); font-size: 12px; }
