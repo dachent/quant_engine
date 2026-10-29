@@ -667,6 +667,39 @@
             "week_start": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }] }
           }
         },
+        "daily_benchmark_returns": {
+          "type": "object",
+          "required": ["first_price_policy", "return_basis", "series", "source_artifact", "source_id", "status", "unit"],
+          "properties": {
+            "first_price_policy": { "const": "DROPPED_NO_PREDECESSOR" },
+            "return_basis": { "type": "string", "minLength": 1 },
+            "source_id": { "type": "string", "minLength": 1 },
+            "status": { "const": "AVAILABLE" },
+            "unit": { "const": "DECIMAL_DAILY_RETURN" },
+            "source_artifact": {
+              "type": "object",
+              "required": ["path", "sha256"],
+              "properties": { "path": { "type": "string", "minLength": 1 }, "sha256": { "$ref": "#/$defs/hash" } }
+            },
+            "series": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["dates", "first_date", "last_date", "observation_count", "returns", "series_id", "ticker"],
+                "properties": {
+                  "dates": { "type": "array", "items": { "type": "string", "format": "date" } },
+                  "returns": { "type": "array", "items": { "type": "string" } },
+                  "first_date": { "type": "string", "format": "date" },
+                  "last_date": { "type": "string", "format": "date" },
+                  "observation_count": { "type": "integer", "minimum": 1 },
+                  "series_id": { "type": "string" },
+                  "ticker": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
         "default_evidence_mode": { "const": "LIVE_ONLY" },
         "display_groups": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
         "generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },

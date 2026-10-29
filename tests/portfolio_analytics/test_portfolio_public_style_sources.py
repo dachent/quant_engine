@@ -342,13 +342,22 @@ def test_calendar_extension_keeps_a_longer_history_before_the_cash_proxy_starts(
     )
 
 
-def test_calendar_extension_must_be_a_requested_non_cash_ticker(
+def test_calendar_extension_is_ignored_by_universes_that_do_not_list_it(
     tmp_path: Path,
 ) -> None:
     catalog, source, manifest, _ = _inputs(tmp_path)
-    for bad in ("BIL", "NOT-REQUESTED"):
-        document = json.loads(catalog.read_text(encoding="utf-8"))
-        document["prior_baseline"]["calendar_extension_proxy"] = bad
-        _write_json(catalog, document)
-        with pytest.raises(sources.StyleSourceError, match="extension proxy"):
-            sources.build_bundle(catalog, source, manifest)
+    document = json.loads(catalog.read_text(encoding="utf-8"))
+    document["prior_baseline"]["calendar_extension_proxy"] = "NOT-REQUESTED"
+    _write_json(catalog, document)
+    outputs, result = sources.build_bundle(catalog, source, manifest)
+    assert result["policies"]["calendar"] == "PROVIDER_OBSERVED_EXACT_DATE_NO_FILL"
+    assert outputs[sources.OUTPUT_NAME]
+
+
+def test_calendar_extension_may_not_be_the_cash_proxy(tmp_path: Path) -> None:
+    catalog, source, manifest, _ = _inputs(tmp_path)
+    document = json.loads(catalog.read_text(encoding="utf-8"))
+    document["prior_baseline"]["calendar_extension_proxy"] = "BIL"
+    _write_json(catalog, document)
+    with pytest.raises(sources.StyleSourceError, match="differ from the cash proxy"):
+        sources.build_bundle(catalog, source, manifest)
