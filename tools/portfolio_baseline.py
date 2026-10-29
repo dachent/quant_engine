@@ -2538,6 +2538,13 @@ def _execution_cost_block(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             parsed = _decimal(fee, "fees_and_commission")
             assert parsed is not None
             value = parsed
+        elif isinstance(commission, str):
+            # A scalar commission (Fidelity's statement column, USD) is the charge
+            # as stated, unsigned: its magnitude is the cost.
+            currency = "USD"
+            parsed = _decimal(commission, "commission")
+            assert parsed is not None
+            value = abs(parsed)
         else:
             continue
         totals[currency] = totals.get(currency, Decimal(0)) + value

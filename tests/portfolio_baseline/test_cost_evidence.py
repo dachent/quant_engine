@@ -198,3 +198,12 @@ def test_spec_schema_admits_the_optional_cost_evidence_source() -> None:
     sources = schema["properties"]["sources"]
     assert "cost-evidence" in sources["properties"]
     assert "cost-evidence" not in sources["required"]
+
+
+def test_a_scalar_commission_is_a_usd_cost_not_an_absent_fact() -> None:
+    block = baseline._execution_cost_block(
+        [{"commission": "1.25", "event_date": "2026-03-02", "strategy_id": "x"}]
+    )
+
+    assert block["status"] == baseline.EXECUTION_COST_AVAILABLE
+    assert block["usd_total"] == "1.25"
