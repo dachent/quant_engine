@@ -44,10 +44,8 @@ from quant_engine.core import (
     read_generation_bundle,
     stage_generation,
 )
-from quant_engine.core.contracts import (
-    canonical_json_bytes,
-    shared_provider_live_blocks,
-)
+from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
 import sleeve_disclosures
 from portfolio_private_stage import validate_private_stage_target

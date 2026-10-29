@@ -1441,3 +1441,43 @@ def validate_admit_or_declare_receipt(
     ):
         raise ProviderAdmissionError("provider invalidated outputs differ")
     return ordered_inventory, ordered_dispositions
+
+
+# Identity keys name which entity or generation a provider-live block was read from. The
+# remaining keys are the measured path itself; two strategies cannot honestly measure the
+# same path, so a shared path is a copied block, whatever identity it carries.
+PROVIDER_LIVE_BLOCK_IDENTITY_KEYS = frozenset(
+    {
+        "entity_id",
+        "generation_as_of_date",
+        "generation_id",
+        "model_entity_id",
+        "provider_id",
+    }
+)
+
+
+def shared_provider_live_blocks(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[tuple[str, str]]:
+    """Return strategy id pairs whose provider-live blocks carry the same measured path."""
+
+    owners: dict[bytes, str] = {}
+    shared: list[tuple[str, str]] = []
+    for row in rows:
+        block = row.get("provider")
+        if not isinstance(block, Mapping):
+            continue
+        measured = {
+            key: value
+            for key, value in block.items()
+            if key not in PROVIDER_LIVE_BLOCK_IDENTITY_KEYS
+        }
+        if not measured:
+            continue
+        fingerprint = _canonical_json_value_bytes(measured)
+        strategy_id = str(row.get("strategy_id"))
+        owner = owners.setdefault(fingerprint, strategy_id)
+        if owner != strategy_id:
+            shared.append((owner, strategy_id))
+    return shared

@@ -49,10 +49,8 @@ from quant_engine.core import (
     read_generation_bundle,
     stage_generation,
 )
-from quant_engine.core.contracts import (
-    canonical_json_bytes,
-    shared_provider_live_blocks,
-)
+from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     HwmInputsContractError,

@@ -41,10 +41,8 @@ from quant_engine.core import (
     hash_file,
     rename_directory_with_retry,
 )
-from quant_engine.core.contracts import (
-    canonical_json_bytes,
-    shared_provider_live_blocks,
-)
+from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core.publication import CurrentPointer
 from quant_engine.portfolio_ledger import (
     AdmissionDisposition,

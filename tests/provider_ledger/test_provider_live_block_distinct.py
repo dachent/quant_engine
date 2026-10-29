@@ -19,8 +19,8 @@ import pytest
 import portfolio_control_panel as panel
 import portfolio_report as reporter
 import provider_ledger as ledger
-from quant_engine.core.contracts import shared_provider_live_blocks
 from quant_engine.portfolio_ledger import (
+    shared_provider_live_blocks,
     GenerationQualification,
     ProviderGenerationIdentity,
 )
