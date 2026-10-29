@@ -322,6 +322,7 @@
      "lens_id": "ECONOMIC_FACTOR",
      "source_key": "us-economic",
      "surface": "STATIC",
+     "unweighted_ranges": [],
      "excluded_series": [
       {
        "series_id": "EU [P123]",
@@ -335,7 +336,15 @@
      "status": "AVAILABLE",
      "reason": null,
      "method_note": "Rolled up by component label over the covered strategies only. Each strategy whitens with its own training covariance, so a label names the anchor factor of the mode, not one shared coordinate system; the figure is a diagnostic.",
-     "weight_basis": "PRIOR_DAY_INVESTED_CAPITAL_SHARE_OF_PERIMETER",
+     "weighting": [
+      {
+       "basis": "CAPITAL_WEIGHTED",
+       "definition": "PRIOR_DAY_INVESTED_CAPITAL_SHARE_OF_PERIMETER",
+       "start": "2026-01-22",
+       "end": "2026-03-23",
+       "observations": 42
+      }
+     ],
      "included_series": [
       "AI Factor [P123]",
       "GrizzlyBears VTMA",

@@ -100,7 +100,10 @@ def test_audit_derived_rows_name_the_pull_that_replaces_them(tmp_path: Path) -> 
     detail = _plain(_detail(tmp_path, block, 1, "strategy"))
 
     titles = {pull["pull_id"]: pull["title"] for pull in block["pulls"]}
-    assert f"replaced by: {titles['PULL_P123_MODEL_TRADE_LISTS']}" in detail
+    bridge = block["strategies"][1]["windows"][0]["bridge"]
+    pull_id = next(c["replacing_pull"] for c in bridge if c["replacing_pull"])
+    assert f"replaced by: {titles[pull_id]}" in detail
+    assert 'title="source: ' in _detail(tmp_path, block, 1, "strategy")
 
 
 def test_unavailable_terms_print_reason_and_pull(tmp_path: Path) -> None:

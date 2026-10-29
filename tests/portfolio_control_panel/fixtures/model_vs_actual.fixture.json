@@ -5,11 +5,19 @@
  "audit_input": {
   "artifact": "model-vs-actual-audit-bridges",
   "schema_version": 1,
-  "sha256": "82d27af13482b9a03d2eaa25ade4805f5b1eb2b006c0dfed8f41a8a9cd39d419",
+  "sha256": "bf8a321da0388b0ca1776367f84a4480f94cb1d114a503a02f4d65d7ba95986a",
   "audit_written": "2026-10-22",
   "source_manifest": {
-   "path": "r21/audit-derived/files.json",
-   "sha256": "5166eee4f7e168e6ef039478fca8b09eaaa45d6ca610dc6fa6fb62690ec6e28f"
+   "path": "r21/audit-derived/manifest.json",
+   "sha256": "1f1fb69188213fe22e39177d8fcad39ed18c0431e221f0dc17195e5398d82f46"
+  },
+  "terms_csv": {
+   "path": "r21/audit-derived/terms.csv",
+   "sha256": "26a7e79f2365ed0218cea335ba115bf073db0e217f50db02c7e6b25f203a3e9a"
+  },
+  "pull_list": {
+   "path": "r21/pull-list-model-vs-actual.md",
+   "sha256": "ef873be9813bdb5ed440a4ab79b3b40316aedbdcc7e59cf31767c8f13112985c"
   }
  },
  "evidence_tags": [
@@ -89,6 +97,294 @@
   }
  ],
  "sign_convention": "gap = account minus model; negative means the account earned less. A component is its contribution to that gap.",
+ "sources": [
+  {
+   "source_id": 0,
+   "file": "leverage/bridges/eu123_closed_bridge.csv",
+   "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
+   "columns": [
+    "names_equal_weight_pp",
+    "sizing_drift_pp"
+   ]
+  },
+  {
+   "source_id": 1,
+   "file": "leverage/bridges/eu123_closed_bridge.csv",
+   "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
+   "columns": [
+    "execution_pp"
+   ]
+  },
+  {
+   "source_id": 2,
+   "file": "leverage/bridges/eu123_closed_bridge.csv",
+   "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
+   "columns": [
+    "commissions_pp"
+   ]
+  },
+  {
+   "source_id": 3,
+   "file": "leverage/bridges/eu123_closed_bridge.csv",
+   "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
+   "columns": [
+    "withholding_pp"
+   ]
+  },
+  {
+   "source_id": 4,
+   "file": "leverage/bridges/eu123_closed_bridge.csv",
+   "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
+   "columns": [
+    "other_fees_fx_translation_nav_pp"
+   ]
+  },
+  {
+   "source_id": 5,
+   "file": "leverage/bridges/eu123_closed_bridge.csv",
+   "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
+   "columns": [
+    "borrowing_pp",
+    "cash_drag_pp",
+    "interest_pp"
+   ]
+  },
+  {
+   "source_id": 6,
+   "file": "leverage/bridges/eu123_closed_bridge.csv",
+   "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
+   "columns": [
+    "fx_translation_pp",
+    "fx_currency_of_cash_pp"
+   ]
+  },
+  {
+   "source_id": 7,
+   "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
+   "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
+   "columns": [
+    "composition",
+    "connection_vs_book"
+   ]
+  },
+  {
+   "source_id": 8,
+   "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
+   "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
+   "columns": [
+    "execution_gross"
+   ]
+  },
+  {
+   "source_id": 9,
+   "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
+   "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
+   "columns": [
+    "commissions"
+   ]
+  },
+  {
+   "source_id": 10,
+   "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
+   "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
+   "columns": [
+    "interest_fees"
+   ]
+  },
+  {
+   "source_id": 11,
+   "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
+   "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
+   "columns": [
+    "leverage"
+   ]
+  },
+  {
+   "source_id": 12,
+   "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
+   "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
+   "columns": [
+    "other"
+   ]
+  },
+  {
+   "source_id": 13,
+   "file": "leverage/bridges/aif_account_leverage_bridge.csv",
+   "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
+   "columns": [
+    "lev_effect_pp",
+    "lev_effect_usd"
+   ]
+  },
+  {
+   "source_id": 14,
+   "file": "vtma/waterfall_v6_hourly.csv",
+   "sha256": "42537c5ce2216e263178734b5ced5c9da5367f4e37d7c69115d06b7f5c5d1487",
+   "columns": [
+    "step_pp"
+   ]
+  },
+  {
+   "source_id": 15,
+   "file": "vtma/RESULT.md",
+   "sha256": "1ec39a214c2cdb53f1bbdde25fefd9e691f8c73e140cc6efc5d95c9a7b651f66",
+   "columns": [
+    "section 0 item 5"
+   ]
+  },
+  {
+   "source_id": 16,
+   "file": "tt/data/ladder_ticker_level_by_epoch.csv",
+   "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
+   "columns": [
+    "replication_pp",
+    "rounding_drift_sizing_pp",
+    "of_which_cash_scale_pp"
+   ]
+  },
+  {
+   "source_id": 17,
+   "file": "tt/data/ladder_ticker_level_by_epoch.csv",
+   "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
+   "columns": [
+    "delay_cadence_pp",
+    "missed_partial_legs_pp",
+    "early_exit_underweight_pp"
+   ]
+  },
+  {
+   "source_id": 18,
+   "file": "tt/data/ladder_ticker_level_by_epoch.csv",
+   "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
+   "columns": [
+    "fill_price_vs_open_pp"
+   ]
+  },
+  {
+   "source_id": 19,
+   "file": "leverage/bridges/tt_leverage_bridge.csv",
+   "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
+   "columns": [
+    "cash_underinvestment_pp",
+    "margin_interest_pp"
+   ]
+  },
+  {
+   "source_id": 20,
+   "file": "tt/data/ladder_ticker_level_by_epoch.csv",
+   "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
+   "columns": [
+    "off_model_pp",
+    "residual_div_fees_other_pp"
+   ]
+  },
+  {
+   "source_id": 21,
+   "file": "leverage/bridges/RESULT.md",
+   "sha256": "a68af07269a065ebdfb2f984eede6a85d41e2987f2bc192b77e17d7374773524",
+   "columns": [
+    "3.3"
+   ]
+  },
+  {
+   "source_id": 22,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "track_B_minus_A_pp"
+   ]
+  },
+  {
+   "source_id": 23,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "c_substitution_pp",
+    "rounding_drift_pp"
+   ]
+  },
+  {
+   "source_id": 24,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "d_exec_timing_pp",
+    "skipped_pp"
+   ]
+  },
+  {
+   "source_id": 25,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "fill_slippage_pp"
+   ]
+  },
+  {
+   "source_id": 26,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "fees_pp"
+   ]
+  },
+  {
+   "source_id": 27,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "cash_pp"
+   ]
+  },
+  {
+   "source_id": 28,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "compounding_interaction_pp"
+   ]
+  },
+  {
+   "source_id": 29,
+   "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
+   "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
+   "columns": [
+    "residual_pp"
+   ]
+  },
+  {
+   "source_id": 30,
+   "file": "qsi/attr/waterfall_by_epoch.csv",
+   "sha256": "f21378004377ae27acf57d17810e378a1e6b7daf7779ead117065ec30ddcfce6",
+   "columns": [
+    "gap_vs_net_pp"
+   ]
+  },
+  {
+   "source_id": 31,
+   "file": "volatis/waterfall_dollars.csv",
+   "sha256": "1dff1a42628ba00d49ef00bb792a454b3fa757dc27ca51f79c6542bf9b4e0415",
+   "columns": [
+    "delta_vs_previous_usd"
+   ]
+  },
+  {
+   "source_id": 32,
+   "file": "leverage/bridges/leverage_bridge_panel_table.csv",
+   "sha256": "23d439a455d4e7a3535b421ed514ebf85df5ca7383bb86846b3c36fbc48fba40",
+   "columns": [
+    "leverage_line_pp"
+   ]
+  },
+  {
+   "source_id": 33,
+   "file": "robuxio/data/waterfall_owner_window.csv",
+   "sha256": "42526efd00782362371a963a89054405488cd14b124e1cb062559a669a07de73",
+   "columns": [
+    "usd_effect"
+   ]
+  }
+ ],
  "strategies": [
   {
    "strategy_id": "p123-eu",
@@ -134,16 +430,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -161,7 +449,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -172,16 +461,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -194,14 +477,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -214,14 +491,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -234,14 +505,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -252,17 +517,8 @@
        "evidence_tag": "ESTIMATED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": 4.6,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -288,7 +544,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -299,16 +556,8 @@
        "evidence_tag": "ESTIMATED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": 4.6,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -326,7 +575,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": 4.6
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": -13.4926,
@@ -389,16 +639,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -416,7 +658,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -427,16 +670,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -449,14 +686,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -469,14 +700,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -489,14 +714,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -507,17 +726,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -543,7 +753,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -554,16 +765,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -581,7 +784,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": -2.0577,
@@ -645,16 +849,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -672,7 +868,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -683,16 +880,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -705,14 +896,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -725,14 +910,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -745,14 +924,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -763,17 +936,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -799,7 +963,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -810,16 +975,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -837,7 +994,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": -2.4616,
@@ -893,16 +1051,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -920,7 +1070,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -931,16 +1082,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -953,14 +1098,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -973,14 +1112,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -993,14 +1126,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -1011,17 +1138,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -1047,7 +1165,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -1058,16 +1177,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -1085,7 +1196,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": -5.7805,
@@ -1144,16 +1256,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -1171,7 +1275,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -1182,16 +1287,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -1204,14 +1303,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -1224,14 +1317,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -1244,14 +1331,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -1262,17 +1343,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -1298,7 +1370,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -1309,16 +1382,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -1336,7 +1401,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": 2.8856,
@@ -1394,16 +1460,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -1421,7 +1479,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -1432,16 +1491,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -1454,14 +1507,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -1474,14 +1521,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -1494,14 +1535,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -1512,17 +1547,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -1548,7 +1574,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -1559,16 +1586,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -1586,7 +1605,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": -4.9603,
@@ -1646,16 +1666,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -1673,7 +1685,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -1684,16 +1697,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -1706,14 +1713,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -1726,14 +1727,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -1746,14 +1741,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -1764,17 +1753,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -1800,7 +1780,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -1811,16 +1792,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -1838,7 +1811,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": 1.5353,
@@ -1897,16 +1871,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "EU-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "names_equal_weight_pp",
-         "sizing_drift_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "names",
@@ -1924,7 +1890,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 0
       },
       {
        "component_id": "execution",
@@ -1935,16 +1902,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "execution_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 1
       },
       {
        "component_id": "commissions",
@@ -1957,14 +1918,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "commissions_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 2
       },
       {
        "component_id": "withholding",
@@ -1977,14 +1932,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "withholding_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 3
       },
       {
        "component_id": "fees_other",
@@ -1997,14 +1946,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "other_fees_fx_translation_nav_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 4
       },
       {
        "component_id": "leverage",
@@ -2015,17 +1958,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "borrowing_pp",
-         "cash_drag_pp",
-         "interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "financial_leverage_borrowing",
@@ -2051,7 +1985,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 5
       },
       {
        "component_id": "fx",
@@ -2062,16 +1997,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "O",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_IBKR_FLEX_MTM_CASH",
+       "replacing_pull": "EU-P5",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/eu123_closed_bridge.csv",
-        "sha256": "0a32987f67856f27b66171b3e52357308a264f1928cfe3ad8b60c1edaf205f98",
-        "columns": [
-         "fx_translation_pp",
-         "fx_currency_of_cash_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "eur_usd_translation",
@@ -2089,7 +2016,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 6
       }
      ],
      "bridge_sum_pp": -2.4677,
@@ -2178,16 +2106,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -2205,7 +2125,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -2216,16 +2137,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -2238,14 +2153,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -2258,14 +2167,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -2276,16 +2179,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -2298,14 +2195,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -16.855,
@@ -2326,14 +2217,7 @@
        "usd": 471.6477,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -2380,16 +2264,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -2407,7 +2283,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -2418,16 +2295,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -2440,14 +2311,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -2460,14 +2325,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -2478,16 +2337,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -2500,14 +2353,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -2.061,
@@ -2528,14 +2375,7 @@
        "usd": 4.8438,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -2578,16 +2418,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -2605,7 +2437,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -2616,16 +2449,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -2638,14 +2465,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -2658,14 +2479,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -2676,16 +2491,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -2698,14 +2507,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -8.265,
@@ -2726,14 +2529,7 @@
        "usd": 109.9691,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -2778,16 +2574,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -2805,7 +2593,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -2816,16 +2605,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -2838,14 +2621,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -2858,14 +2635,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -2876,16 +2647,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -2898,14 +2663,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -2.474,
@@ -2926,14 +2685,7 @@
        "usd": -24.1589,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -2978,16 +2730,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -3005,7 +2749,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -3016,16 +2761,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -3038,14 +2777,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -3058,14 +2791,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -3076,16 +2803,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -3098,14 +2819,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -1.779,
@@ -3126,14 +2841,7 @@
        "usd": -123.2336,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -3178,16 +2886,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -3205,7 +2905,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -3216,16 +2917,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -3238,14 +2933,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -3258,14 +2947,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -3276,16 +2959,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -3298,14 +2975,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -2.334,
@@ -3326,14 +2997,7 @@
        "usd": -278.1086,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -3378,16 +3042,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -3405,7 +3061,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -3416,16 +3073,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -3438,14 +3089,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -3458,14 +3103,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -3476,16 +3115,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -3498,14 +3131,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -0.358,
@@ -3526,14 +3153,7 @@
        "usd": -226.4951,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -3578,16 +3198,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -3605,7 +3217,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -3616,16 +3229,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -3638,14 +3245,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -3658,14 +3259,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -3676,16 +3271,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -3698,14 +3287,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -0.592,
@@ -3726,14 +3309,7 @@
        "usd": -156.702,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -3778,16 +3354,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -3805,7 +3373,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -3816,16 +3385,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -3838,14 +3401,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -3858,14 +3415,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -3876,16 +3427,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -3898,14 +3443,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": -0.05,
@@ -3926,14 +3465,7 @@
        "usd": 229.1528,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -3978,16 +3510,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS",
+       "replacing_pull": "AIF-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "composition",
-         "connection_vs_book"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "composition",
@@ -4005,7 +3529,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 7
       },
       {
        "component_id": "execution",
@@ -4016,16 +3541,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "AIF-P3",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "execution_gross"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 8
       },
       {
        "component_id": "commissions",
@@ -4038,14 +3557,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "commissions"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 9
       },
       {
        "component_id": "interest_fees",
@@ -4058,14 +3571,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "interest_fees"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 10
       },
       {
        "component_id": "leverage",
@@ -4076,16 +3583,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "leverage"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 11
       },
       {
        "component_id": "other",
@@ -4098,14 +3599,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/aif_ladder_published_vs_corrected.csv",
-        "sha256": "31a992baf8c450992d0d2961afe95af85b775310a3138c17ae73b5c65a5886b2",
-        "columns": [
-         "other"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 12
       }
      ],
      "bridge_sum_pp": 2.205,
@@ -4126,14 +3621,7 @@
        "usd": 936.3802,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/aif_account_leverage_bridge.csv",
-        "sha256": "58b2740a5ad805852df269ef54463a68e8494b7bbc97bb3fb5ec2550e8000443",
-        "columns": [
-         "lev_effect_pp",
-         "lev_effect_usd"
-        ]
-       }
+       "source_id": 13
       }
      ],
      "governed_terms": [
@@ -4157,7 +3645,7 @@
      "evidence_tag": "UNAVAILABLE",
      "reason": "NO_MODEL_LEG_AFTER_2026_09_11",
      "window_end": "2026-09-17",
-     "replacing_pull": "PULL_P123_MODEL_TRADE_LISTS"
+     "replacing_pull": "AIF-P1"
     }
    ],
    "notes": [
@@ -4208,15 +3696,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_SPXL_INTRADAY_PRICES",
+       "replacing_pull": "VTMA-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "vtma/waterfall_v6_hourly.csv",
-        "sha256": "42537c5ce2216e263178734b5ced5c9da5367f4e37d7c69115d06b7f5c5d1487",
-        "columns": [
-         "step_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "start_alignment",
@@ -4234,7 +3715,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 14
       },
       {
        "component_id": "execution",
@@ -4245,16 +3727,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_SPXL_INTRADAY_PRICES",
+       "replacing_pull": "VTMA-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "vtma/waterfall_v6_hourly.csv",
-        "sha256": "42537c5ce2216e263178734b5ced5c9da5367f4e37d7c69115d06b7f5c5d1487",
-        "columns": [
-         "step_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 14
       },
       {
        "component_id": "interest_fees",
@@ -4267,14 +3743,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "vtma/waterfall_v6_hourly.csv",
-        "sha256": "42537c5ce2216e263178734b5ced5c9da5367f4e37d7c69115d06b7f5c5d1487",
-        "columns": [
-         "step_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 14
       },
       {
        "component_id": "leverage",
@@ -4287,14 +3757,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "vtma/waterfall_v6_hourly.csv",
-        "sha256": "42537c5ce2216e263178734b5ced5c9da5367f4e37d7c69115d06b7f5c5d1487",
-        "columns": [
-         "step_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 14
       }
      ],
      "bridge_sum_pp": -13.046,
@@ -4315,13 +3779,7 @@
        "usd": -2095.0,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "I",
-       "source_ref": {
-        "file": "vtma/RESULT.md",
-        "sha256": "1ec39a214c2cdb53f1bbdde25fefd9e691f8c73e140cc6efc5d95c9a7b651f66",
-        "columns": [
-         "section 0 item 5"
-        ]
-       }
+       "source_id": 15
       }
      ],
      "governed_terms": [
@@ -4344,7 +3802,7 @@
      "evidence_tag": "UNAVAILABLE",
      "reason": "NO_VERIFIED_SIGNALS_AFTER_2026_08_03",
      "window_end": "2026-09-17",
-     "replacing_pull": "PULL_SPXL_INTRADAY_PRICES"
+     "replacing_pull": "VTMA-P5"
     }
    ],
    "notes": [
@@ -4395,18 +3853,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -4417,17 +3867,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -4453,7 +3894,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -4464,16 +3906,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -4486,14 +3922,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -4511,7 +3939,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -4524,15 +3953,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": -5.207,
@@ -4553,13 +3975,7 @@
        "usd": null,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "I",
-       "source_ref": {
-        "file": "leverage/bridges/RESULT.md",
-        "sha256": "a68af07269a065ebdfb2f984eede6a85d41e2987f2bc192b77e17d7374773524",
-        "columns": [
-         "3.3"
-        ]
-       }
+       "source_id": 21
       }
      ],
      "governed_terms": [
@@ -4604,18 +4020,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -4626,17 +4034,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -4662,7 +4061,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -4673,16 +4073,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -4695,14 +4089,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -4720,7 +4106,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -4733,15 +4120,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": -0.443,
@@ -4795,18 +4175,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -4817,17 +4189,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -4853,7 +4216,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -4864,16 +4228,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -4886,14 +4244,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -4911,7 +4261,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -4924,15 +4275,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": 0.195,
@@ -4986,18 +4330,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -5008,17 +4344,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -5044,7 +4371,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -5055,16 +4383,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -5077,14 +4399,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -5102,7 +4416,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -5115,15 +4430,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": 0.059,
@@ -5177,18 +4485,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -5199,17 +4499,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -5235,7 +4526,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -5246,16 +4538,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -5268,14 +4554,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -5293,7 +4571,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -5306,15 +4585,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": 0.084,
@@ -5368,18 +4640,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -5390,17 +4654,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -5426,7 +4681,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -5437,16 +4693,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -5459,14 +4709,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -5484,7 +4726,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -5497,15 +4740,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": -4.765,
@@ -5559,18 +4795,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -5581,17 +4809,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -5617,7 +4836,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -5628,16 +4848,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -5650,14 +4864,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -5675,7 +4881,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -5688,15 +4895,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": -0.23,
@@ -5750,18 +4950,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "replication_pp",
-         "rounding_drift_sizing_pp",
-         "of_which_cash_scale_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 16
       },
       {
        "component_id": "timing",
@@ -5772,17 +4964,8 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "delay_cadence_pp",
-         "missed_partial_legs_pp",
-         "early_exit_underweight_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "delay",
@@ -5808,7 +4991,8 @@
          "origin_tag": "D",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 17
       },
       {
        "component_id": "execution",
@@ -5819,16 +5003,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "TT-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "fill_price_vs_open_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 18
       },
       {
        "component_id": "leverage",
@@ -5841,14 +5019,6 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "leverage/bridges/tt_leverage_bridge.csv",
-        "sha256": "cd16cfc2a3b93b82660fe3431d9aa8b391f9e72f6317a77830d036f98895aa73",
-        "columns": [
-         "cash_underinvestment_pp",
-         "margin_interest_pp"
-        ]
-       },
        "sub_components": [
         {
          "component_id": "cash_underinvestment",
@@ -5866,7 +5036,8 @@
          "origin_tag": "O",
          "uncertainty_pp_1sigma": null
         }
-       ]
+       ],
+       "source_id": 19
       },
       {
        "component_id": "other",
@@ -5879,15 +5050,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "tt/data/ladder_ticker_level_by_epoch.csv",
-        "sha256": "87fa8d2c6fe5ba4dc17aefedd5968edc6ec16c709417cd3b9da8c370b58d37b8",
-        "columns": [
-         "off_model_pp",
-         "residual_div_fees_other_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 20
       }
      ],
      "bridge_sum_pp": -0.107,
@@ -5965,14 +5129,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "track_B_minus_A_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 22
       },
       {
        "component_id": "composition",
@@ -5983,17 +5141,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "c_substitution_pp",
-         "rounding_drift_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 23
       },
       {
        "component_id": "timing",
@@ -6004,17 +5155,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "d_exec_timing_pp",
-         "skipped_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 24
       },
       {
        "component_id": "execution",
@@ -6025,16 +5169,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fill_slippage_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 25
       },
       {
        "component_id": "commissions",
@@ -6047,14 +5185,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fees_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 26
       },
       {
        "component_id": "leverage",
@@ -6067,14 +5199,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "cash_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 27
       },
       {
        "component_id": "linking",
@@ -6087,14 +5213,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "compounding_interaction_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 28
       },
       {
        "component_id": "unattributed",
@@ -6107,14 +5227,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "residual_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 29
       }
      ],
      "bridge_sum_pp": -0.11,
@@ -6135,13 +5249,7 @@
        "usd": null,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "qsi/attr/waterfall_by_epoch.csv",
-        "sha256": "f21378004377ae27acf57d17810e378a1e6b7daf7779ead117065ec30ddcfce6",
-        "columns": [
-         "gap_vs_net_pp"
-        ]
-       }
+       "source_id": 30
       }
      ],
      "governed_terms": [
@@ -6188,14 +5296,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "track_B_minus_A_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 22
       },
       {
        "component_id": "composition",
@@ -6206,17 +5308,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "c_substitution_pp",
-         "rounding_drift_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 23
       },
       {
        "component_id": "timing",
@@ -6227,17 +5322,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "d_exec_timing_pp",
-         "skipped_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 24
       },
       {
        "component_id": "execution",
@@ -6248,16 +5336,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fill_slippage_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 25
       },
       {
        "component_id": "commissions",
@@ -6270,14 +5352,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fees_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 26
       },
       {
        "component_id": "leverage",
@@ -6290,14 +5366,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "cash_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 27
       },
       {
        "component_id": "linking",
@@ -6310,14 +5380,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "compounding_interaction_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 28
       },
       {
        "component_id": "unattributed",
@@ -6330,14 +5394,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "residual_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 29
       }
      ],
      "bridge_sum_pp": -1.257,
@@ -6358,13 +5416,7 @@
        "usd": null,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "qsi/attr/waterfall_by_epoch.csv",
-        "sha256": "f21378004377ae27acf57d17810e378a1e6b7daf7779ead117065ec30ddcfce6",
-        "columns": [
-         "gap_vs_net_pp"
-        ]
-       }
+       "source_id": 30
       }
      ],
      "governed_terms": [
@@ -6409,14 +5461,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "track_B_minus_A_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 22
       },
       {
        "component_id": "composition",
@@ -6427,17 +5473,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "c_substitution_pp",
-         "rounding_drift_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 23
       },
       {
        "component_id": "timing",
@@ -6448,17 +5487,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "d_exec_timing_pp",
-         "skipped_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 24
       },
       {
        "component_id": "execution",
@@ -6469,16 +5501,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fill_slippage_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 25
       },
       {
        "component_id": "commissions",
@@ -6491,14 +5517,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fees_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 26
       },
       {
        "component_id": "leverage",
@@ -6511,14 +5531,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "cash_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 27
       },
       {
        "component_id": "linking",
@@ -6531,14 +5545,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "compounding_interaction_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 28
       },
       {
        "component_id": "unattributed",
@@ -6551,14 +5559,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "residual_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 29
       }
      ],
      "bridge_sum_pp": 2.854,
@@ -6579,13 +5581,7 @@
        "usd": null,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "qsi/attr/waterfall_by_epoch.csv",
-        "sha256": "f21378004377ae27acf57d17810e378a1e6b7daf7779ead117065ec30ddcfce6",
-        "columns": [
-         "gap_vs_net_pp"
-        ]
-       }
+       "source_id": 30
       }
      ],
      "governed_terms": [
@@ -6630,14 +5626,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "track_B_minus_A_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 22
       },
       {
        "component_id": "composition",
@@ -6648,17 +5638,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "c_substitution_pp",
-         "rounding_drift_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 23
       },
       {
        "component_id": "timing",
@@ -6669,17 +5652,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "d_exec_timing_pp",
-         "skipped_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 24
       },
       {
        "component_id": "execution",
@@ -6690,16 +5666,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fill_slippage_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 25
       },
       {
        "component_id": "commissions",
@@ -6712,14 +5682,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fees_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 26
       },
       {
        "component_id": "leverage",
@@ -6732,14 +5696,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "cash_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 27
       },
       {
        "component_id": "linking",
@@ -6752,14 +5710,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "compounding_interaction_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 28
       },
       {
        "component_id": "unattributed",
@@ -6772,14 +5724,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "residual_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 29
       }
      ],
      "bridge_sum_pp": -0.806,
@@ -6800,13 +5746,7 @@
        "usd": null,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "qsi/attr/waterfall_by_epoch.csv",
-        "sha256": "f21378004377ae27acf57d17810e378a1e6b7daf7779ead117065ec30ddcfce6",
-        "columns": [
-         "gap_vs_net_pp"
-        ]
-       }
+       "source_id": 30
       }
      ],
      "governed_terms": [
@@ -6851,14 +5791,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "track_B_minus_A_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 22
       },
       {
        "component_id": "composition",
@@ -6869,17 +5803,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "c_substitution_pp",
-         "rounding_drift_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 23
       },
       {
        "component_id": "timing",
@@ -6890,17 +5817,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "d_exec_timing_pp",
-         "skipped_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 24
       },
       {
        "component_id": "execution",
@@ -6911,16 +5831,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "QSI-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fill_slippage_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 25
       },
       {
        "component_id": "commissions",
@@ -6933,14 +5847,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "fees_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 26
       },
       {
        "component_id": "leverage",
@@ -6953,14 +5861,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "cash_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 27
       },
       {
        "component_id": "linking",
@@ -6973,14 +5875,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "compounding_interaction_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 28
       },
       {
        "component_id": "unattributed",
@@ -6993,14 +5889,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "qsi/attr/gap_decomposition_by_epoch_2026.csv",
-        "sha256": "2bcfcf1a59d4d281741d845176e65099fa797e325440aa5136979a9ffa07aaba",
-        "columns": [
-         "residual_pp"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 29
       }
      ],
      "bridge_sum_pp": -0.477,
@@ -7021,13 +5911,7 @@
        "usd": null,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "qsi/attr/waterfall_by_epoch.csv",
-        "sha256": "f21378004377ae27acf57d17810e378a1e6b7daf7779ead117065ec30ddcfce6",
-        "columns": [
-         "gap_vs_net_pp"
-        ]
-       }
+       "source_id": 30
       }
      ],
      "governed_terms": [
@@ -7094,14 +5978,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "volatis/waterfall_dollars.csv",
-        "sha256": "1dff1a42628ba00d49ef00bb792a454b3fa757dc27ca51f79c6542bf9b4e0415",
-        "columns": [
-         "delta_vs_previous_usd"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 31
       },
       {
        "component_id": "execution",
@@ -7112,16 +5990,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_DAILY_CLOSES_HELD_NAMES",
+       "replacing_pull": "VOL-P2",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "volatis/waterfall_dollars.csv",
-        "sha256": "1dff1a42628ba00d49ef00bb792a454b3fa757dc27ca51f79c6542bf9b4e0415",
-        "columns": [
-         "delta_vs_previous_usd"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 31
       },
       {
        "component_id": "commissions",
@@ -7134,14 +6006,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "volatis/waterfall_dollars.csv",
-        "sha256": "1dff1a42628ba00d49ef00bb792a454b3fa757dc27ca51f79c6542bf9b4e0415",
-        "columns": [
-         "delta_vs_previous_usd"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 31
       },
       {
        "component_id": "interest_fees",
@@ -7154,14 +6020,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "volatis/waterfall_dollars.csv",
-        "sha256": "1dff1a42628ba00d49ef00bb792a454b3fa757dc27ca51f79c6542bf9b4e0415",
-        "columns": [
-         "delta_vs_previous_usd"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 31
       },
       {
        "component_id": "fees_other",
@@ -7174,14 +6034,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "volatis/waterfall_dollars.csv",
-        "sha256": "1dff1a42628ba00d49ef00bb792a454b3fa757dc27ca51f79c6542bf9b4e0415",
-        "columns": [
-         "delta_vs_previous_usd"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 31
       }
      ],
      "bridge_sum_pp": -14.722087,
@@ -7202,13 +6056,7 @@
        "usd": 274.45,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "volatis/waterfall_dollars.csv",
-        "sha256": "1dff1a42628ba00d49ef00bb792a454b3fa757dc27ca51f79c6542bf9b4e0415",
-        "columns": [
-         "delta_vs_previous_usd"
-        ]
-       }
+       "source_id": 31
       },
       {
        "memo_id": "leverage_cash_buffer",
@@ -7217,13 +6065,7 @@
        "usd": -23.0,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
-       "source_ref": {
-        "file": "leverage/bridges/leverage_bridge_panel_table.csv",
-        "sha256": "23d439a455d4e7a3535b421ed514ebf85df5ca7383bb86846b3c36fbc48fba40",
-        "columns": [
-         "leverage_line_pp"
-        ]
-       }
+       "source_id": 32
       }
      ],
      "governed_terms": [
@@ -7246,7 +6088,7 @@
      "evidence_tag": "UNAVAILABLE",
      "reason": "PROVIDER_PUBLISHES_NO_LIVE_MODEL_SERIES",
      "window_end": "2026-09-17",
-     "replacing_pull": null
+     "replacing_pull": "VOL-P2"
     }
    ],
    "notes": [
@@ -7297,16 +6139,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "I",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_ROBUXIO_VENDOR_FILL_REJECTION_DETAIL",
+       "replacing_pull": "ROB-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "robuxio/data/waterfall_owner_window.csv",
-        "sha256": "42526efd00782362371a963a89054405488cd14b124e1cb062559a669a07de73",
-        "columns": [
-         "usd_effect"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 33
       },
       {
        "component_id": "execution",
@@ -7317,16 +6153,10 @@
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "D",
        "unavailable_reason": null,
-       "replacing_pull": "PULL_ROBUXIO_VENDOR_FILL_REJECTION_DETAIL",
+       "replacing_pull": "ROB-P1",
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "robuxio/data/waterfall_owner_window.csv",
-        "sha256": "42526efd00782362371a963a89054405488cd14b124e1cb062559a669a07de73",
-        "columns": [
-         "usd_effect"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 33
       },
       {
        "component_id": "fees_other",
@@ -7339,14 +6169,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "robuxio/data/waterfall_owner_window.csv",
-        "sha256": "42526efd00782362371a963a89054405488cd14b124e1cb062559a669a07de73",
-        "columns": [
-         "usd_effect"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 33
       },
       {
        "component_id": "fx",
@@ -7359,14 +6183,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "robuxio/data/waterfall_owner_window.csv",
-        "sha256": "42526efd00782362371a963a89054405488cd14b124e1cb062559a669a07de73",
-        "columns": [
-         "usd_effect"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 33
       },
       {
        "component_id": "other",
@@ -7379,14 +6197,8 @@
        "unavailable_reason": null,
        "replacing_pull": null,
        "uncertainty_pp_1sigma": null,
-       "source_ref": {
-        "file": "robuxio/data/waterfall_owner_window.csv",
-        "sha256": "42526efd00782362371a963a89054405488cd14b124e1cb062559a669a07de73",
-        "columns": [
-         "usd_effect"
-        ]
-       },
-       "sub_components": []
+       "sub_components": [],
+       "source_id": 33
       }
      ],
      "bridge_sum_pp": -2.426644,
@@ -7407,13 +6219,7 @@
        "usd": 20.0,
        "evidence_tag": "AUDIT_DERIVED",
        "origin_tag": "I",
-       "source_ref": {
-        "file": "leverage/bridges/leverage_bridge_panel_table.csv",
-        "sha256": "23d439a455d4e7a3535b421ed514ebf85df5ca7383bb86846b3c36fbc48fba40",
-        "columns": [
-         "leverage_line_pp"
-        ]
-       }
+       "source_id": 32
       }
      ],
      "governed_terms": [
@@ -7436,7 +6242,7 @@
      "evidence_tag": "UNAVAILABLE",
      "reason": "PROVIDER_LEVERAGE_FIELDS_UNPOPULATED",
      "window_end": "2026-09-02",
-     "replacing_pull": "PULL_ROBUXIO_VENDOR_FILL_REJECTION_DETAIL"
+     "replacing_pull": "ROB-P4"
     }
    ],
    "notes": [
@@ -7589,57 +6395,149 @@
  },
  "pulls": [
   {
-   "pull_id": "PULL_DAILY_CLOSES_HELD_NAMES",
-   "title": "Daily adjusted closes for model and held names, per bridge window",
-   "source": "Yahoo Finance adjusted daily (the source used for the audit price files); alternative: a licensed EOD vendor",
-   "entities": "every ticker held by the account or the model in the window: AI Factor, EU (P123 designer model) and TT sleeve ETFs, QSI sleeve ETFs, Volatis TQQQ/SHY",
-   "date_range": "2025-11-21 to 2026-09-17 (EU), 2026-01-22 to 2026-09-17 (AI Factor), 2025-11-28 to 2026-09-17 (TT), 2026-01-02 to 2026-09-18 (QSI), 2024-10-14 to 2026-09-17 (Volatis)",
-   "access": "public (no login) for US/EU listed tickers; EU names may need a vendor ticker map",
-   "estimated_size": "about 600 tickers x 220 days x 6 fields, under 100 MB",
+   "pull_id": "EU-P1",
+   "title": "R2G model 1764562 transaction/holdings history by rebalance date",
+   "source": "Portfolio123 (owner login); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "designer model 1764562",
+   "date_range": "weekly 2025-11 to 2026-09",
+   "access": "login-gated (owner)",
+   "estimated_size": "about 40 snapshots x 14 names",
    "replaces": [
-    "execution",
+    "composition"
+   ],
+   "status": "REQUESTED_NOT_DOWNLOADED"
+  },
+  {
+   "pull_id": "EU-P3",
+   "title": "R2G summary page for 1764562: simulation settings, price convention, dividend treatment",
+   "source": "Portfolio123 (owner login); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "designer model 1764562",
+   "date_range": "snapshot",
+   "access": "login-gated (owner)",
+   "estimated_size": "one page",
+   "replaces": [
+    "execution"
+   ],
+   "status": "REQUESTED_NOT_DOWNLOADED"
+  },
+  {
+   "pull_id": "EU-P5",
+   "title": "EU currency-of-cash versus cash-drag split (about +/-4.6 pp 1 sigma): owner ruling on the 1.0x counterfactual, not a download",
+   "source": "owner ruling; IBKR MTM CASH rows may already sit in the retained Flex XML (adapter parsing would make the term DERIVED); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "IBKR 9054",
+   "date_range": "2025-11-21 to 2026-09-11",
+   "access": "no download",
+   "estimated_size": "none",
+   "replaces": [
+    "leverage",
+    "fx"
+   ],
+   "status": "NOT_A_DOWNLOAD_OWNER_RULING"
+  },
+  {
+   "pull_id": "AIF-P1",
+   "title": "Connection 1913284 index and book 1853536 perf tails to the cutoff",
+   "source": "Portfolio123 (owner login); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "connection 1913284; book 1853536",
+   "date_range": "2026-08-14 to 2026-09-17",
+   "access": "login-gated (owner)",
+   "estimated_size": "well under 1 MB",
+   "replaces": [
+    "composition"
+   ],
+   "status": "REQUESTED_NOT_DOWNLOADED"
+  },
+  {
+   "pull_id": "AIF-P2",
+   "title": "Pure model/book comparators for the nested sleeves",
+   "source": "Portfolio123 (owner login); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "books 1911997, 1906462; designer model 1765750; strategy 1958744",
+   "date_range": "2026-01-26 to 2026-07-27 by sleeve",
+   "access": "login-gated (owner)",
+   "estimated_size": "under 1 MB",
+   "replaces": [
+    "composition"
+   ],
+   "status": "REQUESTED_NOT_DOWNLOADED"
+  },
+  {
+   "pull_id": "AIF-P3",
+   "title": "Split of the AI Factor execution line into P123 modelled cost versus IBKR fills: not separable from the captures; owner ruling, not a download",
+   "source": "audit says no source exists; full text in r21/pull-list-model-vs-actual.md",
+   "entities": "AI Factor book",
+   "date_range": "2026-01-26 to 2026-09-02",
+   "access": "no download",
+   "estimated_size": "none",
+   "replaces": [
+    "execution"
+   ],
+   "status": "NOT_A_DOWNLOAD_OWNER_RULING"
+  },
+  {
+   "pull_id": "VTMA-P1",
+   "title": "SPXL 60-minute bars for the VTMA signal and fill times",
+   "source": "Yahoo Finance via yfinance (public); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "SPXL",
+   "date_range": "2026-01-02 to 2026-10-09",
+   "access": "public, no login",
+   "estimated_size": "1,348 bars, under 0.2 MB",
+   "replaces": [
+    "timing",
+    "execution"
+   ],
+   "status": "REQUESTED_NOT_DOWNLOADED"
+  },
+  {
+   "pull_id": "VTMA-P5",
+   "title": "VTMA live-signal CSV as of 2026-10-08 (owner request to the vendor)",
+   "source": "grizzlybulls.com vendor (owner request); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "VTMA signals",
+   "date_range": "2026-08-03 to 2026-10-08",
+   "access": "vendor request, not a download",
+   "estimated_size": "small",
+   "replaces": [
+    "timing"
+   ],
+   "status": "REQUESTED_NOT_DOWNLOADED"
+  },
+  {
+   "pull_id": "TT-P1",
+   "title": "Daily adjusted and raw closes for the TT sleeve ETFs and stocks",
+   "source": "Yahoo Finance via yfinance (public); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "41 tickers (see the pull list)",
+   "date_range": "2025-11-17 to 2026-10-09",
+   "access": "public, no login",
+   "estimated_size": "under 5 MB",
+   "replaces": [
     "composition",
     "timing",
-    "leverage"
+    "execution"
    ],
    "status": "REQUESTED_NOT_DOWNLOADED"
   },
   {
-   "pull_id": "PULL_P123_MODEL_TRADE_LISTS",
-   "title": "P123 model trade lists per rebalance (designer model 1764562 and AI Factor sleeve books)",
-   "source": "Portfolio123 HAR-first captures (no API call without owner approval)",
-   "entities": "designer model 1764562; AI Factor books 1853536 and the connected models",
-   "date_range": "2025-11-21 to 2026-09-17",
-   "access": "login-gated (owner session)",
-   "estimated_size": "under 20 MB",
+   "pull_id": "QSI-P1",
+   "title": "Daily raw and adjusted closes for the QSI sleeve ETFs",
+   "source": "Yahoo Finance via yfinance (public); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "CURE DGP EFO ERX FAS SOXL SPXL SQQQ TECL TMF TQQQ TYD UGE UPW UTSL BIL",
+   "date_range": "2025-12-15 to 2026-10-09",
+   "access": "public, no login",
+   "estimated_size": "under 3 MB",
    "replaces": [
     "composition",
-    "timing"
+    "timing",
+    "execution"
    ],
    "status": "REQUESTED_NOT_DOWNLOADED"
   },
   {
-   "pull_id": "PULL_IBKR_FLEX_MTM_CASH",
-   "title": "IBKR Flex MTMPerformanceSummary CASH rows (currency of cash) for accounts 9054 and 6907",
-   "source": "IBKR Flex Web Service (the governed generation parses ChangeInNAV mtm but does not emit it, and does not parse MTMPerformanceSummary)",
-   "entities": "EU account (9054), AI Factor account (6907)",
-   "date_range": "2025-11-21 to 2026-09-17",
-   "access": "token-gated Flex query (owner approval; no credentials handled by the agent)",
-   "estimated_size": "under 5 MB",
-   "replaces": [
-    "fx",
-    "leverage"
-   ],
-   "status": "REQUESTED_NOT_DOWNLOADED"
-  },
-  {
-   "pull_id": "PULL_SPXL_INTRADAY_PRICES",
-   "title": "SPXL and ES intraday (hourly or 5-minute) prices for the VTMA signal and fill timestamps",
-   "source": "a market-data vendor with intraday history (Yahoo hourly is limited to the last 730 days)",
-   "entities": "SPXL, ES futures",
-   "date_range": "2026-01-02 to 2026-08-03",
-   "access": "public hourly or paid minute data",
-   "estimated_size": "under 5 MB",
+   "pull_id": "VOL-P2",
+   "title": "Quantbase/Statis full provider rebalance history and the fund-level fill log",
+   "source": "Quantbase/Statis (owner action); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "Volatis fund 107",
+   "date_range": "2024-10-14 to 2026-09-17",
+   "access": "owner action",
+   "estimated_size": "audit silent",
    "replaces": [
     "execution",
     "timing"
@@ -7647,16 +6545,29 @@
    "status": "REQUESTED_NOT_DOWNLOADED"
   },
   {
-   "pull_id": "PULL_ROBUXIO_VENDOR_FILL_REJECTION_DETAIL",
-   "title": "Robuxio vendor order fills and the 2026-02-24..26 rejection detail",
-   "source": "Robuxio / Matrixport monthly performance report and fill file",
+   "pull_id": "ROB-P1",
+   "title": "Robuxio/Matrixport fill and rejection log for 2026-02-24..26 and POWERUSDT prices",
+   "source": "Robuxio / Matrixport (owner message to the vendor); full text in r21/pull-list-model-vs-actual.md",
    "entities": "Robuxio crypto product",
-   "date_range": "2025-12-05 to 2026-09-17",
-   "access": "login-gated (vendor portal)",
-   "estimated_size": "under 2 MB",
+   "date_range": "2026-02-24 to 2026-02-26",
+   "access": "login-gated or vendor message",
+   "estimated_size": "audit silent",
    "replaces": [
     "execution",
     "timing"
+   ],
+   "status": "REQUESTED_NOT_DOWNLOADED"
+  },
+  {
+   "pull_id": "ROB-P4",
+   "title": "Matrixport product gross/net leverage real values (provider fields return 0)",
+   "source": "Matrixport (login); full text in r21/pull-list-model-vs-actual.md",
+   "entities": "Robuxio crypto product",
+   "date_range": "snapshot",
+   "access": "login-gated (owner)",
+   "estimated_size": "audit silent",
+   "replaces": [
+    "leverage"
    ],
    "status": "REQUESTED_NOT_DOWNLOADED"
   }

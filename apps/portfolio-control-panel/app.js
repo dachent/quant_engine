@@ -3055,6 +3055,10 @@
     const pull = (Array.isArray(block.pulls) ? block.pulls : []).find((item) => item.pull_id === pullId);
     return pull ? pull.title : pullId;
   };
+  const mvaSource = (block, item) => {
+    const source = Number.isInteger(item?.source_id) && Array.isArray(block.sources) ? block.sources.find((entry) => entry.source_id === item.source_id) : null;
+    return source ? ` title="${safe(`source: ${source.file}${source.sha256 ? ` (sha256 ${source.sha256.slice(0, 12)}…)` : ""}`)}"` : "";
+  };
   const mvaReplaced = (block, pullId) => (pullId ? `<span class="mva-reason">replaced by: ${safe(mvaPullTitle(block, pullId))}</span>` : "");
   function mvaTag(item, block) {
     const tag = item && item.evidence_tag;
@@ -3087,7 +3091,7 @@
         ? `<div class="mva-subs">${item.sub_components.map((sub) => `<div class="mva-sub"><span>${safe(sub.label || humanStatus(sub.component_id))}</span><b class="mva-${mvaSide(sub.pp)}">${mvaPp(sub.pp)}${number(sub.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(sub.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : ""}</b><span class="mva-usd"></span><span>${mvaTag(sub, block)}</span></div>`).join("")}</div>`
         : "";
       const usdText = item.usd_basis === "ESTIMATED_PP_TIMES_CAPITAL_BASE" ? `${mvaUsd(item.usd)}<small class="mva-note">estimated dollars</small>` : mvaUsd(item.usd);
-      return `<div class="mva-bar-row"><div class="mva-bar-label">${safe(item.label || humanStatus(item.component_id))}${item.unavailable_reason ? `<span class="mva-reason">${safe(humanStatus(item.unavailable_reason))}</span>` : ""}${mvaReplaced(block, item.replacing_pull)}</div><div class="mva-bar-track" role="img" aria-label="${safe(item.label || item.component_id)} ${safe(formatter(value))}"><i class="mva-bar mva-bar-${side}" style="width:${(width / 2).toFixed(1)}%"></i></div><b class="mva-${side}">${formatter(value)}${number(item.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(item.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : ""}</b><span class="mva-usd">${extra ? extra(item) : usdText}</span><span>${mvaTag(item, block)}</span></div>${subs}`;
+      return `<div class="mva-bar-row"><div class="mva-bar-label"${mvaSource(block, item)}>${safe(item.label || humanStatus(item.component_id))}${item.unavailable_reason ? `<span class="mva-reason">${safe(humanStatus(item.unavailable_reason))}</span>` : ""}${mvaReplaced(block, item.replacing_pull)}</div><div class="mva-bar-track" role="img" aria-label="${safe(item.label || item.component_id)} ${safe(formatter(value))}"><i class="mva-bar mva-bar-${side}" style="width:${(width / 2).toFixed(1)}%"></i></div><b class="mva-${side}">${formatter(value)}${number(item.uncertainty_pp_1sigma) != null ? `<small class="mva-note">±${decimal(item.uncertainty_pp_1sigma, 1)} pp (1σ)</small>` : ""}</b><span class="mva-usd">${extra ? extra(item) : usdText}</span><span>${mvaTag(item, block)}</span></div>${subs}`;
     }).join("");
     return `<div class="mva-bars">${body}</div>`;
   }
