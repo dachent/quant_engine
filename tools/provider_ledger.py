@@ -220,9 +220,11 @@ _SOURCE_FACT_TARGET: Final = {
     "positions": "positions",
     "transactions": "transactions",
 }
+_MATRIXPORT: Final = "matrixport"
+_QUANTBASE: Final = "quantbase"
 _CSV_FACT_ACCOUNT: Final[dict[str, str]] = {
-    "matrixport": "account-d2e5821e608e25f1",
-    "quantbase": "account-58e75e8d952fa1b8",
+    _MATRIXPORT: "account-d2e5821e608e25f1",
+    _QUANTBASE: "account-58e75e8d952fa1b8",
 }
 _MATRIXPORT_ROBUXIO_PRODUCT_ID: Final = "7361599360326447104"
 _MATRIXPORT_ROBUXIO_ORDER_ID: Final = "7402822649690198016"
@@ -1159,7 +1161,7 @@ def _matrixport_flows(
 ) -> list[dict[str, Any]]:
     """Project confirmed wallet deposits and withdrawals in their native units."""
 
-    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    account_id = _CSV_FACT_ACCOUNT[_MATRIXPORT]
     if account_id not in accounts:
         raise ProviderLedgerError("matrixport wallet account is unknown")
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
@@ -1292,7 +1294,7 @@ def _matrixport_nav_observations(
     cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Admit Matrixport daily portfolio totals as account NAV observations."""
-    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    account_id = _CSV_FACT_ACCOUNT[_MATRIXPORT]
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
     run_root = root / "output" / source_run_id
     if fx_rates is not None:
@@ -1507,7 +1509,7 @@ def _matrixport_capital_anchors(
     ``event_time_fx``, the close of its own event date, which a reader applies
     once to the native amount.
     """
-    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    account_id = _CSV_FACT_ACCOUNT[_MATRIXPORT]
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
     run_root = root / "output" / source_run_id
     artifact_id = "csv/subscription_details.csv"
@@ -1777,7 +1779,7 @@ def _quantbase_nav_observations(
     cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Admit Quantbase Volatis daily dashboard values as strategy NAV observations."""
-    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
             "run_id"
@@ -1867,7 +1869,7 @@ def _quantbase_capital_anchors(
     is the money-weighted cash date, and the recognizing NAV must be the first
     dashboard value after it; an allocation without its fills fails closed.
     """
-    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
             "run_id"
@@ -2113,7 +2115,7 @@ def _quantbase_flows(
     Alpaca fiat account; the retained amount/amount_cents pair and Alpaca's
     accepted USD account unit establish USD without applying any crypto parity.
     """
-    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
             "run_id"
@@ -3749,7 +3751,7 @@ def _assignment_index(
             raise ProviderLedgerError("MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS")
         owner_assignments = [
             item
-            for item in assignments.get(_CSV_FACT_ACCOUNT["matrixport"], [])
+            for item in assignments.get(_CSV_FACT_ACCOUNT[_MATRIXPORT], [])
             if item.get("mapping_status") == "MAPPED"
             and item.get("strategy_id") == "robuxio-crypto"
         ]
@@ -4659,12 +4661,12 @@ def _csv_quantbase_cash_activity(ctx: _CsvFactContext) -> list[dict[str, Any]]:
 
 
 _CSV_FACT_BUILDERS: Final = {
-    ("matrixport", "capital_anchors"): _csv_matrixport_capital_anchors,
-    ("matrixport", "nav_observations"): _csv_matrixport_nav_observations,
-    ("quantbase", "capital_anchors"): _csv_quantbase_capital_anchors,
-    ("quantbase", "flows"): _csv_quantbase_flows,
-    ("quantbase", "nav_observations"): _csv_quantbase_nav_observations,
-    ("quantbase", "transactions"): _csv_quantbase_cash_activity,
+    (_MATRIXPORT, "capital_anchors"): _csv_matrixport_capital_anchors,
+    (_MATRIXPORT, "nav_observations"): _csv_matrixport_nav_observations,
+    (_QUANTBASE, "capital_anchors"): _csv_quantbase_capital_anchors,
+    (_QUANTBASE, "flows"): _csv_quantbase_flows,
+    (_QUANTBASE, "nav_observations"): _csv_quantbase_nav_observations,
+    (_QUANTBASE, "transactions"): _csv_quantbase_cash_activity,
 }
 
 
@@ -7823,7 +7825,7 @@ def _quantbase_flow_coverage(
     capture_ids = legacy_capture_ids if declared_legacy_ids else current_capture_ids
     artifact_ids = (csv_artifact_id, *capture_ids)
 
-    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
     if known_accounts != {account_id}:
         raise ProviderLedgerError("Quantbase account activity account scope differs")
     run_id = _run_id(
@@ -8158,7 +8160,7 @@ def _matrixport_flow_coverage(
             "Matrixport wallet history capture artifact set is incomplete"
         )
 
-    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    account_id = _CSV_FACT_ACCOUNT[_MATRIXPORT]
     if known_accounts != {account_id}:
         raise ProviderLedgerError("Matrixport wallet history account scope differs")
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
@@ -8324,7 +8326,7 @@ def _matrixport_anchor_coverage(
     contain exactly one subscription and no redemption.
     """
 
-    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    account_id = _CSV_FACT_ACCOUNT[_MATRIXPORT]
     if known_accounts != {account_id}:
         raise ProviderLedgerError("Matrixport anchor coverage account scope differs")
 
@@ -10369,7 +10371,7 @@ def build_catalog(
             manifests["matrixport"],
             catalogs["matrixport"],
             provider_roots["matrixport"],
-            {_CSV_FACT_ACCOUNT["matrixport"]},
+            {_CSV_FACT_ACCOUNT[_MATRIXPORT]},
         ),
         matrixport_anchor_coverage=(
             # Q1-F: only when the catalog declares hash pins for the base
@@ -10379,7 +10381,7 @@ def build_catalog(
                 manifests["matrixport"],
                 catalogs["matrixport"],
                 provider_roots["matrixport"],
-                {_CSV_FACT_ACCOUNT["matrixport"]},
+                {_CSV_FACT_ACCOUNT[_MATRIXPORT]},
             )
             if catalogs["matrixport"].get("anchor_coverage") is not None
             else None
@@ -10388,7 +10390,7 @@ def build_catalog(
             manifests["quantbase"],
             catalogs["quantbase"],
             provider_roots["quantbase"],
-            {_CSV_FACT_ACCOUNT["quantbase"]},
+            {_CSV_FACT_ACCOUNT[_QUANTBASE]},
         ),
     )
     admit_or_declare, admit_or_declare_bytes = _admit_or_declare_receipt(
