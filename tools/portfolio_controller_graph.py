@@ -149,6 +149,9 @@ _PATH_STAGES = {
     "tools/check_repository_boundary.py": [],
     "tools/ci.py": [],
     "tools/stall_watchdog.py": [],
+    # Computes labelled fill records for declared vendor NAV gap days from retained
+    # bytes; no stage reads it (consumers take the pinned fill record).
+    "tools/portfolio_vendor_nav_gap_fill.py": [],
     # The nested-strategy tag map (#567 stage 1): policy validation and tag
     # resolution.  The report reads it for sleeve lifecycle links (#592), so a
     # change affects the report and the panel built from it.
