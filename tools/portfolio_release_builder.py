@@ -45,6 +45,16 @@ class VerticalBuildError(ValueError):
     """A source, stage, or proof differs from the vertical-build contract."""
 
 
+def _declared_periods(declared: Mapping[str, int], series_id: str) -> int:
+    """The base specification's annualisation of a series; absent is an error."""
+
+    if series_id not in declared:
+        raise VerticalBuildError(
+            f"base decomposition declares no periods_per_year for {series_id}"
+        )
+    return declared[series_id]
+
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = REPOSITORY_ROOT / "tools"
 FINANCIAL_MVP_TOOL = TOOLS_ROOT / "portfolio_financial_mvp_contract.py"
@@ -3112,6 +3122,26 @@ def _governed_plan_sources(
     ):
         raise VerticalBuildError("governed current strategy plan is unavailable")
     plan = _load(attribution_bundle / plan_relative, "governed current strategy plan")
+    # The annualisation the expected models carry is the governed base spec's, per
+    # target series; it is never a literal here.
+    declared_periods_per_year: dict[str, int] = {}
+    base_spec = _load(
+        attribution_bundle / "inputs/governance/base-decomposition-spec.json",
+        "base decomposition specification",
+    )
+    for base_model in base_spec.get("models", []):
+        if not isinstance(base_model, dict):
+            raise VerticalBuildError("base decomposition model differs")
+        base_series = _text(base_model.get("series_id"), "base model series_id")
+        base_periods = base_model.get("periods_per_year")
+        if (
+            not isinstance(base_periods, int)
+            or isinstance(base_periods, bool)
+            or base_periods < 1
+            or declared_periods_per_year.setdefault(base_series, base_periods)
+            != base_periods
+        ):
+            raise VerticalBuildError("base decomposition periods_per_year differs")
     if plan.get("schema_version") != 3:
         raise VerticalBuildError("governed current strategy plan schema differs")
     sources = plan.get("sources")
@@ -3399,7 +3429,9 @@ def _governed_plan_sources(
                             3, minimum_per_factor * len(factor_set)
                         ),
                         "parsimony_tolerance": parsimony_tolerance,
-                        "periods_per_year": 252,
+                        "periods_per_year": _declared_periods(
+                            declared_periods_per_year, series_id
+                        ),
                         "series_id": series_id,
                         "static_constraint": static_constraint,
                     }
