@@ -137,3 +137,43 @@ def test_the_multiplier_is_the_governed_one_not_a_literal() -> None:
         panel._alpha_context(_row(interval_association=None))["periods_per_year"]
         is None
     )
+
+
+def test_an_inapplicable_series_points_at_the_lens_where_it_has_an_alpha() -> None:
+    def row(source: str, status: str, **extra: Any) -> dict[str, Any]:
+        base = _row(status=status, source_key=source, series_id="Robuxio", **extra)
+        base["alpha_context"] = panel._alpha_context(base)
+        return base
+
+    economic = row(
+        "us-economic",
+        "UNAVAILABLE",
+        alpha=None,
+        unavailable_reasons=["NOT_APPLICABLE_METHOD_SCOPE"],
+    )
+    style = row("multi-asset-style", "DIAGNOSTIC_ONLY")
+    grouped = [
+        {
+            "lens_id": "ECONOMIC_FACTOR",
+            "lens_label": "Economic factors",
+            "surfaces": {"STATIC": {"series": [economic]}},
+        },
+        {
+            "lens_id": "ETF_STYLE",
+            "lens_label": "ETF style",
+            "surfaces": {"STATIC": {"series": [style]}},
+        },
+        {"lens_id": "LEGACY", "series": []},
+    ]
+    panel._attach_alpha_alternatives(grouped)
+    assert economic["alpha_context"]["alternatives"] == [
+        {
+            "lens_id": "ETF_STYLE",
+            "lens_label": "ETF style",
+            "source_key": "multi-asset-style",
+            "surface": "STATIC",
+            "series_status": "DIAGNOSTIC_ONLY",
+            "basis_status": "AVAILABLE_OBSERVED_BASIS",
+        }
+    ]
+    assert style["alpha_context"]["alternatives"] == []

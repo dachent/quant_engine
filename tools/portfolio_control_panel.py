@@ -5120,6 +5120,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
             if days < 365
             else "ANNUALISED"
         ),
+        "alternatives": [],
         "factor_as_of_date": factor_end if isinstance(factor_end, str) else None,
         "factor_staleness_days": staleness,
     }
@@ -5847,6 +5848,48 @@ def _group_decomposition_lens_sources(
     }
 
 
+def _attach_alpha_alternatives(grouped: Sequence[Mapping[str, Any]]) -> None:
+    """Point an inapplicable series at the lenses where the same series has an alpha.
+
+    A series whose method scope excludes a lens (a crypto strategy on the equity
+    factor sources) carries the lenses, sources and surface where the analytics do
+    give it an alpha, so the tile can say where to look instead of only "not
+    applicable".  The row dicts are shared with the lens-level series list, so the
+    change is made in place.
+    """
+
+    found: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for lens in grouped:
+        surfaces = lens.get("surfaces")
+        for surface, node in surfaces.items() if isinstance(surfaces, Mapping) else []:
+            for row in _objects(node.get("series"), "lens surface series"):
+                context = row.get("alpha_context")
+                if (
+                    isinstance(context, dict)
+                    and context.get("status") == "AVAILABLE"
+                    and row.get("status") in {"AVAILABLE", "DIAGNOSTIC_ONLY"}
+                ):
+                    found.setdefault((str(row.get("series_id")), surface), []).append(
+                        {
+                            "lens_id": lens.get("lens_id"),
+                            "lens_label": lens.get("lens_label"),
+                            "source_key": row.get("source_key"),
+                            "surface": surface,
+                            "series_status": row.get("status"),
+                            "basis_status": context.get("basis_status"),
+                        }
+                    )
+    for lens in grouped:
+        surfaces = lens.get("surfaces")
+        for surface, node in surfaces.items() if isinstance(surfaces, Mapping) else []:
+            for row in _objects(node.get("series"), "lens surface series"):
+                context = row.get("alpha_context")
+                if isinstance(context, dict) and context.get("status") == "UNAVAILABLE":
+                    context["alternatives"] = list(
+                        found.get((str(row.get("series_id")), surface), [])
+                    )
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -6151,6 +6194,7 @@ def _decomposition_lenses_for_mode(
                 "surfaces": surfaces,
             }
         )
+    _attach_alpha_alternatives(grouped)
     return (
         {
             "default_lens": "ECONOMIC_FACTOR",
