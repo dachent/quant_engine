@@ -985,6 +985,7 @@ def _build_slice_benchmarks(
     slices: Mapping[str, Any],
     since_start: date,
     daily_benchmarks: Mapping[str, Any] | None,
+    allow_weekly_fallback: bool = False,
 ) -> list[dict[str, Any]]:
     days = [_day(item, "slice date") for item in slices["dates"]]
     flows = [int(v) for v in slices["flows"]["net_flow_cents"]]
@@ -1000,16 +1001,21 @@ def _build_slice_benchmarks(
         if isinstance(weekly_levels, str):
             out.append(_bench_unavailable(series_id, ticker, weekly_levels))
             continue
-        daily, _why = _daily_usable(
+        daily, why = _daily_usable(
             _mapping(daily_benchmarks).get(series_id) if daily_benchmarks else None,
             weekly_levels[-1][0],
         )
         if daily is not None:
             levels = _daily_levels(_mapping(daily["returns"]))
             basis, timing = "DAILY_ADJUSTED_CLOSE", "FLOW_DATE_CLOSE"
-        else:
+        elif allow_weekly_fallback:
             levels = weekly_levels
             basis, timing = "WEEKLY_TOTAL_RETURN_INDEX", "FLOW_WEEK_START"
+        else:
+            out.append(
+                _bench_unavailable(series_id, ticker, f"DAILY_SERIES_REQUIRED:{why}")
+            )
+            continue
         with localcontext() as context:
             context.prec = _PRECISION
             tri = _carry(levels, days)
@@ -1204,7 +1210,9 @@ def _qualified_label(label: str, line: Mapping[str, Any], dates: object) -> str:
 
 
 def build_performance_tab(
-    panel: Mapping[str, Any], daily_benchmarks: Mapping[str, Any] | None = None
+    panel: Mapping[str, Any],
+    daily_benchmarks: Mapping[str, Any] | None = None,
+    allow_weekly_fallback: bool = False,
 ) -> dict[str, Any]:
     """Build the ``performance_tab`` block from the assembled panel mapping.
 
@@ -1212,8 +1220,10 @@ def build_performance_tab(
     ``{"source_id": ..., "returns": {ISO date: daily total return}}`` from the
     admitted daily adjusted-close series, or is read from
     ``weekly_returns.daily_benchmark_returns`` when the weekly generation carries
-    it; without either the flow-matched dollars use the weekly total-return index
-    and say so.
+    it.  Without either the flow-matched dollars are UNAVAILABLE with the reason
+    (``DAILY_SERIES_REQUIRED``): the release path never ships the weekly index.
+    ``allow_weekly_fallback`` is for fixtures and development only; it labels the
+    weekly basis.
     """
 
     weekly = _mapping(panel.get("weekly_returns"))
@@ -1251,13 +1261,17 @@ def build_performance_tab(
         )
         if slices.get("status") == "AVAILABLE":
             slices["flows"]["report_crosscheck"] = _report_crosscheck(
-                slices["flows"], _mapping(panel.get("capital_reconciliation"))
+                slices["flows"],
+                _mapping(panel.get("capital_reconciliation")),
+                _mapping(manifest),
+                slices["reconciliation"]["total_cents"][-1],
             )
             slices["benchmarks"] = _build_slice_benchmarks(
                 weekly,
                 slices,
                 _since_start(readout, slices),
                 daily_benchmarks,
+                allow_weekly_fallback,
             )
     except PerformanceTabError as exc:
         slices = _unavailable(str(exc))
@@ -1282,10 +1296,53 @@ def build_performance_tab(
     }
 
 
+CROSSCHECK_NOTES: Final = {
+    "CLOSED_EPOCH_VALUE_AT_CUTOFF": (
+        "The report's current value of the epochs open at the cutoff carries the "
+        "value of a closed epoch (post-liquidation) that no plotted slice holds."
+    ),
+    "OPENING_BASIS_TRACE_VS_LEDGER": (
+        "Each epoch's P&L from the NAV trace (final value - opening NAV - flows) "
+        "against the ledger gain on the manifest row: epochs that open from the last "
+        "observation before the start (or from a first positive observation) carry a "
+        "NAV-trace opening that differs from the governed ledger opening capital. "
+        "Lines name every epoch."
+    ),
+    "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS": (
+        "DISCLOSED DIFFERENCE, not explained by the manifest rows: the report's "
+        "gain of all epochs minus the sum of the manifest rows' gains.  The report "
+        "totals use its own epoch set (see report_epoch_count against "
+        "manifest_row_count), which includes the four closed sleeve rows and chained "
+        "hand-offs differently; the components of that set are not in the payload."
+    ),
+    "ROUNDING": "Whole-cent rounding of per-epoch and per-day figures.",
+}
+
+
+def _epoch_trace_pnl(row: Mapping[str, Any]) -> tuple[Decimal, Decimal] | None:
+    links = _sequence(_mapping(row.get("observation_trace")).get("links"))
+    if row.get("status") != "OK" or not links:
+        return None
+    flow = sum((_dec(x["net_flow"], "net_flow") for x in links), Decimal(0))
+    pnl = (
+        _dec(links[-1]["ending_nav"], "ending_nav")
+        - _dec(links[0]["base_nav"], "base_nav")
+        - flow
+    )
+    return pnl, _dec(row.get("gain") or 0, "row gain")
+
+
 def _report_crosscheck(
-    flows: Mapping[str, Any], reconciliation: Mapping[str, Any]
+    flows: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    total_end_cents: int,
 ) -> dict[str, Any] | None:
-    """The NAV-trace contributions against the report's ledger-based net capital."""
+    """The NAV-trace contributions against the report's ledger-based net capital.
+
+    ``contributed_minus_report_cents`` is split into named components that sum to it
+    exactly; the part the payload cannot attribute is labelled as such.
+    """
 
     if reconciliation.get("status") != "RECONCILED":
         return None
@@ -1295,14 +1352,59 @@ def _report_crosscheck(
             _dec(reconciliation["derived_total_net_capital_usd"], "net capital")
         )
         gain = _cents(_dec(reconciliation["gain_of_all_epochs_usd"], "gain"))
+        report_current = _cents(
+            _dec(reconciliation["current_of_open_epochs_usd"], "current of open")
+        )
+        lines: list[dict[str, Any]] = []
+        opening = row_gain_total = 0
+        for row in _sequence(manifest.get("rows")):
+            pair = _epoch_trace_pnl(row) if isinstance(row, Mapping) else None
+            if pair is None:
+                continue
+            trace_c, gain_c = _cents(pair[0]), _cents(pair[1])
+            row_gain_total += gain_c
+            opening += trace_c - gain_c
+            lines.append(
+                {
+                    "account_id": row.get("account_id"),
+                    "strategy_id": row.get("strategy_id"),
+                    "effective_start": row.get("effective_start"),
+                    "trace_pnl_cents": trace_c,
+                    "row_gain_cents": gain_c,
+                    "difference_cents": trace_c - gain_c,
+                }
+            )
+    contributed = int(flows["total_contributed_cents"])
+    gap = contributed - net
+    closed = total_end_cents - report_current
+    epoch_set = gain - row_gain_total
+    parts = [
+        ("CLOSED_EPOCH_VALUE_AT_CUTOFF", closed, [], True),
+        ("OPENING_BASIS_TRACE_VS_LEDGER", -opening, lines, True),
+        ("REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS", epoch_set, [], False),
+    ]
+    rounding = gap - sum(item[1] for item in parts)
+    parts.append(("ROUNDING", rounding, [], True))
     return {
         "source": "capital_reconciliation",
         "report_net_capital_cents": net,
-        "trace_contributed_cents": flows["total_contributed_cents"],
-        "contributed_minus_report_cents": flows["total_contributed_cents"] - net,
+        "trace_contributed_cents": contributed,
+        "contributed_minus_report_cents": gap,
         "report_gain_cents": gain,
         "trace_implied_pnl_cents": flows["implied_pnl_cents"],
         "pnl_minus_report_gain_cents": flows["implied_pnl_cents"] - gain,
+        "report_epoch_count": reconciliation.get("epoch_count"),
+        "manifest_row_count": len(lines),
+        "components": [
+            {
+                "component_id": name,
+                "amount_cents": amount,
+                "explained": explained,
+                "note": CROSSCHECK_NOTES[name],
+                "lines": detail,
+            }
+            for name, amount, detail, explained in parts
+        ],
     }
 
 
@@ -1763,16 +1865,83 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
     else:
         net = cents(Fraction(str(recon["derived_total_net_capital_usd"])))
         gain = cents(Fraction(str(recon["gain_of_all_epochs_usd"])))
+        current_open = cents(Fraction(str(recon["current_of_open_epochs_usd"])))
         mine = block["flows"]["total_contributed_cents"]
-        if cross != {
-            "source": "capital_reconciliation",
-            "report_net_capital_cents": net,
-            "trace_contributed_cents": mine,
-            "contributed_minus_report_cents": mine - net,
-            "report_gain_cents": gain,
-            "trace_implied_pnl_cents": block["flows"]["implied_pnl_cents"],
-            "pnl_minus_report_gain_cents": block["flows"]["implied_pnl_cents"] - gain,
-        }:
+        opening_total = 0
+        row_gains = 0
+        expected_lines = []
+        for trace in traces:
+            account, strategy, first, _last, parsed = trace
+            row = next(
+                r
+                for r in _sequence(manifest.get("rows"))
+                if isinstance(r, Mapping)
+                and r.get("status") == "OK"
+                and r.get("account_id") == account
+                and r.get("strategy_id") == strategy
+                and _first_link_start(r) == first.isoformat()
+            )
+            trace_pnl = (
+                parsed[-1][3]
+                - parsed[0][2]
+                - sum((link[4] for link in parsed), Fraction(0))
+            )
+            trace_c = cents(trace_pnl)
+            gain_c = cents(Fraction(str(row.get("gain") or 0)))
+            row_gains += gain_c
+            opening_total += trace_c - gain_c
+            expected_lines.append(
+                {
+                    "account_id": row.get("account_id"),
+                    "strategy_id": row.get("strategy_id"),
+                    "effective_start": row.get("effective_start"),
+                    "trace_pnl_cents": trace_c,
+                    "row_gain_cents": gain_c,
+                    "difference_cents": trace_c - gain_c,
+                }
+            )
+        gap = mine - net
+        amounts = [
+            totals[-1] - current_open,
+            -opening_total,
+            gain - row_gains,
+        ]
+        amounts.append(gap - sum(amounts))
+        components = (cross or {}).get("components") or []
+        if (
+            cross is None
+            or [c["component_id"] for c in components]
+            != [
+                "CLOSED_EPOCH_VALUE_AT_CUTOFF",
+                "OPENING_BASIS_TRACE_VS_LEDGER",
+                "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS",
+                "ROUNDING",
+            ]
+            or [c["amount_cents"] for c in components] != amounts
+            or sorted(
+                components[1]["lines"],
+                key=lambda x: (x["account_id"], x["strategy_id"], x["effective_start"]),
+            )
+            != sorted(
+                expected_lines,
+                key=lambda x: (x["account_id"], x["strategy_id"], x["effective_start"]),
+            )
+            or [c["explained"] for c in components] != [True, True, False, True]
+            or any(c["note"] != CROSSCHECK_NOTES[c["component_id"]] for c in components)
+            or {k: v for k, v in cross.items() if k != "components"}
+            != {
+                "source": "capital_reconciliation",
+                "report_net_capital_cents": net,
+                "trace_contributed_cents": mine,
+                "contributed_minus_report_cents": gap,
+                "report_gain_cents": gain,
+                "trace_implied_pnl_cents": block["flows"]["implied_pnl_cents"],
+                "pnl_minus_report_gain_cents": block["flows"]["implied_pnl_cents"]
+                - gain,
+                "report_epoch_count": recon.get("epoch_count"),
+                "manifest_row_count": len(traces),
+            }
+        ):
             raise _fail("flows cross-check differs")
 
 
@@ -1867,6 +2036,7 @@ def _verify_slice_benchmarks(
     weekly: Mapping[str, Any],
     readout: Mapping[str, Any],
     daily_benchmarks: Mapping[str, Any] | None,
+    allow_weekly_fallback: bool = False,
 ) -> None:
     """Direct-sum re-derivation of the flow-matched dollars, one benchmark at a time."""
 
@@ -1901,12 +2071,19 @@ def _verify_slice_benchmarks(
         if daily is not None:
             levels = _daily_levels(_mapping(daily["returns"]))
             basis, timing = "DAILY_ADJUSTED_CLOSE", "FLOW_DATE_CLOSE"
-        else:
+        elif allow_weekly_fallback:
             levels, basis, timing = (
                 weekly_levels,
                 "WEEKLY_TOTAL_RETURN_INDEX",
                 "FLOW_WEEK_START",
             )
+        else:
+            if (
+                entry["status"] != "UNAVAILABLE"
+                or entry["reason"] != f"DAILY_SERIES_REQUIRED:{_why}"
+            ):
+                raise _fail(f"{series_id} slice benchmark needs the daily series")
+            continue
         with localcontext() as context:
             context.prec = _PRECISION + 10
             level_on: list[Decimal | None] = []
@@ -2067,6 +2244,7 @@ def verify_performance_tab(
     block: Mapping[str, Any],
     panel: Mapping[str, Any],
     daily_benchmarks: Mapping[str, Any] | None = None,
+    allow_weekly_fallback: bool = False,
 ) -> None:
     """Re-derive the block from the panel inputs; raise on any difference."""
 
@@ -2146,6 +2324,10 @@ def verify_performance_tab(
     slices_block = _mapping(block.get("slices"))
     if slices_block.get("status") == "AVAILABLE":
         _verify_slice_benchmarks(
-            slices_block, weekly, _mapping(block.get("readout")), daily_benchmarks
+            slices_block,
+            weekly,
+            _mapping(block.get("readout")),
+            daily_benchmarks,
+            allow_weekly_fallback,
         )
     _verify_readout(_mapping(block.get("readout")), panel)

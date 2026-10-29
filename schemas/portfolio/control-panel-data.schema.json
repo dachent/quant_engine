@@ -2299,8 +2299,25 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["source", "report_net_capital_cents", "trace_contributed_cents", "contributed_minus_report_cents", "report_gain_cents", "trace_implied_pnl_cents", "pnl_minus_report_gain_cents"],
+              "required": ["source", "report_net_capital_cents", "trace_contributed_cents", "contributed_minus_report_cents", "report_gain_cents", "trace_implied_pnl_cents", "pnl_minus_report_gain_cents", "report_epoch_count", "manifest_row_count", "components"],
               "properties": {
+                "report_epoch_count": { "type": ["integer", "null"] },
+                "manifest_row_count": { "type": "integer", "minimum": 0 },
+                "components": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["component_id", "amount_cents", "explained", "note", "lines"],
+                    "properties": {
+                      "component_id": { "type": "string", "minLength": 1 },
+                      "amount_cents": { "type": "integer" },
+                      "explained": { "type": "boolean" },
+                      "note": { "type": "string", "minLength": 1 },
+                      "lines": { "type": "array", "items": { "type": "object" } }
+                    }
+                  }
+                },
                 "source": { "const": "capital_reconciliation" },
                 "report_net_capital_cents": { "type": "integer" },
                 "trace_contributed_cents": { "type": "integer" },

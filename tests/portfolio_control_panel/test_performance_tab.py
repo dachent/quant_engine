@@ -905,7 +905,7 @@ def test_slice_flows_cancel_the_handoff_and_reconcile_to_the_slice_total() -> No
 
 def test_flow_matched_dollars_on_the_weekly_index_match_a_direct_sum() -> None:
     panel = _panel_with_benchmarks()
-    block = tab.build_performance_tab(panel)
+    block = tab.build_performance_tab(panel, allow_weekly_fallback=True)
     spy = block["slices"]["benchmarks"][0]
     assert spy["status"] == "AVAILABLE" and spy["method"] == "FLOW_MATCHED"
     assert spy["tri_basis"] == "WEEKLY_TOTAL_RETURN_INDEX"
@@ -919,7 +919,7 @@ def test_flow_matched_dollars_on_the_weekly_index_match_a_direct_sum() -> None:
         == block["slices"]["reconciliation"]["total_cents"][-1] - spy["end_value_cents"]
     )
     assert spy["trailing"]["1w"] is None or isinstance(spy["trailing"]["1w"], str)
-    tab.verify_performance_tab(block, panel)
+    tab.verify_performance_tab(block, panel, allow_weekly_fallback=True)
     assert list(_schema_validator().iter_errors(block)) == []
 
 
@@ -965,14 +965,21 @@ def test_daily_series_make_flow_matching_exact_per_day() -> None:
             "returns": {k: v for k, v in full["returns"].items() if k < "2026-03-01"},
         }
     }
-    fallback = tab.build_performance_tab(panel, short)
+    refused = tab.build_performance_tab(panel, short)
+    entry = refused["slices"]["benchmarks"][0]
+    assert entry["status"] == "UNAVAILABLE" and entry["nav_cents"] is None
+    assert entry["reason"] == (
+        "DAILY_SERIES_REQUIRED:DAILY_SERIES_ENDS_BEFORE_THE_LAST_WEEKLY_OBSERVATION"
+    )
+    tab.verify_performance_tab(refused, panel, short)
+    fallback = tab.build_performance_tab(panel, short, allow_weekly_fallback=True)
     assert (
         fallback["slices"]["benchmarks"][0]["tri_basis"] == "WEEKLY_TOTAL_RETURN_INDEX"
     )
     assert fallback["benchmarks"][0]["daily"]["reason"] == (
         "DAILY_SERIES_ENDS_BEFORE_THE_LAST_WEEKLY_OBSERVATION"
     )
-    tab.verify_performance_tab(fallback, panel, short)
+    tab.verify_performance_tab(fallback, panel, short, allow_weekly_fallback=True)
 
 
 def test_flow_matched_dollars_without_an_admitted_benchmark_are_unavailable() -> None:
@@ -994,33 +1001,66 @@ def test_flow_matched_dollars_without_an_admitted_benchmark_are_unavailable() ->
         _tamper(["slices", "flows", "internal_cancellation", "net_cents"], 1),
         _tamper(["modes", "LIVE_PLUS_BACKTEST", "group_anchor_index"], 0),
         _tamper(["modes", "LIVE_PLUS_BACKTEST", "lines", 1, "segments"], [[0, 7]]),
-        _tamper(["benchmarks", 0, "daily", "status"], "AVAILABLE"),
+        _tamper(["benchmarks", 0, "daily", "last_date"], "2020-01-01"),
     ],
 )
 def test_the_verifier_rejects_a_tampered_benchmark_dollar_or_flow(mutate: Any) -> None:
     panel = _panel_with_benchmarks()
-    block = copy.deepcopy(tab.build_performance_tab(panel))
+    daily = {
+        "market:SPY": _daily_returns("0.01"),
+        "market:SPXL": _daily_returns("0.02"),
+    }
+    block = copy.deepcopy(tab.build_performance_tab(panel, daily))
+    tab.verify_performance_tab(block, panel, daily)
     mutate(block)
     with pytest.raises((tab.PerformanceTabError, KeyError, IndexError, TypeError)):
-        tab.verify_performance_tab(block, panel)
+        tab.verify_performance_tab(block, panel, daily)
 
 
-def test_the_report_crosscheck_quotes_the_ledger_net_capital_and_gain() -> None:
+def test_the_report_crosscheck_names_components_that_sum_to_the_gap() -> None:
     panel = _panel()
     panel["capital_reconciliation"] = {
         "status": "RECONCILED",
         "derived_total_net_capital_usd": "112.5",
         "gain_of_all_epochs_usd": "5.25",
+        "current_of_open_epochs_usd": "118.04",
+        "epoch_count": 3,
     }
     block = tab.build_performance_tab(panel)
-    assert block["slices"]["flows"]["report_crosscheck"] == {
-        "source": "capital_reconciliation",
-        "report_net_capital_cents": 11250,
-        "trace_contributed_cents": 11300,
-        "contributed_minus_report_cents": 50,
-        "report_gain_cents": 525,
-        "trace_implied_pnl_cents": 500,
-        "pnl_minus_report_gain_cents": -25,
-    }
+    cross = block["slices"]["flows"]["report_crosscheck"]
+    assert cross["report_net_capital_cents"] == 11250
+    assert cross["trace_contributed_cents"] == 11300
+    assert cross["contributed_minus_report_cents"] == 50
+    assert cross["report_gain_cents"] == 525 and cross["manifest_row_count"] == 4
+    ids = [c["component_id"] for c in cross["components"]]
+    assert ids == [
+        "CLOSED_EPOCH_VALUE_AT_CUTOFF",
+        "OPENING_BASIS_TRACE_VS_LEDGER",
+        "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS",
+        "ROUNDING",
+    ]
+    assert sum(c["amount_cents"] for c in cross["components"]) == 50
+    assert [c["explained"] for c in cross["components"]] == [True, True, False, True]
+    assert cross["components"][0]["amount_cents"] == 11800 - 11804
+    assert len(cross["components"][1]["lines"]) == 4
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+    bad = copy.deepcopy(block)
+    bad["slices"]["flows"]["report_crosscheck"]["components"][2]["amount_cents"] += 1
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(bad, panel)
+
+
+def test_without_a_daily_series_the_flow_matched_dollars_are_refused_not_weekly() -> (
+    None
+):
+    panel = _panel_with_benchmarks()
+    block = tab.build_performance_tab(panel)
+    for entry in block["slices"]["benchmarks"]:
+        assert entry["status"] == "UNAVAILABLE"
+        assert entry["reason"] == (
+            "DAILY_SERIES_REQUIRED:"
+            "DAILY_SERIES_NOT_SUPPLIED_TO_THE_PERFORMANCE_TAB_BUILDER"
+        )
     tab.verify_performance_tab(block, panel)
     assert list(_schema_validator().iter_errors(block)) == []
