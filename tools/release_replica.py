@@ -235,6 +235,20 @@ def _findings_commands(
 
 
 def replica_ceremony(a: argparse.Namespace, runner: Runner = _subprocess_runner) -> int:
+    """Run the ceremony; ``ceremony.running`` exists in the out dir while it does, so the
+    load measurements (tools/release_measurements.py) never overlap it."""
+
+    out = Path(a.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    flag = out / "ceremony.running"
+    flag.write_text(_now(), encoding="utf-8")
+    try:
+        return _replica_ceremony(a, runner)
+    finally:
+        flag.unlink(missing_ok=True)
+
+
+def _replica_ceremony(a: argparse.Namespace, runner: Runner) -> int:
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     spec = Path(a.replica_spec)
