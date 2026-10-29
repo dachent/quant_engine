@@ -2299,10 +2299,11 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["source", "report_net_capital_cents", "trace_contributed_cents", "contributed_minus_report_cents", "report_gain_cents", "trace_implied_pnl_cents", "pnl_minus_report_gain_cents", "report_epoch_count", "manifest_row_count", "components"],
+              "required": ["source", "report_net_capital_cents", "trace_contributed_cents", "contributed_minus_report_cents", "report_gain_cents", "trace_implied_pnl_cents", "pnl_minus_report_gain_cents", "report_epoch_count", "manifest_row_count", "retired_epoch_count", "components"],
               "properties": {
                 "report_epoch_count": { "type": ["integer", "null"] },
                 "manifest_row_count": { "type": "integer", "minimum": 0 },
+                "retired_epoch_count": { "type": "integer", "minimum": 0 },
                 "components": {
                   "type": "array",
                   "items": {

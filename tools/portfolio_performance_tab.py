@@ -1289,6 +1289,7 @@ def build_performance_tab(
                 _mapping(panel.get("capital_reconciliation")),
                 _mapping(manifest),
                 slices["reconciliation"]["total_cents"][-1],
+                _report_epoch_keys(_mapping(panel.get("invested_capital"))),
             )
             slices["benchmarks"] = _build_slice_benchmarks(
                 weekly,
@@ -1332,6 +1333,12 @@ CROSSCHECK_NOTES: Final = {
         "NAV-trace opening that differs from the governed ledger opening capital. "
         "Lines name every epoch."
     ),
+    "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET": (
+        "The report's totals use only the governed epochs (invested_capital."
+        "required_epochs); retired epochs that the slices still plot (closed sleeves "
+        "of a parent account, retired provider funds) carry gains that are not in the "
+        "report's gain of all epochs.  Lines name each such epoch with its ledger gain."
+    ),
     "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS": (
         "DISCLOSED DIFFERENCE, not explained by the manifest rows: the report's "
         "gain of all epochs minus the sum of the manifest rows' gains.  The report "
@@ -1340,6 +1347,10 @@ CROSSCHECK_NOTES: Final = {
         "hand-offs differently; the components of that set are not in the payload."
     ),
     "ROUNDING": "Whole-cent rounding of per-epoch and per-day figures.",
+    "UNRECONCILED_REMAINDER": (
+        "DISCLOSED DIFFERENCE: more than whole-cent rounding remains after the named "
+        "components."
+    ),
 }
 
 
@@ -1356,11 +1367,31 @@ def _epoch_trace_pnl(row: Mapping[str, Any]) -> tuple[Decimal, Decimal] | None:
     return pnl, _dec(row.get("gain") or 0, "row gain")
 
 
+def _report_epoch_keys(
+    invested_capital: Mapping[str, Any],
+) -> set[tuple[str, str, str]] | None:
+    """(account, strategy, effective start) of the epochs the report's totals use."""
+
+    required = invested_capital.get("required_epochs")
+    if not isinstance(required, list) or not required:
+        return None
+    return {
+        (
+            str(item.get("account_id")),
+            str(item.get("strategy_id")),
+            str(item.get("effective_start")),
+        )
+        for item in required
+        if isinstance(item, Mapping)
+    }
+
+
 def _report_crosscheck(
     flows: Mapping[str, Any],
     reconciliation: Mapping[str, Any],
     manifest: Mapping[str, Any],
     total_end_cents: int,
+    report_keys: set[tuple[str, str, str]] | None = None,
 ) -> dict[str, Any] | None:
     """The NAV-trace contributions against the report's ledger-based net capital.
 
@@ -1380,6 +1411,7 @@ def _report_crosscheck(
             _dec(reconciliation["current_of_open_epochs_usd"], "current of open")
         )
         lines: list[dict[str, Any]] = []
+        retired: list[dict[str, Any]] = []
         opening = row_gain_total = 0
         for row in _sequence(manifest.get("rows")):
             pair = _epoch_trace_pnl(row) if isinstance(row, Mapping) else None
@@ -1387,6 +1419,24 @@ def _report_crosscheck(
                 continue
             trace_c, gain_c = _cents(pair[0]), _cents(pair[1])
             row_gain_total += gain_c
+            if (
+                report_keys is not None
+                and (
+                    str(row.get("account_id")),
+                    str(row.get("strategy_id")),
+                    str(row.get("effective_start")),
+                )
+                not in report_keys
+            ):
+                retired.append(
+                    {
+                        "account_id": row.get("account_id"),
+                        "strategy_id": row.get("strategy_id"),
+                        "effective_start": row.get("effective_start"),
+                        "effective_end": row.get("effective_end"),
+                        "row_gain_cents": gain_c,
+                    }
+                )
             opening += trace_c - gain_c
             lines.append(
                 {
@@ -1401,14 +1451,25 @@ def _report_crosscheck(
     contributed = int(flows["total_contributed_cents"])
     gap = contributed - net
     closed = total_end_cents - report_current
-    epoch_set = gain - row_gain_total
+    epoch_set = (
+        -sum(item["row_gain_cents"] for item in retired)
+        if report_keys is not None
+        else gain - row_gain_total
+    )
     parts = [
         ("CLOSED_EPOCH_VALUE_AT_CUTOFF", closed, [], True),
         ("OPENING_BASIS_TRACE_VS_LEDGER", -opening, lines, True),
-        ("REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS", epoch_set, [], False),
+        (
+            ("RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET", epoch_set, retired, True)
+            if report_keys is not None
+            else ("REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS", epoch_set, [], False)
+        ),
     ]
     rounding = gap - sum(item[1] for item in parts)
-    parts.append(("ROUNDING", rounding, [], True))
+    rounded = abs(rounding) <= len(lines)
+    parts.append(
+        ("ROUNDING" if rounded else "UNRECONCILED_REMAINDER", rounding, [], rounded)
+    )
     return {
         "source": "capital_reconciliation",
         "report_net_capital_cents": net,
@@ -1419,6 +1480,7 @@ def _report_crosscheck(
         "pnl_minus_report_gain_cents": flows["implied_pnl_cents"] - gain,
         "report_epoch_count": reconciliation.get("epoch_count"),
         "manifest_row_count": len(lines),
+        "retired_epoch_count": len(retired),
         "components": [
             {
                 "component_id": name,
@@ -1924,13 +1986,48 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
                     "difference_cents": trace_c - gain_c,
                 }
             )
+        report_keys = _report_epoch_keys(_mapping(panel.get("invested_capital")))
+        expected_retired: list[dict[str, Any]] = []
+        if report_keys is not None:
+            for trace in traces:
+                account, strategy, first, _last, _parsed = trace
+                row = next(
+                    r
+                    for r in _sequence(manifest.get("rows"))
+                    if isinstance(r, Mapping)
+                    and r.get("status") == "OK"
+                    and r.get("account_id") == account
+                    and r.get("strategy_id") == strategy
+                    and _first_link_start(r) == first.isoformat()
+                )
+                if (
+                    account,
+                    strategy,
+                    str(row.get("effective_start")),
+                ) not in report_keys:
+                    expected_retired.append(
+                        {
+                            "account_id": row.get("account_id"),
+                            "strategy_id": row.get("strategy_id"),
+                            "effective_start": row.get("effective_start"),
+                            "effective_end": row.get("effective_end"),
+                            "row_gain_cents": cents(
+                                Fraction(str(row.get("gain") or 0))
+                            ),
+                        }
+                    )
         gap = mine - net
         amounts = [
             totals[-1] - current_open,
             -opening_total,
-            gain - row_gains,
+            (
+                -sum(int(item["row_gain_cents"]) for item in expected_retired)
+                if report_keys is not None
+                else gain - row_gains
+            ),
         ]
         amounts.append(gap - sum(amounts))
+        rounded = abs(amounts[3]) <= len(traces)
         components = (cross or {}).get("components") or []
         if (
             cross is None
@@ -1938,8 +2035,12 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             != [
                 "CLOSED_EPOCH_VALUE_AT_CUTOFF",
                 "OPENING_BASIS_TRACE_VS_LEDGER",
-                "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS",
-                "ROUNDING",
+                (
+                    "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET"
+                    if report_keys is not None
+                    else "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS"
+                ),
+                "ROUNDING" if rounded else "UNRECONCILED_REMAINDER",
             ]
             or [c["amount_cents"] for c in components] != amounts
             or sorted(
@@ -1950,7 +2051,10 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
                 expected_lines,
                 key=lambda x: (x["account_id"], x["strategy_id"], x["effective_start"]),
             )
-            or [c["explained"] for c in components] != [True, True, False, True]
+            or [c["explained"] for c in components]
+            != [True, True, report_keys is not None, rounded]
+            or sorted(components[2]["lines"], key=lambda x: str(x))
+            != sorted(expected_retired, key=lambda x: str(x))
             or any(c["note"] != CROSSCHECK_NOTES[c["component_id"]] for c in components)
             or {k: v for k, v in cross.items() if k != "components"}
             != {
@@ -1964,6 +2068,7 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
                 - gain,
                 "report_epoch_count": recon.get("epoch_count"),
                 "manifest_row_count": len(traces),
+                "retired_epoch_count": len(expected_retired),
             }
         ):
             raise _fail("flows cross-check differs")

@@ -1037,10 +1037,11 @@ def test_the_report_crosscheck_names_components_that_sum_to_the_gap() -> None:
         "CLOSED_EPOCH_VALUE_AT_CUTOFF",
         "OPENING_BASIS_TRACE_VS_LEDGER",
         "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS",
-        "ROUNDING",
+        "UNRECONCILED_REMAINDER",
     ]
     assert sum(c["amount_cents"] for c in cross["components"]) == 50
-    assert [c["explained"] for c in cross["components"]] == [True, True, False, True]
+    # No governed epoch list: the gain difference and the remainder are disclosed.
+    assert [c["explained"] for c in cross["components"]] == [True, True, False, False]
     assert cross["components"][0]["amount_cents"] == 11800 - 11804
     assert len(cross["components"][1]["lines"]) == 4
     tab.verify_performance_tab(block, panel)
@@ -1093,3 +1094,59 @@ def test_the_daily_block_of_the_weekly_returns_generation_is_read_in_its_own_sha
     assert block["benchmarks"][0]["daily"]["source_id"] == "yahoo-adjusted-etf-daily"
     tab.verify_performance_tab(block, panel)
     assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_the_report_epoch_set_names_the_retired_epochs_outside_it() -> None:
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        if row.get("strategy_id") == "b":
+            row["gain"] = "-3"
+            row["effective_end"] = "2026-03-04"
+        else:
+            row["gain"] = "0"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+    }
+    block = tab.build_performance_tab(panel)
+    cross = block["slices"]["flows"]["report_crosscheck"]
+    retired = next(
+        c
+        for c in cross["components"]
+        if c["component_id"] == "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET"
+    )
+    assert retired["explained"] is True and retired["amount_cents"] == 300
+    assert [
+        (line["strategy_id"], line["row_gain_cents"]) for line in retired["lines"]
+    ] == [("b", -300)]
+    assert cross["retired_epoch_count"] == 1 and cross["report_epoch_count"] == 3
+    assert (
+        sum(c["amount_cents"] for c in cross["components"])
+        == (cross["contributed_minus_report_cents"])
+    )
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+    bad = copy.deepcopy(block)
+    retired_bad = next(
+        c
+        for c in bad["slices"]["flows"]["report_crosscheck"]["components"]
+        if c["component_id"] == "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET"
+    )
+    retired_bad["lines"] = []
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(bad, panel)
