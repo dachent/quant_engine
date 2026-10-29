@@ -5,11 +5,11 @@
  "audit_input": {
   "artifact": "model-vs-actual-audit-bridges",
   "schema_version": 1,
-  "sha256": "bf8a321da0388b0ca1776367f84a4480f94cb1d114a503a02f4d65d7ba95986a",
+  "sha256": "ef115e467bcbcc729b18c4c44b5b60677fa3723d699c1ea8a996371e37a772ba",
   "audit_written": "2026-10-22",
   "source_manifest": {
    "path": "r21/audit-derived/manifest.json",
-   "sha256": "1f1fb69188213fe22e39177d8fcad39ed18c0431e221f0dc17195e5398d82f46"
+   "sha256": "76d3c1b58714fb4996035a6532f164b3eb2923478bdbd5f28e174711daccffcf"
   },
   "terms_csv": {
    "path": "r21/audit-derived/terms.csv",
