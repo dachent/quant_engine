@@ -76,7 +76,7 @@ def _file_sha(path: Path) -> str:
 
 
 def path_digest(path: Path) -> str | None:
-    """Content hash of a file; for a directory, the hash of its (relative path, size) listing."""
+    """Content hash of a file; for a directory, the hash of every file's relative path and content."""
 
     if path.is_file():
         return _file_sha(path)
@@ -84,9 +84,8 @@ def path_digest(path: Path) -> str | None:
         digest = hashlib.sha256()
         for item in sorted(path.rglob("*")):
             if item.is_file():
-                digest.update(
-                    f"{item.relative_to(path).as_posix()}\0{item.stat().st_size}\n".encode()
-                )
+                name = item.relative_to(path).as_posix()
+                digest.update(f"{name}\x00{_file_sha(item)}\n".encode())
         return digest.hexdigest()
     return None
 
@@ -112,6 +111,9 @@ class Run:
             _read_json(self.state_path) if self.state_path.is_file() else {"stages": {}}
         )
         self.derived: dict[str, str] = {}
+        self.binding = hashlib.sha256(
+            json.dumps([config, graph], sort_keys=True).encode()
+        ).hexdigest()
 
     # -- templates -------------------------------------------------------------------
     def expand(self, template: str) -> str:
@@ -362,6 +364,25 @@ def provider_generations(run: Run, target: Path) -> dict[str, Any]:
     return {"roots": len(rows)}
 
 
+def verify_kept(run: Run, stage: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+    """A completed stage is reusable only if the run, the code and its bytes are still what it recorded."""
+
+    run.require_frozen_repo()
+    if record.get("binding") != run.binding:
+        raise Refusal(
+            f"{stage['id']} was produced under a different run configuration or stage graph; rerun it with --only {stage['id']}"
+        )
+    if record["code_commit"] != run.values["code_commit"]:
+        raise Refusal(
+            f"{stage['id']} ran at {record['code_commit'][:12]}, not the run's code identity"
+        )
+    for path, recorded in {**record["outputs"], **record.get("inputs", {})}.items():
+        if path_digest(Path(path)) != recorded:
+            raise Refusal(
+                f"{stage['id']}: {path} changed or vanished since the stage recorded it"
+            )
+
+
 def execute_stage(
     run: Run, stage: Mapping[str, Any], *, replace: bool
 ) -> dict[str, Any]:
@@ -400,14 +421,15 @@ def execute_stage(
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:
-            done = subprocess.run(
-                argv,
-                cwd=run.repo,
-                stdout=stdout_to.open("wb") if stdout_to is not None else log,
-                stderr=log,
-                check=False,
-            )
-        rc = done.returncode
+            if stdout_to is None:
+                rc = subprocess.run(
+                    argv, cwd=run.repo, stdout=log, stderr=log, check=False
+                ).returncode
+            else:
+                with stdout_to.open("wb") as captured:
+                    rc = subprocess.run(
+                        argv, cwd=run.repo, stdout=captured, stderr=log, check=False
+                    ).returncode
     elapsed = round(time.monotonic() - started, 1)
     failures: list[str] = []
     if rc != stage.get("expect_rc", 0):
@@ -424,8 +446,16 @@ def execute_stage(
         failures.append(
             f"repository changed during the stage ({after['head'][:12]} dirty={after['dirty']})"
         )
+    for path in outputs:
+        if not path.exists():
+            failures.append(f"declared output {path} was not produced")
     record: dict[str, Any] = {
         "status": "ok" if not failures else "failed",
+        "binding": run.binding,
+        "inputs": {
+            str(Path(run.expand(item))): path_digest(Path(run.expand(item)))
+            for item in stage.get("inputs", [])
+        },
         "failures": failures,
         "code_commit": run.values["code_commit"],
         "started_at": started_at,
@@ -495,6 +525,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for stage_id in selected:
             record = run.state["stages"].get(stage_id)
             if record and record["status"] == "ok" and args.only is None:
+                verify_kept(run, run.stage(stage_id), record)
                 print(f"{stage_id}: ok (kept)")
                 continue
             print(f"{stage_id}: start {_now()}", flush=True)

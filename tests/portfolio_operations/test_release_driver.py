@@ -432,3 +432,47 @@ def test_the_shipped_graph_is_self_consistent() -> None:
             else "ops/mvp2-release/scripts"
         )
         assert (REPO_ROOT / base / tool).is_file(), tool
+
+
+def test_a_changed_run_configuration_invalidates_completed_stages(
+    world: dict[str, Any],
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    _config(world, requested_as_of="2026-09-18")
+    assert _drive(world, graph) == 2
+    assert _drive(world, graph, "--only", "one", "--replace") == 0
+
+
+def test_kept_stages_are_revalidated_before_success_is_reported(
+    world: dict[str, Any],
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    (world["cycle"] / "two.txt").write_text("edited", encoding="utf-8")
+    assert _drive(world, graph) == 2
+    (world["cycle"] / "two.txt").write_text("2", encoding="utf-8")
+    assert _drive(world, graph) == 0
+    (world["cycle"] / "one.txt").unlink()
+    assert _drive(world, graph) == 2
+    (world["cycle"] / "one.txt").write_text("1", encoding="utf-8")
+    (world["repo"] / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    assert _drive(world, graph) == 2
+
+
+def test_directory_digest_sees_same_length_edits(tmp_path: Path) -> None:
+    (tmp_path / "f.json").write_text("aaaa", encoding="utf-8")
+    before = driver.path_digest(tmp_path)
+    (tmp_path / "f.json").write_text("bbbb", encoding="utf-8")
+    assert driver.path_digest(tmp_path) != before
+
+
+def test_a_stage_that_omits_a_declared_output_fails(world: dict[str, Any]) -> None:
+    stage = {
+        "id": "partial",
+        "outputs": ["{cycle}/a.txt", "{cycle}/b.txt"],
+        "argv": _write_stage("{cycle}/a.txt"),
+    }
+    assert _drive(world, _graph(world, [stage])) == 1
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert "b.txt" in state["stages"]["partial"]["failures"][0]
