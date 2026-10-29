@@ -116,6 +116,7 @@ _PATH_STAGES = {
     # commit (they write no delivery artifact), like the audit/guard tools: no stage impact.
     "packages/core/src/quant_engine/core/replica_gate.py": [],
     "tools/release_replica.py": [],
+    "tools/release_cache_base.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
     # The implementation reconciliation and return-attribution builders write the
