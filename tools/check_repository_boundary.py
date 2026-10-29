@@ -350,7 +350,9 @@ _REQUIRED_PATTERN_DIGESTS = frozenset(
     }
 )
 _ENDPOINT_ALLOWED_OPTIONAL_FIELDS = frozenset({"name", "id", "credential_source"})
-_ENDPOINT_ALLOWED_CREDENTIAL_CLASSES = frozenset({"NONE", "OS_CREDENTIAL_REFERENCE"})
+_ENDPOINT_ALLOWED_CREDENTIAL_CLASSES = frozenset(
+    {"NONE", "OS_CREDENTIAL_REFERENCE", "SECRET_MANAGER_REFERENCE"}
+)
 _ENDPOINT_ALLOWED_APPROVAL_REQUIREMENTS = frozenset({"GOVERNING_ISSUE"})
 _ENDPOINT_REQUIRED_FORBIDDEN_CREDENTIAL_CLASSES = frozenset(
     {"LITERAL", "EMBEDDED", "PLAINTEXT", "CAPTURED_SESSION", "UNKNOWN"}
@@ -1141,7 +1143,7 @@ def load_policy(
         raise PolicyLoadError(
             "POLICY_ENDPOINT_CREDENTIAL_INVALID",
             "endpoint_policy.allowed_credential_classes",
-            "must equal NONE and OS_CREDENTIAL_REFERENCE",
+            "must equal NONE, OS_CREDENTIAL_REFERENCE and SECRET_MANAGER_REFERENCE",
         )
     if not _ENDPOINT_REQUIRED_FORBIDDEN_CREDENTIAL_CLASSES.issubset(
         endpoint.forbidden_credential_classes
