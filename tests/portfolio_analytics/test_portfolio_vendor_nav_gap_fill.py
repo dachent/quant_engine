@@ -30,7 +30,13 @@ LABELS = {
 
 
 def _policy(days: list[dict[str, str]]) -> dict[str, object]:
-    return {"origin_labels": LABELS, "days": days, "provider_return_lag_days": 0}
+    return {
+        "origin_labels": LABELS,
+        "days": days,
+        "provider_return_lag_days": 0,
+        "alternate_tolerance": "0.000001",
+        "alternate_min_overlap_days": 1,
+    }
 
 
 NAV = {
@@ -96,3 +102,23 @@ def test_alternate_reader_parses_snapshot_dates(tmp_path: Path) -> None:
     assert fill.read_alternate_nav(path, "snapshot_time", "nav") == {
         date(2026, 2, 5): D("0.85")
     }
+
+
+def test_alternate_must_reconcile_with_the_vendor_series() -> None:
+    policy = _policy([{"date": "2026-01-02", "rule": "ALTERNATE_SOURCE"}])
+    far = {date(2026, 1, 2): D("1.04"), date(2026, 1, 1): D("1.5")}
+    with pytest.raises(fill.VendorGapFillError, match="disagrees"):
+        fill.build_fills(policy, NAV, far, None)
+    no_overlap = {date(2026, 1, 2): D("1.04")}
+    with pytest.raises(fill.VendorGapFillError, match="too short"):
+        fill.build_fills(policy, NAV, no_overlap, None)
+
+
+def test_declared_lag_must_be_the_best_alignment() -> None:
+    policy = _policy([{"date": "2026-01-02", "rule": "PROVIDER_RETURN_BRIDGE"}])
+    policy["provider_return_lag_days"] = 1
+    shifted = {date(2026, 1, 2): D("0.1"), date(2026, 1, 3): D("0.1")}
+    with pytest.raises(fill.VendorGapFillError, match="best-scoring"):
+        fill.build_fills(
+            policy, NAV, None, {**PROVIDER, **shifted, date(2026, 1, 3): D("0.1")}
+        )

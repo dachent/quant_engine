@@ -39,6 +39,8 @@ RULES: Final = (
     "LINEAR_INTERPOLATION",
 )
 _PRECISION: Final = 40
+#: Offsets (days) searched when proving the provider return alignment.
+LAG_SEARCH: Final = 2
 _ALT_TIME = re.compile(r"^\s*(\d{4})\.(\d{1,2})\.(\d{1,2})\b")
 
 
@@ -152,6 +154,21 @@ def _bridge_value(
     return (forward + backward) / 2, forward, backward
 
 
+def _require_reconciled(policy: Mapping[str, Any], overlap: Mapping[str, Any]) -> None:
+    """An alternate source fills a day only if it reproduces the vendor series."""
+
+    tolerance = policy.get("alternate_tolerance")
+    minimum = policy.get("alternate_min_overlap_days")
+    if tolerance is None or minimum is None:
+        raise VendorGapFillError(
+            "policy must declare the alternate tolerance and overlap"
+        )
+    if overlap["days"] < int(minimum):
+        raise VendorGapFillError("alternate source overlap is too short to reconcile")
+    if Decimal(overlap["max_abs_nav_difference"]) > Decimal(str(tolerance)):
+        raise VendorGapFillError("alternate source disagrees with the vendor series")
+
+
 def build_fills(
     policy: Mapping[str, Any],
     nav: Mapping[date, Decimal],
@@ -171,8 +188,29 @@ def build_fills(
                 "last": both[-1].isoformat() if both else None,
                 "max_abs_nav_difference": _fmt(max(diffs)) if diffs else None,
             }
+            report["alternate_overlap"]["tolerance"] = policy.get("alternate_tolerance")
+            report["alternate_overlap"]["minimum_days"] = policy.get(
+                "alternate_min_overlap_days"
+            )
         if provider is not None:
             report["provider_bridge_score"] = bridge_score(nav, provider, lag)
+            candidates = {}
+            for offset in range(-LAG_SEARCH, LAG_SEARCH + 1):
+                try:
+                    candidates[offset] = bridge_score(nav, provider, offset)
+                except VendorGapFillError:
+                    continue
+            medians = {
+                offset: Decimal(score["median_abs_daily_error"])
+                for offset, score in candidates.items()
+            }
+            report["provider_lag_median_errors"] = {
+                str(offset): _fmt(value) for offset, value in sorted(medians.items())
+            }
+            if min(medians, key=lambda offset: medians[offset]) != lag:
+                raise VendorGapFillError(
+                    "declared provider return lag is not the best-scoring alignment"
+                )
         fills = []
         for item in policy["days"]:
             day = date.fromisoformat(item["date"])
@@ -189,6 +227,7 @@ def build_fills(
             if rule == "ALTERNATE_SOURCE":
                 if alternate is None or day not in alternate:
                     raise VendorGapFillError(f"alternate source lacks {day}")
+                _require_reconciled(policy, report["alternate_overlap"])
                 value = alternate[day]
             elif rule == "PROVIDER_RETURN_BRIDGE":
                 if provider is None:
