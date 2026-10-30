@@ -23,18 +23,24 @@ the digest of every step log so a forgery has to fabricate those too.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from pathlib import Path
 from typing import Any, Final, Mapping
 
 from .contracts import canonical_json_bytes
 from .pipeline import PipelineSpec
+from .replica_marker import (
+    MARKER_SCHEMA_VERSION,
+    REPLICA_MARKER_KIND as REPLICA_MARKER_KIND,
+    REPLICA_MARKER_NAME as REPLICA_MARKER_NAME,
+    ReplicaGateError,
+    marked_ancestor as _marked_ancestor,
+    read_marker,
+    read_object as _read_object,
+)
 
-REPLICA_MARKER_NAME: Final = ".replica-root.json"
-REPLICA_MARKER_KIND: Final = "quant-engine-replica-root"
 RECEIPT_KIND: Final = "quant-engine-replica-ceremony-receipt"
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = MARKER_SCHEMA_VERSION
 
 # Step names, in ceremony order. Every one must have run with exit code 0.
 REQUIRED_STEPS: Final[tuple[str, ...]] = (
@@ -46,10 +52,6 @@ REQUIRED_STEPS: Final[tuple[str, ...]] = (
     "recovery-rehearsal",
     "clean-room-restore",
 )
-
-
-class ReplicaGateError(ValueError):
-    """The replica gate refuses; the message names the first failed condition."""
 
 
 def _normalize(value: Any, anchor: Path) -> Any:
@@ -87,39 +89,6 @@ def topology(spec: PipelineSpec, anchor: Path) -> dict[str, Any]:
         "release_generations": dict(sorted(spec.release_generations.items())),
         "target_count": len(spec.release_generations),
     }
-
-
-def _read_object(path: Path, what: str) -> dict[str, Any]:
-    try:
-        if path.is_symlink() or not path.is_file():
-            raise ReplicaGateError(f"{what} is not a regular file: {path}")
-        value = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ReplicaGateError(f"{what} is unreadable: {path}") from exc
-    if not isinstance(value, dict):
-        raise ReplicaGateError(f"{what} root must be an object: {path}")
-    return value
-
-
-def read_marker(directory: Path) -> dict[str, Any] | None:
-    path = directory / REPLICA_MARKER_NAME
-    if not path.exists():
-        return None
-    marker = _read_object(path, "replica root marker")
-    if (
-        marker.get("kind") != REPLICA_MARKER_KIND
-        or marker.get("schema_version") != SCHEMA_VERSION
-    ):
-        raise ReplicaGateError(f"replica root marker differs: {path}")
-    return marker
-
-
-def _marked_ancestor(path: Path) -> Path | None:
-    resolved = path.resolve()
-    for candidate in (resolved, *resolved.parents):
-        if read_marker(candidate) is not None:
-            return candidate
-    return None
 
 
 def _under(path: Path, bases: list[Path]) -> bool:

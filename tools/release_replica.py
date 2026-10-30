@@ -33,6 +33,7 @@ from quant_engine.core import (
     REPLICA_MARKER_NAME,
     ReplicaGateError,
     build_replica_receipt,
+    release_directory_identity,
     canonical_json_bytes,
     is_replica_spec,
     load_pipeline_spec,
@@ -70,6 +71,35 @@ def _subprocess_runner(argv: Sequence[str], stdout: Path, stderr: Path) -> int:
 
 def _rebase(path: Path, workspace: Path, replica: Path) -> Path:
     return replica / path.resolve().relative_to(workspace.resolve())
+
+
+def _identity_map(
+    spec: dict[str, Any], workspace: Path, replica: Path
+) -> list[dict[str, str]]:
+    """Pair the identity of every real directory a release records (each target root and
+    each companion's parent directory) with the identity of its copy. A committed
+    predecessor recorded the real identities; a copy can never equal them, and the release
+    layer accepts a recorded identity for a marked copy only through this map."""
+
+    pairs: dict[tuple[str, str], None] = {}
+
+    def add(real: Path) -> None:
+        copied = _rebase(real, workspace, replica)
+        if real.is_dir() and copied.is_dir():
+            pairs[
+                (release_directory_identity(real), release_directory_identity(copied))
+            ] = None
+
+    for root in sorted(spec["roots"].values()):
+        add(Path(root))
+    add(Path(spec["coordination_root"]))
+    for companion in spec.get("companions", []):
+        add(
+            (
+                Path(spec["roots"][companion["root_id"]]) / companion["relative_path"]
+            ).parent
+        )
+    return [{"copied": c, "source": s} for s, c in sorted(pairs)]
 
 
 def copy_replica(
@@ -123,12 +153,22 @@ def copy_replica(
                 if size < PROVIDER_COPY_LIMIT_BYTES:
                     shutil.copytree(generation, target, dirs_exist_ok=True)
                     extra_bytes += size
+    # Companion parent directories exist in the copy too (a release records their identity).
+    for companion in spec.get("companions", []):
+        real_parent = (
+            Path(spec["roots"][companion["root_id"]]) / companion["relative_path"]
+        ).parent
+        if real_parent.is_dir():
+            _rebase(real_parent, workspace, replica_root).mkdir(
+                parents=True, exist_ok=True
+            )
     shutil.copytree(
         spec["coordination_root"],
         _rebase(Path(spec["coordination_root"]), workspace, replica_root),
         dirs_exist_ok=True,
     )
     marker = {
+        "identity_map": _identity_map(spec, workspace, replica_root),
         "created_at": _now(),
         "extra_provider_bytes": extra_bytes,
         "kind": REPLICA_MARKER_KIND,
