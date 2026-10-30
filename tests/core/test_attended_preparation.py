@@ -4963,6 +4963,41 @@ class _AnyConfig(dict):  # type: ignore[type-arg]
         return _AnyConfig()
 
 
+def test_ledger_stage_identity_binds_the_model_vs_actual_pin() -> None:
+    base = _AnyConfig()
+    without = preparation._preparation_stage_inputs(base, "c" * 40)["ledger"]
+    assert "model_vs_actual_input" not in without
+    pinned = _AnyConfig(model_vs_actual_input={"path": "a", "sha256": "1"})
+    changed = _AnyConfig(model_vs_actual_input={"path": "a", "sha256": "2"})
+    first = preparation._preparation_stage_inputs(pinned, "c" * 40)["ledger"]
+    second = preparation._preparation_stage_inputs(changed, "c" * 40)["ledger"]
+    assert first["model_vs_actual_input"] != second["model_vs_actual_input"]
+    assert first != without
+
+
+def test_the_model_vs_actual_pin_is_verified_by_the_specification_pin_check(
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "audit-bridges.json"
+    audit.write_bytes(b'{"synthetic": true}')
+    good = {
+        "path": str(audit),
+        "sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+        "size_bytes": audit.stat().st_size,
+    }
+    spec = {"model_vs_actual_input": good}
+    preparation._pins(spec, "preparation specification")
+    assert preparation._pin(good, "model vs actual input") == audit.resolve()
+    with pytest.raises(preparation.AttendedPreparationError, match="pin differs"):
+        preparation._pins(
+            {"model_vs_actual_input": {**good, "sha256": "0" * 64}},
+            "preparation specification",
+        )
+    audit.unlink()
+    with pytest.raises(preparation.AttendedPreparationError, match="unavailable"):
+        preparation._pins(spec, "preparation specification")
+
+
 def test_ledger_stage_identity_binds_the_weekly_gap_fill_pin() -> None:
     base = _AnyConfig()
     without = preparation._preparation_stage_inputs(base, "c" * 40)["ledger"]

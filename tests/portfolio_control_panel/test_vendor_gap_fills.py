@@ -126,3 +126,23 @@ def test_schema_rejects_an_unlabelled_or_extended_block() -> None:
     del block["fills"][0]["extra"]
     del block["fills"][0]["origin_label"]
     assert _schema_errors(block)
+
+
+def test_a_flat_vendor_span_is_published_and_still_closes() -> None:
+    flat = {
+        date(2026, 1, 1): D("1.00"),
+        date(2026, 1, 3): D("1.00"),
+    }
+    policy = {
+        "origin_labels": LABELS,
+        "days": [{"date": "2026-01-02", "rule": "LINEAR_INTERPOLATION"}],
+        "provider_return_lag_days": 0,
+    }
+    record = fills.build_fills(policy, flat, None, None)
+    record["subject"] = {"strategy_id": "fixture-strategy"}
+    content = json.dumps(record).encode("utf-8")
+    pin = hashlib.sha256(content).hexdigest()
+    for receipt in ("0", "0.001", "-0.002"):
+        block = fills.build_vendor_gap_fills(_data(receipt), content, pin)
+        assert _schema_errors(block) == []
+        assert abs(D(block["fills"][0]["closure_residual"])) < D("1e-30")

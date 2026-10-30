@@ -304,12 +304,18 @@ def _receipt_basis_legs(
 
     vendor_span = Decimal(str(fill["span_return"]))
     leg_in = Decimal(str(fill["leg_in_return"]))
-    if vendor_span == 0 or receipt_span <= -1:
+    if receipt_span <= -1 or vendor_span <= -1:
         raise VendorGapFillError(
             "fill span cannot be re-expressed on the receipt basis"
         )
-    share = (Decimal(1) + leg_in).ln() / (Decimal(1) + vendor_span).ln()
-    on_receipt_in = (share * (Decimal(1) + receipt_span).ln()).exp() - Decimal(1)
+    receipt_log = (Decimal(1) + receipt_span).ln()
+    if vendor_span == 0:
+        # A flat vendor span has no proportion to preserve: the fill's own legs stand
+        # and the receipt span is carried evenly across both days.
+        on_receipt_in = (Decimal(1) + leg_in) * (receipt_log / 2).exp() - Decimal(1)
+    else:
+        share = (Decimal(1) + leg_in).ln() / (Decimal(1) + vendor_span).ln()
+        on_receipt_in = (share * receipt_log).exp() - Decimal(1)
     on_receipt_out = (Decimal(1) + receipt_span) / (
         Decimal(1) + on_receipt_in
     ) - Decimal(1)
