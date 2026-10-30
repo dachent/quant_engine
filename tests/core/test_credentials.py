@@ -289,3 +289,17 @@ def test_sources_from_config_enables_keyvault_only_when_configured() -> None:
     ):
         with pytest.raises(CredentialError):
             sources_from_config(bad, runner=runner)
+
+
+def test_native_exceptions_are_not_attached_to_sanitized_errors() -> None:
+    def runner(command: Any, **_kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(command, 1)
+
+    with pytest.raises(CredentialError) as raised:
+        KeyVaultSource(("helper",), runner=runner).read("item-name", None)
+    assert raised.value.__context__ is None and raised.value.__cause__ is None
+
+    blob = WindowsCredentialSource(reader=lambda _t: {"CredentialBlob": b"\xff"})
+    with pytest.raises(CredentialError) as raised:
+        blob.read("target", None)
+    assert raised.value.__context__ is None

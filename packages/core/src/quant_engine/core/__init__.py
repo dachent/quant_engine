@@ -23,7 +23,27 @@ from quant_engine.core.authority import (
     local_freshness_alerts,
 )
 
+from quant_engine.core.retained_cache_base import (
+    CacheBaseError,
+    iter_cache_files,
+    promote_cache_base,
+    read_cache_base_provenance,
+    verify_cache_base,
+    verify_if_promoted,
+)
+from quant_engine.core.replica_marker import (
+    REPLICA_MARKER_KIND,
+    REPLICA_MARKER_NAME,
+    ReplicaGateError,
+)
+from quant_engine.core.replica_gate import (
+    build_receipt as build_replica_receipt,
+    is_replica_spec,
+    replica_anchor,
+    verify_receipt as verify_replica_receipt,
+)
 from quant_engine.core.contracts import (
+    canonical_json_bytes,
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
@@ -85,6 +105,7 @@ from quant_engine.core.pipeline import (
 )
 from quant_engine.core.release import (
     CompanionInput,
+    directory_identity as release_directory_identity,
     CompanionPlan,
     GateEvidence,
     ReleaseCommitError,
@@ -144,6 +165,21 @@ __all__ = [
     "WindowsCredentialSource",
     "plan_from_config",
     "sources_from_config",
+    "release_directory_identity",
+    "CacheBaseError",
+    "iter_cache_files",
+    "promote_cache_base",
+    "read_cache_base_provenance",
+    "verify_cache_base",
+    "verify_if_promoted",
+    "REPLICA_MARKER_KIND",
+    "REPLICA_MARKER_NAME",
+    "ReplicaGateError",
+    "build_replica_receipt",
+    "canonical_json_bytes",
+    "is_replica_spec",
+    "replica_anchor",
+    "verify_replica_receipt",
     "inventory_identity",
     "AdapterCapabilities",
     "ProviderCapability",
