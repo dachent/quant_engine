@@ -12,11 +12,18 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load(name: str, path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
+    # Executing a test module re-registers modules other tests import (it loads
+    # portfolio_performance_tab under its own name); restore every entry afterwards.
+    saved = dict(sys.modules)
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.clear()
+        sys.modules.update(saved)
     return module
 
 
