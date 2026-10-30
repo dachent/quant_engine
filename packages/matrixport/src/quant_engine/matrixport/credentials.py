@@ -11,6 +11,8 @@ or serializes either credential field.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 import tomllib
 from typing import Any
@@ -118,6 +120,32 @@ def _load_configured(config_path: Path, runner: Any | None = None) -> ApiCredent
     return ApiCredentials(
         values["access_key"].reveal(), values["signing_secret"].reveal()
     )
+
+
+def plan_identity(config_path: Path | None = None) -> str:
+    """A non-secret identity of the credential source, for run binding.
+
+    The default is the Windows target name; a configured plan is the digest of its
+    ordered candidate references (never of any value).
+    """
+
+    if config_path is None:
+        return CREDENTIAL_TARGET
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        plan = plan_from_config(config, PROVIDER)
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        raise CredentialError("The credentials configuration cannot be read") from None
+    except _CoreCredentialError as error:
+        raise CredentialError(str(error)) from None
+    reference = {
+        field: [[c.source, c.name, c.field] for c in candidates]
+        for field, candidates in sorted(plan.fields.items())
+    }
+    digest = hashlib.sha256(
+        json.dumps(reference, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"plan:{digest}"
 
 
 def load_credentials(

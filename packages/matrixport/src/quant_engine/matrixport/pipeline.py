@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .catalog import ENDPOINTS, Endpoint, catalog_rows, get_endpoint
-from .credentials import ApiCredentials, load_credentials
+from .credentials import ApiCredentials, load_credentials, plan_identity
 from .exporters import export_datasets, write_csv
 from .governance import authorize_live_read
 from .normalization import enrich_timestamps, normalize_rows
@@ -45,11 +45,32 @@ def _credential_label(
 ) -> str:
     """A non-secret label for where the run's credentials came from."""
 
-    if credentials is not None:
-        return "injected-credentials"
     if credentials_config is not None:
         return "configured-credential-plan"
+    if credentials is not None:
+        return "injected-credentials"
     return DEFAULT_CREDENTIAL_TARGET
+
+
+def _credential_identity(
+    credentials: ApiCredentials | None, credentials_config: Path | None
+) -> str:
+    """Non-secret identity a run is bound to (resume and verify must match it)."""
+
+    if credentials_config is None and credentials is not None:
+        return "injected-credentials"
+    return plan_identity(credentials_config)
+
+
+def recorded_credential_identity(run: Mapping[str, Any]) -> str:
+    """The identity stored for a run; runs that predate it used the default."""
+
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    return str(
+        stored.get("credential_identity")
+        or stored.get("credential_target")
+        or DEFAULT_CREDENTIAL_TARGET
+    )
 
 
 OUTPUT_FOLDER = "output"
@@ -436,6 +457,12 @@ class MatrixportExtractor:
                 raise ExtractionError(
                     "Cannot resume a run with a changed endpoint catalog"
                 )
+            if recorded_credential_identity(existing) != _credential_identity(
+                credentials, credentials_config
+            ):
+                raise ExtractionError(
+                    "Cannot resume a run with a different credential source"
+                )
         else:
             if existing is not None:
                 raise ExtractionError(f"Run already exists: {self.run_id}")
@@ -449,6 +476,9 @@ class MatrixportExtractor:
                 config_hash=self.config_hash,
                 metadata={
                     "credential_target": _credential_label(
+                        credentials, credentials_config
+                    ),
+                    "credential_identity": _credential_identity(
                         credentials, credentials_config
                     ),
                     "history_semantics": "all_api_reachable_history_to_frozen_run_end",

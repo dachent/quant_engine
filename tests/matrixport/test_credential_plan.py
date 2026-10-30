@@ -174,3 +174,48 @@ def test_the_cli_takes_a_config_path_never_a_secret() -> None:
     assert not any(
         word in option for option in option_names for word in ("key", "secret", "token")
     )
+
+
+def test_plan_identity_is_stable_non_secret_and_reference_sensitive(
+    tmp_path: Path,
+) -> None:
+    from quant_engine.matrixport.credentials import plan_identity
+
+    first = plan_identity(_write(tmp_path, PLAN))
+    assert first == plan_identity(_write(tmp_path, PLAN))
+    assert first.startswith("plan:") and "bitcom" not in first
+    other = plan_identity(_write(tmp_path, PLAN.replace("bitcom-access", "other-item")))
+    assert other != first
+    assert plan_identity(None) == "BIT.com-API"
+
+
+def test_a_run_is_bound_to_its_credential_source(tmp_path: Path) -> None:
+    from quant_engine.matrixport.cli import _require_recorded_credentials
+    from quant_engine.matrixport.pipeline import (
+        DATABASE_NAME,
+        _credential_identity,
+        _credential_label,
+    )
+    from quant_engine.matrixport.storage import RunStorage
+
+    config = _write(tmp_path, PLAN)
+    run_dir = tmp_path / "run"
+    (run_dir / "state").mkdir(parents=True)
+    storage = RunStorage(run_dir / "state" / DATABASE_NAME)
+    storage.create_run(
+        "r1",
+        mode="full",
+        run_end_ms=1,
+        extractor_hash="e",
+        config_hash="c",
+        metadata={"credential_identity": _credential_identity(None, config)},
+    )
+    storage.close()
+    _require_recorded_credentials(run_dir, "r1", config)
+    with pytest.raises(CredentialError):
+        _require_recorded_credentials(run_dir, "r1", None)
+    other = _write(tmp_path, PLAN.replace("bitcom-access", "other-item"))
+    with pytest.raises(CredentialError):
+        _require_recorded_credentials(run_dir, "r1", other)
+    # A preloaded credential obtained through a plan is still labelled as the plan.
+    assert _credential_label(object(), config) == "configured-credential-plan"  # type: ignore[arg-type]

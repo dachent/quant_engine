@@ -8,12 +8,16 @@ from typing import Any, Sequence
 
 from .credentials import CredentialError, load_credentials
 from .pipeline import (
+    DATABASE_NAME,
     MatrixportExtractor,
     export_catalog,
     export_run,
     live_auth_test,
+    _credential_identity,
+    recorded_credential_identity,
     validate_run_id,
 )
+from .storage import RunStorage
 from .util import atomic_write, canonical_json
 from .verification import verify_run
 
@@ -76,6 +80,24 @@ def _report(message: str) -> None:
     print(f"[matrixport] {message}", file=sys.stderr, flush=True)
 
 
+def _require_recorded_credentials(
+    run_dir: Path, run_id: str, config_path: Path | None
+) -> None:
+    """Scan for the credentials that produced the run, not whichever are current."""
+
+    storage = RunStorage(run_dir / "state" / DATABASE_NAME)
+    try:
+        run = storage.get_run(run_id)
+    finally:
+        storage.close()
+    if run is not None and recorded_credential_identity(run) != _credential_identity(
+        None, config_path
+    ):
+        raise CredentialError(
+            "The credential source does not match the one recorded for this run"
+        )
+
+
 def _secret_needles(config_path: Path | None = None) -> list[bytes]:
     credentials = load_credentials(config_path)
     values = (credentials.key_identifier, credentials.signing_material)
@@ -117,6 +139,7 @@ def _extract(args: argparse.Namespace) -> int:
 def _verify(run_id: str, config_path: Path | None = None) -> tuple[int, dict[str, Any]]:
     validate_run_id(run_id)
     run_dir = _workspace() / "output" / run_id
+    _require_recorded_credentials(run_dir, run_id, config_path)
     result = verify_run(run_dir, _secret_needles(config_path))
     release_path = run_dir / "reports" / "release_status.json"
     try:
@@ -184,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _workspace(),
                 mode="full",
                 credentials=credentials,
+                credentials_config=args.credentials_config,
                 governance_evidence=args.governance_evidence,
                 live_operation="run",
                 reporter=_report,
