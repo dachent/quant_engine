@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from pathlib import Path
+from decimal import Decimal
 import json
 import os
 from pathlib import Path
@@ -577,3 +579,93 @@ def _assert_existing_web_current_cli_remains_available(tmp_path: Path) -> None:
 def test_existing_web_current_cli_remains_available() -> None:
     with TemporaryDirectory(dir=Path.cwd()) as directory:
         _assert_existing_web_current_cli_remains_available(Path(directory))
+
+
+def _priced_document(price_date: str = "09/17/2026") -> dict[str, object]:
+    document = _holdings_v2_document()
+    accounts = document["accounts"]
+    assert isinstance(accounts, list)
+    for account in accounts:
+        for group in account["groupedPositions"]:
+            for row in group["holdingsRows"]:
+                row["price"] = {"price": "9.99", "priceDate": price_date}
+    return document
+
+
+def test_holdings_v2_values_positions_at_the_official_close_only() -> None:
+    """The capture's own price is a last trade; only an official close values a row."""
+
+    snapshot = read_holdings_v2_current_snapshot(
+        _priced_document(),
+        crosswalk=_holdings_v2_crosswalk(),
+        captured_at="2026-09-18T03:59:40Z",
+        official_closes={"SYNTH-1": Decimal("10.125"), "SYNTH-2": Decimal("4")},
+        price_date=date(2026, 9, 17),
+    )
+
+    values = {
+        row["symbol"]: row["market_value"]
+        for row in snapshot.positions
+        if isinstance(row["market_value"], dict)
+    }
+    assert values["SYNTH-1"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "30.38",
+    }
+    assert values["SYNTH-2"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "-8",
+    }
+    # No official close for a symbol: unavailable, never the capture's 9.99 price.
+    assert values["SYNTH-3"] == {
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": None,
+    }
+
+
+def test_holdings_v2_refuses_a_row_priced_on_another_date() -> None:
+    with pytest.raises(SchwabReadError, match="official-close date"):
+        read_holdings_v2_current_snapshot(
+            _priced_document("09/16/2026"),
+            crosswalk=_holdings_v2_crosswalk(),
+            captured_at="2026-09-18T03:59:40Z",
+            official_closes={"SYNTH-1": Decimal("10")},
+            price_date=date(2026, 9, 17),
+        )
+
+
+def test_holdings_v2_official_closes_need_their_date() -> None:
+    with pytest.raises(SchwabReadError, match="price date"):
+        read_holdings_v2_current_snapshot(
+            _priced_document(),
+            crosswalk=_holdings_v2_crosswalk(),
+            captured_at="2026-09-18T03:59:40Z",
+            official_closes={"SYNTH-1": Decimal("10")},
+        )
+
+
+def test_official_closes_are_read_from_the_retained_public_daily_files(
+    tmp_path: Path,
+) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    import schwab_generation as cli
+
+    (tmp_path / "AAA_yahoo_daily.csv").write_text(
+        "date,open,high,low,close,adjclose,volume,dividend\n"
+        "2026-09-16,1,1,1,9.5,9.4,1,\n"
+        "2026-09-17,1,1,1,10.25,10.2,1,\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "BBB_yahoo_daily.csv").write_text(
+        "date,open,high,low,close,adjclose,volume,dividend\n2026-09-16,1,1,1,7,7,1,\n",
+        encoding="utf-8",
+    )
+
+    assert cli._official_closes(tmp_path, date(2026, 9, 17)) == {  # noqa: SLF001
+        "AAA": Decimal("10.25")
+    }
