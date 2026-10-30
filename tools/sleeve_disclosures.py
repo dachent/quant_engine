@@ -665,8 +665,11 @@ def _perimeter_reconciliation(
     # differences (the unrounded remainder is within one cent of it)
     difference = gain - sleeves
     remainder = difference - entry_total
-    if abs(remainder - _dec(reconciliation["unattributed"])) >= _CENT:
+    unattributed = _dec(reconciliation["unattributed"])
+    if abs(remainder - unattributed) >= _CENT:
         raise DisclosureError("the shown perimeter figures do not close")
+    # the printed remainder is the source's own unattributed amount, rounded once
+    remainder = unattributed.quantize(_CENT)
     later = _dec(reconciliation["paid_in_after_anchor"])
     withdrawn = _dec(reconciliation.get("withdrawn_after_anchor", "0"))
     left = f", {_usd(withdrawn)} withdrawn" if withdrawn else ""
