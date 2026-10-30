@@ -66,7 +66,7 @@ def test_cost_label_is_the_status_and_the_amount_over_its_period(
         "#strategy-table",
     )
 
-    assert "Known gold api · $3,590.00 per year" in table
+    assert "Known (gold API) · $3,590.00 per year" in table
     assert "Unknown model subscription cost · annual amount not published" in table
 
 
@@ -76,9 +76,9 @@ def test_risk_kpi_shows_the_candidate_pending_acceptance_with_the_reason(
     advisory = _risk_payload()["advisory"]
     candidate = _hwm_candidate()
     candidate["kpi"] = {
-        "value": "170.9635",
-        "hwm": "183.5428",
-        "drawdown": "-0.0685",
+        "value": "143.7000",
+        "hwm": "150.0000",
+        "drawdown": "-0.0500",
         "label": candidate.get("label"),
         "window_start": "2024-10-15",
         "window_end": "2026-09-17",
@@ -98,9 +98,9 @@ def test_risk_kpi_shows_the_candidate_pending_acceptance_with_the_reason(
     )
     kpis = _flat(dom, "#risk-kpis")
 
-    assert "Systematic HWM 170.9635" in kpis
+    assert "Systematic HWM 143.7000" in kpis
     assert "pending owner acceptance" in kpis
-    assert "HWM 183.5428" in kpis and "drawdown -6.85%" in kpis
+    assert "HWM 150.0000" in kpis and "drawdown -5.00%" in kpis
     assert "703 daily points" in kpis
     assert "Missing daily points: Robuxio Jan 27, 2026" in kpis
     assert "Systematic HWM Unavailable" not in kpis
@@ -240,7 +240,7 @@ def test_alpha_tile_without_a_context_says_what_is_not_published(
         _run(tmp_path, _alpha_payload(row), "renderFactorDetail"), "#factor-detail"
     )
 
-    assert "observed basis" not in tile.replace("Available observed basis", "")
+    assert "observed basis" not in tile.replace("Available: observed basis", "")
     assert "are not published for this alpha" in tile
 
 
@@ -305,9 +305,9 @@ def test_risk_kpi_shows_the_producer_built_vendor_gap_fill_beside_its_receipt(
     advisory = _risk_payload()["advisory"]
     candidate = _hwm_candidate()
     candidate["kpi"] = {
-        "value": "170.9635",
-        "hwm": "183.5428",
-        "drawdown": "-0.0685",
+        "value": "143.7000",
+        "hwm": "150.0000",
+        "drawdown": "-0.0500",
         "label": candidate.get("label"),
         "window_start": "2024-10-15",
         "window_end": "2026-09-17",
@@ -335,3 +335,57 @@ def test_risk_kpi_shows_the_producer_built_vendor_gap_fill_beside_its_receipt(
     assert "estimated vendor gap" in kpis
     assert "NAV 0.8900" in kpis
     assert "closure residual 0.000000000000" in kpis
+
+
+# ---- P24: nothing hardcoded in the HWM acceptance wording; scope label and enum labels ----
+
+
+def test_hwm_acceptance_wording_is_the_payloads_own_state_not_a_literal(
+    tmp_path: Path,
+) -> None:
+    advisory = _risk_payload()["advisory"]
+    candidate = _hwm_candidate()
+    candidate["financial_acceptance"] = "HELD_FOR_SIGN_OFF"
+    candidate["status"] = "CANDIDATE_HELD_FOR_SIGN_OFF"
+    advisory["hwm_candidate"] = candidate
+    proof = _governed_proof()
+    proof["financial_acceptance"] = "HELD_FOR_SIGN_OFF"
+    dom = _run(
+        tmp_path,
+        _risk_payload(advisory=advisory, hwm_governed_proof=proof),
+        "renderRisk",
+    )
+    kpis = _flat(dom, "#risk-kpis")
+    card = _flat(dom, "#hwm-status")
+
+    assert "candidate shown, held for sign off" in kpis
+    assert "GOVERNED REAL DATA \u2014 HELD FOR SIGN OFF" in card
+    assert "pending owner acceptance" not in (kpis + card).lower()
+
+
+def test_strategy_rows_carry_the_producers_return_scope_label(tmp_path: Path) -> None:
+    scoped = _cost_strategy(
+        strategy_name="S",
+        return_scope_label="Synthetic scope: parent account X; MWR and capital: sleeve Y.",
+    )
+    bare = _cost_strategy(strategy_id="other", strategy_name="Other")
+    capital = _flat(
+        _run(tmp_path, _capital_payload(scoped, bare), "renderCapital"),
+        "#strategy-table",
+    )
+    payload = _risk_payload(
+        performance=[
+            {
+                "account_id": "a",
+                "mwr_status": "AVAILABLE",
+                "strategy_name": "S",
+                "twr": "0.1",
+                "twr_status": "AVAILABLE",
+            }
+        ]
+    )
+    payload["strategies"] = [scoped, bare]
+    performance = _flat(_run(tmp_path, payload, "renderRisk"), "#performance-table")
+
+    assert capital.count("Synthetic scope: parent account X") == 1
+    assert performance.count("Synthetic scope: parent account X") == 1
