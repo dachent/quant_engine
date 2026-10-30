@@ -16,9 +16,8 @@ import io
 import json
 from pathlib import Path
 import re
+from collections.abc import Mapping, Sequence
 from typing import Any
-
-from quant_engine.core.contracts import canonical_json_bytes
 
 
 _HEADER = (
@@ -36,6 +35,15 @@ _EXPECTED_FILES = {
     "raw",
     "normalized",
 }
+
+
+def canonical_json_bytes(value: Mapping[str, Any] | Sequence[Any]) -> bytes:
+    """The repository's canonical JSON encoding (same bytes as core's)."""
+
+    return (
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
 
 
 class IntakeVerificationError(ValueError):

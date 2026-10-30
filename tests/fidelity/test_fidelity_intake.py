@@ -458,3 +458,11 @@ def _xwalk(provider_ref: str) -> list[dict[str, str]]:
     return [
         dict([("external_account_id", provider_ref), ("internal_account_id", INTERNAL)])
     ]
+
+
+def test_local_canonical_encoding_matches_core() -> None:
+    from quant_engine.core.contracts import canonical_json_bytes as core_bytes
+
+    value = {"b": [1, "é"], "a": {"z": None}}
+    assert intake.canonical_json_bytes(value) == core_bytes(value)
+    assert intake_verify.canonical_json_bytes(value) == core_bytes(value)
