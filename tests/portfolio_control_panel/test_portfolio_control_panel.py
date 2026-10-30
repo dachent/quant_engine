@@ -2965,6 +2965,8 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         {
             "account_id": "account-00",
             "as_of_date": "2026-07-30",
+            "asset_category": None,
+            "asset_category_label": None,
             "evidence_class": "WCH_CURRENT",
             "market_value_usd": "30",
             "quantity": "3",
@@ -6442,8 +6444,8 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
-    assert len(manifests) == 31
-    assert len(lints) == 30
+    assert len(manifests) == 34
+    assert len(lints) == 33
     for path in (*manifests, *lints):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["qa_manifest_version"] == 2
@@ -7639,13 +7641,13 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
 def test_mvp_exposes_all_nine_accepted_views() -> None:
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
 
-    # Ten views exist (the Performance charts tab was added), but only nine are primary navigation.  The frozen
+    # Eleven views exist (Performance charts and Model vs actual were added), but only ten are primary navigation.  The frozen
     # candidate catalog is dated research context that cannot change current
     # strategies, readiness or allocation, so it is reachable only through the
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 9
+    assert template.count('class="nav-item') == 10
     for view in (
         "command",
         "capital",
@@ -7655,6 +7657,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "dependence",
         "weekly",
         "performance",
+        "modelvsactual",
         "data",
     ):
         assert f'data-nav="{view}"' in template
@@ -14314,6 +14317,7 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         "renderDependence",
         "renderWeekly",
         "renderPerformance",
+        "renderModelVsActual",
         "renderCandidates",
         "renderData",
     )
@@ -14408,7 +14412,7 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     )
     assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
     manifests = list(output.glob("*/manifest.json"))
-    assert len(manifests) == 31
+    assert len(manifests) == 34
     assert all(
         json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
         for path in manifests
@@ -15044,7 +15048,54 @@ def test_the_governed_number_is_a_candidate_beside_the_unaccepted_status(
         "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
     }
 
-    candidate = panel._hwm_candidate(proof, summary)
+    receipts = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "receipt": {
+                "span_return_receipts": [
+                    {
+                        "missing_source_date": "2026-01-27",
+                        "span_start_date": "2026-01-26",
+                        "span_end_date": "2026-01-28",
+                        "return": "-0.0171",
+                    }
+                ]
+            },
+        }
+    ]
+    candidate = panel._hwm_candidate(proof, summary, receipts)
+    kpi = candidate.pop("kpi")
+    path = proof["index_path"]
+    assert kpi == {
+        "value": format(
+            Decimal(proof["current_index"]).quantize(Decimal("0.0001")), "f"
+        ),
+        "hwm": format(Decimal(proof["current_hwm"]).quantize(Decimal("0.0001")), "f"),
+        "drawdown": format(
+            Decimal(proof["current_drawdown"]).quantize(Decimal("0.0001")), "f"
+        ),
+        "label": "Governed PORT-HWM-4 candidate, pending owner acceptance",
+        "perimeter": "SYSTEMATIC_EX_RESERVE",
+        "return_basis": proof["return_basis"],
+        "index_points": len(path),
+        "window_start": path[0]["as_of"],
+        "window_end": path[-1]["as_of"],
+        "gated_status": {
+            "policy_id": None,
+            "hwm_numerical_status": "UNAVAILABLE",
+            "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+        },
+        "missing_daily_points": [
+            {
+                "strategy_id": "robuxio-crypto",
+                "date": "2026-01-27",
+                "span_start_date": "2026-01-26",
+                "span_end_date": "2026-01-28",
+                "span_return": "-0.0171",
+            }
+        ],
+    }
+    assert panel._hwm_candidate(proof, summary)["kpi"]["missing_daily_points"] == []
 
     assert candidate == {
         "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
