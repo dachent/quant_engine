@@ -1489,6 +1489,11 @@ def _preparation_stage_inputs(
                 if config.get("weekly_gap_fill_spec") is not None
                 else {}
             ),
+            **(
+                {"vendor_gap_fills": config["vendor_gap_fills"]}
+                if config.get("vendor_gap_fills") is not None
+                else {}
+            ),
             "release_commit": release_commit,
             "strategy_attribution": config["retained_verified_generations"][
                 "attribution"
@@ -2112,6 +2117,11 @@ def _prepare_attended_inputs(
                 if config.get("weekly_gap_fill_spec") is not None
                 else None
             ),
+            vendor_gap_fills_path=(
+                _pin(config["vendor_gap_fills"], "vendor gap fills")
+                if config.get("vendor_gap_fills") is not None
+                else None
+            ),
             correlation_source_root=dependence_root,
             legacy_panel=Path(str(config["legacy_panel_root"])),
             as_of_date=cutoff,
@@ -2301,6 +2311,11 @@ def _prepare_attended_inputs(
             weekly_gap_fill_spec_path=(
                 _pin(config["weekly_gap_fill_spec"], "weekly gap fill spec")
                 if config.get("weekly_gap_fill_spec") is not None
+                else None
+            ),
+            vendor_gap_fills_path=(
+                _pin(config["vendor_gap_fills"], "vendor gap fills")
+                if config.get("vendor_gap_fills") is not None
                 else None
             ),
             correlation_source_root=dependence_root,
