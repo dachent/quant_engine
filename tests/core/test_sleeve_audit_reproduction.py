@@ -561,3 +561,56 @@ def test_the_verifier_refuses_a_skipped_weekday_and_a_foreign_tag_field() -> Non
         verifier.verify_sleeve_account_facts(
             artifact, _bytes(other), _bytes(_declared()), rows, sha
         )
+
+
+@pytest.mark.parametrize("version", [7, 8, 9])
+def test_the_builder_and_the_independent_verifier_admit_later_catalog_schemas(
+    version: int,
+) -> None:
+    """IBKR catalog 8 adds symbol/listing_exchange to positions; the facts read none of it."""
+
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    positions = [
+        {**row, "symbol": "SYNTH", "listing_exchange": "SYNTHEX"}
+        for row in document["positions"]
+    ]
+    catalog = _bytes(
+        {
+            "provider_id": "provider-a",
+            "catalog_schema_version": version,
+            "accounts": [{"account_id": ACCOUNT}],
+            "transactions": document["transactions"],
+            "positions": positions,
+            "change_in_nav_observations": document["change_in_nav_observations"],
+        }
+    )
+    built_rows, built_sha = builder.rows_from_catalog(
+        catalog, ACCOUNT, "provider-a", DAYS[0], DAYS[-1]
+    )
+    chosen, verified_sha = verifier.select_catalog_rows(
+        catalog, ACCOUNT, DAYS[0], DAYS[-1]
+    )
+
+    assert len(built_rows.positions) == len(document["positions"])
+    assert len(chosen["positions"]) == len(document["positions"])
+    assert built_sha == verified_sha
+
+
+@pytest.mark.parametrize("version", [6, "8", True, None])
+def test_an_earlier_or_malformed_catalog_schema_is_refused_by_both(
+    version: object,
+) -> None:
+    catalog = _bytes(
+        {
+            "provider_id": "provider-a",
+            "catalog_schema_version": version,
+            "accounts": [{"account_id": ACCOUNT}],
+            "transactions": [],
+            "positions": [],
+            "change_in_nav_observations": [],
+        }
+    )
+    with pytest.raises(builder.SleeveFactsError, match="schema-7-or-later"):
+        builder.rows_from_catalog(catalog, ACCOUNT, "provider-a", DAYS[0], DAYS[-1])
+    with pytest.raises(verifier.SleeveVerificationError, match="schema-7-or-later"):
+        verifier.select_catalog_rows(catalog, ACCOUNT, DAYS[0], DAYS[-1])

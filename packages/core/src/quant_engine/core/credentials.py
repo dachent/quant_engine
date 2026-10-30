@@ -97,6 +97,7 @@ Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 def _run_for_output(runner: Runner, command: Sequence[str], source_id: str) -> str:
     """Run a secret-manager helper; return stdout; sanitize every failure."""
 
+    completed = None
     try:
         completed = runner(
             tuple(command),
@@ -108,7 +109,12 @@ def _run_for_output(runner: Runner, command: Sequence[str], source_id: str) -> s
             timeout=_COMMAND_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.SubprocessError):
-        raise CredentialError(f"{source_id}: the helper could not be run") from None
+        pass
+    # Raised outside the except block so the native exception (which can hold
+    # the command, including the secret name, and captured output) is not
+    # attached as __context__.
+    if completed is None:
+        raise CredentialError(f"{source_id}: the helper could not be run")
     if completed.returncode != 0 or not completed.stdout:
         raise CredentialError(f"{source_id}: the secret could not be read")
     output = completed.stdout
@@ -179,13 +185,16 @@ def _win32_reader(target: str) -> Mapping[str, Any]:
         raise CredentialError(
             "windows-credential-manager: pywin32 is not available"
         ) from None
+    record: Any = None
     try:
         record = win32cred.CredRead(target, win32cred.CRED_TYPE_GENERIC, 0)
     except Exception:
-        # Win32 exceptions can carry native structures; never chain them.
+        pass
+    if record is None:
+        # Raised outside the except block: native exceptions are never chained.
         raise CredentialError(
             "windows-credential-manager: the credential could not be read"
-        ) from None
+        )
     if not isinstance(record, dict):
         raise CredentialError("windows-credential-manager: invalid credential record")
     return record
@@ -213,13 +222,17 @@ class WindowsCredentialSource:
         blob = record.get("CredentialBlob")
         if not isinstance(blob, bytes):
             raise CredentialError("windows-credential-manager: unexpected blob type")
+        decoded: str | None = None
         try:
             # Generic credentials written by Windows hold UTF-16LE text.
             decoded = blob.decode("utf-16-le").rstrip("\x00")
         except UnicodeDecodeError:
+            pass
+        if decoded is None:
+            # UnicodeDecodeError holds the blob; raise outside the except block.
             raise CredentialError(
                 "windows-credential-manager: the blob is not UTF-16LE"
-            ) from None
+            )
         if not decoded:
             raise CredentialError("windows-credential-manager: the secret is empty")
         return decoded
