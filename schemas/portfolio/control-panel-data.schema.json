@@ -559,6 +559,7 @@
     "hwm_governed_proof": { "$ref": "#/$defs/governed_hwm_proof" },
     "performance_tab": { "$ref": "#/$defs/performance_tab" },
     "model_vs_actual": { "$ref": "#/$defs/model_vs_actual" },
+    "orthogonal_risk_attribution": { "$ref": "#/$defs/orthogonal_risk_attribution" },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "performance": {
       "$comment": "JSON Schema uniqueItems cannot enforce semantic account-strategy identity for generic objects; the Python panel validator owns that invariant.",
@@ -2838,6 +2839,243 @@
           }
         }
       ]
+    },
+    "orthorisk_num": { "type": ["number", "null"] },
+    "orthorisk_variance_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "fitted", "residual", "cross_term"],
+      "properties": {
+        "total": { "type": "number" },
+        "fitted": { "type": "number" },
+        "residual": { "type": "number" },
+        "cross_term": { "type": "number" }
+      }
+    },
+    "orthorisk_components": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ids", "share_of_total", "share_of_explained"],
+      "properties": {
+        "ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "share_of_total": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/orthorisk_num" } },
+        "share_of_explained": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/orthorisk_num" } }
+      }
+    },
+    "orthorisk_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["explained_share", "residual_share", "cross_term_share"],
+      "properties": {
+        "explained_share": { "type": "number" },
+        "residual_share": { "type": "number" },
+        "cross_term_share": { "type": "number" }
+      }
+    },
+    "orthorisk_cell_available": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lens_id", "source_key", "surface", "series_id", "status", "window", "fit", "variance", "components", "closure", "evidence"],
+      "properties": {
+        "lens_id": { "type": "string", "minLength": 1 },
+        "source_key": { "type": ["string", "null"] },
+        "surface": { "type": "string", "minLength": 1 },
+        "series_id": { "type": "string", "minLength": 1 },
+        "status": { "const": "AVAILABLE" },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end", "n", "test_n", "as_of"],
+          "properties": {
+            "start": { "type": "string", "format": "date" },
+            "end": { "type": "string", "format": "date" },
+            "n": { "type": "integer", "minimum": 3 },
+            "test_n": { "type": ["integer", "null"] },
+            "as_of": { "type": ["string", "null"] }
+          }
+        },
+        "fit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["r2", "adj_r2", "holdout_r2", "holdout_n", "periods_per_year", "alpha"],
+          "properties": {
+            "r2": { "$ref": "#/$defs/orthorisk_num" },
+            "adj_r2": { "$ref": "#/$defs/orthorisk_num" },
+            "holdout_r2": { "$ref": "#/$defs/orthorisk_num" },
+            "holdout_n": { "type": ["integer", "null"] },
+            "periods_per_year": { "type": ["integer", "null"] },
+            "alpha": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["net", "se", "t", "t_status"],
+              "properties": {
+                "net": { "$ref": "#/$defs/orthorisk_num" },
+                "se": { "$ref": "#/$defs/orthorisk_num" },
+                "t": { "$ref": "#/$defs/orthorisk_num" },
+                "t_status": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "variance": { "$ref": "#/$defs/orthorisk_variance_block" },
+        "components": { "$ref": "#/$defs/orthorisk_components" },
+        "closure": { "$ref": "#/$defs/orthorisk_closure" },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["layer", "series_status", "decision", "information_set", "cost_coverage", "composition", "backtest_share"],
+          "properties": {
+            "layer": { "type": ["string", "null"] },
+            "series_status": { "type": ["string", "null"] },
+            "decision": { "type": ["string", "null"] },
+            "information_set": { "type": ["string", "null"] },
+            "cost_coverage": { "type": ["string", "null"] },
+            "composition": { "type": ["string", "null"] },
+            "backtest_share": { "$ref": "#/$defs/orthorisk_num" }
+          }
+        }
+      }
+    },
+    "orthorisk_cell_unavailable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lens_id", "source_key", "surface", "series_id", "status", "reason"],
+      "properties": {
+        "lens_id": { "type": "string", "minLength": 1 },
+        "source_key": { "type": ["string", "null"] },
+        "surface": { "type": "string", "minLength": 1 },
+        "series_id": { "type": "string", "minLength": 1 },
+        "status": { "const": "UNAVAILABLE" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "orthorisk_aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lens_id", "source_key", "surface", "status", "excluded_series", "included_series", "unweighted_ranges"],
+      "properties": {
+        "lens_id": { "type": "string", "minLength": 1 },
+        "source_key": { "type": ["string", "null"] },
+        "surface": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "excluded_series": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["series_id", "reason"],
+            "properties": { "series_id": { "type": "string" }, "reason": { "type": "string" } }
+          }
+        },
+        "included_series": { "type": "array", "items": { "type": "string" } },
+        "weighting": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["basis", "start", "end", "n"],
+            "properties": {
+              "basis": { "enum": ["CAPITAL_WEIGHTED", "EQUAL_WEIGHT_DIAGNOSTIC", "TARGET_WEIGHTED"] },
+              "start": { "type": "string", "format": "date" },
+              "end": { "type": "string", "format": "date" },
+              "n": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "unweighted_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["start", "end", "days", "reason"],
+            "properties": {
+              "start": { "type": "string", "format": "date" },
+              "end": { "type": "string", "format": "date" },
+              "days": { "type": "integer", "minimum": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "capital_coverage": { "type": ["number", "null"] },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end", "n"],
+          "properties": {
+            "start": { "type": "string", "format": "date" },
+            "end": { "type": "string", "format": "date" },
+            "n": { "type": "integer", "minimum": 3 }
+          }
+        },
+        "variance": { "$ref": "#/$defs/orthorisk_variance_block" },
+        "components": { "$ref": "#/$defs/orthorisk_components" },
+        "closure": { "$ref": "#/$defs/orthorisk_closure" }
+      },
+      "if": { "properties": { "status": { "const": "AVAILABLE" } } },
+      "then": { "required": ["weighting", "capital_coverage", "window", "variance", "components", "closure"] },
+      "else": { "required": ["reason"] }
+    },
+    "orthorisk_mode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": { "status": { "const": "UNAVAILABLE" }, "reason": { "type": "string", "minLength": 1 } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "available_count", "unavailable_count", "cells", "aggregates"],
+          "properties": {
+            "status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+            "available_count": { "type": "integer", "minimum": 0 },
+            "unavailable_count": { "type": "integer", "minimum": 0 },
+            "cells": {
+              "type": "array",
+              "items": { "oneOf": [{ "$ref": "#/$defs/orthorisk_cell_available" }, { "$ref": "#/$defs/orthorisk_cell_unavailable" }] }
+            },
+            "aggregates": { "type": "array", "items": { "$ref": "#/$defs/orthorisk_aggregate" } }
+          }
+        }
+      ]
+    },
+    "orthogonal_risk_attribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "reason", "basis", "response_label", "variance_unit", "agreement_tolerance", "definition", "mode_t_stat", "aggregate_note", "weighting_definitions", "modes"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "reason": { "type": ["string", "null"] },
+        "basis": { "const": "TRAIN_FITTED_EXCESS_RETURN_SAMPLE_VARIANCE_EULER_ALLOCATION" },
+        "response_label": { "const": "ANCHOR_ADJUSTED_TARGET_RETURN" },
+        "variance_unit": { "const": "SAMPLE_VARIANCE_PER_PERIOD_UNANNUALISED" },
+        "agreement_tolerance": { "type": "number" },
+        "definition": { "type": "string", "minLength": 1 },
+        "mode_t_stat": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": { "status": { "const": "UNAVAILABLE" }, "reason": { "type": "string", "minLength": 1 } }
+        },
+        "aggregate_note": { "type": "string", "minLength": 1 },
+        "weighting_definitions": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "modes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+          "properties": {
+            "LIVE_ONLY": { "$ref": "#/$defs/orthorisk_mode" },
+            "LIVE_PLUS_BACKTEST": { "$ref": "#/$defs/orthorisk_mode" }
+          }
+        }
+      }
     },
     "performance_tab": {
       "$comment": "Additive producer block for the Performance tab (own schema_version, no panel version bump).",

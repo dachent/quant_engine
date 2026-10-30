@@ -143,6 +143,9 @@ _PATH_STAGES = {
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
     "tools/portfolio_model_vs_actual.py": ["panel"],
+    # The orthogonal risk-share producer: one optional panel block derived from the
+    # decomposition lenses and invested capital the panel already holds.
+    "tools/portfolio_orthogonal_risk.py": ["panel"],
     # The holdings identity sidecar: built by the report producer into the report
     # payload, and re-derived by the report verifier.  A change moves report bytes.
     "tools/holdings_identity.py": ["report", "panel"],

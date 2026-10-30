@@ -250,6 +250,11 @@
     ],
     [
       "portfolio_control_panel",
+      "portfolio_orthogonal_risk",
+      1
+    ],
+    [
+      "portfolio_control_panel",
       "portfolio_performance_tab",
       1
     ],
