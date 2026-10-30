@@ -23,6 +23,7 @@ the digest of every step log so a forgery has to fabricate those too.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any, Final, Mapping
@@ -54,17 +55,51 @@ REQUIRED_STEPS: Final[tuple[str, ...]] = (
 )
 
 
-def _normalize(value: Any, anchor: Path) -> Any:
-    """Spec value with every path under ``anchor`` replaced by ``<ROOT>``, slashes unified."""
+def _patterns(*pairs: tuple[Path, str]) -> list[tuple[re.Pattern[str], str]]:
+    return [
+        (re.compile(re.escape(base.as_posix().rstrip("/")), re.IGNORECASE), token)
+        for base, token in pairs
+    ]
 
-    pattern = re.compile(re.escape(anchor.as_posix().rstrip("/")), re.IGNORECASE)
+
+def _normalize(value: Any, patterns: list[tuple[re.Pattern[str], str]]) -> Any:
+    """Value with every path under a given base replaced by that base's token, slashes unified."""
+
     if isinstance(value, str):
-        return pattern.sub("<ROOT>", value.replace("\\", "/"))
+        text = value.replace("\\", "/")
+        for pattern, token in patterns:
+            text = pattern.sub(token, text)
+        return text
     if isinstance(value, list):
-        return [_normalize(item, anchor) for item in value]
+        return [_normalize(item, patterns) for item in value]
     if isinstance(value, dict):
-        return {key: _normalize(item, anchor) for key, item in value.items()}
+        return {key: _normalize(item, patterns) for key, item in value.items()}
     return value
+
+
+def _normalize_gates(body: dict[str, Any], anchor: Path) -> None:
+    """Gate files sit beside their spec (real ``production`` vs ``replica-production``) and the
+    rebind contract embeds root paths, so neither the path nor the raw digest can match.
+    Each gate is compared by its file name and by the digest of its content with the gate
+    directory and the workspace anchor replaced by tokens; the directory is read from the
+    gate's own path, never hardcoded. An unreadable file keeps its recorded digest."""
+
+    for gate in body.get("gates", []):
+        path = Path(str(gate["path"]))
+        patterns = _patterns((path.parent, "<GATEDIR>"), (anchor, "<ROOT>"))
+        gate["path"] = _normalize(str(path), patterns)
+        try:
+            raw = path.read_bytes()
+            try:
+                content: Any = _normalize(json.loads(raw.decode("utf-8")), patterns)
+                gate["sha256"] = hashlib.sha256(
+                    canonical_json_bytes(content)
+                ).hexdigest()
+            except (UnicodeDecodeError, ValueError):
+                text = _normalize(raw.decode("utf-8", "replace"), patterns)
+                gate["sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        except OSError:
+            pass
 
 
 def topology(spec: PipelineSpec, anchor: Path) -> dict[str, Any]:
@@ -78,7 +113,8 @@ def topology(spec: PipelineSpec, anchor: Path) -> dict[str, Any]:
 
     body = spec.to_dict()
     body.pop("created_at", None)
-    normalized = _normalize(body, anchor)
+    _normalize_gates(body, anchor)
+    normalized = _normalize(body, _patterns((anchor, "<ROOT>")))
     node_ids = sorted(node.node_id for node in spec.nodes)
     return {
         "code_commit": spec.code_commit,

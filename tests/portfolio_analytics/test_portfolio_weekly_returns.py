@@ -1177,3 +1177,18 @@ def test_gap_fill_spec_pin_must_be_named_spec_json() -> None:
     builder.require_gap_fill_spec_name(Path("x/spec.json"))
     with pytest.raises(builder.VerticalBuildError, match="spec.json"):
         builder.require_gap_fill_spec_name(Path("x/other.json"))
+
+
+def test_vendor_gap_fills_recipe_pin_becomes_the_panel_arguments(
+    tmp_path: Path,
+) -> None:
+    import portfolio_release_builder as builder
+
+    assert builder._vendor_gap_fill_arguments({}) == ()
+    fills = tmp_path / "fills.json"
+    fills.write_bytes(b"{}\n")
+    definition = builder._file_definition(fills)
+    arguments = builder._vendor_gap_fill_arguments({"vendor_gap_fills": definition})
+    assert arguments[0] == "--vendor-gap-fills"
+    assert arguments[2] == "--vendor-gap-fills-sha256"
+    assert arguments[3] == definition["sha256"]

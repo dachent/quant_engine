@@ -208,7 +208,7 @@ def test_copy_writes_marker_last_and_refuses_nonempty_target(tmp_path: Path) -> 
         json.dumps({"generation_id": "g1"}), encoding="utf-8"
     )
     (ws / "coord").mkdir()
-    (ws / "coord" / "CURRENT_RELEASE.json").write_text("{}", encoding="utf-8")
+    (ws / "coord" / "coordination-note.json").write_text("{}", encoding="utf-8")
     spec = tmp_path / "spec.json"
     spec.write_text(
         json.dumps(
@@ -226,7 +226,7 @@ def test_copy_writes_marker_last_and_refuses_nonempty_target(tmp_path: Path) -> 
     assert (
         target / "dataPortfolio" / "generations" / "g1" / "f.txt"
     ).read_text() == "x"
-    assert (target / "coord" / "CURRENT_RELEASE.json").is_file()
+    assert (target / "coord" / "coordination-note.json").is_file()
     with pytest.raises(rr.ReplicaToolError, match="not empty"):
         rr.copy_replica(spec, ws, target)
     with pytest.raises(rr.ReplicaToolError, match="disjoint"):
@@ -244,3 +244,98 @@ def test_ceremony_flag_exists_only_while_it_runs(tmp_path: Path, specs: Any) -> 
 
     rr.replica_ceremony(_args(tmp_path), Spy())
     assert seen and all(seen) and not flag.exists()
+
+
+def _committed_release(tmp: Path) -> tuple[Path, Path, Path]:
+    """A real committed release (one root, one companion launcher); returns the workspace,
+    the real root and the coordination root. Built with the release layer's own helpers."""
+
+    helpers_spec = importlib.util.spec_from_file_location(
+        "release_test_helpers", ROOT / "tests" / "core" / "test_release.py"
+    )
+    assert helpers_spec is not None and helpers_spec.loader is not None
+    helpers = importlib.util.module_from_spec(helpers_spec)
+    helpers_spec.loader.exec_module(helpers)
+    ws = tmp / "ws"
+    root = ws / "first"
+    _, proposed = helpers._stage_pair(root, "first")
+    (root / "index.html").write_bytes(b"old\n")
+    coordination = ws / "coordination"
+    content = b"R2 launcher\n"
+    manifest = helpers.prepare_release(
+        coordination_root=coordination,
+        roots={"first": root},
+        proposed_generations={"first": proposed.generation_id},
+        code_commit=helpers.COMMIT,
+        created_at=helpers.datetime(2026, 8, 2, 10, tzinfo=helpers.UTC),
+        gates=helpers._gate(),
+        companions=(
+            helpers.CompanionInput("panel-launcher", "first", "index.html", content),
+        ),
+    )
+    helpers.commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"first": root},
+        companion_contents={"panel-launcher": content},
+    )
+    return ws, root, coordination
+
+
+def _successor_spec(tmp: Path, ws: Path, root: Path, coordination: Path) -> Path:
+    added = ws / "second"  # the successor adds a root the predecessor never bound
+    added.mkdir()
+    spec = tmp / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "roots": {"first": str(root), "second": str(added)},
+                "coordination_root": str(coordination),
+                "companions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return spec
+
+
+def test_copy_carries_the_committed_predecessor_companion_even_when_the_successor_adds_a_root(
+    tmp_path: Path,
+) -> None:
+    ws, root, coordination = _committed_release(tmp_path)
+    spec = _successor_spec(tmp_path, ws, root, coordination)
+    replica = tmp_path / "replica"
+    rr.copy_replica(spec, ws, replica)
+    assert (replica / "first" / "index.html").read_bytes() == b"R2 launcher\n"
+    assert (replica / "coordination" / "CURRENT_RELEASE.json").is_file()
+
+
+def test_copy_refuses_a_real_companion_that_differs_from_the_committed_manifest(
+    tmp_path: Path,
+) -> None:
+    ws, root, coordination = _committed_release(tmp_path)
+    spec = _successor_spec(tmp_path, ws, root, coordination)
+    (root / "index.html").write_bytes(b"tampered\n")
+    with pytest.raises(rr.ReplicaToolError, match="differs from its manifest"):
+        rr.copy_replica(spec, ws, tmp_path / "replica")
+
+
+def test_copy_without_a_committed_release_has_no_companions_to_carry(
+    tmp_path: Path,
+) -> None:
+    ws = tmp_path / "ws"
+    (ws / "first").mkdir(parents=True)
+    (ws / "coordination").mkdir()
+    spec = tmp_path / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "roots": {"first": str(ws / "first")},
+                "coordination_root": str(ws / "coordination"),
+                "companions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rr.copy_replica(spec, ws, tmp_path / "replica")
+    assert not (tmp_path / "replica" / "first" / "index.html").exists()

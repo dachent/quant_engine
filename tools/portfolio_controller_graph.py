@@ -172,8 +172,8 @@ _PATH_STAGES = {
     "tools/ci.py": [],
     "tools/stall_watchdog.py": [],
     # Computes labelled fill records for declared vendor NAV gap days from retained
-    # bytes; no stage reads it (consumers take the pinned fill record).
-    "tools/portfolio_vendor_nav_gap_fill.py": [],
+    # bytes; the panel reads only the pinned fill record it is handed.
+    "tools/portfolio_vendor_nav_gap_fill.py": ["panel"],
     # Stages an unpublished derived-return candidate from retained bytes; the weekly
     # builder reads only the pinned generation it is handed, never this tool.
     "tools/portfolio_grizzly_signal_replay.py": [],

@@ -147,6 +147,30 @@ def _cents(value: Decimal) -> int:
     return int((value * 100).quantize(_WHOLE))
 
 
+def _retired_component_cents(
+    reconciliation: Mapping[str, Any], retired: Sequence[Mapping[str, Any]]
+) -> int:
+    """The retired-epochs component, from the report's unrounded outside gain.
+
+    The report publishes ``epoch_set.gain_of_outside_report_epochs_usd`` exactly; the
+    component is that value rounded once, not the sum of per-line rounded cents
+    (which can differ by a cent).  The report always carries it, so its absence
+    stops the build.
+    """
+
+    outside = _mapping(reconciliation.get("epoch_set")).get(
+        "gain_of_outside_report_epochs_usd"
+    )
+    if outside is None:
+        raise PerformanceTabError(
+            "capital_reconciliation.epoch_set.gain_of_outside_report_epochs_usd "
+            f"is absent for {len(retired)} retired epochs"
+        )
+    with localcontext() as context:
+        context.prec = _PRECISION
+        return -_cents(_dec(outside, "gain of outside report epochs"))
+
+
 def _text(value: Decimal) -> str:
     return format(value, "f")
 
@@ -770,8 +794,19 @@ def _build_flows(
                     internal_in += amount
                 elif leg.get("class") == "INTERNAL_OUT":
                     internal_out += amount
+        link_cents = [_cents(v) for v in link_flow]
+        opening_cents = [_cents(v) for v in opening]
+        closing_cents = [_cents(v) for v in closing]
+        # The net flow is rounded once from the exact combined amount, so a display
+        # rounding never changes the financial result; rounding_cents (the day's
+        # whole-cent difference to the sum of the rounded components) closes the
+        # identity on every day.
         net = [link_flow[i] + opening[i] - closing[i] for i in range(size)]
         net_cents = [_cents(v) for v in net]
+        rounding_cents = [
+            net_cents[i] - (link_cents[i] + opening_cents[i] - closing_cents[i])
+            for i in range(size)
+        ]
         total_cents = sum(nav_rows[s][-1] for s in nav_rows)
         contributed = sum(net_cents)
         net_internal = internal_in - internal_out
@@ -779,9 +814,10 @@ def _build_flows(
         "unit": "USD_CENTS",
         "definition": SLICE_PERIMETER_FLOW_DEFINITION,
         "net_flow_cents": net_cents,
-        "opening_cents": [_cents(v) for v in opening],
-        "closing_cents": [_cents(v) for v in closing],
-        "link_net_flow_cents": [_cents(v) for v in link_flow],
+        "opening_cents": opening_cents,
+        "closing_cents": closing_cents,
+        "link_net_flow_cents": link_cents,
+        "rounding_cents": rounding_cents,
         "total_contributed_cents": contributed,
         "implied_pnl_cents": total_cents - contributed,
         "internal_cancellation": {
@@ -1337,7 +1373,9 @@ CROSSCHECK_NOTES: Final = {
         "The report's totals use only the governed epochs (invested_capital."
         "required_epochs); retired epochs that the slices still plot (closed sleeves "
         "of a parent account, retired provider funds) carry gains that are not in the "
-        "report's gain of all epochs.  Lines name each such epoch with its ledger gain."
+        "report's gain of all epochs.  The amount is the report's unrounded gain of the "
+        "outside epochs rounded once; lines name each such epoch with its ledger gain, "
+        "each rounded to the cent independently."
     ),
     "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS": (
         "DISCLOSED DIFFERENCE, not explained by the manifest rows: the report's "
@@ -1452,7 +1490,7 @@ def _report_crosscheck(
     gap = contributed - net
     closed = total_end_cents - report_current
     epoch_set = (
-        -sum(item["row_gain_cents"] for item in retired)
+        _retired_component_cents(reconciliation, retired)
         if report_keys is not None
         else gain - row_gain_total
     )
@@ -1886,6 +1924,15 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             floor += 1
         return floor
 
+    def _outside_gain_fraction(reconciliation: Mapping[str, Any]) -> Fraction:
+        # Independent of the builder's helper: exact Fraction of the report's text.
+        outside = _mapping(reconciliation.get("epoch_set")).get(
+            "gain_of_outside_report_epochs_usd"
+        )
+        if outside is None:
+            raise _fail("the report carries no gain of the outside epochs")
+        return Fraction(str(outside))
+
     def epoch_nav(trace: Any, day: date) -> Fraction:
         account, _strategy, first, last, parsed = trace
         if day < first or day > last:
@@ -2021,7 +2068,7 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             totals[-1] - current_open,
             -opening_total,
             (
-                -sum(int(item["row_gain_cents"]) for item in expected_retired)
+                -cents(_outside_gain_fraction(recon))
                 if report_keys is not None
                 else gain - row_gains
             ),
@@ -2135,6 +2182,16 @@ def _verify_flows(
     for key, values in expected.items():
         if list(flows[key]) != values:
             raise _fail(f"flows {key} differ")
+    if list(flows["rounding_cents"]) != [
+        expected["net_flow_cents"][i]
+        - (
+            expected["link_net_flow_cents"][i]
+            + expected["opening_cents"][i]
+            - expected["closing_cents"][i]
+        )
+        for i in range(size)
+    ]:
+        raise _fail("flows rounding_cents differ")
     contributed = sum(expected["net_flow_cents"])
     if (
         flows["total_contributed_cents"] != contributed
