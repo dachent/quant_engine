@@ -466,3 +466,85 @@ def test_local_canonical_encoding_matches_core() -> None:
     value = {"b": [1, "é"], "a": {"z": None}}
     assert intake.canonical_json_bytes(value) == core_bytes(value)
     assert intake_verify.canonical_json_bytes(value) == core_bytes(value)
+
+
+def test_raw_stage_rollback_removes_raw_directory_and_is_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, request_id = _request(tmp_path)
+    source = _export(tmp_path / "export.csv")
+    real = intake._write_once
+
+    def failing(path: Path, payload: bytes) -> None:
+        if path.name == intake.RAW_MANIFEST_NAME:
+            raise OSError("synthetic failure")
+        real(path, payload)
+
+    monkeypatch.setattr(intake, "_write_once", failing)
+    with pytest.raises(OSError):
+        stage_raw(root, request_id, [source])
+    assert sorted(p.name for p in (root / request_id).iterdir()) == [
+        "request-manifest.json"
+    ]
+    monkeypatch.setattr(intake, "_write_once", real)
+    stage_raw(root, request_id, [source])
+
+
+def test_normalized_stage_is_atomic_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, request_id, _ = _staged(tmp_path)
+    real = intake._write_once
+
+    def failing(path: Path, payload: bytes) -> None:
+        if path.name == "normalized-manifest.json":
+            raise OSError("synthetic failure")
+        real(path, payload)
+
+    monkeypatch.setattr(intake, "_write_once", failing)
+    with pytest.raises(OSError):
+        normalize(root, request_id, _crosswalk(tmp_path))
+    assert not any(
+        p.name.startswith(("normalized", ".normalized"))
+        for p in (root / request_id).iterdir()
+    )
+    monkeypatch.setattr(intake, "_write_once", real)
+    normalize(root, request_id, _crosswalk(tmp_path))
+    assert verify_intake(root, request_id)["status"] == "VERIFIED"
+
+
+def test_verifier_checks_catalog_provenance_text_leaks_and_empty_catalog(
+    tmp_path: Path,
+) -> None:
+    root, request_id = _full(tmp_path)
+    _rewrite_catalog(
+        root,
+        request_id,
+        lambda c: c["source_artifacts"][0].__setitem__("sha256", "0" * 64),
+    )
+    with pytest.raises(IntakeVerificationError) as caught:
+        verify_intake(root, request_id)
+    assert "catalog_source_artifacts_differ_from_raw_manifest" in caught.value.reasons
+    case = tmp_path / "text"
+    case.mkdir()
+    root, request_id = _full(case)
+    _rewrite_catalog(
+        root,
+        request_id,
+        lambda c: c["accounts"][0].__setitem__("note", "SYNTHETIC DESCRIPTION"),
+    )
+    with pytest.raises(IntakeVerificationError) as caught:
+        verify_intake(root, request_id)
+    assert any(r.startswith("private_values_in_catalog") for r in caught.value.reasons)
+    case = tmp_path / "empty"
+    case.mkdir()
+    root, request_id = _full(case)
+
+    def clear(c: dict) -> None:  # type: ignore[type-arg]
+        for key in ("transactions", "cash_flows", "corporate_actions"):
+            c[key] = []
+
+    _rewrite_catalog(root, request_id, clear)
+    with pytest.raises(IntakeVerificationError) as caught:
+        verify_intake(root, request_id)
+    assert "activity_count_differs_from_raw" in caught.value.reasons

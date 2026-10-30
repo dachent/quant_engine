@@ -482,6 +482,9 @@ def stage_raw(
     except BaseException:
         for path in written:
             path.unlink(missing_ok=True)
+        raw_dir = request_dir / "raw"
+        if raw_dir.is_dir() and not any(raw_dir.iterdir()):
+            raw_dir.rmdir()
         raise
     return {"artifact_count": len(artifacts), "request_id": request_id}
 
@@ -643,8 +646,22 @@ def normalize(
         "raw_manifest_sha256": _sha(raw_manifest_bytes),
         "request_id": request_id,
     }
-    _write_once(request_dir / NORMALIZED_CATALOG_NAME, catalog_bytes)
-    _write_once(request_dir / NORMALIZED_MANIFEST_NAME, canonical_json_bytes(manifest))
+    final = request_dir / "normalized"
+    if final.exists():
+        raise IntakeError("staging is create-only and the target exists")
+    pending = request_dir / f".normalized-{os.getpid()}.tmp"
+    try:
+        _write_once(pending / "fidelity-intake-catalog.json", catalog_bytes)
+        _write_once(
+            pending / "normalized-manifest.json", canonical_json_bytes(manifest)
+        )
+        os.rename(pending, final)
+    except BaseException:
+        for leftover in pending.glob("*") if pending.is_dir() else ():
+            leftover.unlink()
+        if pending.is_dir():
+            pending.rmdir()
+        raise
     return {
         "account_count": len(accounts),
         "activity_count": activity_count,

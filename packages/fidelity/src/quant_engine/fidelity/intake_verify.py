@@ -164,6 +164,7 @@ def verify_intake(staging_root: Path, request_id: str) -> dict[str, object]:
     days: list[date] = []
     accounts: set[str] = set()
     private_values: set[str] = set()
+    symbols: set[str] = set()
     seen_rows: dict[tuple[str, ...], str] = {}
     for item in listed:
         if not isinstance(item, dict):
@@ -210,9 +211,10 @@ def verify_intake(staging_root: Path, request_id: str) -> dict[str, object]:
             amount_sum += value
             days.append(day)
             accounts.add(row[2].strip())
-            private_values.add(row[2].strip())
-            if len(row[1].strip()) >= 4:
-                private_values.add(row[1].strip())
+            symbols.add(row[4].strip())
+            for index in (1, 2, 3, 5):
+                if len(row[index].strip()) >= 4:
+                    private_values.add(row[index].strip())
 
     catalog_loaded = _json(base / "normalized" / "fidelity-intake-catalog.json")
     manifest_loaded = _json(base / "normalized" / "normalized-manifest.json")
@@ -226,6 +228,18 @@ def verify_intake(staging_root: Path, request_id: str) -> dict[str, object]:
         reasons.append("catalog_hash_differs")
     if manifest.get("raw_manifest_sha256") != _sha(raw_manifest_bytes):
         reasons.append("catalog_not_bound_to_raw_manifest")
+    listed_ids = sorted(
+        (str(i.get("artifact_id")), str(i.get("sha256")), i.get("size_bytes"))
+        for i in listed
+        if isinstance(i, dict)
+    )
+    cataloged = catalog.get("source_artifacts")
+    if not isinstance(cataloged, list) or listed_ids != sorted(
+        (str(i.get("artifact_id")), str(i.get("sha256")), i.get("size_bytes"))
+        for i in cataloged
+        if isinstance(i, dict)
+    ):
+        reasons.append("catalog_source_artifacts_differ_from_raw_manifest")
     if manifest.get("published") is not False:
         reasons.append("intake_claims_publication")
     if catalog.get("request_id") != request_id:
@@ -251,16 +265,20 @@ def verify_intake(staging_root: Path, request_id: str) -> dict[str, object]:
     if catalog_sum is not None and catalog_sum != amount_sum:
         reasons.append("amount_sum_differs_from_raw")
     event_days = sorted(str(x.get("event_date")) for x in records)
-    if days and (
-        event_days[0] != min(days).isoformat()
-        or event_days[-1] != max(days).isoformat()
+    if (
+        days
+        and event_days
+        and (
+            event_days[0] != min(days).isoformat()
+            or event_days[-1] != max(days).isoformat()
+        )
     ):
         reasons.append("date_range_differs_from_raw")
     if len({str(x.get("account_id")) for x in records}) != len(accounts):
         reasons.append("account_count_differs_from_raw")
     leaked = sum(
         1
-        for value in private_values
+        for value in private_values - symbols
         if value and json.dumps(value).encode() in catalog_bytes
     )
     if leaked:
