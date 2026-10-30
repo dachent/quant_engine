@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "description": "Release tail stages of RELEASE-DRIVER-001: recipe through dry-run findings. Every id and path is derived from the run's own outputs by tools/release_driver.py.",
+  "provider_roots": [
+    "provider-alpaca",
+    "provider-fidelity",
+    "provider-ibkr",
+    "provider-matrixport",
+    "provider-portfolio123",
+    "provider-quantbase",
+    "provider-schwab",
+    "epoch-manifest"
+  ],
+  "provider_run_sources": {
+    "epoch-manifest": "{run}/stages/epoch/generations/{epoch_id}"
+  },
+  "paths": {
+    "tail": "{cycle}/tail",
+    "ca": "{cycle}/tail/ca",
+    "production": "{cycle}/production",
+    "recipe_probe": "{cycle}/pipeline-recipe-probe.json",
+    "recipe": "{cycle}/pipeline-recipe.json",
+    "prod_spec": "{cycle}/production/production-spec.json",
+    "tools": "{repo_root}/tools",
+    "mvp2": "{repo_root}/ops/mvp2-release/scripts",
+    "contract": "{repo_root}/contracts/portfolio-financial-mvp-source-v1.json",
+    "source_matrix": "{repo_root}/generated/financial-mvp/source-matrix.json",
+    "ledger_receipt": "{run}/stages/ledger/generations/{ledger_id}/admit-or-declare-receipt.json"
+  },
+  "derive": {
+    "ledger_id": {"single_dir": "{run}/stages/ledger/generations"},
+    "epoch_id": {"single_dir": "{run}/stages/epoch/generations"},
+    "panel_gid": {"json_field": ["{run}/stages/panel/CURRENT.json", "generation_id"]},
+    "spec_panel_gid": {"spec_node_field": ["{prod_spec}", "portfolio-panel", "generation_id"]},
+    "panel_root": {"spec_root": ["{prod_spec}", "portfolio-panel"]},
+    "release_id": {"json_field": ["{production}/execute-stage.json", "release_id"]}
+  },
+  "stages": [
+    {
+      "id": "recipe-probe",
+      "inputs": ["{run}/preparation/release-recipe.json"],
+      "outputs": ["{recipe_probe}"],
+      "argv": [
+        "{python}", "{tools}/portfolio_pipeline_materialize.py", "recipe",
+        "--vertical-recipe", "{run}/preparation/release-recipe.json",
+        "--proof-root", "{run}", "--qa-dir", "{qa}", "--pipeline-id", "{pipeline_id}",
+        "--financial-mvp-contract", "contracts/portfolio-financial-mvp-source-v1.json",
+        "--financial-mvp-source-matrix", "generated/financial-mvp/source-matrix.json",
+        "--output", "{recipe_probe}"
+      ]
+    },
+    {
+      "id": "registries",
+      "requires": ["recipe-probe"],
+      "outputs": ["{ca}"],
+      "argv": [
+        "{python}", "{mvp2}/draft_correction_registries.py",
+        "--run", "{run}", "--pipeline-recipe", "{recipe_probe}",
+        "--history-store", "{history_store}", "--expect-superseded", "{expect_superseded}",
+        "--out", "{ca}"
+      ]
+    },
+    {
+      "id": "recipe",
+      "requires": ["registries"],
+      "outputs": ["{recipe}"],
+      "argv": [
+        "{python}", "{tools}/portfolio_pipeline_materialize.py", "recipe",
+        "--vertical-recipe", "{run}/preparation/release-recipe.json",
+        "--proof-root", "{run}", "--qa-dir", "{qa}", "--pipeline-id", "{pipeline_id}",
+        "--financial-mvp-contract", "contracts/portfolio-financial-mvp-source-v1.json",
+        "--financial-mvp-source-matrix", "generated/financial-mvp/source-matrix.json",
+        "--correction-registry", "{ca}/portfolio-correction-registry.json",
+        "--rederive-receipt-registry", "{ca}/portfolio-rederive-receipt-registry.json",
+        "--output", "{recipe}"
+      ]
+    },
+    {
+      "id": "pipeline-spec",
+      "requires": ["recipe"],
+      "inputs": [
+        "{run}/preparation/hwm-governed-result.json",
+        "{run}/preparation/hwm-input-generation.json",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "{ledger_receipt}",
+        "{run}/preparation/invested-capital-result.json",
+        "{run}/preparation/capital-input-generation.json"
+      ],
+      "outputs": ["{run}/pipeline-spec.json"],
+      "argv": [
+        "{python}", "{tools}/portfolio_pipeline_materialize.py", "spec",
+        "--recipe", "{recipe}", "--output-root", "{run}", "--spec", "{run}/pipeline-spec.json",
+        "--hwm-governed-result", "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation", "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority", "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt", "{ledger_receipt}",
+        "--invested-capital-result", "{run}/preparation/invested-capital-result.json",
+        "--invested-capital-input-generation", "{run}/preparation/capital-input-generation.json",
+        "--financial-input-contract", "contracts/portfolio-financial-mvp-source-v1.json",
+        "--portfolio-root", "{build_portfolio_root}",
+        "--retained-cache-root", "{retained_cache_root}"
+      ]
+    },
+    {
+      "id": "semantic",
+      "requires": ["recipe"],
+      "outputs": ["{run}/evidence/post-build-semantic.json"],
+      "argv": [
+        "{python}", "{tools}/portfolio_pipeline_materialize.py", "semantic",
+        "--recipe", "{recipe}", "--output", "{run}/evidence/post-build-semantic.json"
+      ]
+    },
+    {
+      "id": "financial-artifacts",
+      "requires": ["recipe"],
+      "outputs": ["{production}/financial-artifacts.json"],
+      "argv": [
+        "{python}", "{mvp2}/build_financial_artifacts.py",
+        "--run", "{run}", "--cycle", "{cycle}", "--out", "{production}/financial-artifacts.json"
+      ]
+    },
+    {
+      "id": "provider-generations",
+      "requires": ["recipe"],
+      "builtin": "provider_generations",
+      "outputs": ["{cycle}/provider-generations.json"]
+    },
+    {
+      "id": "production-spec",
+      "requires": ["pipeline-spec", "semantic", "financial-artifacts", "provider-generations"],
+      "outputs": ["{prod_spec}"],
+      "argv": [
+        "{python}", "{tools}/portfolio_pipeline_materialize.py", "production-spec",
+        "--recipe", "{recipe}", "--prepared-root", "{run}",
+        "--semantic-gate", "{run}/evidence/post-build-semantic.json",
+        "--portfolio-root", "{portfolio_root}", "--state-root", "{retained_cache_root}",
+        "--spec", "{prod_spec}",
+        "--financial-artifacts", "{production}/financial-artifacts.json",
+        "--hwm-governed-result", "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation", "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority", "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt", "{ledger_receipt}",
+        "--provider-generations", "{cycle}/provider-generations.json"
+      ]
+    },
+    {
+      "id": "preflight",
+      "requires": ["production-spec"],
+      "outputs": [
+        "{production}/evidence",
+        "{production}/commit-authorization.json"
+      ],
+      "stdout_to": "{production}/preflight.log",
+      "argv": [
+        "{python}", "{tools}/portfolio_qc.py", "--profile", "release-preflight",
+        "--spec", "{prod_spec}", "--evidence-dir", "{production}/evidence",
+        "--emit-commit-authorization", "{production}/commit-authorization.json"
+      ]
+    },
+    {
+      "id": "plan",
+      "requires": ["preflight"],
+      "outputs": ["{production}/plan.json"],
+      "stdout_to": "{production}/plan.json",
+      "argv": ["{python}", "{tools}/data_pipeline.py", "plan", "--spec", "{prod_spec}"],
+      "checks": [
+        {"json": "{production}/plan.json", "path": "financial_mvp.ready_for_execution", "equals": true},
+        {"json": "{production}/plan.json", "path": "financial_mvp.blocking_reasons", "equals": []}
+      ]
+    },
+    {
+      "id": "dry-run",
+      "requires": ["plan"],
+      "outputs": ["{production}/execute-stage.json", "{production}/pointers-after-execute.json"],
+      "stdout_to": "{production}/execute-stage.json",
+      "pointers_unchanged": "{prod_spec}",
+      "snapshot_to": "{production}/pointers-after-execute.json",
+      "argv": ["{python}", "{tools}/data_pipeline.py", "execute", "--spec", "{prod_spec}"]
+    },
+    {
+      "id": "findings-panel",
+      "requires": ["dry-run"],
+      "assert_equal": [["{panel_gid}", "{spec_panel_gid}"]],
+      "outputs": ["{production}/validate-panel.log", "{production}/panel-findings-details.json"],
+      "stdout_to": "{production}/validate-panel.log",
+      "argv": [
+        "{python}", "{tools}/validate_generation.py", "{panel_root}/generations/{panel_gid}",
+        "--expected", "acceptance/expected-baseline.json", "--cutoff", "{requested_as_of}",
+        "--crosswalk", "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
+        "--details-out", "{production}/panel-findings-details.json"
+      ]
+    },
+    {
+      "id": "findings-targets",
+      "requires": ["dry-run"],
+      "outputs": ["{production}/validate-targets.log"],
+      "stdout_to": "{production}/validate-targets.log",
+      "argv": [
+        "{python}", "{tools}/validate_release_targets.py",
+        "--spec", "{prod_spec}", "--release-id", "{release_id}"
+      ]
+    }
+  ]
+}
