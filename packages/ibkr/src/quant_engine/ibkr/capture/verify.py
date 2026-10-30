@@ -114,9 +114,11 @@ def _scan_raw(path: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any
                         "nav": None,
                         "nav_date": None,
                         "currency": None,
+                        "sections": set(),
                     }
                 continue
             if current is not None:
+                current["sections"].add(name)
                 if name == "OpenPosition" and element.get("levelOfDetail") == "SUMMARY":
                     current["positions"] += 1
                 elif name == "Trade" and element.get("levelOfDetail") == "EXECUTION":
@@ -286,6 +288,9 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     checks.append("attempts")
 
     statements, securities = _scan_raw(run_dir / _STATEMENT)
+    for item in statements:
+        if not set(query.sections) <= item["sections"]:
+            raise _fail("statement-sections")
     rows: list[dict[str, Any]] = []
     spans: list[tuple[date, date]] = []
     for item in statements:

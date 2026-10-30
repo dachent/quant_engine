@@ -43,7 +43,8 @@ def _staged(tmp_path: Path, body: bytes, **plan_args: object) -> tuple[Path, Har
 
 def test_normalize_then_verify_round_trip(tmp_path: Path) -> None:
     body = activity_xml((ACCOUNT_ONE, ACCOUNT_TWO), DAYS)
-    run_dir, _ = _staged(tmp_path, body)
+    both = tuple(sorted({account_label(ACCOUNT_ONE), account_label(ACCOUNT_TWO)}))
+    run_dir, _ = _staged(tmp_path, body, labels=both)
     output = tmp_path / "normalized.json"
     document = normalize_run(run_dir, output)
     assert document["coverage"]["status"] == "COMPLETE"
@@ -244,3 +245,31 @@ def test_security_reference_run_normalizes_symbols_and_missing_rows(
     missing = [r for r in document["securities"] if not r["symbols"]]
     assert len(missing) == 1 and missing[0]["rows_missing_symbol"] == 2
     assert verify_run(run_dir, output).status == "VERIFIED"
+
+
+def test_security_reference_requires_its_catalogued_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import quant_engine.ibkr.capture.normalize as normalizer
+
+    bare = (
+        b'<FlexQueryResponse queryName="S" type="AF"><FlexStatements>'
+        b'<FlexStatement accountId="SYNTHACCT1" fromDate="20261005" toDate="20261009"/>'
+        b"</FlexStatements></FlexQueryResponse>"
+    )
+    plan = make_plan(query="security-reference")
+    harness = Harness(tmp_path, [send_ok(), bare], plan=plan)
+    harness.run()
+    (run_dir,) = harness.run_dirs()
+    with pytest.raises(NormalizationError, match="sections missing"):
+        normalize_run(run_dir, tmp_path / "n.json")
+    # The verifier refuses the same shape even if a normalizer let it through.
+    original = normalizer._security_statements
+    monkeypatch.setattr(
+        normalizer, "_security_statements", lambda path, required: original(path, ())
+    )
+    output = tmp_path / "lenient.json"
+    normalize_run(run_dir, output)
+    with pytest.raises(VerificationError) as error:
+        verify_run(run_dir, output)
+    assert error.value.reason == "statement-sections"

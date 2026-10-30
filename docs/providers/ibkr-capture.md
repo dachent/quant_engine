@@ -14,7 +14,7 @@ generation, admission, or any existing module.
 | Piece | Module | Behaviour |
 |---|---|---|
 | Approved query catalog | `catalog.py` | Three saved-query roles: `activity-history` (range, at most 31 days), `activity-current-increment` (exactly one day), `security-reference` (conid, symbol, assetCategory). Statement type AF, XML, service version 3. The catalog hash binds governance. |
-| Request plan | `plan.py` | Hash-bound list of requests (query, expected window), the masked account labels expected, and known non-trading days. Refuses reversed or over-long windows, duplicates, unknown queries, and any window that does not end before the pull date (finality). |
+| Request plan | `plan.py` | Hash-bound list of requests (at most one per query role, with its expected window), the required non-empty list of masked account labels, and known non-trading days. Refuses reversed or over-long windows, duplicates, unknown queries, and any window that does not end before the pull date (finality). |
 | Governance | `governance.py` | Single-use evidence for the exact plan hash and catalog hash; CURRENT authority; review reference is a quant_engine issue comment URL; metering of one SendRequest per planned request, zero retry, at most nine GetStatement attempts. A consumption receipt is created exclusively and rewritten durably before each request. |
 | Credentials | `credentials.py` | Only through the core resolver (`[credentials.ibkr]`). Only the fields a plan needs are read, and only after governance is consumed. |
 | Transport | `transport.py` | HTTPS to `ndcdyn` / `gdcdyn.interactivebrokers.com` only, no redirects, size bound, sanitized errors, pacing of 1 call per second and 10 per minute. Constructed only by the `live` command. |

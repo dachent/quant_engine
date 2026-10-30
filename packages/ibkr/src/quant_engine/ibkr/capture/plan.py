@@ -64,7 +64,7 @@ class RequestPlan:
 def _validate(plan: RequestPlan) -> None:
     if not 1 <= len(plan.requests) <= MAX_REQUESTS:
         raise PlanError("a plan holds between one and twelve requests")
-    seen: set[tuple[str, date, date]] = set()
+    seen: set[str] = set()
     for item in plan.requests:
         try:
             query = get_query(item.query)
@@ -81,10 +81,13 @@ def _validate(plan: RequestPlan) -> None:
             # Flex finalizes a day only after it closes; never ask for a day that
             # is not at least one calendar day behind the pull.
             raise PlanError("a request window must end before the pull date")
-        key = (item.query, item.window_from, item.window_to)
-        if key in seen:
-            raise PlanError("a request is duplicated")
-        seen.add(key)
+        if item.query in seen:
+            # The saved query, not the driver, fixes the window: one role, one
+            # request per plan.
+            raise PlanError("a query role is used more than once in a plan")
+        seen.add(item.query)
+    if not plan.expected_account_labels:
+        raise PlanError("a plan must name its expected account scope")
     if len(set(plan.expected_account_labels)) != len(plan.expected_account_labels):
         raise PlanError("expected account labels are duplicated")
     if any(_LABEL.fullmatch(label) is None for label in plan.expected_account_labels):

@@ -121,7 +121,7 @@ def _activity_statements(path: Path, artifact_id: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _security_statements(path: Path) -> list[dict[str, Any]]:
+def _security_statements(path: Path, required: tuple[str, ...]) -> list[dict[str, Any]]:
     reject_declarations(path.read_bytes())
     rows: list[dict[str, Any]] = []
     try:
@@ -133,6 +133,9 @@ def _security_statements(path: Path) -> list[dict[str, Any]]:
             end = (element.attrib.get("toDate") or "").strip()
             if not account or len(start) < 8 or len(end) < 8:
                 raise NormalizationError("a FlexStatement lacks account or dates")
+            present = {item.tag.rsplit("}", 1)[-1] for item in element.iter()}
+            if not set(required) <= present:
+                raise NormalizationError("security statement sections missing")
             try:
                 start_day = date.fromisoformat(f"{start[:4]}-{start[4:6]}-{start[6:8]}")
                 end_day = date.fromisoformat(f"{end[:4]}-{end[4:6]}-{end[6:8]}")
@@ -166,7 +169,7 @@ def build_normalized(run_dir: Path) -> tuple[dict[str, Any], bytes]:
         ]
         spans = [(day, day) for _, day in dates]
     elif query.kind == KIND_SECURITY:
-        statements = _security_statements(statement_path)
+        statements = _security_statements(statement_path, query.sections)
         dates = [
             (row["account_label"], date.fromisoformat(row["from_date"]))
             for row in statements

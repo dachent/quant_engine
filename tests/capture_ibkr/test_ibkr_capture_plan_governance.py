@@ -238,3 +238,18 @@ def test_credentials_refuse_an_undeclared_field_and_a_literal_value() -> None:
     ]
     with pytest.raises(CredentialError):
         resolve_flex_credentials(literal, plan, sources={})
+
+
+def test_plan_requires_an_explicit_account_scope() -> None:
+    document = make_plan().to_document()
+    document["expected_account_labels"] = []
+    with pytest.raises(PlanError, match="account scope"):
+        plan_from_document(document)
+
+
+def test_plan_refuses_a_query_role_used_twice() -> None:
+    first = CaptureRequest("activity-history", date(2026, 10, 5), date(2026, 10, 9))
+    second = CaptureRequest("activity-history", date(2026, 10, 12), date(2026, 10, 16))
+    plan = RequestPlan(date(2026, 11, 3), (first, second), ("0123456789abcdef",))
+    with pytest.raises(PlanError, match="more than once"):
+        plan_from_document(plan.to_document())

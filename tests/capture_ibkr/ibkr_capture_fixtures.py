@@ -20,6 +20,7 @@ from quant_engine.ibkr.capture import (
     TERMS_VERSION,
     catalog_sha256,
 )
+from quant_engine.ibkr.capture._util import account_label
 from quant_engine.ibkr.capture.credentials import TOKEN_FIELD
 
 FAKE_A = "placeholder-not-a-secret-0001"
@@ -191,13 +192,15 @@ def make_plan(
     query: str = "activity-history",
     start: date = date(2026, 10, 5),
     end: date = date(2026, 10, 9),
-    labels: tuple[str, ...] = (),
+    labels: tuple[str, ...] | None = None,
     non_trading: tuple[date, ...] = (),
 ) -> RequestPlan:
     return RequestPlan(
         pull_date=date(2026, 11, 3),
         requests=(CaptureRequest(query, start, end),),
-        expected_account_labels=labels,
+        expected_account_labels=(
+            labels if labels is not None else (account_label(ACCOUNT_ONE),)
+        ),
         known_non_trading_days=non_trading,
     )
 
