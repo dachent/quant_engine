@@ -1912,6 +1912,15 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             floor += 1
         return floor
 
+    def _outside_gain_fraction(reconciliation: Mapping[str, Any]) -> Fraction:
+        # Independent of the builder's helper: exact Fraction of the report's text.
+        outside = _mapping(reconciliation.get("epoch_set")).get(
+            "gain_of_outside_report_epochs_usd"
+        )
+        if outside is None:
+            raise _fail("the report carries no gain of the outside epochs")
+        return Fraction(str(outside))
+
     def epoch_nav(trace: Any, day: date) -> Fraction:
         account, _strategy, first, last, parsed = trace
         if day < first or day > last:
@@ -2047,7 +2056,7 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             totals[-1] - current_open,
             -opening_total,
             (
-                _retired_component_cents(recon, expected_retired)
+                -cents(_outside_gain_fraction(recon))
                 if report_keys is not None
                 else gain - row_gains
             ),
