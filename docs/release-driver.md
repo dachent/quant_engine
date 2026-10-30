@@ -77,6 +77,16 @@ A stage that declares `commit_gate` (the `execute --commit` stage) refuses unles
 
 The graph adds the commit stage together with the replica ceremony stages it names.
 
+## Restoring the replay world
+
+`tools/release_restore_world.py` rebuilds the input world a replay needs (the old worktree and
+scratch paths a prior release's specs name) from the OneDrive evidence archives declared in
+`ops/mvp2-release/replay-world.json`. It reads every absolute path and `{path, sha256}` pin in the
+given specs, restores what falls under an old root into `--dest`, verifies each restored file
+against its pin, and writes a resolution report. Exit 1 on a hash mismatch or on a missing path not
+named by `--allow-missing` (inputs the cycle regenerates). Run on the R1 release spec it restores 17
+pinned inputs and names the one it cannot find. It writes only `--dest` and `--report`.
+
 ## State
 
 `<cycle>/release-driver-state.json` records per stage its status, code identity, seconds,
