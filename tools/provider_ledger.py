@@ -3095,6 +3095,121 @@ def _finality_quantbase(ctx: _FinalityContext) -> dict[str, Any]:
     return result
 
 
+_SCHWAB_DERIVED_PATCH_KEYS: Final = frozenset(
+    {
+        "schema",
+        "derivation_basis",
+        "patched_dates",
+        "official_closes_manifest",
+        "derivation_record",
+        "patches",
+    }
+)
+_SCHWAB_DERIVED_PATCH_ENTRY_KEYS: Final = frozenset(
+    {
+        "account_id",
+        "native_sha256",
+        "original_normalized_sha256",
+        "patched_sha256",
+        "original_values",
+        "patched_values",
+    }
+)
+
+
+def _schwab_derived_patch(
+    evidence: Mapping[str, Any], end: date
+) -> dict[str, dict[str, Any]]:
+    """Declared patch set over a captured native NAV history, by native hash.
+
+    The capture receipt stays the sole authority for what the provider
+    returned. A patch is a disclosed DERIVATION (selected value = quantity x
+    official close + cash) that replaces named native rows; it is never a
+    provider finality claim. Each entry pins the original capture, the
+    original normalized hash, the patched selected hash and both values.
+    """
+
+    raw = evidence.get("derived_patch")
+    if raw is None:
+        return {}
+    patch = _object(raw, "Schwab derived patch")
+    if (
+        set(patch) != _SCHWAB_DERIVED_PATCH_KEYS
+        or patch["schema"] != "schwab-nav-derived-patch/1"
+        or patch["derivation_basis"] != "DERIVED_FROM_OFFICIAL_CLOSES"
+    ):
+        raise ProviderLedgerError("schwab derived patch declaration differs")
+    dates = {
+        _day(d, "Schwab patched date")
+        for d in _strings(patch["patched_dates"], "Schwab patched dates")
+    }
+    if not dates or max(dates) > end:
+        raise ProviderLedgerError("schwab derived patch dates differ")
+    for key in ("official_closes_manifest", "derivation_record"):
+        ref = _object(patch[key], f"derived patch {key}")
+        if set(ref) != {"path", "sha256", "size_bytes"}:
+            raise ProviderLedgerError(f"derived patch {key} binding differs")
+        _, _, size = _verified_evidence_bytes(
+            _absolute_regular_path(ref["path"], f"derived patch {key}"),
+            ref["sha256"],
+            f"derived patch {key}",
+        )
+        if size != ref["size_bytes"]:
+            raise ProviderLedgerError(f"derived patch {key} size differs")
+    entries: dict[str, dict[str, Any]] = {}
+    for entry in _objects(patch["patches"], "Schwab derived patches"):
+        if set(entry) != _SCHWAB_DERIVED_PATCH_ENTRY_KEYS:
+            raise ProviderLedgerError("schwab derived patch entry differs")
+        original = _object(entry["original_values"], "Schwab original values")
+        patched = _object(entry["patched_values"], "Schwab patched values")
+        if (
+            not patched
+            or set(original) != set(patched)
+            or not {_day(d, "Schwab patched row date") for d in patched} <= dates
+            or entry["native_sha256"] in entries
+        ):
+            raise ProviderLedgerError("schwab derived patch rows differ")
+        entries[entry["native_sha256"]] = entry
+    if not entries:
+        raise ProviderLedgerError("schwab derived patch lists no accounts")
+    return entries
+
+
+def _check_schwab_patched_rows(
+    patch: Mapping[str, Any],
+    native: Mapping[date, Decimal],
+    selected: Mapping[date, Decimal],
+    capture: Mapping[str, Any],
+) -> None:
+    """Every patched row is declared; every other row equals the native capture."""
+
+    patched = {
+        _day(d, "Schwab patched row date"): _decimal(v, "Schwab patched value")
+        for d, v in _object(patch["patched_values"], "Schwab patched values").items()
+    }
+    original = {
+        _day(d, "Schwab original row date"): _decimal(v, "Schwab original value")
+        for d, v in _object(patch["original_values"], "Schwab original values").items()
+    }
+    captured = datetime.fromisoformat(
+        _utc_timestamp(capture["captured_at_utc"], "Schwab NAV capture").replace(
+            "Z", "+00:00"
+        )
+    )
+    new_york = ZoneInfo("America/New_York")
+    if not set(native) <= set(selected) or any(
+        day not in native
+        or native[day] != original[day]
+        or selected[day] != patched[day]
+        or selected[day] == native[day]
+        or captured < datetime(day.year, day.month, day.day, 16, tzinfo=new_york)
+        for day in patched
+    ):
+        raise ProviderLedgerError("schwab derived patch rows differ from selected")
+    if any(selected[d] != native[d] for d in native if d not in patched):
+        raise ProviderLedgerError("schwab derived patch changes undeclared rows")
+
+
 def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
     """Schwab: the recovered native NAV capture binding."""
 
@@ -3127,17 +3242,26 @@ def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
             raise ProviderLedgerError("schwab capture receipt size differs")
         captures = _objects(json.loads(receipt_bytes), "Schwab NAV captures")
         checks = _objects(evidence.get("checks"), "Schwab native binding checks")
+        patches = _schwab_derived_patch(evidence, end)
+        used_patches: set[str] = set()
         used: set[str] = set()
         times = []
         for capture in captures:
             matches = [c for c in checks if c["native_sha256"] == capture["nav_sha256"]]
             if capture.get("http_status") != 200 or len(matches) != 1:
                 raise ProviderLedgerError("schwab native capture binding differs")
-            artifacts = [
-                a
-                for a in historical.values()
-                if a.sha256 == matches[0]["normalized_sha256"]
-            ]
+            patch = patches.get(capture["nav_sha256"])
+            expected_sha = matches[0]["normalized_sha256"]
+            if patch is not None:
+                # The original capture binding must still hold byte for byte;
+                # only then is the declared patched artifact admissible.
+                if patch["original_normalized_sha256"] != expected_sha:
+                    raise ProviderLedgerError(
+                        "schwab derived patch original binding differs"
+                    )
+                used_patches.add(capture["nav_sha256"])
+                expected_sha = patch["patched_sha256"]
+            artifacts = [a for a in historical.values() if a.sha256 == expected_sha]
             if len(artifacts) != 1 or artifacts[0].artifact_id in used:
                 raise ProviderLedgerError(
                     "schwab capture selected account scope differs"
@@ -3161,6 +3285,9 @@ def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
                 ).items()
             }
             selected_values = _schwab_finality_values(catalog, artifact_id)
+            if patch is not None:
+                _check_schwab_patched_rows(patch, values, selected_values, capture)
+                values = {day: selected_values[day] for day in values}
             if (
                 not values
                 or len(values) != capture["date_count"]
@@ -3176,12 +3303,18 @@ def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
             times.append(
                 _utc_timestamp(capture["captured_at_utc"], "Schwab NAV capture")
             )
-        if used != set(historical) or len(checks) != len(captures):
+        if (
+            used != set(historical)
+            or len(checks) != len(captures)
+            or used_patches != set(patches)
+        ):
             raise ProviderLedgerError("schwab native capture inventory differs")
         result.update(
             capture_start_utc=min(times),
             capture_end_utc=max(times),
-            basis="CAPTURED_NATIVE_HISTORICAL_NAV_LABEL",
+            basis="CAPTURED_NATIVE_HISTORICAL_NAV_LABEL_WITH_DECLARED_DERIVED_PATCH"
+            if patches
+            else "CAPTURED_NATIVE_HISTORICAL_NAV_LABEL",
         )
         return result
     roots = _object(evidence.get("roots"), "Schwab source roots")
