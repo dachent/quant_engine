@@ -770,8 +770,14 @@ def _build_flows(
                     internal_in += amount
                 elif leg.get("class") == "INTERNAL_OUT":
                     internal_out += amount
-        net = [link_flow[i] + opening[i] - closing[i] for i in range(size)]
-        net_cents = [_cents(v) for v in net]
+        link_cents = [_cents(v) for v in link_flow]
+        opening_cents = [_cents(v) for v in opening]
+        closing_cents = [_cents(v) for v in closing]
+        # The net flow is the sum of the published cent components, so the
+        # identity link + opening - closing == net holds on every day.
+        net_cents = [
+            link_cents[i] + opening_cents[i] - closing_cents[i] for i in range(size)
+        ]
         total_cents = sum(nav_rows[s][-1] for s in nav_rows)
         contributed = sum(net_cents)
         net_internal = internal_in - internal_out
@@ -779,9 +785,9 @@ def _build_flows(
         "unit": "USD_CENTS",
         "definition": SLICE_PERIMETER_FLOW_DEFINITION,
         "net_flow_cents": net_cents,
-        "opening_cents": [_cents(v) for v in opening],
-        "closing_cents": [_cents(v) for v in closing],
-        "link_net_flow_cents": [_cents(v) for v in link_flow],
+        "opening_cents": opening_cents,
+        "closing_cents": closing_cents,
+        "link_net_flow_cents": link_cents,
         "total_contributed_cents": contributed,
         "implied_pnl_cents": total_cents - contributed,
         "internal_cancellation": {
@@ -2129,7 +2135,8 @@ def _verify_flows(
         "opening_cents": [cents(v) for v in opening],
         "closing_cents": [cents(v) for v in closing],
         "net_flow_cents": [
-            cents(link_flow[i] + opening[i] - closing[i]) for i in range(size)
+            cents(link_flow[i]) + cents(opening[i]) - cents(closing[i])
+            for i in range(size)
         ],
     }
     for key, values in expected.items():

@@ -1150,3 +1150,26 @@ def test_the_report_epoch_set_names_the_retired_epochs_outside_it() -> None:
     retired_bad["lines"] = []
     with pytest.raises(tab.PerformanceTabError):
         tab.verify_performance_tab(bad, panel)
+
+
+def test_the_flow_identity_holds_on_every_day_even_when_components_round_apart() -> (
+    None
+):
+    panel = _panel_with_benchmarks()
+    # Half-cent amounts whose separate roundings differ from the rounded sum.
+    link = panel["account_manifest"]["rows"][0]["observation_trace"]["links"][0]
+    link["net_flow"] = "0.005"
+    panel["account_manifest"]["rows"][2]["observation_trace"]["links"][1][
+        "net_flow"
+    ] = "0.004"
+    block = tab.build_performance_tab(panel)
+    flows = block["slices"]["flows"]
+    for index, net in enumerate(flows["net_flow_cents"]):
+        assert (
+            net
+            == flows["link_net_flow_cents"][index]
+            + flows["opening_cents"][index]
+            - flows["closing_cents"][index]
+        )
+    assert sum(flows["net_flow_cents"]) == flows["total_contributed_cents"]
+    tab.verify_performance_tab(block, panel)
