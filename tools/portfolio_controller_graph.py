@@ -167,6 +167,9 @@ _PATH_STAGES = {
     "tools/check_repository_boundary.py": [],
     "tools/ci.py": [],
     "tools/stall_watchdog.py": [],
+    # Stages an unpublished derived-return candidate from retained bytes; the weekly
+    # builder reads only the pinned generation it is handed, never this tool.
+    "tools/portfolio_grizzly_signal_replay.py": [],
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],
