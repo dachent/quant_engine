@@ -453,3 +453,120 @@ def test_a_bound_measured_on_a_replaced_parent_epoch_is_read_against_the_strateg
         "entry": f"timestamp bound p123-ai-factor on {PARENT}",
         "reason": "NO_REPORT_ROW_FOR_THE_MEASURED_EPOCH",
     } in absent["omitted"]
+
+
+def _committed_release(
+    data_root: Path, release_id: str, panel_generation_id: str, **overrides: Any
+) -> None:
+    """A synthetic committed release authority: pointer, manifest, journal."""
+
+    coordination = data_root / disclosures.COORDINATION_RELATIVE
+    release_dir = coordination / "releases" / release_id
+    release_dir.mkdir(parents=True)
+    manifest = json.dumps(
+        {
+            "release_id": release_id,
+            "targets": [
+                {"root_id": "provider-ledger", "proposed_generation_id": "l" * 64},
+                {
+                    "root_id": "portfolio-panel",
+                    "proposed_generation_id": panel_generation_id,
+                },
+            ],
+        }
+    ).encode()
+    (release_dir / "release.json").write_bytes(manifest)
+    (release_dir / "journal.json").write_bytes(
+        json.dumps(
+            {"release_id": release_id, "state": overrides.get("journal", "COMMITTED")}
+        ).encode()
+    )
+    (coordination / "CURRENT_RELEASE.json").write_bytes(
+        json.dumps(
+            {
+                "release_id": release_id,
+                "release_manifest_sha256": overrides.get("sha", _sha(manifest)),
+                "state": overrides.get("state", "COMMITTED"),
+            }
+        ).encode()
+    )
+
+
+def _pinned_predecessor() -> dict[str, Any]:
+    inputs = json.loads((INPUTS_DIR / "disclosure-inputs.json").read_bytes())
+    return dict(inputs["predecessor_comparison"])
+
+
+def test_the_pinned_predecessor_must_be_the_committed_current_release_panel(
+    tmp_path: Path,
+) -> None:
+    """The predecessor of the next release is the release committed at freeze time.
+
+    A stale pin (the release before the committed one) still hashes cleanly, so only a
+    comparison with the committed CURRENT_RELEASE authority can see it.  Synthetic
+    release authorities only: the identifiers are the repository's own pins.
+    """
+
+    pinned = _pinned_predecessor()
+    release_id = str(pinned["release_id"])
+    panel = str(pinned["panel_generation_id"])
+    assert len(release_id) == len(panel) == 64
+    current = tmp_path / "current"
+    _committed_release(current, release_id, panel)
+    disclosures.check_predecessor_is_current_release(pinned, current)
+    # the whole preparation path applies the same gate when a data root is supplied
+    sources = disclosures.build_sources(
+        facts_paths=[],
+        inputs_path=INPUTS_DIR / "disclosure-inputs.json",
+        predecessor_data_root=current,
+    )
+    assert sources["predecessor"]["reason"] == "PREDECESSOR_GENERATION_NOT_REACHABLE"
+
+    # the committed release moved on: the pin is now the previous release and is refused
+    newer = tmp_path / "newer"
+    _committed_release(newer, "a" * 64, "b" * 64)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.check_predecessor_is_current_release(pinned, newer)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.build_sources(
+            facts_paths=[],
+            inputs_path=INPUTS_DIR / "disclosure-inputs.json",
+            predecessor_data_root=newer,
+        )
+
+    # the release id alone is not enough: the panel generation must match as well
+    other_panel = tmp_path / "other-panel"
+    _committed_release(other_panel, release_id, "c" * 64)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.check_predecessor_is_current_release(pinned, other_panel)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"state": "PREPARED"}, "not COMMITTED"),
+        ({"journal": "PREPARED"}, "not a committed release"),
+        ({"sha": "0" * 64}, "differs from its pointer"),
+    ],
+)
+def test_an_uncommitted_or_altered_release_authority_is_refused(
+    tmp_path: Path, overrides: dict[str, str], message: str
+) -> None:
+    pinned = _pinned_predecessor()
+    _committed_release(
+        tmp_path,
+        str(pinned["release_id"]),
+        str(pinned["panel_generation_id"]),
+        **overrides,
+    )
+    with pytest.raises(disclosures.DisclosureError, match=message):
+        disclosures.check_predecessor_is_current_release(pinned, tmp_path)
+
+
+def test_a_data_root_without_a_published_release_authority_is_refused(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(disclosures.DisclosureError, match="not published"):
+        disclosures.check_predecessor_is_current_release(
+            _pinned_predecessor(), tmp_path
+        )

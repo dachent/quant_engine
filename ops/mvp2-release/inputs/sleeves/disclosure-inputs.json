@@ -2,10 +2,10 @@
   "artifact_id": "sleeve-disclosure-inputs",
   "predecessor_comparison": {
     "data_file": {
-      "relative_path": "dataPortfolio/control-panel/generations/85d0e609542c292b31dda87bd1925d9e580d854faf75a46004290abd716d6fbd/data/dashboard_data.json",
-      "sha256": "c955c2c4c66e750d5bd9333cd74ef1530911d901cb7cbadea7a99609769bc5d9"
+      "relative_path": "dataPortfolio/control-panel/generations/b216a53e86bbd1cb64aca13f49f4d4c08d7a263623165cc26a24b4bcbb9d412f/data/dashboard_data.json",
+      "sha256": "22b8d862e0e1833dabc314d7f7e7aa04ddfda30edf071ed769f3cef7a5ab4a0f"
     },
-    "panel_generation_id": "85d0e609542c292b31dda87bd1925d9e580d854faf75a46004290abd716d6fbd",
+    "panel_generation_id": "b216a53e86bbd1cb64aca13f49f4d4c08d7a263623165cc26a24b4bcbb9d412f",
     "pointers": {
       "aggregate": "/invested_capital/current_aggregate_usd",
       "hwm_current_index": "/hwm_governed_proof/current_index",
@@ -13,7 +13,7 @@
       "strategy_capital_list": "/invested_capital/current_by_strategy",
       "strategy_id": "p123-ai-factor"
     },
-    "release_id": "aa40fc6d261e2017b4d62ff03d0ca152b22c82d59c5469a91e427adef59a07df"
+    "release_id": "01fbe4d85b04f1879d0b9d5c6e2a33298d951b46af72ab1ab182d80899b0651f"
   },
   "schema_version": 1,
   "timestamp_bounds": {

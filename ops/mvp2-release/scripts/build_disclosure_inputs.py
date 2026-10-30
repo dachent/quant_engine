@@ -16,8 +16,8 @@ import hashlib
 import json
 from pathlib import Path
 
-PREDECESSOR_RELEASE = "aa40fc6d261e2017b4d62ff03d0ca152b22c82d59c5469a91e427adef59a07df"
-PREDECESSOR_PANEL = "85d0e609542c292b31dda87bd1925d9e580d854faf75a46004290abd716d6fbd"
+PREDECESSOR_RELEASE = "01fbe4d85b04f1879d0b9d5c6e2a33298d951b46af72ab1ab182d80899b0651f"
+PREDECESSOR_PANEL = "b216a53e86bbd1cb64aca13f49f4d4c08d7a263623165cc26a24b4bcbb9d412f"
 EVIDENCE = "timestamp-delta-result.txt"
 ENTRIES = (
     ("p123-ai-factor", "account-1b44c987969b9e47"),
@@ -59,6 +59,7 @@ def main() -> int:
                 "strategy_capital_list": "/invested_capital/current_by_strategy",
                 "strategy_capital_field": "invested_capital_usd",
                 "aggregate": "/invested_capital/current_aggregate_usd",
+                "hwm_current_index": "/hwm_governed_proof/current_index",
             },
         },
     }

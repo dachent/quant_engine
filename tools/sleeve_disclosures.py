@@ -457,6 +457,66 @@ def _resolve_predecessor(
     }
 
 
+COORDINATION_RELATIVE: Final = Path("dataPortfolio") / "releases-refresh-2026"
+PANEL_ROOT_ID: Final = "portfolio-panel"
+
+
+def check_predecessor_is_current_release(
+    entry: Mapping[str, Any], data_root: Path
+) -> None:
+    """Refuse a predecessor that is not the committed CURRENT_RELEASE panel generation.
+
+    The comparison the report states ("against X in the previous release") is only true
+    when the pinned predecessor IS the release that is committed when the next one is
+    frozen.  A stale pin still hashes cleanly, so the byte-pin check cannot see it; this
+    reads the committed release authority (pointer, manifest hash, journal state, the
+    panel target's generation) and requires the release id and the panel generation to
+    equal the pinned ones.
+    """
+
+    coordination = data_root / COORDINATION_RELATIVE
+    pointer_path = coordination / "CURRENT_RELEASE.json"
+    if not pointer_path.is_file():
+        raise DisclosureError("predecessor release authority is not published")
+    pointer = _object(pointer_path.read_bytes(), "CURRENT_RELEASE pointer")
+    release_id = str(pointer.get("release_id"))
+    if pointer.get("state") != "COMMITTED":
+        raise DisclosureError("CURRENT_RELEASE is not COMMITTED")
+    directory = coordination / "releases" / release_id
+    manifest_path = directory / "release.json"
+    journal_path = directory / "journal.json"
+    if not manifest_path.is_file() or not journal_path.is_file():
+        raise DisclosureError("CURRENT_RELEASE names a release that is not retained")
+    raw = manifest_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != pointer.get("release_manifest_sha256"):
+        raise DisclosureError("CURRENT_RELEASE manifest differs from its pointer")
+    manifest = _object(raw, "current release manifest")
+    journal = _object(journal_path.read_bytes(), "current release journal")
+    if (
+        manifest.get("release_id") != release_id
+        or journal.get("release_id") != release_id
+        or journal.get("state") != "COMMITTED"
+    ):
+        raise DisclosureError("CURRENT_RELEASE is not a committed release")
+    panels = [
+        item.get("proposed_generation_id")
+        for item in manifest.get("targets", [])
+        if isinstance(item, Mapping) and item.get("root_id") == PANEL_ROOT_ID
+    ]
+    if len(panels) != 1:
+        raise DisclosureError("current release does not name one panel generation")
+    if (
+        entry.get("release_id") != release_id
+        or entry.get("panel_generation_id") != panels[0]
+    ):
+        raise DisclosureError(
+            "disclosure predecessor is not the committed CURRENT_RELEASE panel: "
+            f"pinned release {str(entry.get('release_id'))[:8]} panel "
+            f"{str(entry.get('panel_generation_id'))[:8]}, committed release "
+            f"{release_id[:8]} panel {str(panels[0])[:8]}"
+        )
+
+
 def build_sources(
     *,
     facts_paths: Sequence[Path],
@@ -542,6 +602,8 @@ def build_sources(
         }
     predecessor = inputs.get("predecessor_comparison")
     if isinstance(predecessor, Mapping):
+        if predecessor_data_root is not None:
+            check_predecessor_is_current_release(predecessor, predecessor_data_root)
         sources["predecessor"] = _resolve_predecessor(
             predecessor, predecessor_data_root
         )
