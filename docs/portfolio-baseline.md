@@ -78,6 +78,17 @@ carries `as_of_date` = the New York financial day, `capture_date` = the native
 date, `observed_at` and `as_of_basis` =
 `CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE`.
 
+The report restates that basis for a value the admitted finality evidence declares
+derived (a `derived_patch`: the selected NAV and the position values priced from it are
+quantity times official close plus cash, not observed). For an account listed in the
+patch on a patched date, the `account_summary` row and each `positions` row carry
+`value_basis` = `{basis: DERIVED_FROM_OFFICIAL_CLOSES, official_closes_manifest_sha256,
+derivation_record_sha256, finality_evidence_sha256, provider_finality_guarantee: false}`,
+and a derived position row's `as_of_basis` is `DERIVED_FROM_OFFICIAL_CLOSES` instead of
+`CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE` (its `capture_date` and `observed_at` stay).
+Rows of other accounts and dates keep the captured basis and carry no `value_basis`. The
+set comes from the evidence file the run observation pins; it is never hardcoded.
+
 ## One-command rebuild
 
 Run from the repository with the frozen workspace:
