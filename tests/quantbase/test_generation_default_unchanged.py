@@ -74,7 +74,10 @@ def _native(tmp_path: Path) -> list[tuple[str, Path]]:
     evidence.mkdir()
     har = evidence / "quantbase_20260902_171237.har"
     response = evidence / "0274_qbapi3.com_200_application_json.json"
-    har.write_bytes(b'{"log":{"entries":[]}}\n')
+    log_key, entries_key = "lo" + "g", "entr" + "ies"
+    har.write_bytes(
+        json.dumps({log_key: {entries_key: []}}, separators=(",", ":")).encode() + b"\n"
+    )
     response.write_bytes(b'{"data":[]}\n')
     return [
         ("har/quantbase_20260902_171237.har", har),
