@@ -1153,3 +1153,27 @@ def test_daily_benchmark_block_validates_against_the_panel_schema(
     broken["unit"] = "PERCENT"
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(broken)
+
+
+def test_gap_fill_generation_must_pass_the_manifest_contract(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    root = _gap_fill_root(tmp_path)
+    generation = next((root / "generations").iterdir())
+    manifest = generation / "generation.json"
+    manifest.write_bytes(manifest.read_bytes().replace(b'"VERIFIED"', b'"VERIFIED" '))
+    manifest_text = json.loads(manifest.read_bytes())
+    manifest_text["coverage"] = {"forged": True}
+    manifest.write_bytes(json.dumps(manifest_text).encode("utf-8"))
+    with pytest.raises(weekly.WeeklyReturnError, match="manifest contract"):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+
+
+def test_gap_fill_spec_pin_must_be_named_spec_json() -> None:
+    import portfolio_release_builder as builder
+
+    builder.require_gap_fill_spec_name(Path("x/spec.json"))
+    with pytest.raises(builder.VerticalBuildError, match="spec.json"):
+        builder.require_gap_fill_spec_name(Path("x/other.json"))

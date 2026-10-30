@@ -1484,6 +1484,11 @@ def _preparation_stage_inputs(
             "provider_ledger_generation_root": config[
                 "provider_ledger_generation_root"
             ],
+            **(
+                {"weekly_gap_fill_spec": config["weekly_gap_fill_spec"]}
+                if config.get("weekly_gap_fill_spec") is not None
+                else {}
+            ),
             "release_commit": release_commit,
             "strategy_attribution": config["retained_verified_generations"][
                 "attribution"

@@ -406,16 +406,15 @@ def _load_gap_fills(
         artifact_id = _text(source.get("returns_artifact"), "gap fill artifact")
         generation = root / "generations" / generation_id
         manifest_path = generation / "generation.json"
-        manifest = _load_json(manifest_path, "gap fill generation manifest")
-        if (
-            manifest.get("verification") != "VERIFIED"
-            or str(manifest.get("generation_id")) != generation_id
-        ):
-            raise WeeklyReturnError("gap fill generation identity differs")
-        declared = {
-            str(item.get("artifact_id")): item
-            for item in _objects(manifest.get("artifacts"), "gap fill artifacts")
-        }
+        try:
+            manifest = read_generation(root, generation_id)
+        except (GenerationConflictError, OSError, ValueError) as exc:
+            raise WeeklyReturnError(
+                f"gap fill generation fails the manifest contract: {exc}"
+            ) from exc
+        if manifest.verification is not VerificationStatus.VERIFIED:
+            raise WeeklyReturnError("gap fill generation is not verified")
+        declared = {item.artifact_id: item for item in manifest.artifacts}
         returns_path = generation / PurePosixPath(artifact_id)
         entry_artifact = declared.get(artifact_id)
         if (
@@ -426,9 +425,7 @@ def _load_gap_fills(
             raise WeeklyReturnError("gap fill returns artifact is missing")
         content = returns_path.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
-        if entry_artifact.get("sha256") != digest or entry_artifact.get(
-            "size_bytes"
-        ) != len(content):
+        if entry_artifact.sha256 != digest or entry_artifact.size_bytes != len(content):
             raise WeeklyReturnError("gap fill returns differ from their manifest")
         source_series = _text(source.get("series_id"), "gap fill source series")
         layer = _text(source.get("evidence_layer"), "gap fill evidence layer")

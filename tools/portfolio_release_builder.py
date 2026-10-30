@@ -41,8 +41,21 @@ from portfolio_counted_producer import (
 from portfolio_private_stage import validate_private_stage_target
 
 
+#: The weekly builder reads the gap-fill policy from ``<root>/spec.json`` only.
+WEEKLY_GAP_FILL_SPEC_NAME = "spec.json"
+
+
 class VerticalBuildError(ValueError):
     """A source, stage, or proof differs from the vertical-build contract."""
+
+
+def require_gap_fill_spec_name(path: Path) -> None:
+    """The weekly builder reads ``<root>/spec.json`` only, so a pin must name it."""
+
+    if path.name != WEEKLY_GAP_FILL_SPEC_NAME:
+        raise VerticalBuildError(
+            f"weekly_gap_fill_spec must be named {WEEKLY_GAP_FILL_SPEC_NAME}"
+        )
 
 
 def _declared_periods(declared: Mapping[str, int], series_id: str) -> int:
@@ -771,6 +784,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         }:
             raise VerticalBuildError("weekly_gap_fill_spec definition differs")
         artifact = _path(definition["path"], "weekly_gap_fill_spec.path")
+        require_gap_fill_spec_name(artifact)
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("weekly_gap_fill_spec identity differs")
@@ -1073,6 +1087,7 @@ def create_recipe(
     if nested_tag_map_path is not None:
         payload["nested_tag_map"] = _file_definition(nested_tag_map_path.resolve())
     if weekly_gap_fill_spec_path is not None:
+        require_gap_fill_spec_name(weekly_gap_fill_spec_path)
         payload["weekly_gap_fill_spec"] = _file_definition(
             weekly_gap_fill_spec_path.resolve()
         )
