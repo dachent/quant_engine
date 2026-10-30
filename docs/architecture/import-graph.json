@@ -419,6 +419,11 @@
       1
     ],
     [
+      "portfolio_provider_track_record_union",
+      "portfolio_fx_rates",
+      1
+    ],
+    [
       "portfolio_qc",
       "portfolio_financial_outcomes",
       2

@@ -7063,6 +7063,10 @@ def _transactions_and_flows(
     return sorted(rows, key=lambda item: (str(item["date"]), str(item["record_id"])))
 
 
+# A position row whose market value is not available says so with the ledger's own status.
+MARKET_VALUE_REASON_PREFIX: Final = "SOURCE_SNAPSHOT_MARKET_VALUE_"
+
+
 def _positions(
     catalog: Mapping[str, Any], current_account_ids: set[str] | None = None
 ) -> list[dict[str, Any]]:
@@ -7112,6 +7116,13 @@ def _positions(
                     decimal_text(_amount(item, "market_value"))
                     if status == "AVAILABLE"
                     else None
+                ),
+                # Why a row has no value: the source snapshot states none (the
+                # status is the ledger's own word for it), never a guessed one.
+                **(
+                    {}
+                    if status == "AVAILABLE"
+                    else {"market_value_reason": MARKET_VALUE_REASON_PREFIX + status}
                 ),
                 "quantity": item.get("quantity"),
                 "security_id": item.get("security_id"),
@@ -9390,6 +9401,7 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_manifest_rows: list[Mapping[str, Any]] = []
+    manifest_rows_raw: object = None
     epoch_included_rows: list[Mapping[str, Any]] = []
     epoch_perimeter: derived_epoch_perimeter.EffectivePerimeter | None = None
     epoch_crosswalk_rows: list[dict[str, Any]] = []
@@ -10374,6 +10386,11 @@ def build_report_data(
                     hwm_summary=hwm_summary,
                     calculation_cutoff_date=calculation_cutoff_date,
                     custody_current_capital=report.get("custody_current_capital"),
+                    manifest_rows=(
+                        manifest_rows_raw
+                        if isinstance(manifest_rows_raw, list)
+                        else None
+                    ),
                 )
             )
         except PortfolioTotalsError as exc:
