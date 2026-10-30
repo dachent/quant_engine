@@ -1054,26 +1054,67 @@ def cutover_source(plan_path: Path, generation_id: str) -> dict[str, object]:
 
 def _load_native_intake(
     path: Path | None,
-) -> tuple[list[tuple[str, Path]] | None, dict[str, tuple[str, str]] | None]:
-    """Read the HAR-intake driver's native-artifact declaration, if one is given."""
+) -> tuple[
+    list[tuple[str, Path]] | None, dict[str, tuple[str, str]] | None, date | None
+]:
+    """Re-derive the native declaration from a staged and parsed HAR intake.
+
+    The declaration is never read from a caller-authored file: every raw file is
+    re-hashed against the intake record, the staged manifest and the parse report
+    must agree with that record, and the schema contract is built here.
+    """
 
     if path is None:
-        return None, None
-    try:
-        document = _object(json.loads(path.read_text(encoding="utf-8")), "intake")
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise QuantbaseGenerationError("native intake is not valid UTF-8 JSON") from exc
-    artifacts = [
-        (
-            _text(item.get("relative_path"), "native relative_path"),
-            Path(_text(item.get("source_path"), "native source_path")),
-        )
-        for item in _objects(document.get("native_artifacts"), "native_artifacts")
-    ]
-    contract = _declared_contract(document.get("native_contract"))
-    if contract is None:
-        raise QuantbaseGenerationError("native intake must declare its contract")
-    return artifacts, contract
+        return None, None, None
+    root = _absolute_directory(str(path), "native intake", existing=True)
+
+    def load(name: str) -> tuple[bytes, dict[str, Any]]:
+        target = root / name
+        if target.is_symlink() or not target.is_file():
+            raise QuantbaseGenerationError(f"native intake lacks {name}")
+        raw = target.read_bytes()
+        try:
+            return raw, _object(json.loads(raw.decode("utf-8")), name)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise QuantbaseGenerationError(f"native intake {name} is invalid") from exc
+
+    manifest_bytes, manifest = load("manifest.json")
+    _, record = load("intake-manifest.json")
+    _, report = load("parse-report.json")
+    files = _objects(record.get("files"), "intake files")
+    if record.get("manifest_sha256") != hashlib.sha256(manifest_bytes).hexdigest():
+        raise QuantbaseGenerationError("native intake manifest differs from its record")
+    if (
+        report.get("manifest_sha256") != record.get("manifest_sha256")
+        or report.get("intake_id") != record.get("intake_id")
+        or report.get("files") != record.get("files")
+        or report.get("state") not in {"PARSED", "PARSED_WITH_FLAGS"}
+    ):
+        raise QuantbaseGenerationError("native intake parse report does not match")
+    raw_root = root / "raw"
+    if raw_root.is_symlink() or not raw_root.is_dir():
+        raise QuantbaseGenerationError("native intake raw directory is missing")
+    names = [_text(item.get("name"), "intake file name") for item in files]
+    if {item.name for item in raw_root.iterdir()} != set(names) or len(names) != len(
+        set(names)
+    ):
+        raise QuantbaseGenerationError("native intake raw inventory differs")
+    artifacts: list[tuple[str, Path]] = []
+    contract: dict[str, tuple[str, str]] = {}
+    for item in files:
+        name = str(item["name"])
+        raw_path = raw_root / name
+        if raw_path.is_symlink() or hash_file(raw_path) != (
+            item.get("sha256"),
+            item.get("bytes"),
+        ):
+            raise QuantbaseGenerationError(f"native intake raw file differs: {name}")
+        artifacts.append((f"har/{name}", raw_path))
+        contract[f"har/{name}"] = ("quantbase-native-har", "1")
+    artifacts.append(("capture/intake-manifest.json", root / "intake-manifest.json"))
+    contract["capture/intake-manifest.json"] = ("quantbase-har-intake-manifest", "1")
+    cutoff_text = _text(manifest.get("cutoff"), "intake cutoff")
+    return artifacts, contract, date.fromisoformat(cutoff_text)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1104,7 +1145,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "plan":
-            native_artifacts, native_contract = _load_native_intake(args.native_intake)
+            native_artifacts, native_contract, intake_cutoff = _load_native_intake(
+                args.native_intake
+            )
+            if intake_cutoff is not None and args.as_of_date != intake_cutoff:
+                raise QuantbaseGenerationError(
+                    "as-of date must equal the intake manifest cutoff"
+                )
             result = create_plan(
                 args.source_root,
                 args.data_root,

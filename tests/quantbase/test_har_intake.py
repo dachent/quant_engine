@@ -408,7 +408,8 @@ def _plan_kwargs() -> dict[str, Any]:
 
 
 def _native_args(directory: Path) -> tuple[Any, Any]:
-    return generation._load_native_intake(directory / "native-artifacts.json")
+    artifacts, contract, _ = generation._load_native_intake(directory)
+    return artifacts, contract
 
 
 def test_generation_accepts_the_manifest_declared_native_contract(
@@ -506,8 +507,73 @@ def test_cli_plan_accepts_the_native_intake_file(
             "--expected-record-count",
             str(len(_CSV_FILES)),
             "--native-intake",
-            str(directory / "native-artifacts.json"),
+            str(directory),
         ]
     )
     assert code == 0
     assert json.loads(capsys.readouterr().out)["state"] == "PLANNED"
+
+
+def _cli_plan(source: Path, data: Path, directory: Path, as_of: str) -> int:
+    return int(
+        generation.main(
+            [
+                "plan",
+                str(source),
+                str(data),
+                "--as-of-date",
+                as_of,
+                "--quarantine-plan-id",
+                "a" * 64,
+                "--expected-file-count",
+                str(len(_CSV_FILES)),
+                "--expected-record-count",
+                str(len(_CSV_FILES)),
+                "--native-intake",
+                str(directory),
+            ]
+        )
+    )
+
+
+def test_cli_plan_binds_the_as_of_date_to_the_manifest_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, directory = _ready(tmp_path / "intake")
+    intake.parse_intake(directory)
+    source, data = _csv_source(tmp_path / "csv")
+    assert _cli_plan(source, data, directory, "2026-10-06") == 1
+    assert "manifest cutoff" in capsys.readouterr().out
+    assert not (data / "cutovers").exists()
+
+
+def test_native_declaration_is_rederived_not_trusted(tmp_path: Path) -> None:
+    _, directory = _ready(tmp_path / "intake")
+    with pytest.raises(generation.QuantbaseGenerationError, match="lacks"):
+        generation._load_native_intake(directory)
+    intake.parse_intake(directory)
+    (directory / "native-artifacts.json").write_bytes(b"{}")
+    assert generation._load_native_intake(directory)[2] == date(2026, 10, 7)
+    (directory / "raw" / "owner_a.har").write_bytes(b"{}")
+    with pytest.raises(generation.QuantbaseGenerationError, match="raw file differs"):
+        generation._load_native_intake(directory)
+
+
+def test_interrupted_parse_resumes_over_identical_partial_output(
+    tmp_path: Path,
+) -> None:
+    _, directory = _ready(tmp_path / "resume")
+    manifest = intake._load_manifest((directory / "manifest.json").read_bytes())
+    record = json.loads((directory / "intake-manifest.json").read_bytes())
+    outputs = intake._parse(directory, manifest, record)
+    (directory / "normalized").mkdir()
+    (directory / "normalized" / "records.json").write_bytes(
+        outputs["normalized/records.json"]
+    )
+    assert intake.parse_intake(directory)["state"] == "PARSED_WITH_FLAGS"
+    assert intake.verify_intake(directory)["state"].startswith("VERIFIED")
+    _, other = _ready(tmp_path / "conflict")
+    (other / "normalized").mkdir()
+    (other / "normalized" / "records.json").write_bytes(b"{}")
+    with pytest.raises(intake.QuantbaseHarIntakeError, match="partial parse output"):
+        intake.parse_intake(other)

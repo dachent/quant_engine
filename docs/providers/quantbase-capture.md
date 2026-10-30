@@ -94,7 +94,7 @@ together with their schema contract. Pass it to the existing generation tool:
 uv run --frozen --no-sync python tools/quantbase_generation.py plan <csv-root> <dataQuantbase-root> `
   --as-of-date <cutoff> --quarantine-plan-id <id> `
   --expected-file-count <n> --expected-record-count <n> `
-  --native-intake <intake-dir>/native-artifacts.json
+  --native-intake <intake-dir>
 ```
 
 Without `--native-intake` the generation tool behaves exactly as before, and the
@@ -107,3 +107,11 @@ Real response shapes are not observable from this repository. Record counting
 and `records_key` are declared by the owner and verified only against synthetic
 fixtures; they are UNVERIFIED against a real export until the first owner
 capture is parsed.
+
+`--native-intake` takes the intake directory, not a declaration file. The
+generation tool re-hashes every raw file against the intake record, requires the
+staged manifest and the parse report to agree with it, builds the schema contract
+itself, and requires `--as-of-date` to equal the manifest cutoff. It does not
+re-run `verify`; run `verify` first. `native-artifacts.json` is informational.
+Interrupted `parse` runs resume over byte-identical partial output (the report is
+written last).

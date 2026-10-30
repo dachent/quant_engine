@@ -632,11 +632,22 @@ def parse_intake(intake_dir: Path) -> dict[str, object]:
     """Parse a staged intake through the reviewed contract; create-only outputs."""
 
     root, manifest, record = _load_intake(intake_dir)
-    if (root / _REPORT_FILE).exists() or (root / "normalized").exists():
+    if (root / _REPORT_FILE).exists():
         raise QuantbaseHarIntakeError("intake is already parsed; output is create-only")
     outputs = _parse(root, manifest, record)
-    for relative, content in outputs.items():
-        _write_new(root / relative, content)
+    # The report is the terminal marker: it is written last, and an interrupted
+    # earlier attempt resumes only over byte-identical partial outputs.
+    ordered = [_RECORDS_FILE, _NATIVE_FILE, _REPORT_FILE]
+    for relative in ordered:
+        target = root / relative
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or target.read_bytes() != outputs[relative]:
+                raise QuantbaseHarIntakeError(
+                    f"partial parse output differs and is create-only: {relative}"
+                )
+    for relative in ordered:
+        if not (root / relative).exists():
+            _write_new(root / relative, outputs[relative])
     report = json.loads(outputs[_REPORT_FILE])
     return {
         "flags": report["flags"],
