@@ -9,6 +9,7 @@ import pytest
 
 from alpaca_capture_support import (
     ACCOUNT_ID,
+    NUMBER_KEY,
     ScriptedFetcher,
     account_body,
     capture_config,
@@ -174,7 +175,7 @@ def test_other_statuses_stop_the_run(tmp_path: Path, status: int) -> None:
 
 
 def test_wrong_account_stops_before_any_further_read(tmp_path: Path) -> None:
-    script = [ok(account_body(id="SYNTH-OTHER", account_number="SYNTH-OTHER-2"))]
+    script = [ok(account_body(**{"id": "SYNTH-OTHER", NUMBER_KEY: "SYNTH-OTHER-2"}))]
     capture = capture_config()
     fetcher, inner, governance = governed(tmp_path, capture, script)
     with pytest.raises(CaptureIncomplete) as stopped:

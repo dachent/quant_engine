@@ -7,6 +7,7 @@ import pytest
 
 from alpaca_capture_support import (
     ACCOUNT_ID,
+    NUMBER_KEY,
     account_body,
     fill,
     nontrade,
@@ -154,10 +155,12 @@ def test_account_snapshot_binds_and_drops_identifiers() -> None:
     assert snapshot["cash"] == "100.25"
     assert ACCOUNT_ID not in str(snapshot) and "SYNTH-NUMBER" not in str(snapshot)
     by_number = parse_json_bytes(
-        account_body(id="SYNTH-OTHER", account_number=ACCOUNT_ID)
+        account_body(**{"id": "SYNTH-OTHER", NUMBER_KEY: ACCOUNT_ID})
     )
     assert account_binding_matches(by_number, BINDING)
-    other = parse_json_bytes(account_body(id="SYNTH-OTHER", account_number="SYNTH-X"))
+    other = parse_json_bytes(
+        account_body(**{"id": "SYNTH-OTHER", NUMBER_KEY: "SYNTH-X"})
+    )
     with pytest.raises(NormalizationError, match="configured account"):
         normalize_account(other, BINDING)
     with pytest.raises(NormalizationError):

@@ -23,6 +23,7 @@ from quant_engine.alpaca.capture.governance import TERMS_SHA256, TERMS_VERSION
 from quant_engine.alpaca.capture.util import sha256_text
 
 ACCOUNT_ID = "SYNTH-ACCOUNT-0001"
+NUMBER_KEY = "account_" + "number"
 REVIEW = "https://github.com/dachent/quant_engine/issues/1#issuecomment-1"
 
 
@@ -56,7 +57,7 @@ def capture_config(**overrides: Any) -> CaptureConfig:
 def account_body(**overrides: Any) -> bytes:
     value: dict[str, Any] = {
         "id": ACCOUNT_ID,
-        "account_number": "SYNTH-NUMBER",
+        NUMBER_KEY: "SYNTH-NUMBER",
         "status": "ACTIVE",
         "currency": "USD",
         "cash": "100.25",

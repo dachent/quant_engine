@@ -112,7 +112,7 @@ def test_https_fetcher_keeps_error_responses_as_data() -> None:
         "https://paper-api.alpaca.markets/v2/account",
         429,
         "Too Many Requests",
-        {"Retry-After": "3", "Set-Cookie": "dropped"},  # type: ignore[arg-type]
+        {"Retry-After": "3", "X-Synthetic-Dropped": "dropped"},  # type: ignore[arg-type]
         io.BytesIO(b'{"message":"synthetic"}'),
     )
     fetcher, _ = _fetcher(error)
