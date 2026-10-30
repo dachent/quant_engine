@@ -1122,6 +1122,7 @@ def test_the_report_epoch_set_names_the_retired_epochs_outside_it() -> None:
         "gain_of_all_epochs_usd": "0",
         "current_of_open_epochs_usd": "118",
         "epoch_count": 3,
+        "epoch_set": {"gain_of_outside_report_epochs_usd": "-3"},
     }
     block = tab.build_performance_tab(panel)
     cross = block["slices"]["flows"]["report_crosscheck"]
@@ -1150,3 +1151,78 @@ def test_the_report_epoch_set_names_the_retired_epochs_outside_it() -> None:
     retired_bad["lines"] = []
     with pytest.raises(tab.PerformanceTabError):
         tab.verify_performance_tab(bad, panel)
+
+
+def test_the_retired_component_derives_from_the_reports_unrounded_outside_gain() -> (
+    None
+):
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        if row.get("strategy_id") == "b":
+            row["gain"] = "-2.996"
+            row["effective_end"] = "2026-03-04"
+        else:
+            row["gain"] = "0"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+        "epoch_set": {"gain_of_outside_report_epochs_usd": "-2.994"},
+    }
+    block = tab.build_performance_tab(panel)
+    cross = block["slices"]["flows"]["report_crosscheck"]
+    retired = next(
+        c
+        for c in cross["components"]
+        if c["component_id"] == "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET"
+    )
+    # The line rounds to 300 cents; the component is the report's -2.994 rounded once.
+    assert [line["row_gain_cents"] for line in retired["lines"]] == [-300]
+    assert retired["amount_cents"] == 299
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_a_report_without_the_outside_gain_stops_the_crosscheck() -> None:
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        row["gain"] = "-3" if row.get("strategy_id") == "b" else "0"
+        if row.get("strategy_id") == "b":
+            row["effective_end"] = "2026-03-04"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+    }
+    block = tab.build_performance_tab(panel)
+    # The slices block names the missing figure; no figure is substituted.
+    assert block["slices"]["status"] == "UNAVAILABLE"
+    assert "gain_of_outside_report_epochs_usd" in block["slices"]["reason"]

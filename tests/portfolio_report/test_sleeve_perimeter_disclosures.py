@@ -580,3 +580,33 @@ def test_every_parent_account_of_a_product_strategy_is_reconciled_or_named(
         i["value"] for i in result["items"] if i["item"] == "Sleeve capital basis"
     )
     assert "exceeds all external capital" not in text
+
+
+def test_the_printed_remainder_is_the_sources_unattributed_amount_rounded_once() -> (
+    None
+):
+    reconciliation = {
+        "sleeves": [
+            {
+                "sleeve_id": "s1",
+                "account_id": "p",
+                "gain_from_first_day_nav": "2677.440211142",
+                "entry_day_difference": "-1263.557097",
+            }
+        ],
+        "entry_day_total": "-1263.557097",
+        "account_gain": "1441.075514128",
+        "sleeve_gain_total": "2677.440211142",
+        "unattributed": "27.192399999999999999999993",
+        "paid_in_after_anchor": "0",
+        "paid_in": "100",
+        "opening_nav": "100",
+        "anchor_day": "2026-01-01",
+        "last_day": "2026-02-01",
+    }
+    text = disclosures._perimeter_reconciliation(
+        reconciliation, [{"account_id": "p", "gain": "2677.440211142"}]
+    )
+    # The shown figures alone would give +27.20; the source says 27.1924.
+    assert "and +27.19 not attributed" in text
+    assert "+27.20" not in text

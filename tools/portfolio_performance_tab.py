@@ -147,6 +147,30 @@ def _cents(value: Decimal) -> int:
     return int((value * 100).quantize(_WHOLE))
 
 
+def _retired_component_cents(
+    reconciliation: Mapping[str, Any], retired: Sequence[Mapping[str, Any]]
+) -> int:
+    """The retired-epochs component, from the report's unrounded outside gain.
+
+    The report publishes ``epoch_set.gain_of_outside_report_epochs_usd`` exactly; the
+    component is that value rounded once, not the sum of per-line rounded cents
+    (which can differ by a cent).  The report always carries it, so its absence
+    stops the build.
+    """
+
+    outside = _mapping(reconciliation.get("epoch_set")).get(
+        "gain_of_outside_report_epochs_usd"
+    )
+    if outside is None:
+        raise PerformanceTabError(
+            "capital_reconciliation.epoch_set.gain_of_outside_report_epochs_usd "
+            f"is absent for {len(retired)} retired epochs"
+        )
+    with localcontext() as context:
+        context.prec = _PRECISION
+        return -_cents(_dec(outside, "gain of outside report epochs"))
+
+
 def _text(value: Decimal) -> str:
     return format(value, "f")
 
@@ -1337,7 +1361,9 @@ CROSSCHECK_NOTES: Final = {
         "The report's totals use only the governed epochs (invested_capital."
         "required_epochs); retired epochs that the slices still plot (closed sleeves "
         "of a parent account, retired provider funds) carry gains that are not in the "
-        "report's gain of all epochs.  Lines name each such epoch with its ledger gain."
+        "report's gain of all epochs.  The amount is the report's unrounded gain of the "
+        "outside epochs rounded once; lines name each such epoch with its ledger gain, "
+        "each rounded to the cent independently."
     ),
     "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS": (
         "DISCLOSED DIFFERENCE, not explained by the manifest rows: the report's "
@@ -1452,7 +1478,7 @@ def _report_crosscheck(
     gap = contributed - net
     closed = total_end_cents - report_current
     epoch_set = (
-        -sum(item["row_gain_cents"] for item in retired)
+        _retired_component_cents(reconciliation, retired)
         if report_keys is not None
         else gain - row_gain_total
     )
@@ -2021,7 +2047,7 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
             totals[-1] - current_open,
             -opening_total,
             (
-                -sum(int(item["row_gain_cents"]) for item in expected_retired)
+                _retired_component_cents(recon, expected_retired)
                 if report_keys is not None
                 else gain - row_gains
             ),
