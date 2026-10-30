@@ -359,7 +359,7 @@
         "status": { "enum": ["ELIGIBLE_PROVEN_COMPATIBLE", "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY", "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"] }
       }
     },
-    "account_summary": { "$ref": "#/$defs/rows_with_value_basis" },
+    "account_summary": { "$ref": "#/$defs/account_rows_with_value_basis" },
     "allocations": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "type": "object" } },
     "blocking_items": { "$ref": "#/$defs/rows" },
     "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
@@ -569,7 +569,7 @@
       "maxItems": 13,
       "items": { "type": "object" }
     },
-    "positions": { "$ref": "#/$defs/rows_with_value_basis" },
+    "positions": { "$ref": "#/$defs/position_rows_with_value_basis" },
     "position_snapshots": {
       "type": "object",
       "additionalProperties": false,
@@ -3463,7 +3463,16 @@
         "provider_finality_guarantee": { "const": false }
       }
     },
-    "rows_with_value_basis": {
+    "account_rows_with_value_basis": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "value_basis": { "$ref": "#/$defs/value_basis" }
+        }
+      }
+    },
+    "position_rows_with_value_basis": {
       "type": "array",
       "items": {
         "type": "object",
@@ -3474,6 +3483,7 @@
           {
             "if": { "required": ["value_basis"] },
             "then": {
+              "required": ["as_of_basis"],
               "properties": {
                 "as_of_basis": { "const": "DERIVED_FROM_OFFICIAL_CLOSES" }
               }

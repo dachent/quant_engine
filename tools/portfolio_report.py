@@ -4255,10 +4255,14 @@ def _derived_value_index(
         try:
             found.append(
                 {
-                    "accounts": frozenset(
-                        str(entry["account_id"]) for entry in patch["patches"]
-                    ),
-                    "dates": frozenset(str(d) for d in patch["patched_dates"]),
+                    # each account's derived dates are its OWN patched rows: the
+                    # validator allows per-entry subsets of the top-level dates
+                    "accounts": {
+                        str(entry["account_id"]): frozenset(
+                            str(d) for d in entry["patched_values"]
+                        )
+                        for entry in patch["patches"]
+                    },
                     "value_basis": {
                         "basis": str(patch["derivation_basis"]),
                         "derivation_record_sha256": str(
@@ -4291,7 +4295,7 @@ def _derived_value_basis(
     """The declared value basis of an account's value on a date, or None when observed."""
 
     for entry in index or []:
-        if account_id in entry["accounts"] and as_of_date in entry["dates"]:
+        if as_of_date in entry["accounts"].get(account_id, ()):
             return dict(entry["value_basis"])
     return None
 

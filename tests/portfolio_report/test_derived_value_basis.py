@@ -20,7 +20,18 @@ H_CLOSES = "c" * 64
 H_RECORD = "d" * 64
 
 
-def _evidence(tmp_path: Path, accounts: list[str], dates: list[str]) -> dict[str, Any]:
+def _evidence(
+    tmp_path: Path,
+    accounts: list[str] | dict[str, list[str]],
+    dates: list[str],
+) -> dict[str, Any]:
+    """Evidence naming ``accounts``; a mapping gives each account its own patched dates."""
+
+    per_account = (
+        accounts
+        if isinstance(accounts, dict)
+        else {account: list(dates) for account in accounts}
+    )
     document = {
         "derived_patch": {
             "derivation_basis": DERIVED,
@@ -35,7 +46,10 @@ def _evidence(tmp_path: Path, accounts: list[str], dates: list[str]) -> dict[str
                 "sha256": H_RECORD,
                 "size_bytes": 1,
             },
-            "patches": [{"account_id": a} for a in accounts],
+            "patches": [
+                {"account_id": a, "patched_values": {d: "1" for d in days}}
+                for a, days in per_account.items()
+            ],
         }
     }
     raw = json.dumps(document).encode("utf-8")
@@ -223,7 +237,9 @@ def test_account_nav_rows_name_the_basis_only_where_declared(
     assert "value_basis" not in rows["acct-native"]
 
 
-def _row_errors(rows: list[dict[str, Any]]) -> list[str]:
+def _row_errors(
+    rows: list[dict[str, Any]], definition: str = "position_rows_with_value_basis"
+) -> list[str]:
     from jsonschema import Draft202012Validator
 
     schema_path = (
@@ -232,7 +248,7 @@ def _row_errors(rows: list[dict[str, Any]]) -> list[str]:
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     validator = Draft202012Validator(
-        {"$ref": "#/$defs/rows_with_value_basis", "$defs": schema["$defs"]}
+        {"$ref": f"#/$defs/{definition}", "$defs": schema["$defs"]}
     )
     return [e.message for e in validator.iter_errors(rows)]
 
@@ -284,3 +300,67 @@ def test_a_pinned_file_that_is_not_json_declares_no_derived_patch(
         }
     }
     assert reporter._derived_value_index(phase) == []
+
+
+def test_each_account_is_derived_only_on_its_own_patched_dates(tmp_path: Path) -> None:
+    """A patches D2 only, B patches D1 only: the crossed pairs (A, D1) and (B, D2) stay observed."""
+
+    d1, d2 = "2026-09-16", "2026-09-17"
+    phase = _evidence(tmp_path, {"acct-a": [d2], "acct-b": [d1]}, [d1, d2])
+    index = reporter._derived_value_index(phase)
+    assert reporter._derived_value_basis(index, "acct-a", d2) is not None
+    assert reporter._derived_value_basis(index, "acct-b", d1) is not None
+    assert reporter._derived_value_basis(index, "acct-a", d1) is None
+    assert reporter._derived_value_basis(index, "acct-b", d2) is None
+    catalog = {
+        "positions": [
+            {
+                "account_id": a,
+                "as_of_date": d,
+                "mapping_status": "MAPPED",
+                "market_value": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "1",
+                },
+                "quantity": "1",
+                "security_id": f"sec-{a}-{d}",
+                "strategy_id": "strategy-1",
+                "as_of_basis": CAPTURED,
+            }
+            for a, d in (("acct-a", d1), ("acct-a", d2), ("acct-b", d1), ("acct-b", d2))
+        ]
+    }
+    by_key = {
+        (r["account_id"], r["as_of_date"]): r
+        for r in reporter._positions(catalog, None, index)
+    }
+    assert by_key[("acct-a", d2)]["as_of_basis"] == DERIVED
+    assert by_key[("acct-b", d1)]["as_of_basis"] == DERIVED
+    assert (
+        by_key[("acct-a", d1)]["as_of_basis"] == CAPTURED
+        and "value_basis" not in by_key[("acct-a", d1)]
+    )
+    assert (
+        by_key[("acct-b", d2)]["as_of_basis"] == CAPTURED
+        and "value_basis" not in by_key[("acct-b", d2)]
+    )
+
+
+def test_a_position_row_with_value_basis_must_state_the_derived_as_of_basis() -> None:
+    basis = {
+        "basis": DERIVED,
+        "derivation_record_sha256": H_RECORD,
+        "finality_evidence_sha256": "e" * 64,
+        "official_closes_manifest_sha256": H_CLOSES,
+        "provider_finality_guarantee": False,
+    }
+    assert _row_errors([{"value_basis": basis}])  # no as_of_basis at all: refused
+    assert _row_errors([{"value_basis": basis, "as_of_basis": CAPTURED}])
+    assert _row_errors([{"value_basis": basis, "as_of_basis": DERIVED}]) == []
+    # an account row has no as_of_basis by design and still validates with the field
+    assert _row_errors([{"value_basis": basis}], "account_rows_with_value_basis") == []
+    assert _row_errors(
+        [{"value_basis": {**basis, "provider_finality_guarantee": True}}],
+        "account_rows_with_value_basis",
+    )
