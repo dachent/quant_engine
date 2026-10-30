@@ -119,5 +119,5 @@ fi
 
 echo "== execute --commit =="
 "$PY" tools/data_pipeline.py execute --spec "$P/production-spec.json" \
-  --commit --commit-authorization "$P/commit-authorization.json" > "$P/execute.json"
+  --commit --commit-authorization "$P/commit-authorization.json" \n  --replica-receipt "${REPLICA_RECEIPT:?set REPLICA_RECEIPT to the replica-receipt.json from tools/release_replica.py ceremony|lanes}" \n  > "$P/execute.json"
 cat "$P/execute.json"

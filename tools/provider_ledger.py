@@ -42,6 +42,7 @@ from quant_engine.core import (
     rename_directory_with_retry,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core.publication import CurrentPointer
 from quant_engine.portfolio_ledger import (
     AdmissionDisposition,
@@ -101,7 +102,7 @@ for _descriptor in (
     ProviderDescriptor(
         provider_id="ibkr",
         catalog_filename="ibkr-catalog.json",
-        catalog_schema_versions=frozenset({3, 4, 5, 6, 7}),
+        catalog_schema_versions=frozenset({3, 4, 5, 6, 7, 8}),
         account_facts=(
             "capital_anchors",
             "corporate_actions",
@@ -4898,14 +4899,23 @@ def _project_account_facts(
                 # when the source states them, so a catalog fact is never
                 # dropped here.  A ``None`` is no fact and adds no key.
                 for field in (
+                    "asset_category",
                     "close_price",
                     "commission",
                     "event_time",
                     "executed_time",
+                    "expiry",
                     "fees_and_commission",
+                    "listing_exchange",
                     "mark_price",
+                    "multiplier",
                     "order_reference",
+                    "put_call",
+                    "strike",
+                    "sub_category",
+                    "symbol",
                     "timing_granularity",
+                    "underlying_conid_sha256",
                 ):
                     if row.get(field) is not None:
                         record[field] = row[field]
@@ -7471,6 +7481,9 @@ def _refresh_strategy_evidence(
             refreshed_row.pop("account", None)
         if accepted_provider_rows or prior_provider:
             provider_generation = provider_generations.get(provider_provider_id)
+            if accepted_provider_rows:
+                # An admitted path supersedes a prior declaration that none existed.
+                refreshed_row.pop("provider_live", None)
             refreshed_row["provider"] = {
                 **prior_provider,
                 **(
@@ -7493,7 +7506,47 @@ def _refresh_strategy_evidence(
                 "provider_id": provider_provider_id,
             }
         refreshed.append(refreshed_row)
+    _require_distinct_provider_live_blocks(refreshed)
     return refreshed
+
+
+def _require_distinct_provider_live_blocks(
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Refuse strategy evidence whose provider-live block is another strategy's copy.
+
+    A prior receipt's provider block is carried forward whenever no provider returns
+    are admitted for the strategy, so a block pasted into the wrong row would otherwise
+    survive every rebuild and be presented as that strategy's own provider-live book.
+    A strategy whose provider-live path is not admitted declares so with a
+    `provider_live` object instead of carrying a path.
+    """
+
+    for row in rows:
+        declared = row.get("provider_live")
+        if declared is None:
+            continue
+        if (
+            not isinstance(declared, Mapping)
+            or declared.get("status") != "UNAVAILABLE"
+            or not isinstance(declared.get("reason_code"), str)
+            or not declared["reason_code"]
+        ):
+            raise ProviderLedgerError(
+                "strategy evidence provider_live must declare status UNAVAILABLE "
+                f"with a reason_code: {row.get('strategy_id')}"
+            )
+        if row.get("provider") is not None:
+            raise ProviderLedgerError(
+                "strategy evidence carries a provider-live path and declares it "
+                f"unavailable: {row.get('strategy_id')}"
+            )
+    shared = shared_provider_live_blocks(rows)
+    if shared:
+        raise ProviderLedgerError(
+            "strategy evidence provider-live block is shared by strategies: "
+            + ", ".join(f"{first}={second}" for first, second in shared)
+        )
 
 
 def _portfolio123_provider_returns(

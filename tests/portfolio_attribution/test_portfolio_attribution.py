@@ -50,6 +50,7 @@ def _baseline(
     strategy_version_refs: dict[str, str] | None = None,
     baseline_schema_version: int = 1,
     cost_rows: dict[int, tuple[str | None, str]] | None = None,
+    cost_extra: dict[int, dict[str, object]] | None = None,
 ) -> Path:
     root = tmp_path / "baseline"
     version_refs = strategy_version_refs or {}
@@ -110,6 +111,7 @@ def _baseline(
                     else "unknown"
                 ),
                 "strategy_id": f"strategy-{index}",
+                **((cost_extra or {}).get(index, {})),
             }
             for index in range(1, 10)
         ],
@@ -1643,3 +1645,30 @@ def test_receipt_bound_daily_exact_endpoint_or_cut_is_explicit(
         else:
             assert catalog[name][0]["metrics"]["account_cumulative_return"] == expected
             assert catalog[name][0]["metrics"]["observations"] == 2
+
+
+def test_declared_basis_and_execution_cost_ride_the_cost_row(tmp_path: Path) -> None:
+    """R2.1 Q1: the baseline's evidence keys reach the attribution cost row unchanged."""
+
+    extra = {
+        "cost_class": "SUBSCRIPTION",
+        "declared": {"amount": "50", "period": "MONTH"},
+        "corroboration": [{"kind": "CARD_FEED_OBSERVED_CHARGES"}],
+        "execution_cost": {"status": "AVAILABLE", "usd_total": "2"},
+    }
+    baseline = _baseline(
+        tmp_path,
+        cost_rows={1: ("600", "known_subscription_provider_declared")},
+        cost_extra={1: extra},
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    row = catalog["costs"][0]
+    assert {key: row[key] for key in attribution.COST_EVIDENCE_KEYS} == extra
+    assert row["fees_status"] == "EVIDENCED_PRE_TAX"
+    assert all(key not in catalog["costs"][1] for key in extra)
+    assert tuple(attribution.COST_EVIDENCE_KEYS) == tuple(
+        __import__("portfolio_report").COST_EVIDENCE_KEYS
+    )
