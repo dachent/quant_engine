@@ -190,68 +190,122 @@ def _line(block: dict[str, Any], mode: str, series_id: str) -> dict[str, Any]:
 # ------------------------------------------------------------ weekly lines
 
 
-def test_live_only_window_origin_and_equal_weight() -> None:
+def test_live_only_grid_is_the_union_with_nulls_and_an_anchor_at_the_last_start() -> (
+    None
+):
     block = tab.build_performance_tab(_panel())
     mode = block["modes"]["LIVE_ONLY"]
-    assert mode["common_start_date"] == WEEKS[4]
-    assert mode["common_start_set_by"] in {"strategy:A one", "strategy:B two"}
+    # C (live from week 3) opens the union; A and B start live in week 4.
+    assert mode["union_start_date"] == WEEKS[3]
+    assert mode["union_start_set_by"] == "strategy:C three"
+    assert mode["group_anchor_date"] == WEEKS[4]
+    assert mode["group_anchor_index"] == 1
+    assert mode["common_start_date"] == mode["group_anchor_date"]
+    assert mode["common_start_set_by"] == mode["group_anchor_set_by"]
+    assert mode["group_anchor_set_by"] in {"strategy:A one", "strategy:B two"}
     assert mode["first_observation_common_start"] == WEEKS[4]
-    assert mode["dates"] == WEEKS[4:]
+    assert mode["base_point"] == "START_OF_EACH_LINE_FIRST_WEEK"
+    assert mode["dates"] == WEEKS[3:]
     assert mode["gaps_before_common_start"] == []
-    for line in mode["lines"]:
-        assert line["origin"] == [[0, 3, "LIVE"]]
+    a = _line(block, "LIVE_ONLY", "strategy:A one")
+    assert a["tri"][0] is None and a["tri"][1] == 1.01
+    assert (a["first_week"], a["first_index"], a["last_index"]) == (WEEKS[4], 1, 4)
+    assert a["segments"] == [[1, 4]] and a["origin"] == [[1, 4, "LIVE"]]
+    c = _line(block, "LIVE_ONLY", "strategy:C three")
+    assert c["first_index"] == 0 and c["origin"] == [[0, 4, "LIVE"]]
     expected = Decimal(1)
     for _ in range(4):
         expected *= (
             Decimal("1") + (Decimal("0.01") - Decimal("0.005") + Decimal("0.02")) / 3
         )
-    assert _line(block, "LIVE_ONLY", "portfolio:equal_weight")["tri"][-1] == float(
-        round(expected, 8)
-    )
-    assert _line(block, "LIVE_ONLY", "strategy:A one")["tri"][0] == 1.01
+    ew = _line(block, "LIVE_ONLY", "portfolio:equal_weight")
+    assert ew["tri"][0] is None and ew["tri"][-1] == float(round(expected, 8))
+    assert ew["member_count"] == 3 and ew["first_week"] == WEEKS[4]
+    available = _line(block, "LIVE_ONLY", "portfolio:equal_weight_available")
+    assert available["member_counts"] == [1, 3, 3, 3, 3]
+    assert available["first_index"] == 0
+    tab.verify_performance_tab(block, _panel())
 
 
-def test_hybrid_window_starts_where_the_last_series_begins() -> None:
+def test_hybrid_grid_runs_back_to_the_earliest_line_and_names_the_unfilled_gap() -> (
+    None
+):
     mode = tab.build_performance_tab(_panel())["modes"]["LIVE_PLUS_BACKTEST"]
     assert mode["status"] == "AVAILABLE"
-    # C starts at week 3 (live-only fallback); B is missing weeks 1 and 2.
+    assert mode["dates"] == WEEKS and mode["union_start_date"] == WEEKS[0]
+    # B is missing weeks 1 and 2 (unfilled), so the group anchor is week 3.
+    assert mode["group_anchor_date"] == WEEKS[3] and mode["group_anchor_index"] == 3
+    assert mode["group_anchor_set_by"] == "strategy:B two"
     assert mode["first_observation_common_start"] == WEEKS[3]
     assert mode["first_observation_set_by"] == "strategy:C three"
-    assert mode["common_start_date"] == WEEKS[3]
-    gaps = mode["gaps_before_common_start"]
-    assert gaps == []  # B's gap lies before the first common observation
-    assert mode["dates"] == WEEKS[3:]
+    assert mode["gaps_before_common_start"] == [
+        {
+            "series_id": "strategy:B two",
+            "missing_weeks": 2,
+            "first_missing_week": WEEKS[1],
+            "last_missing_week": WEEKS[2],
+        }
+    ]
+    b = next(line for line in mode["lines"] if line["series_id"] == "strategy:B two")
+    assert b["segments"] == [[0, 0], [3, 7]]
+    assert b["tri"][1] is None and b["tri"][2] is None
+    # Each segment restarts at 1.0 immediately before its first week.
+    assert b["tri"][0] == 0.995 and b["tri"][3] == 0.995
 
 
 def test_hybrid_origin_marks_backtest_mixed_and_live_by_the_live_start() -> None:
     block = tab.build_performance_tab(_panel())
     a = _line(block, "LIVE_PLUS_BACKTEST", "strategy:A one")
-    # Weeks 3.. : week 3 backtest, week 4 (2026-02-02, live from the 4th) mixed.
-    assert a["origin"] == [[0, 0, "BACKTEST"], [1, 1, "MIXED"], [2, 4, "LIVE"]]
+    assert a["origin"] == [[0, 3, "BACKTEST"], [4, 4, "MIXED"], [5, 7, "LIVE"]]
     c = _line(block, "LIVE_PLUS_BACKTEST", "strategy:C three")
     assert c["source_mode"] == "LIVE_ONLY_FALLBACK"
-    assert c["origin"] == [[0, 4, "LIVE"]]
+    assert c["origin"] == [[3, 7, "LIVE"]]
     ew = _line(block, "LIVE_PLUS_BACKTEST", "portfolio:equal_weight")
+    assert ew["first_index"] == 3 and ew["tri"][2] is None
     assert ew["origin"][0][2] == "MIXED" and ew["origin"][-1][2] == "LIVE"
     assert "weekly" in ew["definition"] and "never filled with zero" in ew["definition"]
 
 
-def test_a_gap_after_the_first_common_observation_starts_the_window_later() -> None:
+def test_provider_model_and_derived_weeks_take_their_declared_origin() -> None:
+    panel = _panel()
+    hybrid_meta = panel["weekly_returns"]["series"][0]["observation_meta_by_mode"][
+        "LIVE_PLUS_BACKTEST"
+    ]
+    hybrid_meta[WEEKS[1]][4] = ["ORIGIN_PROVIDER_MODEL_LIVE"]
+    hybrid_meta[WEEKS[2]][4] = ["ORIGIN_DERIVED"]
+    block = tab.build_performance_tab(panel)
+    a = _line(block, "LIVE_PLUS_BACKTEST", "strategy:A one")
+    assert a["origin"][:4] == [
+        [0, 0, "BACKTEST"],
+        [1, 1, "PROVIDER_MODEL_LIVE"],
+        [2, 2, "DERIVED"],
+        [3, 3, "BACKTEST"],
+    ]
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+    live_only = _line(block, "LIVE_ONLY", "strategy:A one")
+    assert {run[2] for run in live_only["origin"]} == {"LIVE"}
+
+
+def test_a_gap_after_the_first_common_observation_moves_the_anchor_not_the_grid() -> (
+    None
+):
     panel = _panel()
     series = panel["weekly_returns"]["series"]
     del series[1]["values_by_mode"]["LIVE_PLUS_BACKTEST"][WEEKS[4]]
     mode = tab.build_performance_tab(panel)["modes"]["LIVE_PLUS_BACKTEST"]
     assert mode["first_observation_common_start"] == WEEKS[3]
-    assert mode["common_start_date"] == WEEKS[5]
+    assert mode["group_anchor_date"] == WEEKS[5]
     assert mode["common_start_set_by"] == "strategy:B two"
     assert mode["gaps_before_common_start"] == [
         {
             "series_id": "strategy:B two",
-            "missing_weeks": 1,
-            "first_missing_week": WEEKS[4],
+            "missing_weeks": 3,
+            "first_missing_week": WEEKS[1],
             "last_missing_week": WEEKS[4],
         }
     ]
+    assert mode["dates"] == WEEKS
     tab.verify_performance_tab(tab.build_performance_tab(panel), panel)
 
 
@@ -607,28 +661,39 @@ def test_admitted_spy_and_spxl_become_total_return_lines_without_origin() -> Non
         assert spy["basis"] == "TOTAL_RETURN_ETF_PROXY"
         assert len(spy["tri"]) == len(block["modes"][mode]["dates"])
         assert block["modes"][mode]["benchmarks_unavailable"] == []
-    assert _line(block, "LIVE_ONLY", "market:SPY")["tri"][0] == 1.004
-    assert _line(block, "LIVE_ONLY", "market:SPXL")["tri"][1] == round(1.012**2, 8)
+    assert _line(block, "LIVE_PLUS_BACKTEST", "market:SPY")["tri"][0] == 1.004
+    assert _line(block, "LIVE_PLUS_BACKTEST", "market:SPXL")["tri"][1] == round(
+        1.012**2, 8
+    )
+    assert block["benchmarks"][0]["first_week"] == WEEKS[0]
+    assert block["benchmarks"][0]["daily"]["status"] == "UNAVAILABLE"
     assert "ITOT" not in json.dumps(block)
     tab.verify_performance_tab(block, panel)
     assert list(_schema_validator().iter_errors(block)) == []
 
 
-def test_a_benchmark_with_a_missing_week_is_named_per_mode_not_zero_filled() -> None:
+def test_a_benchmark_that_ends_early_is_null_after_its_last_week_not_zero_filled() -> (
+    None
+):
     panel = _panel_with_benchmarks(spxl_weeks=WEEKS[:6])
     block = tab.build_performance_tab(panel)
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
-        assert block["modes"][mode]["benchmarks_unavailable"] == [
-            {
-                "series_id": "market:SPXL",
-                "reason": f"MISSING_WEEK:market:SPXL:{WEEKS[6]}",
-            }
-        ]
-        assert all(
-            line["series_id"] != "market:SPXL" for line in block["modes"][mode]["lines"]
-        )
+        line = _line(block, mode, "market:SPXL")
+        assert line["tri"][-2:] == [None, None]
+        assert line["last_index"] == len(line["tri"]) - 3
+        assert block["modes"][mode]["benchmarks_unavailable"] == []
     tab.verify_performance_tab(block, panel)
     assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_a_benchmark_without_any_week_in_the_grid_is_named_not_drawn() -> None:
+    panel = _panel_with_benchmarks(spxl_weeks=["2027-01-04"])
+    block = tab.build_performance_tab(panel)
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        assert block["modes"][mode]["benchmarks_unavailable"] == [
+            {"series_id": "market:SPXL", "reason": "NO_WEEK_IN_GRID:market:SPXL"}
+        ]
+    tab.verify_performance_tab(block, panel)
 
 
 def test_the_verifier_rejects_a_tampered_or_invented_benchmark_line() -> None:
@@ -652,7 +717,7 @@ def test_the_verifier_rejects_a_benchmark_line_outside_the_admitted_pair() -> No
     bad["modes"]["LIVE_ONLY"]["lines"].append(invented)
     with pytest.raises(tab.PerformanceTabError):
         tab.verify_performance_tab(bad, panel)
-    assert block["schema_version"] == 2
+    assert block["schema_version"] == 3
 
 
 def test_a_wholly_unavailable_593_block_passes_its_reason_through() -> None:
@@ -811,3 +876,422 @@ def test_the_residual_label_quotes_the_memo_remainder_and_the_closed_epoch_cash(
     tab.verify_performance_tab(tab.build_performance_tab(panel), panel)
     # a remainder the panel does not carry leaves the label as before, naming the memo
     assert "when that block carries it" in base["residual_label"]
+
+
+# ------------------------------------------------ flow-matched benchmark dollars (Q8)
+
+
+def _daily_returns(step: str) -> dict[str, Any]:
+    days = [date(2026, 2, 20) + timedelta(days=i) for i in range(20)]
+    return {
+        "source_id": "yahoo-adjusted-etf-daily",
+        "returns": {d.isoformat(): step for d in days if d.weekday() < 5},
+    }
+
+
+def test_slice_flows_cancel_the_handoff_and_reconcile_to_the_slice_total() -> None:
+    flows = tab.build_performance_tab(_panel())["slices"]["flows"]
+    # 03-01: a1 100 + c 10; 03-02: b 50; 03-03: b link flow 5; 03-04: a1 closes (-102)
+    # and its same-account successor a2 opens (+102); 03-05: b closes (-52).
+    assert flows["net_flow_cents"] == [11000, 5000, 500, 0, -5200]
+    assert flows["opening_cents"][3] == 10200 and flows["closing_cents"][3] == 10200
+    assert flows["total_contributed_cents"] == 11300
+    total = tab.build_performance_tab(_panel())["slices"]["reconciliation"][
+        "total_cents"
+    ]
+    assert flows["implied_pnl_cents"] == total[-1] - 11300 == 500
+    assert flows["report_crosscheck"] is None
+
+
+def test_flow_matched_dollars_on_the_weekly_index_match_a_direct_sum() -> None:
+    panel = _panel_with_benchmarks()
+    block = tab.build_performance_tab(panel, allow_weekly_fallback=True)
+    spy = block["slices"]["benchmarks"][0]
+    assert spy["status"] == "AVAILABLE" and spy["method"] == "FLOW_MATCHED"
+    assert spy["tri_basis"] == "WEEKLY_TOTAL_RETURN_INDEX"
+    assert spy["flow_timing"] == "FLOW_WEEK_START"
+    # The week ending 2026-03-06 is the first observed in the window; before it the
+    # index is the level at the end of the prior week.
+    assert len(spy["nav_cents"]) == len(block["slices"]["dates"])
+    assert spy["end_value_cents"] == spy["nav_cents"][-1]
+    assert (
+        spy["portfolio_minus_benchmark_cents"]
+        == block["slices"]["reconciliation"]["total_cents"][-1] - spy["end_value_cents"]
+    )
+    assert spy["trailing"]["1w"] is None or isinstance(spy["trailing"]["1w"], str)
+    tab.verify_performance_tab(block, panel, allow_weekly_fallback=True)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_daily_series_make_flow_matching_exact_per_day() -> None:
+    panel = _panel_with_benchmarks()
+    daily = {
+        "market:SPY": _daily_returns("0.01"),
+        "market:SPXL": _daily_returns("0.02"),
+    }
+    block = tab.build_performance_tab(panel, daily)
+    spy = block["slices"]["benchmarks"][0]
+    assert spy["tri_basis"] == "DAILY_ADJUSTED_CLOSE"
+    assert spy["flow_timing"] == "FLOW_DATE_CLOSE"
+    assert block["benchmarks"][0]["daily"] == {
+        "status": "AVAILABLE",
+        "source_id": "yahoo-adjusted-etf-daily",
+        "first_date": "2026-02-20",
+        "last_date": "2026-03-11",
+        "reason": None,
+    }
+    # Day 1 (03-01) flow 110 enters on a Sunday level, then compounds 1% per
+    # trading day: 03-02..03-05 are four trading days after the 03-01 flow.
+    flows = block["slices"]["flows"]["net_flow_cents"]
+    expected = Decimal(0)
+    level_by_day: dict[date, Decimal] = {}
+    level = Decimal(1)
+    for offset in range(20):
+        day = date(2026, 2, 20) + timedelta(days=offset)
+        if day.isoformat() in daily["market:SPY"]["returns"]:
+            level *= Decimal("1.01")
+        level_by_day[day] = level
+    for i, flow in enumerate(flows):
+        day = date(2026, 3, 1) + timedelta(days=i)
+        expected += Decimal(flow) * level_by_day[date(2026, 3, 5)] / level_by_day[day]
+    assert abs(Decimal(spy["end_value_cents"]) - expected) <= Decimal("1.01")
+    tab.verify_performance_tab(block, panel, daily)
+    assert list(_schema_validator().iter_errors(block)) == []
+    # A daily series that stops before the weekly one is not used, and says so.
+    full = _daily_returns("0.01")
+    short = {
+        "market:SPY": {
+            "source_id": full["source_id"],
+            "returns": {k: v for k, v in full["returns"].items() if k < "2026-03-01"},
+        }
+    }
+    refused = tab.build_performance_tab(panel, short)
+    entry = refused["slices"]["benchmarks"][0]
+    assert entry["status"] == "UNAVAILABLE" and entry["nav_cents"] is None
+    assert entry["reason"] == (
+        "DAILY_SERIES_REQUIRED:DAILY_SERIES_ENDS_BEFORE_THE_LAST_WEEKLY_OBSERVATION"
+    )
+    tab.verify_performance_tab(refused, panel, short)
+    fallback = tab.build_performance_tab(panel, short, allow_weekly_fallback=True)
+    assert (
+        fallback["slices"]["benchmarks"][0]["tri_basis"] == "WEEKLY_TOTAL_RETURN_INDEX"
+    )
+    assert fallback["benchmarks"][0]["daily"]["reason"] == (
+        "DAILY_SERIES_ENDS_BEFORE_THE_LAST_WEEKLY_OBSERVATION"
+    )
+    tab.verify_performance_tab(fallback, panel, short, allow_weekly_fallback=True)
+
+
+def test_flow_matched_dollars_without_an_admitted_benchmark_are_unavailable() -> None:
+    block = tab.build_performance_tab(_panel())
+    for entry in block["slices"]["benchmarks"]:
+        assert entry["status"] == "UNAVAILABLE" and entry["reason"] == "NOT_ADMITTED"
+        assert entry["nav_cents"] is None and entry["trailing"] is None
+    tab.verify_performance_tab(block, _panel())
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _tamper(["slices", "benchmarks", 0, "nav_cents", 4], 1),
+        _tamper(["slices", "benchmarks", 1, "tri", 3], 9.0),
+        _tamper(["slices", "benchmarks", 0, "trailing", "1w"], "0.5"),
+        _tamper(["slices", "flows", "net_flow_cents", 0], 1),
+        _tamper(["slices", "flows", "internal_cancellation", "net_cents"], 1),
+        _tamper(["modes", "LIVE_PLUS_BACKTEST", "group_anchor_index"], 0),
+        _tamper(["modes", "LIVE_PLUS_BACKTEST", "lines", 1, "segments"], [[0, 7]]),
+        _tamper(["benchmarks", 0, "daily", "last_date"], "2020-01-01"),
+    ],
+)
+def test_the_verifier_rejects_a_tampered_benchmark_dollar_or_flow(mutate: Any) -> None:
+    panel = _panel_with_benchmarks()
+    daily = {
+        "market:SPY": _daily_returns("0.01"),
+        "market:SPXL": _daily_returns("0.02"),
+    }
+    block = copy.deepcopy(tab.build_performance_tab(panel, daily))
+    tab.verify_performance_tab(block, panel, daily)
+    mutate(block)
+    with pytest.raises((tab.PerformanceTabError, KeyError, IndexError, TypeError)):
+        tab.verify_performance_tab(block, panel, daily)
+
+
+def test_the_report_crosscheck_names_components_that_sum_to_the_gap() -> None:
+    panel = _panel()
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "5.25",
+        "current_of_open_epochs_usd": "118.04",
+        "epoch_count": 3,
+    }
+    block = tab.build_performance_tab(panel)
+    cross = block["slices"]["flows"]["report_crosscheck"]
+    assert cross["report_net_capital_cents"] == 11250
+    assert cross["trace_contributed_cents"] == 11300
+    assert cross["contributed_minus_report_cents"] == 50
+    assert cross["report_gain_cents"] == 525 and cross["manifest_row_count"] == 4
+    ids = [c["component_id"] for c in cross["components"]]
+    assert ids == [
+        "CLOSED_EPOCH_VALUE_AT_CUTOFF",
+        "OPENING_BASIS_TRACE_VS_LEDGER",
+        "REPORT_GAIN_NOT_ON_PLOTTED_EPOCH_ROWS",
+        "UNRECONCILED_REMAINDER",
+    ]
+    assert sum(c["amount_cents"] for c in cross["components"]) == 50
+    # No governed epoch list: the gain difference and the remainder are disclosed.
+    assert [c["explained"] for c in cross["components"]] == [True, True, False, False]
+    assert cross["components"][0]["amount_cents"] == 11800 - 11804
+    assert len(cross["components"][1]["lines"]) == 4
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+    bad = copy.deepcopy(block)
+    bad["slices"]["flows"]["report_crosscheck"]["components"][2]["amount_cents"] += 1
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(bad, panel)
+
+
+def test_without_a_daily_series_the_flow_matched_dollars_are_refused_not_weekly() -> (
+    None
+):
+    panel = _panel_with_benchmarks()
+    block = tab.build_performance_tab(panel)
+    for entry in block["slices"]["benchmarks"]:
+        assert entry["status"] == "UNAVAILABLE"
+        assert entry["reason"] == (
+            "DAILY_SERIES_REQUIRED:"
+            "DAILY_SERIES_NOT_SUPPLIED_TO_THE_PERFORMANCE_TAB_BUILDER"
+        )
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_the_daily_block_of_the_weekly_returns_generation_is_read_in_its_own_shape() -> (
+    None
+):
+    panel = _panel_with_benchmarks()
+    daily = {
+        "market:SPY": _daily_returns("0.01"),
+        "market:SPXL": _daily_returns("0.02"),
+    }
+    panel["weekly_returns"]["daily_benchmark_returns"] = {
+        "status": "AVAILABLE",
+        "source_id": "yahoo-adjusted-etf-daily",
+        "series": [
+            {
+                "series_id": series_id,
+                "dates": sorted(item["returns"]),
+                "returns": [item["returns"][d] for d in sorted(item["returns"])],
+            }
+            for series_id, item in daily.items()
+        ],
+    }
+    block = tab.build_performance_tab(panel)
+    assert [b["tri_basis"] for b in block["slices"]["benchmarks"]] == [
+        "DAILY_ADJUSTED_CLOSE"
+    ] * 2
+    assert block["benchmarks"][0]["daily"]["source_id"] == "yahoo-adjusted-etf-daily"
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_the_report_epoch_set_names_the_retired_epochs_outside_it() -> None:
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        if row.get("strategy_id") == "b":
+            row["gain"] = "-3"
+            row["effective_end"] = "2026-03-04"
+        else:
+            row["gain"] = "0"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+        "epoch_set": {"gain_of_outside_report_epochs_usd": "-3"},
+    }
+    block = tab.build_performance_tab(panel)
+    cross = block["slices"]["flows"]["report_crosscheck"]
+    retired = next(
+        c
+        for c in cross["components"]
+        if c["component_id"] == "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET"
+    )
+    assert retired["explained"] is True and retired["amount_cents"] == 300
+    assert [
+        (line["strategy_id"], line["row_gain_cents"]) for line in retired["lines"]
+    ] == [("b", -300)]
+    assert cross["retired_epoch_count"] == 1 and cross["report_epoch_count"] == 3
+    assert (
+        sum(c["amount_cents"] for c in cross["components"])
+        == (cross["contributed_minus_report_cents"])
+    )
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+    bad = copy.deepcopy(block)
+    retired_bad = next(
+        c
+        for c in bad["slices"]["flows"]["report_crosscheck"]["components"]
+        if c["component_id"] == "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET"
+    )
+    retired_bad["lines"] = []
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(bad, panel)
+
+
+def test_the_flow_identity_closes_with_the_published_rounding_on_every_day() -> None:
+    panel = _panel_with_benchmarks()
+    # 0.006 + 0.006 rounds apart (1c + 1c) but together is 0.012 (1c): the net flow
+    # is rounded once from the exact amount and rounding_cents carries the day's cent.
+    panel["account_manifest"]["rows"][0]["observation_trace"]["links"][0][
+        "net_flow"
+    ] = "0.006"
+    panel["account_manifest"]["rows"][2]["observation_trace"]["links"][1][
+        "net_flow"
+    ] = "0.006"
+    block = tab.build_performance_tab(panel)
+    flows = block["slices"]["flows"]
+    for index, net in enumerate(flows["net_flow_cents"]):
+        assert (
+            net
+            == flows["link_net_flow_cents"][index]
+            + flows["opening_cents"][index]
+            - flows["closing_cents"][index]
+            + flows["rounding_cents"][index]
+        )
+        assert abs(flows["rounding_cents"][index]) <= 1
+    assert sum(flows["net_flow_cents"]) == flows["total_contributed_cents"]
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_the_retired_component_derives_from_the_reports_unrounded_outside_gain() -> (
+    None
+):
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        if row.get("strategy_id") == "b":
+            row["gain"] = "-2.996"
+            row["effective_end"] = "2026-03-04"
+        else:
+            row["gain"] = "0"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+        "epoch_set": {"gain_of_outside_report_epochs_usd": "-2.994"},
+    }
+    block = tab.build_performance_tab(panel)
+    cross = block["slices"]["flows"]["report_crosscheck"]
+    retired = next(
+        c
+        for c in cross["components"]
+        if c["component_id"] == "RETIRED_EPOCHS_OUTSIDE_REPORT_EPOCH_SET"
+    )
+    # The line rounds to 300 cents; the component is the report's -2.994 rounded once.
+    assert [line["row_gain_cents"] for line in retired["lines"]] == [-300]
+    assert retired["amount_cents"] == 299
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
+def test_a_report_without_the_outside_gain_stops_the_crosscheck() -> None:
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        row["gain"] = "-3" if row.get("strategy_id") == "b" else "0"
+        if row.get("strategy_id") == "b":
+            row["effective_end"] = "2026-03-04"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+    }
+    block = tab.build_performance_tab(panel)
+    # The slices block names the missing figure; no figure is substituted.
+    assert block["slices"]["status"] == "UNAVAILABLE"
+    assert "gain_of_outside_report_epochs_usd" in block["slices"]["reason"]
+
+
+def test_a_defect_in_the_builders_retired_helper_is_caught_by_the_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        row["gain"] = "-2.996" if row.get("strategy_id") == "b" else "0"
+        if row.get("strategy_id") == "b":
+            row["effective_end"] = "2026-03-04"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+        "epoch_set": {"gain_of_outside_report_epochs_usd": "-2.994"},
+    }
+    good = tab.build_performance_tab(panel)
+    tab.verify_performance_tab(good, panel)
+    # A builder helper that rounds the wrong way (here: sums the rounded lines).
+    monkeypatch.setattr(
+        tab,
+        "_retired_component_cents",
+        lambda _reconciliation, retired: (
+            -sum(int(i["row_gain_cents"]) for i in retired)
+        ),
+    )
+    broken = tab.build_performance_tab(panel)
+    with pytest.raises(tab.PerformanceTabError, match="cross-check"):
+        tab.verify_performance_tab(broken, panel)
