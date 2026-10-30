@@ -3116,7 +3116,7 @@
 
   function mvaUnavailableTerms(strategy, block) {
     const terms = Array.isArray(strategy.unavailable) ? strategy.unavailable : [];
-    return terms.map((item) => `<div class="mva-unavailable"><strong>${safe(humanStatus(item.term))}</strong> ${mvaTag(item, block)} <span class="mva-reason">${safe(humanStatus(item.reason))}${item.window_end ? ` · to ${safe(formatDate(item.window_end))}` : ""}</span>${mvaReplaced(block, item.replacing_pull)}</div>`).join("");
+    return terms.map((item) => `<div class="mva-unavailable"><strong>${safe(item.label || humanStatus(item.term))}</strong> ${mvaTag(item, block)} <span class="mva-reason">${safe(humanStatus(item.reason))}${item.window_end ? ` · to ${safe(formatDate(item.window_end))}` : ""}</span>${mvaReplaced(block, item.replacing_pull)}</div>`).join("");
   }
 
   // Signed bars on a shared zero line: width is |value| over the largest |value| in the set; direction by side AND sign text.

@@ -627,6 +627,8 @@ def build_model_vs_actual(
         unavailable = [
             {
                 "term": f"window:{w['window_id']}",
+                # the reader-facing name of the withheld window, from its own label and dates
+                "label": f"{w['label']}, ends {w['end']} after the {cutoff} cutoff",
                 "evidence_tag": TAG_UNAVAILABLE,
                 "reason": f"WINDOW_ENDS_AFTER_CUTOFF:{w['end']}",
                 "window_end": w["end"],

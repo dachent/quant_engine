@@ -126,3 +126,29 @@ def test_no_generated_sentence_repeats_a_word() -> None:
         assert re.search(r"\b(\w+) \1\b", text, re.IGNORECASE) is None, text
     assert "times the window capital base" in block["portfolio_bridge"]["dollar_basis"]
     json.dumps(copy.deepcopy(block))  # still serialisable
+
+
+def test_a_withheld_window_is_named_from_its_label_and_dates_not_its_id() -> None:
+    """The raw ``window:E1`` id is not shown as a name: the label is generated from the window."""
+
+    from test_model_vs_actual import _errors
+
+    audit = _audit()
+    audit["strategies"][0]["windows"][1]["end"] = (
+        "2026-04-01"  # after the 2026-03-09 cutoff
+    )
+    audit["strategies"][0]["windows"][1]["label"] = "Epoch one"
+    block, _raw, _sha = _build(audit)
+    withheld = [
+        u for u in block["strategies"][0]["unavailable"] if u["term"] == "window:E1"
+    ]
+    assert len(withheld) == 1
+    item = withheld[0]
+    assert item["label"] == "Epoch one, ends 2026-04-01 after the 2026-03-09 cutoff"
+    assert item["window_end"] == "2026-04-01"
+    assert "window:" not in item["label"]
+    # the other unavailable terms are untouched (no label is invented for them)
+    assert all(
+        "label" not in u for u in block["strategies"][0]["unavailable"] if u is not item
+    )
+    assert _errors(block) == []
