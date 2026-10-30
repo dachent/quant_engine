@@ -130,6 +130,17 @@ else:
         _model_vs_actual_module = import_module("portfolio_model_vs_actual")
     build_model_vs_actual = _model_vs_actual_module.build_model_vs_actual
 
+if TYPE_CHECKING:
+    from portfolio_vendor_nav_gap_fill import build_vendor_gap_fills
+else:
+    try:
+        _vendor_gap_fill_module = import_module("tools.portfolio_vendor_nav_gap_fill")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        _vendor_gap_fill_module = import_module("portfolio_vendor_nav_gap_fill")
+    build_vendor_gap_fills = _vendor_gap_fill_module.build_vendor_gap_fills
+
 ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
     build_manifest_candidate.__code__.co_filename
 ).resolve()
@@ -1401,6 +1412,18 @@ def _model_vs_actual_cli_value(args: argparse.Namespace) -> tuple[Path, str] | N
     if (path is None) != (sha256 is None):
         raise ControlPanelValidationError(
             "--model-vs-actual-input and --model-vs-actual-input-sha256 go together"
+        )
+    return None if path is None else (path, str(sha256))
+
+
+def _vendor_gap_fills_cli_value(args: argparse.Namespace) -> tuple[Path, str] | None:
+    """The optional labelled vendor gap-day fill record and its pin, both or neither."""
+
+    path = getattr(args, "vendor_gap_fills", None)
+    sha256 = getattr(args, "vendor_gap_fills_sha256", None)
+    if (path is None) != (sha256 is None):
+        raise ControlPanelValidationError(
+            "--vendor-gap-fills and --vendor-gap-fills-sha256 go together"
         )
     return None if path is None else (path, str(sha256))
 
@@ -5071,6 +5094,13 @@ def _optional_mapping(value: object) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
 
 
+def _available_prefixed(status: object) -> str:
+    """The confidence status as one value: prefixed only when it is not already."""
+
+    text = str(status)
+    return text if text.startswith("AVAILABLE_") else "AVAILABLE_" + text
+
+
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a reader needs next to an alpha tile: window, n, SE, t, backtest share, basis.
 
@@ -5149,7 +5179,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "se": None if se is None else se_text,
         "t_stat": None if t_stat is None else format(t_stat, "f"),
         "t_status": (
-            "AVAILABLE_" + str(alpha.get("confidence_status"))
+            _available_prefixed(alpha.get("confidence_status"))
             if t_stat is not None and alpha is not None
             else "UNAVAILABLE_NO_STANDARD_ERROR"
         ),
@@ -11988,6 +12018,7 @@ def _rendered_files(
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
     model_vs_actual_input: tuple[Path, str] | None = None,
+    vendor_gap_fills: tuple[Path, str] | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -12420,6 +12451,19 @@ def _rendered_files(
             raise ControlPanelValidationError(
                 f"model_vs_actual input is not usable: {exc}"
             ) from exc
+    # The labelled vendor gap-day fills (estimates or alternate-source values shown
+    # beside the HWM span receipts); the receipts and the index path are unchanged.
+    if vendor_gap_fills is not None:
+        try:
+            data["vendor_gap_fills"] = build_vendor_gap_fills(
+                data,
+                vendor_gap_fills[0].read_bytes(),
+                vendor_gap_fills[1],
+            )
+        except (OSError, ValueError) as exc:
+            raise ControlPanelValidationError(
+                f"vendor_gap_fills input is not usable: {exc}"
+            ) from exc
     # The orthogonal risk shares are re-derived from the decomposition lenses and the
     # governed invested capital the payload already holds; the block is optional.
     data["orthogonal_risk_attribution"] = build_orthogonal_risk_attribution(data)
@@ -12702,6 +12746,8 @@ def _rendered_files(
     }
     if model_vs_actual_input is not None:
         bound_inputs["model_vs_actual_input"] = model_vs_actual_input
+    if vendor_gap_fills is not None:
+        bound_inputs["vendor_gap_fills"] = vendor_gap_fills
     for name, (path, expected_sha256) in optional_bindings.items():
         if path is not None and expected_sha256 is not None:
             bound_inputs[name] = (path, str(expected_sha256))
@@ -12823,6 +12869,7 @@ def build_candidate(
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
     model_vs_actual_input: tuple[Path, str] | None = None,
+    vendor_gap_fills: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -12864,6 +12911,7 @@ def build_candidate(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         model_vs_actual_input=model_vs_actual_input,
+        vendor_gap_fills=vendor_gap_fills,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -13118,6 +13166,7 @@ def verify_candidate(
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
     model_vs_actual_input: tuple[Path, str] | None = None,
+    vendor_gap_fills: tuple[Path, str] | None = None,
     _rendered_bundle: list[
         tuple[dict[str, bytes], dict[str, Any], dict[str, tuple[Path, str]]]
     ]
@@ -13163,6 +13212,7 @@ def verify_candidate(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         model_vs_actual_input=model_vs_actual_input,
+        vendor_gap_fills=vendor_gap_fills,
     )
     if _rendered_bundle is not None:
         _rendered_bundle.append((expected, data, _))
@@ -14801,6 +14851,7 @@ def publish_panel(
     strategy_history_contract_path: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
     model_vs_actual_input: tuple[Path, str] | None = None,
+    vendor_gap_fills: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -14874,6 +14925,7 @@ def publish_panel(
         strategy_history_contract_path=strategy_history_contract_path,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
         model_vs_actual_input=model_vs_actual_input,
+        vendor_gap_fills=vendor_gap_fills,
         _rendered_bundle=rendered_bundle,
     )
     if verification.get("all_passed") is not True:
@@ -15343,6 +15395,15 @@ def _parser() -> argparse.ArgumentParser:
             ),
         )
         command.add_argument("--model-vs-actual-input-sha256")
+        command.add_argument(
+            "--vendor-gap-fills",
+            type=Path,
+            help=(
+                "Hash-pinned labelled fill record for declared vendor NAV gap days "
+                "(vendor_gap_fills block); requires --vendor-gap-fills-sha256."
+            ),
+        )
+        command.add_argument("--vendor-gap-fills-sha256")
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
@@ -15585,6 +15646,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
                 model_vs_actual_input=_model_vs_actual_cli_value(args),
+                vendor_gap_fills=_vendor_gap_fills_cli_value(args),
             )
         elif args.command == "verify":
             if (args.report_root is None) == (args.report_candidate is None):
@@ -15636,6 +15698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
                 model_vs_actual_input=_model_vs_actual_cli_value(args),
+                vendor_gap_fills=_vendor_gap_fills_cli_value(args),
             )
         elif args.command == "qa":
             result = validate_qa(
@@ -15707,6 +15770,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 strategy_history_contract_path=args.strategy_history_contract,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
                 model_vs_actual_input=_model_vs_actual_cli_value(args),
+                vendor_gap_fills=_vendor_gap_fills_cli_value(args),
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)
