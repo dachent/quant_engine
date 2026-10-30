@@ -101,6 +101,9 @@ _PATH_STAGES = {
     # materializer imports it and it can refuse or fail any stage, so it carries the
     # controller's impact; it writes no delivery artifact itself.
     "packages/core/src/quant_engine/core/run_storage.py": list(_STAGE_ORDER),
+    # Verifies a promoted retained-cache base before the runner links an overlay to it; it
+    # can refuse any stage's run, like run_storage.
+    "packages/core/src/quant_engine/core/retained_cache_base.py": list(_STAGE_ORDER),
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
@@ -116,6 +119,7 @@ _PATH_STAGES = {
     # commit (they write no delivery artifact), like the audit/guard tools: no stage impact.
     "packages/core/src/quant_engine/core/replica_gate.py": [],
     "tools/release_replica.py": [],
+    "tools/release_cache_base.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
     # The implementation reconciliation and return-attribution builders write the
