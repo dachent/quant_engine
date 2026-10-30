@@ -769,3 +769,56 @@ def test_commit_gate_without_driver_replica_checks_needs_only_receipt_and_confir
     assert _commit(world, gate) == 2
     (world["cycle"] / "replica-receipt.json").write_text("{}", encoding="utf-8")
     assert _commit(world, gate) == 0
+
+
+def test_an_explicit_stage_is_not_part_of_everything(world: dict[str, Any]) -> None:
+    stages = [dict(CHAIN[0]), {**CHAIN[1], "explicit": True}]
+    graph = _graph(world, stages)
+    assert _drive(world, graph) == 0
+    assert (world["cycle"] / "one.txt").is_file() and not (
+        world["cycle"] / "two.txt"
+    ).exists()
+    assert _drive(world, graph, "--through", "two") == 0
+    assert (world["cycle"] / "two.txt").is_file()
+
+
+def test_the_shipped_graph_ends_in_an_explicit_gated_commit_stage() -> None:
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    last = graph["stages"][-1]
+    assert last["id"] == "commit" and last["explicit"] is True
+    assert set(last["commit_gate"]) == {"spec", "replica_receipt", "pointer_snapshot"}
+    assert "--replica-receipt" in last["argv"] and "--commit" in last["argv"]
+
+
+def test_topology_ignores_companion_source_paths(tmp_path: Path) -> None:
+    def spec(source: str) -> Path:
+        path = tmp_path / f"{Path(source).name}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "nodes": [],
+                    "code_commit": "c",
+                    "as_of_date": "d",
+                    "pipeline_id": "p",
+                    "companions": [
+                        {
+                            "companion_id": "x",
+                            "root_id": "r",
+                            "relative_path": "a",
+                            "sha256": "h",
+                            "source_path": source,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    assert driver.spec_topology(spec("C:/real/x")) == driver.spec_topology(
+        spec("C:/replica/x")
+    )
