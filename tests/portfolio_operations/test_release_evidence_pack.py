@@ -118,3 +118,43 @@ def test_a_link_out_of_the_cycle_is_refused(cycle: Path, tmp_path: Path) -> None
         pytest.skip("symlinks unavailable")
     assert _run(cycle, tmp_path / "evidence") == 1
     assert not (tmp_path / "evidence" / "logs" / "link.txt").exists()
+
+
+def test_metadata_files_and_the_whole_destination_are_create_only(
+    cycle: Path, tmp_path: Path
+) -> None:
+    dest = tmp_path / "evidence"
+    assert _run(cycle, dest) == 0
+    sums_before = (dest / tool.SUMS).read_bytes()
+    (cycle / "logs" / "extra.log").write_text("new", encoding="utf-8")
+    assert _run(cycle, dest) == 1
+    assert (dest / tool.SUMS).read_bytes() == sums_before
+    assert not (dest / "logs" / "extra.log").exists()
+
+
+def test_a_destination_holding_foreign_files_is_refused(
+    cycle: Path, tmp_path: Path
+) -> None:
+    dest = tmp_path / "evidence"
+    dest.mkdir()
+    (dest / "stray.txt").write_text("not mine", encoding="utf-8")
+    assert _run(cycle, dest) == 1
+    assert not (dest / "production").exists()
+
+
+def test_a_linked_destination_entry_or_destination_is_refused(
+    cycle: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    assert _run(cycle, tmp_path / "linked") == 1
+    assert list(outside.iterdir()) == []
+    dest = tmp_path / "evidence"
+    (dest / "logs").mkdir(parents=True)
+    (dest / "production").symlink_to(outside, target_is_directory=True)
+    assert _run(cycle, dest) == 1
+    assert list(outside.iterdir()) == []
