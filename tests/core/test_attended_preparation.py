@@ -5007,3 +5007,15 @@ def test_ledger_stage_identity_binds_the_weekly_gap_fill_pin() -> None:
     first = preparation._preparation_stage_inputs(pinned, "c" * 40)["ledger"]
     second = preparation._preparation_stage_inputs(changed, "c" * 40)["ledger"]
     assert first["weekly_gap_fill_spec"] != second["weekly_gap_fill_spec"]
+
+
+def test_ledger_stage_identity_binds_the_vendor_gap_fills_pin() -> None:
+    without = preparation._preparation_stage_inputs(_AnyConfig(), "c" * 40)["ledger"]
+    assert "vendor_gap_fills" not in without
+    first = preparation._preparation_stage_inputs(
+        _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "1"}), "c" * 40
+    )["ledger"]
+    second = preparation._preparation_stage_inputs(
+        _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "2"}), "c" * 40
+    )["ledger"]
+    assert first["vendor_gap_fills"] != second["vendor_gap_fills"]

@@ -1490,6 +1490,11 @@ def _preparation_stage_inputs(
                 else {}
             ),
             **(
+                {"vendor_gap_fills": config["vendor_gap_fills"]}
+                if config.get("vendor_gap_fills") is not None
+                else {}
+            ),
+            **(
                 {"model_vs_actual_input": config["model_vs_actual_input"]}
                 if config.get("model_vs_actual_input") is not None
                 else {}
@@ -2117,6 +2122,11 @@ def _prepare_attended_inputs(
                 if config.get("weekly_gap_fill_spec") is not None
                 else None
             ),
+            vendor_gap_fills_path=(
+                _pin(config["vendor_gap_fills"], "vendor gap fills")
+                if config.get("vendor_gap_fills") is not None
+                else None
+            ),
             model_vs_actual_input_path=(
                 _pin(config["model_vs_actual_input"], "model vs actual input")
                 if config.get("model_vs_actual_input") is not None
@@ -2311,6 +2321,11 @@ def _prepare_attended_inputs(
             weekly_gap_fill_spec_path=(
                 _pin(config["weekly_gap_fill_spec"], "weekly gap fill spec")
                 if config.get("weekly_gap_fill_spec") is not None
+                else None
+            ),
+            vendor_gap_fills_path=(
+                _pin(config["vendor_gap_fills"], "vendor gap fills")
+                if config.get("vendor_gap_fills") is not None
                 else None
             ),
             model_vs_actual_input_path=(
