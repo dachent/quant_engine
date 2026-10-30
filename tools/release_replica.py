@@ -36,9 +36,8 @@ from quant_engine.core import (
     release_directory_identity,
     canonical_json_bytes,
     is_replica_spec,
-    ReleaseConflictError,
     load_pipeline_spec,
-    read_current_release,
+    read_release,
     replica_anchor,
     verify_replica_receipt,
 )
@@ -115,12 +114,23 @@ def _copy_predecessor_companions(
     root with no committed release has no predecessor companions."""
 
     roots = {key: Path(value) for key, value in spec["roots"].items()}
-    try:
-        manifest = read_current_release(Path(spec["coordination_root"]), roots)
-    except ReleaseConflictError as exc:
-        if "no coordinated release authority" in str(exc):
-            return
-        raise
+    # Read the committed authority and its manifest directly: a successor spec may ADD
+    # roots, and the predecessor is judged over only the roots it bound (the replica
+    # dry-run does the full committed-state validation).
+    pointer = Path(spec["coordination_root"]) / "CURRENT_RELEASE.json"
+    if not pointer.is_file():
+        return
+    release_id = json.loads(pointer.read_bytes()).get("release_id")
+    if not isinstance(release_id, str):
+        raise ReplicaToolError(f"CURRENT_RELEASE.json names no release: {pointer}")
+    manifest, journal = read_release(Path(spec["coordination_root"]), release_id)
+    if journal.state.value != "COMMITTED":
+        raise ReplicaToolError(f"authoritative release is not COMMITTED: {release_id}")
+    missing = {c.root_id for c in manifest.companions} - set(roots)
+    if missing:
+        raise ReplicaToolError(
+            f"predecessor companion root is not in the spec: {sorted(missing)}"
+        )
     for companion in manifest.companions:
         source = roots[companion.root_id] / companion.relative_path
         if not source.is_file():

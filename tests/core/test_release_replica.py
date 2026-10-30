@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -247,73 +246,96 @@ def test_ceremony_flag_exists_only_while_it_runs(tmp_path: Path, specs: Any) -> 
     assert seen and all(seen) and not flag.exists()
 
 
-def _companion_world(tmp: Path) -> tuple[Path, Path, str]:
-    ws = tmp / "ws"
-    (ws / "panel" / "generations" / "g1").mkdir(parents=True)
-    (ws / "panel" / "CURRENT.json").write_text(
-        json.dumps({"generation_id": "g1"}), encoding="utf-8"
+def _committed_release(tmp: Path) -> tuple[Path, Path, Path]:
+    """A real committed release (one root, one companion launcher); returns the workspace,
+    the real root and the coordination root. Built with the release layer's own helpers."""
+
+    helpers_spec = importlib.util.spec_from_file_location(
+        "release_test_helpers", ROOT / "tests" / "core" / "test_release.py"
     )
-    (ws / "panel" / "index.html").write_bytes(b"<launcher>")
-    (ws / "coord").mkdir()
+    assert helpers_spec is not None and helpers_spec.loader is not None
+    helpers = importlib.util.module_from_spec(helpers_spec)
+    helpers_spec.loader.exec_module(helpers)
+    ws = tmp / "ws"
+    root = ws / "first"
+    _, proposed = helpers._stage_pair(root, "first")
+    (root / "index.html").write_bytes(b"old\n")
+    coordination = ws / "coordination"
+    content = b"R2 launcher\n"
+    manifest = helpers.prepare_release(
+        coordination_root=coordination,
+        roots={"first": root},
+        proposed_generations={"first": proposed.generation_id},
+        code_commit=helpers.COMMIT,
+        created_at=helpers.datetime(2026, 8, 2, 10, tzinfo=helpers.UTC),
+        gates=helpers._gate(),
+        companions=(
+            helpers.CompanionInput("panel-launcher", "first", "index.html", content),
+        ),
+    )
+    helpers.commit_release(
+        coordination_root=coordination,
+        release_id=manifest.release_id,
+        roots={"first": root},
+        companion_contents={"panel-launcher": content},
+    )
+    return ws, root, coordination
+
+
+def _successor_spec(tmp: Path, ws: Path, root: Path, coordination: Path) -> Path:
+    added = ws / "second"  # the successor adds a root the predecessor never bound
+    added.mkdir()
     spec = tmp / "spec.json"
     spec.write_text(
         json.dumps(
             {
-                "roots": {"portfolio-panel": str(ws / "panel")},
-                "coordination_root": str(ws / "coord"),
+                "roots": {"first": str(root), "second": str(added)},
+                "coordination_root": str(coordination),
                 "companions": [],
             }
         ),
         encoding="utf-8",
     )
-    return ws, spec, hashlib.sha256(b"<launcher>").hexdigest()
+    return spec
 
 
-def _predecessor(
-    monkeypatch: pytest.MonkeyPatch, sha: str, name: str = "index.html"
+def test_copy_carries_the_committed_predecessor_companion_even_when_the_successor_adds_a_root(
+    tmp_path: Path,
 ) -> None:
-    companion = SimpleNamespace(
-        companion_id="portfolio-panel-launcher",
-        root_id="portfolio-panel",
-        relative_path=name,
-        proposed_sha256=sha,
-    )
-    monkeypatch.setattr(
-        rr,
-        "read_current_release",
-        lambda coordination_root, roots: SimpleNamespace(companions=[companion]),
-    )
+    ws, root, coordination = _committed_release(tmp_path)
+    spec = _successor_spec(tmp_path, ws, root, coordination)
+    replica = tmp_path / "replica"
+    rr.copy_replica(spec, ws, replica)
+    assert (replica / "first" / "index.html").read_bytes() == b"R2 launcher\n"
+    assert (replica / "coordination" / "CURRENT_RELEASE.json").is_file()
 
 
-def test_copy_carries_every_companion_file_of_the_committed_predecessor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_copy_refuses_a_real_companion_that_differs_from_the_committed_manifest(
+    tmp_path: Path,
 ) -> None:
-    ws, spec, sha = _companion_world(tmp_path)
-    _predecessor(monkeypatch, sha)
-    rr.copy_replica(spec, ws, tmp_path / "replica")
-    assert (tmp_path / "replica" / "panel" / "index.html").read_bytes() == b"<launcher>"
-
-
-def test_copy_refuses_a_predecessor_companion_that_differs_or_is_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    ws, spec, sha = _companion_world(tmp_path)
-    _predecessor(monkeypatch, "0" * 64)
+    ws, root, coordination = _committed_release(tmp_path)
+    spec = _successor_spec(tmp_path, ws, root, coordination)
+    (root / "index.html").write_bytes(b"tampered\n")
     with pytest.raises(rr.ReplicaToolError, match="differs from its manifest"):
-        rr.copy_replica(spec, ws, tmp_path / "r1")
-    _predecessor(monkeypatch, sha, name="gone.html")
-    with pytest.raises(rr.ReplicaToolError, match="missing"):
-        rr.copy_replica(spec, ws, tmp_path / "r2")
+        rr.copy_replica(spec, ws, tmp_path / "replica")
 
 
-def test_copy_without_a_committed_predecessor_has_no_companions_to_carry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_copy_without_a_committed_release_has_no_companions_to_carry(
+    tmp_path: Path,
 ) -> None:
-    ws, spec, _ = _companion_world(tmp_path)
-
-    def none(coordination_root: Path, roots: Any) -> Any:
-        raise rr.ReleaseConflictError("no coordinated release authority is published")
-
-    monkeypatch.setattr(rr, "read_current_release", none)
+    ws = tmp_path / "ws"
+    (ws / "first").mkdir(parents=True)
+    (ws / "coordination").mkdir()
+    spec = tmp_path / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "roots": {"first": str(ws / "first")},
+                "coordination_root": str(ws / "coordination"),
+                "companions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     rr.copy_replica(spec, ws, tmp_path / "replica")
-    assert not (tmp_path / "replica" / "panel" / "index.html").exists()
+    assert not (tmp_path / "replica" / "first" / "index.html").exists()
