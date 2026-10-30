@@ -559,6 +559,7 @@
     "hwm_governed_proof": { "$ref": "#/$defs/governed_hwm_proof" },
     "performance_tab": { "$ref": "#/$defs/performance_tab" },
     "model_vs_actual": { "$ref": "#/$defs/model_vs_actual" },
+    "vendor_gap_fills": { "$ref": "#/$defs/vendor_gap_fills" },
     "orthogonal_risk_attribution": { "$ref": "#/$defs/orthogonal_risk_attribution" },
     "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "performance": {
@@ -2450,6 +2451,41 @@
         "closure_ok": { "type": "boolean" }
       }
     },
+    "vendor_gap_fills": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "input_sha256", "policy_sha256", "fills"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "status": { "const": "AVAILABLE" },
+        "input_sha256": { "$ref": "#/$defs/hash" },
+        "policy_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "fills": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["strategy_id", "date", "origin_label", "rule", "nav", "span_start_date", "span_end_date", "leg_in_return", "leg_out_return", "receipt_span_return", "vendor_span_return", "span_basis_difference", "closure_residual"],
+            "properties": {
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "date": { "type": "string", "format": "date" },
+              "origin_label": { "type": "string", "minLength": 1 },
+              "rule": { "type": "string", "minLength": 1 },
+              "nav": { "$ref": "#/$defs/decimal" },
+              "span_start_date": { "type": "string", "format": "date" },
+              "span_end_date": { "type": "string", "format": "date" },
+              "leg_in_return": { "$ref": "#/$defs/decimal" },
+              "leg_out_return": { "$ref": "#/$defs/decimal" },
+              "receipt_span_return": { "$ref": "#/$defs/decimal" },
+              "vendor_span_return": { "$ref": "#/$defs/decimal" },
+              "span_basis_difference": { "$ref": "#/$defs/decimal" },
+              "closure_residual": { "$ref": "#/$defs/decimal" }
+            }
+          }
+        }
+      }
+    },
     "model_vs_actual": {
       "type": "object",
       "additionalProperties": false,
@@ -2681,7 +2717,7 @@
     "performance_tab_flows": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["unit", "definition", "net_flow_cents", "opening_cents", "closing_cents", "link_net_flow_cents", "total_contributed_cents", "implied_pnl_cents", "internal_cancellation", "residual_treatment", "report_crosscheck"],
+      "required": ["unit", "definition", "net_flow_cents", "opening_cents", "closing_cents", "link_net_flow_cents", "rounding_cents", "total_contributed_cents", "implied_pnl_cents", "internal_cancellation", "residual_treatment", "report_crosscheck"],
       "properties": {
         "unit": { "const": "USD_CENTS" },
         "definition": { "type": "string", "minLength": 1 },
@@ -2689,6 +2725,7 @@
         "opening_cents": { "type": "array", "items": { "type": "integer" } },
         "closing_cents": { "type": "array", "items": { "type": "integer" } },
         "link_net_flow_cents": { "type": "array", "items": { "type": "integer" } },
+        "rounding_cents": { "type": "array", "items": { "type": "integer" } },
         "total_contributed_cents": { "type": "integer" },
         "implied_pnl_cents": { "type": "integer" },
         "internal_cancellation": {

@@ -1219,7 +1219,14 @@
       const hwmValue = kpiBlock.hwm ?? candidate.current_hwm;
       const drawdown = kpiBlock.drawdown ?? candidate.current_drawdown;
       const gated = kpiBlock.gated_status || { policy_id: data.hwm_summary?.policy_id, hwm_numerical_status: data.advisory.hwm_numerical_status, hwm_numerical_reason: data.advisory.hwm_numerical_reason };
-      const missing = (Array.isArray(kpiBlock.missing_daily_points) ? kpiBlock.missing_daily_points : []).map((point) => `${point.strategy} ${formatDate(point.date)}`);
+      // R2.1: a missing day the producer fills (an estimate or an admitted alternate-source value, from the pinned
+      // `vendor_gap_fills` block) is shown beside its receipt with its origin label, rule, legs and closure residual.
+      const gapFills = Array.isArray(data.vendor_gap_fills?.fills) ? data.vendor_gap_fills.fills : [];
+      const fillText = (point) => {
+        const fill = gapFills.find((item) => item.strategy_id === point.strategy_id && item.date === point.date);
+        return fill ? ` [${humanStatus(fill.origin_label).toLowerCase()}: NAV ${decimal(fill.nav, 4)}, ${humanStatus(fill.rule).toLowerCase()}; legs ${pct(fill.leg_in_return, 2)} / ${pct(fill.leg_out_return, 2)} on the receipt span ${pct(fill.receipt_span_return, 2)}; closure residual ${decimal(fill.closure_residual, 12)}]` : "";
+      };
+      const missing = (Array.isArray(kpiBlock.missing_daily_points) ? kpiBlock.missing_daily_points : []).map((point) => `${point.strategy_id || point.strategy} ${formatDate(point.date)}${fillText(point)}`);
       const window = kpiBlock.window_start && kpiBlock.window_end ? ` over ${formatDate(kpiBlock.window_start)} to ${formatDate(kpiBlock.window_end)}${number(kpiBlock.index_points) == null ? "" : ` (${integer.format(kpiBlock.index_points)} daily points)`}` : candidate.complete_through ? ` through ${formatDate(candidate.complete_through)}` : "";
       const gateText = `${gated.hwm_numerical_status ? ` Numeric HWM (${gated.policy_id || "legacy gate"}): ${humanStatus(gated.hwm_numerical_status).toLowerCase()}.` : ""}${missing.length ? ` Missing daily points: ${missing.join(", ")}.` : ""}`;
       return ["Systematic HWM", decimal(index, 4), `${hwmNotAccepted}. HWM ${decimal(hwmValue, 4)} · drawdown ${pct(drawdown, 2)}${window}.${gateText}`, "warning"];
