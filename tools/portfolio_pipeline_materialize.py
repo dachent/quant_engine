@@ -26,7 +26,7 @@ from quant_engine.core import (
     read_generation_bundle,
     runtime_environment_sha256,
 )
-from quant_engine.core import run_storage
+from quant_engine.core import CacheBaseError, run_storage, verify_if_promoted
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
 from quant_engine.portfolio_ledger import (
@@ -1166,6 +1166,7 @@ def _schwab_selected_point_positions(
                         "market_value",
                         "average_price",
                         "security_id",
+                        "symbol",
                     )
                 },
                 "evidence_layer": "ACCOUNT_LIVE",
@@ -6824,6 +6825,12 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
         # runner creates as hard links to the base on its first execution.
         if retained_cache_base.is_symlink() or not retained_cache_base.is_dir():
             raise MaterializationError("attended retained cache base is unavailable")
+        try:
+            # A promoted base (tools/release_cache_base.py) carries sha256 provenance; a
+            # modified one must refuse here, not become the new baseline of its overlays.
+            verify_if_promoted(retained_cache_base)
+        except CacheBaseError as exc:
+            raise MaterializationError(str(exc)) from exc
         if retained_cache_root.is_symlink() or (
             retained_cache_root.exists() and not retained_cache_root.is_dir()
         ):

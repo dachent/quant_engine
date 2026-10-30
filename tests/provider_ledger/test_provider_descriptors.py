@@ -28,7 +28,7 @@ import provider_ledger as ledger  # noqa: E402
 GOLDEN_CATALOGS = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
     "fidelity": ("fidelity-generation.json", frozenset({1})),
-    "ibkr": ("ibkr-catalog.json", frozenset({3, 4, 5, 6, 7})),
+    "ibkr": ("ibkr-catalog.json", frozenset({3, 4, 5, 6, 7, 8})),
     "matrixport": ("catalog.json", frozenset({1, 2})),
     "portfolio123": ("portfolio123-generation.json", frozenset({1})),
     "quantbase": ("quantbase-generation.json", frozenset({1})),

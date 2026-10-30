@@ -1799,6 +1799,12 @@ def test_provider_ledger_schwab_current_position_uses_new_york_financial_day(
         assert [row["record_id"] for row in result[3]] == [
             "schwab:position-native-utc-18"
         ]
+        # The row is the 09-17 New York end-of-day book, captured under the
+        # native 09-18 UTC date, and says both.
+        held = result[3][0]
+        assert held["as_of_date"] == "2026-09-17"
+        assert held["capture_date"] == "2026-09-18"
+        assert held["observed_at"] == observed_at
     else:
         with pytest.raises(
             baseline.BaselineValidationError,
@@ -2570,7 +2576,7 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
 
     The pins moved once, with cluster 2 task T1 (the catalog gained the
     ``current_capital`` and ``audit_snapshot`` blocks and the two audit checks
-    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0).
+    left ``reconciliation_checks``; the builder version went 1.2.0 -> 1.3.0; R2.1 then added the per-strategy execution_cost block and the optional cost evidence, 1.3.0 -> 1.4.0).
     ``test_allocations_stay_byte_identical_to_the_dated_audit_snapshot`` proves
     that nothing else moved: undoing exactly those changes reproduces the
     previous catalog hash ``fde46f73...``."""
@@ -2583,11 +2589,11 @@ def test_hwm_inputs_absent_output_is_byte_identical_to_pre_envelope_baseline(
     assert b'"hwm_inputs"' not in catalog_bytes
     assert (
         hashlib.sha256(catalog_bytes).hexdigest()
-        == "cd5751c7dd6d70ccd38fdfe4d5c8610d00d094dd7aabac4eea7b7574896f6636"
+        == "9be761a40d9b6254edb8091a2dd4a76a4e0c2e0507f45db3674dabd26a5d9c72"
     )
     assert (
         hashlib.sha256(manifest_bytes).hexdigest()
-        == "2940ca6db27414bb8f0c7fbe9b67d237510009db4b5baa271ac7a245f33534d8"
+        == "e33b4af4cb47ab99acad2d8156b3c1b0f16cc6716299d466b6311bb826d2d8ec"
     )
 
 
@@ -4211,6 +4217,11 @@ def test_allocations_stay_byte_identical_to_the_dated_audit_snapshot(
     legacy["reconciliation_checks"] = [
         catalog["reconciliation_checks"][0],
         *catalog["audit_snapshot"]["checks"],
+    ]
+    # R2.1 added the per-strategy execution_cost block beside each cost row.
+    legacy["costs"] = [
+        {key: value for key, value in row.items() if key != "execution_cost"}
+        for row in catalog["costs"]
     ]
     assert (
         hashlib.sha256(canonical_json_bytes(legacy)).hexdigest()
