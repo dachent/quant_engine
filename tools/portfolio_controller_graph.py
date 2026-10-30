@@ -234,6 +234,7 @@ _PATH_STAGES = {
     "tools/build_sleeve_facts_release.py": ["report", "panel"],
     "tools/sleeve_inputs.py": ["report", "panel"],
     "tools/verify_sleeve_ledger.py": [],
+    "tools/schwab_capture_driver.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": [],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
