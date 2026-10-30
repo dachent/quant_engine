@@ -182,6 +182,7 @@ def _plan_fixture(
     tmp_path: Path,
     *,
     observation_dates: tuple[str, ...] = ("2026-07-27", "2026-07-28"),
+    market_history_dates: tuple[str, ...] = ("2026-07-14", "2026-07-15"),
 ) -> Path:
     bundle = tmp_path / ("b" * 64)
     sources = {
@@ -243,6 +244,18 @@ def _plan_fixture(
         ]
         _write_csv(path, columns, rows)
         manifest_inputs.append({"path": relative, "sha256": _sha(path)})
+    market_path = bundle / "inputs/market/style_returns.csv"
+    market_rows = [
+        {"date": observed, "SPY": "0.004", "SPXL": "0.012", "BIL": ""}
+        for observed in market_history_dates
+    ] + [
+        {"date": observed, "SPY": "0.01", "SPXL": "0.03", "BIL": "0.0001"}
+        for observed in observation_dates
+    ]
+    _write_csv(market_path, ["date", "BIL", "SPY", "SPXL"], market_rows)
+    manifest_inputs.append(
+        {"path": "inputs/market/style_returns.csv", "sha256": _sha(market_path)}
+    )
     _write_json(
         bundle / "plan-manifest.json",
         {
@@ -873,3 +886,90 @@ def test_weekly_compounding_error_is_bounded_well_below_the_consumers_resolution
         exact -= 1
     assert len(published) == 1
     assert abs(Decimal(next(iter(published.values()))) - exact) < Decimal("4e-27")
+
+
+def test_full_history_benchmarks_come_from_the_market_input_not_the_gated_lens(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+
+    payload, inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    by_id = {row["series_id"]: row for row in payload["series"]}
+    for ticker in weekly.FULL_HISTORY_BENCHMARKS:
+        row = by_id[f"market:{ticker}"]
+        assert row["source_key"] == "core-benchmark-market"
+        assert "CORE_BENCHMARK" in row["display_groups"]
+        # the history before the cash proxy's first observation is kept
+        assert row["coverage"]["first_week"] == "2026-07-13"
+    assert plan_bundle / "inputs/market/style_returns.csv" in inputs
+    assert by_id["market:IWX"]["source_key"] == "us-equity-style"
+
+    daily = payload["daily_benchmark_returns"]
+    assert daily["status"] == "AVAILABLE"
+    assert daily["source_id"] == "yahoo-adjusted-etf-daily"
+    assert daily["unit"] == "DECIMAL_DAILY_RETURN"
+    assert daily["source_artifact"]["path"] == "inputs/market/style_returns.csv"
+    spy = next(item for item in daily["series"] if item["ticker"] == "SPY")
+    assert spy["series_id"] == "market:SPY"
+    assert spy["dates"][:2] == ["2026-07-14", "2026-07-15"]
+    assert spy["returns"][:2] == ["0.004", "0.004"]
+    assert spy["observation_count"] == len(spy["dates"]) == len(spy["returns"])
+    assert spy["dates"] == sorted(set(spy["dates"]))
+    assert max(spy["dates"]) <= payload["as_of_date"]
+    # daily and weekly agree: the weekly value is the product of the daily returns
+    week = [
+        Decimal(1) + Decimal(value)
+        for day, value in zip(spy["dates"], spy["returns"], strict=True)
+        if "2026-07-13" <= day <= "2026-07-19"
+    ]
+    product = Decimal(1)
+    for factor in week:
+        product *= factor
+    assert Decimal(by_id["market:SPY"]["values"]["2026-07-13"]) == product - 1
+
+
+def test_market_benchmark_input_hash_is_bound_to_the_plan_manifest(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    market = plan_bundle / "inputs/market/style_returns.csv"
+    market.write_bytes(market.read_bytes() + b"2026-07-29,,0.5,0.5\n")
+
+    with pytest.raises(weekly.WeeklyReturnError, match="hash differs"):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+
+
+def test_daily_benchmark_block_validates_against_the_panel_schema(
+    tmp_path: Path,
+) -> None:
+    import jsonschema
+
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    block_schema = {
+        "$defs": schema["$defs"],
+        **schema["properties"]["weekly_returns"]["properties"][
+            "daily_benchmark_returns"
+        ],
+    }
+    validator = jsonschema.Draft202012Validator(
+        block_schema, format_checker=jsonschema.FormatChecker()
+    )
+    validator.validate(payload["daily_benchmark_returns"])
+    broken = json.loads(json.dumps(payload["daily_benchmark_returns"]))
+    broken["unit"] = "PERCENT"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(broken)
