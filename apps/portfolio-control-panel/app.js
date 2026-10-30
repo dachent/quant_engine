@@ -324,6 +324,17 @@
   // one annual pre-tax external amount; an unpublished amount is said to be unpublished.
   const costAmountText = (row) => (number(row.annual_external_cost_usd) == null ? "annual amount not published" : `${currencyExact(row.annual_external_cost_usd)} per year`);
   const costLabel = (row) => `${humanStatus(row.cost_status)} · ${costAmountText(row)}`;
+  // R2.1: the producer's structured cost components (subscription, execution) are printed as published: kind, amount,
+  // currency and period, the source and its corroboration, and the annual equivalent only when the producer gives one.
+  const costComponentLine = (item) => {
+    const amount = number(item.amount) == null ? "amount not published" : `${decimal(item.amount, 2)}${item.currency ? ` ${item.currency}` : ""}`;
+    const window = item.window_start && item.window_end ? ` ${formatDate(item.window_start)} to ${formatDate(item.window_end)}` : "";
+    const period = item.period ? ` per ${humanStatus(item.period).toLowerCase()}${item.period === "PERIOD_TO_DATE" ? window : ""}` : "";
+    const annual = number(item.annual_equivalent_usd) != null ? ` · ${currencyExact(item.annual_equivalent_usd)} a year` : "";
+    const evidence = [item.source_label, item.corroboration_label].filter(Boolean).join("; ");
+    return `${humanStatus(item.kind)} ${amount}${period}${annual}${evidence ? ` (${evidence})` : ""}`;
+  };
+  const costComponentsMarkup = (row) => (Array.isArray(row.cost_components) ? row.cost_components.map((item) => `<span class="cell-secondary">${safe(costComponentLine(item))}</span>`).join("") : "");
   const costDisclosure = (row) => {
     const amount = number(row.annual_external_cost_usd) == null ? "Pre-tax cost unavailable" : `${currencyExact(row.annual_external_cost_usd)} annually`;
     // N64: a rate divides by the sleeve value at the cutoff and says which date that value
@@ -339,7 +350,7 @@
     } else {
       rate = `${pct(row.annual_external_cost_rate_pre_tax, 2)} of sleeve value (denominator date not published by this report schema)`;
     }
-    return `<span class="cell-primary">${safe(costLabel(row))}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
+    return `<span class="cell-primary">${safe(costLabel(row))}</span>${costComponentsMarkup(row)}<span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
   };
   // N55: who authorized the current benchmark assignment.  An owner-made override is
   // named explicitly; a row that has never been overridden retains the prior status quo
@@ -715,7 +726,7 @@
     $("#operator-queue").innerHTML = Array.isArray(operatorItems) ? operatorItems.join("") : operatorItems;
     const implementationRows = currentStrategies().map((row) => {
       const factor = factorModelSummary(row.strategy_name);
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(costLabel(row))}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(costLabel(row))}${costComponentsMarkup(row)}</td><td>${statusText(factor.state)}<span class="cell-secondary">${safe(factor.note)}</span></td></tr>`;
     });
     $("#portfolio-implementation-table").innerHTML = tableMarkup([["Strategy"], ["Source evidence"], ["Implementation gap (account vs model)"], ["Cost"], ["Factor model"]], implementationRows, evidenceCaption("Implementation, costs, and model readiness"));
     const constructionPoints = performanceLineageMismatch
@@ -851,6 +862,11 @@
     return `<span class="cell-primary"${reason}>${safe(row.symbol)}</span>${assetCategoryText(row) ? `<span class="cell-secondary">${safe(assetCategoryText(row))}</span>` : ""}${identity}`;
   };
 
+  // A missing market value says so on its row; the cause is printed only when the producer publishes one, and the
+  // as-of basis and capture date a row carries are shown beside its date.
+  const positionValueNote = (row) => (number(row.market_value_usd) == null ? `<span class="cell-secondary">${safe(row.market_value_reason ? humanStatus(row.market_value_reason) : "No market value published for this row")}</span>` : "");
+  const positionBasisNote = (row) => (row.as_of_basis ? `<span class="cell-secondary">${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
+
   function renderPositionTable() {
     const query = positionSearch.toLowerCase();
     const accepted = currentPositionRows().filter((row) => matchesContext(row)
@@ -860,7 +876,7 @@
     const pageCount = Math.max(1, Math.ceil(accepted.length / positionPageSize));
     positionPage = Math.min(positionPage, pageCount - 1);
     const visible = accepted.slice(positionPage * positionPageSize, (positionPage + 1) * positionPageSize);
-    const positionRows = visible.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td>${symbolCell(row)}</td><td>${safe(accountLabel(row.account_id))}</td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}</td><td>${formatDateHtml(row.as_of_date)}</td><td>${statusText(row.status)}</td></tr>`);
+    const positionRows = visible.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td><span class="cell-primary">${safe(row.strategy_name || "UNMAPPED")}</span><span class="cell-secondary">${safe(row.strategy_id || "No accepted strategy")}</span></td><td>${symbolCell(row)}</td><td>${safe(accountLabel(row.account_id))}</td><td class="numeric">${safe(row.quantity ?? "—")}</td><td class="numeric">${currency(row.market_value_usd)}${positionValueNote(row)}</td><td>${formatDateHtml(row.as_of_date)}${positionBasisNote(row)}</td><td>${statusText(row.status)}</td></tr>`);
     const positionTable = $("#position-table");
     positionTable.dataset.visibleRows = String(accepted.length);
     const pricedValues = accepted.map((row) => number(row.market_value_usd)).filter((value) => value != null);
