@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -208,7 +209,7 @@ def test_copy_writes_marker_last_and_refuses_nonempty_target(tmp_path: Path) -> 
         json.dumps({"generation_id": "g1"}), encoding="utf-8"
     )
     (ws / "coord").mkdir()
-    (ws / "coord" / "CURRENT_RELEASE.json").write_text("{}", encoding="utf-8")
+    (ws / "coord" / "coordination-note.json").write_text("{}", encoding="utf-8")
     spec = tmp_path / "spec.json"
     spec.write_text(
         json.dumps(
@@ -226,7 +227,7 @@ def test_copy_writes_marker_last_and_refuses_nonempty_target(tmp_path: Path) -> 
     assert (
         target / "dataPortfolio" / "generations" / "g1" / "f.txt"
     ).read_text() == "x"
-    assert (target / "coord" / "CURRENT_RELEASE.json").is_file()
+    assert (target / "coord" / "coordination-note.json").is_file()
     with pytest.raises(rr.ReplicaToolError, match="not empty"):
         rr.copy_replica(spec, ws, target)
     with pytest.raises(rr.ReplicaToolError, match="disjoint"):
@@ -244,3 +245,75 @@ def test_ceremony_flag_exists_only_while_it_runs(tmp_path: Path, specs: Any) -> 
 
     rr.replica_ceremony(_args(tmp_path), Spy())
     assert seen and all(seen) and not flag.exists()
+
+
+def _companion_world(tmp: Path) -> tuple[Path, Path, str]:
+    ws = tmp / "ws"
+    (ws / "panel" / "generations" / "g1").mkdir(parents=True)
+    (ws / "panel" / "CURRENT.json").write_text(
+        json.dumps({"generation_id": "g1"}), encoding="utf-8"
+    )
+    (ws / "panel" / "index.html").write_bytes(b"<launcher>")
+    (ws / "coord").mkdir()
+    spec = tmp / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "roots": {"portfolio-panel": str(ws / "panel")},
+                "coordination_root": str(ws / "coord"),
+                "companions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ws, spec, hashlib.sha256(b"<launcher>").hexdigest()
+
+
+def _predecessor(
+    monkeypatch: pytest.MonkeyPatch, sha: str, name: str = "index.html"
+) -> None:
+    companion = SimpleNamespace(
+        companion_id="portfolio-panel-launcher",
+        root_id="portfolio-panel",
+        relative_path=name,
+        proposed_sha256=sha,
+    )
+    monkeypatch.setattr(
+        rr,
+        "read_current_release",
+        lambda coordination_root, roots: SimpleNamespace(companions=[companion]),
+    )
+
+
+def test_copy_carries_every_companion_file_of_the_committed_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws, spec, sha = _companion_world(tmp_path)
+    _predecessor(monkeypatch, sha)
+    rr.copy_replica(spec, ws, tmp_path / "replica")
+    assert (tmp_path / "replica" / "panel" / "index.html").read_bytes() == b"<launcher>"
+
+
+def test_copy_refuses_a_predecessor_companion_that_differs_or_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws, spec, sha = _companion_world(tmp_path)
+    _predecessor(monkeypatch, "0" * 64)
+    with pytest.raises(rr.ReplicaToolError, match="differs from its manifest"):
+        rr.copy_replica(spec, ws, tmp_path / "r1")
+    _predecessor(monkeypatch, sha, name="gone.html")
+    with pytest.raises(rr.ReplicaToolError, match="missing"):
+        rr.copy_replica(spec, ws, tmp_path / "r2")
+
+
+def test_copy_without_a_committed_predecessor_has_no_companions_to_carry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws, spec, _ = _companion_world(tmp_path)
+
+    def none(coordination_root: Path, roots: Any) -> Any:
+        raise rr.ReleaseConflictError("no coordinated release authority is published")
+
+    monkeypatch.setattr(rr, "read_current_release", none)
+    rr.copy_replica(spec, ws, tmp_path / "replica")
+    assert not (tmp_path / "replica" / "panel" / "index.html").exists()

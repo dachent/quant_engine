@@ -36,7 +36,9 @@ from quant_engine.core import (
     release_directory_identity,
     canonical_json_bytes,
     is_replica_spec,
+    ReleaseConflictError,
     load_pipeline_spec,
+    read_current_release,
     replica_anchor,
     verify_replica_receipt,
 )
@@ -102,6 +104,40 @@ def _identity_map(
     return [{"copied": c, "source": s} for s, c in sorted(pairs)]
 
 
+def _copy_predecessor_companions(
+    spec: dict[str, Any], workspace: Path, replica_root: Path
+) -> None:
+    """Copy every companion FILE of the committed predecessor release.
+
+    The list comes from the predecessor manifest (``read_current_release``), never from the
+    new spec: the dry-run compares each committed companion's hash with the manifest, so a
+    missing or different file refuses with "committed companion differs". A real coordination
+    root with no committed release has no predecessor companions."""
+
+    roots = {key: Path(value) for key, value in spec["roots"].items()}
+    try:
+        manifest = read_current_release(Path(spec["coordination_root"]), roots)
+    except ReleaseConflictError as exc:
+        if "no coordinated release authority" in str(exc):
+            return
+        raise
+    for companion in manifest.companions:
+        source = roots[companion.root_id] / companion.relative_path
+        if not source.is_file():
+            raise ReplicaToolError(f"predecessor companion file is missing: {source}")
+        if _sha256_file(source) != companion.proposed_sha256:
+            raise ReplicaToolError(
+                f"predecessor companion differs from its manifest: {companion.companion_id}"
+            )
+        target = _rebase(source, workspace, replica_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        if _sha256_file(target) != companion.proposed_sha256:
+            raise ReplicaToolError(
+                f"companion copy differs from its manifest: {companion.companion_id}"
+            )
+
+
 def copy_replica(
     spec_path: Path,
     workspace_root: Path,
@@ -162,6 +198,7 @@ def copy_replica(
             _rebase(real_parent, workspace, replica_root).mkdir(
                 parents=True, exist_ok=True
             )
+    _copy_predecessor_companions(spec, workspace, replica_root)
     shutil.copytree(
         spec["coordination_root"],
         _rebase(Path(spec["coordination_root"]), workspace, replica_root),
