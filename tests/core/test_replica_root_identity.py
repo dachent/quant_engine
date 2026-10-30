@@ -145,3 +145,47 @@ def test_marker_that_overlaps_its_source_workspace_is_not_honored(
     marker_path.write_text(json.dumps(marker), encoding="utf-8")
     with pytest.raises(rel.ReleaseConflictError, match="identity changed"):
         rel._validate_root_identities(manifest, {"root-a": replica / "root-a"})
+
+
+def test_companion_directly_under_the_root_translates_after_the_recorded_comparison(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real"
+    (real / "root-a").mkdir(parents=True)
+    (real / "root-a" / "index.html").write_text("x", encoding="utf-8")
+    (real / "coord").mkdir()
+    spec = tmp_path / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "roots": {"root-a": str(real / "root-a")},
+                "coordination_root": str(real / "coord"),
+                "companions": [
+                    {
+                        "companion_id": "c",
+                        "root_id": "root-a",
+                        "relative_path": "index.html",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    identity = rel._root_identity(real / "root-a")
+    manifest = SimpleNamespace(
+        release_schema_version=rel._SCHEMA_VERSION,
+        targets=[SimpleNamespace(root_id="root-a", root_identity=identity)],
+        companions=[
+            SimpleNamespace(
+                root_id="root-a", relative_path="index.html", parent_identity=identity
+            )
+        ],
+    )
+    replica = tmp_path / "replica"
+    rr.copy_replica(spec, real, replica)
+    roots = {"root-a": replica / "root-a"}
+    expected = rel._release_lease_expectations(manifest, roots)
+    assert expected[roots["root-a"]] == rel._root_identity(roots["root-a"])
+    assert rel._release_lease_expectations(manifest, {"root-a": real / "root-a"}) == {
+        real / "root-a": identity
+    }

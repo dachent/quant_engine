@@ -1295,7 +1295,7 @@ def _release_lease_expectations(
     expected: dict[Path, str | None] = {}
     for target in manifest.targets:
         root = roots[target.root_id]
-        expected[root] = _replica_expected(root, target.root_identity)
+        expected[root] = target.root_identity
     for companion in manifest.companions:
         parent = _companion_path(
             roots[companion.root_id], companion.relative_path
@@ -1307,8 +1307,10 @@ def _release_lease_expectations(
             and prior != companion.parent_identity
         ):
             raise ReleaseConflictError("release directory identities conflict")
-        expected[parent] = _replica_expected(parent, companion.parent_identity or prior)
-    return expected
+        expected[parent] = companion.parent_identity or prior
+    # Compare the RECORDED identities first (above); only the final per-path expectation is
+    # translated to the copy's own identity, so a root shared with a companion parent works.
+    return {path: _replica_expected(path, value) for path, value in expected.items()}
 
 
 def _validate_previous_inventory(root: Path, target: ReleaseTarget) -> None:
