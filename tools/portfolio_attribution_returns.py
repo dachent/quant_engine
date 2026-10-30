@@ -21,14 +21,15 @@ Member kinds (all data in the spec, none in code):
   values, published as one series.
 * ``equity_curve``: daily returns from a total-equity column adjusted for a
   cash-added column (``(equity - added) / previous equity - 1``).
-* ``xlsx_column``: a date column and a return column of one worksheet.
+
+Workbooks are not an admitted source: no member kind reads one.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
@@ -46,7 +47,6 @@ OUTPUT_FIELDS: Final = (
     "version_ref",
     "source_artifact_id",
 )
-EXCEL_EPOCH: Final = date(1899, 12, 30)
 DIFFERENCE_THRESHOLD: Final = Decimal("0.000001")
 
 
@@ -80,8 +80,6 @@ def _day(value: object, label: str) -> date:
         return value.date()
     if isinstance(value, date):
         return value
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return EXCEL_EPOCH + timedelta(days=int(value))
     try:
         return date.fromisoformat(str(value)[:10])
     except ValueError as exc:
@@ -166,43 +164,10 @@ def _equity_curve(member: dict[str, Any], content: bytes) -> list[dict[str, str]
     return out
 
 
-def _xlsx_column(member: dict[str, Any], content: bytes) -> list[dict[str, str]]:
-    import openpyxl  # type: ignore[import-untyped]  # noqa: PLC0415
-
-    series_id, layer, version, source = _identity(member)
-    workbook = openpyxl.load_workbook(
-        io.BytesIO(content), read_only=True, data_only=True
-    )
-    sheet = workbook[str(member["sheet"])]
-    date_index = int(member["date_column"]) - 1
-    value_index = int(member["value_column"]) - 1
-    out = []
-    for row in sheet.iter_rows(values_only=True):
-        if len(row) <= max(date_index, value_index):
-            continue
-        stamp, value = row[date_index], row[value_index]
-        if not isinstance(stamp, (datetime, date)) or not isinstance(
-            value, (int, float)
-        ):
-            continue
-        out.append(
-            {
-                "series_id": series_id,
-                "date": _day(stamp, series_id).isoformat(),
-                "return": format(Decimal(repr(float(value))), "f"),
-                "evidence_layer": layer,
-                "version_ref": version,
-                "source_artifact_id": source,
-            }
-        )
-    return out
-
-
 _KINDS: Final = {
     "carry": _carry,
     "csv_series": _csv_series,
     "equity_curve": _equity_curve,
-    "xlsx_column": _xlsx_column,
 }
 
 
@@ -245,7 +210,11 @@ def assemble(spec_path: Path, output_dir: Path) -> dict[str, Any]:
             "size_bytes": len(content),
         }
         produced = _KINDS[kind](member, content)
+        kept = [row for row in produced if row["date"] <= as_of]
+        dropped = len(produced) - len(kept)
+        produced = kept
         report: dict[str, Any] = {
+            "rows_after_as_of_date_dropped": dropped,
             "kind": kind,
             "input_sha256": inputs[str(path)]["sha256"],
         }

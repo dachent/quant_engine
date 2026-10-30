@@ -122,10 +122,17 @@ def _load_member(root: Path) -> dict[str, Any]:
     root = root.resolve()
     manifest_bytes = _regular(root / "generation.json", "source manifest")
     manifest = _json(manifest_bytes, "source manifest")
+    try:
+        parsed = GenerationManifest.from_json_bytes(manifest_bytes)
+    except ValueError as exc:
+        raise ProviderTrackRecordUnionError(
+            f"source manifest is invalid: {root.name}"
+        ) from exc
     if (
         not isinstance(manifest, dict)
-        or manifest.get("verification") != "VERIFIED"
-        or str(manifest.get("generation_id")) != root.name
+        or parsed.verification is not VerificationStatus.VERIFIED
+        or parsed.generation_id != root.name
+        or parsed.to_json_bytes() != manifest_bytes
     ):
         raise ProviderTrackRecordUnionError(
             f"source generation is not verified or differs from its directory: {root.name}"
@@ -261,6 +268,16 @@ def _convert(
     from portfolio_fx_rates import FiatRateTable  # noqa: PLC0415
 
     table = FiatRateTable(fx_root.resolve())
+    pairs = {
+        (row["currency"], row["base_currency"])
+        for row in csv.DictReader(
+            io.StringIO((fx_root / "rates.csv").read_text(encoding="utf-8"))
+        )
+    }
+    if pairs != {(native_currency, "USD")}:
+        raise ProviderTrackRecordUnionError(
+            f"{member_id}: the FX generation does not quote {native_currency} in USD"
+        )
     previous_rate, previous_observed = table.rate_on(level_start)
     first_rate = previous_rate
     out: list[dict[str, str]] = []

@@ -352,3 +352,25 @@ def test_staging_leaves_the_global_decimal_context_alone(tmp_path: Path) -> None
     before = decimal.getcontext().prec
     union.stage_candidate(_spec(tmp_path), tmp_path / "out", AS_OF)
     assert decimal.getcontext().prec == before == 28
+
+
+def test_refuses_a_source_manifest_edited_to_match_altered_bytes(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    primary = Path(json.loads(spec.read_text())["members"][0]["generation_root"])
+    path = primary / "generation.json"
+    manifest = json.loads(path.read_bytes())
+    manifest["coverage"]["boundary"] = "edited"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(UnionError, match="manifest is invalid|not verified"):
+        union.stage_candidate(spec, tmp_path / "out", AS_OF)
+
+
+def test_refuses_an_fx_generation_for_another_currency(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    data = json.loads(spec.read_text())
+    data["members"][1]["currency"] = "GBP"
+    spec.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(UnionError, match="does not quote GBP in USD"):
+        union.stage_candidate(spec, tmp_path / "out", AS_OF)

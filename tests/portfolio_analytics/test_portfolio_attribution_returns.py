@@ -10,7 +10,6 @@ from pathlib import Path
 import sys
 from typing import Any
 
-import openpyxl  # type: ignore[import-untyped]
 import pytest
 
 
@@ -79,28 +78,8 @@ def _styles(tmp_path: Path) -> Path:
     return _write_csv(tmp_path / "styles.csv", rows, ["date", "AAA", "BBB"])
 
 
-def _workbook(tmp_path: Path) -> Path:
-    workbook = openpyxl.Workbook()
-    sheet = workbook.active
-    sheet.title = "data"
-    sheet.append(["header", None])
-    import datetime as dt
-
-    sheet.append([dt.datetime(2024, 1, 2), 0.001])
-    sheet.append([dt.datetime(2024, 1, 3), 0.002])
-    sheet.append(["not a date", 0.5])
-    path = tmp_path / "book.xlsx"
-    workbook.save(path)
-    return path
-
-
 def _spec(tmp_path: Path) -> dict[str, Any]:
-    old, perf, styles, book = (
-        _old_source(tmp_path),
-        _perf(tmp_path),
-        _styles(tmp_path),
-        _workbook(tmp_path),
-    )
+    old, perf, styles = (_old_source(tmp_path), _perf(tmp_path), _styles(tmp_path))
     identity = {"evidence_layer": "L", "version_ref": "v", "source_artifact_id": "s"}
     return {
         "as_of_date": "2024-02-01",
@@ -134,16 +113,6 @@ def _spec(tmp_path: Path) -> dict[str, Any]:
                 "date_column": "date",
                 "value_columns": ["AAA", "BBB"],
                 "series_id": "benchmark:mix",
-                **identity,
-            },
-            {
-                "kind": "xlsx_column",
-                "path": str(book),
-                "sha256": _sha(book),
-                "sheet": "data",
-                "date_column": 1,
-                "value_column": 2,
-                "series_id": "provider:x",
                 **identity,
             },
         ],
@@ -181,10 +150,6 @@ def test_assembles_every_member_kind_with_the_governed_columns(tmp_path: Path) -
     assert abs(equity["2024-01-04"] - Decimal("0.01")) < Decimal("1e-12")
     mix = _series(rows, "benchmark:mix")
     assert mix == {"2024-01-02": Decimal("0.02"), "2024-01-04": Decimal("0.03")}
-    assert _series(rows, "provider:x") == {
-        "2024-01-02": Decimal("0.001"),
-        "2024-01-03": Decimal("0.002"),
-    }
     assert [s["series_id"] for s in result["series"]][:2] == ["account:a", "provider:p"]
 
 
@@ -256,4 +221,20 @@ def test_restating_is_byte_identical_and_refuses_a_conflicting_existing_output(
     assert first == second
     (tmp_path / "out" / "attribution-returns.csv").write_bytes(b"x")
     with pytest.raises(Error, match="different bytes"):
+        _run(tmp_path, spec)
+
+
+def test_rows_after_the_declared_as_of_date_are_not_admitted(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    spec["as_of_date"] = "2024-01-03"
+    _result, rows = _run(tmp_path, spec)
+    assert max(r["date"] for r in rows) == "2024-01-03"
+    manifest = json.loads((tmp_path / "out" / "source-manifest.json").read_text())
+    assert any(r["rows_after_as_of_date_dropped"] for r in manifest["member_reports"])
+
+
+def test_no_member_kind_reads_a_workbook(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    spec["members"][0]["kind"] = "xlsx_column"
+    with pytest.raises(Error, match="unknown member kind"):
         _run(tmp_path, spec)
