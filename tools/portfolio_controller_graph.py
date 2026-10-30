@@ -112,6 +112,10 @@ _PATH_STAGES = {
     # release builder, attended preparation): a change moves receipts of every stage.
     _DIRECTORY_IDENTITY: list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
+    # The replica gate and the replica ceremony tool only refuse or orchestrate a real-roots
+    # commit (they write no delivery artifact), like the audit/guard tools: no stage impact.
+    "packages/core/src/quant_engine/core/replica_gate.py": [],
+    "tools/release_replica.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
     # The implementation reconciliation and return-attribution builders write the

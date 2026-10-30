@@ -23,7 +23,17 @@ from quant_engine.core.authority import (
     local_freshness_alerts,
 )
 
+from quant_engine.core.replica_gate import (
+    REPLICA_MARKER_KIND,
+    REPLICA_MARKER_NAME,
+    ReplicaGateError,
+    build_receipt as build_replica_receipt,
+    is_replica_spec,
+    replica_anchor,
+    verify_receipt as verify_replica_receipt,
+)
 from quant_engine.core.contracts import (
+    canonical_json_bytes,
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
@@ -122,6 +132,14 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "REPLICA_MARKER_KIND",
+    "REPLICA_MARKER_NAME",
+    "ReplicaGateError",
+    "build_replica_receipt",
+    "canonical_json_bytes",
+    "is_replica_spec",
+    "replica_anchor",
+    "verify_replica_receipt",
     "inventory_identity",
     "AdapterCapabilities",
     "ProviderCapability",
