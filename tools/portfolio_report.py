@@ -4242,8 +4242,13 @@ def _derived_value_index(
         ):
             continue
         path = _source_clock_file_path(row["finality_evidence"], "finality evidence")
-        document = _load_json(path, "finality evidence")
-        patch = document.get("derived_patch")
+        # the bytes are verified against the pin above; a file that is not a JSON object
+        # (a selected-source date-label bundle) declares no derived patch
+        try:
+            document = json.loads(path.read_bytes())
+        except (UnicodeDecodeError, ValueError):
+            continue
+        patch = document.get("derived_patch") if isinstance(document, Mapping) else None
         if not isinstance(patch, Mapping):
             continue
         interpretation = row.get("finality_interpretation")

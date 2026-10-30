@@ -261,3 +261,26 @@ def test_the_panel_schema_refuses_a_derived_row_without_its_basis_or_with_a_capt
             }
         ]
     )
+
+
+def test_a_pinned_file_that_is_not_json_declares_no_derived_patch(
+    tmp_path: Path,
+) -> None:
+    raw = b"selected source date labels, not a JSON bundle"
+    path = tmp_path / "labels.txt"
+    path.write_bytes(raw)
+    phase = {
+        "source_provenance": {
+            "providers": [
+                {
+                    "provider_id": "p",
+                    "finality_evidence": {
+                        "path": str(path),
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "size_bytes": len(raw),
+                    },
+                }
+            ]
+        }
+    }
+    assert reporter._derived_value_index(phase) == []
