@@ -124,6 +124,18 @@ from quant_engine.core.release import (
     recover_release,
     rollback_release,
 )
+from quant_engine.core.credentials import (
+    BitwardenSource,
+    CredentialError,
+    CredentialPlan,
+    CredentialResolver,
+    KeyVaultSource,
+    SecretCandidate,
+    SecretValue,
+    WindowsCredentialSource,
+    plan_from_config,
+    sources_from_config,
+)
 from quant_engine.core.directory_identity import inventory_identity
 from quant_engine.core.providers import (
     AdapterCapabilities,
@@ -143,6 +155,16 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "BitwardenSource",
+    "CredentialError",
+    "CredentialPlan",
+    "CredentialResolver",
+    "KeyVaultSource",
+    "SecretCandidate",
+    "SecretValue",
+    "WindowsCredentialSource",
+    "plan_from_config",
+    "sources_from_config",
     "release_directory_identity",
     "CacheBaseError",
     "iter_cache_files",
