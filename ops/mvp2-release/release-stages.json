@@ -208,6 +208,17 @@
       ]
     },
     {
+      "id": "pack-evidence",
+      "explicit": true,
+      "requires": ["findings-panel", "findings-targets"],
+      "argv": [
+        "{python}", "{tools}/release_evidence_pack.py", "--cycle", "{cycle}", "--dest", "{evidence_dest}",
+        "--include", "production", "logs", "release-driver-state.json", "pipeline-recipe.json",
+        "provider-generations.json", "replica",
+        "--exclude", "production/state/*", "*.prev-*"
+      ]
+    },
+    {
       "id": "commit",
       "explicit": true,
       "requires": ["findings-panel", "findings-targets"],

@@ -425,6 +425,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "portfolio_root",
         "retained_cache_root",
         "requested_as_of",
+        "evidence_dest",
     }
     for tool in re.findall(r"\{(?:tools|mvp2)\}/([\w.]+)", json.dumps(graph)):
         base = (

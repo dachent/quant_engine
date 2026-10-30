@@ -87,6 +87,15 @@ against its pin, and writes a resolution report. Exit 1 on a hash mismatch or on
 named by `--allow-missing` (inputs the cycle regenerates). Run on the R1 release spec it restores 17
 pinned inputs and names the one it cannot find. It writes only `--dest` and `--report`.
 
+## Packing evidence
+
+`tools/release_evidence_pack.py` copies the cycle's state, logs and stage outputs (the
+`pack-evidence` stage, an explicit stage like the commit) into `evidence_dest`, a OneDrive evidence
+directory, with `SHA256SUMS.txt` and a `manifest.json` (file count, code commits, stage statuses).
+It is create-only: an existing file with other bytes is a refusal, `--dest` may not be inside the
+cycle, and a link out of the cycle is refused. The packed directory is re-hashed against its sums
+before the tool reports success.
+
 ## State
 
 `<cycle>/release-driver-state.json` records per stage its status, code identity, seconds,
