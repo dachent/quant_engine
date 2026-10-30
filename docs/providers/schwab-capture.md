@@ -95,3 +95,16 @@ Developer API route would go through the core credential resolver.
 - That `Schwab-Client-Ids` scoping, verified for the transaction POST, also
   applies to the two GET reads.
 - Early-close days (13:00) are not modelled; the close is 16:00 New York.
+
+## Design notes
+
+- Evidence is single use and a failed run is not resumed: a run stops before
+  writing its manifest, fails verification, and a retry needs a fresh approval
+  and a new run id. This mirrors the Matrixport gate; a resumable partial run
+  would let one approval authorise an open-ended number of reads.
+- The normalized capture schema has no consumer yet. Feeding it to
+  `tools/schwab_generation.py` (whose `normalize-holdings-v2` requires the
+  capture UTC date to equal the spec `as_of_date`) is deliberately left to a
+  separate change while generation behaviour is frozen.
+- The holdings request start time, not only the response time, must lie inside
+  the allowed window after the close.

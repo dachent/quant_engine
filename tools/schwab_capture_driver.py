@@ -1061,6 +1061,9 @@ def run_capture(
     requests: list[dict[str, object]] = []
 
     holdings_req = governance.request_for("holdings.v2")
+    # The book may be read at any moment between request and response, so the
+    # request start must already be inside the allowed window (not only the end).
+    assess_timing(now(), cutoff, exception_label=label)
     status, holdings_raw = governed.get(holdings_req.path, holdings_req.query, None)
     holdings_at = now()
     _single_ok(status, "holdings")
@@ -1340,6 +1343,10 @@ def _verify_run(
         for v in transactions.values()
     ):
         raise DriverError("transaction history is not terminal for every account")
+    for internal, summary in transactions.items():
+        _verify_transaction_pages(
+            run_dir, internal, _object(summary, "transaction summary")
+        )
     if crosswalk is not None:
         blob = b"".join(
             (run_dir / name).read_bytes()
@@ -1366,6 +1373,45 @@ def _verify_run(
         "position_count": len(held),
         "status": "VERIFIED",
     }
+
+
+def _verify_transaction_pages(
+    run_dir: Path, internal: str, summary: Mapping[str, Any]
+) -> None:
+    """Recompute terminality and counts from the staged pages themselves."""
+
+    base = run_dir / "transactions"
+    child = _load(base / "manifest.json", "transaction manifest")
+    state = _object(_object(child.get("accounts"), "accounts").get(internal), "state")
+    page_dir = base / "pages" / internal
+    names = sorted(p.name for p in page_dir.glob("*.json") if ".request." not in p.name)
+    if not names or names != [f"{n:04d}.json" for n in range(len(names))]:
+        raise DriverError("transaction pages are not contiguous")
+    rows = 0
+    for position, name in enumerate(names):
+        page = _load(page_dir / name, "transaction page")
+        if "bookmark" not in page:
+            raise DriverError("transaction page omits its bookmark")
+        last = position == len(names) - 1
+        if (page["bookmark"] is None) != last:
+            raise DriverError("transaction history is not terminal at its last page")
+        rows += len(_objects(page.get("brokerageTransactions"), "page rows"))
+    normalized = strict_json_loads(
+        (
+            base / "normalized" / "wch" / "transactions" / f"{internal}.json"
+        ).read_bytes(),
+        label="transactions",
+    )
+    if not isinstance(normalized, list):
+        raise DriverError("transactions must be a list")
+    counts = {
+        rows,
+        len(normalized),
+        summary.get("count"),
+        state.get("transaction_count"),
+    }
+    if len(counts) != 1 or state.get("page_count") != len(names):
+        raise DriverError("transaction page and row counts do not reconcile")
 
 
 def _strict_keys_driver(value: dict[str, Any], keys: set[str]) -> None:

@@ -663,6 +663,49 @@ def test_verifier_reports_malformed_forgeries_as_driver_errors(tmp_path: Path) -
         driver.verify_run(run_dir)
 
 
+def test_verifier_recomputes_terminality_from_rehashed_pages(tmp_path: Path) -> None:
+    _, run_dir, _ = _run(tmp_path)
+    internal = f"account-{1:016x}"
+    page = run_dir / "transactions" / "pages" / internal / "0000.json"
+    document = json.loads(page.read_text("utf-8"))
+    document["bookmark"] = "[REDACTED]"
+    payload = driver._canonical(document)
+    page.write_bytes(payload)
+    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    for entry in manifest["artifacts"]:
+        if entry["path"] == f"transactions/pages/{internal}/0000.json":
+            entry["sha256"] = hashlib.sha256(payload).hexdigest()
+            entry["size_bytes"] = len(payload)
+    (run_dir / "manifest.json").write_bytes(driver._canonical(manifest))
+    with pytest.raises(driver.DriverError, match="not terminal at its last page"):
+        driver.verify_run(run_dir)
+
+
+def test_holdings_request_start_before_close_is_refused(tmp_path: Path) -> None:
+    moments = iter(
+        [
+            datetime(2031, 6, 13, 19, 59, 58, tzinfo=timezone.utc),
+            datetime(2031, 6, 13, 19, 59, 59, tzinfo=timezone.utc),
+            datetime(2031, 6, 13, 20, 0, 1, tzinfo=timezone.utc),
+        ]
+        + [NOW] * 50
+    )
+    governance = _authorize(tmp_path, _evidence())
+    fake = FakeTransport()
+    with pytest.raises(driver.DriverError, match="precedes"):
+        driver.run_capture(
+            transport=fake,
+            governance=governance,
+            crosswalk=_crosswalk(),
+            targets=_targets(),
+            cutoff=CUTOFF,
+            staging_root=tmp_path / "staging",
+            run_id="synthetic-run-4",
+            clock=lambda: next(moments),
+        )
+    assert fake.calls == []
+
+
 # --------------------------------------------------------------------------- #
 # CLI, imports, and unchanged existing behaviour
 # --------------------------------------------------------------------------- #
