@@ -38,6 +38,8 @@ DEFAULT_FILE_COUNT: Final = 55
 DEFAULT_RECORD_COUNT: Final = 14901
 PLANNING_RECORD_COUNT: Final = 14981
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_DECLARED_SCHEMA_NAME = re.compile(r"^quantbase-[a-z0-9-]{1,80}$")
+_DECLARED_SCHEMA_VERSION = re.compile(r"^[0-9a-z][0-9a-z.-]{0,31}$")
 _NATIVE_ARTIFACT_CONTRACTS: Final[tuple[dict[str, tuple[str, str]], ...]] = (
     {
         "har/quantbase_20260902_171237.har": (
@@ -374,6 +376,7 @@ def create_plan(
     expected_record_count: int = DEFAULT_RECORD_COUNT,
     planning_record_count: int = PLANNING_RECORD_COUNT,
     native_artifacts: Sequence[tuple[str, Path]] | None = None,
+    native_contract: Mapping[str, tuple[str, str]] | None = None,
 ) -> dict[str, object]:
     """Create one content-addressed, private cutover plan."""
 
@@ -393,6 +396,8 @@ def create_plan(
             "CSV record count differs from accepted baseline"
         )
     runbook_hash, runbook_size = hash_file(runbook)
+    if native_contract is not None and native_artifacts is None:
+        raise QuantbaseGenerationError("a native contract requires native artifacts")
     native_entries: list[dict[str, object]] = []
     if native_artifacts is not None:
         relative_paths: list[str] = []
@@ -422,7 +427,7 @@ def create_plan(
             )
         if len(source_paths) != len(set(source_paths)):
             raise QuantbaseGenerationError("native artifact sources must be unique")
-        contract = _native_artifact_contract(relative_paths)
+        contract = _native_artifact_contract(relative_paths, declared=native_contract)
         for relative, source_path in sorted(
             zip(relative_paths, source_paths, strict=True), key=lambda item: item[0]
         ):
@@ -459,6 +464,15 @@ def create_plan(
         "datasets": datasets,
         **(
             {"native_artifacts": native_entries} if native_artifacts is not None else {}
+        ),
+        **(
+            {
+                "native_contract": {
+                    key: list(value) for key, value in sorted(native_contract.items())
+                }
+            }
+            if native_contract is not None
+            else {}
         ),
         "observed_end": max(observed).isoformat(),
         "observed_start": min(observed).isoformat(),
@@ -556,7 +570,9 @@ def _native_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         raise QuantbaseGenerationError("native artifact relative paths must be unique")
     if len(source_paths) != len(set(source_paths)):
         raise QuantbaseGenerationError("native artifact sources must be unique")
-    contract = _native_artifact_contract(relative_paths)
+    contract = _native_artifact_contract(
+        relative_paths, declared=_declared_contract(plan.get("native_contract"))
+    )
     for item, relative in zip(native, relative_paths, strict=True):
         if (
             item.get("schema_name") != contract[relative][0]
@@ -566,9 +582,40 @@ def _native_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     return native
 
 
+def _declared_contract(value: object) -> dict[str, tuple[str, str]] | None:
+    """Validate a manifest-declared native contract; None selects the legacy set."""
+
+    if value is None:
+        return None
+    declared: dict[str, tuple[str, str]] = {}
+    for key, pair in _object(value, "native_contract").items():
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise QuantbaseGenerationError("native contract entry is malformed")
+        name, version = pair
+        if (
+            not isinstance(name, str)
+            or _DECLARED_SCHEMA_NAME.fullmatch(name) is None
+            or not isinstance(version, str)
+            or _DECLARED_SCHEMA_VERSION.fullmatch(version) is None
+        ):
+            raise QuantbaseGenerationError("native contract schema is invalid")
+        declared[key] = (name, version)
+    if not declared:
+        raise QuantbaseGenerationError("native contract must not be empty")
+    return declared
+
+
 def _native_artifact_contract(
     relative_paths: Sequence[str],
-) -> dict[str, tuple[str, str]]:
+    *,
+    declared: Mapping[str, tuple[str, str]] | None = None,
+) -> Mapping[str, tuple[str, str]]:
+    if declared is not None:
+        if set(relative_paths) != set(declared):
+            raise QuantbaseGenerationError(
+                "native artifacts differ from the declared native contract"
+            )
+        return declared
     for contract in _NATIVE_ARTIFACT_CONTRACTS:
         if set(relative_paths) == set(contract):
             return contract
@@ -723,7 +770,12 @@ def build_generation(
             "observed_end": plan["observed_end"],
             "observed_start": plan["observed_start"],
             "out_of_boundary": [
-                "No freshness claim is made after the 2026-07-29 legacy capture.",
+                (
+                    "No freshness claim is made after the "
+                    f"{as_of.isoformat()} declared capture cutoff."
+                    if "native_contract" in plan
+                    else "No freshness claim is made after the 2026-07-29 legacy capture."
+                ),
                 "The producing source revision is unknown and remains LEGACY_UNKNOWN.",
                 "The captured runbook contains stale narrative counts; hash-bound CSV files govern.",
                 "Inherited wins fields cannot be independently recomputed from the available evidence.",
@@ -1000,6 +1052,71 @@ def cutover_source(plan_path: Path, generation_id: str) -> dict[str, object]:
     return result
 
 
+def _load_native_intake(
+    path: Path | None,
+) -> tuple[
+    list[tuple[str, Path]] | None, dict[str, tuple[str, str]] | None, date | None
+]:
+    """Re-derive the native declaration from a staged and parsed HAR intake.
+
+    The declaration is never read from a caller-authored file: every raw file is
+    re-hashed against the intake record, the staged manifest and the parse report
+    must agree with that record, and the schema contract is built here.
+    """
+
+    if path is None:
+        return None, None, None
+    root = _absolute_directory(str(path), "native intake", existing=True)
+
+    def load(name: str) -> tuple[bytes, dict[str, Any]]:
+        target = root / name
+        if target.is_symlink() or not target.is_file():
+            raise QuantbaseGenerationError(f"native intake lacks {name}")
+        raw = target.read_bytes()
+        try:
+            return raw, _object(json.loads(raw.decode("utf-8")), name)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise QuantbaseGenerationError(f"native intake {name} is invalid") from exc
+
+    manifest_bytes, manifest = load("manifest.json")
+    _, record = load("intake-manifest.json")
+    _, report = load("parse-report.json")
+    files = _objects(record.get("files"), "intake files")
+    if record.get("manifest_sha256") != hashlib.sha256(manifest_bytes).hexdigest():
+        raise QuantbaseGenerationError("native intake manifest differs from its record")
+    if (
+        report.get("manifest_sha256") != record.get("manifest_sha256")
+        or report.get("intake_id") != record.get("intake_id")
+        or report.get("files") != record.get("files")
+        or report.get("state") not in {"PARSED", "PARSED_WITH_FLAGS"}
+    ):
+        raise QuantbaseGenerationError("native intake parse report does not match")
+    raw_root = root / "raw"
+    if raw_root.is_symlink() or not raw_root.is_dir():
+        raise QuantbaseGenerationError("native intake raw directory is missing")
+    names = [_text(item.get("name"), "intake file name") for item in files]
+    if {item.name for item in raw_root.iterdir()} != set(names) or len(names) != len(
+        set(names)
+    ):
+        raise QuantbaseGenerationError("native intake raw inventory differs")
+    artifacts: list[tuple[str, Path]] = []
+    contract: dict[str, tuple[str, str]] = {}
+    for item in files:
+        name = str(item["name"])
+        raw_path = raw_root / name
+        if raw_path.is_symlink() or hash_file(raw_path) != (
+            item.get("sha256"),
+            item.get("bytes"),
+        ):
+            raise QuantbaseGenerationError(f"native intake raw file differs: {name}")
+        artifacts.append((f"har/{name}", raw_path))
+        contract[f"har/{name}"] = ("quantbase-native-har", "1")
+    artifacts.append(("capture/intake-manifest.json", root / "intake-manifest.json"))
+    contract["capture/intake-manifest.json"] = ("quantbase-har-intake-manifest", "1")
+    cutoff_text = _text(manifest.get("cutoff"), "intake cutoff")
+    return artifacts, contract, date.fromisoformat(cutoff_text)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1013,6 +1130,7 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--planning-record-count", type=int, default=PLANNING_RECORD_COUNT
     )
+    plan.add_argument("--native-intake", type=Path)
     for command in ("build", "stage"):
         child = commands.add_parser(command)
         child.add_argument("plan", type=Path)
@@ -1027,6 +1145,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "plan":
+            native_artifacts, native_contract, intake_cutoff = _load_native_intake(
+                args.native_intake
+            )
+            if intake_cutoff is not None and args.as_of_date != intake_cutoff:
+                raise QuantbaseGenerationError(
+                    "as-of date must equal the intake manifest cutoff"
+                )
             result = create_plan(
                 args.source_root,
                 args.data_root,
@@ -1035,6 +1160,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_file_count=args.expected_file_count,
                 expected_record_count=args.expected_record_count,
                 planning_record_count=args.planning_record_count,
+                native_artifacts=native_artifacts,
+                native_contract=native_contract,
             )
         elif args.command == "build":
             catalog, manifest, catalog_bytes = build_generation(args.plan)
