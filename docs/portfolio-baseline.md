@@ -52,6 +52,32 @@ The private input follows
 The generated catalog follows
 [`baseline-catalog.schema.json`](../schemas/portfolio/baseline-catalog.schema.json).
 
+## Cost rows, their evidence, and execution cost (R2.1)
+
+`costs[]` states the annual subscription amount from the `cost-economics` source
+and its status (a status starting `known` is an evidenced cost).  Three further
+facts ride on the row:
+
+- `cost_class`, `declared` and `corroboration` come from the optional hash-bound
+  `cost-evidence` source (`portfolio-cost-evidence/1`).  `declared` names the
+  provider's declared amount, currency (USD only), billing period and the artifact
+  field it was read from; `corroboration` lists observed charges (for example the
+  owner's card feed) with their artifact digest and the date the feed ends.  The
+  baseline refuses a row whose annual amount is not exactly the declared amount
+  times the periods per year, a corroborating charge that differs from the declared
+  amount, a non-USD declaration, or a charge dated after the cutoff.
+- `execution_cost` is derived from the admitted ledger transactions of the
+  strategy: commissions (`commission` for IBKR, signed as Flex signs it, and
+  `fees_and_commission` for Schwab) summed per native currency as positive costs,
+  with the record count and window.  It is never added to the subscription amount
+  and never converted: `usd_total` exists only when every amount is USD.
+
+A position row whose provider captured it after the New York close of its as-of
+date but stores it under the later native UTC date (Schwab's holdings capture)
+carries `as_of_date` = the New York financial day, `capture_date` = the native
+date, `observed_at` and `as_of_basis` =
+`CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE`.
+
 ## One-command rebuild
 
 Run from the repository with the frozen workspace:

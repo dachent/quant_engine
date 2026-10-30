@@ -4954,3 +4954,21 @@ def test_disclosure_sources_read_the_pinned_declared_funding_events_or_refuse(
             destination=tmp_path / "again",
             ledger_generation_dir=_ledger_dir(tmp_path),
         )
+
+
+class _AnyConfig(dict):  # type: ignore[type-arg]
+    """A config whose every required key resolves to a nested placeholder."""
+
+    def __missing__(self, key: str) -> "_AnyConfig":
+        return _AnyConfig()
+
+
+def test_ledger_stage_identity_binds_the_weekly_gap_fill_pin() -> None:
+    base = _AnyConfig()
+    without = preparation._preparation_stage_inputs(base, "c" * 40)["ledger"]
+    assert "weekly_gap_fill_spec" not in without
+    pinned = _AnyConfig(weekly_gap_fill_spec={"path": "a", "sha256": "1"})
+    changed = _AnyConfig(weekly_gap_fill_spec={"path": "a", "sha256": "2"})
+    first = preparation._preparation_stage_inputs(pinned, "c" * 40)["ledger"]
+    second = preparation._preparation_stage_inputs(changed, "c" * 40)["ledger"]
+    assert first["weekly_gap_fill_spec"] != second["weekly_gap_fill_spec"]

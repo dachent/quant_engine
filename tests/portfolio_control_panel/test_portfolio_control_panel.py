@@ -2965,6 +2965,8 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         {
             "account_id": "account-00",
             "as_of_date": "2026-07-30",
+            "asset_category": None,
+            "asset_category_label": None,
             "evidence_class": "WCH_CURRENT",
             "market_value_usd": "30",
             "quantity": "3",
@@ -6442,8 +6444,8 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
-    assert len(manifests) == 31
-    assert len(lints) == 30
+    assert len(manifests) == 34
+    assert len(lints) == 33
     for path in (*manifests, *lints):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["qa_manifest_version"] == 2
@@ -7639,13 +7641,13 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
 def test_mvp_exposes_all_nine_accepted_views() -> None:
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
 
-    # Ten views exist (the Performance charts tab was added), but only nine are primary navigation.  The frozen
+    # Eleven views exist (Performance charts and Model vs actual were added), but only ten are primary navigation.  The frozen
     # candidate catalog is dated research context that cannot change current
     # strategies, readiness or allocation, so it is reachable only through the
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 9
+    assert template.count('class="nav-item') == 10
     for view in (
         "command",
         "capital",
@@ -7655,6 +7657,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "dependence",
         "weekly",
         "performance",
+        "modelvsactual",
         "data",
     ):
         assert f'data-nav="{view}"' in template
@@ -14314,6 +14317,7 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         "renderDependence",
         "renderWeekly",
         "renderPerformance",
+        "renderModelVsActual",
         "renderCandidates",
         "renderData",
     )
@@ -14408,7 +14412,7 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     )
     assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
     manifests = list(output.glob("*/manifest.json"))
-    assert len(manifests) == 31
+    assert len(manifests) == 34
     assert all(
         json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
         for path in manifests
@@ -15768,3 +15772,56 @@ def test_panel_schema_binds_the_lifecycle_marker_to_the_fields() -> None:
         "performance": [{**row, **_LIFECYCLE_ACTIVE}] * 13,
     }
     assert lifecycle_errors(current) == []
+
+
+def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The optional block is built, schema-validated and bound only when its pinned input is supplied."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mva_synthetic", Path(__file__).with_name("test_model_vs_actual.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mva_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mva_tests)
+    staged = tmp_path / "audit-bridges.json"
+    staged.write_bytes(mva_tests.synthetic_staged_bytes())
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    base_args = (inputs["report"], inputs["legacy"], panel.DEFAULT_TEMPLATE_ROOT)
+    base_kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+    }
+    without_files, without_data, without_bound = panel._rendered_files(
+        *base_args, **base_kwargs
+    )
+    assert "model_vs_actual" not in without_data
+    assert "model_vs_actual_input" not in without_bound
+
+    files, data, bound = panel._rendered_files(
+        *base_args, **base_kwargs, model_vs_actual_input=(staged, pin)
+    )
+    assert data["model_vs_actual"]["schema_version"] == 1
+    assert data["model_vs_actual"]["audit_input"]["sha256"] == pin
+    assert bound["model_vs_actual_input"] == (staged, pin)
+    published = json.loads(files["data/dashboard_data.json"])
+    assert published["model_vs_actual"]["strategies"][0]["strategy_id"]
+    # Everything else is unchanged by the optional block.
+    assert {
+        k: v for k, v in files.items() if k != "data/dashboard_data.json"
+    }.keys() == {
+        k: v for k, v in without_files.items() if k != "data/dashboard_data.json"
+    }.keys()
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._rendered_files(
+            *base_args, **base_kwargs, model_vs_actual_input=(staged, "0" * 64)
+        )
+    with pytest.raises(panel.ControlPanelValidationError, match="not usable"):
+        panel._rendered_files(
+            *base_args,
+            **base_kwargs,
+            model_vs_actual_input=(staged.with_name("absent.json"), pin),
+        )

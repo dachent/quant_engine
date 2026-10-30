@@ -1484,6 +1484,11 @@ def _preparation_stage_inputs(
             "provider_ledger_generation_root": config[
                 "provider_ledger_generation_root"
             ],
+            **(
+                {"weekly_gap_fill_spec": config["weekly_gap_fill_spec"]}
+                if config.get("weekly_gap_fill_spec") is not None
+                else {}
+            ),
             "release_commit": release_commit,
             "strategy_attribution": config["retained_verified_generations"][
                 "attribution"
@@ -2102,6 +2107,11 @@ def _prepare_attended_inputs(
             strategy_attribution_generation_id=attribution_source.name,
             decomposition_plan_bundle=plan_roots["LIVE_ONLY"],
             hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"],
+            weekly_gap_fill_spec_path=(
+                _pin(config["weekly_gap_fill_spec"], "weekly gap fill spec")
+                if config.get("weekly_gap_fill_spec") is not None
+                else None
+            ),
             correlation_source_root=dependence_root,
             legacy_panel=Path(str(config["legacy_panel_root"])),
             as_of_date=cutoff,
@@ -2288,6 +2298,11 @@ def _prepare_attended_inputs(
             strategy_attribution_generation_id=attribution_source.name,
             decomposition_plan_bundle=plan_roots["LIVE_ONLY"],
             hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"],
+            weekly_gap_fill_spec_path=(
+                _pin(config["weekly_gap_fill_spec"], "weekly gap fill spec")
+                if config.get("weekly_gap_fill_spec") is not None
+                else None
+            ),
             correlation_source_root=dependence_root,
             legacy_panel=Path(str(config["legacy_panel_root"])),
             as_of_date=cutoff,
