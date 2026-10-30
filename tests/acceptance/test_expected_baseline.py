@@ -53,7 +53,7 @@ CURRENT_ORACLE_MANIFEST_SHA256 = {
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
-    "721d4122eb837e7573add1446aa58cb05525338fe3bee0d17a3175a49d9536c6",
+    "291f53ad3efaeadd7d5151aaf241b365beff508e2233fb657d4d979a793da84c",
 )
 CURRENT_AUDIT_AUTHORITY_POINTERS: frozenset[tuple[str, str]] = frozenset()
 
