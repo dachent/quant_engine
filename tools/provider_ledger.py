@@ -102,7 +102,7 @@ for _descriptor in (
     ProviderDescriptor(
         provider_id="ibkr",
         catalog_filename="ibkr-catalog.json",
-        catalog_schema_versions=frozenset({3, 4, 5, 6, 7}),
+        catalog_schema_versions=frozenset({3, 4, 5, 6, 7, 8}),
         account_facts=(
             "capital_anchors",
             "corporate_actions",
@@ -4899,14 +4899,23 @@ def _project_account_facts(
                 # when the source states them, so a catalog fact is never
                 # dropped here.  A ``None`` is no fact and adds no key.
                 for field in (
+                    "asset_category",
                     "close_price",
                     "commission",
                     "event_time",
                     "executed_time",
+                    "expiry",
                     "fees_and_commission",
+                    "listing_exchange",
                     "mark_price",
+                    "multiplier",
                     "order_reference",
+                    "put_call",
+                    "strike",
+                    "sub_category",
+                    "symbol",
                     "timing_granularity",
+                    "underlying_conid_sha256",
                 ):
                     if row.get(field) is not None:
                         record[field] = row[field]
