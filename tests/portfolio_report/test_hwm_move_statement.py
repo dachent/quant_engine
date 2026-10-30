@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from test_sleeve_perimeter_disclosures import (
+    PARENT,
     _closing_ledger,
     _compose,
     _facts,
@@ -28,30 +29,24 @@ def _path(values: list[str], days: list[str] | None = None) -> list[dict[str, st
     ]
 
 
-def _clock(date: str | None) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = [
+def _patches(date: str | None, account: str = PARENT) -> list[dict[str, Any]]:
+    """The derived-patch index the report builds from the pinned finality evidence."""
+
+    if date is None:
+        return []
+    return [
         {
-            "source_id": "other",
-            "provider_data_date": "2026-09-14",
-            "finality": {"basis": "NATIVE"},
+            "accounts": {account: frozenset({date})},
+            "value_basis": {"basis": "DERIVED_FROM_OFFICIAL_CLOSES"},
         }
     ]
-    if date is not None:
-        rows.append(
-            {
-                "source_id": "prov",
-                "provider_data_date": date,
-                "finality": {"basis": "NATIVE_LABEL_WITH_DECLARED_DERIVED_PATCH"},
-            }
-        )
-    return {"source_data_as_of": rows}
 
 
 def _sentence(
     tmp_path: Path,
     prior: list[list[str]] | None,
     now: list[dict[str, str]],
-    clock: dict[str, Any] | None,
+    clock: list[dict[str, Any]] | None,
     before: str | None = None,
 ) -> str:
     sources = _sources(tmp_path, _facts(), _closing_ledger())
@@ -75,7 +70,7 @@ def _sentence(
             _rows(),
             hwm_current_index=now[-1]["index"],
             hwm_index_path=now,
-            source_clock=clock,
+            derived_patches=clock,
         )["items"]
         if i["item"] == "HWM member series"
     )
@@ -88,7 +83,7 @@ def test_a_move_confined_to_a_derived_patch_date_is_attributed_to_it(
         [d, v] for d, v in zip(DAYS, ["100", "101", "102", "103", "104"], strict=True)
     ]
     now = _path(["100", "101", "102", "103", "105.5"])
-    text = _sentence(tmp_path, prior, now, _clock("2026-09-14"))
+    text = _sentence(tmp_path, prior, now, _patches("2026-09-14"))
     assert (
         "The index is 105.5000 against 104.0000 in the previous release (+1.50, +1.44%)"
         in text
@@ -99,11 +94,8 @@ def test_a_move_confined_to_a_derived_patch_date_is_attributed_to_it(
     )
     assert "and +0.00 is the movement from 2026-09-14 to 2026-09-14" in text
     assert "differ on 1 of 5 common dates" in text
-    assert (
-        "prov NATIVE_LABEL_WITH_DECLARED_DERIVED_PATCH" in text
-        and "2026-09-14 (" in text
-    )
-    assert "attributed to that provider NAV revision" in text
+    assert "2026-09-14 (DERIVED_FROM_OFFICIAL_CLOSES)" in text
+    assert "attributed to that NAV revision" in text
     assert "not attributed beyond" not in text
 
 
@@ -114,9 +106,9 @@ def test_a_move_on_other_dates_is_not_attributed_to_the_revision(
         [d, v] for d, v in zip(DAYS, ["100", "101", "102", "103", "104"], strict=True)
     ]
     now = _path(["100", "101.5", "102.5", "103.5", "105.5"])
-    text = _sentence(tmp_path, prior, now, _clock("2026-09-14"))
+    text = _sentence(tmp_path, prior, now, _patches("2026-09-14"))
     assert "differ on 4 of 5 common dates (first 2026-09-09, last 2026-09-14)" in text
-    assert "attributed to that provider NAV revision" not in text
+    assert "attributed to that NAV revision" not in text
     assert "not attributed beyond this timing" in text
 
 
@@ -125,9 +117,9 @@ def test_a_clock_without_a_patch_on_the_date_attributes_nothing(tmp_path: Path) 
         [d, v] for d, v in zip(DAYS, ["100", "101", "102", "103", "104"], strict=True)
     ]
     now = _path(["100", "101", "102", "103", "105.5"])
-    for clock in (None, _clock(None), _clock("2026-09-11")):
+    for clock in (None, _patches(None), _patches("2026-09-11")):
         text = _sentence(tmp_path, prior, now, clock)
-        assert "attributed to that provider NAV revision" not in text
+        assert "attributed to that NAV revision" not in text
         assert "not attributed beyond this timing" in text
 
 
@@ -137,7 +129,7 @@ def test_the_two_parts_always_sum_to_the_printed_move(tmp_path: Path) -> None:
     prior_days = DAYS[:3]
     prior = [[d, v] for d, v in zip(prior_days, ["100", "101", "102.25"], strict=True)]
     now = _path(["100", "101.5", "103", "104", "105.5"])
-    text = _sentence(tmp_path, prior, now, _clock("2026-09-14"))
+    text = _sentence(tmp_path, prior, now, _patches("2026-09-14"))
     move = Decimal("105.5") - Decimal("102.25")
     assert f"({move:+.2f}," in text
     numbers = [
@@ -159,7 +151,7 @@ def test_paths_that_do_not_end_on_the_printed_figures_give_no_split(
         [d, v] for d, v in zip(DAYS, ["100", "101", "102", "103", "104"], strict=True)
     ]
     now = _path(["100", "101", "102", "103", "105.5"])
-    text = _sentence(tmp_path, prior, now, _clock("2026-09-14"), before="99")
+    text = _sentence(tmp_path, prior, now, _patches("2026-09-14"), before="99")
     assert "restatement" not in text
     assert text.endswith("the move is not attributed beyond this timing.")
 
@@ -168,7 +160,7 @@ def test_without_a_predecessor_path_the_old_unattributed_wording_remains(
     tmp_path: Path,
 ) -> None:
     now = _path(["100", "101", "102", "103", "105.5"])
-    text = _sentence(tmp_path, None, now, _clock("2026-09-14"), before="104")
+    text = _sentence(tmp_path, None, now, _patches("2026-09-14"), before="104")
     assert "restatement" not in text
     assert "not attributed beyond this timing" in text
 
@@ -197,3 +189,39 @@ def test_the_predecessor_path_is_read_from_the_pinned_data_file(tmp_path: Path) 
         )
         is None
     )
+
+
+def test_a_patch_on_another_account_or_an_earlier_date_attributes_nothing(
+    tmp_path: Path,
+) -> None:
+    """The scope is the governed patch's own account and dates, never the provider's data date."""
+
+    prior = [
+        [d, v] for d, v in zip(DAYS, ["100", "101", "102", "103", "104"], strict=True)
+    ]
+    now = _path(["100", "101", "102", "103", "105.5"])
+    for clock in (
+        _patches(
+            "2026-09-14", account="account-unrelated"
+        ),  # right date, wrong account
+        _patches("2026-09-11"),  # right account, other date
+        _patches("2026-09-14", account="account-unrelated") + _patches("2026-09-11"),
+    ):
+        text = _sentence(tmp_path, prior, now, clock)
+        assert "attributed to that NAV revision" not in text
+        assert "not attributed beyond this timing" in text
+    # the member's own sleeve account counts as well as its parent
+    from test_sleeve_perimeter_disclosures import S1, S2
+
+    for member in (S1, S2):
+        text = _sentence(tmp_path, prior, now, _patches("2026-09-14", account=member))
+        assert ("attributed to that NAV revision" in text) == (
+            member == _member(tmp_path)
+        )
+
+
+def _member(tmp_path: Path) -> str:
+    """The HWM member account the fixture's sentence names."""
+
+    text = _sentence(tmp_path, None, _path(["1", "1", "1", "1", "1"]), None, before="1")
+    return re.search(r"sleeve series (\S+) from", text).group(1)  # type: ignore[union-attr]

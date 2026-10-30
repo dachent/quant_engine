@@ -16,7 +16,7 @@ Two steps, so a report is a pure function of its pinned inputs:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -724,22 +724,24 @@ def _path_by_date(rows: Sequence[Any] | None) -> dict[str, Decimal]:
     return result
 
 
-def _revision_sources(source_clock: Mapping[str, Any] | None) -> dict[str, str]:
-    """Provider data date -> finality basis, for sources whose basis declares a derived patch."""
+def _derived_scope(
+    derived_patches: Sequence[Mapping[str, Any]] | None, accounts: Collection[str]
+) -> dict[str, str]:
+    """Date -> derivation basis, for the given accounts' own declared derived dates.
+
+    ``derived_patches`` comes from the finality evidence the run observation pins: each
+    entry maps an account to the dates of ITS patched rows. Nothing is inferred from a
+    provider's data date or finality label.
+    """
 
     found: dict[str, str] = {}
-    rows = source_clock.get("source_data_as_of") if source_clock else None
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, Mapping):
+    for entry in derived_patches or []:
+        dates_by_account = entry.get("accounts")
+        if not isinstance(dates_by_account, Mapping):
             continue
-        finality = row.get("finality")
-        basis = finality.get("basis") if isinstance(finality, Mapping) else None
-        if (
-            isinstance(basis, str)
-            and "DERIVED_PATCH" in basis
-            and row.get("provider_data_date")
-        ):
-            found[str(row["provider_data_date"])] = f"{row.get('source_id')} {basis}"
+        for account in accounts:
+            for day in dates_by_account.get(account, ()):
+                found[str(day)] = str(entry["value_basis"]["basis"])
     return found
 
 
@@ -747,7 +749,8 @@ def _index_move(
     predecessor: object,
     current: str | None,
     current_path: Sequence[Any] | None = None,
-    source_clock: Mapping[str, Any] | None = None,
+    derived_patches: Sequence[Mapping[str, Any]] | None = None,
+    member_accounts: Collection[str] = (),
 ) -> str:
     if not (
         current is not None
@@ -790,14 +793,15 @@ def _index_move(
         f"and {extension:+.2f} is the movement from {last_prior} to {last_now}; the two "
         f"paths differ on {len(differing)} of {len(common)} common dates"
     )
-    revisions = _revision_sources(source_clock)
+    revisions = _derived_scope(derived_patches, member_accounts)
     if differing and all(d in revisions for d in differing):
         named = "; ".join(f"{d} ({revisions[d]})" for d in differing)
         return (
             head
             + parts
-            + f", all of them dates on which the source clock records a declared derived "
-            f"patch: {named}; the restatement is attributed to that provider NAV revision."
+            + ", all of them dates on which the finality evidence declares this member's "
+            f"account NAV derived: {named}; the restatement is attributed to that NAV "
+            "revision."
         )
     if differing:
         return (
@@ -819,7 +823,7 @@ def compose(
     strategy_returns: Mapping[str, Decimal] | None = None,
     hwm_current_index: str | None = None,
     hwm_index_path: Sequence[Mapping[str, Any]] | None = None,
-    source_clock: Mapping[str, Any] | None = None,
+    derived_patches: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Methodology items from the sources and the report's own rows.
 
@@ -1130,7 +1134,8 @@ def compose(
                             sources.get("predecessor"),
                             hwm_current_index,
                             hwm_index_path,
-                            source_clock,
+                            derived_patches,
+                            {epochs[0][1], sleeve_accounts[epochs[0][1]]},
                         )
                     ),
                 }
