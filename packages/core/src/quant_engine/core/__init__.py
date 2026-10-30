@@ -31,10 +31,12 @@ from quant_engine.core.retained_cache_base import (
     verify_cache_base,
     verify_if_promoted,
 )
-from quant_engine.core.replica_gate import (
+from quant_engine.core.replica_marker import (
     REPLICA_MARKER_KIND,
     REPLICA_MARKER_NAME,
     ReplicaGateError,
+)
+from quant_engine.core.replica_gate import (
     build_receipt as build_replica_receipt,
     is_replica_spec,
     replica_anchor,
@@ -103,6 +105,7 @@ from quant_engine.core.pipeline import (
 )
 from quant_engine.core.release import (
     CompanionInput,
+    directory_identity as release_directory_identity,
     CompanionPlan,
     GateEvidence,
     ReleaseCommitError,
@@ -140,6 +143,7 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "release_directory_identity",
     "CacheBaseError",
     "iter_cache_files",
     "promote_cache_base",

@@ -118,6 +118,9 @@ _PATH_STAGES = {
     # The replica gate and the replica ceremony tool only refuse or orchestrate a real-roots
     # commit (they write no delivery artifact), like the audit/guard tools: no stage impact.
     "packages/core/src/quant_engine/core/replica_gate.py": [],
+    # Read by release.py to accept a marked replica copy's directory identities; it can refuse
+    # a replica release, never a real one (real roots carry no marker).
+    "packages/core/src/quant_engine/core/replica_marker.py": [],
     "tools/release_replica.py": [],
     "tools/release_cache_base.py": [],
     "tools/release_measurements.py": [],
