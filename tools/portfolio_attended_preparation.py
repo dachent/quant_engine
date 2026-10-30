@@ -1489,6 +1489,11 @@ def _preparation_stage_inputs(
                 if config.get("weekly_gap_fill_spec") is not None
                 else {}
             ),
+            **(
+                {"model_vs_actual_input": config["model_vs_actual_input"]}
+                if config.get("model_vs_actual_input") is not None
+                else {}
+            ),
             "release_commit": release_commit,
             "strategy_attribution": config["retained_verified_generations"][
                 "attribution"
@@ -2112,6 +2117,11 @@ def _prepare_attended_inputs(
                 if config.get("weekly_gap_fill_spec") is not None
                 else None
             ),
+            model_vs_actual_input_path=(
+                _pin(config["model_vs_actual_input"], "model vs actual input")
+                if config.get("model_vs_actual_input") is not None
+                else None
+            ),
             correlation_source_root=dependence_root,
             legacy_panel=Path(str(config["legacy_panel_root"])),
             as_of_date=cutoff,
@@ -2301,6 +2311,11 @@ def _prepare_attended_inputs(
             weekly_gap_fill_spec_path=(
                 _pin(config["weekly_gap_fill_spec"], "weekly gap fill spec")
                 if config.get("weekly_gap_fill_spec") is not None
+                else None
+            ),
+            model_vs_actual_input_path=(
+                _pin(config["model_vs_actual_input"], "model vs actual input")
+                if config.get("model_vs_actual_input") is not None
                 else None
             ),
             correlation_source_root=dependence_root,
