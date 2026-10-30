@@ -27,6 +27,7 @@ from quant_engine.alpaca.capture.run import (
     MANIFEST_DIGEST_FILE,
     MANIFEST_FILE,
     REQUEST_MANIFEST_FILE,
+    activity_query,
 )
 from quant_engine.alpaca.capture.util import sha256_bytes
 
@@ -93,6 +94,7 @@ def verify_run(run_directory: str | Path) -> VerificationReport:
         activity_count = int(manifest["activity_row_count"])
         page_size = int(window["page_size"])
         include_positions = bool(window["include_positions"])
+        activity_query(window, None)
     except (KeyError, TypeError, ValueError, UnicodeDecodeError):
         return VerificationReport(False, ("manifest_malformed",), 0, 0)
     if manifest.get("provider") != "alpaca" or manifest.get("schema_version") != 1:
@@ -163,8 +165,13 @@ def verify_run(run_directory: str | Path) -> VerificationReport:
             continue
         bodies.setdefault(endpoint.report, []).append(body)
         if endpoint.report != "activities":
+            if record.get("safe_params"):
+                findings.append("request_outside_declared_window")
             continue
         params = record.get("safe_params") or {}
+        declared = activity_query(window, params.get(PAGE_CURSOR))
+        if params != declared:
+            findings.append("request_outside_declared_window")
         try:
             page = parse_json_bytes(body)
         except NormalizationError:

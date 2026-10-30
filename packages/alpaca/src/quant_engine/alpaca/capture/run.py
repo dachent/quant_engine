@@ -10,7 +10,7 @@ raw bytes are durable, so an unknown shape never loses evidence.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -119,14 +119,31 @@ class _Recorder:
         self.requests[sequence - 1]["row_count"] = rows
 
 
-def _activity_query(config: CaptureConfig, cursor: str | None) -> dict[str, str]:
-    query = {"direction": DIRECTION, "page_size": str(config.page_size)}
-    if config.activity_types:
-        query["activity_types"] = ",".join(config.activity_types)
-    if config.after is not None:
-        query["after"] = config.after
-    if config.until is not None:
-        query["until"] = config.until
+def window_of(config: CaptureConfig) -> dict[str, Any]:
+    return {
+        "after": config.after,
+        "until": config.until,
+        "activity_types": list(config.activity_types),
+        "direction": DIRECTION,
+        "page_size": config.page_size,
+        "max_pages": config.max_pages,
+        "include_positions": config.include_positions,
+    }
+
+
+def activity_query(window: Mapping[str, Any], cursor: str | None) -> dict[str, str]:
+    """The exact activities query a declared window implies (shared with verify)."""
+
+    query = {
+        "direction": str(window["direction"]),
+        "page_size": str(window["page_size"]),
+    }
+    if window["activity_types"]:
+        query["activity_types"] = ",".join(window["activity_types"])
+    if window["after"] is not None:
+        query["after"] = str(window["after"])
+    if window["until"] is not None:
+        query["until"] = str(window["until"])
     if cursor is not None:
         query[PAGE_CURSOR] = cursor
     return query
@@ -149,7 +166,9 @@ def _capture(config: CaptureConfig, recorder: _Recorder) -> None:
     seen: set[str] = set()
     for _page in range(config.max_pages):
         _, sequence = recorder.get(
-            "activities", "/v2/account/activities", _activity_query(config, cursor)
+            "activities",
+            "/v2/account/activities",
+            activity_query(window_of(config), cursor),
         )
         try:
             page = parse_json_bytes(recorder.bodies["activities"][-1])
@@ -230,15 +249,7 @@ def run_capture(
         "account_binding_sha256": sha256_text(config.account_id),
         "catalog_sha256": catalog_sha256(),
         "governance_evidence_sha256": governance.evidence_sha256,
-        "window": {
-            "after": config.after,
-            "until": config.until,
-            "activity_types": list(config.activity_types),
-            "direction": DIRECTION,
-            "page_size": config.page_size,
-            "max_pages": config.max_pages,
-            "include_positions": config.include_positions,
-        },
+        "window": window_of(config),
         "request_count": len(recorder.requests),
         "request_manifest_sha256": request_digest,
         "raw_files": dict(sorted(recorder.raw_files.items())),

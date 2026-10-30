@@ -178,3 +178,18 @@ def test_positions_snapshot_sorted_and_strict() -> None:
     duplicate.append(duplicate[0])
     with pytest.raises(NormalizationError, match="duplicate"):
         normalize_positions(duplicate)
+
+
+def test_documented_withdrawal_type_and_cusip_field_are_accepted() -> None:
+    withdrawal = normalize_activity(nontrade(1, "CSW", "-20.00"))
+    assert (
+        withdrawal["category"] == "transfer" and withdrawal["cash_amount"] == "-20.00"
+    )
+    dividend = normalize_activity(
+        nontrade(2, "DIV", "0.42", symbol="SYNA", cusip="000000000")
+    )
+    assert dividend["category"] == "dividend" and "cusip" not in dividend
+    with pytest.raises(NormalizationError):
+        normalize_activity(nontrade(3, "DIV", "0.42", cusip=""))
+    with pytest.raises(NormalizationError):
+        normalize_activity(nontrade(4, "DIV", "0.42", cusip=12))

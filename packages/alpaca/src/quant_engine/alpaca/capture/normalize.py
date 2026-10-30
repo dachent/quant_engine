@@ -36,6 +36,7 @@ ACTIVITY_CATEGORIES: Final[Mapping[str, str]] = {
     "DIVTW": "dividend",
     "DIVTXEX": "dividend",
     "CSD": "transfer",
+    "CSW": "transfer",
     "CSR": "transfer",
     "JNL": "transfer",
     "JNLC": "transfer",
@@ -119,6 +120,7 @@ _NONTRADE_KEYS: Final[frozenset[str]] = frozenset(
         "per_share_amount",
         "status",
         "description",
+        "cusip",
     }
 )
 _NONTRADE_REQUIRED: Final[frozenset[str]] = frozenset({"id", "activity_type", "date"})
@@ -331,6 +333,9 @@ def normalize_activity(raw: Any) -> dict[str, Any]:
         record["status"] = _text(raw["status"], "status")
     if "description" in raw:
         record["description"] = _text(raw["description"], "description")
+    if "cusip" in raw:
+        # Documented on non-trade rows; validated but deliberately not emitted.
+        _text(raw["cusip"], "cusip")
     return record
 
 

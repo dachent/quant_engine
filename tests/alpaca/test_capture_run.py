@@ -401,3 +401,57 @@ def test_verifier_rederives_normalized_output_independently(tmp_path: Path) -> N
         hashlib.sha256(new_manifest).hexdigest() + "\n"
     )
     assert "normalized_output_mismatch" in verify_run(result.run_directory).findings
+
+
+def _rehash(run_directory: Path, requests: list[dict[str, Any]]) -> None:
+    import hashlib
+
+    lines = b"".join(
+        (json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        for r in requests
+    )
+    (run_directory / "request_manifest.jsonl").write_bytes(lines)
+    manifest_path = run_directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["request_manifest_sha256"] = hashlib.sha256(lines).hexdigest()
+    new_manifest = (
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    manifest_path.write_bytes(new_manifest)
+    (run_directory / "MANIFEST.sha256").write_text(
+        hashlib.sha256(new_manifest).hexdigest() + "\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"after": "2020-01-01"},
+        {"until": "2030-01-01"},
+        {"direction": "desc"},
+        {"page_size": "100"},
+        {"activity_types": "FILL"},
+    ],
+)
+def test_verifier_rejects_requests_outside_the_declared_window(
+    tmp_path: Path, change: dict[str, str]
+) -> None:
+    result, _ = _run(tmp_path, _happy_script())
+    path = result.run_directory / "request_manifest.jsonl"
+    requests = [json.loads(line) for line in path.read_text().splitlines()]
+    requests[2]["safe_params"].update(change)
+    _rehash(result.run_directory, requests)
+    assert (
+        "request_outside_declared_window" in verify_run(result.run_directory).findings
+    )
+
+
+def test_verifier_rejects_dropped_window_parameter(tmp_path: Path) -> None:
+    result, _ = _run(tmp_path, _happy_script())
+    path = result.run_directory / "request_manifest.jsonl"
+    requests = [json.loads(line) for line in path.read_text().splitlines()]
+    del requests[2]["safe_params"]["after"]
+    _rehash(result.run_directory, requests)
+    assert (
+        "request_outside_declared_window" in verify_run(result.run_directory).findings
+    )
