@@ -1152,16 +1152,16 @@ def test_the_report_epoch_set_names_the_retired_epochs_outside_it() -> None:
         tab.verify_performance_tab(bad, panel)
 
 
-def test_the_flow_identity_holds_on_every_day_even_when_components_round_apart() -> (
-    None
-):
+def test_the_flow_identity_closes_with_the_published_rounding_on_every_day() -> None:
     panel = _panel_with_benchmarks()
-    # Half-cent amounts whose separate roundings differ from the rounded sum.
-    link = panel["account_manifest"]["rows"][0]["observation_trace"]["links"][0]
-    link["net_flow"] = "0.005"
+    # 0.006 + 0.006 rounds apart (1c + 1c) but together is 0.012 (1c): the net flow
+    # is rounded once from the exact amount and rounding_cents carries the day's cent.
+    panel["account_manifest"]["rows"][0]["observation_trace"]["links"][0][
+        "net_flow"
+    ] = "0.006"
     panel["account_manifest"]["rows"][2]["observation_trace"]["links"][1][
         "net_flow"
-    ] = "0.004"
+    ] = "0.006"
     block = tab.build_performance_tab(panel)
     flows = block["slices"]["flows"]
     for index, net in enumerate(flows["net_flow_cents"]):
@@ -1170,6 +1170,9 @@ def test_the_flow_identity_holds_on_every_day_even_when_components_round_apart()
             == flows["link_net_flow_cents"][index]
             + flows["opening_cents"][index]
             - flows["closing_cents"][index]
+            + flows["rounding_cents"][index]
         )
+        assert abs(flows["rounding_cents"][index]) <= 1
     assert sum(flows["net_flow_cents"]) == flows["total_contributed_cents"]
     tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []

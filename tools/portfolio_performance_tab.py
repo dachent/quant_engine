@@ -773,10 +773,15 @@ def _build_flows(
         link_cents = [_cents(v) for v in link_flow]
         opening_cents = [_cents(v) for v in opening]
         closing_cents = [_cents(v) for v in closing]
-        # The net flow is the sum of the published cent components, so the
-        # identity link + opening - closing == net holds on every day.
-        net_cents = [
-            link_cents[i] + opening_cents[i] - closing_cents[i] for i in range(size)
+        # The net flow is rounded once from the exact combined amount, so a display
+        # rounding never changes the financial result; rounding_cents (the day's
+        # whole-cent difference to the sum of the rounded components) closes the
+        # identity on every day.
+        net = [link_flow[i] + opening[i] - closing[i] for i in range(size)]
+        net_cents = [_cents(v) for v in net]
+        rounding_cents = [
+            net_cents[i] - (link_cents[i] + opening_cents[i] - closing_cents[i])
+            for i in range(size)
         ]
         total_cents = sum(nav_rows[s][-1] for s in nav_rows)
         contributed = sum(net_cents)
@@ -788,6 +793,7 @@ def _build_flows(
         "opening_cents": opening_cents,
         "closing_cents": closing_cents,
         "link_net_flow_cents": link_cents,
+        "rounding_cents": rounding_cents,
         "total_contributed_cents": contributed,
         "implied_pnl_cents": total_cents - contributed,
         "internal_cancellation": {
@@ -2135,13 +2141,22 @@ def _verify_flows(
         "opening_cents": [cents(v) for v in opening],
         "closing_cents": [cents(v) for v in closing],
         "net_flow_cents": [
-            cents(link_flow[i]) + cents(opening[i]) - cents(closing[i])
-            for i in range(size)
+            cents(link_flow[i] + opening[i] - closing[i]) for i in range(size)
         ],
     }
     for key, values in expected.items():
         if list(flows[key]) != values:
             raise _fail(f"flows {key} differ")
+    if list(flows["rounding_cents"]) != [
+        expected["net_flow_cents"][i]
+        - (
+            expected["link_net_flow_cents"][i]
+            + expected["opening_cents"][i]
+            - expected["closing_cents"][i]
+        )
+        for i in range(size)
+    ]:
+        raise _fail("flows rounding_cents differ")
     contributed = sum(expected["net_flow_cents"])
     if (
         flows["total_contributed_cents"] != contributed
