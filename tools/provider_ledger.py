@@ -3102,8 +3102,15 @@ _SCHWAB_DERIVED_PATCH_KEYS: Final = frozenset(
         "patched_dates",
         "official_closes_manifest",
         "derivation_record",
+        "replay",
         "patches",
     }
+)
+_SCHWAB_REPLAY_KEYS: Final = frozenset(
+    {"positions_capture", "closes", "cash_security_type", "rounding"}
+)
+_SCHWAB_REPLAY_ROUNDING: Final = (
+    "SUM_QUANTITY_X_CLOSE_QUANTIZE_0.01_HALF_EVEN_PLUS_CASH"
 )
 _SCHWAB_DERIVED_PATCH_ENTRY_KEYS: Final = frozenset(
     {
@@ -3117,8 +3124,124 @@ _SCHWAB_DERIVED_PATCH_ENTRY_KEYS: Final = frozenset(
 )
 
 
+def _schwab_pinned_bytes(value: object, name: str) -> bytes:
+    ref = _object(value, name)
+    if set(ref) != {"path", "sha256", "size_bytes"}:
+        raise ProviderLedgerError(f"{name} binding differs")
+    content, _, size = _verified_evidence_bytes(
+        _absolute_regular_path(ref["path"], name), ref["sha256"], name
+    )
+    if size != ref["size_bytes"]:
+        raise ProviderLedgerError(f"{name} size differs")
+    return content
+
+
+def _replay_schwab_patched_navs(
+    patch: Mapping[str, Any],
+    entries: Mapping[str, Mapping[str, Any]],
+    catalog: Mapping[str, Any],
+) -> None:
+    """Recompute every patched NAV from pinned inputs; no tolerance, exact match.
+
+    Value = round(sum(quantity x official close), 2) + cash rows, from the
+    hash-pinned all-brokerage holdings capture and hash-pinned official-close
+    files. Independent of the normalizer that built the generation.
+    """
+
+    replay = _object(patch["replay"], "Schwab replay")
+    if (
+        set(replay) != _SCHWAB_REPLAY_KEYS
+        or replay["rounding"] != _SCHWAB_REPLAY_ROUNDING
+        or replay["cash_security_type"] != 9
+    ):
+        raise ProviderLedgerError("schwab derived patch replay declaration differs")
+    closes: dict[tuple[str, date], Decimal] = {}
+    seen_symbols: set[str] = set()
+    for item in _objects(replay["closes"], "Schwab replay closes"):
+        symbol = _text(item.get("symbol"), "Schwab replay close symbol")
+        if symbol in seen_symbols:
+            raise ProviderLedgerError("schwab replay close symbol repeats")
+        seen_symbols.add(symbol)
+        body = _schwab_pinned_bytes(
+            {k: item.get(k) for k in ("path", "sha256", "size_bytes")},
+            "replay close file",
+        )
+        for row in csv.DictReader(io.StringIO(body.decode("utf-8-sig"))):
+            closes[(symbol, _day(row["date"], "Schwab replay close date"))] = _decimal(
+                row["close"], "Schwab replay close"
+            )
+    capture = _object(
+        json.loads(_schwab_pinned_bytes(replay["positions_capture"], "replay capture")),
+        "Schwab replay capture",
+    )
+    suffix_account = {
+        _text(e.get("native_suffix"), "Schwab suffix"): _text(
+            e.get("account_id"), "Schwab crosswalk account"
+        )
+        for e in _objects(
+            _object(
+                catalog.get("journal_counterparty_crosswalk"), "Schwab crosswalk"
+            ).get("entries"),
+            "Schwab crosswalk entries",
+        )
+    }
+    held: dict[str, tuple[dict[str, Decimal], Decimal]] = {}
+    for account in _objects(capture.get("accounts"), "Schwab replay accounts"):
+        account_id = suffix_account.get(
+            _text(account.get("accountId"), "native id")[-3:]
+        )
+        if account_id is None or account_id in held:
+            raise ProviderLedgerError("schwab replay capture account scope differs")
+        quantities: dict[str, Decimal] = {}
+        cash = Decimal(0)
+        for group in _objects(account.get("groupedPositions"), "Schwab groups"):
+            for row in _objects(group.get("holdingsRows"), "Schwab holdings rows"):
+                if group.get("securityType") == replay["cash_security_type"]:
+                    cash += _decimal(
+                        _object(row["marketValue"], "Schwab market value")["val"],
+                        "Schwab cash",
+                    )
+                else:
+                    symbol = _text(
+                        _object(row["symbol"], "Schwab symbol")["symbol"], "symbol"
+                    )
+                    quantities[symbol] = quantities.get(symbol, Decimal(0)) + _decimal(
+                        _object(row["qty"], "Schwab quantity")["qty"], "Schwab qty"
+                    )
+        held[account_id] = (quantities, cash)
+    record = _object(
+        json.loads(
+            _schwab_pinned_bytes(patch["derivation_record"], "derivation record")
+        ),
+        "Schwab derivation record",
+    )
+    for entry in entries.values():
+        quantities, cash = held.get(entry["account_id"], ({}, Decimal(0)))
+        if entry["account_id"] not in held:
+            raise ProviderLedgerError("schwab replay account lacks holdings")
+        for day_text, value in _object(entry["patched_values"], "values").items():
+            day = _day(day_text, "Schwab patched row date")
+            try:
+                total = sum(
+                    (q * closes[(sym, day)] for sym, q in quantities.items()),
+                    Decimal(0),
+                )
+            except KeyError as exc:
+                raise ProviderLedgerError(
+                    "schwab replay lacks an official close"
+                ) from exc
+            replayed = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN) + cash
+            stated = _object(record.get(entry["account_id"]), "derivation row")
+            if replayed != _decimal(
+                value, "Schwab patched value"
+            ) or replayed != _decimal(
+                stated.get(f"official_{day:%m%d}"), "derivation record value"
+            ):
+                raise ProviderLedgerError("schwab derived patch replay differs")
+
+
 def _schwab_derived_patch(
-    evidence: Mapping[str, Any], end: date
+    evidence: Mapping[str, Any], end: date, catalog: Mapping[str, Any]
 ) -> dict[str, dict[str, Any]]:
     """Declared patch set over a captured native NAV history, by native hash.
 
@@ -3172,6 +3295,7 @@ def _schwab_derived_patch(
         entries[entry["native_sha256"]] = entry
     if not entries:
         raise ProviderLedgerError("schwab derived patch lists no accounts")
+    _replay_schwab_patched_navs(patch, entries, catalog)
     return entries
 
 
@@ -3242,7 +3366,7 @@ def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
             raise ProviderLedgerError("schwab capture receipt size differs")
         captures = _objects(json.loads(receipt_bytes), "Schwab NAV captures")
         checks = _objects(evidence.get("checks"), "Schwab native binding checks")
-        patches = _schwab_derived_patch(evidence, end)
+        patches = _schwab_derived_patch(evidence, end, catalog)
         used_patches: set[str] = set()
         used: set[str] = set()
         times = []
@@ -3284,7 +3408,9 @@ def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
                     native_payload.get("histories"), "Schwab histories"
                 ).items()
             }
-            selected_values = _schwab_finality_values(catalog, artifact_id)
+            selected_values = _schwab_finality_values(
+                catalog, artifact_id, None if patch is None else patch["account_id"]
+            )
             if patch is not None:
                 _check_schwab_patched_rows(patch, values, selected_values, capture)
                 values = {day: selected_values[day] for day in values}

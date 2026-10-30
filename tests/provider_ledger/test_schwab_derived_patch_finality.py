@@ -112,6 +112,47 @@ def _build(tmp_path: Path, *, captured: str = "2026-09-18T04:59:12.765Z"):
             )
     receipt_path = _write(tmp_path / "nav-capture-receipt.json", receipt)
     closes = _write(tmp_path / "closes-manifest.json", {"symbols": 1})
+    close_csv = tmp_path / "XYZ_yahoo_daily.csv"
+    close_csv.write_text("date,close\n2026-09-16,9.90\n2026-09-17,10.05\n")
+    positions = _write(
+        tmp_path / "positions.json",
+        {
+            "accounts": [
+                {
+                    "accountId": "***001",
+                    "groupedPositions": [
+                        {
+                            "securityType": 2,
+                            "holdingsRows": [
+                                {
+                                    "symbol": {"symbol": "XYZ"},
+                                    "qty": {"qty": 10},
+                                    "marketValue": {"val": 100.5},
+                                }
+                            ],
+                        },
+                        {
+                            "securityType": 9,
+                            "holdingsRows": [
+                                {"symbol": {"symbol": ""}, "marketValue": {"val": 10}}
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "accountId": "***002",
+                    "groupedPositions": [
+                        {
+                            "securityType": 9,
+                            "holdingsRows": [
+                                {"symbol": {"symbol": ""}, "marketValue": {"val": 50}}
+                            ],
+                        }
+                    ],
+                },
+            ]
+        },
+    )
     derivation = _write(
         tmp_path / "derivation.json", {"account-a": {"official_0917": "110.50"}}
     )
@@ -126,11 +167,25 @@ def _build(tmp_path: Path, *, captured: str = "2026-09-18T04:59:12.765Z"):
             "patched_dates": ["2026-09-17"],
             "official_closes_manifest": _pin(closes),
             "derivation_record": _pin(derivation),
+            "replay": {
+                "positions_capture": _pin(positions),
+                "closes": [{"symbol": "XYZ", **_pin(close_csv)}],
+                "cash_security_type": 9,
+                "rounding": "SUM_QUANTITY_X_CLOSE_QUANTIZE_0.01_HALF_EVEN_PLUS_CASH",
+            },
             "patches": patches,
         },
     }
     manifest = SimpleNamespace(artifacts=artifacts)
-    catalog = {"nav_observations": nav_rows}
+    catalog = {
+        "nav_observations": nav_rows,
+        "journal_counterparty_crosswalk": {
+            "entries": [
+                {"native_suffix": "001", "account_id": "account-a"},
+                {"native_suffix": "002", "account_id": "account-b"},
+            ]
+        },
+    }
     return manifest, catalog, evidence
 
 
@@ -205,7 +260,7 @@ def test_patched_selection_without_declaration_is_rejected(tmp_path: Path) -> No
             lambda e: e["derived_patch"]["patches"][0]["patched_values"].update(
                 {"2026-09-17": "1.00"}
             ),
-            "rows differ from selected",
+            "replay differs",
         ),
         (
             lambda e: e["derived_patch"]["patches"][0]["original_values"].update(
@@ -261,4 +316,53 @@ def test_patch_not_consumed_by_any_capture_is_rejected(tmp_path: Path) -> None:
     extra["native_sha256"] = "f" * 64
     evidence["derived_patch"]["patches"].append(extra)
     with pytest.raises(ledger.ProviderLedgerError, match="inventory differs"):
+        _run(manifest, catalog, evidence)
+
+
+def test_replay_rejects_wrong_nav_value_wrong_close_and_wrong_account(
+    tmp_path: Path,
+) -> None:
+    # Wrong NAV: patched value, selected catalog and record all say 110.51.
+    manifest, catalog, evidence = _build(tmp_path)
+    evidence["derived_patch"]["patches"][0]["patched_values"]["2026-09-17"] = "110.51"
+    with pytest.raises(ledger.ProviderLedgerError, match="replay differs"):
+        _run(manifest, catalog, evidence)
+
+
+def test_replay_rejects_changed_official_close(tmp_path: Path) -> None:
+    manifest, catalog, evidence = _build(tmp_path)
+    tampered = tmp_path / "XYZ_tampered.csv"
+    tampered.write_text("date,close\n2026-09-17,10.06\n")
+    evidence["derived_patch"]["replay"]["closes"][0].update(_pin(tampered))
+    with pytest.raises(ledger.ProviderLedgerError, match="replay differs"):
+        _run(manifest, catalog, evidence)
+
+
+def test_replay_rejects_missing_close(tmp_path: Path) -> None:
+    manifest, catalog, evidence = _build(tmp_path)
+    evidence["derived_patch"]["replay"]["closes"] = []
+    with pytest.raises(ledger.ProviderLedgerError, match="lacks an official close"):
+        _run(manifest, catalog, evidence)
+
+
+def test_patch_account_must_be_the_matched_artifact_account(tmp_path: Path) -> None:
+    manifest, catalog, evidence = _build(tmp_path)
+    for row in catalog["nav_observations"]:
+        if row["source_artifact_id"] == "wch/nav/aaa.csv":
+            row["account_id"] = "account-b"
+    with pytest.raises(ledger.ProviderLedgerError, match="account scope differs"):
+        _run(manifest, catalog, evidence)
+
+
+def test_replay_rejects_swapped_account_ids(tmp_path: Path) -> None:
+    manifest, catalog, evidence = _build(tmp_path)
+    evidence["derived_patch"]["patches"][0]["account_id"] = "account-b"
+    with pytest.raises(ledger.ProviderLedgerError):
+        _run(manifest, catalog, evidence)
+
+
+def test_replay_rejects_tolerant_rounding_declaration(tmp_path: Path) -> None:
+    manifest, catalog, evidence = _build(tmp_path)
+    evidence["derived_patch"]["replay"]["rounding"] = "TOLERANT"
+    with pytest.raises(ledger.ProviderLedgerError, match="replay declaration"):
         _run(manifest, catalog, evidence)
