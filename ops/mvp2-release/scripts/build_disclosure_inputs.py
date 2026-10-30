@@ -3,10 +3,14 @@
 The inputs file carries no measured value: it names the evidence file whose results the report
 cites (parsed from that file at preparation time, pinned by sha256 and size here) and the
 retained predecessor generation and JSON pointers a comparison is read from (pinned by the
-sha256 of that generation's data file).  Re-run after the evidence or the predecessor changes
-and commit the result; the sleeve policy manifest pins this file in turn.
+sha256 of that generation's data file).  The predecessor is DERIVED from the committed
+CURRENT_RELEASE of the data root (its release id and portfolio-panel generation), never typed
+in: the run refuses when the release authority is missing or not committed.  Re-run after the
+evidence or the committed release changes and commit the result; the sleeve policy manifest
+pins this file in turn.  With --check nothing is written and the run refuses (exit 1) when the
+file at --out differs from what the committed release derives.
 
-usage: build_disclosure_inputs.py --data-root <QE data root> --out <disclosure-inputs.json>
+usage: build_disclosure_inputs.py --data-root <QE data root> --out <disclosure-inputs.json> [--check]
 """
 
 from __future__ import annotations
@@ -15,9 +19,13 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import sys
 
-PREDECESSOR_RELEASE = "01fbe4d85b04f1879d0b9d5c6e2a33298d951b46af72ab1ab182d80899b0651f"
-PREDECESSOR_PANEL = "b216a53e86bbd1cb64aca13f49f4d4c08d7a263623165cc26a24b4bcbb9d412f"
+REPO = Path(__file__).resolve().parents[3]
+sys.path[:0] = [str(REPO / "tools")]
+
+import sleeve_disclosures  # noqa: E402
+
 EVIDENCE = "timestamp-delta-result.txt"
 ENTRIES = (
     ("p123-ai-factor", "account-1b44c987969b9e47"),
@@ -29,9 +37,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
+    try:
+        predecessor_release, predecessor_panel = (
+            sleeve_disclosures.committed_release_panel(args.data_root)
+        )
+    except sleeve_disclosures.DisclosureError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
     evidence = args.out.parent / EVIDENCE
-    relative = f"dataPortfolio/control-panel/generations/{PREDECESSOR_PANEL}/data/dashboard_data.json"
+    relative = f"dataPortfolio/control-panel/generations/{predecessor_panel}/data/dashboard_data.json"
     data_file = args.data_root / relative
     document = {
         "schema_version": 1,
@@ -48,8 +64,8 @@ def main() -> int:
             ],
         },
         "predecessor_comparison": {
-            "release_id": PREDECESSOR_RELEASE,
-            "panel_generation_id": PREDECESSOR_PANEL,
+            "release_id": predecessor_release,
+            "panel_generation_id": predecessor_panel,
             "data_file": {
                 "relative_path": relative,
                 "sha256": hashlib.sha256(data_file.read_bytes()).hexdigest(),
@@ -63,9 +79,18 @@ def main() -> int:
             },
         },
     }
-    args.out.write_bytes(
-        (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    )
+    content = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if args.check:
+        if not args.out.is_file() or args.out.read_bytes() != content:
+            print(
+                "refused: the pinned disclosure inputs differ from the committed "
+                f"CURRENT_RELEASE derivation (release {predecessor_release[:8]}, "
+                f"panel {predecessor_panel[:8]})",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+    args.out.write_bytes(content)
     return 0
 
 

@@ -570,3 +570,105 @@ def test_a_data_root_without_a_published_release_authority_is_refused(
         disclosures.check_predecessor_is_current_release(
             _pinned_predecessor(), tmp_path
         )
+
+
+def _synthetic_panel(data_root: Path, panel_generation_id: str) -> bytes:
+    document = {
+        "invested_capital": {
+            "current_by_strategy": [
+                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "1000.4"}
+            ],
+            "current_aggregate_usd": "4000.21",
+        },
+        "hwm_governed_proof": {"current_index": "100.0000"},
+    }
+    raw = json.dumps(document).encode()
+    path = (
+        data_root
+        / "dataPortfolio"
+        / "control-panel"
+        / "generations"
+        / panel_generation_id
+        / "data"
+        / "dashboard_data.json"
+    )
+    path.parent.mkdir(parents=True)
+    path.write_bytes(raw)
+    return raw
+
+
+def _generate(data_root: Path, out: Path, *flags: str) -> int:
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(
+                REPOSITORY_ROOT / "ops/mvp2-release/scripts/build_disclosure_inputs.py"
+            ),
+            "--data-root",
+            str(data_root),
+            "--out",
+            str(out),
+            *flags,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode
+
+
+def test_disclosure_inputs_and_sources_are_derived_from_and_bound_to_current_release(
+    tmp_path: Path,
+) -> None:
+    """The generator derives the predecessor from CURRENT_RELEASE; a stale pin fails.
+
+    Synthetic release authority and panel generation only.  The inputs file, the
+    sources document built from it and the committed release agree by id and data sha;
+    once the committed release moves on, the inputs, the sources and the generator's
+    --check all refuse.
+    """
+
+    root = tmp_path / "root"
+    release, panel = "d" * 64, "e" * 64
+    _committed_release(root, release, panel)
+    data = _synthetic_panel(root, panel)
+    out_dir = tmp_path / "inputs"
+    out_dir.mkdir()
+    (out_dir / "timestamp-delta-result.txt").write_bytes(
+        (INPUTS_DIR / "timestamp-delta-result.txt").read_bytes()
+    )
+    out = out_dir / "disclosure-inputs.json"
+    assert _generate(root, out) == 0
+    inputs = json.loads(out.read_bytes())
+    entry = inputs["predecessor_comparison"]
+    assert (entry["release_id"], entry["panel_generation_id"]) == (release, panel)
+    assert entry["data_file"]["sha256"] == _sha(data)
+    assert _generate(root, out, "--check") == 0
+
+    sources = disclosures.build_sources(
+        facts_paths=[], inputs_path=out, predecessor_data_root=root
+    )
+    assert sources["predecessor"]["status"] == "RESOLVED"
+    assert sources["predecessor"]["values"] == {
+        "strategy_id": "p123-ai-factor",
+        "strategy_capital_usd": "1000.4",
+        "aggregate_capital_usd": "4000.21",
+        "hwm_current_index": "100.0000",
+    }
+    disclosures.check_sources_bound_to_current_release(sources, inputs, root)
+
+    # a later release is committed: every stale binding is refused
+    _committed_release(root, "f" * 64, "9" * 64)
+    assert _generate(root, out, "--check") == 1
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.check_sources_bound_to_current_release(sources, inputs, root)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.build_sources(
+            facts_paths=[], inputs_path=out, predecessor_data_root=root
+        )
+
+    # without a committed release authority nothing is derived
+    assert _generate(tmp_path / "empty", out_dir / "other.json") == 1

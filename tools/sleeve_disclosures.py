@@ -461,17 +461,11 @@ COORDINATION_RELATIVE: Final = Path("dataPortfolio") / "releases-refresh-2026"
 PANEL_ROOT_ID: Final = "portfolio-panel"
 
 
-def check_predecessor_is_current_release(
-    entry: Mapping[str, Any], data_root: Path
-) -> None:
-    """Refuse a predecessor that is not the committed CURRENT_RELEASE panel generation.
+def committed_release_panel(data_root: Path) -> tuple[str, str]:
+    """The committed CURRENT_RELEASE id and its portfolio-panel generation id.
 
-    The comparison the report states ("against X in the previous release") is only true
-    when the pinned predecessor IS the release that is committed when the next one is
-    frozen.  A stale pin still hashes cleanly, so the byte-pin check cannot see it; this
-    reads the committed release authority (pointer, manifest hash, journal state, the
-    panel target's generation) and requires the release id and the panel generation to
-    equal the pinned ones.
+    Reads the committed release authority (pointer, manifest hash, journal state, the
+    panel target's generation) and refuses when any of it is missing or not committed.
     """
 
     coordination = data_root / COORDINATION_RELATIVE
@@ -505,16 +499,57 @@ def check_predecessor_is_current_release(
     ]
     if len(panels) != 1:
         raise DisclosureError("current release does not name one panel generation")
+    return release_id, str(panels[0])
+
+
+def check_predecessor_is_current_release(
+    entry: Mapping[str, Any], data_root: Path
+) -> None:
+    """Refuse a predecessor that is not the committed CURRENT_RELEASE panel generation.
+
+    The comparison the report states ("against X in the previous release") is only true
+    when the pinned predecessor IS the release that is committed when the next one is
+    frozen.  A stale pin still hashes cleanly, so the byte-pin check cannot see it; the
+    release id and the panel generation must equal the committed ones.  ``entry`` is a
+    ``predecessor_comparison`` block or the ``predecessor`` block of the disclosure
+    sources document: both carry ``release_id`` and ``panel_generation_id``.
+    """
+
+    release_id, panel = committed_release_panel(data_root)
     if (
         entry.get("release_id") != release_id
-        or entry.get("panel_generation_id") != panels[0]
+        or entry.get("panel_generation_id") != panel
     ):
         raise DisclosureError(
             "disclosure predecessor is not the committed CURRENT_RELEASE panel: "
             f"pinned release {str(entry.get('release_id'))[:8]} panel "
             f"{str(entry.get('panel_generation_id'))[:8]}, committed release "
-            f"{release_id[:8]} panel {str(panels[0])[:8]}"
+            f"{release_id[:8]} panel {panel[:8]}"
         )
+
+
+def check_sources_bound_to_current_release(
+    sources: Mapping[str, Any], inputs: Mapping[str, Any], data_root: Path
+) -> None:
+    """A written sleeve-disclosure-sources document and its inputs name CURRENT_RELEASE.
+
+    Id and data-file sha: the inputs pin the data file the sources were read from, and
+    both name the committed release and its panel generation.
+    """
+
+    entry = inputs.get("predecessor_comparison")
+    block = sources.get("predecessor")
+    if not isinstance(entry, Mapping) or not isinstance(block, Mapping):
+        raise DisclosureError("no predecessor comparison to bind to CURRENT_RELEASE")
+    check_predecessor_is_current_release(entry, data_root)
+    check_predecessor_is_current_release(block, data_root)
+    data_file = entry.get("data_file")
+    if (
+        block.get("status") != "RESOLVED"
+        or not isinstance(data_file, Mapping)
+        or block.get("data_file_sha256") != data_file.get("sha256")
+    ):
+        raise DisclosureError("disclosure sources do not carry the pinned data file")
 
 
 def build_sources(
