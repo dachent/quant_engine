@@ -547,3 +547,47 @@ def test_mode_must_be_declared(world: dict[str, Any]) -> None:
     del config["mode"]
     world["config"].write_text(json.dumps(config), encoding="utf-8")
     assert _drive(world, _graph(world, CHAIN)) == 2
+
+
+def test_probe_refuses_a_live_retained_cache_even_when_the_portfolio_root_is_scratch(
+    world: dict[str, Any],
+) -> None:
+    _guard_world(world, spec_under_live=False)
+    _config(
+        world,
+        portfolio_root=str(world["tmp"] / "scratch" / "dataPortfolio"),
+        retained_cache_root=str(world["tmp"] / "live" / "cache"),
+    )
+    stage = {
+        "id": "g",
+        "live_guard_keys": ["portfolio_root", "retained_cache_root"],
+        "outputs": ["{cycle}/g.txt"],
+        "argv": _write_stage("{cycle}/g.txt"),
+    }
+    assert _drive(world, _graph(world, [stage])) == 2
+
+
+def test_stage_records_from_release_mode_are_not_reused_by_a_probe(
+    world: dict[str, Any],
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    _config(world, mode="probe", live_workspace=str(world["tmp"] / "live"))
+    assert _drive(world, graph) == 2
+
+
+def test_the_shipped_graph_guards_every_stage_that_binds_a_root_or_cache() -> None:
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    by_id = {stage["id"]: stage for stage in graph["stages"]}
+    assert set(by_id["production-spec"]["live_guard_keys"]) == {
+        "portfolio_root",
+        "retained_cache_root",
+    }
+    assert set(by_id["pipeline-spec"]["live_guard_keys"]) == {
+        "build_portfolio_root",
+        "retained_cache_root",
+    }

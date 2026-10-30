@@ -77,6 +77,7 @@
     },
     {
       "id": "pipeline-spec",
+      "live_guard_keys": ["build_portfolio_root", "retained_cache_root"],
       "requires": ["recipe"],
       "inputs": [
         "{run}/preparation/hwm-governed-result.json",
@@ -127,7 +128,7 @@
     },
     {
       "id": "production-spec",
-      "live_guard_keys": ["portfolio_root"],
+      "live_guard_keys": ["portfolio_root", "retained_cache_root"],
       "requires": ["pipeline-spec", "semantic", "financial-artifacts", "provider-generations"],
       "outputs": ["{prod_spec}"],
       "argv": [
