@@ -2497,9 +2497,9 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
-     "generation_sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8",
-     "as_of": "2026-09-04"
+     "generation_id": "bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795",
+     "generation_sha256": "9d190c1f6e6e3b95e7635332ac9df004980dbcd255e5ed7964053b497c4d4e1c",
+     "as_of": "2026-09-17"
     },
     "strategy_version": {
      "status": "UNRESOLVED",
@@ -2529,34 +2529,34 @@
       "artifact_role": "provider-track-record-current-pointer",
       "artifact_selector": "CURRENT.json",
       "authority_root": "PROVIDER_TRACK_RECORD",
-      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "generation_id": "bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795",
       "locator_kind": "CURRENT_POINTER",
       "manifest_artifact_id": null,
-      "sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8"
+      "sha256": "9d190c1f6e6e3b95e7635332ac9df004980dbcd255e5ed7964053b497c4d4e1c"
      },
      {
       "artifact_role": "provider-track-record-generation-manifest",
-      "artifact_selector": "generations/63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c/generation.json",
+      "artifact_selector": "generations/bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795/generation.json",
       "authority_root": "PROVIDER_TRACK_RECORD",
-      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "generation_id": "bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8"
+      "sha256": "9d190c1f6e6e3b95e7635332ac9df004980dbcd255e5ed7964053b497c4d4e1c"
      },
      {
       "artifact_role": "provider-track-record-returns",
-      "artifact_selector": "generations/63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c/returns.csv",
+      "artifact_selector": "generations/bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795/returns.csv",
       "authority_root": "PROVIDER_TRACK_RECORD",
-      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "generation_id": "bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "returns.csv",
       "sha256": "c0d28752d260503e3e42b7c297dc062b705e77ac9cf40a72b293bd3417f9440e"
      },
      {
       "artifact_role": "provider-track-record-report",
-      "artifact_selector": "generations/63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c/raw/track-record-report.json",
+      "artifact_selector": "generations/bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795/raw/track-record-report.json",
       "authority_root": "PROVIDER_TRACK_RECORD",
-      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "generation_id": "bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "raw/track-record-report.json",
       "sha256": "ab734e3c069d576545eb192d625b29889216aba2737720e33bf6cbdb69c2581d"
@@ -3475,8 +3475,8 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "b3d89a73f92ca4ed5b090d65dd2d0088febc82ffdfe4db0bc21b63b03a6332b4",
-    "sha256": "b3d89a73f92ca4ed5b090d65dd2d0088febc82ffdfe4db0bc21b63b03a6332b4",
+    "generation_id": "44569b1a53818ce54282503b6aee0726880777b915e1a0b7cab215ea35afaf0f",
+    "sha256": "44569b1a53818ce54282503b6aee0726880777b915e1a0b7cab215ea35afaf0f",
     "as_of": "2026-10-27"
    },
    "existence_status": "EXISTS",
@@ -3765,9 +3765,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "as_of": "2026-09-04",
-    "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
-    "sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8"
+    "as_of": "2026-09-17",
+    "generation_id": "bee20ca8e64a3fe00fc6e340f89a2133e4370dde6d2fbecba10467e9741ea795",
+    "sha256": "9d190c1f6e6e3b95e7635332ac9df004980dbcd255e5ed7964053b497c4d4e1c"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",

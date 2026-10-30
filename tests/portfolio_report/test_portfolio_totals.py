@@ -153,8 +153,27 @@ def _proof(last_index: str = "110") -> dict[str, Any]:
     }
 
 
+def _manifest_rows(case: dict[str, Any]) -> list[dict[str, Any]]:
+    """The report's epochs plus two retired epochs the report's totals do not use."""
+
+    retired = _row(
+        "C",
+        "S9",
+        "2025-06-01",
+        "2025-12-31",
+        last_nav="2025-12-31",
+        basis="FIRST_AVAILABLE_NAV",
+        opening="300",
+        current="340",
+    )
+    unpriced = {**retired, "account_id": "D", "status": "NO_NAV", "gain": None}
+    unpriced["current_value"] = None
+    return [*case["rows"], unpriced, retired]
+
+
 def _build(case: dict[str, Any], proof: dict[str, Any] | None = None) -> dict[str, Any]:
     return totals.build_portfolio_totals(
+        manifest_rows=_manifest_rows(case),
         rows=case["rows"],
         invested_capital=case["capital"],
         governed_hwm_proof=proof if proof is not None else _proof(),
@@ -188,6 +207,44 @@ def test_capital_reconciliation_names_components_summing_to_the_difference() -> 
     # net capital differs from the derived total by exactly the closed closing value.
     naive = sum(Decimal(row["net_capital"]) for row in _case()["rows"])
     assert naive - Decimal(block["derived_total_net_capital_usd"]) == Decimal("1050")
+
+
+def test_epoch_set_names_the_report_epochs_against_the_manifest_rows() -> None:
+    block = _build(_case())["capital_reconciliation"]
+    epoch_set = block["epoch_set"]
+    assert epoch_set["report_epoch_count"] == 3
+    assert epoch_set["manifest_row_count"] == 5
+    assert epoch_set["gain_of_report_epochs_usd"] == block["gain_of_all_epochs_usd"]
+    assert epoch_set["gain_of_outside_report_epochs_usd"] == "40"
+    outside = epoch_set["outside_report_epochs"]
+    assert [(x["account_id"], x["gain_usd"]) for x in outside] == [
+        ("C", "40"),
+        ("D", None),
+    ]
+    # Without a manifest the block carries no epoch set (optional, additive).
+    bare = totals.build_portfolio_totals(
+        rows=_case()["rows"],
+        invested_capital=_case()["capital"],
+        governed_hwm_proof=_proof(),
+        hwm_summary={"governed_perimeter_value_usd": "1900"},
+        calculation_cutoff_date=CUTOFF,
+    )
+    assert "epoch_set" not in bare["capital_reconciliation"]
+
+
+def test_verifier_rederives_the_epoch_set() -> None:
+    report, manifest, crosswalk = _verification_inputs(_case())
+    verify.verify_portfolio_totals(report, manifest, crosswalk)
+    tampered = deepcopy(report)
+    tampered["capital_reconciliation"]["epoch_set"]["outside_report_epochs"][0][
+        "gain_usd"
+    ] = "41"
+    with pytest.raises(verify.PortfolioTotalsVerificationError, match="epoch_set"):
+        verify.verify_portfolio_totals(tampered, manifest, crosswalk)
+    absent = deepcopy(report)
+    del absent["capital_reconciliation"]["epoch_set"]
+    with pytest.raises(verify.PortfolioTotalsVerificationError, match="epoch_set"):
+        verify.verify_portfolio_totals(absent, manifest, crosswalk)
 
 
 def test_closed_epoch_without_successor_is_its_own_component() -> None:
@@ -343,7 +400,7 @@ def _verification_inputs(
         "hwm_governed_proof": _proof(),
         **published,
     }
-    manifest = {"rows": case["rows"]}
+    manifest = {"rows": _manifest_rows(case)}
     crosswalk = {
         "calculation_cutoff_date": CUTOFF,
         "rows": [
@@ -509,6 +566,9 @@ def test_a_derived_product_epoch_reconciles_and_the_verifier_agrees() -> None:
         "A",
         "B-s2",
     ]
+    report["capital_reconciliation"]["epoch_set"] = totals.build_epoch_set(
+        verify.included_rows(manifest, crosswalk), manifest["rows"]
+    )
     verify.verify_portfolio_totals(report, manifest, crosswalk)
 
 
@@ -546,6 +606,7 @@ def _mismatch_case() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         hwm_summary={"governed_perimeter_value_usd": str(perimeter)},
         calculation_cutoff_date=CUTOFF,
         custody_current_capital=custody,
+        manifest_rows=_manifest_rows(case),
     )
     report, manifest, crosswalk = _verification_inputs(case)
     report.update(published)
