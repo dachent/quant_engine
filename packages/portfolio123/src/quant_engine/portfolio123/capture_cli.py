@@ -60,6 +60,11 @@ def _parser() -> argparse.ArgumentParser:
     inventory.add_argument("--staging-root", type=Path, required=True)
     inventory.add_argument("--run-id", required=True)
     inventory.add_argument("--input", type=Path, required=True, dest="source")
+    inventory.add_argument(
+        "--reveal-segments",
+        action="store_true",
+        help="keep unknown alphabetic path words (may disclose slugs)",
+    )
     verify = commands.add_parser("verify")
     verify.add_argument("--staging-root", type=Path, required=True)
     verify.add_argument("--run-id", required=True)
@@ -78,7 +83,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "evidence_status": "UNVERIFIED_SYNTHETIC_SHAPES",
             }
         elif args.command == "inventory-har":
-            result = inventory_har(args.staging_root, args.run_id, args.source)
+            result = inventory_har(
+                args.staging_root,
+                args.run_id,
+                args.source,
+                reveal_segments=args.reveal_segments,
+            )
         elif args.command in {"stage-har", "stage-file"}:
             form = FORM_HAR if args.command == "stage-har" else FORM_FILE
             result = stage_run(

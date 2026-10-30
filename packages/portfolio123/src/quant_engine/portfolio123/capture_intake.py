@@ -51,6 +51,7 @@ from quant_engine.portfolio123.capture_shapes import (
     validate_shape,
 )
 from quant_engine.web_contracts import (
+    PORTFOLIO123_CONTRACT,
     ExtractedResponse,
     SessionEnvelope,
     WebContractError,
@@ -66,11 +67,24 @@ INVENTORY_DIRECTORY = "p123-capture-inventory"
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 MAX_CSV_ROWS = 2_000_000
 _RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_SEGMENT_KEEP = re.compile(r"^[A-Za-z][A-Za-z_.-]{0,59}$")
+# Only structural words already present in reviewed or catalogued routes survive in an
+# inventory; every other segment is redacted unless the owner opts in to reveal it.
+_STRUCTURAL = frozenset(
+    part
+    for path in (
+        *(item.path for item in capture_contract().endpoints),
+        *(item.path for item in PORTFOLIO123_CONTRACT.endpoints),
+    )
+    for part in path.split("/")
+    if part and not part.startswith("{")
+) | frozenset({"api", "app", "spr", "static", "v1", "v2"})
 _FOREIGN = "FOREIGN_ORIGIN"
+_REVEALABLE = re.compile(r"^[A-Za-z][A-Za-z_.-]{0,59}$")
 _MATCHED = "MATCHED"
 _UNREVIEWED = "UNREVIEWED_ROUTE"
 _REPARSE_POINT = 0x0400
+_BINARY = getattr(os, "O_BINARY", 0)
+EVIDENCE_STATUS = "UNVERIFIED_SYNTHETIC_SHAPES"
 _MANIFEST_KEYS = frozenset(
     {
         "schema_version",
@@ -173,7 +187,10 @@ def _write_new(path: Path, data: bytes) -> None:
     """Create-only write: refuses to replace anything that already exists."""
 
     try:
-        with open(path, "xb") as handle:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY, 0o600
+        )
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -183,11 +200,19 @@ def _write_new(path: Path, data: bytes) -> None:
         raise CaptureRefusal("WRITE_FAILED") from None
 
 
+def _private_directory(path: Path) -> None:
+    """Create a directory (if absent) readable by the owner only on POSIX."""
+
+    path.mkdir(mode=0o700, exist_ok=True)
+
+
 def _check_staging_root(root: Path) -> None:
     if not root.is_absolute():
         raise CaptureRefusal("PATH_NOT_ABSOLUTE")
     if not root.is_dir() or _is_link(root):
         raise CaptureRefusal("STAGING_ROOT_INVALID")
+    if os.name != "nt" and root.stat().st_mode & 0o077:
+        raise CaptureRefusal("STAGING_ROOT_NOT_PRIVATE")
     for parent in (root, *root.parents):
         if (parent / ".git").exists():
             raise CaptureRefusal("STAGING_ROOT_IN_REPOSITORY")
@@ -206,7 +231,7 @@ def _sha256(data: bytes) -> str:
 # --------------------------------------------------------------------------- HAR
 
 
-def _template(url: str) -> tuple[str, str, tuple[str, ...]]:
+def _template(url: str, reveal: bool = False) -> tuple[str, str, tuple[str, ...]]:
     """Origin class, id-free path template, and sorted query keys."""
 
     parsed = urlsplit(url)
@@ -220,7 +245,7 @@ def _template(url: str) -> tuple[str, str, tuple[str, ...]]:
             continue
         if part.isdigit():
             segments.append("{n}")
-        elif _SEGMENT_KEEP.fullmatch(part):
+        elif part in _STRUCTURAL or (reveal and _REVEALABLE.fullmatch(part)):
             segments.append(part)
         else:
             segments.append("{x}")
@@ -296,7 +321,7 @@ _InventoryKey = tuple[str, str, str, tuple[str, ...], int, str]
 
 
 def _classify(
-    source: bytes,
+    source: bytes, reveal: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Counter[_InventoryKey]]:
     """Split HAR entries into reviewed-route matches and an id-free inventory."""
 
@@ -306,7 +331,7 @@ def _classify(
     inventory: Counter[_InventoryKey] = Counter()
     for entry in entries:
         method, url, status, mime = _entry_facts(entry)
-        origin_class, template, keys = _template(url)
+        origin_class, template, keys = _template(url, reveal)
         try:
             contract.route(method, url)
             disposition = _MATCHED
@@ -343,7 +368,11 @@ def _inventory_rows(
 
 
 def inventory_har(
-    staging_root: Path, run_id: str, source_path: Path
+    staging_root: Path,
+    run_id: str,
+    source_path: Path,
+    *,
+    reveal_segments: bool = False,
 ) -> dict[str, object]:
     """Write a create-only, id-free route inventory for route review.
 
@@ -356,12 +385,19 @@ def inventory_har(
     if _RUN_ID.fullmatch(run_id) is None:
         raise CaptureRefusal("RUN_ID_INVALID")
     entries, matched, inventory = _classify(
-        _read_regular_file(source_path, MAX_SOURCE_BYTES)
+        _read_regular_file(source_path, MAX_SOURCE_BYTES), reveal_segments
     )
     rows, totals = _inventory_rows(inventory, len(entries), len(matched))
-    data = canonical_bytes({"form": FORM_HAR, "routes": rows, "totals": totals})
+    data = canonical_bytes(
+        {
+            "form": FORM_HAR,
+            "routes": rows,
+            "segments_revealed": reveal_segments,
+            "totals": totals,
+        }
+    )
     directory = staging_root / INVENTORY_DIRECTORY
-    directory.mkdir(exist_ok=True)
+    _private_directory(directory)
     _write_new(directory / f"{run_id}.json", data)
     return {"inventory_sha256": _sha256(data), "routes": len(rows), **totals}
 
@@ -567,14 +603,14 @@ def stage_run(request: StageRequest) -> RunSummary:
         suffix=suffix,
     )
     run_dir = _run_directory(request.staging_root, request.run_id)
-    (request.staging_root / RUN_DIRECTORY).mkdir(exist_ok=True)
+    _private_directory(request.staging_root / RUN_DIRECTORY)
     try:
-        run_dir.mkdir()
+        run_dir.mkdir(mode=0o700)
     except FileExistsError:
         raise CaptureRefusal("RUN_EXISTS") from None
     try:
-        (run_dir / "raw").mkdir()
-        (run_dir / "normalized").mkdir()
+        (run_dir / "raw").mkdir(mode=0o700)
+        (run_dir / "normalized").mkdir(mode=0o700)
         raw_name = f"raw/source{suffix}"
         parts = {
             raw_name: ("raw", source),
@@ -598,7 +634,7 @@ def stage_run(request: StageRequest) -> RunSummary:
             "run_id": request.run_id,
             "form": request.form,
             "catalog_sha256": catalog_sha256(),
-            "evidence_status": "UNVERIFIED_SYNTHETIC_SHAPES",
+            "evidence_status": EVIDENCE_STATUS,
             "scope": list(scope),
             "captured_at": captured_at.isoformat(),
             "session_expires_at": None
@@ -713,6 +749,10 @@ def verify_run(
         or manifest["kind"] != KIND
         or manifest["run_id"] != run_id
         or manifest["restricted"] is not True
+        or manifest["evidence_status"] != EVIDENCE_STATUS
+        or manifest["raw_contains_session_material"]
+        is not (manifest["form"] == FORM_HAR)
+        or not isinstance(manifest["allow_partial"], bool)
         or canonical_bytes(manifest) != manifest_bytes
     ):
         raise CaptureRefusal("MANIFEST_INVALID")

@@ -176,6 +176,7 @@ class ApiGovernance:
     credit_table_captured_at: datetime
     spent_credits: int = 0
     reserved_calls: int = 0
+    outstanding_credits: int = 0
     halted: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -192,7 +193,12 @@ class ApiGovernance:
 
     def _append(self, row: Mapping[str, object]) -> None:
         line = canonical_bytes(dict(row))
-        with open(self.ledger_path, "ab") as handle:
+        descriptor = os.open(
+            self.ledger_path,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "ab") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
@@ -207,7 +213,8 @@ class ApiGovernance:
                 raise CaptureRefusal("OPERATION_NOT_APPROVED")
             if self.reserved_calls >= self.max_calls:
                 raise CaptureRefusal("CALL_BUDGET_EXHAUSTED")
-            if estimated <= 0 or self.spent_credits + estimated > self.credit_budget:
+            committed = self.spent_credits + self.outstanding_credits
+            if estimated <= 0 or committed + estimated > self.credit_budget:
                 raise CaptureRefusal("CREDIT_BUDGET_EXHAUSTED")
             try:
                 authorization = self.authorization(operation, estimated)
@@ -215,6 +222,7 @@ class ApiGovernance:
             except Portfolio123RoutingError:
                 raise CaptureRefusal("AUTHORIZATION_INVALID") from None
             self.reserved_calls += 1
+            self.outstanding_credits += estimated
             self._append(
                 {
                     "event": "reserve",
@@ -225,8 +233,11 @@ class ApiGovernance:
             )
             return authorization
 
-    def complete(self, operation: str, actual: int, remaining: int) -> None:
+    def complete(
+        self, operation: str, estimated: int, actual: int, remaining: int
+    ) -> None:
         with self._lock:
+            self.outstanding_credits = max(0, self.outstanding_credits - estimated)
             self.spent_credits += actual
             self._append(
                 {
@@ -338,10 +349,15 @@ def authorize_api_read(
             raise CaptureRefusal("HAR_FIRST")
         approved[operation] = basis
     digest = hashlib.sha256(raw).hexdigest()
-    receipt_root.mkdir(parents=True, exist_ok=True)
+    receipt_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     receipt = receipt_root / f"p123-api-{digest[:32]}.receipt.json"
     try:
-        with open(receipt, "xb") as handle:
+        descriptor = os.open(
+            receipt,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(
                 canonical_bytes({"evidence_sha256": digest, "schema_version": 1})
             )
@@ -501,12 +517,16 @@ class ReadOnlyApiCapture:
         except Portfolio123RoutingError:
             self._governance.complete(
                 operation,
+                estimated_credits,
                 max(0, response.credits_used),
                 max(0, response.quota_remaining),
             )
             self._governance.halt(operation)
             raise CaptureRefusal("CREDIT_BUDGET_EXCEEDED") from None
         self._governance.complete(
-            operation, evidence.actual_credits, evidence.quota_remaining
+            operation,
+            estimated_credits,
+            evidence.actual_credits,
+            evidence.quota_remaining,
         )
         return ApiResult(response.payload, evidence)

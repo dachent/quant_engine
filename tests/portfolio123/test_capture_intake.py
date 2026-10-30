@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -445,7 +446,7 @@ def test_inventory_is_create_only_id_free_and_parses_no_body(
     assert summary["entries"] == 9 and summary["matched"] == 6
     written = (root / "p123-capture-inventory" / "inv-one.json").read_text()
     assert (
-        "/app/other/{n}" in written and "12345" not in written and "9001" not in written
+        "/app/{x}/{n}" in written and "12345" not in written and "9001" not in written
     )
     assert "Synthetic" not in written
     with pytest.raises(CaptureRefusal) as caught:
@@ -464,3 +465,47 @@ def test_runbook_lists_every_capability_and_command() -> None:
     for command in ("inventory-har", "stage-har", "stage-file", "verify", "catalog"):
         assert f"capture_cli {command}" in text
     assert "UNVERIFIED" in text and "[credentials.p123]" in text
+
+
+def test_inventory_redacts_unknown_words_unless_revealed(
+    root: Path, tmp_path: Path
+) -> None:
+    source = write_har(
+        tmp_path / "export.har",
+        [
+            entry(f"{ORIGIN}/app/account/alice-example/12", None, raw_text="x"),
+            *standard_entries(),
+        ],
+    )
+    capture_intake.inventory_har(root, "inv-redacted", source)
+    text = (root / "p123-capture-inventory" / "inv-redacted.json").read_text()
+    assert "alice" not in text and "/app/account/{x}/{n}" in text
+    capture_intake.inventory_har(root, "inv-revealed", source, reveal_segments=True)
+    text = (root / "p123-capture-inventory" / "inv-revealed.json").read_text()
+    assert "alice-example" in text and '"segments_revealed":true' in text
+
+
+def test_verifier_enforces_evidence_classification(root: Path, tmp_path: Path) -> None:
+    run = _stage_standard(root, tmp_path)
+    manifest = json.loads((run / "manifest.json").read_bytes())
+    for key, value in (
+        ("evidence_status", "VERIFIED"),
+        ("raw_contains_session_material", False),
+    ):
+        forged = {**manifest, key: value}
+        (run / "manifest.json").write_bytes(canonical_json_bytes(forged))
+        with pytest.raises(CaptureRefusal) as caught:
+            verify_run(root, "run-one")
+        assert caught.value.code == "MANIFEST_INVALID"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+def test_run_files_are_owner_only(root: Path, tmp_path: Path) -> None:
+    root.chmod(0o700)
+    run = _stage_standard(root, tmp_path)
+    assert (run / "raw" / "source.har").stat().st_mode & 0o077 == 0
+    assert run.stat().st_mode & 0o077 == 0
+    root.chmod(0o755)
+    with pytest.raises(CaptureRefusal) as caught:
+        verify_run(root, "run-one")
+    assert caught.value.code == "STAGING_ROOT_NOT_PRIVATE"

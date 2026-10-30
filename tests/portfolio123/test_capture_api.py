@@ -369,3 +369,15 @@ def test_module_has_no_generic_request_surface() -> None:
     public = {name for name in dir(api.ReadOnlyApiCapture) if not name.startswith("_")}
     assert public == {"call"}
     assert not hasattr(api, "requests") and not hasattr(api, "urllib")
+
+
+def test_outstanding_reservations_count_against_the_budget(tmp_path: Path) -> None:
+    governance = _authorize(tmp_path, budget=10, calls=5)
+    governance.reserve("screen_run", 6)
+    assert (
+        _refusal(lambda: governance.reserve("screen_run", 6))
+        == "CREDIT_BUDGET_EXHAUSTED"
+    )
+    governance.complete("screen_run", 6, 6, 90)
+    assert governance.outstanding_credits == 0
+    governance.reserve("screen_run", 4)

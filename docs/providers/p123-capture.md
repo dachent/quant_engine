@@ -100,6 +100,8 @@ scope, or a scope capability with no response, refuses the run (`SCOPE_MISMATCH`
 
 `inventory-har` writes one create-only file, `<staging-root>/p123-capture-inventory/<run-id>.json`
 (route templates, status codes, counts; no bodies, identifiers, or source copy).
+Unknown path words are redacted to `{x}` except structural words already in the catalog;
+add `--reveal-segments` only when you accept that slugs may appear, to see real route names.
 `<staging-root>/p123-capture/<run-id>/` holds `raw/source.<ext>` (byte copy of the
 export), `inventory.json` (route templates and dispositions), `normalized/records.json`
 (canonical, shape-checked), and `manifest.json` (written last, hash-bound). Staging
@@ -124,6 +126,7 @@ and `UNVERIFIED_SYNTHETIC_SHAPES`.
 | `CSV_COLUMNS_UNREVIEWED` / `CSV_SHAPE_REFUSED` / `EXPORT_HAS_NO_ROWS` | Download differs from the reviewed columns or is empty. |
 | `RUN_EXISTS` / `DESTINATION_EXISTS` | Create-only staging refused to overwrite. |
 | `STAGING_ROOT_IN_REPOSITORY` | Staging root is inside a repository. |
+| `STAGING_ROOT_NOT_PRIVATE` | POSIX staging root is accessible to group or others (files are written 0600, directories 0700). |
 | `REDERIVATION_MISMATCH` / `FILE_HASH_MISMATCH` / `UNDECLARED_FILES` / `CATALOG_DRIFT` | `verify` found a changed, forged, extra, or stale artifact. |
 
 ## API exception (declared HAR gap or explicit owner selection only)
