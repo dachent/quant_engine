@@ -58,6 +58,20 @@ def require_gap_fill_spec_name(path: Path) -> None:
         )
 
 
+def _vendor_gap_fill_arguments(recipe: Mapping[str, Any]) -> tuple[str, ...]:
+    """The panel arguments that carry the recipe's pinned vendor gap-day fill record."""
+
+    definition = recipe.get("vendor_gap_fills")
+    if not isinstance(definition, dict):
+        return ()
+    return (
+        "--vendor-gap-fills",
+        str(_path(definition["path"], "vendor_gap_fills.path")),
+        "--vendor-gap-fills-sha256",
+        str(definition["sha256"]),
+    )
+
+
 def _declared_periods(declared: Mapping[str, int], series_id: str) -> int:
     """The base specification's annualisation of a series; absent is an error."""
 
@@ -703,9 +717,11 @@ def _recipe(path: Path) -> dict[str, Any]:
         - {
             "dependence_selected_inputs",
             "evaluated_on",
+            "model_vs_actual_input",
             "nested_tag_map",
             "sleeve_disclosure_sources",
             "source_clock",
+            "vendor_gap_fills",
             "weekly_gap_fill_spec",
         }
         != required
@@ -788,6 +804,19 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("weekly_gap_fill_spec identity differs")
+    if "vendor_gap_fills" in recipe:
+        definition = recipe["vendor_gap_fills"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("vendor_gap_fills definition differs")
+        artifact = _path(definition["path"], "vendor_gap_fills.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("vendor_gap_fills identity differs")
+    _model_vs_actual_arguments(recipe)
     if "sleeve_disclosure_sources" in recipe:
         definition = recipe["sleeve_disclosure_sources"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -976,6 +1005,8 @@ def create_recipe(
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
     weekly_gap_fill_spec_path: Path | None = None,
+    vendor_gap_fills_path: Path | None = None,
+    model_vs_actual_input_path: Path | None = None,
 ) -> dict[str, Any]:
     financial_cutoff = date.fromisoformat(as_of_date)
     normalized_evaluated_on: str | None = None
@@ -1086,10 +1117,16 @@ def create_recipe(
         payload["source_clock"] = _file_definition(source_clock_path.resolve())
     if nested_tag_map_path is not None:
         payload["nested_tag_map"] = _file_definition(nested_tag_map_path.resolve())
+    if vendor_gap_fills_path is not None:
+        payload["vendor_gap_fills"] = _file_definition(vendor_gap_fills_path.resolve())
     if weekly_gap_fill_spec_path is not None:
         require_gap_fill_spec_name(weekly_gap_fill_spec_path)
         payload["weekly_gap_fill_spec"] = _file_definition(
             weekly_gap_fill_spec_path.resolve()
+        )
+    if model_vs_actual_input_path is not None:
+        payload["model_vs_actual_input"] = _file_definition(
+            model_vs_actual_input_path.resolve()
         )
     if sleeve_disclosure_sources_path is not None:
         payload["sleeve_disclosure_sources"] = _file_definition(
@@ -5410,6 +5447,34 @@ def _stage_account_strategy_manifest(
     return staged
 
 
+def _model_vs_actual_arguments(recipe: Mapping[str, Any]) -> tuple[str, ...]:
+    """The panel flags for the optional model_vs_actual audit input, from the recipe pin.
+
+    The pin is re-verified at every call: a missing file or a changed byte refuses here,
+    before the panel is invoked, and the same sha256 is the producer's own pin.
+    """
+
+    if "model_vs_actual_input" not in recipe:
+        return ()
+    definition = recipe["model_vs_actual_input"]
+    if not isinstance(definition, dict) or set(definition) != {
+        "path",
+        "sha256",
+        "size_bytes",
+    }:
+        raise VerticalBuildError("model_vs_actual_input definition differs")
+    artifact = _path(definition["path"], "model_vs_actual_input.path")
+    sha256, size = _sha(artifact)
+    if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+        raise VerticalBuildError("model_vs_actual_input identity differs")
+    return (
+        "--model-vs-actual-input",
+        str(artifact),
+        "--model-vs-actual-input-sha256",
+        sha256,
+    )
+
+
 def _panel_financial_arguments(
     recipe: Mapping[str, Any],
     baseline_root: Path,
@@ -5483,6 +5548,7 @@ def build_panel_candidate(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    model_vs_actual_arguments = _model_vs_actual_arguments(recipe)
     dependence_selected_inputs = recipe.get("dependence_selected_inputs")
     dependence_selected_arguments = (
         (
@@ -5537,6 +5603,7 @@ def build_panel_candidate(
         account_strategy_manifest,
     )
     epoch_arguments = _verified_epoch_manifest_panel_arguments(epoch_identity)
+    vendor_gap_fill_arguments = _vendor_gap_fill_arguments(recipe)
     hybrid_arguments = (
         (
             "--hybrid-decomposition-plan-bundle",
@@ -5552,6 +5619,7 @@ def build_panel_candidate(
         str(report_root),
         *strategy_history_arguments,
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5574,6 +5642,7 @@ def build_panel_candidate(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--output-root",
@@ -5588,6 +5657,7 @@ def build_panel_candidate(
         str(report_root),
         *strategy_history_arguments,
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5610,6 +5680,7 @@ def build_panel_candidate(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -5687,6 +5758,7 @@ def publish_panel(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    model_vs_actual_arguments = _model_vs_actual_arguments(recipe)
     dependence_selected_inputs = recipe.get("dependence_selected_inputs")
     dependence_selected_arguments = (
         (
@@ -5720,6 +5792,7 @@ def publish_panel(
         account_strategy_manifest,
     )
     epoch_arguments = _verified_epoch_manifest_panel_arguments(epoch_identity)
+    vendor_gap_fill_arguments = _vendor_gap_fill_arguments(recipe)
     # portfolio_control_panel.py:11963 requires private stage context for a
     # governed financial publication, a financial-mode panel and a verified
     # account-manifest bundle alike, not only when governed HWM or capital
@@ -5787,6 +5860,7 @@ def publish_panel(
         str(report_root),
         *strategy_history_arguments,
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5806,6 +5880,7 @@ def publish_panel(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -5840,6 +5915,7 @@ def publish_panel(
         # them here let the panel verify and then fail at the last step of the
         # last stage.
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5862,6 +5938,7 @@ def publish_panel(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -6636,6 +6713,8 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
     recipe.add_argument("--dependence-selected-inputs", type=Path)
     recipe.add_argument("--weekly-gap-fill-spec", type=Path)
+    recipe.add_argument("--vendor-gap-fills", type=Path)
+    recipe.add_argument("--model-vs-actual-input", type=Path)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
     recipe.add_argument("--as-of-date", required=True)
     recipe.add_argument("--pipeline-id", required=True)
@@ -6722,6 +6801,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 correlation_source_root=args.correlation_source_root,
                 weekly_gap_fill_spec_path=args.weekly_gap_fill_spec,
+                vendor_gap_fills_path=args.vendor_gap_fills,
+                model_vs_actual_input_path=args.model_vs_actual_input,
                 legacy_panel=args.legacy_panel,
                 as_of_date=args.as_of_date,
                 pipeline_id=args.pipeline_id,

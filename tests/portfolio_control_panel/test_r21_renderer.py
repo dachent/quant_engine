@@ -255,3 +255,83 @@ def test_position_cell_shows_symbol_and_asset_category(tmp_path: Path) -> None:
     assert 'class="cell-primary"' in cells[0] and "SPXL" in cells[0]
     assert '<span class="cell-secondary">Stk</span>' in cells[0]
     assert "Symbol unavailable no symbol" in cells[1]
+
+
+def test_risk_kpi_shows_the_producer_built_vendor_gap_fill_beside_its_receipt(
+    tmp_path: Path,
+) -> None:
+    """The producer's block (built by the tool, not hand-written) reaches the rendered KPI text."""
+
+    import hashlib
+    import json
+    import sys
+    from datetime import date
+    from decimal import Decimal
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    import portfolio_vendor_nav_gap_fill as fills
+
+    policy = {
+        "origin_labels": {
+            "ALTERNATE_SOURCE": "ADMITTED_ALTERNATE_SOURCE",
+            "PROVIDER_RETURN_BRIDGE": "ESTIMATED_VENDOR_GAP",
+            "LINEAR_INTERPOLATION": "ESTIMATED_VENDOR_GAP",
+        },
+        "days": [{"date": "2026-01-27", "rule": "LINEAR_INTERPOLATION"}],
+        "provider_return_lag_days": 0,
+    }
+    record = fills.build_fills(
+        policy,
+        {date(2026, 1, 26): Decimal("0.9"), date(2026, 1, 28): Decimal("0.88")},
+        None,
+        None,
+    )
+    record["subject"] = {"strategy_id": "robuxio-crypto"}
+    content = json.dumps(record).encode("utf-8")
+    point = {
+        "strategy_id": "robuxio-crypto",
+        "date": "2026-01-27",
+        "span_start_date": "2026-01-26",
+        "span_end_date": "2026-01-28",
+        "span_return": "-0.0217",
+    }
+    kpi_data = {
+        "advisory": {"hwm_candidate": {"kpi": {"missing_daily_points": [point]}}}
+    }
+    block = fills.build_vendor_gap_fills(
+        kpi_data, content, hashlib.sha256(content).hexdigest()
+    )
+
+    advisory = _risk_payload()["advisory"]
+    candidate = _hwm_candidate()
+    candidate["kpi"] = {
+        "value": "170.9635",
+        "hwm": "183.5428",
+        "drawdown": "-0.0685",
+        "label": candidate.get("label"),
+        "window_start": "2024-10-15",
+        "window_end": "2026-09-17",
+        "index_points": 703,
+        "gated_status": {
+            "policy_id": "PORT-HWM-3",
+            "hwm_numerical_status": "UNAVAILABLE",
+            "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+        },
+        "missing_daily_points": [point],
+    }
+    advisory["hwm_candidate"] = candidate
+    dom = _run(
+        tmp_path,
+        _risk_payload(
+            advisory=advisory,
+            hwm_governed_proof=_governed_proof(),
+            vendor_gap_fills=block,
+        ),
+        "renderRisk",
+    )
+    kpis = _flat(dom, "#risk-kpis")
+
+    assert "robuxio-crypto Jan 27, 2026" in kpis
+    assert "estimated vendor gap" in kpis
+    assert "NAV 0.8900" in kpis
+    assert "closure residual 0.000000000000" in kpis

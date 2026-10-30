@@ -15825,3 +15825,44 @@ def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
             **base_kwargs,
             model_vs_actual_input=(staged.with_name("absent.json"), pin),
         )
+
+
+def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The optional fill record is bound by its pin and refused when no span receipt declares its day."""
+
+    staged = tmp_path / "fills.json"
+    staged.write_bytes(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "subject": {"strategy_id": "fixture-strategy"},
+                "inputs": {"policy_sha256": "b" * 64},
+                "fills": [
+                    {
+                        "date": "2026-01-02",
+                        "rule": "LINEAR_INTERPOLATION",
+                        "origin_label": "ESTIMATED_VENDOR_GAP",
+                        "nav": "0.99",
+                        "previous_nav": {"date": "2026-01-01", "nav": "1"},
+                        "next_nav": {"date": "2026-01-03", "nav": "0.98"},
+                        "leg_in_return": "-0.01",
+                        "leg_out_return": "-0.010101010101010101",
+                        "span_return": "-0.02",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+    )
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    base_args = (inputs["report"], inputs["legacy"], panel.DEFAULT_TEMPLATE_ROOT)
+    base_kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+    }
+    _files, data, bound = panel._rendered_files(*base_args, **base_kwargs)
+    assert "vendor_gap_fills" not in data
+    assert "vendor_gap_fills" not in bound
+    with pytest.raises(panel.ControlPanelValidationError, match="vendor_gap_fills"):
+        panel._rendered_files(*base_args, **base_kwargs, vendor_gap_fills=(staged, pin))

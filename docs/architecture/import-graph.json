@@ -270,6 +270,11 @@
     ],
     [
       "portfolio_control_panel",
+      "portfolio_vendor_nav_gap_fill",
+      1
+    ],
+    [
+      "portfolio_control_panel",
       "sleeve_disclosures",
       1
     ],
