@@ -15772,3 +15772,56 @@ def test_panel_schema_binds_the_lifecycle_marker_to_the_fields() -> None:
         "performance": [{**row, **_LIFECYCLE_ACTIVE}] * 13,
     }
     assert lifecycle_errors(current) == []
+
+
+def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The optional block is built, schema-validated and bound only when its pinned input is supplied."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mva_synthetic", Path(__file__).with_name("test_model_vs_actual.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mva_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mva_tests)
+    staged = tmp_path / "audit-bridges.json"
+    staged.write_bytes(mva_tests.synthetic_staged_bytes())
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    base_args = (inputs["report"], inputs["legacy"], panel.DEFAULT_TEMPLATE_ROOT)
+    base_kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+    }
+    without_files, without_data, without_bound = panel._rendered_files(
+        *base_args, **base_kwargs
+    )
+    assert "model_vs_actual" not in without_data
+    assert "model_vs_actual_input" not in without_bound
+
+    files, data, bound = panel._rendered_files(
+        *base_args, **base_kwargs, model_vs_actual_input=(staged, pin)
+    )
+    assert data["model_vs_actual"]["schema_version"] == 1
+    assert data["model_vs_actual"]["audit_input"]["sha256"] == pin
+    assert bound["model_vs_actual_input"] == (staged, pin)
+    published = json.loads(files["data/dashboard_data.json"])
+    assert published["model_vs_actual"]["strategies"][0]["strategy_id"]
+    # Everything else is unchanged by the optional block.
+    assert {
+        k: v for k, v in files.items() if k != "data/dashboard_data.json"
+    }.keys() == {
+        k: v for k, v in without_files.items() if k != "data/dashboard_data.json"
+    }.keys()
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._rendered_files(
+            *base_args, **base_kwargs, model_vs_actual_input=(staged, "0" * 64)
+        )
+    with pytest.raises(panel.ControlPanelValidationError, match="not usable"):
+        panel._rendered_files(
+            *base_args,
+            **base_kwargs,
+            model_vs_actual_input=(staged.with_name("absent.json"), pin),
+        )

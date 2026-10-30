@@ -142,6 +142,7 @@ _PATH_STAGES = {
     # The Performance tab producer: builds one additive panel block from the weekly
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
+    "tools/portfolio_model_vs_actual.py": ["panel"],
     # The orthogonal risk-share producer: one optional panel block derived from the
     # decomposition lenses and invested capital the panel already holds.
     "tools/portfolio_orthogonal_risk.py": ["panel"],

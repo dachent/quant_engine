@@ -20,7 +20,8 @@
       "hwm_governed_proof": 112859,
       "performance_tab": 375785,
       "orthogonal_risk_attribution": 168346,
-      "strategy_underwriting": 76811
+      "strategy_underwriting": 76811,
+      "model_vs_actual": 133549
     }
   },
   "blocks": {
@@ -38,7 +39,8 @@
     "hwm_governed_proof": 117000,
     "performance_tab": 388000,
     "orthogonal_risk_attribution": 174000,
-    "strategy_underwriting": 80000
+    "strategy_underwriting": 80000,
+    "model_vs_actual": 138000
   },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
