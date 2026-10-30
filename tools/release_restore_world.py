@@ -9,7 +9,8 @@ resolution report. It never writes outside ``--dest`` and ``--report``.
 
 A path is resolved, in order, from: the live workspace (``workspace_fallback`` prefixes; no copy),
 an exact archive entry, or an archive subtree when the path names a directory. Anything else is
-``MISSING``; a pinned file whose restored bytes hash differently is ``MISMATCH``. Exit 0 only when
+``MISSING``; a pinned file whose bytes (restored or in the live workspace) hash differently is
+``MISMATCH``; a path or archive entry that would land outside ``--dest`` is ``UNSAFE``. Exit 0 only when
 nothing is MISMATCH and every MISSING path starts with an ``--allow-missing`` prefix (inputs the
 cycle regenerates), 1 otherwise, 2 on usage errors.
 
@@ -68,7 +69,18 @@ def _under(path: str, old: str) -> str | None:
 
 
 def _local(root_key: str, dest: Path, relative: str) -> Path:
-    return dest / root_key / Path(*PureWindowsPath(relative).parts)
+    """Where ``relative`` lands under ``dest/root_key``; a path that would leave it is refused."""
+
+    parts = PureWindowsPath(relative).parts
+    base = (dest / root_key).resolve()
+    target = (base / Path(*parts)).resolve()
+    if ".." in parts or (target != base and base not in target.parents):
+        raise ValueError(f"{relative!r} would leave {base}")
+    return base / Path(*parts)
+
+
+def _file_matches(path: Path, pin: str | None) -> bool:
+    return pin is None or hashlib.sha256(path.read_bytes()).hexdigest() == pin
 
 
 def resolve(
@@ -81,21 +93,24 @@ def resolve(
 ) -> list[dict[str, str]]:
     archives: dict[str, tuple[zipfile.ZipFile, set[str]]] = {}
     rows: list[dict[str, str]] = []
-    restored_dirs: list[str] = []
     for path in sorted(paths):
         root = next(
             (r for r in world["roots"] if _under(path, r["old"]) is not None), None
         )
-        if root is None or any(
-            path.lower().startswith(d.lower() + "\\") for d in restored_dirs
-        ):
+        if root is None:
             continue
         relative = str(_under(path, root["old"]))
         slashed = relative.replace("\\", "/")
         row = {"path": path, "status": "MISSING", "new": "", "detail": ""}
         rows.append(row)
         if root.get("workspace_fallback") and (workspace / slashed).exists():
-            row.update(status="WORKSPACE", new=str(workspace / slashed))
+            live = workspace / slashed
+            row.update(status="WORKSPACE", new=str(live))
+            if live.is_file() and not _file_matches(live, pins.get(path)):
+                row.update(
+                    status="MISMATCH",
+                    detail=f"live workspace bytes differ from the pin {pins[path][:12]}",
+                )
             continue
         only = root.get("only_prefixes") or []
         if only and not slashed.startswith(tuple(only)):
@@ -114,7 +129,11 @@ def resolve(
         archive, names = archives[root["archive"]]
         inner = root.get("archive_prefix", "")
         entry = inner + slashed
-        target = _local(root["key"], dest, relative)
+        try:
+            target = _local(root["key"], dest, relative)
+        except ValueError as error:
+            row.update(status="UNSAFE", detail=str(error))
+            continue
         if entry in names:
             data = archive.read(entry)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -128,14 +147,25 @@ def resolve(
             continue
         children = sorted(n for n in names if n.startswith(entry.rstrip("/") + "/"))
         if children:
-            for name in children:
-                child = _local(root["key"], dest, name[len(inner) :].replace("/", "\\"))
+            try:
+                landing = [
+                    (
+                        name,
+                        _local(
+                            root["key"], dest, name[len(inner) :].replace("/", "\\")
+                        ),
+                    )
+                    for name in children
+                ]
+            except ValueError as error:
+                row.update(status="UNSAFE", detail=f"archive entry: {error}")
+                continue
+            for name, child in landing:
                 child.parent.mkdir(parents=True, exist_ok=True)
                 child.write_bytes(archive.read(name))
             row.update(
                 status="RESTORED", new=str(target), detail=f"{len(children)} files"
             )
-            restored_dirs.append(path)
     return rows
 
 
@@ -195,7 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for r in rows
         if r["status"] == "MISSING" and not r["path"].lower().startswith(allowed)
     ]
-    bad = [r for r in rows if r["status"] == "MISMATCH"]
+    bad = [r for r in rows if r["status"] in ("MISMATCH", "UNSAFE")]
     counts: dict[str, int] = {}
     for row in rows:
         counts[row["status"]] = counts.get(row["status"], 0) + 1
