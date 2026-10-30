@@ -245,6 +245,16 @@
     ],
     [
       "portfolio_control_panel",
+      "portfolio_model_vs_actual",
+      1
+    ],
+    [
+      "portfolio_control_panel",
+      "portfolio_orthogonal_risk",
+      1
+    ],
+    [
+      "portfolio_control_panel",
       "portfolio_performance_tab",
       1
     ],
@@ -257,6 +267,11 @@
       "portfolio_control_panel",
       "portfolio_report",
       3
+    ],
+    [
+      "portfolio_control_panel",
+      "portfolio_vendor_nav_gap_fill",
+      1
     ],
     [
       "portfolio_control_panel",
@@ -316,6 +331,11 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_report",
+      1
+    ],
+    [
+      "portfolio_grizzly_signal_replay",
+      "portfolio_strategy_history",
       1
     ],
     [
@@ -411,6 +431,11 @@
     [
       "portfolio_private_stage",
       "portfolio_pipeline_materialize",
+      1
+    ],
+    [
+      "portfolio_provider_track_record_union",
+      "portfolio_fx_rates",
       1
     ],
     [

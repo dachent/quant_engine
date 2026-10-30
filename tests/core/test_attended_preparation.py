@@ -4954,3 +4954,68 @@ def test_disclosure_sources_read_the_pinned_declared_funding_events_or_refuse(
             destination=tmp_path / "again",
             ledger_generation_dir=_ledger_dir(tmp_path),
         )
+
+
+class _AnyConfig(dict):  # type: ignore[type-arg]
+    """A config whose every required key resolves to a nested placeholder."""
+
+    def __missing__(self, key: str) -> "_AnyConfig":
+        return _AnyConfig()
+
+
+def test_ledger_stage_identity_binds_the_model_vs_actual_pin() -> None:
+    base = _AnyConfig()
+    without = preparation._preparation_stage_inputs(base, "c" * 40)["ledger"]
+    assert "model_vs_actual_input" not in without
+    pinned = _AnyConfig(model_vs_actual_input={"path": "a", "sha256": "1"})
+    changed = _AnyConfig(model_vs_actual_input={"path": "a", "sha256": "2"})
+    first = preparation._preparation_stage_inputs(pinned, "c" * 40)["ledger"]
+    second = preparation._preparation_stage_inputs(changed, "c" * 40)["ledger"]
+    assert first["model_vs_actual_input"] != second["model_vs_actual_input"]
+    assert first != without
+
+
+def test_the_model_vs_actual_pin_is_verified_by_the_specification_pin_check(
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "audit-bridges.json"
+    audit.write_bytes(b'{"synthetic": true}')
+    good = {
+        "path": str(audit),
+        "sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+        "size_bytes": audit.stat().st_size,
+    }
+    spec = {"model_vs_actual_input": good}
+    preparation._pins(spec, "preparation specification")
+    assert preparation._pin(good, "model vs actual input") == audit.resolve()
+    with pytest.raises(preparation.AttendedPreparationError, match="pin differs"):
+        preparation._pins(
+            {"model_vs_actual_input": {**good, "sha256": "0" * 64}},
+            "preparation specification",
+        )
+    audit.unlink()
+    with pytest.raises(preparation.AttendedPreparationError, match="unavailable"):
+        preparation._pins(spec, "preparation specification")
+
+
+def test_ledger_stage_identity_binds_the_weekly_gap_fill_pin() -> None:
+    base = _AnyConfig()
+    without = preparation._preparation_stage_inputs(base, "c" * 40)["ledger"]
+    assert "weekly_gap_fill_spec" not in without
+    pinned = _AnyConfig(weekly_gap_fill_spec={"path": "a", "sha256": "1"})
+    changed = _AnyConfig(weekly_gap_fill_spec={"path": "a", "sha256": "2"})
+    first = preparation._preparation_stage_inputs(pinned, "c" * 40)["ledger"]
+    second = preparation._preparation_stage_inputs(changed, "c" * 40)["ledger"]
+    assert first["weekly_gap_fill_spec"] != second["weekly_gap_fill_spec"]
+
+
+def test_ledger_stage_identity_binds_the_vendor_gap_fills_pin() -> None:
+    without = preparation._preparation_stage_inputs(_AnyConfig(), "c" * 40)["ledger"]
+    assert "vendor_gap_fills" not in without
+    first = preparation._preparation_stage_inputs(
+        _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "1"}), "c" * 40
+    )["ledger"]
+    second = preparation._preparation_stage_inputs(
+        _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "2"}), "c" * 40
+    )["ledger"]
+    assert first["vendor_gap_fills"] != second["vendor_gap_fills"]
