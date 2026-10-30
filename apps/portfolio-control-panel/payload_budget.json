@@ -47,7 +47,7 @@
     "dashboard_data_js_bytes": 44700000
   },
   "fixture": {
-    "basis": "performance_tab built from the eight-week panel of tests/portfolio_control_panel/test_performance_tab.py measured 9549 B at R2; guards block shape in CI, where no real generation exists",
-    "performance_tab_max_bytes": 10000
+    "basis": "performance_tab built from the eight-week panel of tests/portfolio_control_panel/test_performance_tab.py measured 9549 B at R2 (schema 2) and 15898 B on r21-integration (schema 3: union grid, benchmark series); guards block shape in CI, where no real generation exists",
+    "performance_tab_max_bytes": 16400
   }
 }
