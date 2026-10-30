@@ -17,7 +17,7 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from quant_engine.core.credentials import (
+from quant_engine.core import (
     CredentialError as _CoreCredentialError,
     CredentialResolver,
     plan_from_config,
