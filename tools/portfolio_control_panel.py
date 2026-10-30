@@ -89,11 +89,27 @@ else:
     validate_manifest_schema = _manifest_module.validate_manifest_schema
 
 if TYPE_CHECKING:
+    from portfolio_orthogonal_risk import (
+        build_orthogonal_risk_attribution,
+        verify_orthogonal_risk_attribution,
+    )
     from portfolio_performance_tab import (
         build_performance_tab,
         verify_performance_tab,
     )
 else:
+    try:
+        _orthogonal_risk_module = import_module("tools.portfolio_orthogonal_risk")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        _orthogonal_risk_module = import_module("portfolio_orthogonal_risk")
+    build_orthogonal_risk_attribution = (
+        _orthogonal_risk_module.build_orthogonal_risk_attribution
+    )
+    verify_orthogonal_risk_attribution = (
+        _orthogonal_risk_module.verify_orthogonal_risk_attribution
+    )
     try:
         _performance_tab_module = import_module("tools.portfolio_performance_tab")
     except ModuleNotFoundError as exc:  # direct `python tools/...` execution
@@ -12367,6 +12383,9 @@ def _rendered_files(
     # The Performance tab reads the totals above (summed-epoch TWR and difference),
     # so it is built after they are attached.
     data["performance_tab"] = build_performance_tab(data)
+    # The orthogonal risk shares are re-derived from the decomposition lenses and the
+    # governed invested capital the payload already holds; the block is optional.
+    data["orthogonal_risk_attribution"] = build_orthogonal_risk_attribution(data)
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,
@@ -13258,6 +13277,21 @@ def verify_candidate(
             "Performance tab re-derives from the panel inputs",
             performance_tab_error is None,
             performance_tab_error,
+        )
+    )
+    orthogonal_risk = data.get("orthogonal_risk_attribution")
+    orthogonal_risk_error: str | None = None
+    try:
+        if not isinstance(orthogonal_risk, Mapping):
+            raise ValueError("orthogonal_risk_attribution is absent")
+        verify_orthogonal_risk_attribution(orthogonal_risk, data)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        orthogonal_risk_error = str(exc)
+    checks.append(
+        _check(
+            "Orthogonal risk shares re-derive from the decomposition lenses",
+            orthogonal_risk_error is None,
+            orthogonal_risk_error,
         )
     )
     weekly_payload = _object(data.get("weekly_returns"), "weekly returns")
