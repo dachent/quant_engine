@@ -21,10 +21,55 @@ import json
 from pathlib import Path
 import sys
 
-REPO = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(REPO / "tools")]
+COORDINATION = Path("dataPortfolio") / "releases-refresh-2026"
+PANEL_ROOT_ID = "portfolio-panel"
 
-import sleeve_disclosures  # noqa: E402
+
+class Refused(ValueError):
+    """The committed release authority is missing or not committed."""
+
+
+def committed_release_panel(data_root: Path) -> tuple[str, str]:
+    """The committed CURRENT_RELEASE id and its portfolio-panel generation id.
+
+    Same derivation as tools/sleeve_disclosures.committed_release_panel (a test holds the
+    two equal); repeated here because a release script may not widen sys.path.
+    """
+
+    coordination = data_root / COORDINATION
+    pointer_path = coordination / "CURRENT_RELEASE.json"
+    if not pointer_path.is_file():
+        raise Refused("release authority is not published")
+    pointer = json.loads(pointer_path.read_bytes())
+    release_id = str(pointer.get("release_id"))
+    if pointer.get("state") != "COMMITTED":
+        raise Refused("CURRENT_RELEASE is not COMMITTED")
+    directory = coordination / "releases" / release_id
+    if (
+        not (directory / "release.json").is_file()
+        or not (directory / "journal.json").is_file()
+    ):
+        raise Refused("CURRENT_RELEASE names a release that is not retained")
+    raw = (directory / "release.json").read_bytes()
+    if hashlib.sha256(raw).hexdigest() != pointer.get("release_manifest_sha256"):
+        raise Refused("CURRENT_RELEASE manifest differs from its pointer")
+    manifest = json.loads(raw)
+    journal = json.loads((directory / "journal.json").read_bytes())
+    if (
+        manifest.get("release_id") != release_id
+        or journal.get("release_id") != release_id
+        or journal.get("state") != "COMMITTED"
+    ):
+        raise Refused("CURRENT_RELEASE is not a committed release")
+    panels = [
+        item.get("proposed_generation_id")
+        for item in manifest.get("targets", [])
+        if isinstance(item, dict) and item.get("root_id") == PANEL_ROOT_ID
+    ]
+    if len(panels) != 1:
+        raise Refused("current release does not name one panel generation")
+    return release_id, str(panels[0])
+
 
 EVIDENCE = "timestamp-delta-result.txt"
 ENTRIES = (
@@ -40,10 +85,8 @@ def main() -> int:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:
-        predecessor_release, predecessor_panel = (
-            sleeve_disclosures.committed_release_panel(args.data_root)
-        )
-    except sleeve_disclosures.DisclosureError as exc:
+        predecessor_release, predecessor_panel = committed_release_panel(args.data_root)
+    except Refused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
     evidence = args.out.parent / EVIDENCE

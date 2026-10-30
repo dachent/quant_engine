@@ -647,6 +647,19 @@ def test_disclosure_inputs_and_sources_are_derived_from_and_bound_to_current_rel
     assert (entry["release_id"], entry["panel_generation_id"]) == (release, panel)
     assert entry["data_file"]["sha256"] == _sha(data)
     assert _generate(root, out, "--check") == 0
+    # the generator's own derivation equals the tool's
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_disclosure_inputs_under_test",
+        REPOSITORY_ROOT / "ops/mvp2-release/scripts/build_disclosure_inputs.py",
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    assert generator.committed_release_panel(root) == (
+        disclosures.committed_release_panel(root)
+    )
 
     sources = disclosures.build_sources(
         facts_paths=[], inputs_path=out, predecessor_data_root=root
