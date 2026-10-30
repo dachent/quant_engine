@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import copy
-import json
 from pathlib import Path
 import re
 from typing import Any
 
+from synthetic_r21_blocks import model_vs_actual_block
 from test_panel_render_audit_543 import base, call, run
-
-FIXTURE = Path(__file__).parent / "fixtures" / "model_vs_actual.fixture.json"
 
 
 def _block() -> dict[str, Any]:
-    return copy.deepcopy(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    return copy.deepcopy(model_vs_actual_block())
 
 
 def _plain(markup: str) -> str:
@@ -62,7 +60,7 @@ def test_totals_table_lists_every_strategy_with_tags_and_a_dollar_total(
     assert f"{gap:,}" in text
     assert "Audit derived" in text
     assert block["sign_convention"] in text
-    assert "±4.6 pp (1σ)" in text
+    assert "±1.5 pp (1σ)" in text
     assert 'id="mva-total-table"' in root
 
 
@@ -92,7 +90,7 @@ def test_estimated_dollars_and_uncertainty_are_labelled(tmp_path: Path) -> None:
     detail = _detail(tmp_path, _block(), 0, "strategy")
 
     assert "estimated dollars" in detail
-    assert "±4.6 pp (1σ)" in detail
+    assert "±1.5 pp (1σ)" in detail
 
 
 def test_audit_derived_rows_name_the_pull_that_replaces_them(tmp_path: Path) -> None:
