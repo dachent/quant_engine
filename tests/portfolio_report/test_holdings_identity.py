@@ -314,3 +314,20 @@ def test_a_position_keeps_the_capture_it_was_observed_under() -> None:
     assert held["as_of_basis"] == "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE"
     assert held["observed_at"] == "2026-09-18T03:59:40+00:00"
     assert "capture_date" not in rows[IBKR_ID]
+
+
+def test_a_position_without_a_value_states_why() -> None:
+    """The row names the ledger status that leaves it without a value."""
+
+    catalog = _catalog()
+    catalog["positions"][1] = {
+        **catalog["positions"][1],
+        "market_value": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+    }
+    rows = {row["security_id"]: row for row in reporter._positions(catalog)}
+
+    assert rows[IBKR_ID_2]["market_value_usd"] is None
+    assert rows[IBKR_ID_2]["market_value_reason"] == (
+        reporter.MARKET_VALUE_REASON_PREFIX + "UNAVAILABLE"
+    )
+    assert "market_value_reason" not in rows[IBKR_ID]
