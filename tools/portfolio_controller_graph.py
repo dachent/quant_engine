@@ -151,6 +151,9 @@ _PATH_STAGES = {
     # path raises "unmapped relevant production change" instead of being
     # treated as harmless -- two of these tripped that gate during the #374
     # integration, one of them on a pure type-annotation change.
+    # #540 payload budget: reads a published generation and the budget file, imports no
+    # producer and writes no delivery artifact.
+    "tools/panel_payload_size.py": [],
     "tools/check_architecture.py": [],
     "tools/check_data_roots.py": [],
     "tools/check_fact_admission.py": [],
