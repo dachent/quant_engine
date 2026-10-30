@@ -50,6 +50,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     HwmInputsContractError,
@@ -1603,6 +1604,91 @@ def _capital_coverage_bounds(
     }
 
 
+# Cost-row keys the attribution catalog carries from the baseline (declared basis,
+# corroborating observed charges, separate execution cost); equal to
+# portfolio_attribution.COST_EVIDENCE_KEYS, which a test enforces.
+COST_EVIDENCE_KEYS: Final = (
+    "corroboration",
+    "cost_class",
+    "declared",
+    "execution_cost",
+)
+
+
+def _plain_words(code: object) -> str:
+    """An enum code in plain lower-case words (``PROVIDER_DECLARED`` -> provider declared)."""
+
+    return str(code).replace("_", " ").lower()
+
+
+def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The structured cost pieces of one strategy row, every word taken from data.
+
+    One SUBSCRIPTION component when the cost row carries a declared amount (with
+    the plain-words source and the corroborating observed charges), and one
+    EXECUTION component per native currency when the ledger states commissions.
+    ``annual_external_cost_usd`` stays the headline annual amount; an execution
+    amount is period-to-date and has no annual equivalent.
+    """
+
+    components: list[dict[str, Any]] = []
+    declared = cost.get("declared")
+    if isinstance(declared, Mapping):
+        corroboration = [
+            item
+            for item in cost.get("corroboration") or []
+            if isinstance(item, Mapping)
+        ]
+        label = None
+        if corroboration:
+            observations = [
+                row
+                for item in corroboration
+                for row in item.get("observations") or []
+                if isinstance(row, Mapping)
+            ]
+            dates = sorted(str(row["date"]) for row in observations)
+            kind = _plain_words(corroboration[0].get("kind"))
+            feed_end = max(str(item.get("feed_last_date")) for item in corroboration)
+            if dates:
+                label = (
+                    f"{kind} {dates[0]}..{dates[-1]} ({len(dates)} charges, "
+                    f"feed through {feed_end})"
+                )
+        components.append(
+            {
+                "amount": declared.get("amount"),
+                "annual_equivalent_usd": cost.get("annual_external_cost_usd"),
+                "corroboration_label": label,
+                "currency": declared.get("currency"),
+                "kind": "SUBSCRIPTION",
+                "period": declared.get("period"),
+                "source_label": _plain_words(declared.get("basis")),
+                "status": cost.get("cost_status"),
+                "window_end": None,
+                "window_start": None,
+            }
+        )
+    execution = cost.get("execution_cost")
+    if isinstance(execution, Mapping) and execution.get("status") == "AVAILABLE":
+        for item in execution.get("by_currency") or []:
+            components.append(
+                {
+                    "amount": item.get("amount"),
+                    "annual_equivalent_usd": None,
+                    "corroboration_label": None,
+                    "currency": item.get("currency"),
+                    "kind": "EXECUTION",
+                    "period": "PERIOD_TO_DATE",
+                    "source_label": _plain_words(execution.get("basis")),
+                    "status": execution.get("status"),
+                    "window_end": execution.get("window_end"),
+                    "window_start": execution.get("window_start"),
+                }
+            )
+    return components
+
+
 FEES_STATUS_EVIDENCED: Final = "EVIDENCED_PRE_TAX"
 FEES_STATUS_UPPER_BOUND: Final = "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
 FEES_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
@@ -2310,6 +2396,10 @@ def _merge_attribution(
                 "attribution.benchmark_comparison.metrics",
             )
         )
+        cost_evidence: dict[str, Any] = {
+            key: cost[key] for key in COST_EVIDENCE_KEYS if key in cost
+        }
+        components = cost_components(cost)
         result.append(
             {
                 **item,
@@ -2397,6 +2487,8 @@ def _merge_attribution(
                 "after_tax_annual_cost_rate": cost.get("after_tax_annual_cost_rate"),
                 "after_tax_status": cost.get("after_tax_status"),
                 "fees_status": cost.get("fees_status"),
+                **cost_evidence,
+                **({"cost_components": components} if components else {}),
                 **(
                     {}
                     if cost_rate_at_cutoff is None
@@ -5226,6 +5318,12 @@ def _strategy_provider_evidence(
                 "return_series_sha256": canonical["return_series_sha256"],
             }
         rows.append(row)
+    shared = shared_provider_live_blocks(rows)
+    if shared:
+        raise ReportValidationError(
+            "strategy provider evidence provider-live block is shared by strategies: "
+            + ", ".join(f"{first}={second}" for first, second in shared)
+        )
     return rows
 
 
@@ -6965,6 +7063,10 @@ def _transactions_and_flows(
     return sorted(rows, key=lambda item: (str(item["date"]), str(item["record_id"])))
 
 
+# A position row whose market value is not available says so with the ledger's own status.
+MARKET_VALUE_REASON_PREFIX: Final = "SOURCE_SNAPSHOT_MARKET_VALUE_"
+
+
 def _positions(
     catalog: Mapping[str, Any], current_account_ids: set[str] | None = None
 ) -> list[dict[str, Any]]:
@@ -7015,6 +7117,13 @@ def _positions(
                     if status == "AVAILABLE"
                     else None
                 ),
+                # Why a row has no value: the source snapshot states none (the
+                # status is the ledger's own word for it), never a guessed one.
+                **(
+                    {}
+                    if status == "AVAILABLE"
+                    else {"market_value_reason": MARKET_VALUE_REASON_PREFIX + status}
+                ),
                 "quantity": item.get("quantity"),
                 "security_id": item.get("security_id"),
                 "snapshot_status": (
@@ -7029,6 +7138,13 @@ def _positions(
                 ),
                 "strategy_id": item.get("strategy_id"),
                 "symbol": item.get("symbol"),
+                # The capture the row was observed under, when its as-of date is
+                # the financial day of a later-dated native capture.
+                **{
+                    key: item[key]
+                    for key in ("as_of_basis", "capture_date", "observed_at")
+                    if item.get(key) is not None
+                },
             }
         )
     return sorted(
@@ -9285,6 +9401,7 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_manifest_rows: list[Mapping[str, Any]] = []
+    manifest_rows_raw: object = None
     epoch_included_rows: list[Mapping[str, Any]] = []
     epoch_perimeter: derived_epoch_perimeter.EffectivePerimeter | None = None
     epoch_crosswalk_rows: list[dict[str, Any]] = []
@@ -10269,6 +10386,11 @@ def build_report_data(
                     hwm_summary=hwm_summary,
                     calculation_cutoff_date=calculation_cutoff_date,
                     custody_current_capital=report.get("custody_current_capital"),
+                    manifest_rows=(
+                        manifest_rows_raw
+                        if isinstance(manifest_rows_raw, list)
+                        else None
+                    ),
                 )
             )
         except PortfolioTotalsError as exc:

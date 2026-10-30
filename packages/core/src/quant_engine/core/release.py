@@ -22,6 +22,7 @@ from quant_engine.core.contracts import (
     VerificationStatus,
     canonical_json_bytes,
 )
+from quant_engine.core.replica_marker import root_carries_marker, translate_identity
 from quant_engine.core.publication import (
     CurrentPointer,
     PointerIntegrityError,
@@ -1254,10 +1255,38 @@ def _validate_root_identities(
     if manifest.release_schema_version < _SCHEMA_VERSION:
         return
     for target in manifest.targets:
-        if _root_identity(roots[target.root_id]) != target.root_identity:
+        root = roots[target.root_id]
+        if root_carries_marker(root):
+            raise ReleaseConflictError(
+                f"release root contains a replica marker: {target.root_id}"
+            )
+        computed = _root_identity(root)
+        # A scratch replica never has the real directory's identity; the marker's identity
+        # map (written by the copy) pairs the recorded identity with the copy's own. Real
+        # roots carry no marker, so their check is unchanged.
+        if computed != translate_identity(root, target.root_identity, computed):
             raise ReleaseConflictError(
                 f"release root identity changed: {target.root_id}"
             )
+
+
+def directory_identity(path: Path) -> str:
+    """The identity digest a release records for a directory (volume serial, file index)."""
+
+    return _root_identity(path)
+
+
+def _replica_expected(path: Path, recorded: str | None) -> str | None:
+    """The identity a lease must see for ``path``: the recorded one, or for a marked replica
+    copy the copy's own identity when the marker's map pairs it with the recorded one."""
+
+    if recorded is None:
+        return None
+    try:
+        computed = _root_identity(path)
+    except OSError:
+        return recorded
+    return translate_identity(path, recorded, computed)
 
 
 def _release_lease_expectations(
@@ -1265,7 +1294,8 @@ def _release_lease_expectations(
 ) -> dict[Path, str | None]:
     expected: dict[Path, str | None] = {}
     for target in manifest.targets:
-        expected[roots[target.root_id]] = target.root_identity
+        root = roots[target.root_id]
+        expected[root] = target.root_identity
     for companion in manifest.companions:
         parent = _companion_path(
             roots[companion.root_id], companion.relative_path
@@ -1278,7 +1308,9 @@ def _release_lease_expectations(
         ):
             raise ReleaseConflictError("release directory identities conflict")
         expected[parent] = companion.parent_identity or prior
-    return expected
+    # Compare the RECORDED identities first (above); only the final per-path expectation is
+    # translated to the copy's own identity, so a root shared with a companion parent works.
+    return {path: _replica_expected(path, value) for path, value in expected.items()}
 
 
 def _validate_previous_inventory(root: Path, target: ReleaseTarget) -> None:

@@ -101,6 +101,9 @@ _PATH_STAGES = {
     # materializer imports it and it can refuse or fail any stage, so it carries the
     # controller's impact; it writes no delivery artifact itself.
     "packages/core/src/quant_engine/core/run_storage.py": list(_STAGE_ORDER),
+    # Verifies a promoted retained-cache base before the runner links an overlay to it; it
+    # can refuse any stage's run, like run_storage.
+    "packages/core/src/quant_engine/core/retained_cache_base.py": list(_STAGE_ORDER),
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
@@ -112,6 +115,15 @@ _PATH_STAGES = {
     # release builder, attended preparation): a change moves receipts of every stage.
     _DIRECTORY_IDENTITY: list(_STAGE_ORDER),
     "tools/data_pipeline.py": list(_STAGE_ORDER),
+    # The replica gate and the replica ceremony tool only refuse or orchestrate a real-roots
+    # commit (they write no delivery artifact), like the audit/guard tools: no stage impact.
+    "packages/core/src/quant_engine/core/replica_gate.py": [],
+    # Read by release.py to accept a marked replica copy's directory identities; it can refuse
+    # a replica release, never a real one (real roots carry no marker).
+    "packages/core/src/quant_engine/core/replica_marker.py": [],
+    "tools/release_replica.py": [],
+    "tools/release_cache_base.py": [],
+    "tools/release_measurements.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
     # The implementation reconciliation and return-attribution builders write the
@@ -127,9 +139,16 @@ _PATH_STAGES = {
     "tools/portfolio_totals_verify.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # Builds the style-return bundle the decomposition plan pins (calendar, return
+    # columns); a change moves the plan inputs and everything downstream of them.
+    "tools/portfolio_public_style_sources.py": ["analytics", "report", "panel"],
     # The Performance tab producer: builds one additive panel block from the weekly
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],
+    "tools/portfolio_model_vs_actual.py": ["panel"],
+    # The orthogonal risk-share producer: one optional panel block derived from the
+    # decomposition lenses and invested capital the panel already holds.
+    "tools/portfolio_orthogonal_risk.py": ["panel"],
     # The holdings identity sidecar: built by the report producer into the report
     # payload, and re-derived by the report verifier.  A change moves report bytes.
     "tools/holdings_identity.py": ["report", "panel"],
@@ -140,6 +159,9 @@ _PATH_STAGES = {
     # path raises "unmapped relevant production change" instead of being
     # treated as harmless -- two of these tripped that gate during the #374
     # integration, one of them on a pure type-annotation change.
+    # #540 payload budget: reads a published generation and the budget file, imports no
+    # producer and writes no delivery artifact.
+    "tools/panel_payload_size.py": [],
     "tools/check_architecture.py": [],
     "tools/check_data_roots.py": [],
     "tools/check_fact_admission.py": [],
@@ -149,6 +171,21 @@ _PATH_STAGES = {
     "tools/check_repository_boundary.py": [],
     "tools/ci.py": [],
     "tools/stall_watchdog.py": [],
+    # Computes labelled fill records for declared vendor NAV gap days from retained
+    # bytes; no stage reads it (consumers take the pinned fill record).
+    "tools/portfolio_vendor_nav_gap_fill.py": [],
+    # Stages an unpublished derived-return candidate from retained bytes; the weekly
+    # builder reads only the pinned generation it is handed, never this tool.
+    "tools/portfolio_grizzly_signal_replay.py": [],
+    # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
+    # the pinned generation it is handed, never this tool.
+    "tools/portfolio_fx_rates.py": [],
+    # Assembles the pinned attribution return-source CSV; the attribution stage reads
+    # only the file and manifest the spec pins, never this tool.
+    "tools/portfolio_attribution_returns.py": [],
+    # Stages an unpublished provider track-record union from verified source
+    # generations; consumers read only the generation they are handed.
+    "tools/portfolio_provider_track_record_union.py": [],
     # The nested-strategy tag map (#567 stage 1): policy validation and tag
     # resolution.  The report reads it for sleeve lifecycle links (#592), so a
     # change affects the report and the panel built from it.

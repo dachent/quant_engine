@@ -45,6 +45,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
 import sleeve_disclosures
 from portfolio_private_stage import validate_private_stage_target
@@ -88,11 +89,27 @@ else:
     validate_manifest_schema = _manifest_module.validate_manifest_schema
 
 if TYPE_CHECKING:
+    from portfolio_orthogonal_risk import (
+        build_orthogonal_risk_attribution,
+        verify_orthogonal_risk_attribution,
+    )
     from portfolio_performance_tab import (
         build_performance_tab,
         verify_performance_tab,
     )
 else:
+    try:
+        _orthogonal_risk_module = import_module("tools.portfolio_orthogonal_risk")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        _orthogonal_risk_module = import_module("portfolio_orthogonal_risk")
+    build_orthogonal_risk_attribution = (
+        _orthogonal_risk_module.build_orthogonal_risk_attribution
+    )
+    verify_orthogonal_risk_attribution = (
+        _orthogonal_risk_module.verify_orthogonal_risk_attribution
+    )
     try:
         _performance_tab_module = import_module("tools.portfolio_performance_tab")
     except ModuleNotFoundError as exc:  # direct `python tools/...` execution
@@ -101,6 +118,17 @@ else:
         _performance_tab_module = import_module("portfolio_performance_tab")
     build_performance_tab = _performance_tab_module.build_performance_tab
     verify_performance_tab = _performance_tab_module.verify_performance_tab
+
+if TYPE_CHECKING:
+    from portfolio_model_vs_actual import build_model_vs_actual
+else:
+    try:
+        _model_vs_actual_module = import_module("tools.portfolio_model_vs_actual")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        _model_vs_actual_module = import_module("portfolio_model_vs_actual")
+    build_model_vs_actual = _model_vs_actual_module.build_model_vs_actual
 
 ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
     build_manifest_candidate.__code__.co_filename
@@ -746,6 +774,12 @@ def _validated_strategy_evidence(
             "generation_as_of_date": generation_as_of_date,
             "provider_id": provider_id,
         }
+    shared = shared_provider_live_blocks(list(by_id.values()))
+    if shared:
+        raise ControlPanelValidationError(
+            "strategy evidence provider-live block is shared by strategies: "
+            + ", ".join(f"{first}={second}" for first, second in shared)
+        )
     return by_id
 
 
@@ -1357,6 +1391,18 @@ def _gunzip_exact(content: bytes) -> bytes:
 
 
 _PANEL_LENS_REPRESENTATION: Final = "SURFACE_SERIES_ONCE_V1"
+
+
+def _model_vs_actual_cli_value(args: argparse.Namespace) -> tuple[Path, str] | None:
+    """The optional model_vs_actual audit input and its pin, both or neither."""
+
+    path = getattr(args, "model_vs_actual_input", None)
+    sha256 = getattr(args, "model_vs_actual_input_sha256", None)
+    if (path is None) != (sha256 is None):
+        raise ControlPanelValidationError(
+            "--model-vs-actual-input and --model-vs-actual-input-sha256 go together"
+        )
+    return None if path is None else (path, str(sha256))
 
 
 def _panel_wire_form(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -3799,6 +3845,10 @@ def _suppress_unmatched_strategy_performance(
             "after_tax_annual_cost_rate",
             "after_tax_status",
             "fees_status",
+            "cost_class",
+            "declared",
+            "corroboration",
+            "execution_cost",
             "systematic_weight",
         ):
             row[field] = None
@@ -9390,35 +9440,126 @@ POSITION_CURRENT_BASIS: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF"
 _POSITION_LATEST: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
 _POSITION_HISTORICAL: Final = "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
 
-# E1 (ADJ 6a): the contract's portfolio-security-master source is
-# REQUIRED_NOT_READY (contract :5010-5105, blockers [476]), so an accepted
-# position can have no symbol today.  G1.3 requires the gap be explicit rather
-# than a bare dash; this is that explicit reason, named once so it cannot drift
-# between the producer and its tests.
-E1_SYMBOL_NOT_READY_REASON: Final = (
-    "Listing identity (ticker symbol) is not ready: the security master source "
-    "is required by the financial source contract but is not yet admitted, so "
-    "this position is identified by its provider security id only."
-)
+# E1: a position's listing identity is the report's ``holdings_identity`` sidecar
+# row for the same (account_id, as_of_date, security_id).  The panel states what
+# that row proves and nothing more: a symbol the sidecar proves is shown, a symbol
+# it cannot prove stays NOT_READY with the sidecar's own reason code, and a report
+# without a sidecar says so.  A position and a sidecar row that disagree are a
+# build error, never a reconciled value.
+SYMBOL_STATUS_NOT_READY_NO_SIDECAR: Final = "HOLDINGS_IDENTITY_SIDECAR_ABSENT"
 _POSITION_ACCEPTED_STATUS_PREFIX: Final = "AVAILABLE"
+_IDENTITY_JOIN_FIELDS: Final = ("quantity", "strategy_id")
+
+
+def _holdings_identity_index(
+    report: Mapping[str, Any],
+) -> dict[tuple[str, str, str], Mapping[str, Any]] | None:
+    """The sidecar rows keyed by (account_id, as_of_date, security_id), or None."""
+
+    section = report.get("holdings_identity")
+    if section is None:
+        return None
+    if not isinstance(section, Mapping):
+        raise ControlPanelValidationError("holdings_identity is not an object")
+    index: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+    for item in _objects(section.get("rows"), "holdings_identity.rows"):
+        key = (
+            _text(item.get("account_id"), "holdings_identity account_id"),
+            _text(item.get("as_of_date"), "holdings_identity as_of_date"),
+            _text(item.get("security_id"), "holdings_identity security_id"),
+        )
+        if key in index:
+            raise ControlPanelValidationError(
+                f"holdings_identity has two rows for {key}"
+            )
+        index[key] = item
+    return index
+
+
+def _identity_row_for(
+    row: Mapping[str, Any],
+    index: Mapping[tuple[str, str, str], Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """The sidecar row of one accepted position; refuse when it does not match."""
+
+    key = (
+        str(row.get("account_id")),
+        str(row.get("as_of_date")),
+        str(row.get("security_id")),
+    )
+    identity = index.get(key)
+    if identity is None:
+        raise ControlPanelValidationError(
+            f"position {key} has no holdings_identity row"
+        )
+    for field in _IDENTITY_JOIN_FIELDS:
+        if identity.get(field) != row.get(field):
+            raise ControlPanelValidationError(
+                f"position {key} differs from its holdings_identity row on {field}"
+            )
+    carried = row.get("symbol")
+    if carried is not None and carried != identity.get("symbol"):
+        raise ControlPanelValidationError(
+            f"position {key} symbol differs from its holdings_identity row"
+        )
+    return identity
+
+
+# IBKR Flex ``assetCategory`` codes in plain words.  A code outside this documented
+# vocabulary is shown as its own words, never guessed.
+_ASSET_CATEGORY_WORDS: Final = {
+    "BILL": "Treasury bill",
+    "BOND": "Bond",
+    "CASH": "Cash or currency",
+    "CFD": "Contract for difference",
+    "CMDTY": "Commodity",
+    "CRYPTO": "Cryptocurrency",
+    "FOP": "Futures option",
+    "FUND": "Fund",
+    "FUT": "Future",
+    "OPT": "Option",
+    "STK": "Stock",
+    "WAR": "Warrant",
+}
+
+
+def asset_category_label(category: object) -> str | None:
+    """A plain-words label for an asset category code, or None without a code."""
+
+    if not isinstance(category, str) or not category.strip():
+        return None
+    return _ASSET_CATEGORY_WORDS.get(
+        category.strip().upper(), category.strip().replace("_", " ").lower().title()
+    )
 
 
 def _position_symbol_status_and_reason(
     row: Mapping[str, Any],
-) -> tuple[str, str | None]:
-    """E1: state explicitly why an accepted position has no symbol.
+    identity_index: Mapping[tuple[str, str, str], Mapping[str, Any]] | None,
+) -> tuple[str, str | None, str | None, str | None]:
+    """State a position's symbol and asset category from its sidecar row.
 
-    AVAILABLE when the row carries a symbol; NOT_READY with the governing
-    reason when an accepted position (``status`` starting with ``AVAILABLE``)
-    has none; NOT_APPLICABLE otherwise (the row is not an accepted position,
-    e.g. the no-position sentinel row).
+    Returns ``(symbol_status, symbol_reason, symbol, asset_category)``.  AVAILABLE
+    when the sidecar proves a symbol; NOT_READY with the sidecar's reason code when
+    an accepted position has none; NOT_APPLICABLE when the row is not an accepted
+    position (the no-position sentinel row).  Nothing is typed in: the symbol is
+    the sidecar's, and an accepted position the sidecar does not describe refuses.
     """
 
-    if row.get("symbol") is not None:
-        return "AVAILABLE", None
-    if str(row.get("status", "")).startswith(_POSITION_ACCEPTED_STATUS_PREFIX):
-        return "NOT_READY", E1_SYMBOL_NOT_READY_REASON
-    return "NOT_APPLICABLE", None
+    if not str(row.get("status", "")).startswith(_POSITION_ACCEPTED_STATUS_PREFIX):
+        return "NOT_APPLICABLE", None, row.get("symbol"), None
+    if identity_index is None:
+        return (
+            ("AVAILABLE", None, row.get("symbol"), None)
+            if row.get("symbol") is not None
+            else ("NOT_READY", SYMBOL_STATUS_NOT_READY_NO_SIDECAR, None, None)
+        )
+    identity = _identity_row_for(row, identity_index)
+    category = identity.get("asset_category")
+    if identity.get("symbol_status") == "AVAILABLE":
+        return "AVAILABLE", None, _text(identity.get("symbol"), "symbol"), category
+    reason = identity.get("symbol_unavailable_reason")
+    return "NOT_READY", reason if isinstance(reason, str) else None, None, category
 
 
 def _alpha_window(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -10393,11 +10534,17 @@ def _panel_data(
         positions, _position_cutoff_date(report)
     )
     normalized_positions = []
+    identity_index = _holdings_identity_index(report)
     for row in classified_positions:
-        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        symbol_status, symbol_reason, symbol, asset_category = (
+            _position_symbol_status_and_reason(row, identity_index)
+        )
         normalized_positions.append(
             {
                 **row,
+                "asset_category": asset_category,
+                "asset_category_label": asset_category_label(asset_category),
+                "symbol": symbol,
                 "strategy_name": (
                     None
                     if row.get("strategy_id") is None
@@ -11840,6 +11987,7 @@ def _rendered_files(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -12259,6 +12407,22 @@ def _rendered_files(
     # The Performance tab reads the totals above (summed-epoch TWR and difference),
     # so it is built after they are attached.
     data["performance_tab"] = build_performance_tab(data)
+    # PANEL-VIS-004: the optional model-versus-actual block, built only when the
+    # release supplies its hash-pinned audit input; otherwise the panel is unchanged.
+    if model_vs_actual_input is not None:
+        try:
+            data["model_vs_actual"] = build_model_vs_actual(
+                data,
+                model_vs_actual_input[0].read_bytes(),
+                model_vs_actual_input[1],
+            )
+        except (OSError, ValueError) as exc:
+            raise ControlPanelValidationError(
+                f"model_vs_actual input is not usable: {exc}"
+            ) from exc
+    # The orthogonal risk shares are re-derived from the decomposition lenses and the
+    # governed invested capital the payload already holds; the block is optional.
+    data["orthogonal_risk_attribution"] = build_orthogonal_risk_attribution(data)
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,
@@ -12536,6 +12700,8 @@ def _rendered_files(
             ),
         ),
     }
+    if model_vs_actual_input is not None:
+        bound_inputs["model_vs_actual_input"] = model_vs_actual_input
     for name, (path, expected_sha256) in optional_bindings.items():
         if path is not None and expected_sha256 is not None:
             bound_inputs[name] = (path, str(expected_sha256))
@@ -12656,6 +12822,7 @@ def build_candidate(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -12696,6 +12863,7 @@ def build_candidate(
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        model_vs_actual_input=model_vs_actual_input,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -12949,6 +13117,7 @@ def verify_candidate(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
     _rendered_bundle: list[
         tuple[dict[str, bytes], dict[str, Any], dict[str, tuple[Path, str]]]
     ]
@@ -12993,6 +13162,7 @@ def verify_candidate(
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        model_vs_actual_input=model_vs_actual_input,
     )
     if _rendered_bundle is not None:
         _rendered_bundle.append((expected, data, _))
@@ -13150,6 +13320,21 @@ def verify_candidate(
             "Performance tab re-derives from the panel inputs",
             performance_tab_error is None,
             performance_tab_error,
+        )
+    )
+    orthogonal_risk = data.get("orthogonal_risk_attribution")
+    orthogonal_risk_error: str | None = None
+    try:
+        if not isinstance(orthogonal_risk, Mapping):
+            raise ValueError("orthogonal_risk_attribution is absent")
+        verify_orthogonal_risk_attribution(orthogonal_risk, data)
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        orthogonal_risk_error = str(exc)
+    checks.append(
+        _check(
+            "Orthogonal risk shares re-derive from the decomposition lenses",
+            orthogonal_risk_error is None,
+            orthogonal_risk_error,
         )
     )
     weekly_payload = _object(data.get("weekly_returns"), "weekly returns")
@@ -13370,11 +13555,17 @@ def verify_candidate(
         report_position_rows, _position_cutoff_date(report)
     )
     expected_position_rows = []
+    expected_identity_index = _holdings_identity_index(report)
     for row in classified_report_positions:
-        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        symbol_status, symbol_reason, symbol, asset_category = (
+            _position_symbol_status_and_reason(row, expected_identity_index)
+        )
         expected_position_rows.append(
             {
                 **row,
+                "asset_category": asset_category,
+                "asset_category_label": asset_category_label(asset_category),
+                "symbol": symbol,
                 "strategy_name": (
                     None
                     if row.get("strategy_id") is None
@@ -14609,6 +14800,7 @@ def publish_panel(
     hybrid_decomposition_plan_bundle: Path | None = None,
     strategy_history_contract_path: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -14681,6 +14873,7 @@ def publish_panel(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         strategy_history_contract_path=strategy_history_contract_path,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        model_vs_actual_input=model_vs_actual_input,
         _rendered_bundle=rendered_bundle,
     )
     if verification.get("all_passed") is not True:
@@ -15141,6 +15334,15 @@ def _parser() -> argparse.ArgumentParser:
             ),
         )
         command.add_argument("--dependence-selected-inputs", type=Path)
+        command.add_argument(
+            "--model-vs-actual-input",
+            type=Path,
+            help=(
+                "Hash-pinned audit bridges input for the optional model_vs_actual "
+                "block (PANEL-VIS-004); requires --model-vs-actual-input-sha256."
+            ),
+        )
+        command.add_argument("--model-vs-actual-input-sha256")
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
@@ -15382,6 +15584,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                model_vs_actual_input=_model_vs_actual_cli_value(args),
             )
         elif args.command == "verify":
             if (args.report_root is None) == (args.report_candidate is None):
@@ -15432,6 +15635,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                model_vs_actual_input=_model_vs_actual_cli_value(args),
             )
         elif args.command == "qa":
             result = validate_qa(
@@ -15502,6 +15706,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 strategy_history_contract_path=args.strategy_history_contract,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                model_vs_actual_input=_model_vs_actual_cli_value(args),
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

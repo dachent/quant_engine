@@ -70,6 +70,7 @@ def _correlation_fixture(
     *,
     source_artifact_id: str = "provider-rollforward/layered-strategy-returns.csv",
     strategy_count: int = 9,
+    backtest_date: str = "2026-07-20",
 ) -> tuple[Path, Path]:
     strategy_returns = tmp_path / "strategy-returns.csv"
     selected_strategies = STRATEGIES[:strategy_count]
@@ -97,7 +98,7 @@ def _correlation_fixture(
         if index == 0:
             rows.append(
                 {
-                    "date": "2026-07-20",
+                    "date": backtest_date,
                     "evidence_layer": "BACKTEST",
                     "return": "0.02",
                     "series_id": strategy,
@@ -182,6 +183,7 @@ def _plan_fixture(
     tmp_path: Path,
     *,
     observation_dates: tuple[str, ...] = ("2026-07-27", "2026-07-28"),
+    market_history_dates: tuple[str, ...] = ("2026-07-14", "2026-07-15"),
 ) -> Path:
     bundle = tmp_path / ("b" * 64)
     sources = {
@@ -243,6 +245,18 @@ def _plan_fixture(
         ]
         _write_csv(path, columns, rows)
         manifest_inputs.append({"path": relative, "sha256": _sha(path)})
+    market_path = bundle / "inputs/market/style_returns.csv"
+    market_rows = [
+        {"date": observed, "SPY": "0.004", "SPXL": "0.012", "BIL": ""}
+        for observed in market_history_dates
+    ] + [
+        {"date": observed, "SPY": "0.01", "SPXL": "0.03", "BIL": "0.0001"}
+        for observed in observation_dates
+    ]
+    _write_csv(market_path, ["date", "BIL", "SPY", "SPXL"], market_rows)
+    manifest_inputs.append(
+        {"path": "inputs/market/style_returns.csv", "sha256": _sha(market_path)}
+    )
     _write_json(
         bundle / "plan-manifest.json",
         {
@@ -873,3 +887,293 @@ def test_weekly_compounding_error_is_bounded_well_below_the_consumers_resolution
         exact -= 1
     assert len(published) == 1
     assert abs(Decimal(next(iter(published.values()))) - exact) < Decimal("4e-27")
+
+
+def test_full_history_benchmarks_come_from_the_market_input_not_the_gated_lens(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+
+    payload, inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    by_id = {row["series_id"]: row for row in payload["series"]}
+    for ticker in weekly.FULL_HISTORY_BENCHMARKS:
+        row = by_id[f"market:{ticker}"]
+        assert row["source_key"] == "core-benchmark-market"
+        assert "CORE_BENCHMARK" in row["display_groups"]
+        # the history before the cash proxy's first observation is kept
+        assert row["coverage"]["first_week"] == "2026-07-13"
+    assert plan_bundle / "inputs/market/style_returns.csv" in inputs
+    assert by_id["market:IWX"]["source_key"] == "us-equity-style"
+
+    daily = payload["daily_benchmark_returns"]
+    assert daily["status"] == "AVAILABLE"
+    assert daily["source_id"] == "yahoo-adjusted-etf-daily"
+    assert daily["unit"] == "DECIMAL_DAILY_RETURN"
+    assert daily["source_artifact"]["path"] == "inputs/market/style_returns.csv"
+    spy = next(item for item in daily["series"] if item["ticker"] == "SPY")
+    assert spy["series_id"] == "market:SPY"
+    assert spy["dates"][:2] == ["2026-07-14", "2026-07-15"]
+    assert spy["returns"][:2] == ["0.004", "0.004"]
+    assert spy["observation_count"] == len(spy["dates"]) == len(spy["returns"])
+    assert spy["dates"] == sorted(set(spy["dates"]))
+    assert max(spy["dates"]) <= payload["as_of_date"]
+    # daily and weekly agree: the weekly value is the product of the daily returns
+    week = [
+        Decimal(1) + Decimal(value)
+        for day, value in zip(spy["dates"], spy["returns"], strict=True)
+        if "2026-07-13" <= day <= "2026-07-19"
+    ]
+    product = Decimal(1)
+    for factor in week:
+        product *= factor
+    assert Decimal(by_id["market:SPY"]["values"]["2026-07-13"]) == product - 1
+
+
+def test_market_benchmark_input_hash_is_bound_to_the_plan_manifest(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    market = plan_bundle / "inputs/market/style_returns.csv"
+    market.write_bytes(market.read_bytes() + b"2026-07-29,,0.5,0.5\n")
+
+    with pytest.raises(weekly.WeeklyReturnError, match="hash differs"):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+
+
+def _gap_fill_root(
+    tmp_path: Path,
+    *,
+    flag: str = "ORIGIN_DERIVED",
+    days: tuple[str, ...] = (
+        "2026-07-13",
+        "2026-07-14",
+        "2026-07-15",
+        "2026-07-16",
+        "2026-07-17",
+        "2026-07-20",
+        "2026-07-21",
+        "2026-07-22",
+        "2026-07-23",
+        "2026-07-24",
+    ),
+    mode: str = "LIVE_PLUS_BACKTEST",
+    series: str = "Strategy 0",
+) -> Path:
+    root = tmp_path / "gap-fill"
+    rows = [
+        {
+            "series_id": "Fill Source",
+            "date": day,
+            "return": "0.01",
+            "evidence_layer": "DERIVED",
+            "return_basis": "FIXTURE",
+        }
+        for day in days
+    ] + [
+        {
+            "series_id": "Other Source",
+            "date": "2026-07-14",
+            "return": "0.5",
+            "evidence_layer": "DERIVED",
+            "return_basis": "FIXTURE",
+        }
+    ]
+    staging = tmp_path / "fill-returns.csv"
+    _write_csv(
+        staging,
+        ["series_id", "date", "return", "evidence_layer", "return_basis"],
+        rows,
+    )
+    artifact = SourceArtifact.from_path(
+        staging,
+        artifact_id="returns.csv",
+        as_of_date=EXECUTION_DATE,
+        schema_name="fixture-returns",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=EXECUTION_DATE,
+        adapter=AdapterIdentity("synthetic-fill", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic fill",
+            fact_types=("fill",),
+            observed_start=date(2026, 7, 13),
+            observed_end=date(2026, 7, 24),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation = root / "generations" / manifest.generation_id
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    (generation / "returns.csv").write_bytes(staging.read_bytes())
+    _write_json(
+        root / "spec.json",
+        {
+            "schema_version": 1,
+            "policy_id": "fixture-fill",
+            "fills": [
+                {
+                    "strategy_series_id": series,
+                    "mode": mode,
+                    "origin_flag": flag,
+                    "source": {
+                        "generation_id": manifest.generation_id,
+                        "returns_artifact": "returns.csv",
+                        "series_id": "Fill Source",
+                        "evidence_layer": "DERIVED",
+                    },
+                }
+            ],
+        },
+    )
+    return root
+
+
+def test_gap_fill_supplies_only_the_unobserved_hybrid_weeks_with_an_origin_flag(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(
+        tmp_path, backtest_date="2026-07-06"
+    )
+    plan_bundle = _plan_fixture(tmp_path)
+    before, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+    base = next(r for r in before["series"] if r["series_id"] == "strategy:Strategy 0")
+    base_hybrid = base["values_by_mode"]["LIVE_PLUS_BACKTEST"]
+    assert base["mode_coverage"]["LIVE_PLUS_BACKTEST"]["internal_missing_weeks"] == 2
+    assert before["gap_fills"] == {"fills": [], "policy_id": None, "spec_sha256": None}
+
+    root = _gap_fill_root(tmp_path)
+    payload, inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, root
+    )
+    row = next(r for r in payload["series"] if r["series_id"] == "strategy:Strategy 0")
+    hybrid = row["values_by_mode"]["LIVE_PLUS_BACKTEST"]
+    meta = row["observation_meta_by_mode"]["LIVE_PLUS_BACKTEST"]
+    # existing weeks are untouched; the two gap weeks are filled and flagged
+    assert hybrid["2026-07-06"] == base_hybrid["2026-07-06"]
+    assert hybrid["2026-07-27"] == base_hybrid["2026-07-27"]
+    assert meta["2026-07-13"][4] == ["ORIGIN_DERIVED"]
+    assert meta["2026-07-20"][4] == ["ORIGIN_DERIVED"]
+    assert meta["2026-07-13"][0] == 5
+    assert "ORIGIN_DERIVED" not in meta["2026-07-27"][4]
+    expected = Decimal("1.01") ** 5 - 1
+    assert abs(Decimal(hybrid["2026-07-13"]) - expected) < Decimal("1E-20")
+    coverage = row["mode_coverage"]["LIVE_PLUS_BACKTEST"]
+    assert coverage["internal_missing_weeks"] == 0
+    detail = coverage["gap_fill"]
+    assert detail["filled_weeks"] == 2
+    assert detail["filled_daily_observations"] == 10
+    assert detail["first_filled_week"] == "2026-07-13"
+    assert detail["observations_outside_gap_ignored"] == 0
+    # LIVE_ONLY never carries a fill
+    assert "gap_fill" not in row["mode_coverage"]["LIVE_ONLY"]
+    assert all(
+        "ORIGIN_DERIVED" not in item[4]
+        for item in row["observation_meta_by_mode"]["LIVE_ONLY"].values()
+    )
+    assert payload["gap_fills"]["fills"][0]["origin_flag"] == "ORIGIN_DERIVED"
+    assert root / "spec.json" in inputs
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"flag": "ORIGIN_BACKTEST"}, "origin flag is unsupported"),
+        ({"mode": "LIVE_ONLY"}, "hybrid mode"),
+        ({"series": "No Such Strategy"}, "unknown strategy"),
+        ({"days": ("2026-07-13", "2026-07-14")}, "unfilled weeks"),
+    ],
+)
+def test_gap_fill_refuses_unsupported_or_incomplete_fills(
+    tmp_path: Path, overrides: dict[str, object], message: str
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(
+        tmp_path, backtest_date="2026-07-06"
+    )
+    plan_bundle = _plan_fixture(tmp_path)
+    root = _gap_fill_root(tmp_path, **overrides)  # type: ignore[arg-type]
+    with pytest.raises(weekly.WeeklyReturnError, match=message):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+
+
+def test_gap_fill_requires_a_real_gap_and_an_untampered_source(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    root = _gap_fill_root(tmp_path)
+    with pytest.raises(weekly.WeeklyReturnError, match="no gap"):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+    generation = next((root / "generations").iterdir())
+    returns = generation / "returns.csv"
+    returns.write_bytes(returns.read_bytes() + b"\n")
+    with pytest.raises(weekly.WeeklyReturnError, match="differ from their manifest"):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+
+
+def test_daily_benchmark_block_validates_against_the_panel_schema(
+    tmp_path: Path,
+) -> None:
+    import jsonschema
+
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    block_schema = {
+        "$defs": schema["$defs"],
+        **schema["properties"]["weekly_returns"]["properties"][
+            "daily_benchmark_returns"
+        ],
+    }
+    validator = jsonschema.Draft202012Validator(
+        block_schema, format_checker=jsonschema.FormatChecker()
+    )
+    validator.validate(payload["daily_benchmark_returns"])
+    broken = json.loads(json.dumps(payload["daily_benchmark_returns"]))
+    broken["unit"] = "PERCENT"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(broken)
+
+
+def test_gap_fill_generation_must_pass_the_manifest_contract(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    root = _gap_fill_root(tmp_path)
+    generation = next((root / "generations").iterdir())
+    manifest = generation / "generation.json"
+    manifest.write_bytes(manifest.read_bytes().replace(b'"VERIFIED"', b'"VERIFIED" '))
+    manifest_text = json.loads(manifest.read_bytes())
+    manifest_text["coverage"] = {"forged": True}
+    manifest.write_bytes(json.dumps(manifest_text).encode("utf-8"))
+    with pytest.raises(weekly.WeeklyReturnError, match="manifest contract"):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+
+
+def test_gap_fill_spec_pin_must_be_named_spec_json() -> None:
+    import portfolio_release_builder as builder
+
+    builder.require_gap_fill_spec_name(Path("x/spec.json"))
+    with pytest.raises(builder.VerticalBuildError, match="spec.json"):
+        builder.require_gap_fill_spec_name(Path("x/other.json"))
