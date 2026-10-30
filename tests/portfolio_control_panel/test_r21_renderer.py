@@ -388,4 +388,9 @@ def test_strategy_rows_carry_the_producers_return_scope_label(tmp_path: Path) ->
     performance = _flat(_run(tmp_path, payload, "renderRisk"), "#performance-table")
 
     assert capital.count("Synthetic scope: parent account X") == 1
+    implementation = _flat(
+        _run(tmp_path, _capital_payload(scoped, bare), "renderSignals"),
+        "#implementation-table",
+    )
+    assert implementation.count("Synthetic scope: parent account X") == 1
     assert performance.count("Synthetic scope: parent account X") == 1
