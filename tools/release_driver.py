@@ -302,7 +302,16 @@ def spec_topology(spec_file: Path) -> str:
     rows.sort(key=str)
     payload = {
         "nodes": rows,
-        "companions": spec["companions"],
+        "companions": sorted(
+            (
+                {
+                    key: item[key]
+                    for key in ("companion_id", "root_id", "relative_path", "sha256")
+                }
+                for item in spec["companions"]
+            ),
+            key=lambda item: item["companion_id"],
+        ),
         "code_commit": spec["code_commit"],
         "as_of_date": spec["as_of_date"],
         "pipeline_id": spec["pipeline_id"],
@@ -647,7 +656,9 @@ def _select(run: Run, only: str | None, through: str | None) -> list[str]:
             raise Refusal(f"no stage {name!r}; stages are {ids}")
     if only is not None:
         return [only]
-    return ids[: ids.index(through) + 1] if through is not None else ids
+    # an explicit stage (the commit) never runs as part of "everything"; name it with --through or --only
+    runnable = [i for i in ids if not run.stage(i).get("explicit") or i == through]
+    return runnable[: runnable.index(through) + 1] if through is not None else runnable
 
 
 def main(argv: Sequence[str] | None = None) -> int:
