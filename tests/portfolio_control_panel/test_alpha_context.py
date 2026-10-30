@@ -69,7 +69,7 @@ def test_a_live_alpha_carries_window_n_se_t_basis_and_annualisation() -> None:
     assert context["window_days"] == 190 and context["n_obs"] == 132
     assert context["train_observations"] == 105
     assert context["se"] == "0.2" and context["t_stat"].startswith("-0.5")
-    assert context["t_status"] == "AVAILABLE_AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION"
+    assert context["t_status"] == "AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION"
     assert context["backtest_share"] == "0.000000000000"
     assert context["basis_status"] == "AVAILABLE_OBSERVED_BASIS"
     assert context["periods_per_year"] == 252
@@ -177,3 +177,11 @@ def test_an_inapplicable_series_points_at_the_lens_where_it_has_an_alpha() -> No
         }
     ]
     assert style["alpha_context"]["alternatives"] == []
+
+
+def test_t_status_is_one_value_with_a_single_available_prefix() -> None:
+    assert panel._available_prefixed("AVAILABLE_HAC_X") == "AVAILABLE_HAC_X"
+    assert panel._available_prefixed("HAC_X") == "AVAILABLE_HAC_X"
+    context = panel._alpha_context(_row())
+    assert context["t_status"] == "AVAILABLE_HAC_DESCRIPTIVE_POST_SELECTION"
+    assert "AVAILABLE_AVAILABLE" not in context["t_status"]

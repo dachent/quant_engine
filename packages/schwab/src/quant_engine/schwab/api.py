@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 from pathlib import Path
@@ -448,8 +448,21 @@ def read_holdings_v2_current_snapshot(
     *,
     crosswalk: Mapping[str, str],
     captured_at: object,
+    official_closes: Mapping[str, Decimal] | None = None,
+    price_date: date | None = None,
 ) -> CurrentSnapshot:
-    """Normalize a retained Holdings-V2 response without inferring currency facts."""
+    """Normalize a retained Holdings-V2 response without inferring currency facts.
+
+    Holdings-V2 prices every row at the provider's last trade (extended hours
+    included), which is not the official close, so a position carries no market
+    value unless ``official_closes`` supplies the official close of ``price_date``
+    for its symbol.  Every priced row must be priced on ``price_date``; a symbol
+    without an official close stays UNAVAILABLE, never valued at the capture's
+    last-trade price.
+    """
+
+    if (official_closes is None) != (price_date is None):
+        raise SchwabReadError("official closes need their price date, and conversely")
 
     if not crosswalk or len(crosswalk) != len(set(crosswalk.values())):
         raise SchwabReadError("crosswalk must be nonempty and one-to-one")
@@ -511,6 +524,18 @@ def read_holdings_v2_current_snapshot(
                     "as_of_date": observed_at.date().isoformat(),
                     "security_id": security_id,
                 }
+                market_value = ObservedAmount.unavailable("USD")
+                if official_closes is not None and price_date is not None:
+                    quoted = _object(raw.get("price"), "holdings v2 price")
+                    if quoted.get("priceDate") != price_date.strftime("%m/%d/%Y"):
+                        raise SchwabReadError(
+                            "holdings v2 row is not priced on the official-close date"
+                        )
+                    close = official_closes.get(symbol)
+                    if close is not None:
+                        market_value = ObservedAmount.available(
+                            (quantity * close).quantize(Decimal("0.01")), "USD"
+                        )
                 record = PositionSnapshot(
                     record_id=(
                         "position-"
@@ -520,7 +545,7 @@ def read_holdings_v2_current_snapshot(
                     security_id=security_id,
                     as_of_date=observed_at.date(),
                     quantity=quantity,
-                    market_value=ObservedAmount.unavailable("USD"),
+                    market_value=market_value,
                     mapping_status=MappingStatus.UNMAPPED,
                 ).to_dict()
                 record.update(

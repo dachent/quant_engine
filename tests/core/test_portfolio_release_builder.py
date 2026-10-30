@@ -1247,6 +1247,8 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     output = tmp_path / "generated-recipe.json"
+    audit_input = tmp_path / "audit-bridges.json"
+    audit_input.write_text('{"synthetic": true}', encoding="utf-8")
 
     result = builder.create_recipe(
         provider_ledger_spec=provider,
@@ -1264,11 +1266,13 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
         pipeline_id="synthetic-vertical",
         release_commit="a" * 40,
         output=output,
+        model_vs_actual_input_path=audit_input,
     )
 
     assert result["recipe"] == str(output)
     accepted = builder._recipe(output)
     assert accepted["schema_version"] == 6
+    assert accepted["model_vs_actual_input"] == _file_definition(audit_input)
     assert accepted["hybrid_decomposition_plan_bundle"] == {
         "path": str(hybrid_plan.resolve()),
         **builder._directory_inventory(hybrid_plan.resolve()),
@@ -3816,6 +3820,106 @@ def test_legacy_release_composer_rejects_bundle_identity_rewrite() -> None:
         match="bundle identity differs",
     ):
         builder._legacy_release_plan_specs(manifest)
+
+
+def _model_vs_actual_recipe(tmp_path: Path) -> tuple[Path, Path, str]:
+    recipe_path = _recipe(tmp_path)
+    audit_input = tmp_path / "audit-bridges.json"
+    audit_input.write_text('{"synthetic": true}', encoding="utf-8")
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    recipe["model_vs_actual_input"] = _file_definition(audit_input)
+    recipe_path.write_bytes(canonical_json_bytes(recipe))
+    return (
+        recipe_path,
+        audit_input,
+        hashlib.sha256(audit_input.read_bytes()).hexdigest(),
+    )
+
+
+def _panel_stage_arguments(tmp_path: Path, recipe: Path) -> tuple[Any, ...]:
+    analytics = {
+        "decomposition_root": str(tmp_path / "decomposition"),
+        "decomposition_lenses_root": str(tmp_path / "lenses"),
+        "correlation_root": str(tmp_path / "correlation-out"),
+        "weekly_root": str(tmp_path / "weekly"),
+    }
+    return (
+        recipe,
+        tmp_path / "stages" / "report",
+        tmp_path / "stages" / "baseline",
+        tmp_path / "bundle",
+        analytics,
+        tmp_path / "freshness.json",
+    )
+
+
+def test_panel_invocations_carry_the_pinned_model_vs_actual_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, audit_input, sha = _model_vs_actual_recipe(tmp_path)
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "panel.html").write_text("candidate", encoding="utf-8")
+    qa = tmp_path / "qa"
+    qa.mkdir()
+    (qa / "browser.json").write_text("{}", encoding="utf-8")
+    base = _panel_stage_arguments(tmp_path, recipe)
+    builder.build_panel_candidate(*base, tmp_path / "stages" / "panel")
+    builder.publish_panel(*base, candidate, qa, tmp_path / "stages" / "panel")
+
+    panel_calls = [call for call in calls if call[1] != "qa"]
+    assert [call[1] for call in panel_calls] == ["build", "verify", "verify", "publish"]
+    for call in panel_calls:
+        assert call[call.index("--model-vs-actual-input") + 1] == str(audit_input)
+        assert call[call.index("--model-vs-actual-input-sha256") + 1] == sha
+
+
+def test_panel_invocations_omit_the_model_vs_actual_flags_when_the_recipe_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe = _recipe(tmp_path)
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        builder,
+        "_tool",
+        lambda *args, **_kwargs: calls.append(args) or {"candidate_dir": "x"},
+    )
+    builder.build_panel_candidate(
+        *_panel_stage_arguments(tmp_path, recipe), tmp_path / "stages" / "panel"
+    )
+    assert calls and all("--model-vs-actual-input" not in call for call in calls)
+
+
+def test_a_changed_or_absent_model_vs_actual_input_refuses_before_the_panel_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, audit_input, _sha = _model_vs_actual_recipe(tmp_path)
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        builder, "_tool", lambda *args, **_kwargs: calls.append(args) or {}
+    )
+    panel_root = tmp_path / "stages" / "panel"
+    original = audit_input.read_bytes()
+    audit_input.write_bytes(original + b" ")
+    with pytest.raises(builder.VerticalBuildError, match="identity differs"):
+        builder.build_panel_candidate(
+            *_panel_stage_arguments(tmp_path, recipe), panel_root
+        )
+    with pytest.raises(builder.VerticalBuildError, match="identity differs"):
+        builder._recipe(recipe)
+    audit_input.unlink()
+    with pytest.raises(builder.VerticalBuildError):
+        builder.build_panel_candidate(
+            *_panel_stage_arguments(tmp_path, recipe), panel_root
+        )
+    assert calls == []
 
 
 def test_panel_invocations_carry_baseline_root(
