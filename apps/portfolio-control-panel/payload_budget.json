@@ -18,7 +18,7 @@
       "coverage": 129325,
       "strategies": 121117,
       "hwm_governed_proof": 112859,
-      "performance_tab": 101836,
+      "performance_tab": 375785,
       "orthogonal_risk_attribution": 168346,
       "strategy_underwriting": 76811
     }
@@ -36,7 +36,7 @@
     "coverage": 134000,
     "strategies": 125000,
     "hwm_governed_proof": 117000,
-    "performance_tab": 105000,
+    "performance_tab": 388000,
     "orthogonal_risk_attribution": 174000,
     "strategy_underwriting": 80000
   },
