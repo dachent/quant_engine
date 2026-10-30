@@ -273,3 +273,16 @@ candidates, are listed in `CORE_BENCHMARKS` of `tools/portfolio_weekly_returns.p
 fitted as a decomposition factor. SPXL is its own total return, not 3x SPY. A style
 source run must request both tickers (capture script and manifest are retained with
 the run).
+
+Full history. The style bundle's calendar is the cash proxy's (BIL) observed return
+dates, which begin 2007-05-31. The catalog's `prior_baseline.calendar_extension_proxy`
+(`SPY`) extends that calendar before the cash proxy's first observation with SPY's own
+observed trading dates, so `SPY` (adjusted close from 2007-01-03, first return
+2007-01-04) and `SPXL` (from 2008-11-05, first return 2008-11-06) keep their whole
+governed history in `inputs/market/style_returns.csv`. Factor lenses still require
+the cash proxy on every row, so no lens fit input changes. The weekly-return builder
+reads `SPY` and `SPXL` from that unprojected market input (bound by the plan manifest
+hash), never from the gated lens copy, and publishes
+`weekly_returns.daily_benchmark_returns` (daily adjusted-close total returns, decimal
+text, parallel `dates` and `returns` arrays per benchmark) for flow-matched dollar
+comparisons.

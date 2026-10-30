@@ -3822,6 +3822,10 @@ def _suppress_unmatched_strategy_performance(
             "after_tax_annual_cost_rate",
             "after_tax_status",
             "fees_status",
+            "cost_class",
+            "declared",
+            "corroboration",
+            "execution_cost",
             "systematic_weight",
         ):
             row[field] = None
@@ -9413,35 +9417,126 @@ POSITION_CURRENT_BASIS: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT_AT_CUTOFF"
 _POSITION_LATEST: Final = "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
 _POSITION_HISTORICAL: Final = "HISTORICAL_ACCEPTED_ACCOUNT_SNAPSHOT"
 
-# E1 (ADJ 6a): the contract's portfolio-security-master source is
-# REQUIRED_NOT_READY (contract :5010-5105, blockers [476]), so an accepted
-# position can have no symbol today.  G1.3 requires the gap be explicit rather
-# than a bare dash; this is that explicit reason, named once so it cannot drift
-# between the producer and its tests.
-E1_SYMBOL_NOT_READY_REASON: Final = (
-    "Listing identity (ticker symbol) is not ready: the security master source "
-    "is required by the financial source contract but is not yet admitted, so "
-    "this position is identified by its provider security id only."
-)
+# E1: a position's listing identity is the report's ``holdings_identity`` sidecar
+# row for the same (account_id, as_of_date, security_id).  The panel states what
+# that row proves and nothing more: a symbol the sidecar proves is shown, a symbol
+# it cannot prove stays NOT_READY with the sidecar's own reason code, and a report
+# without a sidecar says so.  A position and a sidecar row that disagree are a
+# build error, never a reconciled value.
+SYMBOL_STATUS_NOT_READY_NO_SIDECAR: Final = "HOLDINGS_IDENTITY_SIDECAR_ABSENT"
 _POSITION_ACCEPTED_STATUS_PREFIX: Final = "AVAILABLE"
+_IDENTITY_JOIN_FIELDS: Final = ("quantity", "strategy_id")
+
+
+def _holdings_identity_index(
+    report: Mapping[str, Any],
+) -> dict[tuple[str, str, str], Mapping[str, Any]] | None:
+    """The sidecar rows keyed by (account_id, as_of_date, security_id), or None."""
+
+    section = report.get("holdings_identity")
+    if section is None:
+        return None
+    if not isinstance(section, Mapping):
+        raise ControlPanelValidationError("holdings_identity is not an object")
+    index: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+    for item in _objects(section.get("rows"), "holdings_identity.rows"):
+        key = (
+            _text(item.get("account_id"), "holdings_identity account_id"),
+            _text(item.get("as_of_date"), "holdings_identity as_of_date"),
+            _text(item.get("security_id"), "holdings_identity security_id"),
+        )
+        if key in index:
+            raise ControlPanelValidationError(
+                f"holdings_identity has two rows for {key}"
+            )
+        index[key] = item
+    return index
+
+
+def _identity_row_for(
+    row: Mapping[str, Any],
+    index: Mapping[tuple[str, str, str], Mapping[str, Any]],
+) -> Mapping[str, Any]:
+    """The sidecar row of one accepted position; refuse when it does not match."""
+
+    key = (
+        str(row.get("account_id")),
+        str(row.get("as_of_date")),
+        str(row.get("security_id")),
+    )
+    identity = index.get(key)
+    if identity is None:
+        raise ControlPanelValidationError(
+            f"position {key} has no holdings_identity row"
+        )
+    for field in _IDENTITY_JOIN_FIELDS:
+        if identity.get(field) != row.get(field):
+            raise ControlPanelValidationError(
+                f"position {key} differs from its holdings_identity row on {field}"
+            )
+    carried = row.get("symbol")
+    if carried is not None and carried != identity.get("symbol"):
+        raise ControlPanelValidationError(
+            f"position {key} symbol differs from its holdings_identity row"
+        )
+    return identity
+
+
+# IBKR Flex ``assetCategory`` codes in plain words.  A code outside this documented
+# vocabulary is shown as its own words, never guessed.
+_ASSET_CATEGORY_WORDS: Final = {
+    "BILL": "Treasury bill",
+    "BOND": "Bond",
+    "CASH": "Cash or currency",
+    "CFD": "Contract for difference",
+    "CMDTY": "Commodity",
+    "CRYPTO": "Cryptocurrency",
+    "FOP": "Futures option",
+    "FUND": "Fund",
+    "FUT": "Future",
+    "OPT": "Option",
+    "STK": "Stock",
+    "WAR": "Warrant",
+}
+
+
+def asset_category_label(category: object) -> str | None:
+    """A plain-words label for an asset category code, or None without a code."""
+
+    if not isinstance(category, str) or not category.strip():
+        return None
+    return _ASSET_CATEGORY_WORDS.get(
+        category.strip().upper(), category.strip().replace("_", " ").lower().title()
+    )
 
 
 def _position_symbol_status_and_reason(
     row: Mapping[str, Any],
-) -> tuple[str, str | None]:
-    """E1: state explicitly why an accepted position has no symbol.
+    identity_index: Mapping[tuple[str, str, str], Mapping[str, Any]] | None,
+) -> tuple[str, str | None, str | None, str | None]:
+    """State a position's symbol and asset category from its sidecar row.
 
-    AVAILABLE when the row carries a symbol; NOT_READY with the governing
-    reason when an accepted position (``status`` starting with ``AVAILABLE``)
-    has none; NOT_APPLICABLE otherwise (the row is not an accepted position,
-    e.g. the no-position sentinel row).
+    Returns ``(symbol_status, symbol_reason, symbol, asset_category)``.  AVAILABLE
+    when the sidecar proves a symbol; NOT_READY with the sidecar's reason code when
+    an accepted position has none; NOT_APPLICABLE when the row is not an accepted
+    position (the no-position sentinel row).  Nothing is typed in: the symbol is
+    the sidecar's, and an accepted position the sidecar does not describe refuses.
     """
 
-    if row.get("symbol") is not None:
-        return "AVAILABLE", None
-    if str(row.get("status", "")).startswith(_POSITION_ACCEPTED_STATUS_PREFIX):
-        return "NOT_READY", E1_SYMBOL_NOT_READY_REASON
-    return "NOT_APPLICABLE", None
+    if not str(row.get("status", "")).startswith(_POSITION_ACCEPTED_STATUS_PREFIX):
+        return "NOT_APPLICABLE", None, row.get("symbol"), None
+    if identity_index is None:
+        return (
+            ("AVAILABLE", None, row.get("symbol"), None)
+            if row.get("symbol") is not None
+            else ("NOT_READY", SYMBOL_STATUS_NOT_READY_NO_SIDECAR, None, None)
+        )
+    identity = _identity_row_for(row, identity_index)
+    category = identity.get("asset_category")
+    if identity.get("symbol_status") == "AVAILABLE":
+        return "AVAILABLE", None, _text(identity.get("symbol"), "symbol"), category
+    reason = identity.get("symbol_unavailable_reason")
+    return "NOT_READY", reason if isinstance(reason, str) else None, None, category
 
 
 def _alpha_window(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -10416,11 +10511,17 @@ def _panel_data(
         positions, _position_cutoff_date(report)
     )
     normalized_positions = []
+    identity_index = _holdings_identity_index(report)
     for row in classified_positions:
-        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        symbol_status, symbol_reason, symbol, asset_category = (
+            _position_symbol_status_and_reason(row, identity_index)
+        )
         normalized_positions.append(
             {
                 **row,
+                "asset_category": asset_category,
+                "asset_category_label": asset_category_label(asset_category),
+                "symbol": symbol,
                 "strategy_name": (
                     None
                     if row.get("strategy_id") is None
@@ -13411,11 +13512,17 @@ def verify_candidate(
         report_position_rows, _position_cutoff_date(report)
     )
     expected_position_rows = []
+    expected_identity_index = _holdings_identity_index(report)
     for row in classified_report_positions:
-        symbol_status, symbol_reason = _position_symbol_status_and_reason(row)
+        symbol_status, symbol_reason, symbol, asset_category = (
+            _position_symbol_status_and_reason(row, expected_identity_index)
+        )
         expected_position_rows.append(
             {
                 **row,
+                "asset_category": asset_category,
+                "asset_category_label": asset_category_label(asset_category),
+                "symbol": symbol,
                 "strategy_name": (
                     None
                     if row.get("strategy_id") is None
