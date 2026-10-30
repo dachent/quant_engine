@@ -20,6 +20,7 @@ import sys
 from typing import Any
 
 import pytest
+from synthetic_r21_blocks import risk_attribution_block
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT))
@@ -2129,11 +2130,7 @@ def test_F25_the_builder_reads_the_stylesheet_through_the_selector() -> None:
 
 
 def _risk_attribution_payload() -> dict[str, Any]:
-    fixture = json.loads(
-        (
-            Path(__file__).parent / "fixtures" / "risk_attribution.fixture.json"
-        ).read_text(encoding="utf-8")
-    )
+    fixture = risk_attribution_block()
     return base(
         orthogonal_risk_attribution=fixture,
         decomposition_lenses={
@@ -2146,7 +2143,7 @@ def _risk_attribution_payload() -> dict[str, Any]:
 
 def _selected_row(**attribution: Any) -> dict[str, Any]:
     row = _orthogonal_row(**attribution)
-    row.update(series_id="AI Factor [P123]", source_key="us-economic")
+    row.update(series_id="Synthetic A", source_key="syn-source")
     return row
 
 
@@ -2195,6 +2192,6 @@ def test_mockup_F_missing_block_and_unavailable_cell_say_why(tmp_path: Path) -> 
 
     payload = _risk_attribution_payload()
     row = _selected_row()
-    row["series_id"] = "EU [P123]"
+    row["series_id"] = "Synthetic B"
     unavailable = call(tmp_path, payload, "orthogonalAttributionMarkup", row)
     assert "Unavailable: Not applicable method scope" in unavailable
