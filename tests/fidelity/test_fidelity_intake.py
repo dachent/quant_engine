@@ -124,7 +124,7 @@ def _evidence(tmp_path: Path, **overrides: object) -> Path:
 def _crosswalk(tmp_path: Path) -> Path:
     path = tmp_path / "crosswalk.json"
     path.write_text(
-        json.dumps([{"external_account_id": ACCOUNT, "internal_account_id": INTERNAL}]),
+        json.dumps(_xwalk(ACCOUNT)),
         encoding="utf-8",
     )
     return path
@@ -334,9 +334,7 @@ def test_unknown_action_unmapped_account_and_window_fail_closed(tmp_path: Path) 
     case.mkdir()
     root, request_id, _ = _staged(case)
     other = case / "other.json"
-    other.write_text(
-        json.dumps([{"external_account_id": "OTHER", "internal_account_id": INTERNAL}])
-    )
+    other.write_text(json.dumps(_xwalk("OTHER")))
     with pytest.raises(IntakeError, match="unmapped"):
         normalize(root, request_id, other)
 
@@ -454,3 +452,9 @@ def test_intake_modules_have_no_network_or_login_code() -> None:
                 assert top not in banned, (path.name, name)
     source = files[0].read_text(encoding="utf-8")
     assert "os.environ" not in source and "os.system" not in source
+
+
+def _xwalk(provider_ref: str) -> list[dict[str, str]]:
+    return [
+        dict([("external_account_id", provider_ref), ("internal_account_id", INTERNAL)])
+    ]
