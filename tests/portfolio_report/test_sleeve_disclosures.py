@@ -685,3 +685,28 @@ def test_disclosure_inputs_and_sources_are_derived_from_and_bound_to_current_rel
 
     # without a committed release authority nothing is derived
     assert _generate(tmp_path / "empty", out_dir / "other.json") == 1
+
+
+@pytest.mark.parametrize("record", ["CURRENT_RELEASE.json", "release.json"])
+def test_a_symlinked_release_authority_record_is_refused(
+    tmp_path: Path, record: str
+) -> None:
+    pinned = _pinned_predecessor()
+    release = str(pinned["release_id"])
+    root = tmp_path / "root"
+    _committed_release(root, release, str(pinned["panel_generation_id"]))
+    coordination = root / disclosures.COORDINATION_RELATIVE
+    real = (
+        coordination / record
+        if record == "CURRENT_RELEASE.json"
+        else coordination / "releases" / release / record
+    )
+    moved = tmp_path / f"moved-{record}"
+    real.rename(moved)
+    try:
+        real.symlink_to(moved)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(disclosures.DisclosureError, match="symlink"):
+        disclosures.committed_release_panel(root)
+    assert _generate(root, tmp_path / "out.json") == 1

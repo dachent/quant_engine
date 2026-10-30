@@ -38,6 +38,8 @@ def committed_release_panel(data_root: Path) -> tuple[str, str]:
 
     coordination = data_root / COORDINATION
     pointer_path = coordination / "CURRENT_RELEASE.json"
+    if pointer_path.is_symlink():
+        raise Refused("CURRENT_RELEASE.json must not be a symlink")
     if not pointer_path.is_file():
         raise Refused("release authority is not published")
     pointer = json.loads(pointer_path.read_bytes())
@@ -45,6 +47,10 @@ def committed_release_panel(data_root: Path) -> tuple[str, str]:
     if pointer.get("state") != "COMMITTED":
         raise Refused("CURRENT_RELEASE is not COMMITTED")
     directory = coordination / "releases" / release_id
+    if (directory / "release.json").is_symlink() or (
+        directory / "journal.json"
+    ).is_symlink():
+        raise Refused("retained release records must not be symlinks")
     if (
         not (directory / "release.json").is_file()
         or not (directory / "journal.json").is_file()

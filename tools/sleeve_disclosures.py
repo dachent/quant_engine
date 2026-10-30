@@ -470,6 +470,8 @@ def committed_release_panel(data_root: Path) -> tuple[str, str]:
 
     coordination = data_root / COORDINATION_RELATIVE
     pointer_path = coordination / "CURRENT_RELEASE.json"
+    if pointer_path.is_symlink():
+        raise DisclosureError("CURRENT_RELEASE.json must not be a symlink")
     if not pointer_path.is_file():
         raise DisclosureError("predecessor release authority is not published")
     pointer = _object(pointer_path.read_bytes(), "CURRENT_RELEASE pointer")
@@ -479,6 +481,8 @@ def committed_release_panel(data_root: Path) -> tuple[str, str]:
     directory = coordination / "releases" / release_id
     manifest_path = directory / "release.json"
     journal_path = directory / "journal.json"
+    if manifest_path.is_symlink() or journal_path.is_symlink():
+        raise DisclosureError("retained release records must not be symlinks")
     if not manifest_path.is_file() or not journal_path.is_file():
         raise DisclosureError("CURRENT_RELEASE names a release that is not retained")
     raw = manifest_path.read_bytes()
