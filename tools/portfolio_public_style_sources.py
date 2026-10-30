@@ -152,10 +152,14 @@ def _catalog_tickers(
         if extension_raw is None
         else _text(extension_raw, "prior calendar_extension_proxy")
     )
-    if extension is not None and (extension not in tickers or extension == cash):
+    if extension == cash:
         raise StyleSourceError(
-            "catalog calendar extension proxy must be a requested non-cash ticker"
+            "catalog calendar extension proxy must differ from the cash proxy"
         )
+    if extension is not None and extension not in tickers:
+        # the extension belongs to the universe that lists it; a bundle of another
+        # universe (sectors, industries) keeps its own calendar
+        extension = None
     lens = next(iter(selected_lenses))
     output_name = (
         SECTOR_OUTPUT_NAME

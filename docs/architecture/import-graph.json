@@ -319,6 +319,11 @@
       1
     ],
     [
+      "portfolio_grizzly_signal_replay",
+      "portfolio_strategy_history",
+      1
+    ],
+    [
       "portfolio_hwm_selected_inputs",
       "derived_epoch_perimeter",
       1
@@ -411,6 +416,11 @@
     [
       "portfolio_private_stage",
       "portfolio_pipeline_materialize",
+      1
+    ],
+    [
+      "portfolio_provider_track_record_union",
+      "portfolio_fx_rates",
       1
     ],
     [

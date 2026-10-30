@@ -505,3 +505,38 @@ and advances `<portfolio-root>/control-panel/CURRENT.json` only after all checks
 pass. A failed build or QA run remains a non-authoritative candidate; a failed
 publication leaves the prior pointer unchanged. The strategy-allocation audit
 source is never edited, moved, or deleted by this workflow.
+
+## Payload size and load budget (#540)
+
+Size, per block (CI-cheap, release-time on a real generation):
+
+```powershell
+uv run --frozen --no-sync python tools/panel_payload_size.py <generation-dir> --out size.json
+```
+
+It reports the physical size, the serialized bytes of each top-level block of
+`data/dashboard_data.json`, and exits 1 when a figure is over
+`apps/portfolio-control-panel/payload_budget.json` (R2 committed figures plus 3%).
+A block over budget fails, a new block over 50 kB without an entry fails, and
+download copies fail. Raise a budget only in the change that grows the block, with
+the reason in the change description. CI guards block shape on the fixture
+`performance_tab` (`tests/portfolio_control_panel/test_panel_payload_budget_540.py`).
+Encode new daily grids compactly (nullable arrays keyed once by a shared date
+axis, no per-observation repeats of ids or labels).
+
+Load, unattended and off the critical path:
+
+```powershell
+node apps/portfolio-control-panel/measure_load.mjs --html <generation>\index.html `
+  --control <committed-previous-generation>\index.html --runs 3 --memory --lens-and-download `
+  --out load.json
+```
+
+Usable load is `page.goto(file://...#command, waitUntil: "commit")` until
+`#app[data-app-state="ready"]` exists (no DOMContentLoaded, no paint; clicks are not
+part of it). Timing runs never run a sampler, because a process-tree scan beside the
+load produced R2's retracted 88-150 s figures. Peak RSS (`--memory`, Windows) is a
+separate run. The machine state is recorded (`idle`), and the verdict is the
+candidate/control ratio of the timed means (`--max-ratio`, default 1.25), so a busy
+machine moves both. R1/R2 reference: about 2.2 s usable load, lens mode open 1.2 s,
+JS heap about 305 MiB, peak RSS 0.85-0.96 GiB (idle-ish machine, R2 evidence).

@@ -1122,3 +1122,34 @@ def test_gap_fill_requires_a_real_gap_and_an_untampered_source(tmp_path: Path) -
         weekly.build_weekly_returns(
             correlation_root, strategy_returns, plan_bundle, root
         )
+
+
+def test_daily_benchmark_block_validates_against_the_panel_schema(
+    tmp_path: Path,
+) -> None:
+    import jsonschema
+
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    block_schema = {
+        "$defs": schema["$defs"],
+        **schema["properties"]["weekly_returns"]["properties"][
+            "daily_benchmark_returns"
+        ],
+    }
+    validator = jsonschema.Draft202012Validator(
+        block_schema, format_checker=jsonschema.FormatChecker()
+    )
+    validator.validate(payload["daily_benchmark_returns"])
+    broken = json.loads(json.dumps(payload["daily_benchmark_returns"]))
+    broken["unit"] = "PERCENT"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(broken)
