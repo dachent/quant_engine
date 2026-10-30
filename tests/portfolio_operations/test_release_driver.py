@@ -789,8 +789,8 @@ def test_the_shipped_graph_ends_in_an_explicit_gated_commit_stage() -> None:
             encoding="utf-8"
         )
     )
-    last = graph["stages"][-1]
-    assert last["id"] == "commit" and last["explicit"] is True
+    last = next(stage for stage in graph["stages"] if stage["id"] == "commit")
+    assert last["explicit"] is True
     assert set(last["commit_gate"]) == {"spec", "replica_receipt", "pointer_snapshot"}
     assert "--replica-receipt" in last["argv"] and "--commit" in last["argv"]
 
@@ -823,3 +823,47 @@ def test_topology_ignores_companion_source_paths(tmp_path: Path) -> None:
     assert driver.spec_topology(spec("C:/real/x")) == driver.spec_topology(
         spec("C:/replica/x")
     )
+
+
+def test_the_final_pack_follows_the_commit_and_the_probe_pack_never_does() -> None:
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    ids = [stage["id"] for stage in graph["stages"]]
+    by_id = {stage["id"]: stage for stage in graph["stages"]}
+    assert ids.index("pack-evidence") > ids.index("commit")
+    assert (
+        by_id["pack-evidence"]["requires"] == ["commit"]
+        and by_id["pack-evidence"]["only_mode"] == "release"
+    )
+    assert (
+        ids.index("pack-probe") < ids.index("commit")
+        and by_id["pack-probe"]["only_mode"] == "probe"
+    )
+
+
+def test_through_an_explicit_stage_includes_the_explicit_stages_before_it(
+    world: dict[str, Any],
+) -> None:
+    stages = [{**CHAIN[0], "explicit": True}, {**CHAIN[1], "explicit": True}]
+    graph = _graph(world, stages)
+    assert _drive(world, graph) == 0
+    assert not (world["cycle"] / "one.txt").exists()
+    assert _drive(world, graph, "--through", "two") == 0
+    assert (world["cycle"] / "one.txt").is_file() and (
+        world["cycle"] / "two.txt"
+    ).is_file()
+
+
+def test_only_mode_stages_refuse_the_other_mode(world: dict[str, Any]) -> None:
+    stage = {
+        "id": "p",
+        "only_mode": "probe",
+        "outputs": ["{cycle}/p.txt"],
+        "argv": _write_stage("{cycle}/p.txt"),
+    }
+    assert _drive(world, _graph(world, [stage])) == 2
+    _config(world, mode="probe", live_workspace=str(world["tmp"] / "live"))
+    assert _drive(world, _graph(world, [stage])) == 0

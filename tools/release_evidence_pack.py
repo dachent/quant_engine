@@ -63,6 +63,17 @@ def select(cycle: Path, includes: Sequence[str], excludes: Sequence[str]) -> lis
     return chosen
 
 
+def _refuse_links(dest: Path) -> None:
+    """The destination and every entry already below it are real directories and files."""
+
+    if dest.is_symlink():
+        raise PackError(f"{dest} is a link")
+    if dest.is_dir():
+        for item in dest.rglob("*"):
+            if item.is_symlink():
+                raise PackError(f"{item} in the destination is a link")
+
+
 def pack(
     cycle: Path, dest: Path, includes: Sequence[str], excludes: Sequence[str] = ()
 ) -> dict[str, object]:
@@ -70,23 +81,19 @@ def pack(
     if dest == cycle or cycle in dest.parents:
         raise PackError("--dest lies inside --cycle")
     files = select(cycle, includes, excludes)
-    for file in files:
-        target = dest / file.relative_to(cycle)
+    _refuse_links(dest)
+    targets = {file: dest / file.relative_to(cycle) for file in files}
+    for file, target in targets.items():
+        if dest not in target.resolve().parents:
+            raise PackError(f"{target} resolves outside {dest}")
         if target.exists() and _sha(target) != _sha(file):
             raise PackError(
                 f"{target} already exists with other bytes; evidence is create-only"
             )
-    rows: list[tuple[str, str, int]] = []
-    for file in files:
-        relative = file.relative_to(cycle)
-        target = dest / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            shutil.copyfile(file, target)
-        rows.append((relative.as_posix(), _sha(target), target.stat().st_size))
-    (dest / SUMS).write_bytes(
-        "".join(f"{sha} *{name}\n" for name, sha, _ in rows).encode()
-    )
+    rows = [
+        (file.relative_to(cycle).as_posix(), _sha(file), file.stat().st_size)
+        for file in files
+    ]
     state_file = cycle / STATE_NAME
     state = (
         json.loads(state_file.read_bytes()) if state_file.is_file() else {"stages": {}}
@@ -104,9 +111,31 @@ def pack(
         ),
         "stages": {name: record.get("status") for name, record in stages.items()},
     }
-    (dest / MANIFEST).write_bytes(
-        (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()
-    )
+    metadata = {
+        dest / SUMS: "".join(f"{sha} *{name}\n" for name, sha, _ in rows).encode(),
+        dest / MANIFEST: (
+            json.dumps(manifest, indent=1, sort_keys=True) + "\n"
+        ).encode(),
+    }
+    for path, content in metadata.items():
+        if path.exists() and path.read_bytes() != content:
+            raise PackError(
+                f"{path} already exists with other content; evidence is create-only"
+            )
+    if dest.is_dir():
+        expected = set(targets.values()) | set(metadata)
+        extra = sorted(
+            str(p) for p in dest.rglob("*") if p.is_file() and p not in expected
+        )
+        if extra:
+            raise PackError(f"{dest} holds files this pack does not: {extra[:3]}")
+    for file, target in targets.items():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            shutil.copyfile(file, target)
+    for path, content in metadata.items():
+        if not path.exists():
+            path.write_bytes(content)
     return manifest
 
 
