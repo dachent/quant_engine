@@ -154,14 +154,18 @@ def _retired_component_cents(
 
     The report publishes ``epoch_set.gain_of_outside_report_epochs_usd`` exactly; the
     component is that value rounded once, not the sum of per-line rounded cents
-    (which can differ by a cent).  Without the report's figure the line sum stands.
+    (which can differ by a cent).  The report always carries it, so its absence
+    stops the build.
     """
 
     outside = _mapping(reconciliation.get("epoch_set")).get(
         "gain_of_outside_report_epochs_usd"
     )
     if outside is None:
-        return -sum(int(item["row_gain_cents"]) for item in retired)
+        raise PerformanceTabError(
+            "capital_reconciliation.epoch_set.gain_of_outside_report_epochs_usd "
+            f"is absent for {len(retired)} retired epochs"
+        )
     with localcontext() as context:
         context.prec = _PRECISION
         return -_cents(_dec(outside, "gain of outside report epochs"))
