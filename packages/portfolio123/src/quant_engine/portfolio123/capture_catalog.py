@@ -17,16 +17,16 @@ from dataclasses import dataclass
 import hashlib
 from typing import Any
 
-from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio123.capture_shapes import (
     Choice,
     Obj,
     Seq,
     Spec,
+    canonical_bytes,
     describe,
 )
-from quant_engine.web_contracts import PORTFOLIO123_CONTRACT
-from quant_engine.web_contracts.contracts import (
+from quant_engine.web_contracts import (
+    PORTFOLIO123_CONTRACT,
     EndpointContract,
     ProviderContract,
     SemanticEffect,
@@ -275,7 +275,7 @@ def catalog_rows() -> list[dict[str, Any]]:
 
 
 def catalog_sha256() -> str:
-    return hashlib.sha256(canonical_json_bytes(catalog_rows())).hexdigest()
+    return hashlib.sha256(canonical_bytes(catalog_rows())).hexdigest()
 
 
 def _query_validator(keys: frozenset[str]) -> Callable[[Mapping[str, Any]], None]:

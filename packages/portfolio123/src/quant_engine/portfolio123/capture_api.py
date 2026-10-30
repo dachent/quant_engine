@@ -26,17 +26,17 @@ import re
 import threading
 from typing import Any, Protocol
 
-from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core.credentials import (
+from quant_engine.core import (
     CredentialError,
     CredentialResolver,
-    SecretSource,
     SecretValue,
+    StrictJSONError,
     plan_from_config,
     sources_from_config,
+    strict_json_object,
 )
-from quant_engine.core.strict_json import StrictJSONError, strict_json_object
 from quant_engine.portfolio123.capture_catalog import CaptureRefusal
+from quant_engine.portfolio123.capture_shapes import canonical_bytes
 from quant_engine.portfolio123.routing import (
     API_COST_DOCUMENTATION_URL,
     API_DOCUMENTATION_URL,
@@ -106,7 +106,7 @@ OPERATION_CAPABILITY: Mapping[str, str] = _operations()
 
 def allow_list_sha256() -> str:
     return hashlib.sha256(
-        canonical_json_bytes(
+        canonical_bytes(
             {"operations": sorted(OPERATION_CAPABILITY), "terms": TERMS_SHA256}
         )
     ).hexdigest()
@@ -118,7 +118,7 @@ def allow_list_sha256() -> str:
 def resolve_api_credentials(
     config: Mapping[str, Any],
     *,
-    sources: Mapping[str, SecretSource] | None = None,
+    sources: Mapping[str, Any] | None = None,
 ) -> dict[str, SecretValue]:
     """Resolve ``key_id`` and ``key`` from ``[credentials.p123]`` (names are config)."""
 
@@ -191,7 +191,7 @@ class ApiGovernance:
         )
 
     def _append(self, row: Mapping[str, object]) -> None:
-        line = canonical_json_bytes(dict(row))
+        line = canonical_bytes(dict(row))
         with open(self.ledger_path, "ab") as handle:
             handle.write(line)
             handle.flush()
@@ -343,7 +343,7 @@ def authorize_api_read(
     try:
         with open(receipt, "xb") as handle:
             handle.write(
-                canonical_json_bytes({"evidence_sha256": digest, "schema_version": 1})
+                canonical_bytes({"evidence_sha256": digest, "schema_version": 1})
             )
             handle.flush()
             os.fsync(handle.fileno())

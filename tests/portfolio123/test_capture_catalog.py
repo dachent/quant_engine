@@ -14,7 +14,9 @@ from p123_capture_fixtures import (
     SIMULATION,
     transactions_page,
 )
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio123.capture_shapes import (
+    canonical_bytes as canonical_json_bytes,
+)
 from quant_engine.portfolio123 import capture_catalog as catalog
 from quant_engine.portfolio123.capture_shapes import (
     Choice,

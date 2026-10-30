@@ -21,7 +21,9 @@ from p123_capture_fixtures import (
     transactions_page,
     write_har,
 )
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio123.capture_shapes import (
+    canonical_bytes as canonical_json_bytes,
+)
 from quant_engine.portfolio123 import capture_catalog, capture_cli, capture_intake
 from quant_engine.portfolio123.capture_catalog import CaptureRefusal
 from quant_engine.portfolio123.capture_intake import StageRequest, stage_run, verify_run

@@ -33,8 +33,7 @@ import stat
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core.strict_json import StrictJSONError, strict_json_object
+from quant_engine.core import StrictJSONError, strict_json_object
 from quant_engine.portfolio123.capture_catalog import (
     FORM_FILE,
     FORM_HAR,
@@ -45,7 +44,12 @@ from quant_engine.portfolio123.capture_catalog import (
     catalog_sha256,
     route_for,
 )
-from quant_engine.portfolio123.capture_shapes import ShapeError, Spec, validate_shape
+from quant_engine.portfolio123.capture_shapes import (
+    ShapeError,
+    Spec,
+    canonical_bytes,
+    validate_shape,
+)
 from quant_engine.web_contracts import (
     ExtractedResponse,
     SessionEnvelope,
@@ -355,7 +359,7 @@ def inventory_har(
         _read_regular_file(source_path, MAX_SOURCE_BYTES)
     )
     rows, totals = _inventory_rows(inventory, len(entries), len(matched))
-    data = canonical_json_bytes({"form": FORM_HAR, "routes": rows, "totals": totals})
+    data = canonical_bytes({"form": FORM_HAR, "routes": rows, "totals": totals})
     directory = staging_root / INVENTORY_DIRECTORY
     directory.mkdir(exist_ok=True)
     _write_new(directory / f"{run_id}.json", data)
@@ -387,7 +391,7 @@ def _normalize_har(
     for item in extracted:
         key = (item.capability, item.request_sha256)
         if key in unique:
-            if canonical_json_bytes(unique[key].to_dict()) != canonical_json_bytes(
+            if canonical_bytes(unique[key].to_dict()) != canonical_bytes(
                 item.to_dict()
             ):
                 raise CaptureRefusal("CONFLICTING_DUPLICATE", item.capability)
@@ -422,9 +426,7 @@ def _normalize_har(
     totals["duplicates_dropped"] = duplicates
     return _Derived(
         normalized=canonical_extraction(records),
-        inventory=canonical_json_bytes(
-            {"form": FORM_HAR, "routes": rows, "totals": totals}
-        ),
+        inventory=canonical_bytes({"form": FORM_HAR, "routes": rows, "totals": totals}),
         capabilities=summary,
         totals=totals,
         complete=complete,
@@ -492,8 +494,8 @@ def _normalize_file(
     elif media == "csv":
         record.update(_csv_record(route, source))
     return _Derived(
-        normalized=canonical_json_bytes({"records": [record]}),
-        inventory=canonical_json_bytes({"form": FORM_FILE, "routes": [], "totals": {}}),
+        normalized=canonical_bytes({"records": [record]}),
+        inventory=canonical_bytes({"form": FORM_FILE, "routes": [], "totals": {}}),
         capabilities={capability: {"records": 1, "coverage": "COMPLETE"}},
         totals={},
         complete=True,
@@ -615,7 +617,7 @@ def stage_run(request: StageRequest) -> RunSummary:
             "raw_contains_session_material": request.form == FORM_HAR,
             "restricted": True,
         }
-        manifest_bytes = canonical_json_bytes(manifest)
+        manifest_bytes = canonical_bytes(manifest)
         _write_new(run_dir / "manifest.json", manifest_bytes)
     except BaseException:
         shutil.rmtree(run_dir, ignore_errors=True)
@@ -711,7 +713,7 @@ def verify_run(
         or manifest["kind"] != KIND
         or manifest["run_id"] != run_id
         or manifest["restricted"] is not True
-        or canonical_json_bytes(manifest) != manifest_bytes
+        or canonical_bytes(manifest) != manifest_bytes
     ):
         raise CaptureRefusal("MANIFEST_INVALID")
     if manifest["catalog_sha256"] != catalog_sha256():

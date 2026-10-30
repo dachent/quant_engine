@@ -11,8 +11,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
+import json
 import math
-from typing import Union
+from typing import Any, Union
 
 
 MAX_DEPTH = 12
@@ -141,3 +142,10 @@ def describe(spec: Spec) -> object:
             key: describe(spec.optional[key]) for key in sorted(spec.optional)
         },
     }
+
+
+def canonical_bytes(value: Mapping[str, Any] | list[Any]) -> bytes:
+    """The repository's canonical JSON encoding (sorted keys, ASCII, one newline)."""
+
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return (text + chr(10)).encode("utf-8")
