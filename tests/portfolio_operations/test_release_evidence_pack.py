@@ -81,7 +81,7 @@ def test_pack_is_create_only_but_idempotent_for_identical_bytes(
     dest = tmp_path / "evidence"
     assert _run(cycle, dest) == 0
     assert _run(cycle, dest) == 0
-    (cycle / "production" / "plan.json").write_text('{"pass": 2}', encoding="utf-8")
+    (cycle / "production" / "plan.json").write_text('{"cycle": 2}', encoding="utf-8")
     assert _run(cycle, dest) == 1
     assert (dest / "production" / "plan.json").read_text(encoding="utf-8") == "{}"
 
@@ -111,7 +111,7 @@ def test_dest_inside_the_cycle_is_refused(cycle: Path) -> None:
 
 def test_a_link_out_of_the_cycle_is_refused(cycle: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside.txt"
-    outside.write_text("secret", encoding="utf-8")
+    outside.write_text("outside bytes", encoding="utf-8")
     try:
         (cycle / "logs" / "link.txt").symlink_to(outside)
     except OSError:
