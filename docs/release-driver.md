@@ -20,10 +20,18 @@ Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
 `run.json` holds absolute paths and the frozen code identity: `repo_root`, `python`,
 `cycle` (the scratch cycle directory that holds state, logs and production outputs),
 `run` (the attended run's output root), `qa`, `code_commit`, `pipeline_id`,
-`requested_as_of`, `history_store`, `expect_superseded`, `build_portfolio_root`,
+`mode`, `live_workspace` (probe), `requested_as_of`, `history_store`, `expect_superseded`, `build_portfolio_root`,
 `portfolio_root`, `retained_cache_root`, and `provider_sources` (root id to the provider
 generation directory the release binds). The epoch manifest generation comes from the run
 itself. A test fails if the graph starts using a key this list does not name.
+
+## Probe and release mode
+
+`mode` is required and is `probe` or `release`. A probe runs on a scratch copy of the real
+roots: with `live_workspace` set to the real `_quant_engine` directory, every stage from the
+production spec onward refuses (exit 2) when the spec's coordination root, state root or any
+root, or the `portfolio_root` argument, lies inside it. `release` mode does not guard and is
+used only for the attended release itself.
 
 ## What a stage may start on
 

@@ -77,6 +77,7 @@
     },
     {
       "id": "pipeline-spec",
+      "live_guard_keys": ["build_portfolio_root", "retained_cache_root"],
       "requires": ["recipe"],
       "inputs": [
         "{run}/preparation/hwm-governed-result.json",
@@ -127,6 +128,7 @@
     },
     {
       "id": "production-spec",
+      "live_guard_keys": ["portfolio_root", "retained_cache_root"],
       "requires": ["pipeline-spec", "semantic", "financial-artifacts", "provider-generations"],
       "outputs": ["{prod_spec}"],
       "argv": [
@@ -145,6 +147,7 @@
     },
     {
       "id": "preflight",
+      "guard_spec": "{prod_spec}",
       "requires": ["production-spec"],
       "outputs": [
         "{production}/evidence",
@@ -159,6 +162,7 @@
     },
     {
       "id": "plan",
+      "guard_spec": "{prod_spec}",
       "requires": ["preflight"],
       "outputs": ["{production}/plan.json"],
       "stdout_to": "{production}/plan.json",
@@ -170,6 +174,7 @@
     },
     {
       "id": "dry-run",
+      "guard_spec": "{prod_spec}",
       "requires": ["plan"],
       "outputs": ["{production}/execute-stage.json", "{production}/pointers-after-execute.json"],
       "stdout_to": "{production}/execute-stage.json",
@@ -179,6 +184,7 @@
     },
     {
       "id": "findings-panel",
+      "guard_spec": "{prod_spec}",
       "requires": ["dry-run"],
       "assert_equal": [["{panel_gid}", "{spec_panel_gid}"]],
       "outputs": ["{production}/validate-panel.log", "{production}/panel-findings-details.json"],
@@ -192,6 +198,7 @@
     },
     {
       "id": "findings-targets",
+      "guard_spec": "{prod_spec}",
       "requires": ["dry-run"],
       "outputs": ["{production}/validate-targets.log"],
       "stdout_to": "{production}/validate-targets.log",
