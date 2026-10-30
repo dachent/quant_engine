@@ -226,6 +226,7 @@ _PATH_STAGES = {
     "tools/check_release_closure.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
+    "tools/capture_fidelity_intake.py": [],
     "tools/merge_readiness.py": [],
     # Acceptance runner entrypoint (corrective program WS5). Its checks live in
     # top-level `acceptance/validate/`; it reads published outputs and imports no
