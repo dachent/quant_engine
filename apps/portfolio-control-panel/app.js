@@ -1878,7 +1878,7 @@
     const excluded = (aggregate.excluded_series || []).map((item) => `${item.series_id} (${humanStatus(item.reason).toLowerCase()})`).join(", ");
     const unweighted = (aggregate.unweighted_ranges || []).map((item) => `${formatDate(item.start)} to ${formatDate(item.end)} (${integer.format(item.days)} d): ${humanStatus(item.reason).toLowerCase()}`);
     const ranges = unweighted.length ? `<p class="cell-secondary">Dates with no weight, named and not filled: ${safe(unweighted.join("; "))}.</p>` : "";
-    if (aggregate.status !== "AVAILABLE") return `<h4>All covered strategies</h4><div class="callout callout-neutral">Unavailable: ${safe(humanStatus(aggregate.reason || "UNAVAILABLE"))}${excluded ? `. Excluded: ${safe(excluded)}` : ""}.</div>${ranges}`;
+    if (!aggregate.components) return `<h4>All covered strategies</h4><div class="callout callout-neutral">Unavailable: ${safe(humanStatus(aggregate.reason || "UNAVAILABLE"))}${excluded ? `. Excluded: ${safe(excluded)}` : ""}.</div>${ranges}`;
     const weighting = (aggregate.weighting || []).map((item) => `${humanStatus(item.basis)} ${formatDate(item.start)} to ${formatDate(item.end)} (${integer.format(item.n)} d)`).join("; ");
     return `<h4>All covered strategies (${integer.format((aggregate.included_series || []).length)}, capital coverage ${pct(aggregate.capital_coverage, 0)})</h4>${oraComponentBars(aggregate.components)}${oraClosureStrip(aggregate)}<p class="cell-secondary">${safe(block.aggregate_note || "")} ${weighting ? `Weighting: ${safe(weighting)}.` : ""}${excluded ? ` Excluded: ${safe(excluded)}.` : ""}</p>${ranges}`;
   }
@@ -1895,7 +1895,7 @@
     const aggregate = (mode.aggregates || []).find(sameLens);
     const cellMarkup = !cell
       ? '<div class="callout callout-neutral">No attribution cell was published for this series on this lens.</div>'
-      : cell.status !== "AVAILABLE"
+      : !cell.components
         ? `<div class="callout callout-neutral">Unavailable: ${safe(humanStatus(cell.reason || "UNAVAILABLE"))}.</div>`
         : `${oraComponentBars(cell.components)}<p class="cell-secondary">Bars are shares of the explained variance. ${safe(block.definition || "")}</p>${oraClosureStrip(cell)}${oraEvidenceLine(cell, block)}`;
     const coefficients = row.orthogonal_attribution?.mode_coefficients;
