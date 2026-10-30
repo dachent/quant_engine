@@ -48,8 +48,8 @@ from quant_engine.portfolio_ledger import (
 
 
 SPEC_SCHEMA_VERSION = 3
-CATALOG_SCHEMA_VERSION = 7
-ADAPTER_VERSION = "0.4.0"
+CATALOG_SCHEMA_VERSION = 8
+ADAPTER_VERSION = "0.5.0"
 _CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -1109,6 +1109,14 @@ def _normalize(
                 "strategy_id": strategy_id,
             }
             position_fields: dict[str, object] = {
+                # The identity the position's own OpenPosition element states on
+                # its own statement date.  A conid can be reported under
+                # more than one symbol over time and across listings (BSL and
+                # BSLd, WILC and WILCF, RLYB and RLYB.OLD), so the symbol is never
+                # resolved per conid: each position row keeps the symbol of the
+                # element it was read from, and a row without one carries none.
+                "symbol": position.symbol,
+                "listing_exchange": position.listing_exchange,
                 "asset_category": position.asset_category,
                 "sub_category": position.sub_category,
                 "multiplier": _optional_decimal_text(position.multiplier),
