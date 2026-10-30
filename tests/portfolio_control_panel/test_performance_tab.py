@@ -1252,3 +1252,46 @@ def test_a_report_without_the_outside_gain_stops_the_crosscheck() -> None:
     # The slices block names the missing figure; no figure is substituted.
     assert block["slices"]["status"] == "UNAVAILABLE"
     assert "gain_of_outside_report_epochs_usd" in block["slices"]["reason"]
+
+
+def test_a_defect_in_the_builders_retired_helper_is_caught_by_the_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel = _panel()
+    rows = panel["account_manifest"]["rows"]
+    for row in rows:
+        row["gain"] = "-2.996" if row.get("strategy_id") == "b" else "0"
+        if row.get("strategy_id") == "b":
+            row["effective_end"] = "2026-03-04"
+    panel["invested_capital"] = {
+        "required_epochs": [
+            {
+                "account_id": r["account_id"],
+                "strategy_id": r["strategy_id"],
+                "effective_start": r["effective_start"],
+            }
+            for r in rows
+            if r.get("strategy_id") in {"a", "c"}
+        ]
+    }
+    panel["capital_reconciliation"] = {
+        "status": "RECONCILED",
+        "derived_total_net_capital_usd": "112.5",
+        "gain_of_all_epochs_usd": "0",
+        "current_of_open_epochs_usd": "118",
+        "epoch_count": 3,
+        "epoch_set": {"gain_of_outside_report_epochs_usd": "-2.994"},
+    }
+    good = tab.build_performance_tab(panel)
+    tab.verify_performance_tab(good, panel)
+    # A builder helper that rounds the wrong way (here: sums the rounded lines).
+    monkeypatch.setattr(
+        tab,
+        "_retired_component_cents",
+        lambda _reconciliation, retired: (
+            -sum(int(i["row_gain_cents"]) for i in retired)
+        ),
+    )
+    broken = tab.build_performance_tab(panel)
+    with pytest.raises(tab.PerformanceTabError, match="cross-check"):
+        tab.verify_performance_tab(broken, panel)
