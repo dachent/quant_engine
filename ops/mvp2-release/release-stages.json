@@ -208,6 +208,18 @@
       ]
     },
     {
+      "id": "pack-probe",
+      "explicit": true,
+      "requires": ["findings-panel", "findings-targets"],
+      "only_mode": "probe",
+      "argv": [
+        "{python}", "{tools}/release_evidence_pack.py", "--cycle", "{cycle}", "--dest", "{evidence_dest}",
+        "--include", "production", "logs", "release-driver-state.json", "pipeline-recipe.json",
+        "provider-generations.json", "replica",
+        "--exclude", "production/state/*", "*.prev-*"
+      ]
+    },
+    {
       "id": "commit",
       "explicit": true,
       "requires": ["findings-panel", "findings-targets"],
@@ -225,6 +237,18 @@
       ],
       "checks": [
         {"json": "{production}/execute-commit.json", "path": "release_state", "equals": "COMMITTED"}
+      ]
+    },
+    {
+      "id": "pack-evidence",
+      "explicit": true,
+      "requires": ["commit"],
+      "only_mode": "release",
+      "argv": [
+        "{python}", "{tools}/release_evidence_pack.py", "--cycle", "{cycle}", "--dest", "{evidence_dest}",
+        "--include", "production", "logs", "release-driver-state.json", "pipeline-recipe.json",
+        "provider-generations.json", "replica",
+        "--exclude", "production/state/*", "*.prev-*"
       ]
     }
   ]

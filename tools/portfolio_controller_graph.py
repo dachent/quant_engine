@@ -168,6 +168,7 @@ _PATH_STAGES = {
     "tools/verify_release_restore.py": [],
     "tools/release_driver.py": [],
     "tools/release_restore_world.py": [],
+    "tools/release_evidence_pack.py": [],
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],

@@ -400,6 +400,8 @@ def check_ready(run: Run, stage: Mapping[str, Any], *, replace: bool) -> None:
     run.require_frozen_repo()
     check_probe_guard(run, stage)
     check_commit_gate(run, stage)
+    if "only_mode" in stage and run.values["mode"] != stage["only_mode"]:
+        raise Refusal(f"{stage['id']} runs only in {stage['only_mode']} mode")
     state = run.state["stages"]
     for required in stage.get("requires", []):
         record = state.get(required)
@@ -656,9 +658,10 @@ def _select(run: Run, only: str | None, through: str | None) -> list[str]:
             raise Refusal(f"no stage {name!r}; stages are {ids}")
     if only is not None:
         return [only]
+    if through is not None:
+        return ids[: ids.index(through) + 1]
     # an explicit stage (the commit) never runs as part of "everything"; name it with --through or --only
-    runnable = [i for i in ids if not run.stage(i).get("explicit") or i == through]
-    return runnable[: runnable.index(through) + 1] if through is not None else runnable
+    return [i for i in ids if not run.stage(i).get("explicit")]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
