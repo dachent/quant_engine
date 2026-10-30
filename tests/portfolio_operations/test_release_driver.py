@@ -591,3 +591,234 @@ def test_the_shipped_graph_guards_every_stage_that_binds_a_root_or_cache() -> No
         "build_portfolio_root",
         "retained_cache_root",
     }
+
+
+def _node(node_id: str, generation: str) -> dict[str, Any]:
+    return {
+        "kind": "GENERATION",
+        "node_id": node_id,
+        "depends_on": [],
+        "root_id": "r",
+        "generation_id": generation,
+        "manifest_sha256": "m" * 64,
+        "release_target": True,
+    }
+
+
+def _spec(path: Path, base: Path, commit: str, generation: str = "G1") -> None:
+    (base / "coord" / "releases").mkdir(parents=True, exist_ok=True)
+    (base / "root").mkdir(exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "coordination_root": str(base / "coord"),
+                "roots": {"r": str(base / "root")},
+                "companions": [],
+                "code_commit": commit,
+                "as_of_date": "2026-09-17",
+                "pipeline_id": "p",
+                "nodes": [_node("n1", generation)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+GATE_STAGE = {
+    "id": "commit",
+    "commit_gate": {
+        "spec": "{cycle}/spec.json",
+        "replica_spec": "{cycle}/replica-spec.json",
+        "replica_stages": ["replica-commit", "replica-restore"],
+        "inputs_same": [["{cycle}/pg.json", "{cycle}/replica-pg.json"]],
+        "pointer_snapshot": "{cycle}/after.json",
+    },
+    "outputs": ["{cycle}/committed.txt"],
+    "argv": _write_stage("{cycle}/committed.txt"),
+}
+GATE_DERIVE = {
+    "release_id": {"json_field": ["{cycle}/execute-stage.json", "release_id"]}
+}
+
+
+def _gate_world(world: dict[str, Any]) -> dict[str, Any]:
+    cycle, tmp = world["cycle"], world["tmp"]
+    cycle.mkdir(parents=True, exist_ok=True)
+    commit = json.loads(world["config"].read_text(encoding="utf-8"))["code_commit"]
+    _spec(cycle / "spec.json", tmp / "real", commit)
+    _spec(cycle / "replica-spec.json", tmp / "replica", commit)
+    (tmp / "real" / "coord" / "releases" / "R1").mkdir()
+    (cycle / "execute-stage.json").write_text('{"release_id": "R1"}', encoding="utf-8")
+    for name in ("pg.json", "replica-pg.json"):
+        (cycle / name).write_text("[]", encoding="utf-8")
+    (cycle / "after.json").write_text(
+        json.dumps(driver.pointer_snapshot(cycle / "spec.json")), encoding="utf-8"
+    )
+    record = {"status": "ok", "code_commit": commit, "outputs": {}}
+    (cycle / driver.STATE_NAME).write_text(
+        json.dumps({"stages": {"replica-commit": record, "replica-restore": record}}),
+        encoding="utf-8",
+    )
+    return {"commit": commit, "graph": _graph(world, [GATE_STAGE], derive=GATE_DERIVE)}
+
+
+def _commit(
+    world: dict[str, Any], gate: dict[str, Any], confirm: str | None = "R1"
+) -> int:
+    args = ["--confirm-release-id", confirm] if confirm else []
+    return _drive(world, gate["graph"], *args)
+
+
+def test_commit_runs_for_the_confirmed_release_after_a_matching_replica(
+    world: dict[str, Any],
+) -> None:
+    gate = _gate_world(world)
+    assert _commit(world, gate) == 0
+    assert (world["cycle"] / "committed.txt").is_file()
+
+
+@pytest.mark.parametrize("confirm", [None, "R2"])
+def test_commit_refuses_without_the_owner_confirmed_exact_release(
+    world: dict[str, Any], confirm: str | None
+) -> None:
+    gate = _gate_world(world)
+    assert _commit(world, gate, confirm) == 2
+    assert not (world["cycle"] / "committed.txt").exists()
+
+
+def test_commit_refuses_probe_mode(world: dict[str, Any]) -> None:
+    gate = _gate_world(world)
+    _config(world, mode="probe")
+    assert _commit(world, gate) == 2
+
+
+def test_commit_refuses_a_missing_or_foreign_replica_receipt(
+    world: dict[str, Any],
+) -> None:
+    gate = _gate_world(world)
+    state_path = world["cycle"] / driver.STATE_NAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["stages"]["replica-restore"]["status"] = "failed"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    assert _commit(world, gate) == 2
+    state["stages"]["replica-restore"].update(status="ok", code_commit="0" * 40)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    assert _commit(world, gate) == 2
+    del state["stages"]["replica-restore"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    assert _commit(world, gate) == 2
+
+
+def test_commit_refuses_a_replica_with_a_different_topology_or_inputs(
+    world: dict[str, Any],
+) -> None:
+    gate = _gate_world(world)
+    _spec(
+        world["cycle"] / "replica-spec.json",
+        world["tmp"] / "replica",
+        gate["commit"],
+        generation="G2",
+    )
+    assert _commit(world, gate) == 2
+    _spec(
+        world["cycle"] / "replica-spec.json", world["tmp"] / "replica", gate["commit"]
+    )
+    (world["cycle"] / "replica-pg.json").write_text(
+        '[{"root_id": "x"}]', encoding="utf-8"
+    )
+    assert _commit(world, gate) == 2
+
+
+def test_commit_refuses_an_unprepared_release_or_moved_pointers(
+    world: dict[str, Any],
+) -> None:
+    gate = _gate_world(world)
+    (world["tmp"] / "real" / "coord" / "releases" / "R1").rmdir()
+    assert _commit(world, gate) == 2
+    (world["tmp"] / "real" / "coord" / "releases" / "R1").mkdir()
+    (world["tmp"] / "real" / "root" / "CURRENT.json").write_text(
+        '{"generation_id": "G9"}', encoding="utf-8"
+    )
+    assert _commit(world, gate) == 2
+
+
+def test_commit_refuses_a_spec_bound_to_another_code_commit(
+    world: dict[str, Any],
+) -> None:
+    gate = _gate_world(world)
+    for name, base in (("spec.json", "real"), ("replica-spec.json", "replica")):
+        _spec(world["cycle"] / name, world["tmp"] / base, "f" * 40)
+    assert _commit(world, gate) == 2
+
+
+def test_commit_gate_without_driver_replica_checks_needs_only_receipt_and_confirmation(
+    world: dict[str, Any],
+) -> None:
+    gate = _gate_world(world)
+    stage = {
+        "id": "commit",
+        "commit_gate": {
+            "spec": "{cycle}/spec.json",
+            "replica_receipt": "{cycle}/replica-receipt.json",
+            "pointer_snapshot": "{cycle}/after.json",
+        },
+        "outputs": ["{cycle}/committed.txt"],
+        "argv": _write_stage("{cycle}/committed.txt"),
+    }
+    gate["graph"] = _graph(world, [stage], derive=GATE_DERIVE)
+    assert _commit(world, gate) == 2
+    (world["cycle"] / "replica-receipt.json").write_text("{}", encoding="utf-8")
+    assert _commit(world, gate) == 0
+
+
+def test_an_explicit_stage_is_not_part_of_everything(world: dict[str, Any]) -> None:
+    stages = [dict(CHAIN[0]), {**CHAIN[1], "explicit": True}]
+    graph = _graph(world, stages)
+    assert _drive(world, graph) == 0
+    assert (world["cycle"] / "one.txt").is_file() and not (
+        world["cycle"] / "two.txt"
+    ).exists()
+    assert _drive(world, graph, "--through", "two") == 0
+    assert (world["cycle"] / "two.txt").is_file()
+
+
+def test_the_shipped_graph_ends_in_an_explicit_gated_commit_stage() -> None:
+    graph = json.loads(
+        (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    last = graph["stages"][-1]
+    assert last["id"] == "commit" and last["explicit"] is True
+    assert set(last["commit_gate"]) == {"spec", "replica_receipt", "pointer_snapshot"}
+    assert "--replica-receipt" in last["argv"] and "--commit" in last["argv"]
+
+
+def test_topology_ignores_companion_source_paths(tmp_path: Path) -> None:
+    def spec(source: str) -> Path:
+        path = tmp_path / f"{Path(source).name}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "nodes": [],
+                    "code_commit": "c",
+                    "as_of_date": "d",
+                    "pipeline_id": "p",
+                    "companions": [
+                        {
+                            "companion_id": "x",
+                            "root_id": "r",
+                            "relative_path": "a",
+                            "sha256": "h",
+                            "source_path": source,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    assert driver.spec_topology(spec("C:/real/x")) == driver.spec_topology(
+        spec("C:/replica/x")
+    )

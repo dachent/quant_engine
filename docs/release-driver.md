@@ -59,6 +59,24 @@ may appear.
 hand, and refuses when a bound root has no source, a source is missing, or the configuration
 names a root the graph does not bind.
 
+## Commit gate
+
+A stage that declares `commit_gate` (the `execute --commit` stage) refuses unless
+
+- `mode` is `release` and `--confirm-release-id` equals the release id the dry run reported:
+  the exact release the owner confirmed, not a hash the driver chose;
+- every named replica stage (commit, post-release verify, rehearsal, restore) finished `ok`
+  at the run's code identity;
+- the replica spec and the real spec have the same topology (`spec_topology`: node ids,
+  dependencies, generation ids and manifest hashes, artifact hashes, companions, code
+  commit, as-of date, pipeline id; paths and roots are left out because they legitimately
+  differ), and the real spec binds the run's code commit;
+- the declared inputs (provider generations, financial artifacts) are byte-identical between
+  the real run and the replica;
+- the release is prepared on disk, and no pointer has moved since the dry run snapshot.
+
+The graph adds the commit stage together with the replica ceremony stages it names.
+
 ## State
 
 `<cycle>/release-driver-state.json` records per stage its status, code identity, seconds,

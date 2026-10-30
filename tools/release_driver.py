@@ -116,6 +116,7 @@ class Run:
         self.binding = hashlib.sha256(
             json.dumps([config, graph], sort_keys=True).encode()
         ).hexdigest()
+        self.confirmed_release_id: str | None = None
 
     # -- templates -------------------------------------------------------------------
     def expand(self, template: str) -> str:
@@ -271,11 +272,134 @@ def check_probe_guard(run: Run, stage: Mapping[str, Any]) -> None:
         )
 
 
+def spec_topology(spec_file: Path) -> str:
+    """Hash of what a release spec binds, independent of where the roots live.
+
+    A replica spec and the real spec of the same release differ only in paths: node ids,
+    dependencies, generation ids and manifest hashes, artifact hashes, companions, code
+    commit, as-of date and pipeline id are identical (checked on the R1 specs).
+    """
+
+    spec = _read_json(spec_file)
+    rows = []
+    for node in spec["nodes"]:
+        if node["kind"] == "GENERATION":
+            rows.append(
+                [
+                    node["node_id"],
+                    node["kind"],
+                    node["depends_on"],
+                    node["root_id"],
+                    node["generation_id"],
+                    node["manifest_sha256"],
+                    node["release_target"],
+                ]
+            )
+        else:
+            rows.append(
+                [node["node_id"], node["kind"], node["depends_on"], node["sha256"]]
+            )
+    rows.sort(key=str)
+    payload = {
+        "nodes": rows,
+        "companions": sorted(
+            (
+                {
+                    key: item[key]
+                    for key in ("companion_id", "root_id", "relative_path", "sha256")
+                }
+                for item in spec["companions"]
+            ),
+            key=lambda item: item["companion_id"],
+        ),
+        "code_commit": spec["code_commit"],
+        "as_of_date": spec["as_of_date"],
+        "pipeline_id": spec["pipeline_id"],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _check_replica_agrees(
+    run: Run, stage: Mapping[str, Any], gate: Mapping[str, Any], real_spec: Path
+) -> None:
+    """Optional: the driver's own replica checks (core's replica gate is the authority on the receipt)."""
+
+    replica_spec = Path(run.expand(gate["replica_spec"]))
+    if not replica_spec.is_file():
+        raise Refusal(
+            f"{stage['id']}: no replica spec at {replica_spec}; the replica ceremony has not run"
+        )
+    for replica_stage in gate.get("replica_stages", []):
+        record = run.state["stages"].get(replica_stage)
+        if (
+            not record
+            or record["status"] != "ok"
+            or record["code_commit"] != run.values["code_commit"]
+        ):
+            raise Refusal(
+                f"{stage['id']}: replica receipt {replica_stage} is missing, failed, or from another code identity"
+            )
+    if spec_topology(real_spec) != spec_topology(replica_spec):
+        raise Refusal(
+            f"{stage['id']}: the replica spec binds a different topology than the real spec"
+        )
+    for real_input, replica_input in gate.get("inputs_same", []):
+        left, right = Path(run.expand(real_input)), Path(run.expand(replica_input))
+        if path_digest(left) is None or path_digest(left) != path_digest(right):
+            raise Refusal(
+                f"{stage['id']}: {left.name} differs between the real run and the replica"
+            )
+
+
+def check_commit_gate(run: Run, stage: Mapping[str, Any]) -> None:
+    """``execute --commit`` runs only for the exact release the owner confirmed, from a prepared, unmoved state."""
+
+    gate = stage.get("commit_gate")
+    if gate is None:
+        return
+    if run.values["mode"] != "release":
+        raise Refusal(f"{stage['id']}: a commit needs mode 'release'")
+    release_id = run.derive("release_id")
+    if run.confirmed_release_id != release_id:
+        raise Refusal(
+            f"{stage['id']}: commit needs --confirm-release-id {release_id}, the exact release the owner confirmed"
+        )
+    real_spec = Path(run.expand(gate["spec"]))
+    if _read_json(real_spec)["code_commit"] != run.values["code_commit"]:
+        raise Refusal(f"{stage['id']}: the real spec binds another code commit")
+    if (
+        "replica_receipt" in gate
+        and not Path(run.expand(gate["replica_receipt"])).is_file()
+    ):
+        raise Refusal(
+            f"{stage['id']}: no replica receipt at {run.expand(gate['replica_receipt'])}"
+        )
+    if "replica_spec" in gate:
+        _check_replica_agrees(run, stage, gate, real_spec)
+    prepared = (
+        Path(_read_json(real_spec)["coordination_root"]) / "releases" / release_id
+    )
+    if not prepared.is_dir():
+        raise Refusal(
+            f"{stage['id']}: release {release_id[:12]} is not prepared at {prepared}"
+        )
+    recorded = _read_json(Path(run.expand(gate["pointer_snapshot"])))
+    now = pointer_snapshot(real_spec)
+    moved = [
+        key
+        for key in sorted(recorded)
+        if key != "release_dirs" and recorded[key] != now.get(key)
+    ]
+    if moved:
+        raise Refusal(f"{stage['id']}: pointers moved since the dry run: {moved[:4]}")
+
+
 def check_ready(run: Run, stage: Mapping[str, Any], *, replace: bool) -> None:
     """Every refusal that applies before ``stage`` runs. Raises ``Refusal``; changes nothing."""
 
     run.require_frozen_repo()
     check_probe_guard(run, stage)
+    check_commit_gate(run, stage)
     state = run.state["stages"]
     for required in stage.get("requires", []):
         record = state.get(required)
@@ -532,7 +656,9 @@ def _select(run: Run, only: str | None, through: str | None) -> list[str]:
             raise Refusal(f"no stage {name!r}; stages are {ids}")
     if only is not None:
         return [only]
-    return ids[: ids.index(through) + 1] if through is not None else ids
+    # an explicit stage (the commit) never runs as part of "everything"; name it with --through or --only
+    runnable = [i for i in ids if not run.stage(i).get("explicit") or i == through]
+    return runnable[: runnable.index(through) + 1] if through is not None else runnable
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -549,9 +675,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="move colliding create-only outputs aside",
     )
+    parser.add_argument(
+        "--confirm-release-id",
+        help="the exact release id the owner confirmed (commit stage)",
+    )
     args = parser.parse_args(argv)
     try:
         run = load_run(args.config, args.graph)
+        run.confirmed_release_id = args.confirm_release_id
         selected = _select(run, args.only, args.through)
         if args.command == "plan":
             for stage_id in selected:

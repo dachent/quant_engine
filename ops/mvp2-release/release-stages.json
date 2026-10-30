@@ -206,6 +206,26 @@
         "{python}", "{tools}/validate_release_targets.py",
         "--spec", "{prod_spec}", "--release-id", "{release_id}"
       ]
+    },
+    {
+      "id": "commit",
+      "explicit": true,
+      "requires": ["findings-panel", "findings-targets"],
+      "commit_gate": {
+        "spec": "{prod_spec}",
+        "replica_receipt": "{cycle}/replica/replica-receipt.json",
+        "pointer_snapshot": "{production}/pointers-after-execute.json"
+      },
+      "outputs": ["{production}/execute-commit.json"],
+      "stdout_to": "{production}/execute-commit.json",
+      "argv": [
+        "{python}", "{tools}/data_pipeline.py", "execute", "--spec", "{prod_spec}",
+        "--commit", "--commit-authorization", "{production}/commit-authorization.json",
+        "--replica-receipt", "{cycle}/replica/replica-receipt.json"
+      ],
+      "checks": [
+        {"json": "{production}/execute-commit.json", "path": "release_state", "equals": "COMMITTED"}
+      ]
     }
   ]
 }
