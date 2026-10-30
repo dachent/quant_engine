@@ -289,6 +289,105 @@ def build_record(
     return record
 
 
+VENDOR_GAP_FILLS_SCHEMA_VERSION: Final = 1
+
+
+def _receipt_basis_legs(
+    fill: Mapping[str, Any], receipt_span: Decimal
+) -> tuple[Decimal, Decimal]:
+    """Split the governed receipt span across the fill day, in the fill's own proportions.
+
+    The fill is measured on the vendor product NAV; the receipt span is the governed
+    series' own two-day return, which can differ slightly.  The legs are re-expressed
+    on the receipt basis so they compound to the receipt exactly.
+    """
+
+    vendor_span = Decimal(str(fill["span_return"]))
+    leg_in = Decimal(str(fill["leg_in_return"]))
+    if receipt_span <= -1 or vendor_span <= -1:
+        raise VendorGapFillError(
+            "fill span cannot be re-expressed on the receipt basis"
+        )
+    receipt_log = (Decimal(1) + receipt_span).ln()
+    if vendor_span == 0:
+        # A flat vendor span has no proportion to preserve: the fill's own legs stand
+        # and the receipt span is carried evenly across both days.
+        on_receipt_in = (Decimal(1) + leg_in) * (receipt_log / 2).exp() - Decimal(1)
+    else:
+        share = (Decimal(1) + leg_in).ln() / (Decimal(1) + vendor_span).ln()
+        on_receipt_in = (share * receipt_log).exp() - Decimal(1)
+    on_receipt_out = (Decimal(1) + receipt_span) / (
+        Decimal(1) + on_receipt_in
+    ) - Decimal(1)
+    return on_receipt_in, on_receipt_out
+
+
+def build_vendor_gap_fills(
+    data: Mapping[str, Any], content: bytes, expected_sha256: str
+) -> dict[str, Any]:
+    """The panel's labelled fill block, closed against the HWM span receipts it sits beside."""
+
+    if hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise VendorGapFillError("vendor gap fill record differs from its pin")
+    record = json.loads(content.decode("utf-8"))
+    if record.get("schema_version") != SCHEMA_VERSION:
+        raise VendorGapFillError("vendor gap fill record schema differs")
+    subject = record.get("subject") or {}
+    strategy_id = subject.get("strategy_id")
+    candidate = (data.get("advisory") or {}).get("hwm_candidate")
+    points = ((candidate or {}).get("kpi") or {}).get("missing_daily_points")
+    if not isinstance(points, list) or not strategy_id:
+        raise VendorGapFillError("no HWM span receipts to close the fills against")
+    by_key = {(item["strategy_id"], item["date"]): item for item in points}
+    rows: list[dict[str, Any]] = []
+    with localcontext() as ctx:
+        ctx.prec = _PRECISION
+        for fill in record["fills"]:
+            point = by_key.get((strategy_id, fill["date"]))
+            if point is None:
+                raise VendorGapFillError(
+                    f"fill {fill['date']} matches no declared missing day of {strategy_id}"
+                )
+            if (
+                point["span_start_date"] != fill["previous_nav"]["date"]
+                or point["span_end_date"] != fill["next_nav"]["date"]
+            ):
+                raise VendorGapFillError(
+                    f"fill {fill['date']} spans different endpoints"
+                )
+            receipt_span = Decimal(str(point["span_return"]))
+            leg_in, leg_out = _receipt_basis_legs(fill, receipt_span)
+            residual = (Decimal(1) + leg_in) * (Decimal(1) + leg_out) - (
+                Decimal(1) + receipt_span
+            )
+            vendor_span = Decimal(str(fill["span_return"]))
+            rows.append(
+                {
+                    "strategy_id": strategy_id,
+                    "date": fill["date"],
+                    "origin_label": fill["origin_label"],
+                    "rule": fill["rule"],
+                    "nav": fill["nav"],
+                    "span_start_date": point["span_start_date"],
+                    "span_end_date": point["span_end_date"],
+                    "leg_in_return": _fmt(leg_in),
+                    "leg_out_return": _fmt(leg_out),
+                    "receipt_span_return": _fmt(receipt_span),
+                    "vendor_span_return": _fmt(vendor_span),
+                    "span_basis_difference": _fmt(receipt_span - vendor_span),
+                    "closure_residual": _fmt(residual),
+                }
+            )
+    inputs = record.get("inputs") or {}
+    return {
+        "schema_version": VENDOR_GAP_FILLS_SCHEMA_VERSION,
+        "status": "AVAILABLE",
+        "input_sha256": expected_sha256,
+        "policy_sha256": inputs.get("policy_sha256"),
+        "fills": rows,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--policy", type=Path, required=True)
