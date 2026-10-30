@@ -198,7 +198,7 @@ required_fields = [
   "approval_requirement",
 ]
 allowed_optional_fields = ["name", "id", "credential_source"]
-allowed_credential_classes = ["NONE", "OS_CREDENTIAL_REFERENCE"]
+allowed_credential_classes = ["NONE", "OS_CREDENTIAL_REFERENCE", "SECRET_MANAGER_REFERENCE"]
 forbidden_credential_classes = [
   "LITERAL",
   "EMBEDDED",
