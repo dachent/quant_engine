@@ -167,3 +167,41 @@ def test_the_shipped_world_file_names_real_roots() -> None:
     )
     assert {root["key"] for root in shipped["roots"]} == {"wt", "chain2"}
     assert all(root["old"].endswith("\\") for root in shipped["roots"])
+
+
+def test_a_workspace_fallback_is_hash_checked_against_its_pin(
+    world: dict[str, Any],
+) -> None:
+    live = OLD_W + "dataPortfolio\\live.json"
+    assert _run(world, _spec(world, {"path": live, "sha256": _sha(b"live")})) == 0
+    assert _run(world, _spec(world, {"path": live, "sha256": _sha(b"historic")})) == 1
+    assert _report(world)["counts"] == {"MISMATCH": 1}
+
+
+def test_a_requested_descendant_of_a_restored_directory_is_still_validated(
+    world: dict[str, Any],
+) -> None:
+    spec = _spec(
+        world,
+        OLD_W + ".pt\\dir",
+        {"path": OLD_W + ".pt\\dir\\one.txt", "sha256": _sha(b"wrong")},
+        OLD_W + ".pt\\dir\\absent.txt",
+    )
+    assert _run(world, spec) == 1
+    statuses = {row["path"]: row["status"] for row in _report(world)["rows"]}
+    assert statuses[OLD_W + ".pt\\dir\\one.txt"] == "MISMATCH"
+    assert statuses[OLD_W + ".pt\\dir\\absent.txt"] == "MISSING"
+
+
+def test_archive_entries_and_spec_paths_cannot_escape_the_destination(
+    world: dict[str, Any],
+) -> None:
+    with zipfile.ZipFile(world["workspace"] / "evidence" / "staging.zip", "a") as z:
+        z.writestr("worktrees/.pt/evil/../../../../escaped.txt", b"x")
+        z.writestr("worktrees/.pt/evil/ok.txt", b"ok")
+    spec = _spec(world, OLD_W + ".pt\\evil", OLD_W + ".pt\\..\\..\\outside.txt")
+    assert _run(world, spec) == 1
+    statuses = sorted(row["status"] for row in _report(world)["rows"])
+    assert statuses == ["UNSAFE", "UNSAFE"]
+    assert not (world["tmp"] / "escaped.txt").exists()
+    assert not (world["dest"] / "wt" / ".pt" / "evil").exists()
