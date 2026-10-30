@@ -136,6 +136,9 @@ _PATH_STAGES = {
     "tools/portfolio_totals_verify.py": ["report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
+    # Builds the style-return bundle the decomposition plan pins (calendar, return
+    # columns); a change moves the plan inputs and everything downstream of them.
+    "tools/portfolio_public_style_sources.py": ["analytics", "report", "panel"],
     # The Performance tab producer: builds one additive panel block from the weekly
     # returns, account manifest and governed HWM proof the panel already holds.
     "tools/portfolio_performance_tab.py": ["panel"],

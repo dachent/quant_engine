@@ -1166,6 +1166,7 @@ def _schwab_selected_point_positions(
                         "market_value",
                         "average_price",
                         "security_id",
+                        "symbol",
                     )
                 },
                 "evidence_layer": "ACCOUNT_LIVE",
