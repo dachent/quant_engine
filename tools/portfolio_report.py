@@ -10419,6 +10419,12 @@ def build_report_data(
                         or governed_hwm_proof.get("current_index") is None
                         else str(governed_hwm_proof["current_index"])
                     ),
+                    hwm_index_path=(
+                        None
+                        if governed_hwm_proof is None
+                        else governed_hwm_proof.get("index_path")
+                    ),
+                    source_clock=source_clock,
                     strategy_returns={
                         str(item["strategy_id"]): Decimal(
                             str(item["account_live_cumulative_return"])

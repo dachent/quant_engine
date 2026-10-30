@@ -448,13 +448,39 @@ def _resolve_predecessor(
             )
     except (KeyError, IndexError, ValueError, StopIteration, TypeError):
         return {"status": "OMITTED", "reason": "POINTER_DOES_NOT_RESOLVE", **release}
-    return {
+    resolved: dict[str, Any] = {
         "status": "RESOLVED",
         **release,
         "data_file_sha256": sha256,
         "pointers": dict(pointers),
         "values": values,
     }
+    index_path = _predecessor_index_path(document, pointers)
+    if index_path is not None:
+        resolved["hwm_index_path"] = index_path
+    return resolved
+
+
+def _predecessor_index_path(
+    document: Mapping[str, Any], pointers: Mapping[str, Any]
+) -> list[list[str]] | None:
+    """The predecessor's dated index path, or None when its pointer does not resolve.
+
+    The pointer is ``hwm_index_path`` when named, else the ``index_path`` sibling of the
+    ``hwm_current_index`` pointer (the governed proof block carries both).
+    """
+
+    pointer = pointers.get("hwm_index_path")
+    if pointer is None and "hwm_current_index" in pointers:
+        head, _sep, _tail = str(pointers["hwm_current_index"]).rpartition("/")
+        pointer = f"{head}/index_path"
+    if pointer is None:
+        return None
+    try:
+        rows = _pointer(document, str(pointer))
+        return [[str(row["as_of"]), str(row["index"])] for row in rows]
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
 
 
 def build_sources(
@@ -686,21 +712,101 @@ def _perimeter_reconciliation(
     )
 
 
-def _index_move(predecessor: object, current: str | None) -> str:
-    if (
+def _path_by_date(rows: Sequence[Any] | None) -> dict[str, Decimal]:
+    """Dated index values from mapping rows (as_of, index) or [date, index] pairs."""
+
+    result: dict[str, Decimal] = {}
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            result[str(row["as_of"])] = _dec(row["index"])
+        else:
+            result[str(row[0])] = _dec(row[1])
+    return result
+
+
+def _revision_sources(source_clock: Mapping[str, Any] | None) -> dict[str, str]:
+    """Provider data date -> finality basis, for sources whose basis declares a derived patch."""
+
+    found: dict[str, str] = {}
+    rows = source_clock.get("source_data_as_of") if source_clock else None
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        finality = row.get("finality")
+        basis = finality.get("basis") if isinstance(finality, Mapping) else None
+        if (
+            isinstance(basis, str)
+            and "DERIVED_PATCH" in basis
+            and row.get("provider_data_date")
+        ):
+            found[str(row["provider_data_date"])] = f"{row.get('source_id')} {basis}"
+    return found
+
+
+def _index_move(
+    predecessor: object,
+    current: str | None,
+    current_path: Sequence[Any] | None = None,
+    source_clock: Mapping[str, Any] | None = None,
+) -> str:
+    if not (
         current is not None
         and isinstance(predecessor, Mapping)
         and predecessor.get("status") == "RESOLVED"
         and "hwm_current_index" in predecessor["values"]
     ):
-        before = _dec(predecessor["values"]["hwm_current_index"])
-        now = _dec(current)
+        return "Its movement against the previous release is not attributed beyond this timing."
+    before = _dec(predecessor["values"]["hwm_current_index"])
+    now = _dec(current)
+    head = (
+        f"The index is {now:.4f} against {before:.4f} in the previous release "
+        f"({now - before:+.2f}, {((now - before) / before * 100):+.2f}%)"
+    )
+    prior = _path_by_date(predecessor.get("hwm_index_path"))
+    later = _path_by_date(current_path)
+    if not prior or not later:
+        return head + "; the move is not attributed beyond this timing."
+    last_prior, last_now = max(prior), max(later)
+    # the paths must end on the figures printed above, else no split is stated
+    if (
+        last_prior not in later
+        or prior[last_prior].quantize(Decimal("0.0001"))
+        != before.quantize(Decimal("0.0001"))
+        or later[last_now].quantize(Decimal("0.0001"))
+        != now.quantize(Decimal("0.0001"))
+    ):
+        return head + "; the move is not attributed beyond this timing."
+    restated = later[last_prior] - prior[last_prior]
+    extension = later[last_now] - later[last_prior]
+    common = sorted(set(prior) & set(later))
+    differing = [
+        d
+        for d in common
+        if later[d].quantize(Decimal("0.0001")) != prior[d].quantize(Decimal("0.0001"))
+    ]
+    parts = (
+        f"; of this {restated:+.2f} is the restatement of the previous release's own last "
+        f"date {last_prior} ({later[last_prior]:.4f} now against {prior[last_prior]:.4f}) "
+        f"and {extension:+.2f} is the movement from {last_prior} to {last_now}; the two "
+        f"paths differ on {len(differing)} of {len(common)} common dates"
+    )
+    revisions = _revision_sources(source_clock)
+    if differing and all(d in revisions for d in differing):
+        named = "; ".join(f"{d} ({revisions[d]})" for d in differing)
         return (
-            f"The index is {now:.4f} against {before:.4f} in the previous release "
-            f"({now - before:+.2f}, {((now - before) / before * 100):+.2f}%); the move is "
-            "not attributed beyond this timing."
+            head
+            + parts
+            + f", all of them dates on which the source clock records a declared derived "
+            f"patch: {named}; the restatement is attributed to that provider NAV revision."
         )
-    return "Its movement against the previous release is not attributed beyond this timing."
+    if differing:
+        return (
+            head
+            + parts
+            + f" (first {differing[0]}, last {differing[-1]}); that difference is not "
+            "attributed beyond this timing."
+        )
+    return head + parts + "; the move is the extension of the path only."
 
 
 def compose(
@@ -712,6 +818,8 @@ def compose(
     product_strategies: Sequence[str],
     strategy_returns: Mapping[str, Decimal] | None = None,
     hwm_current_index: str | None = None,
+    hwm_index_path: Sequence[Mapping[str, Any]] | None = None,
+    source_clock: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Methodology items from the sources and the report's own rows.
 
@@ -1018,7 +1126,12 @@ def compose(
                         f"The governed HWM member for {strategy} is the sleeve series "
                         f"{epochs[0][1]} from {epochs[0][0]}; the index carries this member from "
                         "that date. "
-                        + _index_move(sources.get("predecessor"), hwm_current_index)
+                        + _index_move(
+                            sources.get("predecessor"),
+                            hwm_current_index,
+                            hwm_index_path,
+                            source_clock,
+                        )
                     ),
                 }
             )

@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import date
 import hashlib
 import json
+import re
 from typing import Any, Final, Mapping, Sequence
 
 SCHEMA_VERSION: Final = 1
@@ -47,7 +48,7 @@ TAG_DEFINITIONS: Final = {
     TAG_DERIVED: "Arithmetic on governed inputs only.",
     TAG_AUDIT_DERIVED: (
         "From the hash-pinned audit analysis: inputs that are not governed data. "
-        "Each row names the pull that replaces it."
+        "A row names the pull that replaces it only where the audit input names one."
     ),
     TAG_ESTIMATED: "An inference or conversion with a stated basis and uncertainty.",
     TAG_UNAVAILABLE: "Cannot be produced from admitted inputs; the pull is named.",
@@ -320,6 +321,30 @@ def _build_component(c: Mapping[str, Any], base: float | None) -> dict[str, Any]
     }
 
 
+_LABEL_DAYS: Final = re.compile(r",\s*(\d+)\s+days\s*$")
+
+
+def _window_label(label: str, calendar_days: int, audit_days: object) -> str:
+    """Re-state a trailing ", N days" in an audit label from the window's own dates.
+
+    The audit's ``days`` is an observation count, the window's calendar span is derived
+    from its start and end: when both are given and differ, the label prints both so the
+    word "days" is never ambiguous. The audit text itself stays verbatim in the input.
+    """
+
+    match = _LABEL_DAYS.search(label)
+    if match is None:
+        return label
+    stem = label[: match.start()]
+    if (
+        isinstance(audit_days, int)
+        and not isinstance(audit_days, bool)
+        and audit_days != calendar_days
+    ):
+        return f"{stem}, {calendar_days} calendar days ({audit_days} observations)"
+    return f"{stem}, {calendar_days} calendar days"
+
+
 def _build_window(
     panel: Mapping[str, Any],
     strategy_id: str,
@@ -387,7 +412,11 @@ def _build_window(
     tags = [c["evidence_tag"] for c in components]
     return {
         "window_id": _text(w.get("window_id"), "window_id"),
-        "label": _text(w.get("label"), "label"),
+        "label": _window_label(
+            _text(w.get("label"), "label"),
+            (end - start).days + 1,
+            w.get("days"),
+        ),
         "kind": w["kind"],
         "start": start.isoformat(),
         "end": end.isoformat(),
@@ -436,6 +465,51 @@ def _intern_sources(strategies: Sequence[dict[str, Any]]) -> list[dict[str, Any]
             for item in [*window["bridge"], *window["memo"]]:
                 item["source_id"] = intern(item.pop("source_ref"))
     return table
+
+
+def _pull_counts(strategies: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Counts of the AUDIT_DERIVED bridge rows by whether they name a replacing pull."""
+
+    named = unnamed = subs = memos = 0
+    for strategy in strategies:
+        for window in [*strategy["windows"], *strategy["epochs"]]:
+            for row in window["bridge"]:
+                if row["evidence_tag"] != TAG_AUDIT_DERIVED:
+                    continue
+                if row["replacing_pull"] is None:
+                    unnamed += 1
+                else:
+                    named += 1
+            subs += len([r for r in window["bridge"] for _s in r["sub_components"]])
+            memos += len(window["memo"])
+    return {
+        "named": named,
+        "unnamed": unnamed,
+        "total": named + unnamed,
+        "sub_components": subs,
+        "memo_rows": memos,
+    }
+
+
+def _tag_definitions(counts: Mapping[str, int]) -> dict[str, str]:
+    """The tag definitions; the AUDIT_DERIVED one states this block's own pull counts."""
+
+    definitions = dict(TAG_DEFINITIONS)
+    definitions[TAG_AUDIT_DERIVED] = (
+        f"{TAG_DEFINITIONS[TAG_AUDIT_DERIVED]} In this block {counts['named']} of "
+        f"{counts['total']} AUDIT_DERIVED bridge rows name a replacing pull and "
+        f"{counts['unnamed']} name none; sub-components and memo rows carry no pull field."
+    )
+    return definitions
+
+
+def _pull_note(counts: Mapping[str, int]) -> str:
+    return (
+        "AUDIT_DERIVED rows are not governed data: they come from the pinned audit "
+        f"analysis. The {counts['named']} bridge rows that name a pull are replaced when "
+        f"that pull is admitted; the {counts['unnamed']} that name none have no pull "
+        "named in the audit input."
+    )
 
 
 def _as_of(panel: Mapping[str, Any]) -> str:
@@ -512,7 +586,7 @@ def _portfolio_bridge(strategies: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "window_basis": "EACH_STRATEGY_PRIMARY_WINDOW_NOT_A_COMMON_WINDOW",
         "dollar_basis": (
             "Audit dollars where the audit supplied them; otherwise component pp times the "
-            "the window capital base named on each row (ESTIMATED)."
+            "window capital base named on each row (ESTIMATED)."
         ),
         "strategies_included": included,
         "strategies_excluded": excluded,
@@ -594,6 +668,8 @@ def build_model_vs_actual(
         del strategy["_all"]
     sources = _intern_sources(strategies)
     pulls = [dict(_mapping(p, "pull")) for p in audit["pulls"]]
+    counts = _pull_counts(strategies)
+    definitions = _tag_definitions(counts)
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "AVAILABLE",
@@ -607,9 +683,7 @@ def build_model_vs_actual(
             "terms_csv": audit.get("terms_csv"),
             "pull_list": audit.get("pull_list"),
         },
-        "evidence_tags": [
-            {"tag": t, "definition": TAG_DEFINITIONS[t]} for t in TAG_ORDER
-        ],
+        "evidence_tags": [{"tag": t, "definition": definitions[t]} for t in TAG_ORDER],
         "components": [
             {"component_id": cid, "label": label} for cid, label in COMPONENTS
         ],
@@ -619,7 +693,7 @@ def build_model_vs_actual(
         "portfolio_bridge": portfolio,
         "pulls": pulls,
         "notes": [
-            "AUDIT_DERIVED rows are not governed data: they come from the pinned audit analysis and are replaced when the named pull is admitted.",
+            _pull_note(counts),
             "A strategy whose window has no admitted model leg is listed under unavailable with the pull that closes it.",
         ],
     }
