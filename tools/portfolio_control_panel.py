@@ -103,6 +103,17 @@ else:
     build_performance_tab = _performance_tab_module.build_performance_tab
     verify_performance_tab = _performance_tab_module.verify_performance_tab
 
+if TYPE_CHECKING:
+    from portfolio_model_vs_actual import build_model_vs_actual
+else:
+    try:
+        _model_vs_actual_module = import_module("tools.portfolio_model_vs_actual")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        _model_vs_actual_module = import_module("portfolio_model_vs_actual")
+    build_model_vs_actual = _model_vs_actual_module.build_model_vs_actual
+
 ACCOUNT_MANIFEST_CALCULATION_CODE: Final = Path(
     build_manifest_candidate.__code__.co_filename
 ).resolve()
@@ -1364,6 +1375,18 @@ def _gunzip_exact(content: bytes) -> bytes:
 
 
 _PANEL_LENS_REPRESENTATION: Final = "SURFACE_SERIES_ONCE_V1"
+
+
+def _model_vs_actual_cli_value(args: argparse.Namespace) -> tuple[Path, str] | None:
+    """The optional model_vs_actual audit input and its pin, both or neither."""
+
+    path = getattr(args, "model_vs_actual_input", None)
+    sha256 = getattr(args, "model_vs_actual_input_sha256", None)
+    if (path is None) != (sha256 is None):
+        raise ControlPanelValidationError(
+            "--model-vs-actual-input and --model-vs-actual-input-sha256 go together"
+        )
+    return None if path is None else (path, str(sha256))
 
 
 def _panel_wire_form(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -11847,6 +11870,7 @@ def _rendered_files(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -12266,6 +12290,19 @@ def _rendered_files(
     # The Performance tab reads the totals above (summed-epoch TWR and difference),
     # so it is built after they are attached.
     data["performance_tab"] = build_performance_tab(data)
+    # PANEL-VIS-004: the optional model-versus-actual block, built only when the
+    # release supplies its hash-pinned audit input; otherwise the panel is unchanged.
+    if model_vs_actual_input is not None:
+        try:
+            data["model_vs_actual"] = build_model_vs_actual(
+                data,
+                model_vs_actual_input[0].read_bytes(),
+                model_vs_actual_input[1],
+            )
+        except (OSError, ValueError) as exc:
+            raise ControlPanelValidationError(
+                f"model_vs_actual input is not usable: {exc}"
+            ) from exc
     wire_data = _panel_wire_form(data)
     _validate_panel_data_schema(
         wire_data,
@@ -12543,6 +12580,8 @@ def _rendered_files(
             ),
         ),
     }
+    if model_vs_actual_input is not None:
+        bound_inputs["model_vs_actual_input"] = model_vs_actual_input
     for name, (path, expected_sha256) in optional_bindings.items():
         if path is not None and expected_sha256 is not None:
             bound_inputs[name] = (path, str(expected_sha256))
@@ -12663,6 +12702,7 @@ def build_candidate(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -12703,6 +12743,7 @@ def build_candidate(
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        model_vs_actual_input=model_vs_actual_input,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -12956,6 +12997,7 @@ def verify_candidate(
     manifest_membership_census_path: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
     _rendered_bundle: list[
         tuple[dict[str, bytes], dict[str, Any], dict[str, tuple[Path, str]]]
     ]
@@ -13000,6 +13042,7 @@ def verify_candidate(
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        model_vs_actual_input=model_vs_actual_input,
     )
     if _rendered_bundle is not None:
         _rendered_bundle.append((expected, data, _))
@@ -14616,6 +14659,7 @@ def publish_panel(
     hybrid_decomposition_plan_bundle: Path | None = None,
     strategy_history_contract_path: Path | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    model_vs_actual_input: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -14688,6 +14732,7 @@ def publish_panel(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         strategy_history_contract_path=strategy_history_contract_path,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        model_vs_actual_input=model_vs_actual_input,
         _rendered_bundle=rendered_bundle,
     )
     if verification.get("all_passed") is not True:
@@ -15148,6 +15193,15 @@ def _parser() -> argparse.ArgumentParser:
             ),
         )
         command.add_argument("--dependence-selected-inputs", type=Path)
+        command.add_argument(
+            "--model-vs-actual-input",
+            type=Path,
+            help=(
+                "Hash-pinned audit bridges input for the optional model_vs_actual "
+                "block (PANEL-VIS-004); requires --model-vs-actual-input-sha256."
+            ),
+        )
+        command.add_argument("--model-vs-actual-input-sha256")
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
@@ -15389,6 +15443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                model_vs_actual_input=_model_vs_actual_cli_value(args),
             )
         elif args.command == "verify":
             if (args.report_root is None) == (args.report_candidate is None):
@@ -15439,6 +15494,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                model_vs_actual_input=_model_vs_actual_cli_value(args),
             )
         elif args.command == "qa":
             result = validate_qa(
@@ -15509,6 +15565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 strategy_history_contract_path=args.strategy_history_contract,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                model_vs_actual_input=_model_vs_actual_cli_value(args),
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)
