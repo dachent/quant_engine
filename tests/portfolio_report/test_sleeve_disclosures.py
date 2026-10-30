@@ -292,9 +292,9 @@ def _compose(
         rows=rows,
         invested_capital={
             "current_by_strategy": [
-                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "73130.957"}
+                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "1250.5"}
             ],
-            "current_aggregate_usd": "393491.77",
+            "current_aggregate_usd": "5000.25",
         },
         sleeve_accounts={S1: PARENT, S2: PARENT, f"{PARENT}-s3": PARENT},
         product_strategies=["p123-ai-factor"],
@@ -353,9 +353,9 @@ def test_the_predecessor_comparison_is_read_by_hash_and_pointer_or_omitted(
     previous = {
         "invested_capital": {
             "current_by_strategy": [
-                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "55748.4"}
+                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "1000.4"}
             ],
-            "current_aggregate_usd": "376109.21",
+            "current_aggregate_usd": "4000.21",
         }
     }
     data_root = tmp_path / "root"
@@ -382,7 +382,7 @@ def test_the_predecessor_comparison_is_read_by_hash_and_pointer_or_omitted(
     text = next(
         i["value"] for i in result["items"] if i["item"] == "Sleeve capital basis"
     )
-    assert "55,748.40" in text and "376,109.21" in text and "31.2%" in text
+    assert "1,000.40" in text and "4,000.21" in text and "+250.10, +25.0%" in text
     # an unreachable, mis-hashed or unresolvable predecessor is omitted, never guessed
     assert (
         disclosures._resolve_predecessor(entry, None)["reason"]
