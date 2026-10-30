@@ -1818,6 +1818,7 @@ def _current_plan_bundle(
             "schema_name": "portfolio-canonical-strategy-returns",
             "schema_version": "1",
         },
+        "models": [{"periods_per_year": 252, "series_id": series_id}],
         "provenance_sources": [
             {
                 "expected_sha256": hashlib.sha256(provenance_content).hexdigest(),
@@ -5808,3 +5809,9 @@ def test_current_base_analytics_reads_factors_projected_to_the_spec_date(
     )
     # The retained input is untouched.
     assert retained.read_bytes() == _BASE_FACTORS
+
+
+def test_expected_model_annualisation_comes_from_the_base_spec_not_a_literal() -> None:
+    assert builder._declared_periods({"Strategy 0": 52}, "Strategy 0") == 52
+    with pytest.raises(builder.VerticalBuildError, match="periods_per_year"):
+        builder._declared_periods({"Strategy 0": 252}, "Strategy 1")

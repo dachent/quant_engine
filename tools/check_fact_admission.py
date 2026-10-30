@@ -26,14 +26,23 @@ from typing import Any
 # tests/provider_ledger/test_fact_admission_gate.py reads that tuple from the
 # source and fails when the two differ.
 ADMITTED_FIELDS = (
+    "asset_category",
     "close_price",
     "commission",
     "event_time",
     "executed_time",
+    "expiry",
     "fees_and_commission",
+    "listing_exchange",
     "mark_price",
+    "multiplier",
     "order_reference",
+    "put_call",
+    "strike",
+    "sub_category",
+    "symbol",
     "timing_granularity",
+    "underlying_conid_sha256",
 )
 
 

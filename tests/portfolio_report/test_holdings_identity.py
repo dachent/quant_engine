@@ -241,3 +241,76 @@ def test_schema_admits_the_sidecar_and_old_reports_without_it() -> None:
     forged = deepcopy(document)
     forged["holdings_identity"]["rows"][0]["symbol_status"] = "MAYBE"
     assert list(validator.iter_errors(forged))
+
+
+def test_ibkr_symbol_is_the_one_its_own_position_row_carries_per_date() -> None:
+    """R2.1 Q2: an IBKR conid re-reported under another symbol keeps each date's own.
+
+    The id is sha256(conid), so the id cannot prove a symbol; the position row the
+    IBKR adapter wrote from the OpenPosition element of that statement date does.
+    """
+
+    catalog = _catalog()
+    catalog["positions"] = [
+        {
+            **catalog["positions"][0],
+            "symbol": "WILCF",
+            "listing_exchange": "PINK",
+        },
+        {
+            **catalog["positions"][0],
+            "as_of_date": "2026-08-01",
+            "symbol": "WILC",
+            "listing_exchange": "NASDAQ",
+        },
+    ]
+    section = build_holdings_identity(reporter._positions(catalog), catalog)
+    by_date = {row["as_of_date"]: row for row in section["rows"]}
+
+    assert by_date["2026-09-17"]["symbol"] == "WILCF"
+    assert by_date["2026-09-17"]["identity"]["listing_exchange"] == "PINK"
+    assert by_date["2026-08-01"]["symbol"] == "WILC"
+    assert by_date["2026-08-01"]["identity"]["listing_exchange"] == "NASDAQ"
+    for row in by_date.values():
+        assert row["symbol_source"] == "POSITION_ROW"
+        assert row["symbol_proof"] == "LEDGER_ROW_CARRIED"
+        assert row["symbol_status"] == "AVAILABLE"
+        assert row["identity"]["provider_identifier_sha256"] == _h("265598")
+    assert (
+        verify_holdings_identity(
+            {
+                "positions": reporter._positions(catalog),
+                "holdings_identity": section,
+            },
+            catalog,
+        )["holdings_identity_symbol_available"]
+        == 2
+    )
+    validator = Draft202012Validator(SECTION_SCHEMA, format_checker=FormatChecker())
+    assert (
+        list(
+            validator.iter_errors(
+                {"report_schema_version": 4, "holdings_identity": section}
+            )
+        )
+        == []
+    )
+
+
+def test_a_position_keeps_the_capture_it_was_observed_under() -> None:
+    """R2.1 Q2: a 09-17 end-of-day book captured on the 09-18 UTC date says both."""
+
+    catalog = _catalog()
+    catalog["positions"][2] = {
+        **catalog["positions"][2],
+        "as_of_basis": "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE",
+        "capture_date": "2026-09-18",
+        "observed_at": "2026-09-18T03:59:40+00:00",
+    }
+    rows = {row["security_id"]: row for row in reporter._positions(catalog)}
+
+    held = rows[SCHWAB_ID]
+    assert held["capture_date"] == "2026-09-18"
+    assert held["as_of_basis"] == "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE"
+    assert held["observed_at"] == "2026-09-18T03:59:40+00:00"
+    assert "capture_date" not in rows[IBKR_ID]

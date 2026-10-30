@@ -32,7 +32,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "0.2.0"
+BUILDER_VERSION: Final = "0.3.0"
 SCHEMA_VERSION: Final = 2
 STRATEGY_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 PUBLIC_SOURCES: Final = {
@@ -86,6 +86,17 @@ CORE_BENCHMARKS: Final = {
     "SPY": "U.S. large-cap equity (S&P 500)",
     "SPXL": "U.S. large-cap equity, 3x daily leveraged",
 }
+# SPY and SPXL are the dollar-matched comparison benchmarks.  Their governed
+# history reaches back before the cash proxy that bounds every factor lens, so the
+# weekly and daily series are read from the unprojected market input of the plan
+# bundle (the cash-proxy-gated lens copy would truncate them) and never from a lens.
+FULL_HISTORY_BENCHMARKS: Final = ("SPY", "SPXL")
+MARKET_BENCHMARK_SOURCE: Final = (
+    "inputs/market/style_returns.csv",
+    "STYLE_MULTI_ASSET",
+    "TOTAL_RETURN_ETF_PROXY",
+)
+DAILY_BENCHMARK_SOURCE_ID: Final = "yahoo-adjusted-etf-daily"
 
 
 class WeeklyReturnError(ValueError):
@@ -567,9 +578,59 @@ def _wide_return_columns(
     return values
 
 
+def _selected_return_columns(
+    path: Path, selected: Iterable[str], as_of: date
+) -> dict[str, list[tuple[date, Decimal]]]:
+    wanted = tuple(selected)
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        header = csv.DictReader(handle).fieldnames
+    if header is None or "date" not in header:
+        raise WeeklyReturnError(f"wide return source lacks date: {path.name}")
+    absent = [column for column in wanted if column not in header]
+    if absent:
+        raise WeeklyReturnError(f"market benchmark column is absent: {absent[0]}")
+    columns = _wide_return_columns(
+        path, {name for name in header if name not in wanted}
+    )
+    return {
+        column: [item for item in columns[column] if item[0] <= as_of]
+        for column in wanted
+    }
+
+
+def _daily_benchmark_block(
+    selected: Mapping[str, list[tuple[date, Decimal]]],
+    relative: str,
+    sha256: str,
+) -> dict[str, Any]:
+    series = []
+    for column in FULL_HISTORY_BENCHMARKS:
+        observations = sorted(selected[column])
+        series.append(
+            {
+                "dates": [day.isoformat() for day, _ in observations],
+                "first_date": observations[0][0].isoformat(),
+                "last_date": observations[-1][0].isoformat(),
+                "observation_count": len(observations),
+                "returns": [_decimal_text(value) for _, value in observations],
+                "series_id": f"market:{column}",
+                "ticker": column,
+            }
+        )
+    return {
+        "first_price_policy": "DROPPED_NO_PREDECESSOR",
+        "return_basis": MARKET_BENCHMARK_SOURCE[2],
+        "series": series,
+        "source_artifact": {"path": relative, "sha256": sha256},
+        "source_id": DAILY_BENCHMARK_SOURCE_ID,
+        "status": "AVAILABLE",
+        "unit": "DECIMAL_DAILY_RETURN",
+    }
+
+
 def _public_rows(
     plan_bundle: Path, as_of: date
-) -> tuple[list[dict[str, Any]], list[Path]]:
+) -> tuple[list[dict[str, Any]], list[Path], dict[str, Any]]:
     expected_hashes = _manifest_hashes(plan_bundle)
     rows_by_id: dict[str, dict[str, Any]] = {}
     input_paths: list[Path] = [plan_bundle / "plan-manifest.json"]
@@ -584,6 +645,8 @@ def _public_rows(
             raise WeeklyReturnError(f"planning input hash differs: {relative}")
         input_paths.append(path)
         for column, observations in _wide_return_columns(path, excluded).items():
+            if column.upper() in FULL_HISTORY_BENCHMARKS:
+                continue
             if source_key.startswith("us-economic"):
                 canonical_id = f"factor:us:{column.upper()}"
                 display_name = f"U.S. {column.upper()}"
@@ -618,6 +681,40 @@ def _public_rows(
                     f"canonical weekly series is duplicated: {canonical_id}"
                 )
             rows_by_id[canonical_id] = item
+    market_relative, market_group, market_basis = MARKET_BENCHMARK_SOURCE
+    market_path = plan_bundle / Path(market_relative)
+    market_sha256 = hash_file(market_path)[0]
+    if expected_hashes.get(market_relative) != market_sha256:
+        raise WeeklyReturnError(f"planning input hash differs: {market_relative}")
+    input_paths.append(market_path)
+    market_columns = _selected_return_columns(
+        market_path, FULL_HISTORY_BENCHMARKS, as_of
+    )
+    for column, observations in market_columns.items():
+        if not observations:
+            raise WeeklyReturnError(f"market benchmark has no observations: {column}")
+        values, observation_meta, calendar_basis = _weekly_series(
+            observations, as_of=as_of
+        )
+        canonical_id = f"market:{column}"
+        if canonical_id in rows_by_id:
+            raise WeeklyReturnError(
+                f"canonical weekly series is duplicated: {canonical_id}"
+            )
+        rows_by_id[canonical_id] = {
+            "absent_value_status": "UNAVAILABLE_NO_OBSERVATION_IN_WEEK",
+            "calendar_basis": calendar_basis,
+            "coverage": _coverage(values),
+            "display_groups": [market_group, "CORE_BENCHMARK"],
+            "display_name": f"{column} · {CORE_BENCHMARKS[column]}",
+            "primary_group": market_group,
+            "observation_meta": observation_meta,
+            "return_basis": market_basis,
+            "series_id": canonical_id,
+            "source_key": "core-benchmark-market",
+            "values": values,
+        }
+    daily_block = _daily_benchmark_block(market_columns, market_relative, market_sha256)
     benchmark_ids = {
         row["series_id"].split(":", 1)[1]
         for row in rows_by_id.values()
@@ -625,7 +722,7 @@ def _public_rows(
     }
     if benchmark_ids != set(CORE_BENCHMARKS):
         raise WeeklyReturnError("core benchmark boundary differs")
-    return [rows_by_id[key] for key in sorted(rows_by_id)], input_paths
+    return [rows_by_id[key] for key in sorted(rows_by_id)], input_paths, daily_block
 
 
 def build_weekly_returns(
@@ -640,7 +737,7 @@ def build_weekly_returns(
     strategy_rows = _strategy_rows(
         strategy_returns, correlation, generation_manifest, as_of
     )
-    public_rows, public_paths = _public_rows(plan_bundle, as_of)
+    public_rows, public_paths, daily_benchmarks = _public_rows(plan_bundle, as_of)
     rows = [*strategy_rows, *public_rows]
     series_ids = [row["series_id"] for row in rows]
     if len(series_ids) != len(set(series_ids)):
@@ -660,6 +757,7 @@ def build_weekly_returns(
         "as_of_date": as_of.isoformat(),
         "builder_version": BUILDER_VERSION,
         "current_week": current_week,
+        "daily_benchmark_returns": daily_benchmarks,
         "default_evidence_mode": "LIVE_ONLY",
         "display_groups": [
             "STRATEGY",
