@@ -171,7 +171,10 @@ new tail would collide with them.
    `CURRENT.json` files before/after to prove nothing moved.
 9. **The real commit (owner-authorized only):** `tools/data_pipeline.py
    execute --spec <production-spec.json> --commit --commit-authorization
-   <commit-authorization.json>`.
+   <commit-authorization.json> --replica-receipt <replica-receipt.json>`.
+   The receipt comes from `tools/release_replica.py ceremony` (or `lanes`, which
+   runs it beside the real-roots dry-run); the commit refuses without a receipt
+   whose steps all passed for this release's code commit and full normalized spec.
 10. **Post-commit:** `tools/portfolio_qc.py --profile post-release-verify
     --spec <spec> --preflight-receipt <preflight receipt json>
     --evidence-dir <post-release evidence dir>`, then

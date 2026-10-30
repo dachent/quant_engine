@@ -23,7 +23,8 @@
           <button class="nav-item" type="button" data-nav="dependence"><span class="nav-index">06</span><span>Dependence</span></button>
           <button class="nav-item" type="button" data-nav="weekly"><span class="nav-index">07</span><span>Weekly returns</span></button>
           <button class="nav-item" type="button" data-nav="performance"><span class="nav-index">08</span><span>Performance charts</span></button>
-          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">09</span><span>Data health</span></button>
+          <button class="nav-item" type="button" data-nav="modelvsactual"><span class="nav-index">09</span><span>Model vs actual</span></button>
+          <button class="nav-item" type="button" data-nav="data"><span class="nav-index">10</span><span>Data health</span></button>
         </nav>
         <div class="sidebar-note"><div class="eyebrow">Mandate firewall</div><div class="reserve-lock policy-text" title="Policy statement; the payload carries no field for the reserve risk budget"><span aria-hidden="true">◆</span> Reserve risk budget: $0</div><p>Read-only local evidence. No brokerage connection, order path, or trade authorization.</p></div>
       </aside>
@@ -137,11 +138,16 @@
           </section>
 
           <section class="view" data-view="performance" aria-labelledby="performance-heading" hidden>
-            <div class="section-intro"><div><div class="eyebrow">Performance charts</div><h2 id="performance-heading">How the strategies and the portfolio have compounded, and what the systematic book is worth</h2></div><p>Total return only, from the accepted weekly series and the daily account NAV of each strategy's epochs. What the snapshot does not carry (SPY, SPXL) is named as not in this snapshot, never filled in.</p></div>
+            <div class="section-intro"><div><div class="eyebrow">Performance charts</div><h2 id="performance-heading">How the strategies and the portfolio have compounded, and what the systematic book is worth</h2></div><p>Total return only, from the accepted weekly series and the daily account NAV of each strategy's epochs. What the producer does not publish is named as unavailable with its reason, never filled in.</p></div>
             <div class="grid grid-12">
               <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Rebased total return</div><h3>Seven strategies, an equal-weight portfolio, SPY and SPXL</h3></div></div><div class="perf-controls"><div class="segmented" aria-label="Evidence mode"><button type="button" class="segment" data-perf-mode="LIVE_PLUS_BACKTEST" aria-pressed="false">Live + backtest</button><button type="button" class="segment" data-perf-mode="LIVE_ONLY" aria-pressed="false">Live only</button></div><div class="segmented" aria-label="Value axis"><button type="button" class="segment" data-perf-axis="linear" aria-pressed="false">Linear</button><button type="button" class="segment" data-perf-axis="log" aria-pressed="false">Log</button></div><div id="perf-zoom-selector" class="segmented" aria-label="Zoom"></div></div><div id="perf-returns-chart"></div><div id="perf-returns-legend" class="perf-legend"></div><p id="perf-returns-note" class="cell-secondary"></p></article>
-              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Systematic portfolio</div><h3>Dollar value by strategy, reserve excluded</h3></div></div><div id="perf-value-readout"></div><div class="perf-controls"><div id="perf-value-zoom-selector" class="segmented" aria-label="Zoom"></div></div><div id="perf-value-chart"></div><div id="perf-value-legend" class="perf-legend"></div><div class="table-wrap wide"><table id="perf-trailing-table"><caption>Trailing returns</caption></table></div><p class="cell-secondary">Value is the sum of each strategy's account NAV on each day (deposits and withdrawals move it). Returns come from the governed HWM index: time-weighted, levered net NAV basis.</p></article>
+              <article class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Systematic portfolio</div><h3>Dollar value by strategy, reserve excluded</h3></div></div><div id="perf-value-readout"></div><div class="perf-controls"><div id="perf-value-zoom-selector" class="segmented" aria-label="Zoom"></div></div><div id="perf-value-chart"></div><div id="perf-value-legend" class="perf-legend"></div><div class="table-wrap wide"><table id="perf-trailing-table"><caption>Trailing returns</caption></table></div><p class="cell-secondary">Value is the sum of each strategy's account NAV on each day (deposits and withdrawals move it). Benchmark dollar lines put the same deposits and withdrawals into the benchmark on their dates. Portfolio returns come from the governed HWM index: time-weighted, levered net NAV basis.</p></article>
             </div>
+          </section>
+
+          <section class="view" data-view="modelvsactual" aria-labelledby="modelvsactual-heading" hidden>
+            <div class="section-intro"><div><div class="eyebrow">Model vs actual</div><h2 id="modelvsactual-heading">Why did the account earn less than the model?</h2></div><p>Each strategy's account return against its comparator model over the same window, split into signed components. Every number carries an evidence tag; terms the producer cannot yet publish are named with their reason and the pull that replaces them.</p></div>
+            <div class="grid grid-12"><article class="panel span-12"><div id="mva-root"></div></article></div>
           </section>
 
           <section class="view" data-view="candidates" aria-labelledby="candidates-heading" hidden>

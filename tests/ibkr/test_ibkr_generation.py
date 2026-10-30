@@ -1205,7 +1205,7 @@ def test_refresh_and_tws_snapshot_are_reconciled_without_identifiers(
     second, second_manifest, second_bytes = build_generation(spec_path)
     assert first_bytes == second_bytes
     assert first_manifest.generation_id == second_manifest.generation_id
-    assert first["catalog_schema_version"] == 7
+    assert first["catalog_schema_version"] == 8
     assert {row["value_basis"] for row in first["nav_observations"]} == {
         "ACCOUNT_TOTAL"
     }
@@ -2825,6 +2825,116 @@ def test_trade_quantity_and_prices_reach_the_catalog(
     assert {row["quantity"] for row in trades} == {"1"}
     assert {row["execution_price"] for row in trades} == {"10.25"}
     assert {row["close_price"] for row in trades} == {"10.5"}
+
+
+def _positions_by_day(catalog: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    by_day: dict[str, list[dict[str, Any]]] = {}
+    for row in catalog["positions"]:
+        by_day.setdefault(row["as_of_date"], []).append(row)
+    return by_day
+
+
+def test_position_symbol_is_the_one_its_own_statement_element_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2.1 Q2: one conid reported as WILC and then WILCF keeps both, by date.
+
+    IBKR re-reports a conid under another symbol when the listing changes (BSL and
+    BSLd, WILC NASDAQ and WILCF PINK, RLYB and RLYB.OLD).  The rule is that a
+    position row carries the symbol and listing of the OpenPosition element it was
+    read from, for that statement date, and that the symbol is never resolved per
+    conid across dates.
+    """
+
+    import re
+    import sys
+
+    original = _xml
+
+    def relisted(*args: Any, **kwargs: Any) -> str:
+        text = original(*args, **kwargs)
+        # args[1] is the statement day; from 2026-01-05 the conid trades as WILCF.
+        late = args[1] >= date(2026, 1, 5)
+        symbol, exchange = ("WILCF", "PINK") if late else ("WILC", "NASDAQ")
+        return re.sub(
+            r'symbol="SYNTH"',
+            f'symbol="{symbol}" listingExchange="{exchange}"',
+            text,
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", relisted)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    by_day = _positions_by_day(catalog)
+    assert len({row["security_id"] for rows in by_day.values() for row in rows}) == 1
+    for day, rows in by_day.items():
+        expected = ("WILCF", "PINK") if day >= "2026-01-05" else ("WILC", "NASDAQ")
+        assert {(row["symbol"], row["listing_exchange"]) for row in rows} == {expected}
+    # The security table never carries a per-conid symbol: it would be ambiguous.
+    assert all("symbol" not in row for row in catalog["securities"])
+
+
+def test_position_without_a_stated_symbol_carries_no_symbol_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    original = _xml
+
+    def blank(*args: Any, **kwargs: Any) -> str:
+        return original(*args, **kwargs).replace('symbol="SYNTH"', 'symbol=""')
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", blank)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    assert catalog["positions"]
+    assert all(
+        "symbol" not in row and "listing_exchange" not in row
+        for row in catalog["positions"]
+    )
+
+
+def test_position_symbol_and_asset_category_reach_the_ledger_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ledger row keeps the catalog's identity facts (fact-admission gate)."""
+
+    import sys
+
+    import check_fact_admission as gate
+
+    original = _xml
+
+    def classified(*args: Any, **kwargs: Any) -> str:
+        return original(*args, **kwargs).replace(
+            'symbol="SYNTH"',
+            'symbol="SYNTH" assetCategory="STK" subCategory="COMMON" '
+            'listingExchange="NYSE"',
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_xml", classified)
+    catalog, _manifest, _payload = build_generation(_spec(tmp_path))
+
+    rows = catalog["positions"]
+    assert {row["asset_category"] for row in rows} == {"STK"}
+    projected, _ = ledger._project_account_facts(  # noqa: SLF001
+        "ibkr",
+        "generation-ibkr",
+        {
+            **{fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]},  # noqa: SLF001
+            "positions": rows,
+        },
+        {row["account_id"] for row in rows},
+        {row["strategy_id"] for row in rows if row["strategy_id"]},
+        {
+            account: [{"effective_start": "2026-01-01", "strategy_id": "strategy-x"}]
+            for account in {row["account_id"] for row in rows}
+        },
+    )
+    assert projected["positions"]
+    assert gate.dropped_facts(rows, projected["positions"]) == []
+    assert {row["symbol"] for row in projected["positions"]} == {"SYNTH"}
+    assert {row["asset_category"] for row in projected["positions"]} == {"STK"}
 
 
 @pytest.mark.parametrize(

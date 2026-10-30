@@ -1675,6 +1675,36 @@
         "lines": {"type": "array", "items": {"type": "object"}}
       }
     },
+    "capital_reconciliation_epoch_line": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "strategy_id", "effective_start", "effective_end", "status", "lifecycle_state", "gain_usd", "current_value_usd"],
+      "properties": {
+        "account_id": {"type": ["string", "null"]},
+        "strategy_id": {"type": ["string", "null"]},
+        "effective_start": {"type": ["string", "null"]},
+        "effective_end": {"type": ["string", "null"]},
+        "status": {"type": ["string", "null"]},
+        "lifecycle_state": {"type": ["string", "null"]},
+        "gain_usd": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "current_value_usd": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
+      }
+    },
+    "capital_reconciliation_epoch_set": {
+      "$comment": "R2.1: the report's governed epochs against every epoch-manifest row, epoch by epoch; the outside rows carry the gain that no report total counts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report_epoch_count", "manifest_row_count", "gain_of_report_epochs_usd", "gain_of_outside_report_epochs_usd", "report_epochs", "outside_report_epochs", "note"],
+      "properties": {
+        "report_epoch_count": {"type": "integer", "minimum": 0},
+        "manifest_row_count": {"type": "integer", "minimum": 0},
+        "gain_of_report_epochs_usd": {"$ref": "#/$defs/decimal"},
+        "gain_of_outside_report_epochs_usd": {"$ref": "#/$defs/decimal"},
+        "report_epochs": {"type": "array", "items": {"$ref": "#/$defs/capital_reconciliation_epoch_line"}},
+        "outside_report_epochs": {"type": "array", "items": {"$ref": "#/$defs/capital_reconciliation_epoch_line"}},
+        "note": {"type": "string"}
+      }
+    },
     "capital_reconciliation": {
       "$comment": "PANEL-VIS-002: derived total net capital minus governed invested capital, split into named components that sum to the difference with a zero residual.",
       "type": "object",
@@ -1699,6 +1729,7 @@
         "difference_usd": {"$ref": "#/$defs/decimal"},
         "components": {"type": "array", "items": {"$ref": "#/$defs/capital_reconciliation_component"}},
         "residual_usd": {"const": "0"},
+        "epoch_set": {"$ref": "#/$defs/capital_reconciliation_epoch_set"},
         "memo": {"type": "object"}
       },
       "allOf": [
