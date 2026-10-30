@@ -88,3 +88,31 @@ def test_harness_measures_a_stub_panel_with_a_control(tmp_path: Path) -> None:
     assert len(report["candidate"]["timed"]) == 2
     assert report["verdict"]["pass"] is True
     assert report["candidate"]["errors"] == []
+
+
+_CLEANUP = """
+import { removeTree } from %(harness)s;
+const seen = [];
+const eperm = () => { const e = new Error("held"); e.code = "EPERM"; throw e; };
+const denied = () => { const e = new Error("no"); e.code = "EACCES"; throw e; };
+const tolerated = removeTree("x", (p, o) => { seen.push(o); eperm(); });
+let refused = false;
+try { removeTree("x", denied); } catch (e) { refused = e.code === "EACCES"; }
+process.stdout.write(JSON.stringify({ tolerated, refused, opts: seen[0], ok: removeTree("x", () => {}) }));
+"""
+
+
+def test_cleanup_tolerates_a_held_profile_but_not_other_errors() -> None:
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    if runtime is None:
+        pytest.skip("node is unavailable")
+    source = _CLEANUP % {"harness": json.dumps(HARNESS.as_uri())}
+    done = subprocess.run(
+        [runtime.node, "--input-type=module", "-e", source],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    out = json.loads(done.stdout)
+    assert out["tolerated"] is False and out["refused"] is True and out["ok"] is True
+    assert out["opts"]["maxRetries"] >= 10 and out["opts"]["retryDelay"] >= 200

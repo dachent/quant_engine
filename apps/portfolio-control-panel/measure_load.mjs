@@ -109,9 +109,24 @@ async function launch(pw, executable, port) {
       const exited = new Promise((r) => child.once("exit", r));
       child.kill();
       await Promise.race([exited, sleep(5000)]);
-      fs.rmSync(userDir, { recursive: true, force: true, maxRetries: 3 });
+      removeTree(userDir);
     },
   };
+}
+
+// Windows can hold a just-killed browser's profile files for a moment (EPERM/EBUSY). The
+// measurement is already complete when this runs, so retry generously and then tolerate a
+// cleanup failure instead of failing the harness; a leftover temp dir is not a result.
+export function removeTree(target, remove = fs.rmSync) {
+  try {
+    remove(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    return true;
+  } catch (error) {
+    if (["EPERM", "EBUSY", "ENOTEMPTY"].includes(error && error.code)) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function loadOnce(browser, html, extra) {
@@ -155,7 +170,7 @@ async function lensAndDownload(page) {
     out.download_bytes = bytes.length;
     out.download_sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
   }
-  fs.rmSync(dir, { recursive: true, force: true });
+  removeTree(dir);
   return out;
 }
 
