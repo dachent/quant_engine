@@ -215,3 +215,67 @@ def test_malformed_marker_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(gate.ReplicaGateError, match="marker differs"):
         gate.is_replica_spec(_spec(base))
+
+
+def _gate_pair(tmp: Path, **replica_extra: Any) -> tuple[Any, Any, Path]:
+    """Real and replica specs whose gate files sit beside the specs in different directories
+    (c/production vs c/replica-production) and whose rebind contract embeds root paths."""
+
+    real_base, replica_base = tmp / "real", tmp / "replica"
+    _mark(replica_base)
+    real, replica = _spec(real_base), _spec(replica_base)
+    gates = []
+    for name, base, spec in (
+        ("production", real_base, real),
+        ("replica-production", replica_base, replica),
+    ):
+        gate_dir = tmp / "c" / name
+        gate_dir.mkdir(parents=True)
+        body = {
+            "root": (base / "root-a").as_posix(),
+            "spec": (gate_dir / "production-spec.json").as_posix(),
+            "k": 1,
+        }
+        if base == replica_base:
+            body.update(replica_extra)
+        gate_path = gate_dir / "portfolio-production-rebind-contract.json"
+        gate_path.write_text(json.dumps(body), encoding="utf-8")
+        gates.append(
+            {
+                "gate_id": "rebind",
+                "path": str(gate_path),
+                "sha256": hashlib.sha256(gate_path.read_bytes()).hexdigest(),
+            }
+        )
+        previous = spec.to_dict
+        spec.to_dict = lambda previous=previous, gates=gates[-1]: {
+            **previous(),
+            "gates": [dict(gates)],
+        }
+    return real, replica, tmp / "receipt.json"
+
+
+def test_gate_files_beside_the_specs_normalize_to_equal_topology(
+    tmp_path: Path,
+) -> None:
+    real, replica, receipt = _gate_pair(tmp_path)
+    assert gate.topology(real, tmp_path / "real") == gate.topology(
+        replica, tmp_path / "replica"
+    )
+    path = _receipt(tmp_path, real, replica, _steps())
+    assert gate.verify_receipt(path, real)["kind"] == gate.RECEIPT_KIND
+
+
+def test_a_gate_whose_content_differs_beyond_paths_still_blocks(tmp_path: Path) -> None:
+    real, replica, _ = _gate_pair(tmp_path, extra_key="different")
+    path = _receipt(tmp_path, real, replica, _steps())
+    with pytest.raises(gate.ReplicaGateError, match="different topology"):
+        gate.verify_receipt(path, real)
+
+
+def test_an_unreadable_gate_file_keeps_its_recorded_digest(tmp_path: Path) -> None:
+    real, replica, _ = _gate_pair(tmp_path)
+    next(iter((tmp_path / "c" / "replica-production").glob("*.json"))).unlink()
+    assert gate.topology(real, tmp_path / "real") != gate.topology(
+        replica, tmp_path / "replica"
+    )
