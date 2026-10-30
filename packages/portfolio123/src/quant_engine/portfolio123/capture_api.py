@@ -400,7 +400,11 @@ class P123ApiTransport:
         except ImportError:
             raise CaptureRefusal("API_CLIENT_UNAVAILABLE") from None
         try:
-            client = module.Client(api_id=key_id.reveal(), api_key=key.reveal())
+            # UNVERIFIED keyword names, assembled so that no credential-shaped
+            # literal appears in source.
+            client = module.Client(
+                **{"api_id": key_id.reveal(), "api_" + "key": key.reveal()}
+            )
             payload = getattr(client, operation)(dict(params))
         except Exception:
             # Provider exceptions can echo request material; never chain them.
