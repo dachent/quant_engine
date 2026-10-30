@@ -32,6 +32,7 @@ _IDENTITY_KEYS: Final = (
     "expiry",
     "figi",
     "isin",
+    "listing_exchange",
     "multiplier",
     "provider_identifier_sha256",
     "put_call",
@@ -48,8 +49,8 @@ REQUIRED_PULLS: Final[dict[str, str]] = {
     "HASHED_IDENTIFIER:" + NO_SYMBOL_IN_LEDGER: (
         "IBKR Flex statement OpenPosition, Trade and CashTransaction rows (conid, "
         "symbol, assetCategory) for the account and date, joined where "
-        "sha256(conid)[:24] equals the security id; or an IBKR generation whose "
-        "securities rows carry symbol"
+        "sha256(conid)[:24] equals the security id; or an IBKR generation (catalog schema 8 or later) whose "
+        "position rows carry symbol"
     ),
     "SYMBOL_ID:" + NO_SYMBOL_IN_LEDGER: (
         "the provider statement row for the security carrying its symbol"

@@ -699,8 +699,18 @@ def select_catalog_rows(
     """One account's rows inside the window, and the SHA-256 of their canonical bytes."""
 
     catalog = _strict_json(raw, "catalog")
-    if not isinstance(catalog, Mapping) or catalog.get("catalog_schema_version") != 7:
-        raise SleeveVerificationError("not a schema-7 catalog")
+    version = (
+        catalog.get("catalog_schema_version") if isinstance(catalog, Mapping) else None
+    )
+    # Independent of the builder: schema 7 introduced the fields read below and later
+    # schemas only add fields.
+    if (
+        not isinstance(catalog, Mapping)
+        or isinstance(version, bool)
+        or not isinstance(version, int)
+        or version < 7
+    ):
+        raise SleeveVerificationError("not a schema-7-or-later catalog")
     chosen: dict[str, list[Mapping[str, Any]]] = {}
     for key, day_key in (
         ("transactions", None),
