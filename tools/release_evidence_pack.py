@@ -77,6 +77,8 @@ def _refuse_links(dest: Path) -> None:
 def pack(
     cycle: Path, dest: Path, includes: Sequence[str], excludes: Sequence[str] = ()
 ) -> dict[str, object]:
+    if dest.is_symlink():
+        raise PackError(f"{dest} is a link")
     cycle, dest = cycle.resolve(), dest.resolve()
     if dest == cycle or cycle in dest.parents:
         raise PackError("--dest lies inside --cycle")
