@@ -5071,6 +5071,13 @@ def _optional_mapping(value: object) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
 
 
+def _available_prefixed(status: object) -> str:
+    """The confidence status as one value: prefixed only when it is not already."""
+
+    text = str(status)
+    return text if text.startswith("AVAILABLE_") else "AVAILABLE_" + text
+
+
 def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     """What a reader needs next to an alpha tile: window, n, SE, t, backtest share, basis.
 
@@ -5149,7 +5156,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "se": None if se is None else se_text,
         "t_stat": None if t_stat is None else format(t_stat, "f"),
         "t_status": (
-            "AVAILABLE_" + str(alpha.get("confidence_status"))
+            _available_prefixed(alpha.get("confidence_status"))
             if t_stat is not None and alpha is not None
             else "UNAVAILABLE_NO_STANDARD_ERROR"
         ),

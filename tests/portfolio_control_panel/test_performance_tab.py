@@ -1153,6 +1153,32 @@ def test_the_report_epoch_set_names_the_retired_epochs_outside_it() -> None:
         tab.verify_performance_tab(bad, panel)
 
 
+def test_the_flow_identity_closes_with_the_published_rounding_on_every_day() -> None:
+    panel = _panel_with_benchmarks()
+    # 0.006 + 0.006 rounds apart (1c + 1c) but together is 0.012 (1c): the net flow
+    # is rounded once from the exact amount and rounding_cents carries the day's cent.
+    panel["account_manifest"]["rows"][0]["observation_trace"]["links"][0][
+        "net_flow"
+    ] = "0.006"
+    panel["account_manifest"]["rows"][2]["observation_trace"]["links"][1][
+        "net_flow"
+    ] = "0.006"
+    block = tab.build_performance_tab(panel)
+    flows = block["slices"]["flows"]
+    for index, net in enumerate(flows["net_flow_cents"]):
+        assert (
+            net
+            == flows["link_net_flow_cents"][index]
+            + flows["opening_cents"][index]
+            - flows["closing_cents"][index]
+            + flows["rounding_cents"][index]
+        )
+        assert abs(flows["rounding_cents"][index]) <= 1
+    assert sum(flows["net_flow_cents"]) == flows["total_contributed_cents"]
+    tab.verify_performance_tab(block, panel)
+    assert list(_schema_validator().iter_errors(block)) == []
+
+
 def test_the_retired_component_derives_from_the_reports_unrounded_outside_gain() -> (
     None
 ):

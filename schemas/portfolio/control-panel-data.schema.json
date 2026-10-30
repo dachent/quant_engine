@@ -2681,7 +2681,7 @@
     "performance_tab_flows": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["unit", "definition", "net_flow_cents", "opening_cents", "closing_cents", "link_net_flow_cents", "total_contributed_cents", "implied_pnl_cents", "internal_cancellation", "residual_treatment", "report_crosscheck"],
+      "required": ["unit", "definition", "net_flow_cents", "opening_cents", "closing_cents", "link_net_flow_cents", "rounding_cents", "total_contributed_cents", "implied_pnl_cents", "internal_cancellation", "residual_treatment", "report_crosscheck"],
       "properties": {
         "unit": { "const": "USD_CENTS" },
         "definition": { "type": "string", "minLength": 1 },
@@ -2689,6 +2689,7 @@
         "opening_cents": { "type": "array", "items": { "type": "integer" } },
         "closing_cents": { "type": "array", "items": { "type": "integer" } },
         "link_net_flow_cents": { "type": "array", "items": { "type": "integer" } },
+        "rounding_cents": { "type": "array", "items": { "type": "integer" } },
         "total_contributed_cents": { "type": "integer" },
         "implied_pnl_cents": { "type": "integer" },
         "internal_cancellation": {
