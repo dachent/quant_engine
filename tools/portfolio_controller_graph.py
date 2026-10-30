@@ -120,6 +120,7 @@ _PATH_STAGES = {
     "packages/core/src/quant_engine/core/replica_gate.py": [],
     "tools/release_replica.py": [],
     "tools/release_cache_base.py": [],
+    "tools/release_measurements.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
     "tools/portfolio_counted_producer.py": ["analytics", "report", "panel"],
     # The implementation reconciliation and return-attribution builders write the

@@ -231,3 +231,16 @@ def test_copy_writes_marker_last_and_refuses_nonempty_target(tmp_path: Path) -> 
         rr.copy_replica(spec, ws, target)
     with pytest.raises(rr.ReplicaToolError, match="disjoint"):
         rr.copy_replica(spec, ws, ws / "inside")
+
+
+def test_ceremony_flag_exists_only_while_it_runs(tmp_path: Path, specs: Any) -> None:
+    flag = tmp_path / "out" / "ceremony.running"
+    seen: list[bool] = []
+
+    class Spy(FakeRunner):
+        def __call__(self, argv: Sequence[str], stdout: Path, stderr: Path) -> int:
+            seen.append(flag.exists())
+            return super().__call__(argv, stdout, stderr)
+
+    rr.replica_ceremony(_args(tmp_path), Spy())
+    assert seen and all(seen) and not flag.exists()
