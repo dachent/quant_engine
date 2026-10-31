@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, localcontext
 import hashlib
 import importlib.util
 import io
@@ -5422,6 +5422,73 @@ def _verified_epoch_manifest_panel_arguments(
     )
 
 
+# The manifest link factors and the history span receipts come from different
+# arithmetic (the Matrixport generation's 28-significant-digit Decimal context versus
+# the receipt's longer quotient), so they agree exactly at this many significant
+# digits, the same precision at which the weekly line compounds.
+SPAN_FACTOR_SIGNIFICANT_DIGITS = 28
+
+
+def _verify_weekly_spans_against_manifest(
+    weekly_root: Path, account_strategy_manifest: Path | None
+) -> int:
+    """Fail unless every accepted weekly span equals a manifest link factor exactly.
+
+    The weekly stage reads its spans from the governed history coverage because the
+    account manifest is staged later.  Once the manifest exists, each span must match
+    the ``observation_trace.links`` factor of the same interval at 28 significant
+    digits, so any drift between the two authorities stops the build.
+    """
+
+    if account_strategy_manifest is None:
+        return 0
+    generation_id, generation = _published_generation(weekly_root)
+    weekly_path = generation / "weekly-returns.json"
+    if weekly_path.is_symlink() or not weekly_path.is_file():
+        raise VerticalBuildError("weekly generation lacks its payload")
+    weekly = _load(weekly_path, f"weekly returns {generation_id}")
+    manifest = _load(account_strategy_manifest, "account-strategy manifest")
+    factors: dict[tuple[str, str], set[str]] = {}
+    for row in manifest.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        trace = row.get("observation_trace")
+        links = trace.get("links") if isinstance(trace, dict) else None
+        for link in links if isinstance(links, list) else []:
+            if isinstance(link, dict):
+                key = (str(link.get("start_date")), str(link.get("end_date")))
+                factors.setdefault(key, set()).add(str(link.get("factor")))
+    checked = 0
+    for series in weekly.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        coverage = series.get("mode_coverage")
+        if not isinstance(coverage, dict):
+            continue
+        spans = {
+            json.dumps(span, sort_keys=True): span
+            for mode in coverage.values()
+            if isinstance(mode, dict)
+            for span in mode.get("accepted_multi_day_spans", [])
+        }
+        for span in spans.values():
+            key = (str(span["start"]), str(span["end"]))
+            candidates = factors.get(key, set())
+            matched = False
+            for factor_text in candidates:
+                with localcontext() as context:
+                    context.prec = SPAN_FACTOR_SIGNIFICANT_DIGITS
+                    expected = Decimal(1) + Decimal(str(span["return"]))
+                    matched = matched or expected == +Decimal(factor_text)
+            if not matched:
+                raise VerticalBuildError(
+                    "weekly accepted span differs from the account manifest link: "
+                    f"{series.get('series_id')} {key[0]}..{key[1]}"
+                )
+            checked += 1
+    return checked
+
+
 def _stage_account_strategy_manifest(
     recipe: Mapping[str, Any],
     report_root: Path,
@@ -5616,6 +5683,10 @@ def build_panel_candidate(
             raise VerticalBuildError(
                 "epoch-manifest generation source identity differs"
             )
+    _verify_weekly_spans_against_manifest(
+        Path(_text(analytics.get("weekly_root"), "weekly_root")),
+        account_strategy_manifest,
+    )
     financial_arguments = _panel_financial_arguments(
         recipe,
         baseline_root,
@@ -5805,6 +5876,10 @@ def publish_panel(
             baseline_root,
             output_root,
         )
+    _verify_weekly_spans_against_manifest(
+        Path(_text(analytics.get("weekly_root"), "weekly_root")),
+        account_strategy_manifest,
+    )
     financial_arguments = _panel_financial_arguments(
         recipe,
         baseline_root,

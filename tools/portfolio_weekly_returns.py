@@ -807,6 +807,7 @@ def _strategy_rows(
                         "accepted_multi_day_spans": [
                             {
                                 "end": span.end.isoformat(),
+                                "return": _decimal_text(span.value),
                                 "start": span.start.isoformat(),
                             }
                             for span in span_links

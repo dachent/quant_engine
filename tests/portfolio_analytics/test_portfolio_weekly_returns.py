@@ -1413,8 +1413,8 @@ def test_accepted_spans_compound_into_the_week_containing_their_end(
     assert meta["2026-07-20"][0] == 4 and meta["2026-07-27"][0] == 3
     spans = row["mode_coverage"]["LIVE_ONLY"]["accepted_multi_day_spans"]
     assert spans == [
-        {"end": "2026-07-23", "start": "2026-07-21"},
-        {"end": "2026-07-27", "start": "2026-07-24"},
+        {"end": "2026-07-23", "return": "-0.03", "start": "2026-07-21"},
+        {"end": "2026-07-27", "return": "0.015", "start": "2026-07-24"},
     ]
     plain = _span_series(payload, PLAIN_SERIES)
     assert "accepted_multi_day_spans" not in plain["mode_coverage"]["LIVE_ONLY"]
@@ -1504,3 +1504,61 @@ def test_release_builder_passes_the_history_coverage_to_the_weekly_stage(
         "--history-coverage",
         str(tmp_path / "history-coverage.json"),
     )
+
+
+def test_weekly_spans_must_equal_the_manifest_links_exactly(tmp_path: Path) -> None:
+    import portfolio_release_builder as builder
+
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+    coverage = _span_coverage(tmp_path / "history-coverage.json")
+    weekly_root = tmp_path / "weekly"
+    candidate = weekly.build_candidate(
+        correlation_root, strategy_returns, plan_bundle, weekly_root, None, coverage
+    )
+    weekly.publish(
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        Path(candidate["candidate_dir"]),
+        weekly_root,
+        None,
+        coverage,
+    )
+
+    def manifest(factors: tuple[str, str]) -> Path:
+        path = tmp_path / f"manifest-{factors[0]}-{factors[1]}.json"
+        _write_json(
+            path,
+            {
+                "rows": [
+                    {
+                        "observation_trace": {
+                            "links": [
+                                {
+                                    "start_date": start,
+                                    "end_date": end,
+                                    "factor": factor,
+                                }
+                                for (start, end, _value), factor in zip(
+                                    SPAN_LINKS, factors, strict=True
+                                )
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+        return path
+
+    assert builder._verify_weekly_spans_against_manifest(weekly_root, None) == 0
+    exact = manifest(("0.97", "1.015"))
+    assert builder._verify_weekly_spans_against_manifest(weekly_root, exact) == 2
+    for drifted in (("0.97", "1.0150000000001"), ("0.9700000001", "1.015")):
+        with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+            builder._verify_weekly_spans_against_manifest(
+                weekly_root, manifest(drifted)
+            )
+    gone = tmp_path / "manifest-empty.json"
+    _write_json(gone, {"rows": [{"observation_trace": {"links": []}}]})
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(weekly_root, gone)
