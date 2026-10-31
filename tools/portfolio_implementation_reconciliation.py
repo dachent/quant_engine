@@ -1175,6 +1175,78 @@ _TT_ENDPOINT_NAMES: Final = frozenset(
 )
 
 
+def _apply_truncated_row_fallbacks(manifest: dict[str, Any]) -> None:
+    """Replace flagged TRUNCATED_ROW snapshots by their recorded fallback.
+
+    The builder flags a dated holdings row whose missing mass is explained by a
+    dropped position and records where the complete weights live: the nearest
+    complete row of the same component, or the live portfolio-holdings.  Both
+    consumers read dated snapshots only through this reader, so the fallback is
+    applied here, in memory; the retained manifest file is never altered.  A
+    flag with no usable fallback fails closed.
+    """
+    provenance = manifest.get("capture_provenance")
+    if not isinstance(provenance, dict):
+        return
+    validation = provenance.get("holdings_row_validation")
+    flags = validation.get("flags") if isinstance(validation, dict) else None
+    if not flags:
+        return
+    by_slug = {str(row["slug"]): row for row in manifest["selected_components"]}
+    applied: list[dict[str, str]] = []
+    for flag in flags:
+        if not isinstance(flag, dict) or flag.get("flag") != "TRUNCATED_ROW":
+            continue
+        component = by_slug.get(str(flag.get("slug")))
+        fallback = flag.get("fallback")
+        if component is None or not isinstance(fallback, dict):
+            raise ImplementationReconciliationError(
+                "TuringTrader truncated row has no usable fallback"
+            )
+        snapshots = component["dated_holdings"]["snapshots"]
+        target = next(
+            (
+                snap
+                for snap in snapshots
+                if snap.get("observed_date") == flag.get("observed_date")
+            ),
+            None,
+        )
+        kind = fallback.get("kind")
+        weights: dict[str, Any] | None = None
+        if kind == "LIVE_PORTFOLIO_HOLDINGS":
+            live = {
+                str(item["symbol"]): item["weight"]
+                for item in component.get("current_holdings", [])
+            }
+            if live and all(weight is not None for weight in live.values()):
+                weights = dict(sorted(live.items()))
+        elif kind in {"LAST_COMPLETE_ROW", "NEXT_COMPLETE_ROW"}:
+            source = next(
+                (
+                    snap
+                    for snap in snapshots
+                    if snap.get("observed_date") == fallback.get("observed_date")
+                ),
+                None,
+            )
+            if source is not None and source is not target:
+                weights = dict(source["weights"])
+        if target is None or not weights:
+            raise ImplementationReconciliationError(
+                "TuringTrader truncated row has no usable fallback"
+            )
+        target["weights"] = weights
+        applied.append(
+            {
+                "fallback": str(kind),
+                "observed_date": str(flag["observed_date"]),
+                "slug": str(flag["slug"]),
+            }
+        )
+    manifest["applied_truncated_row_fallbacks"] = applied
+
+
 def _read_tt_source_manifest(
     path: Path,
     components: Sequence[str],
@@ -1344,6 +1416,7 @@ def _read_tt_source_manifest(
         raise ImplementationReconciliationError(
             "TuringTrader adjusted price evidence differs"
         )
+    _apply_truncated_row_fallbacks(manifest)
     return manifest
 
 
