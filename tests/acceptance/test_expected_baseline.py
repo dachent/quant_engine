@@ -39,17 +39,17 @@ HISTORICAL_V3_PATH = (
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
 )
-CURRENT_SUCCESSOR_HEAD = "74dc3fa65cf51d0b70d68c8f21f539f40688de5b"
+CURRENT_SUCCESSOR_HEAD = "9d9cac1edabe0dd98f8e7f3a0a0d1f9f3c86dd3d"
 CURRENT_AGREE_COUNT = 165
 CURRENT_NOT_DERIVABLE_COUNT = 18
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "5a4c5f0369c09ac866d8b207f880093d0f362176eb4d2d0a8b4bd300c2371d32",
-    "b": "0cccd3abd50c003eb904f143039910a5618272914cac14dd2ec4bd30724e461b",
+    "a": "6c3ccb059ed1f1238925409f09fd01bd6c47d2a920a9fa58b6b938958bba22ec",
+    "b": "cce95d07704aec7105014b82e0be0d0313d02eeb19a0c9c09ffa0cad47e3e859",
 }
 CURRENT_ORACLE_MANIFEST_SHA256 = {
-    # R2: both derivers read the same acceptance-inputs manifest (oracle-manifest-r2.json).
-    "a": "1008ddea1f2dfeb84c84149e453c192d61043097c122b2700da920debb2cbabb",
-    "b": "1008ddea1f2dfeb84c84149e453c192d61043097c122b2700da920debb2cbabb",
+    # R2.1: both derivers read the same acceptance-inputs manifest (p24 manifest: Schwab 09-17 ledger 8c20b436).
+    "a": "4165a1d0e1c584ba8a0e79e07e3c1c2424a4f6598a700697c66a00c7e987b5b7",
+    "b": "4165a1d0e1c584ba8a0e79e07e3c1c2424a4f6598a700697c66a00c7e987b5b7",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
@@ -308,10 +308,10 @@ def test_current_successor_identity_and_authority_coverage() -> None:
         "75112945918983b311aff52a92a172fdfe7a3ca0348686e906933103898fe775"
     )
     assert doc["pointer_map_sha256"] == (
-        "81e00a815e5f3c83c75f5d84301f653dbeac405fb970806fe1d3249fe3567756"
+        "efb9f694d8cf4f0444bf0eef6c3ad790d879f068b288b2d4383e5bbf3728b2ea"
     )
     assert doc["admission_decision_sha256"] == (
-        "5b71e04ab7e4bf321a294e5e4e0eb3d701ae8342285ebe64fb226f77f7dad272"
+        "267ddea1609a79618fa1cea2c71158dfe265e69d92b09d3278e76be765c8a34f"
     )
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT

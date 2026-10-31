@@ -4210,12 +4210,103 @@ def _validate_report_account_manifest(
     return actual
 
 
+VALUE_BASIS_DERIVED: Final = "DERIVED_FROM_OFFICIAL_CLOSES"
+
+
+def _derived_value_index(
+    source_phase: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Declared derived-value sets (account, dates, evidence) from the admitted finality evidence.
+
+    A provider's finality evidence may declare a derived patch: the selected NAV, and the
+    position values priced from it, for named accounts and dates are computed from official
+    closes instead of observed. The evidence file is the one the run observation pins (its
+    path, sha256 and size are verified here); nothing is read from outside that binding.
+    """
+
+    if source_phase is None:
+        return []
+    observation = source_phase.get("source_provenance")
+    providers = (
+        observation.get("providers") if isinstance(observation, Mapping) else None
+    )
+    rows = (
+        list(providers.values())
+        if isinstance(providers, Mapping)
+        else list(providers or [])
+    )
+    found: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or not isinstance(
+            row.get("finality_evidence"), Mapping
+        ):
+            continue
+        path = _source_clock_file_path(row["finality_evidence"], "finality evidence")
+        # the bytes are verified against the pin above; a file that is not a JSON object
+        # (a selected-source date-label bundle) declares no derived patch
+        try:
+            document = json.loads(path.read_bytes())
+        except (UnicodeDecodeError, ValueError):
+            continue
+        patch = document.get("derived_patch") if isinstance(document, Mapping) else None
+        if not isinstance(patch, Mapping):
+            continue
+        interpretation = row.get("finality_interpretation")
+        try:
+            found.append(
+                {
+                    # each account's derived dates are its OWN patched rows: the
+                    # validator allows per-entry subsets of the top-level dates
+                    "accounts": {
+                        str(entry["account_id"]): frozenset(
+                            str(d) for d in entry["patched_values"]
+                        )
+                        for entry in patch["patches"]
+                    },
+                    "value_basis": {
+                        "basis": str(patch["derivation_basis"]),
+                        "derivation_record_sha256": str(
+                            patch["derivation_record"]["sha256"]
+                        ),
+                        "finality_evidence_sha256": str(
+                            row["finality_evidence"]["sha256"]
+                        ),
+                        "official_closes_manifest_sha256": str(
+                            patch["official_closes_manifest"]["sha256"]
+                        ),
+                        "provider_finality_guarantee": (
+                            interpretation.get("provider_finality_guarantee")
+                            if isinstance(interpretation, Mapping)
+                            else None
+                        ),
+                    },
+                }
+            )
+        except (KeyError, TypeError) as exc:
+            raise ReportValidationError(
+                "finality evidence derived patch differs"
+            ) from exc
+    return found
+
+
+def _derived_value_basis(
+    index: Sequence[Mapping[str, Any]] | None, account_id: object, as_of_date: object
+) -> dict[str, Any] | None:
+    """The declared value basis of an account's value on a date, or None when observed."""
+
+    for entry in index or []:
+        if as_of_date in entry["accounts"].get(account_id, ()):
+            return dict(entry["value_basis"])
+    return None
+
+
 def _accounts(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
     current_epoch_account_details: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     raw_observation_coverage: Mapping[str, str] | None = None,
+    derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     latest = _latest_nav(catalog)
     synthetic_controls = strategy_product_controls is not None and all(
@@ -4271,6 +4362,9 @@ def _accounts(
             "role": role,
             "status": status,
         }
+        value_basis = _derived_value_basis(derived_values, account_id, as_of)
+        if value_basis is not None:
+            account_row["value_basis"] = value_basis
         if current_epoch_account_details is not None:
             detail = current_epoch_account_details.get(account_id)
             account_row["account_label"] = detail["account_label"] if detail else None
@@ -7068,7 +7162,9 @@ MARKET_VALUE_REASON_PREFIX: Final = "SOURCE_SNAPSHOT_MARKET_VALUE_"
 
 
 def _positions(
-    catalog: Mapping[str, Any], current_account_ids: set[str] | None = None
+    catalog: Mapping[str, Any],
+    current_account_ids: set[str] | None = None,
+    derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows = _objects(catalog.get("positions"), "positions")
     if current_account_ids is not None:
@@ -7147,6 +7243,12 @@ def _positions(
                 },
             }
         )
+        # A value the finality evidence declares derived is not "captured": the row says
+        # how it was valued and keeps the capture date and clock it was held under.
+        value_basis = _derived_value_basis(derived_values, account_id, as_of_date)
+        if value_basis is not None:
+            accepted[-1]["value_basis"] = value_basis
+            accepted[-1]["as_of_basis"] = value_basis["basis"]
     return sorted(
         accepted,
         key=lambda item: (
@@ -10014,11 +10116,15 @@ def build_report_data(
         current_account_ids,
         "provider_admissions",
     )
+    derived_values = _derived_value_index(
+        None if source_clock_authority is None else source_clock_authority[0]
+    )
     account_summary = _accounts(
         catalog,
         strategy_product_controls,
         current_epoch_account_details,
         raw_observation_coverage=raw_observation_coverage,
+        derived_values=derived_values,
     )
     # B4: the report never compared a strategy value with its accounts.  The account
     # rows come from the NAV facts, the strategy values from the baseline block; a
@@ -10119,6 +10225,7 @@ def build_report_data(
         "positions": _positions(
             catalog,
             current_account_ids,
+            derived_values,
         ),
         "provider_admissions": provider_admissions,
         "provider_coverage": catalog.get("provider_coverage", []),
@@ -10418,6 +10525,16 @@ def build_report_data(
                         if governed_hwm_proof is None
                         or governed_hwm_proof.get("current_index") is None
                         else str(governed_hwm_proof["current_index"])
+                    ),
+                    hwm_index_path=(
+                        None
+                        if governed_hwm_proof is None
+                        else governed_hwm_proof.get("index_path")
+                    ),
+                    derived_patches=_derived_value_index(
+                        None
+                        if source_clock_authority is None
+                        else source_clock_authority[0]
                     ),
                     strategy_returns={
                         str(item["strategy_id"]): Decimal(

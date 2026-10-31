@@ -124,5 +124,5 @@ def test_rows_without_components_print_only_the_status_and_amount(
         _run(tmp_path, _capital_payload(row), "renderCapital"), "#strategy-table"
     )
 
-    assert "Known gold api · $3,590.00 per year" in table
+    assert "Known (gold API) · $3,590.00 per year" in table
     assert "Subscription" not in table and "Execution" not in table
