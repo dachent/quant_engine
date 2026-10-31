@@ -6,11 +6,14 @@ Synthetic audit input only (``test_model_vs_actual._audit``): no real figure app
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 from typing import Any
 
-from test_model_vs_actual import _audit, _build
+from test_model_vs_actual import _audit, _build, _errors, _panel
+
+import portfolio_model_vs_actual as mva
 
 AUDIT_DERIVED = "AUDIT_DERIVED"
 
@@ -154,4 +157,73 @@ def test_a_withheld_window_is_named_from_its_label_and_dates_not_its_id() -> Non
     assert all(
         "label" not in u for u in block["strategies"][0]["unavailable"] if u is not item
     )
+    assert _errors(block) == []
+
+
+def _unavailable_items(block: dict[str, Any]) -> list[dict[str, Any]]:
+    items = [u for s in block["strategies"] for u in s["unavailable"]]
+    for strategy in block["strategies"]:
+        for window in [*strategy["windows"], *strategy["epochs"]]:
+            items += [
+                t
+                for t in window["governed_terms"]
+                if t["evidence_tag"] == "UNAVAILABLE"
+            ]
+    return items
+
+
+def _unavailable_definition(block: dict[str, Any]) -> str:
+    return next(
+        t["definition"] for t in block["evidence_tags"] if t["tag"] == "UNAVAILABLE"
+    )
+
+
+def test_the_unavailable_definition_counts_the_items_that_name_a_pull() -> None:
+    audit = _audit()
+    audit["strategies"][0]["unavailable"].append(
+        {
+            "term": "gap_two",
+            "reason": "NO_MODEL_LEG",
+            "window_end": None,
+            "replacing_pull": None,
+        }
+    )
+    panel = _panel()
+    panel[
+        "leverage_disclosures"
+    ] = []  # no governed interest rows: governed terms are UNAVAILABLE
+    raw = json.dumps(audit).encode("utf-8")
+    block = mva.build_model_vs_actual(panel, raw, hashlib.sha256(raw).hexdigest())
+    items = _unavailable_items(block)
+    named = sum(1 for u in items if u.get("replacing_pull") is not None)
+    empty = sum(
+        1 for u in items if "replacing_pull" in u and u["replacing_pull"] is None
+    )
+    absent = sum(1 for u in items if "replacing_pull" not in u)
+    assert named >= 1 and empty >= 1 and absent >= 1, (
+        "fixture must hold all three kinds"
+    )
+    text = _unavailable_definition(block)
+    assert f"{named} of {len(items)} UNAVAILABLE items name a replacing pull" in text
+    assert f"{empty} have an empty pull field" in text
+    assert f"{absent} carry no pull field" in text
+    assert "the pull is named" not in text
+
+
+def test_the_unavailable_note_counts_only_the_listed_unavailable_entries() -> None:
+    audit = _audit()
+    audit["strategies"][0]["unavailable"].append(
+        {
+            "term": "gap_two",
+            "reason": "NO_MODEL_LEG",
+            "window_end": None,
+            "replacing_pull": None,
+        }
+    )
+    block, _raw, _sha = _build(audit)
+    entries = [u for s in block["strategies"] for u in s["unavailable"]]
+    named = sum(1 for u in entries if u["replacing_pull"] is not None)
+    note = block["notes"][1]
+    assert f"{named} of the {len(entries)} unavailable entries name" in note
+    assert "with the pull that closes it" not in note
     assert _errors(block) == []

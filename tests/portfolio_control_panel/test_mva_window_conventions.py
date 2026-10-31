@@ -58,6 +58,7 @@ def test_notes_name_observations_and_calendar_days_from_the_window_fields() -> N
         41  # the audit's observation count for W (60 calendar days)
     )
     strategy["windows"][1]["days"] = 17  # and for E1
+    strategy["windows"][1]["label"] = "Post-funding"
     strategy["notes"] = [
         "Cash is not robust over 41 days: the split carries a band.",
         "Post-funding (17 d) and E4 do not depend on the convention.",
@@ -128,3 +129,21 @@ def test_each_place_that_states_the_same_window_states_its_convention() -> None:
 def test_a_one_day_window_is_singular() -> None:
     assert mva._days_text(1) == "1 calendar day inclusive"
     assert mva._days_text(2) == "2 calendar days inclusive"
+
+
+def test_a_number_that_only_coincides_with_a_window_count_is_left_alone() -> None:
+    """A note is re-worded only when its number is tied to a window (primary, or named)."""
+
+    audit = _audit()
+    strategy = audit["strategies"][0]
+    strategy["windows"][0]["days"] = 41  # primary window W
+    strategy["windows"][1]["days"] = 17  # window E1, labelled "E1", not primary
+    strategy["notes"] = [
+        "Cash settles after 17 days.",  # 17 equals E1's count but the note does not name E1
+        "In window E1 the count is 17 d.",  # names the window by id
+        "The primary count is 41 days.",  # the primary window's own count
+    ]
+    got = _build(audit)[0]["strategies"][0]["notes"]
+    assert got[0] == "Cash settles after 17 days."
+    assert got[1] == "In window E1 the count is 17 observations."
+    assert got[2] == "The primary count is 41 observations."

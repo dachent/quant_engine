@@ -7,7 +7,7 @@ grows by well under 0.2 MB:
 ``modes``
     Per evidence mode (``LIVE_ONLY`` and ``LIVE_PLUS_BACKTEST``) a weekly grid over
     the common window and the lines drawn on it: one total-return index per
-    strategy (1.0 immediately before the first common week), the equal-weight
+    strategy (1.0 immediately before that line's own first week), the equal-weight
     portfolio, and per point origin runs (``LIVE`` / ``BACKTEST`` / ``MIXED``)
     derived from the admitted mode coverage.  The window start is stated with the
     series that sets it.
@@ -49,21 +49,33 @@ _WHOLE: Final = Decimal(1)
 _TRI_QUANTUM: Final = Decimal(1).scaleb(-TRI_DECIMALS)
 _TRAILING_QUANTUM: Final = Decimal(1).scaleb(-12)
 
+#: Where every line starts compounding. The payload carries this value as ``base_point``
+#: and the line definitions quote the text beside it, so the words cannot differ from it.
+BASE_POINT: Final = "START_OF_EACH_LINE_FIRST_WEEK"
+_BASE_POINT_TEXT: Final = {
+    BASE_POINT: (
+        "compounded from 1.0 immediately before this line's own first week "
+        "(its first_week)"
+    ),
+}
+_COMPOUNDED: Final = _BASE_POINT_TEXT[BASE_POINT]
+
 EW_SERIES_ID: Final = "portfolio:equal_weight"
 EW_DEFINITION: Final = (
     "Equal-weight portfolio of every strategy line in this mode: each week's "
     "return is the arithmetic mean of the strategy weekly total returns "
-    "(1/N each, rebalanced to equal weights at the start of every week), compounded "
-    "from 1.0 immediately before the first common week.  Daily returns are not in "
+    "(1/N each, rebalanced to equal weights at the start of every week), "
+    + _COMPOUNDED
+    + ".  Daily returns are not in "
     "the panel, so the rebalance is weekly.  A week missing for any strategy makes "
     "the mode UNAVAILABLE; it is never filled with zero.  In LIVE_PLUS_BACKTEST a "
     "strategy with no admitted backtest history contributes its live weeks and the "
     "line is labelled by origin (MIXED where components differ)."
 )
 STRATEGY_DEFINITION: Final = (
-    "Weekly total return of the strategy compounded from 1.0 immediately before "
-    "the first common week; the value at index i is the index at the end of week "
-    "dates[i]."
+    "Weekly total return of the strategy "
+    + _COMPOUNDED
+    + "; the value at index i is the index at the end of week dates[i]."
 )
 SLICE_CARRY_FORWARD: Final = (
     "Each epoch contributes its observation-trace ending_nav on every calendar day "
@@ -105,8 +117,8 @@ _BENCHMARKS: Final = (
 BENCHMARK_DEFINITION: Final = (
     "Weekly total return of the benchmark ETF from the governed weekly returns "
     "(adjusted-close total return from the admitted yahoo-adjusted-etf-daily source), "
-    "compounded from 1.0 immediately before the first common week.  It has no "
-    "live or backtest origin."
+    + _COMPOUNDED
+    + ".  It has no live or backtest origin."
 )
 
 
@@ -279,9 +291,9 @@ EW_AVAILABLE_SERIES_ID: Final = "portfolio:equal_weight_available"
 EW_AVAILABLE_DEFINITION: Final = (
     "Equal-weight portfolio of the strategy lines that have a value in each week "
     "(the member count of every week is published): each week's return is the "
-    "arithmetic mean of the available strategy weekly total returns, compounded "
-    "from 1.0 immediately before the first week with any strategy.  It is a "
-    "secondary line; the headline equal-weight line starts only where every "
+    "arithmetic mean of the available strategy weekly total returns, "
+    + _COMPOUNDED
+    + ".  It is a secondary line; the headline equal-weight line starts only where every "
     "strategy has data."
 )
 
@@ -538,7 +550,7 @@ def _build_mode(weekly: Mapping[str, Any], mode: str) -> dict[str, Any]:
     return {
         "status": "AVAILABLE",
         "grid": "ISO_WEEK_START_MONDAY",
-        "base_point": "START_OF_EACH_LINE_FIRST_WEEK",
+        "base_point": BASE_POINT,
         "union_start_date": union_start_key,
         "union_start_set_by": union_setter,
         "group_anchor_date": week_keys[anchor_index],
@@ -1854,7 +1866,7 @@ def _verify_mode(
         raise _fail(f"{mode} stale_before_current_week differs")
     if len(block["week_end_dates"]) != length:
         raise _fail(f"{mode} week_end_dates length differs")
-    if block["base_point"] != "START_OF_EACH_LINE_FIRST_WEEK":
+    if block["base_point"] != BASE_POINT:
         raise _fail(f"{mode} base_point differs")
 
 

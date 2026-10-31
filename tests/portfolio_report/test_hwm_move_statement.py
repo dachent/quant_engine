@@ -228,6 +228,24 @@ def _member(tmp_path: Path) -> str:
     return re.search(r"sleeve series (\S+) from", text).group(1)  # type: ignore[union-attr]
 
 
+def test_identical_paths_on_the_same_end_date_state_no_restatement_and_no_extension(
+    tmp_path: Path,
+) -> None:
+    values = ["100", "101", "102", "103", "104"]
+    same = _sentence(
+        tmp_path,
+        [[d, v] for d, v in zip(DAYS, values, strict=True)],
+        _path(values),
+        None,
+    )
+    assert "(+0.00, +0.00%)" in same
+    assert "restatement" not in same and "extension" not in same
+    assert (
+        "both releases end on 2026-09-14 and their paths do not differ on any of 5 common dates"
+        in same
+    )
+
+
 def test_the_movement_clause_is_stated_only_when_the_releases_end_on_different_dates(
     tmp_path: Path,
 ) -> None:

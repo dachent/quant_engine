@@ -888,6 +888,12 @@ def _index_move(
         for d in common
         if later[d].quantize(Decimal("0.0001")) != prior[d].quantize(Decimal("0.0001"))
     ]
+    if last_now == last_prior and not differing:
+        return (
+            head
+            + f"; both releases end on {last_now} and their paths do not differ on any of "
+            f"{len(common)} common dates."
+        )
     restatement = (
         f"the restatement of the previous release's own last date {last_prior} "
         f"({later[last_prior]:.4f} now against {prior[last_prior]:.4f})"
