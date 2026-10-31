@@ -817,7 +817,7 @@
     const rows = accepted.map((row, index) => {
       const target = targetState(row);
       const current = currents[index];
-      const currentValue = current.value != null ? currency(current.value) : current.status ? statusText(current.status) : "—";
+      const currentValue = current.value != null ? `${currency(current.value)}${row.scope === "RESERVE" ? reserveBasisNote() : ""}` : current.status ? statusText(current.status) : "—";
       const identity = "Reserve classification";
       return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
     });
@@ -874,6 +874,26 @@
   // A row whose value is declared derived says so in a tooltip: the closes manifest and the finality evidence it names.
   const valueBasisTitle = (row) => (row.value_basis ? ` title="${safe(`${humanStatus(row.value_basis.basis)}; official closes manifest ${String(row.value_basis.official_closes_manifest_sha256).slice(0, 8)}; evidence ${String(row.value_basis.finality_evidence_sha256).slice(0, 8)}${row.value_basis.provider_finality_guarantee === false ? "; no provider finality guarantee" : ""}`)}"` : "");
   const positionBasisNote = (row) => (row.as_of_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
+
+  // An account NAV row whose value the report declares derived says so beside the figure, with the same label and
+  // tooltip a position row carries.  The account_summary row is the source: it is matched by account id, and for an
+  // epoch row by its end date as well, because the epoch's current value is that row's observation.  The date printed
+  // is the row's own capture_date, else observed_at, else as_of_date; none is supplied here.
+  const accountBasisNote = (summary) => {
+    if (!summary?.value_basis) return "";
+    const dated = [["capture_date", "captured"], ["observed_at", "observed"], ["as_of_date", "as of"]]
+      .find(([field]) => typeof summary[field] === "string" && summary[field] !== "");
+    return `<span class="cell-secondary"${valueBasisTitle(summary)}>${safe(humanStatus(summary.value_basis.basis))}${dated ? ` · ${dated[1]} ${safe(formatDate(summary[dated[0]]))}` : ""}</span>`;
+  };
+  const epochBasisNote = (row) => accountBasisNote(accountDimension.find((summary) => summary.account_id === row.account_id
+    && String(summary.as_of_date || "").slice(0, 10) === String(row.end || "").slice(0, 10)));
+  // The reserve figure is an aggregate: the note is shown only when every reserve account carries a derived
+  // value and they all share one basis, never because one member does.
+  const reserveBasisNote = () => {
+    const members = accountDimension.filter((summary) => summary.role === "RESERVE");
+    const first = members[0]?.value_basis?.basis;
+    return first && members.every((summary) => summary.value_basis?.basis === first) ? accountBasisNote(members[0]) : "";
+  };
 
   function renderPositionTable() {
     const query = positionSearch.toLowerCase();
@@ -1496,7 +1516,7 @@
       if (row.status !== "OK") {
         return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}<span class="cell-secondary">${safe(row.effective_end || "open")} · ${manifestBlockerText(row)}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td></tr>`;
       }
-      return `<tr data-account-id="${safe(row.account_id)}" data-opening-basis="${safe(row.opening_basis)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric"${sleeveAttribute(row)}>${manifestMoney(row.invested)}${sleeveRow(row) ? `<span class="cell-secondary">sleeve allocation</span>` : ""}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.gain)}${row.post_liquidation_income != null ? `<span class="cell-secondary">incl. post-liquidation income ${manifestMoney(row.post_liquidation_income)}</span>` : ""}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(manifestDrawdown(row.observed_max_drawdown)) ? "is-negative" : ""}">${manifestPct(manifestDrawdown(row.observed_max_drawdown))}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}" data-opening-basis="${safe(row.opening_basis)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.start)}<span class="cell-secondary">${safe(row.end)}</span></td><td class="numeric"${sleeveAttribute(row)}>${manifestMoney(row.invested)}${sleeveRow(row) ? `<span class="cell-secondary">sleeve allocation</span>` : ""}</td><td class="numeric">${manifestMoney(row.withdrawn)}</td><td class="numeric ${manifestNegative(row.net_capital) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.net_capital)}</td><td class="numeric">${manifestMoney(row.current_value)}${epochBasisNote(row)}</td><td class="numeric ${manifestNegative(row.gain) ? "is-negative" : ""}"${sleeveAttribute(row)}>${manifestMoney(row.gain)}${row.post_liquidation_income != null ? `<span class="cell-secondary">incl. post-liquidation income ${manifestMoney(row.post_liquidation_income)}</span>` : ""}</td><td class="numeric">${manifestPct(row.return_on_net_capital)}</td><td class="numeric">${manifestPct(row.annualized_return_on_net_capital)}</td><td class="numeric">${manifestPct(row.observation_linked_return)}</td><td class="numeric">${manifestFixed(row.observed_hwm_index, 2)}</td><td class="numeric ${manifestNegative(manifestDrawdown(row.observed_max_drawdown)) ? "is-negative" : ""}">${manifestPct(manifestDrawdown(row.observed_max_drawdown))}</td></tr>`;
     });
     $("#account-manifest-table").innerHTML = tableMarkup([
       ["Account"], ["Strategy"], ["Observed interval"],
@@ -3121,7 +3141,7 @@
     const windows = Array.isArray(strategy.windows) ? strategy.windows : [];
     return windows.find((item) => item.window_id === strategy.primary_window_id) || windows[0] || null;
   };
-  const mvaWindowText = (window) => (window ? `${formatDate(window.start)} → ${formatDate(window.end)}${number(window.days) != null ? ` (${integer.format(window.days)} d)` : ""}` : "window not published");
+  const mvaWindowText = (window) => (window ? `${formatDate(window.start)} → ${formatDate(window.end)}${typeof window.days_text === "string" && window.days_text ? ` (${window.days_text})` : number(window.days) != null ? ` (${integer.format(window.days)} d)` : ""}` : "window not published");
   const mvaComponent = (window, componentId) => (Array.isArray(window?.bridge) ? window.bridge.find((item) => item.component_id === componentId) || null : null);
 
   function mvaUnavailableTerms(strategy, block) {

@@ -40,6 +40,18 @@ builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
 
 
+@pytest.fixture(autouse=True)
+def _weekly_span_manifest_check_is_covered_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """These stubs publish no weekly generation; the check has its own tests in
+    tests/portfolio_analytics/test_portfolio_weekly_returns.py."""
+
+    monkeypatch.setattr(
+        builder, "_verify_weekly_spans_against_manifest", lambda *_a, **_k: 0
+    )
+
+
 def _load_module(name: str, path: Path) -> object:
     """Load a fixture module without leaking or replacing a module registry entry."""
 

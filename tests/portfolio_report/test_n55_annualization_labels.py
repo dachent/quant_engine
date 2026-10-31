@@ -515,6 +515,8 @@ def test_the_qsi_weekly_comparison_is_labelled_a_short_window(tmp_path: Path) ->
         "periods_per_year": 52,
         "short_window": True,
         "window_days": 182,
+        "window_days_basis": "EXCLUSIVE_END_MINUS_START",
+        "window_days_text": "182 days exclusive (end minus start)",
         "window_end": "2026-07-10",
         "window_start": "2026-01-09",
     }

@@ -1987,6 +1987,13 @@ _FREQUENCY_WORDS: Final = {
 }
 
 
+WINDOW_DAYS_BASIS_EXCLUSIVE: Final = "EXCLUSIVE_END_MINUS_START"
+
+
+def _exclusive_days_text(days: int) -> str:
+    return f"{days} days exclusive (end minus start)"
+
+
 def _annualization_label(
     *,
     basis: str,
@@ -2035,6 +2042,10 @@ def _annualization_label(
         "periods_per_year": periods,
         "short_window": short,
         "window_days": window_days,
+        # window_days is end minus start: model_vs_actual counts both endpoints, so each
+        # place states which convention its day count follows
+        "window_days_basis": WINDOW_DAYS_BASIS_EXCLUSIVE,
+        "window_days_text": _exclusive_days_text(window_days),
         "window_end": end,
         "window_start": start,
     }
@@ -2315,6 +2326,8 @@ def _label_window(label: object) -> dict[str, Any] | None:
         "start": label.get("window_start"),
         "end": label.get("window_end"),
         "days": label.get("window_days"),
+        "days_basis": label.get("window_days_basis"),
+        "days_text": label.get("window_days_text"),
         "observations": label.get("observations"),
     }
 

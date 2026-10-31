@@ -1295,3 +1295,32 @@ def test_a_defect_in_the_builders_retired_helper_is_caught_by_the_verifier(
     broken = tab.build_performance_tab(panel)
     with pytest.raises(tab.PerformanceTabError, match="cross-check"):
         tab.verify_performance_tab(broken, panel)
+
+
+def test_line_definitions_state_the_base_point_the_payload_declares() -> None:
+    """The definition text and the math agree: every line compounds from its own first week."""
+
+    block = tab.build_performance_tab(_panel())
+    for mode in block["modes"].values():
+        assert mode["base_point"] == "START_OF_EACH_LINE_FIRST_WEEK"
+        phrase = tab._BASE_POINT_TEXT[mode["base_point"]]
+        assert "first common week" not in phrase and "own first week" in phrase
+        for line in mode["lines"]:
+            assert phrase in line["definition"], line["series_id"]
+            assert "immediately before the first common week" not in line["definition"]
+    # the math the text describes: value 1.0 immediately before the line's own first week
+    a = _line(block, "LIVE_ONLY", "strategy:A one")
+    assert (
+        a["tri"][a["first_index"]] == 1.01
+    )  # 1.0 x (1 + the first weekly return 0.01)
+    assert (
+        a["first_index"] > 0
+        or a["first_week"] == block["modes"]["LIVE_ONLY"]["dates"][0]
+    )
+    for benchmark in block["benchmarks"]:
+        if "definition" in benchmark:
+            assert (
+                tab._BASE_POINT_TEXT["START_OF_EACH_LINE_FIRST_WEEK"]
+                in benchmark["definition"]
+            )
+    tab.verify_performance_tab(block, _panel())

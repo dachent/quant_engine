@@ -33,7 +33,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "0.4.0"
+BUILDER_VERSION: Final = "0.5.0"
 SCHEMA_VERSION: Final = 2
 STRATEGY_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 PUBLIC_SOURCES: Final = {
@@ -285,6 +285,130 @@ def _coverage(values: Mapping[str, str]) -> dict[str, Any]:
         "status": "AVAILABLE_SPARSE_MAP_ABSENT_IS_UNAVAILABLE",
         "weekly_observations": len(values),
     }
+
+
+@dataclass(frozen=True)
+class AcceptedSpan:
+    """One accepted multi-day holding-period return, owned by its end date.
+
+    The daily strategy-return source carries no row for the end date of such a span
+    (its previous endpoint is more than one day earlier), so the span's return is the
+    only measured link across that interval and a cumulative line must compound it.
+    """
+
+    start: date
+    end: date
+    value: Decimal
+
+
+@dataclass(frozen=True)
+class AcceptedSpans:
+    """The governed accepted spans per strategy series, with the daily-path binding."""
+
+    spans: dict[str, tuple[AcceptedSpan, ...]]
+    daily_sha256: dict[str, str]
+    observed_end: dict[str, date]
+    strategy_ids: dict[str, str]
+
+
+DEPENDENCE_RECEIPT_NAME: Final = "dependence-source.json"
+SPAN_TELESCOPE_TOLERANCE: Final = Decimal("1e-18")
+
+
+def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
+    """Read the accepted multi-day spans from the governed history coverage.
+
+    ``epoch_hpr_receipts`` is the history producer's separately admitted holding-period
+    path: its daily path hash plus the span links that cumulative consumers must
+    compound.  No dates live in code; an absent file means no spans are accepted.
+    """
+
+    if path is None:
+        return AcceptedSpans({}, {}, {}, {}), []
+    # The coverage is authority only as the dependence source packaged it: the
+    # sibling receipt must name this exact file by hash and size.
+    receipt_path = path.parent / DEPENDENCE_RECEIPT_NAME
+    receipt_document = _load_json(receipt_path, "dependence source receipt")
+    authority = receipt_document.get("history_authority")
+    declared = authority.get("coverage") if isinstance(authority, dict) else None
+    actual_hash, actual_size = hash_file(path)
+    if (
+        not isinstance(declared, dict)
+        or declared.get("sha256") != actual_hash
+        or declared.get("size_bytes") != actual_size
+    ):
+        raise WeeklyReturnError(
+            "history coverage differs from the dependence source receipt"
+        )
+    coverage = _load_json(path, "history coverage")
+    series_by_strategy: dict[str, str] = {}
+    for entry in _objects(coverage.get("strategies"), "history strategies"):
+        series_id = entry.get("series_id")
+        if series_id is not None:
+            series_by_strategy[_text(entry.get("strategy_id"), "strategy_id")] = _text(
+                series_id, "history series_id"
+            )
+    spans: dict[str, tuple[AcceptedSpan, ...]] = {}
+    daily_sha: dict[str, str] = {}
+    observed_end: dict[str, date] = {}
+    owner: dict[str, str] = {}
+    for item in _objects(coverage.get("epoch_hpr_receipts"), "epoch HPR receipts"):
+        if item.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(item.get("strategy_id"), "epoch HPR strategy_id")
+        series_id = series_by_strategy.get(strategy_id)
+        if series_id is None:
+            raise WeeklyReturnError(
+                f"epoch HPR names an unknown strategy: {strategy_id}"
+            )
+        if series_id in spans:
+            raise WeeklyReturnError(f"epoch HPR receipt is duplicated: {series_id}")
+        receipt = item.get("receipt")
+        if not isinstance(receipt, dict):
+            raise WeeklyReturnError("epoch HPR receipt must be an object")
+        accepted: list[AcceptedSpan] = []
+        for raw in _objects(receipt.get("span_return_receipts"), "span receipts"):
+            try:
+                start = date.fromisoformat(
+                    _text(raw.get("span_start_date"), "span start")
+                )
+                end = date.fromisoformat(_text(raw.get("span_end_date"), "span end"))
+            except ValueError as exc:
+                raise WeeklyReturnError("span receipt date is invalid") from exc
+            if (end - start).days < 2:
+                raise WeeklyReturnError("span receipt is not a multi-day span")
+            accepted.append(
+                AcceptedSpan(start, end, _decimal(raw.get("return"), "span return"))
+            )
+        accepted.sort(key=lambda span: span.end)
+        if any(a.end > b.start for a, b in zip(accepted, accepted[1:], strict=False)):
+            raise WeeklyReturnError(f"accepted spans overlap: {series_id}")
+        # The receipt must telescope: daily path times spans is the epoch return.
+        wealth = Decimal(1) + _decimal(
+            receipt.get("daily_cumulative_return"), "daily cumulative"
+        )
+        for span in accepted:
+            wealth *= Decimal(1) + span.value
+        epoch = Decimal(1) + _decimal(
+            receipt.get("epoch_cumulative_return"), "epoch cumulative"
+        )
+        if abs(wealth - epoch) > SPAN_TELESCOPE_TOLERANCE:
+            raise WeeklyReturnError(f"accepted spans do not telescope: {series_id}")
+        spans[series_id] = tuple(accepted)
+        owner[series_id] = strategy_id
+        daily_sha[series_id] = _text(
+            receipt.get("daily_return_series_sha256"), "daily path sha"
+        )
+        try:
+            observed_end[series_id] = date.fromisoformat(
+                _text(receipt.get("observed_end"), "epoch HPR observed_end")
+            )
+        except ValueError as exc:
+            raise WeeklyReturnError("epoch HPR observed_end is invalid") from exc
+    return AcceptedSpans(spans, daily_sha, observed_end, owner), [
+        receipt_path,
+        path,
+    ]
 
 
 def _correlation_inputs(
@@ -553,6 +677,7 @@ def _strategy_rows(
     generation_manifest: GenerationManifest,
     as_of: date,
     gap_fills: Mapping[str, GapFill] | None = None,
+    accepted_spans: AcceptedSpans | None = None,
 ) -> list[dict[str, Any]]:
     raw_source = correlation.get("source")
     if not isinstance(raw_source, dict) or not all(
@@ -624,6 +749,12 @@ def _strategy_rows(
             (observed_date, _decimal(row.get("return"), "strategy return"))
         )
 
+    accepted = accepted_spans or AcceptedSpans({}, {}, {}, {})
+    unknown_spans = sorted(set(accepted.spans) - set(compositions["LIVE_ONLY"]))
+    if unknown_spans:
+        raise WeeklyReturnError(
+            f"accepted span names an unknown strategy: {unknown_spans[0]}"
+        )
     fills = dict(gap_fills or {})
     unknown = sorted(set(fills) - set(compositions["LIVE_ONLY"]))
     if unknown:
@@ -652,6 +783,32 @@ def _strategy_rows(
             else:
                 backtest = []
             selected = live if mode == "LIVE_ONLY" else [*backtest, *live]
+            span_links: list[AcceptedSpan] = []
+            if series_id in accepted.spans:
+                # The receipt hashes the whole epoch.  Where the epoch runs past the
+                # common cutoff the returns source is projected to it and cannot
+                # reproduce that hash; the receipt binding above is the authority.
+                if accepted.observed_end[series_id] <= as_of and accepted.daily_sha256[
+                    series_id
+                ] != (_canonical_series_sha256(live)):
+                    raise WeeklyReturnError(
+                        f"accepted spans do not bind the live daily path: {series_id}"
+                    )
+                live_days = {row[0] for row in live}
+                span_links = [
+                    span
+                    for span in accepted.spans[series_id]
+                    if span.end <= as_of
+                    and (live_inception is None or span.end >= live_inception)
+                ]
+                if any(span.end in live_days for span in span_links):
+                    raise WeeklyReturnError(
+                        f"accepted span end has a daily observation: {series_id}"
+                    )
+                selected = [
+                    *selected,
+                    *((span.end, span.value) for span in span_links),
+                ]
             expected_live = item.get("live_observations")
             expected_backtest = item.get("backtest_observations_used")
             if expected_live != len(live):
@@ -680,6 +837,21 @@ def _strategy_rows(
                 if mode != "LIVE_ONLY"
                 else 0,
                 "canonical_live_series_sha256": _canonical_series_sha256(live),
+                **(
+                    {
+                        "accepted_multi_day_spans": [
+                            {
+                                "end": span.end.isoformat(),
+                                "return": _decimal_text(span.value),
+                                "strategy_id": accepted.strategy_ids[series_id],
+                                "start": span.start.isoformat(),
+                            }
+                            for span in span_links
+                        ]
+                    }
+                    if span_links
+                    else {}
+                ),
                 "live_daily_observations": len(live),
                 "strategy_version": version,
             }
@@ -949,14 +1121,21 @@ def build_weekly_returns(
     strategy_returns: Path,
     plan_bundle: Path,
     gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> tuple[dict[str, Any], tuple[Path, ...]]:
     correlation, generation_manifest, correlation_path, manifest_path = (
         _correlation_inputs(correlation_root)
     )
     as_of = _correlation_cutoff(correlation, generation_manifest)
     gap_fills, gap_fill_paths, gap_fill_provenance = _load_gap_fills(gap_fill_root)
+    accepted_spans, span_paths = _load_accepted_spans(history_coverage)
     strategy_rows = _strategy_rows(
-        strategy_returns, correlation, generation_manifest, as_of, gap_fills
+        strategy_returns,
+        correlation,
+        generation_manifest,
+        as_of,
+        gap_fills,
+        accepted_spans,
     )
     public_rows, public_paths, daily_benchmarks = _public_rows(plan_bundle, as_of)
     rows = [*strategy_rows, *public_rows]
@@ -1020,6 +1199,7 @@ def build_weekly_returns(
                 strategy_returns,
                 *public_paths,
                 *gap_fill_paths,
+                *span_paths,
             ]
         ),
     )
@@ -1048,9 +1228,14 @@ def build_candidate(
     plan_bundle: Path,
     output_root: Path,
     gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> dict[str, Any]:
     payload, _ = build_weekly_returns(
-        correlation_root, strategy_returns, plan_bundle, gap_fill_root
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        gap_fill_root,
+        history_coverage,
     )
     content = canonical_json_bytes(payload)
     candidate_id = hashlib.sha256(content).hexdigest()
@@ -1070,9 +1255,14 @@ def verify_candidate(
     plan_bundle: Path,
     candidate_dir: Path,
     gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> dict[str, Any]:
     payload, _ = build_weekly_returns(
-        correlation_root, strategy_returns, plan_bundle, gap_fill_root
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        gap_fill_root,
+        history_coverage,
     )
     correlation, _manifest, _correlation_path, _manifest_path = _correlation_inputs(
         correlation_root
@@ -1134,12 +1324,22 @@ def publish(
     candidate_dir: Path,
     output_root: Path,
     gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
-        correlation_root, strategy_returns, plan_bundle, candidate_dir, gap_fill_root
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        candidate_dir,
+        gap_fill_root,
+        history_coverage,
     )
     payload, input_paths = build_weekly_returns(
-        correlation_root, strategy_returns, plan_bundle, gap_fill_root
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        gap_fill_root,
+        history_coverage,
     )
     as_of = date.fromisoformat(payload["as_of_date"])
     artifacts = [
@@ -1225,6 +1425,11 @@ def _parser() -> argparse.ArgumentParser:
             type=Path,
             help="directory holding spec.json and the generations it names",
         )
+        command.add_argument(
+            "--history-coverage",
+            type=Path,
+            help="governed history coverage naming the accepted multi-day spans",
+        )
         if name in {"build", "publish"}:
             command.add_argument("--output-root", type=Path, required=True)
         if name in {"verify", "publish"}:
@@ -1242,6 +1447,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.plan_bundle,
                 args.output_root,
                 args.gap_fill_root,
+                args.history_coverage,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -1250,6 +1456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.plan_bundle,
                 args.candidate_dir,
                 args.gap_fill_root,
+                args.history_coverage,
             )
         else:
             result = publish(
@@ -1259,6 +1466,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.candidate_dir,
                 args.output_root,
                 args.gap_fill_root,
+                args.history_coverage,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-weekly-returns: FAIL: {exc}", file=sys.stderr)
