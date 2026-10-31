@@ -173,6 +173,8 @@ def test_comparison_window_is_read_from_the_annualisation_label(
         "start": "2026-02-01",
         "end": "2026-07-10",
         "days": 159,
+        "days_basis": "EXCLUSIVE_END_MINUS_START",
+        "days_text": "159 days exclusive (end minus start)",
         "observations": 100,
     }
     assert reporter._label_window(None) is None

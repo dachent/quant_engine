@@ -89,10 +89,11 @@ def test_a_move_confined_to_a_derived_patch_date_is_attributed_to_it(
         in text
     )
     assert (
-        "of this +1.50 is the restatement of the previous release's own last date 2026-09-14"
+        "all of this is the restatement of the previous release's own last date 2026-09-14"
         in text
     )
-    assert "and +0.00 is the movement from 2026-09-14 to 2026-09-14" in text
+    # both releases end on the same date: no movement between dates is stated
+    assert "is the movement from" not in text and "+0.00" not in text
     assert "differ on 1 of 5 common dates" in text
     assert "2026-09-14 (DERIVED_FROM_OFFICIAL_CLOSES)" in text
     assert "attributed to that NAV revision" in text
@@ -109,7 +110,7 @@ def test_a_move_on_other_dates_is_not_attributed_to_the_revision(
     text = _sentence(tmp_path, prior, now, _patches("2026-09-14"))
     assert "differ on 4 of 5 common dates (first 2026-09-09, last 2026-09-14)" in text
     assert "attributed to that NAV revision" not in text
-    assert "not attributed beyond this timing" in text
+    assert "not attributed to a named cause" in text
 
 
 def test_a_clock_without_a_patch_on_the_date_attributes_nothing(tmp_path: Path) -> None:
@@ -120,7 +121,7 @@ def test_a_clock_without_a_patch_on_the_date_attributes_nothing(tmp_path: Path) 
     for clock in (None, _patches(None), _patches("2026-09-11")):
         text = _sentence(tmp_path, prior, now, clock)
         assert "attributed to that NAV revision" not in text
-        assert "not attributed beyond this timing" in text
+        assert "not attributed to a named cause" in text
 
 
 def test_the_two_parts_always_sum_to_the_printed_move(tmp_path: Path) -> None:
@@ -153,7 +154,7 @@ def test_paths_that_do_not_end_on_the_printed_figures_give_no_split(
     now = _path(["100", "101", "102", "103", "105.5"])
     text = _sentence(tmp_path, prior, now, _patches("2026-09-14"), before="99")
     assert "restatement" not in text
-    assert text.endswith("the move is not attributed beyond this timing.")
+    assert text.endswith("the move is not attributed to a named cause.")
 
 
 def test_without_a_predecessor_path_the_old_unattributed_wording_remains(
@@ -162,7 +163,7 @@ def test_without_a_predecessor_path_the_old_unattributed_wording_remains(
     now = _path(["100", "101", "102", "103", "105.5"])
     text = _sentence(tmp_path, None, now, _patches("2026-09-14"), before="104")
     assert "restatement" not in text
-    assert "not attributed beyond this timing" in text
+    assert "not attributed to a named cause" in text
 
 
 def test_the_predecessor_path_is_read_from_the_pinned_data_file(tmp_path: Path) -> None:
@@ -209,7 +210,7 @@ def test_a_patch_on_another_account_or_an_earlier_date_attributes_nothing(
     ):
         text = _sentence(tmp_path, prior, now, clock)
         assert "attributed to that NAV revision" not in text
-        assert "not attributed beyond this timing" in text
+        assert "not attributed to a named cause" in text
     # the member's own sleeve account counts as well as its parent
     from test_sleeve_perimeter_disclosures import S1, S2
 
@@ -225,3 +226,43 @@ def _member(tmp_path: Path) -> str:
 
     text = _sentence(tmp_path, None, _path(["1", "1", "1", "1", "1"]), None, before="1")
     return re.search(r"sleeve series (\S+) from", text).group(1)  # type: ignore[union-attr]
+
+
+def test_identical_paths_on_the_same_end_date_state_no_restatement_and_no_extension(
+    tmp_path: Path,
+) -> None:
+    values = ["100", "101", "102", "103", "104"]
+    same = _sentence(
+        tmp_path,
+        [[d, v] for d, v in zip(DAYS, values, strict=True)],
+        _path(values),
+        None,
+    )
+    assert "(+0.00, +0.00%)" in same
+    assert "restatement" not in same and "extension" not in same
+    assert (
+        "both releases end on 2026-09-14 and their paths do not differ on any of 5 common dates"
+        in same
+    )
+
+
+def test_the_movement_clause_is_stated_only_when_the_releases_end_on_different_dates(
+    tmp_path: Path,
+) -> None:
+    prior = [[d, v] for d, v in zip(DAYS[:3], ["100", "101", "102.25"], strict=True)]
+    now = _path(["100", "101.5", "103", "104", "105.5"])
+    later = _sentence(tmp_path, prior, now, _patches("2026-09-14"))
+    assert "is the movement from 2026-09-10 to 2026-09-14" in later
+    same = _sentence(
+        tmp_path,
+        [
+            [d, v]
+            for d, v in zip(DAYS, ["100", "101", "102", "103", "104"], strict=True)
+        ],
+        _path(["100", "101", "102", "103", "105.5"]),
+        None,
+    )
+    assert "is the movement from" not in same
+    assert "all of this is the restatement" in same
+    assert "differ on 1 of 5 common dates (2026-09-14)" in same
+    assert "first 2026-09-14, last 2026-09-14" not in same

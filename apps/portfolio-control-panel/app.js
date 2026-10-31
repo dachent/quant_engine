@@ -3121,7 +3121,7 @@
     const windows = Array.isArray(strategy.windows) ? strategy.windows : [];
     return windows.find((item) => item.window_id === strategy.primary_window_id) || windows[0] || null;
   };
-  const mvaWindowText = (window) => (window ? `${formatDate(window.start)} → ${formatDate(window.end)}${number(window.days) != null ? ` (${integer.format(window.days)} d)` : ""}` : "window not published");
+  const mvaWindowText = (window) => (window ? `${formatDate(window.start)} → ${formatDate(window.end)}${typeof window.days_text === "string" && window.days_text ? ` (${window.days_text})` : number(window.days) != null ? ` (${integer.format(window.days)} d)` : ""}` : "window not published");
   const mvaComponent = (window, componentId) => (Array.isArray(window?.bridge) ? window.bridge.find((item) => item.component_id === componentId) || null : null);
 
   function mvaUnavailableTerms(strategy, block) {

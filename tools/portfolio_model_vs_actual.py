@@ -51,7 +51,7 @@ TAG_DEFINITIONS: Final = {
         "A row names the pull that replaces it only where the audit input names one."
     ),
     TAG_ESTIMATED: "An inference or conversion with a stated basis and uncertainty.",
-    TAG_UNAVAILABLE: "Cannot be produced from admitted inputs; the pull is named.",
+    TAG_UNAVAILABLE: "Cannot be produced from admitted inputs.",
 }
 ORIGIN_TAGS: Final = frozenset({"O", "D", "I"})
 USD_BASIS_AUDIT: Final = "AUDIT_USD"
@@ -321,15 +321,29 @@ def _build_component(c: Mapping[str, Any], base: float | None) -> dict[str, Any]
     }
 
 
+DAYS_BASIS: Final = "INCLUSIVE_OF_BOTH_ENDPOINTS"
 _LABEL_DAYS: Final = re.compile(r",\s*(\d+)\s+days\s*$")
+_NOTE_DAYS: Final = re.compile(r"\b(\d+)\s*(?:days|d)\b")
+
+
+def _inclusive_days(start: date, end: date) -> int:
+    """The one window length in this block: calendar days counting both endpoints."""
+
+    return (end - start).days + 1
+
+
+def _days_text(calendar_days: int) -> str:
+    unit = "day" if calendar_days == 1 else "days"
+    return f"{calendar_days} calendar {unit} inclusive"
 
 
 def _window_label(label: str, calendar_days: int, audit_days: object) -> str:
     """Re-state a trailing ", N days" in an audit label from the window's own dates.
 
     The audit's ``days`` is an observation count, the window's calendar span is derived
-    from its start and end: when both are given and differ, the label prints both so the
-    word "days" is never ambiguous. The audit text itself stays verbatim in the input.
+    from its start and end and counts both endpoints: when both are given and differ, the
+    label prints both so the word "days" is never ambiguous. The audit text itself stays
+    verbatim in the input.
     """
 
     match = _LABEL_DAYS.search(label)
@@ -341,8 +355,52 @@ def _window_label(label: str, calendar_days: int, audit_days: object) -> str:
         and not isinstance(audit_days, bool)
         and audit_days != calendar_days
     ):
-        return f"{stem}, {calendar_days} calendar days ({audit_days} observations)"
-    return f"{stem}, {calendar_days} calendar days"
+        return f"{stem}, {_days_text(calendar_days)} ({audit_days} observations)"
+    return f"{stem}, {_days_text(calendar_days)}"
+
+
+def _note_text(note: str, windows: Sequence[Mapping[str, Any]]) -> str:
+    """Re-word the day counts of a pass-through audit note from the windows' own fields.
+
+    Each entry of ``windows`` carries a window's ``calendar_days``, the audit's own
+    ``audit_days`` count for it, its ``stem`` (label without a trailing day count), its
+    ``window_id`` and whether it is the strategy's ``primary`` window. A number followed
+    by "days" or "d" is re-worded only when it is tied to such a window: it is the primary
+    window's count, or the note names the window (its stem or id). Tied to a window, an
+    audit count that differs from the calendar span is an observation count and a
+    calendar span is stated as inclusive calendar days; anything else, or a number that
+    could be either, is left as written.
+    """
+
+    def tied(window: Mapping[str, Any]) -> bool:
+        if window["primary"]:
+            return True
+        names = [str(window["window_id"]), str(window["stem"])]
+        return any(name and name in note for name in names)
+
+    observations: set[int] = set()
+    calendars: set[int] = set()
+    for window in windows:
+        if not tied(window):
+            continue
+        calendars.add(int(window["calendar_days"]))
+        audit = window["audit_days"]
+        if (
+            isinstance(audit, int)
+            and not isinstance(audit, bool)
+            and audit != window["calendar_days"]
+        ):
+            observations.add(audit)
+
+    def reword(match: re.Match[str]) -> str:
+        number = int(match.group(1))
+        if number in observations and number not in calendars:
+            return f"{number} observations"
+        if number in calendars and number not in observations:
+            return _days_text(number)
+        return match.group(0)
+
+    return _NOTE_DAYS.sub(reword, note)
 
 
 def _build_window(
@@ -414,13 +472,15 @@ def _build_window(
         "window_id": _text(w.get("window_id"), "window_id"),
         "label": _window_label(
             _text(w.get("label"), "label"),
-            (end - start).days + 1,
+            _inclusive_days(start, end),
             w.get("days"),
         ),
         "kind": w["kind"],
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "days": (end - start).days + 1,
+        "days": _inclusive_days(start, end),
+        "days_basis": DAYS_BASIS,
+        "days_text": _days_text(_inclusive_days(start, end)),
         "view": _text(w.get("view"), "view"),
         "account_return_pct": _round(account),
         "model_return_pct": _round(model),
@@ -482,12 +542,43 @@ def _pull_counts(strategies: Sequence[Mapping[str, Any]]) -> dict[str, int]:
                     named += 1
             subs += len([r for r in window["bridge"] for _s in r["sub_components"]])
             memos += len(window["memo"])
-    return {
+    counts = {
         "named": named,
         "unnamed": unnamed,
         "total": named + unnamed,
         "sub_components": subs,
         "memo_rows": memos,
+    }
+    counts.update(_unavailable_counts(strategies))
+    return counts
+
+
+def _unavailable_counts(strategies: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Counts of the UNAVAILABLE items by whether they name a replacing pull.
+
+    The listed ``unavailable`` entries always carry a ``replacing_pull`` field (a pull id
+    or null); a governed term has none. The counts come from the built items.
+    """
+
+    entries: list[Mapping[str, Any]] = []
+    terms: list[Mapping[str, Any]] = []
+    for strategy in strategies:
+        entries.extend(strategy["unavailable"])
+        for window in [*strategy["windows"], *strategy["epochs"]]:
+            terms.extend(
+                t
+                for t in window["governed_terms"]
+                if t["evidence_tag"] == TAG_UNAVAILABLE
+            )
+    named = sum(1 for e in entries if e["replacing_pull"] is not None)
+    return {
+        "unavailable_entries": len(entries),
+        "unavailable_entries_named": named,
+        "unavailable_items": len(entries) + len(terms),
+        "unavailable_items_named": named
+        + sum(1 for t in terms if t.get("replacing_pull") is not None),
+        "unavailable_empty_pull": len(entries) - named,
+        "unavailable_no_pull_field": sum(1 for t in terms if "replacing_pull" not in t),
     }
 
 
@@ -500,7 +591,21 @@ def _tag_definitions(counts: Mapping[str, int]) -> dict[str, str]:
         f"{counts['total']} AUDIT_DERIVED bridge rows name a replacing pull and "
         f"{counts['unnamed']} name none; sub-components and memo rows carry no pull field."
     )
+    definitions[TAG_UNAVAILABLE] = (
+        f"{TAG_DEFINITIONS[TAG_UNAVAILABLE]} In this block "
+        f"{counts['unavailable_items_named']} of {counts['unavailable_items']} UNAVAILABLE "
+        f"items name a replacing pull; {counts['unavailable_empty_pull']} have an empty pull "
+        f"field and {counts['unavailable_no_pull_field']} carry no pull field."
+    )
     return definitions
+
+
+def _unavailable_note(counts: Mapping[str, int]) -> str:
+    return (
+        "A strategy whose window has no admitted model leg is listed under unavailable; "
+        f"{counts['unavailable_entries_named']} of the {counts['unavailable_entries']} "
+        "unavailable entries name the pull that closes it."
+    )
 
 
 def _pull_note(counts: Mapping[str, int]) -> str:
@@ -660,7 +765,24 @@ def build_model_vs_actual(
                 "windows": [w for w in windows if w["kind"] == "ALIGNED"],
                 "epochs": [w for w in windows if w["kind"] == "EPOCH"],
                 "unavailable": unavailable,
-                "notes": [_text(n, "note") for n in item.get("notes") or []],
+                "notes": [
+                    _note_text(
+                        _text(n, "note"),
+                        [
+                            {
+                                "window_id": b["window_id"],
+                                "stem": _LABEL_DAYS.sub("", str(a.get("label"))),
+                                "calendar_days": b["days"],
+                                "audit_days": a.get("days"),
+                                "primary": b["window_id"]
+                                == item.get("primary_window_id"),
+                            }
+                            for a, b in zip(item["windows"], built, strict=True)
+                        ],
+                    )
+                    for n in item.get("notes") or []
+                ],
+                "notes_verbatim": [_text(n, "note") for n in item.get("notes") or []],
             }
         )
     for strategy in strategies:
@@ -696,7 +818,7 @@ def build_model_vs_actual(
         "pulls": pulls,
         "notes": [
             _pull_note(counts),
-            "A strategy whose window has no admitted model leg is listed under unavailable with the pull that closes it.",
+            _unavailable_note(counts),
         ],
     }
 

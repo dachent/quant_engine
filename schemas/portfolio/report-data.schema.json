@@ -1563,6 +1563,8 @@
         "start": {"type": "string", "format": "date"},
         "end": {"type": "string", "format": "date"},
         "days": {"type": "integer", "minimum": 0},
+        "days_basis": {"enum": ["EXCLUSIVE_END_MINUS_START", null]},
+        "days_text": {"type": ["string", "null"]},
         "observations": {"type": ["integer", "null"], "minimum": 0}
       }
     },
@@ -1589,7 +1591,7 @@
       "additionalProperties": {"$ref": "#/$defs/annualisation_basis_entry"},
       "required": ["twr"]
     },
-    "annualization_label": {"type": ["object", "null"], "additionalProperties": false, "required": ["basis", "frequency", "label", "observations", "periods_per_year", "short_window", "window_days", "window_end", "window_start"], "properties": {"basis": {"enum": ["CALENDAR_DAYS_COMPOUNDED_OVER_365", "SOURCE_REPORTED", "XIRR_ACT_365", "PERIODS_PER_YEAR_SCALED"]}, "frequency": {"type": ["string", "null"]}, "label": {"type": "string", "minLength": 1}, "observations": {"type": ["integer", "null"], "minimum": 0}, "periods_per_year": {"type": ["integer", "null"], "minimum": 1}, "short_window": {"type": "boolean"}, "window_days": {"type": "integer", "minimum": 0}, "window_end": {"type": "string", "format": "date"}, "window_start": {"type": "string", "format": "date"}}},
+    "annualization_label": {"type": ["object", "null"], "additionalProperties": false, "required": ["basis", "frequency", "label", "observations", "periods_per_year", "short_window", "window_days", "window_end", "window_start"], "properties": {"basis": {"enum": ["CALENDAR_DAYS_COMPOUNDED_OVER_365", "SOURCE_REPORTED", "XIRR_ACT_365", "PERIODS_PER_YEAR_SCALED"]}, "frequency": {"type": ["string", "null"]}, "label": {"type": "string", "minLength": 1}, "observations": {"type": ["integer", "null"], "minimum": 0}, "periods_per_year": {"type": ["integer", "null"], "minimum": 1}, "short_window": {"type": "boolean"}, "window_days": {"type": "integer", "minimum": 0}, "window_days_basis": {"const": "EXCLUSIVE_END_MINUS_START"}, "window_days_text": {"type": "string", "pattern": "^[0-9]+ days exclusive [(]end minus start[)]$"}, "window_end": {"type": "string", "format": "date"}, "window_start": {"type": "string", "format": "date"}}},
     "portfolio_totals_schema_version": {"const": 1},
     "portfolio_twr_cumulative": {
       "$comment": "PANEL-VIS-002: headline portfolio return is the governed HWM index series (base 100); the summed-epoch TWR and the difference are published beside it.",

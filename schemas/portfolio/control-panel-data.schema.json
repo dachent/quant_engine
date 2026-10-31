@@ -2321,6 +2321,8 @@
         "start": { "type": "string", "format": "date" },
         "end": { "type": "string", "format": "date" },
         "days": { "type": "integer", "minimum": 1 },
+        "days_basis": { "const": "INCLUSIVE_OF_BOTH_ENDPOINTS" },
+        "days_text": { "type": "string", "pattern": "^[0-9]+ calendar days? inclusive$" },
         "view": { "type": "string", "minLength": 1 },
         "account_return_pct": { "type": "number" },
         "model_return_pct": { "type": "number" },
@@ -2392,7 +2394,8 @@
         "windows": { "type": "array", "items": { "$ref": "#/$defs/mva_window" } },
         "epochs": { "type": "array", "items": { "$ref": "#/$defs/mva_window" } },
         "unavailable": { "type": "array", "items": { "$ref": "#/$defs/mva_unavailable" } },
-        "notes": { "type": "array", "items": { "type": "string" } }
+        "notes": { "type": "array", "items": { "type": "string" } },
+        "notes_verbatim": { "type": "array", "items": { "type": "string" } }
       }
     },
     "mva_portfolio_bridge": {
