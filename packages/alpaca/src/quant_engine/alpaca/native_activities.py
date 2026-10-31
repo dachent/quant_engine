@@ -101,7 +101,7 @@ def window_dates(after: object, until: object) -> tuple[date, date]:
         raise _fail("the window must be bounded on both sides")
     first = _bound(after, end=False)
     last = _bound(until, end=True)
-    if first.date() > last.date():
+    if first > last:
         raise _fail("the window start is after its end")
     return first.date(), last.date()
 

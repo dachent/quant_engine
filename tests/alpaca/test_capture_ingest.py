@@ -69,6 +69,7 @@ from quant_engine.alpaca.native_activities import (
     row_order,
     sha256_hex,
     summarize,
+    window_dates,
 )
 from test_alpaca_generation import _source
 
@@ -1011,3 +1012,32 @@ def test_tool_plan_accepts_native_activities(tmp_path: Path) -> None:
         ]
     )
     assert bare.native_activities is None
+
+
+def test_refuses_a_run_filtered_by_activity_type(tmp_path: Path) -> None:
+    run = _make_run(tmp_path, [[nontrade(1, "FEE", "-1")], []], activity_types=["FEE"])
+    assert verify_run(run).ok
+    with pytest.raises(IngestRefused, match="filtered by activity type"):
+        _ingest(tmp_path, run)
+    assert _tree(_out(tmp_path)) == []
+
+
+def test_inverted_same_day_timestamp_window_is_refused() -> None:
+    with pytest.raises(NativeActivitiesError, match="after its end"):
+        window_dates("2024-01-01T18:00:00Z", "2024-01-01T09:00:00Z")
+
+
+def test_generation_refuses_native_events_after_the_as_of_date(
+    tmp_path: Path,
+) -> None:
+    package = _package(tmp_path)
+    source, data, tracker = _source(tmp_path)
+    with pytest.raises(AlpacaGenerationError, match="beyond the generation as-of"):
+        create_plan(
+            source,
+            data,
+            tracker,
+            internal_account_id="account-0000000000000001",
+            as_of_date=date(2024, 6, 30),
+            native_activities=package,
+        )

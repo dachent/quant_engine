@@ -240,6 +240,10 @@ def _plan_package(
         raise _refuse("the run window is not bounded on both sides") from None
     if (after, until) != (expect_after, expect_until):
         raise _refuse("the run window differs from the declared window")
+    if window.get("activity_types"):
+        raise _refuse(
+            "the run is filtered by activity type, so its cash totals are partial"
+        )
     binding = manifest["account_binding_sha256"]
     if crosswalk.get(internal_account_id) != binding:
         raise _refuse("the run account binding differs from the crosswalk")

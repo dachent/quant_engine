@@ -20,6 +20,7 @@ from quant_engine.alpaca.native_activities import (
     NativeActivitiesError,
     NativePackage,
     load_native_package,
+    window_dates,
 )
 from quant_engine.core import (
     AdapterIdentity,
@@ -618,6 +619,7 @@ def create_plan(
             "directory": str(package.directory),
             "internal_account_id": package.internal_account_id,
         }
+        _native_within_as_of(package, as_of_date)
     plan_id = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     run_id = f"legacy-{as_of_date.strftime('%Y%m%d')}-{plan_id[:12]}"
     plan = {**payload, "plan_id": plan_id, "run_id": run_id}
@@ -707,6 +709,13 @@ def _native_package(block: Mapping[str, Any]) -> NativePackage:
     if declared is not None and declared != package.internal_account_id:
         raise AlpacaGenerationError("native activities account differs from the plan")
     return package
+
+
+def _native_within_as_of(native: NativePackage, as_of: date) -> None:
+    if window_dates(native.after, native.until)[1] > as_of:
+        raise AlpacaGenerationError(
+            "native activities window extends beyond the generation as-of date"
+        )
 
 
 def _native_transaction(account_id: str, row: Mapping[str, Any]) -> dict[str, object]:
@@ -892,6 +901,7 @@ def build_generation(
         if not isinstance(native_object.get("binding_sha256"), str):
             raise AlpacaGenerationError("native activities binding is not pinned")
         native = _native_package(native_object)
+        _native_within_as_of(native, generation_as_of)
         used_ids = {str(item["record_id"]) for item in transactions}
         for row in native.rows:
             native_transaction = _native_transaction(native.internal_account_id, row)
