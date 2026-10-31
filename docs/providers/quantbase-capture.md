@@ -336,3 +336,43 @@ page-set `jwt` header in `Network.requestWillBeSent` (the tool warns
 `API_RESPONSES_WITHOUT_JWT` and records nothing for such responses if it does not),
 that response bodies stay readable after `loadingFinished` for large fund series,
 and which extra routes the real pages call beyond the reviewed table.
+
+## Declared contract extension (`build_quantbase_contract`)
+
+`quant_engine.web_contracts.build_quantbase_contract(extension)` widens the reviewed
+Quantbase contract with DECLARED data, so the routes and paging keys found at the
+sitting (see `propose-contract` above) become a reviewed document, not a code edit.
+With no extension it returns `QUANTBASE_CONTRACT` itself, and a golden table in
+`tests/web_contracts/test_quantbase_extension.py` pins how every reviewed route and
+near-miss URL routes. The reviewed routes keep exact query-key matching
+(`EndpointContract.optional_query_keys` is empty for all of them).
+
+```json
+{
+  "schema_version": 1,
+  "routes": [
+    {"capability": "funds.detail", "origin": "https://app.getquantbase.com",
+     "path": "/_next/data/{build_id}/funds/{id}.json",
+     "path_pattern": "/_next/data/[^/]+/funds/[0-9]+\.json"},
+    {"capability": "funds.search", "origin": "https://qbapi3.com",
+     "path": "/api/funds/search/", "query_keys": ["q"], "authentication_header": "jwt"}
+  ],
+  "extra_query_keys": {"accounts.activity": ["page"]}
+}
+```
+
+`routes` add GET routes (required `query_keys` must all appear); `extra_query_keys`
+makes keys optional on one capability. It fails closed with `WebContractError`: unknown
+keys at any level, a non-portable or repeated key, a capability or route identity that
+repeats a reviewed one, an origin other than the two Quantbase origins, a path outside
+`/api/` (API origin) or `/_next/data/` (page data), a templated path without a
+`path_pattern` or an exact path with one, a pattern with an unbounded wildcard, an API
+route without `authentication_header: "jwt"` or a page-data route with one, any path,
+capability or key containing a mutation word (`track-event`, `delete`, `withdraw`,
+`transfer`, `link`, ...), and extra keys for an unknown capability, for one with a
+reviewed query validator (`users.profile`, `funds.statistics`,
+`funds.rebalance-history`), empty, or repeating a required key.
+`extract_quantbase_har(document, session=..., contract=...)` takes the extended
+contract; the default is unchanged. No real route is declared in this change, and the
+intake driver does not load an extension yet: wiring `--contract-extension` into
+`capture_quantbase_har.py` is the step after the sitting's draft is reviewed.
