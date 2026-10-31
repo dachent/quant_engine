@@ -2350,6 +2350,7 @@
       "required": ["term", "evidence_tag", "reason", "window_end", "replacing_pull"],
       "properties": {
         "term": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
         "evidence_tag": { "const": "UNAVAILABLE" },
         "reason": { "type": "string", "minLength": 1 },
         "window_end": { "type": ["string", "null"] },
