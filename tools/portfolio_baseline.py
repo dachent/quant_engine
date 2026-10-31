@@ -2358,6 +2358,7 @@ def _allocations_and_coverage(
         costs = _attach_cost_evidence(
             costs, evidence_path, strategy_aliases, publication_date
         )
+    _require_fee_rate_evidence(costs)
     # The audit snapshot is sealed: these totals are compared with the audit's reported
     # total and with the materializer's own sum, so they are added as the audit added
     # them (see ``_snapshot_sum``), never exactly.
@@ -2370,6 +2371,19 @@ def _allocations_and_coverage(
         systematic_total,
         nav_covered,
     )
+
+
+def _require_fee_rate_evidence(costs: Sequence[Mapping[str, Any]]) -> None:
+    """A documented-rate status claims rates exist: it needs its evidence row."""
+
+    for row in costs:
+        if row["cost_status"] == COST_STATUS_DOCUMENTED_RATE and not isinstance(
+            row.get("fee_rates"), dict
+        ):
+            raise BaselineValidationError(
+                f"documented-rate cost for {row['strategy_id']} "
+                "has no fee-rate evidence row"
+            )
 
 
 def _rate_source(value: object, name: str) -> dict[str, str]:

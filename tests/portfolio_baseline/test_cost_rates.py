@@ -193,6 +193,20 @@ def test_rates_require_the_percent_rate_class_and_a_cost_row(tmp_path: Path) -> 
         )
 
 
+def test_a_documented_rate_status_without_an_evidence_row_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The gate in the cost-row builder: no fee_rates, no documented-rate claim."""
+
+    bare = _costs("documented_rate_percent")
+    with pytest.raises(baseline.BaselineValidationError, match="no fee-rate evidence"):
+        baseline._require_fee_rate_evidence(bare)
+    attached = _attach(tmp_path, _rows("QUALIFIED_0_1M"), bare)
+    baseline._require_fee_rate_evidence(attached)
+    # An unsettled tier claims no rate, so it needs no evidence row.
+    baseline._require_fee_rate_evidence(_costs("documented_rate_tier_unsettled")[:1])
+
+
 def test_an_owner_declared_fixed_amount_is_an_admitted_basis(tmp_path: Path) -> None:
     sha = docs.digest("owner message")
     row = {
