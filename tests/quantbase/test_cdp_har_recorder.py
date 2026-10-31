@@ -1504,3 +1504,31 @@ def test_capability_suggestions_are_portable_and_unique() -> None:
     assert first == "funds.2"
     assert rec.suggest_capability("/api/Some_Thing/{id}/", set()) == "some-thing"
     assert rec.suggest_capability("/{id}", set()) == "route"
+
+
+def test_several_query_shapes_of_one_new_route_coalesce_into_one_declaration() -> None:
+    def item(keys: list[str]) -> dict[str, Any]:
+        return {
+            "origin": API,
+            "path_template": "/api/widgets/",
+            "query_keys": keys,
+            "count": 1,
+        }
+
+    manifest = {
+        "UNREVIEWED_ROUTE_NOT_RECORDED": [
+            item(["limit"]),
+            item(["limit", "page"]),
+            item(["limit", "page", "sort"]),
+        ]
+    }
+    draft = rec.build_contract_draft([manifest])
+    (route,) = draft["extension"]["routes"]
+    assert route["query_keys"] == ["limit"]
+    assert route["optional_query_keys"] == ["page", "sort"]
+    assert [o["proposal"] for o in draft["observed"]] == ["NEW_ROUTE"] * 3
+    assert len({o["capability"] for o in draft["observed"]}) == 1
+    manifest["UNREVIEWED_ROUTE_NOT_RECORDED"].append(item([]))
+    (route,) = rec.build_contract_draft([manifest])["extension"]["routes"]
+    assert route["query_keys"] == []
+    assert route["optional_query_keys"] == ["limit", "page", "sort"]
