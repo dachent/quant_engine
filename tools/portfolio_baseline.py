@@ -2072,6 +2072,20 @@ def _provider_ledger_facts(
                 financial_fact_date = observed_at.astimezone(
                     ZoneInfo("America/New_York")
                 ).date()
+                if item.get("valuation_cutoff") is not None:
+                    # An explicit valuation cutoff (a capture taken after the
+                    # cutoff day, observed_at being the real capture instant)
+                    # is the financial day; absent, the New York day above is
+                    # unchanged (legacy generations).
+                    valuation_cutoff = _date(
+                        item["valuation_cutoff"], "positions.valuation_cutoff"
+                    )
+                    if valuation_cutoff > financial_fact_date:
+                        raise BaselineValidationError(
+                            "Schwab current position valuation cutoff is later "
+                            "than its observation"
+                        )
+                    financial_fact_date = valuation_cutoff
             if financial_fact_date > baseline_as_of:
                 raise BaselineValidationError(
                     "provider-ledger fact is newer than baseline"
