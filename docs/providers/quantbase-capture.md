@@ -99,7 +99,7 @@ uv run --frozen --no-sync python tools/quantbase_generation.py plan <csv-root> <
 
 Without `--native-intake` the generation tool behaves exactly as before, and the
 legacy native contract (the 2026-09-02 file names) is unchanged. The CSV
-conversion step is outside this driver.
+conversion is a separate tool, see "HAR-to-CSV converter" below.
 
 ## Limits
 
@@ -135,3 +135,91 @@ the cutoff plus the grid-predicted date. Off-grid captured rows (provisional
 latest points) are never publishable. It refuses a cutoff before the first grid
 date, interior grid dates missing from the capture, and an off-grid cutoff or a
 cutoff later than the newest captured grid date unless a non-empty `label` says so.
+
+## HAR-to-CSV converter
+
+`tools/quantbase_har_to_csv.py` turns a verified intake into the exact source
+root `quantbase_generation.py plan` takes, plus the `--native-manifest`
+declaration, so the chain from owner HAR to plan needs no hand step. It opens no
+network connection and reads no credential.
+
+```powershell
+uv run --frozen --no-sync python tools/quantbase_har_to_csv.py convert `
+  --intake <intake-dir> --out-root <private-root> --volatis-pricehistory public
+uv run --frozen --no-sync python tools/quantbase_har_to_csv.py verify `
+  --intake <intake-dir> --out-root <private-root> --volatis-pricehistory public
+uv run --frozen --no-sync python tools/quantbase_generation.py plan `
+  <out>/quantbase-har-csv/<intake-id>/source <dataQuantbase-root> `
+  --as-of-date <cutoff> --quarantine-plan-id <id> `
+  --expected-file-count <csv_file_count> --expected-record-count <csv_record_count> `
+  --native-manifest <out>/quantbase-har-csv/<intake-id>/native-manifest.json
+```
+
+`csv_file_count` and `csv_record_count` are in the command's JSON result and in
+`conversion-report.json`. The output directory is create-only and holds
+`source/csv/*.csv`, `source/RUNBOOK_QUANTBASE.md`, `conversion-report.json` (counts,
+hashes and flags, no values) and, written last, `native-manifest.json`
+(`native-har` per raw HAR and `har-intake-manifest`, absolute paths into the intake,
+cutoff from the intake manifest). `--out-root` must be disjoint from the repository
+and the intake.
+
+Binding to the verified parse. `convert` first runs this driver's `verify`. It then
+re-reads the staged raw HAR one entry at a time through the same reviewed web
+contract and requires the sanitized form of what it read to equal
+`normalized/records.json` byte for byte. Anything the contract disposes of
+(preflight, analytics, static assets, ignored origins) is skipped; anything else
+the contract refuses stops the conversion.
+
+Why the CSV values are read from the raw bodies. The contract sanitizer redacts
+every `id`, `user` and `*_id` field and every scalar that looks like a token. In the
+retained 2026-09-02 capture that is every `fundPriceData` value (all 11,040 are
+24 or more characters), every activity `id` (so the order-to-fill join key is
+gone), the account fund value and the dashboard fund id. `records.json` therefore
+cannot carry the series the CSVs exist for. The raw bodies stay inside the verified
+intake; headers, cookies and the session JWT are never read into an output, and
+`convert` and `verify` refuse any output that contains a captured session header
+value (whole value or any `;`-separated piece). The raw HAR itself still holds the
+session headers (the driver flags `RAW_HAR_HOLDS_SESSION_MATERIAL`), and the
+`native-har` manifest entry binds it as received; redacting it is the owner decision
+in the proposal above.
+
+Role of each CSV (header order is the generation tool's, pinned by a test):
+
+| Capability | CSV |
+| --- | --- |
+| `users.profile` | `user_profile.csv` (sorted key/value, `ob_status.*` flattened) |
+| `accounts.linked` | `accounts.csv` |
+| `accounts.activity` | `account_activity.csv` (full 43-column header; `activity_type` from the entry type) |
+| `portfolio.dashboard` | `dashboard_<fund>_pricehistory.csv`, `dashboard_<fund>_holdings.csv` (only when non-empty), `dashboard_total_wins.csv` |
+| `partners.status` | `partner_status.csv` (optional) |
+| `funds.statistics` | `volatis_strategy_stats.csv` (only the Volatis fund) |
+| `funds.rebalance-history` | `volatis_strategy_rebalance_history.csv`; any other title becomes `fund_rebalance_<title>.csv` |
+| `funds.invest` | `ssg_<fund>_pricehistory.csv` per fund (the 5-day public series), `ssg_all_funds_stats.csv` and `projections_all_live_funds.csv` (one fund-metadata table under both names, as the retained converter wrote it) |
+
+`--volatis-pricehistory` is required and has no default. `public` writes the
+provider's public fund series for Volatis. `account-level` replaces only that file
+with the dashboard's daily account series, which is what the retained 2026-09-02
+files contain (the public series is then not written). The mode is the owner's
+ruling on which series is authoritative; `verify` must be given the same value.
+
+`dashboard_total_wins.csv` keeps the retained rule: the first fund in response order
+with a non-null `wins.total` supplies the `total_*` rows (Volatis in the retained
+capture, not the `Total` fund, whose values differ); the source fund is named in
+`conversion-report.json`.
+
+Refusals (fail closed): an intake that does not verify; records that differ from
+`normalized/records.json`; a capability with no CSV role (`funds.catalog`,
+`funds.index`, `funds.projections`) or a missing required one; a key the pinned
+shape lacks or adds (names only, never values); repeated identical requests with
+differing bodies; more than one distinct request for a singleton capability;
+`funds.statistics` for any fund but Volatis; a fund title with no safe file name or
+two titles with one file name; a fund with two ids or a repeated fund/time row;
+missing required datasets; an existing output directory.
+
+Limits. Key sets are pinned from the retained 2026-09-02 capture, so a provider
+field addition stops the conversion until the shape is reviewed. The account
+`funds` list was empty in that capture, so its entries are written as JSON without
+shape checks. The 2026-09-02 reproduction (46 CSVs) is recorded in the READY note;
+shapes after 2026-09-02 and a capture that includes `funds.projections` remain
+UNVERIFIED. No flow-coverage artifact is produced: a native HAR declared under a new
+name is not one of the files the ledger's account-activity check recognises.
