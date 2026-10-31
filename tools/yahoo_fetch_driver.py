@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
@@ -1418,6 +1418,81 @@ def official_files(merged: Mapping[str, Mapping[str, list[str]]]) -> dict[str, b
     return files
 
 
+OFFICIAL_MANIFEST = "official-closes/official-closes-manifest.json"
+
+
+def utc_text(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def official_manifest(
+    merged: Mapping[str, Mapping[str, list[str]]],
+    *,
+    cutoff: date,
+    run_id: str,
+    config_sha256: str,
+    started: str,
+    completed: str,
+) -> bytes:
+    """Small sidecar the ingest reads instead of opening the run.
+
+    Lists each file with its sha256, bar dates and the cutoff-date raw close, and the
+    fetch timestamps the ingest's split guard compares with the cutoff close.
+    """
+    bodies = official_files(merged)
+    entries = []
+    for name in sorted(merged):
+        body = bodies[f"official-closes/{name}_yahoo_daily.csv"]
+        days = sorted(merged[name])
+        at_cutoff = merged[name].get(cutoff.isoformat())
+        entries.append(
+            {
+                "symbol": name,
+                "file": f"{name}_yahoo_daily.csv",
+                "sha256": sha256_hex(body),
+                "size_bytes": len(body),
+                "first_bar": days[0],
+                "last_bar": days[-1],
+                "cutoff_bar": None if at_cutoff is None else cutoff.isoformat(),
+                "cutoff_close": None if at_cutoff is None else at_cutoff[3],
+            }
+        )
+    return pretty(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "yahoo-official-closes-manifest",
+            "run_id": run_id,
+            "cutoff": cutoff.isoformat(),
+            "fetch_started_utc": started,
+            "fetch_completed_utc": completed,
+            "config_effective_sha256": config_sha256,
+            "close_column": "close = raw daily Close (split-adjusted by Yahoo, not dividend-adjusted)",
+            "name_rule": "Schwab symbol with '/' written as '.' (BRK/B -> BRK.B_yahoo_daily.csv)",
+            "files": entries,
+        }
+    )
+
+
+def fetch_times_problems(manifest: Mapping[str, Any], cutoff: date) -> list[str]:
+    """Presence, UTC form and ordering of the recorded fetch timestamps."""
+    problems: list[str] = []
+    parsed: dict[str, datetime] = {}
+    for key in ("fetch_started_utc", "fetch_completed_utc"):
+        try:
+            value = manifest.get(key)
+            if not isinstance(value, str) or not value.endswith("Z"):
+                raise GovernanceError(f"{key} is missing or not a Z timestamp")
+            parsed[key] = _aware(value, key)
+        except DriverError as exc:
+            problems.append(str(exc))
+    if len(parsed) == 2:
+        if parsed["fetch_completed_utc"] < parsed["fetch_started_utc"]:
+            problems.append("fetch_completed_utc precedes fetch_started_utc")
+        if parsed["fetch_started_utc"].date() <= cutoff:
+            problems.append("fetch started before the cutoff day had closed")
+    return problems
+
+
 def official_coverage(
     merged: Mapping[str, Mapping[str, list[str]]], cutoff: date
 ) -> tuple[dict[str, Any], list[str]]:
@@ -1528,8 +1603,13 @@ def run_fetch(
     allow_unresolved: bool = False,
     max_requests: int | None = None,
     config_source_sha256: str | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> Path:
-    """Fetch every group, evaluate every rule, stage create-only, manifest last."""
+    """Fetch every group, evaluate every rule, stage create-only, manifest last.
+
+    ``now`` is the clock the governance receipt used and is recorded as
+    ``fetch_started_utc``; ``clock`` (default ``now``) gives ``fetch_completed_utc``.
+    """
     if not _RUN_ID.fullmatch(run_id):
         raise DriverError("run id is invalid")
     if (stage_root / run_id).exists() or (
@@ -1655,12 +1735,27 @@ def run_fetch(
         raise DriverError(
             f"fetch rejected ({len(failures)} failure(s)); report at {path}"
         )
+    completed_at = clock() if clock is not None else now
+    if completed_at < now:
+        raise DriverError("fetch completed before it started")
+    started_text, completed_text = utc_text(now), utc_text(completed_at)
+    if official_parts:
+        files[OFFICIAL_MANIFEST] = official_manifest(
+            merged,
+            cutoff=config.cutoff,
+            run_id=run_id,
+            config_sha256=config.sha256,
+            started=started_text,
+            completed=completed_text,
+        )
     files["config.json"] = config.effective_bytes
     files["coverage.json"] = pretty(coverage)
     header = {
         "kind": "yahoo-fetch-run",
         "run_label": config.run_label,
         "cutoff": config.cutoff.isoformat(),
+        "fetch_started_utc": started_text,
+        "fetch_completed_utc": completed_text,
         "created_at_utc": now.astimezone(timezone.utc)
         .isoformat()
         .replace("+00:00", "Z"),
@@ -2195,6 +2290,7 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
         problems.append("config.json is not the bound effective config")
     if config.cutoff.isoformat() != manifest.get("cutoff"):
         problems.append("manifest cutoff differs from the config")
+    problems.extend(fetch_times_problems(manifest, config.cutoff))
     if now is not None and any(
         g.through >= now.astimezone(timezone.utc).date() for g in config.groups
     ):
@@ -2276,8 +2372,25 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
                 if (run_dir / "official-closes").is_dir()
                 else set()
             )
-            if staged_names != set(official_files(merged)):
+            if staged_names != set(official_files(merged)) | {OFFICIAL_MANIFEST}:
                 problems.append("official-closes holds files the raw bytes do not give")
+            expected_manifest = official_manifest(
+                merged,
+                cutoff=config.cutoff,
+                run_id=run_dir.name,
+                config_sha256=config.sha256,
+                started=str(manifest.get("fetch_started_utc")),
+                completed=str(manifest.get("fetch_completed_utc")),
+            )
+            staged_manifest = run_dir / OFFICIAL_MANIFEST
+            if (
+                not staged_manifest.is_file()
+                or staged_manifest.read_bytes() != expected_manifest
+            ):
+                problems.append(
+                    "official-closes-manifest.json differs from the files and "
+                    "the run's fetch timestamps"
+                )
         except DriverError as exc:
             problems.append(str(exc))
     if canonical(recomputed) != canonical(stored):
@@ -2668,6 +2781,7 @@ def _live(args: argparse.Namespace) -> int:  # pragma: no cover - live only
             allow_unresolved=args.allow_unresolved,
             max_requests=budget,
             config_source_sha256=sha256_hex(raw),
+            clock=lambda: datetime.now(timezone.utc),
         )
     print(f"staged {path}")
     return 0

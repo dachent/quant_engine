@@ -1273,7 +1273,11 @@ def test_official_close_files_carry_the_raw_close_not_adj_close(tmp_path: Path) 
     )
     assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
     files = sorted(p.name for p in (run / "official-closes").iterdir())
-    assert files == ["BRK.B_yahoo_daily.csv", "SPY_yahoo_daily.csv"]
+    assert files == [
+        "BRK.B_yahoo_daily.csv",
+        "SPY_yahoo_daily.csv",
+        "official-closes-manifest.json",
+    ]
     spy = (run / "official-closes/SPY_yahoo_daily.csv").read_text().splitlines()
     assert spy[0] == "date,open,high,low,close,adjclose,volume,dividend"
     last = spy[-1].split(",")
@@ -1362,3 +1366,111 @@ def test_official_closes_need_a_daily_history_group_and_schwab_positions(
         driver.parse_config(json.dumps(bad).encode())
     with pytest.raises(driver.DriverError, match="no positions"):
         driver.parse_config(_held_config(), schwab_positions=_positions(tmp_path, []))
+
+
+# --------------------------------------- fetch timestamps and official manifest
+
+
+def _held_run(tmp_path: Path, run_id: str = "time-run", **kw: Any) -> Path:
+    config = driver.parse_config(
+        _held_config(), schwab_positions=_positions(tmp_path, ["SPY", "BRK/B"])
+    )
+    return driver.run_fetch(
+        config,
+        stage_root=tmp_path / "s",
+        run_id=run_id,
+        yf=FakeYF(),
+        chart=FakeChart(),
+        **kw,
+    )
+
+
+def test_manifest_records_fetch_times_from_the_governance_clock(tmp_path: Path) -> None:
+    ticks = iter([datetime(2026, 10, 12, 15, 7, tzinfo=timezone.utc)])
+    run = _held_run(tmp_path, now=NOW, clock=lambda: next(ticks))
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    assert manifest["fetch_started_utc"] == "2026-10-12T15:00:00Z"
+    assert manifest["fetch_completed_utc"] == "2026-10-12T15:07:00Z"
+    assert manifest["cutoff"] == CUTOFF
+    sidecar = json.loads(
+        (run / "official-closes/official-closes-manifest.json").read_text()
+    )
+    assert sidecar["fetch_started_utc"] == manifest["fetch_started_utc"]
+    assert sidecar["fetch_completed_utc"] == manifest["fetch_completed_utc"]
+    assert sidecar["cutoff"] == CUTOFF
+    assert sidecar["name_rule"].startswith("Schwab symbol with '/' written as '.'")
+    by_name = {f["symbol"]: f for f in sidecar["files"]}
+    assert set(by_name) == {"BRK.B", "SPY"}
+    spy = by_name["SPY"]
+    body = (run / "official-closes" / spy["file"]).read_bytes()
+    assert spy["sha256"] == driver.sha256_hex(body) and spy["size_bytes"] == len(body)
+    assert spy["cutoff_bar"] == CUTOFF and spy["last_bar"] == CUTOFF
+    assert spy["cutoff_close"] == body.decode().splitlines()[-1].split(",")[4]
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+
+
+def test_clock_that_runs_backwards_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(driver.DriverError, match="completed before it started"):
+        _held_run(
+            tmp_path,
+            now=NOW,
+            clock=lambda: datetime(2026, 10, 12, 14, 0, tzinfo=timezone.utc),
+        )
+
+
+def _patch_header(run: Path, **changes: Any) -> None:
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    for key, value in changes.items():
+        if value is None:
+            manifest.pop(key, None)
+        else:
+            manifest[key] = value
+    (run / "MANIFEST.json").write_bytes(driver.pretty(manifest))
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"fetch_started_utc": None}, "fetch_started_utc is missing"),
+        ({"fetch_completed_utc": None}, "fetch_completed_utc is missing"),
+        ({"fetch_completed_utc": "2026-10-12T14:00:00Z"}, "precedes"),
+        ({"fetch_started_utc": "2026-10-12T15:00:00+02:00"}, "not a Z timestamp"),
+        (
+            {
+                "fetch_started_utc": "2026-10-09T20:00:00Z",
+                "fetch_completed_utc": "2026-10-09T21:00:00Z",
+            },
+            "before the cutoff day had closed",
+        ),
+    ],
+)
+def test_verify_rechecks_fetch_time_presence_and_order(
+    tmp_path: Path, changes: dict[str, Any], message: str
+) -> None:
+    run = _held_run(tmp_path, now=NOW)
+    _patch_header(run, **changes)
+    with pytest.raises(driver.DriverError, match=message):
+        driver.verify_run(run)
+
+
+def test_official_manifest_is_bound_to_files_and_times(tmp_path: Path) -> None:
+    run = _held_run(tmp_path, now=NOW)
+    sidecar = run / "official-closes/official-closes-manifest.json"
+    document = json.loads(sidecar.read_text())
+    document["files"][0]["sha256"] = "0" * 64
+    sidecar.write_bytes(driver.pretty(document))
+    _rewrite_manifest(run, "official-closes/official-closes-manifest.json")
+    with pytest.raises(
+        driver.DriverError, match="official-closes-manifest.json differs"
+    ):
+        driver.verify_run(run)
+    run2 = _held_run(tmp_path, run_id="time-run-2", now=NOW)
+    _patch_header(
+        run2,
+        fetch_started_utc="2026-10-12T15:00:01Z",
+        fetch_completed_utc="2026-10-12T15:00:02Z",
+    )
+    with pytest.raises(
+        driver.DriverError, match="official-closes-manifest.json differs"
+    ):
+        driver.verify_run(run2)

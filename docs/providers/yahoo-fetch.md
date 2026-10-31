@@ -53,6 +53,15 @@ bar refuse the run, and every name must have a bar on the cutoff date. A group w
 Schwab symbol with `/` written as `.`). `verify` rebuilds each file from the raw CSV and
 rejects any difference.
 
+`MANIFEST.json` records `fetch_started_utc` (the clock the governance receipt used) and
+`fetch_completed_utc`, both `Z` timestamps, and the cutoff; `verify` re-checks presence,
+UTC form, `completed >= started` and that the fetch started after the cutoff day closed.
+`official-closes/official-closes-manifest.json` sits beside the files so the ingest need
+not open the run: per file the symbol, sha256, size, first and last bar, the cutoff bar
+and its raw close, plus the run id, cutoff, config hash and the same two timestamps;
+`verify` rebuilds it from the files and the header. The file name is the ingest's alias
+key: the Schwab symbol with `/` written as `.` (`BRK/B` -> `BRK.B_yahoo_daily.csv`).
+
 ## Symbol resolution and admission
 
 An id in `symbol_resolution` is fetched only through `resolved_ticker`, which requires
