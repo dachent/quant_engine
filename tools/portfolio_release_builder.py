@@ -5433,14 +5433,43 @@ def _verified_epoch_manifest_panel_arguments(
 SPAN_FACTOR_TOLERANCE = Decimal("1e-26")
 
 
+def _history_source(recipe: Mapping[str, Any]) -> Path | None:
+    definition = recipe.get("correlation_source_root")
+    if not isinstance(definition, dict):
+        return None
+    return _path(definition.get("path"), "correlation source root")
+
+
+def _live_dates_by_series(returns_csv: Path) -> dict[str, set[date]]:
+    live: dict[str, set[date]] = {}
+    with returns_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("evidence_layer") == "ACCOUNT_LIVE":
+                live.setdefault(str(row["series_id"]), set()).add(
+                    date.fromisoformat(str(row["date"]))
+                )
+    return live
+
+
 def _verify_weekly_spans_against_manifest(
-    weekly_root: Path, account_strategy_manifest: Path | None
+    weekly_root: Path,
+    account_strategy_manifest: Path | None,
+    history_source: Path | None = None,
 ) -> int:
-    """Fail unless every accepted weekly span equals a manifest link factor exactly.
+    """Fail unless the weekly accepted spans and the manifest links agree both ways.
 
     The weekly stage reads its spans from the governed history coverage because the
-    account manifest is staged later.  Once the manifest exists, each span must match
-    the ``observation_trace.links`` factor of the same interval within SPAN_FACTOR_TOLERANCE, so any drift between the two authorities stops the build.
+    account manifest is staged later.  Once the manifest exists:
+
+    * every weekly span must equal, within SPAN_FACTOR_TOLERANCE, the factor of the
+      same interval on every manifest row of the span's owning strategy (a row's
+      ``strategy_id`` against the span's ``strategy_id``; a row of another strategy,
+      or an account row of the same strategy that disagrees, cannot satisfy it), and
+      at least one such row must exist;
+    * when ``history_source`` (the dependence source holding ``returns.csv`` and the
+      history coverage) is given, every manifest link of a covered strategy whose end
+      date carries no daily live observation must have its weekly span, so a measured
+      interval the weekly line leaves out stops the build.
     """
 
     if account_strategy_manifest is None:
@@ -5451,16 +5480,30 @@ def _verify_weekly_spans_against_manifest(
         raise VerticalBuildError("weekly generation lacks its payload")
     weekly = _load(weekly_path, f"weekly returns {generation_id}")
     manifest = _load(account_strategy_manifest, "account-strategy manifest")
-    factors: dict[tuple[str, str], set[str]] = {}
-    for row in manifest.get("rows") or []:
-        if not isinstance(row, dict):
-            continue
+    rows = [row for row in manifest.get("rows") or [] if isinstance(row, dict)]
+    # (strategy, start, end) -> [(account, factor)] over every manifest row
+    factors: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
+    for row in rows:
         trace = row.get("observation_trace")
         links = trace.get("links") if isinstance(trace, dict) else None
         for link in links if isinstance(links, list) else []:
             if isinstance(link, dict):
-                key = (str(link.get("start_date")), str(link.get("end_date")))
-                factors.setdefault(key, set()).add(str(link.get("factor")))
+                key = (
+                    str(row.get("strategy_id")),
+                    str(link.get("start_date")),
+                    str(link.get("end_date")),
+                )
+                factors.setdefault(key, []).append(
+                    (str(row.get("account_id")), str(link.get("factor")))
+                )
+
+    def close(span_return: object, factor_text: str) -> bool:
+        with localcontext() as context:
+            context.prec = 60
+            expected = Decimal(1) + Decimal(str(span_return))
+            return abs(expected - Decimal(factor_text)) <= SPAN_FACTOR_TOLERANCE
+
+    seen: set[tuple[str, str, str]] = set()
     checked = 0
     for series in weekly.get("series") or []:
         if not isinstance(series, dict):
@@ -5475,21 +5518,47 @@ def _verify_weekly_spans_against_manifest(
             for span in mode.get("accepted_multi_day_spans", [])
         }
         for span in spans.values():
-            key = (str(span["start"]), str(span["end"]))
-            candidates = factors.get(key, set())
-            matched = False
-            for factor_text in candidates:
-                with localcontext() as context:
-                    context.prec = 60
-                    expected = Decimal(1) + Decimal(str(span["return"]))
-                    gap = abs(expected - Decimal(factor_text))
-                    matched = matched or gap <= SPAN_FACTOR_TOLERANCE
-            if not matched:
+            key = (str(span.get("strategy_id")), str(span["start"]), str(span["end"]))
+            owners = factors.get(key, [])
+            if not owners or not all(close(span["return"], f) for _a, f in owners):
                 raise VerticalBuildError(
                     "weekly accepted span differs from the account manifest link: "
-                    f"{series.get('series_id')} {key[0]}..{key[1]}"
+                    f"{series.get('series_id')} {key[1]}..{key[2]}"
                 )
+            seen.add(key)
             checked += 1
+    if history_source is not None:
+        coverage_path = history_source / "history-coverage.json"
+        returns_path = history_source / "returns.csv"
+        if coverage_path.is_file() and returns_path.is_file():
+            history = _load(coverage_path, "history coverage")
+            series_of = {
+                str(item["strategy_id"]): str(item["series_id"])
+                for item in history.get("strategies") or []
+                if isinstance(item, dict) and item.get("series_id") is not None
+            }
+            live = _live_dates_by_series(returns_path)
+            for row in rows:
+                series_id = series_of.get(str(row.get("strategy_id")))
+                days = live.get(series_id or "")
+                trace = row.get("observation_trace")
+                links = trace.get("links") if isinstance(trace, dict) else None
+                for link in links if isinstance(links, list) else []:
+                    if not days or not isinstance(link, dict):
+                        continue
+                    end = date.fromisoformat(str(link.get("end_date")))
+                    if not min(days) < end <= max(days) or end in days:
+                        continue
+                    key = (
+                        str(row.get("strategy_id")),
+                        str(link.get("start_date")),
+                        str(link.get("end_date")),
+                    )
+                    if key not in seen:
+                        raise VerticalBuildError(
+                            "account manifest link has no weekly accepted span: "
+                            f"{row.get('account_id')} {key[0]} {key[1]}..{key[2]}"
+                        )
     return checked
 
 
@@ -5690,6 +5759,7 @@ def build_panel_candidate(
     _verify_weekly_spans_against_manifest(
         Path(_text(analytics.get("weekly_root"), "weekly_root")),
         account_strategy_manifest,
+        _history_source(recipe),
     )
     financial_arguments = _panel_financial_arguments(
         recipe,
@@ -5883,6 +5953,7 @@ def publish_panel(
     _verify_weekly_spans_against_manifest(
         Path(_text(analytics.get("weekly_root"), "weekly_root")),
         account_strategy_manifest,
+        _history_source(recipe),
     )
     financial_arguments = _panel_financial_arguments(
         recipe,

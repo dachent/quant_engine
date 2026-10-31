@@ -887,7 +887,13 @@
   };
   const epochBasisNote = (row) => accountBasisNote(accountDimension.find((summary) => summary.account_id === row.account_id
     && String(summary.as_of_date || "").slice(0, 10) === String(row.end || "").slice(0, 10)));
-  const reserveBasisNote = () => accountBasisNote(accountDimension.find((summary) => summary.role === "RESERVE" && summary.value_basis));
+  // The reserve figure is an aggregate: the note is shown only when every reserve account carries a derived
+  // value and they all share one basis, never because one member does.
+  const reserveBasisNote = () => {
+    const members = accountDimension.filter((summary) => summary.role === "RESERVE");
+    const first = members[0]?.value_basis?.basis;
+    return first && members.every((summary) => summary.value_basis?.basis === first) ? accountBasisNote(members[0]) : "";
+  };
 
   function renderPositionTable() {
     const query = positionSearch.toLowerCase();

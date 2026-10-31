@@ -23,6 +23,7 @@ the digest of every step log so a forgery has to fabricate those too.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import re
 from pathlib import Path
@@ -55,9 +56,19 @@ REQUIRED_STEPS: Final[tuple[str, ...]] = (
 )
 
 
+def _path_case_flags() -> int:
+    """Windows paths compare without case; on a case-sensitive filesystem two roots that
+    differ only by case are different roots and must keep the digest apart."""
+
+    return re.IGNORECASE if os.name == "nt" else 0
+
+
 def _patterns(*pairs: tuple[Path, str]) -> list[tuple[re.Pattern[str], str]]:
     return [
-        (re.compile(re.escape(base.as_posix().rstrip("/")), re.IGNORECASE), token)
+        (
+            re.compile(re.escape(base.as_posix().rstrip("/")), _path_case_flags()),
+            token,
+        )
         for base, token in pairs
     ]
 
@@ -115,7 +126,8 @@ def _normalize_gates(
 
     real_base = (
         re.compile(
-            re.escape(real_anchor.as_posix().rstrip("/")) + r"(?=/|$)", re.IGNORECASE
+            re.escape(real_anchor.as_posix().rstrip("/")) + r"(?=/|$)",
+            _path_case_flags(),
         )
         if real_anchor is not None
         else None
