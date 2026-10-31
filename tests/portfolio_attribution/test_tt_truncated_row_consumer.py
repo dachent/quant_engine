@@ -174,3 +174,44 @@ def test_flags_after_the_cutoff_and_other_flags_are_ignored(tmp_path: Path) -> N
 def test_manifest_without_provenance_is_returned_unchanged(tmp_path: Path) -> None:
     manifest = _manifest(tmp_path, None)
     assert reconciliation.with_truncated_row_fallbacks(manifest, SECOND) is manifest
+
+
+def _override(marker: str) -> dict[str, Any]:
+    return {
+        "class": "LIVE_HOLDINGS_OVERRIDE",
+        "fallback": {
+            "kind": "LIVE_HOLDINGS_OVERRIDE",
+            "sources": {"last_rebalance_marker": {"value": marker}},
+        },
+    }
+
+
+def test_live_holdings_override_replaces_the_latest_row(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path, _override("2026-09-01"), weights={"SPY": 0.3})
+    repaired = reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+    assert _weights(repaired) == {"BIL": 0.5, "SPY": 0.5}
+    assert repaired["applied_truncated_row_fallbacks"][0]["fallback"] == (
+        "LIVE_HOLDINGS_OVERRIDE"
+    )
+    assert _weights(manifest) == {"SPY": 0.3}
+
+
+def test_live_holdings_override_needs_the_same_day_marker(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path, _override("2026-08-31"))
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError, match="no usable fallback"
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+def test_live_holdings_override_only_repairs_the_latest_row(tmp_path: Path) -> None:
+    manifest = _manifest(
+        tmp_path,
+        _override("2026-08-31"),
+        index=0,
+        observed="2026-08-31",
+    )
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError, match="no usable fallback"
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)

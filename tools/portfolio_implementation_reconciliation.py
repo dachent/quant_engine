@@ -1188,6 +1188,9 @@ def with_truncated_row_fallbacks(
     * ``LAST_COMPLETE_ROW`` / ``NEXT_COMPLETE_ROW`` copy that row's weights; a
       next-row source dated after ``accepted_as_of`` is refused (no post-cutoff
       information in a historical calculation).
+    * ``LIVE_HOLDINGS_OVERRIDE`` replaces the component's latest row by the live
+      holdings when the row is dated the same day as the recorded last-rebalance
+      marker (the live holdings are the post-rebalance state).
     * ``LIVE_PORTFOLIO_HOLDINGS`` only repairs the component's latest row and
       keeps the published weight of every shared symbol (it must agree with the
       live weight within the recorded explain tolerance); only symbols the row
@@ -1234,7 +1237,27 @@ def with_truncated_row_fallbacks(
             raise refuse()
         kind = fallback.get("kind")
         weights: dict[str, Any] | None = None
-        if kind == "LIVE_PORTFOLIO_HOLDINGS":
+        if kind == "LIVE_HOLDINGS_OVERRIDE":
+            sources = fallback.get("sources")
+            marker = (
+                sources.get("last_rebalance_marker")
+                if isinstance(sources, dict)
+                else None
+            )
+            live = {
+                str(item["symbol"]): item["weight"]
+                for item in component.get("current_holdings", [])
+            }
+            if (
+                target is snapshots[-1]
+                and isinstance(marker, dict)
+                and marker.get("value") == observed
+                and live
+                and all(weight is not None for weight in live.values())
+                and set(target["weights"]) <= set(live)
+            ):
+                weights = dict(live)
+        elif kind == "LIVE_PORTFOLIO_HOLDINGS":
             live = {
                 str(item["symbol"]): item["weight"]
                 for item in component.get("current_holdings", [])
