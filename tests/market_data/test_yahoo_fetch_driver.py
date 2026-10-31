@@ -446,12 +446,24 @@ def test_open_session_is_rejected(tmp_path: Path) -> None:
 
 def test_chart_bar_after_cutoff_and_empty_chart_are_rejected(tmp_path: Path) -> None:
     groups = [_group("fx", kind="chart", symbols=["EURUSD=X"])]
-    _rejected(
-        tmp_path,
-        _config(groups),
-        "after the declared through",
-        chart=FakeChart(extra_day=True),
+    run = _fetch(
+        tmp_path, _config(groups), run_id="trim", chart=FakeChart(extra_day=True)
     )
+    raw = run / "raw/fx/EURUSD_X.chart.json"
+    derived = run / "derived/fx/EURUSD_X.chart.json"
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    assert {"raw/fx/EURUSD_X.chart.json", "derived/fx/EURUSD_X.chart.json"} <= set(
+        manifest["files"]
+    )
+    assert raw.read_bytes() != derived.read_bytes()
+    entry = json.loads((run / "coverage.json").read_text())["groups"][0]["symbols"][0]
+    assert entry["raw_bars_after_through_dropped"] > 0
+    assert entry["status"] == "PASS"
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    derived.write_bytes(raw.read_bytes())
+    _rewrite_manifest(run, "derived/fx/EURUSD_X.chart.json")
+    with pytest.raises(driver.DriverError, match="cutoff-clean"):
+        driver.verify_run(run)
     groups2 = [_group("fx", kind="chart", symbols=["EURUSD=X"], max_null_closes=0)]
     with pytest.raises(driver.DriverError):
         _fetch(
@@ -822,3 +834,404 @@ def test_every_group_is_resolved_before_any_transport_call(tmp_path: Path) -> No
     assert yf.calls == []
     assert not (tmp_path / "s" / "pre-1").exists()
     assert driver.preflight(config, allow_unresolved=True)[0]["id"] == "ASB"
+
+
+# ------------------------------------------------- derived TT symbol set
+
+
+def _tt_manifest(tmp_path: Path, symbols_at_start: list[str], later: list[str]) -> Path:
+    document = {
+        "portfolio": {"live_inception": "2026-08-31"},
+        "selected_components": [
+            {
+                "dated_holdings": {
+                    "snapshots": [
+                        {
+                            "observed_date": "2026-08-28",
+                            "weights": {s: 0.1 for s in symbols_at_start},
+                        },
+                        {
+                            "observed_date": "2026-09-03",
+                            "weights": {s: 0.1 for s in later},
+                        },
+                        {"observed_date": "2026-12-01", "weights": {"LATE": 1.0}},
+                    ]
+                }
+            }
+        ],
+    }
+    path = tmp_path / "tt.json"
+    path.write_text(json.dumps(document))
+    return path
+
+
+def _derived_config() -> bytes:
+    group = _group("tt-daily", symbols_from="tt-source-manifest")
+    del group["symbols"], group["start"]
+    group.update(
+        symbols_must_include=["BNY", "DUK"], start_offset_days_before_inception=7
+    )
+    return _config([group])
+
+
+def test_tt_symbols_are_derived_not_listed(tmp_path: Path) -> None:
+    manifest = _tt_manifest(tmp_path, ["AAA", "BRK.B"], ["BNY", "DUK"])
+    config = driver.parse_config(_derived_config(), tt_source_manifest=manifest)
+    group = config.groups[0]
+    assert group.symbols == ("AAA", "BNY", "BRK-B", "DUK")  # LATE is after the cutoff
+    assert group.start == date(2026, 8, 24)
+    assert config.document["derivations"]["tt-source-manifest:2026-10-09"][
+        "inception"
+    ] == ("2026-08-31")
+    with pytest.raises(driver.DriverError, match="needs --tt-source-manifest"):
+        driver.parse_config(_derived_config())
+    stale = _tt_manifest(tmp_path, ["AAA"], ["DUK"])
+    with pytest.raises(driver.DriverError, match=r"lacks required \['BNY'\]"):
+        driver.parse_config(_derived_config(), tt_source_manifest=stale)
+
+
+def test_derived_group_refuses_a_hand_list_and_stages_resolved(tmp_path: Path) -> None:
+    manifest = _tt_manifest(tmp_path, ["AAA"], ["BNY", "DUK"])
+    document = json.loads(_derived_config())
+    document["groups"][0]["symbols"] = ["AAA"]
+    with pytest.raises(driver.DriverError, match="must not list"):
+        driver.parse_config(json.dumps(document).encode(), tt_source_manifest=manifest)
+    config = driver.parse_config(_derived_config(), tt_source_manifest=manifest)
+    run = driver.run_fetch(
+        config,
+        stage_root=tmp_path / "s",
+        run_id="tt-run",
+        yf=FakeYF(),
+        chart=FakeChart(),
+        now=NOW,
+    )
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    staged = json.loads((run / "config.json").read_text())
+    assert staged["groups"][0]["symbols"] == ["AAA", "BNY", "DUK"]
+    with pytest.raises(driver.DriverError, match="derivations are written"):
+        driver.parse_config((run / "config.json").read_bytes())
+
+
+# ------------------------------------------- reference-based admission
+
+HOLD = date(2026, 9, 7)
+
+
+def _points(values: dict[str, float]) -> list[dict[str, Any]]:
+    return [{"date": d, "value": v} for d, v in values.items()]
+
+
+def _reference(**over: Any) -> dict[str, Any]:
+    ref: dict[str, Any] = {
+        "kind": "equity",
+        "name": "ASBISc Enterprises Plc",
+        "name_tokens": ["asbis"],
+        "country": "POL",
+        "currency": "PLN",
+        "accepted_exchanges": ["WSE"],
+        "tolerance": 0.01,
+        "min_points": 3,
+        "points": _points(
+            {
+                "2026-09-01": 100.0,
+                "2026-09-02": 102.0,
+                "2026-09-03": 104.0,
+                "2026-09-04": 99.0,
+            }
+        ),
+        "sources": [{"artifact": "ibkr-catalog", "sha256": "a" * 64, "note": "marks"}],
+    }
+    ref.update(over)
+    return ref
+
+
+def _equity_chart(
+    ticker: str,
+    closes: dict[str, float],
+    *,
+    currency: str = "PLN",
+    exchange: str = "WSE",
+    long_name: str = "ASBISc Enterprises Plc",
+) -> bytes:
+    zone = ZoneInfo("Europe/Warsaw")
+    days = sorted(closes)
+    stamps = [
+        int(datetime(*map(int, d.split("-")), 9, 0, tzinfo=zone).timestamp())
+        for d in days
+    ]
+    body = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {
+                        "currency": currency,
+                        "symbol": ticker,
+                        "exchangeName": exchange,
+                        "dataGranularity": "1d",
+                        "exchangeTimezoneName": "Europe/Warsaw",
+                        "longName": long_name,
+                    },
+                    "timestamp": stamps,
+                    "indicators": {"quote": [{"close": [closes[d] for d in days]}]},
+                }
+            ]
+        }
+    }
+    return json.dumps(body).encode()
+
+
+GOOD = {
+    "2026-09-01": 100.2,
+    "2026-09-02": 101.8,
+    "2026-09-03": 104.1,
+    "2026-09-04": 99.3,
+}
+
+
+def _probe_config(
+    reference: dict[str, Any] | None = None, extra: list[str] | None = None
+) -> bytes:
+    entry = {
+        "id": "ASB",
+        "status": "UNRESOLVED",
+        "resolved_ticker": None,
+        "candidates": [
+            {"ticker": t, "note": "candidate"} for t in ["ASB.WA", *(extra or [])]
+        ],
+        "reference": reference if reference is not None else _reference(),
+    }
+    return _config([_group(symbols=["AAA", "ASB"])], symbol_resolution=[entry])
+
+
+def _recorded(tmp_path: Path, files: dict[str, bytes]) -> Path:
+    directory = tmp_path / "rec"
+    directory.mkdir(exist_ok=True)
+    for ticker, payload in files.items():
+        (directory / f"{driver._safe_name(ticker)}.chart.json").write_bytes(payload)
+    return directory
+
+
+def _probe(
+    tmp_path: Path, raw: bytes, files: dict[str, bytes], run_id: str = "probe-a"
+) -> Path:
+    config = driver.parse_config(raw)
+    return driver.run_probe(
+        config,
+        stage_root=tmp_path / "s",
+        run_id=run_id,
+        chart=driver.RecordedChart(_recorded(tmp_path, files)),
+        now=NOW,
+    )
+
+
+def test_matching_candidate_is_admitted_and_applied(tmp_path: Path) -> None:
+    run = _probe(tmp_path, _probe_config(), {"ASB.WA": _equity_chart("ASB.WA", GOOD)})
+    item = json.loads((run / "probe-report.json").read_text())["items"][0]
+    assert item["resolution"]["status"] == "ADMITTED"
+    assert item["candidates"][0]["judgement"]["verdict"] == "ADMITTED"
+    assert driver.verify_run(run)["status"] == "VERIFIED_NOT_ADMITTED"
+    out = driver.apply_admissions(_probe_config(), run)
+    config = driver.parse_config(out)
+    entry = config.resolution_for("ASB")
+    assert entry is not None and entry.status == "CONFIRMED"
+    assert entry.resolved_ticker == "ASB.WA"
+    assert entry.evidence is not None and entry.evidence["probe_run_id"] == "probe-a"
+    assert driver.resolve_group(config.groups[0], config, allow_unresolved=False)[0][
+        1
+    ] == (
+        "ASB",
+        "ASB.WA",
+    )
+    with pytest.raises(driver.DriverError, match="different config"):
+        driver.apply_admissions(_probe_config(_reference(tolerance=0.02)), run)
+
+
+@pytest.mark.parametrize(
+    ("chart_kwargs", "closes", "failed"),
+    [
+        ({"currency": "EUR"}, GOOD, "currency"),
+        ({"exchange": "NMS"}, GOOD, "exchange"),
+        ({"long_name": "Other Corp"}, GOOD, "name"),
+        ({}, {k: v * 1.05 for k, v in GOOD.items()}, "price_points"),
+        ({}, {"2026-09-01": 100.0}, "price_points"),
+    ],
+)
+def test_any_disagreement_keeps_the_id_unresolved(
+    tmp_path: Path, chart_kwargs: dict[str, Any], closes: dict[str, float], failed: str
+) -> None:
+    run = _probe(
+        tmp_path,
+        _probe_config(),
+        {"ASB.WA": _equity_chart("ASB.WA", closes, **chart_kwargs)},
+    )
+    item = json.loads((run / "probe-report.json").read_text())["items"][0]
+    assert item["resolution"]["status"] == "UNRESOLVED"
+    assert failed in item["candidates"][0]["judgement"]["failed"]
+    assert json.loads((run / "admissions.json").read_text())["admitted"] == []
+    out = driver.apply_admissions(_probe_config(), run)
+    assert driver.parse_config(out).resolution_for("ASB").status == "UNRESOLVED"  # type: ignore[union-attr]
+
+
+def test_pence_quotes_are_rescaled_and_read_as_gbp(tmp_path: Path) -> None:
+    ref = _reference(
+        currency="GBP", accepted_exchanges=["LSE"], name_tokens=["frontier"]
+    )
+    closes = {k: v * 100 for k, v in GOOD.items()}
+    chart = _equity_chart(
+        "FDEV.L",
+        closes,
+        currency="GBp",
+        exchange="LSE",
+        long_name="Frontier Developments",
+    )
+    raw = _probe_config(ref).replace(b"ASB.WA", b"FDEV.L")
+    run = _probe(tmp_path, raw, {"FDEV.L": chart})
+    item = json.loads((run / "probe-report.json").read_text())["items"][0]
+    assert item["resolution"] == {
+        "status": "ADMITTED",
+        "ticker": "FDEV.L",
+        "raw_file": "raw/ASB/FDEV.L.chart.json",
+        "raw_sha256": driver.sha256_hex(chart),
+    }
+
+
+def test_missing_series_two_matches_and_no_reference(tmp_path: Path) -> None:
+    run = _probe(tmp_path, _probe_config(), {}, run_id="probe-none")
+    item = json.loads((run / "probe-report.json").read_text())["items"][0]
+    assert item["candidates"][0]["judgement"]["verdict"] == "NO_SERIES"
+    assert item["resolution"]["status"] == "UNRESOLVED"
+    both = {
+        "ASB.WA": _equity_chart("ASB.WA", GOOD),
+        "ASB.XX": _equity_chart("ASB.XX", GOOD),
+    }
+    run2 = _probe(tmp_path, _probe_config(extra=["ASB.XX"]), both, run_id="probe-two")
+    assert (
+        json.loads((run2 / "probe-report.json").read_text())["items"][0]["resolution"][
+            "status"
+        ]
+        == "AMBIGUOUS"
+    )
+    document = json.loads(_probe_config())
+    del document["symbol_resolution"][0]["reference"]
+    run3 = _probe(
+        tmp_path,
+        json.dumps(document).encode(),
+        {"ASB.WA": _equity_chart("ASB.WA", GOOD)},
+        run_id="probe-noref",
+    )
+    cand = json.loads((run3 / "probe-report.json").read_text())["items"][0][
+        "candidates"
+    ][0]
+    assert cand["judgement"]["verdict"] == "NO_REFERENCE"
+
+
+def test_probe_verify_rejudges_from_raw_bytes(tmp_path: Path) -> None:
+    run = _probe(tmp_path, _probe_config(), {"ASB.WA": _equity_chart("ASB.WA", GOOD)})
+    raw = run / "raw/ASB/ASB.WA.chart.json"
+    bad = _equity_chart("ASB.WA", {k: v * 1.5 for k, v in GOOD.items()})
+    raw.write_bytes(bad)
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    manifest["files"]["raw/ASB/ASB.WA.chart.json"] = driver._file_record(bad)
+    (run / "MANIFEST.json").write_bytes(driver.pretty(manifest))
+    with pytest.raises(driver.DriverError, match="hash differs|judgement differs"):
+        driver.verify_run(run)
+
+
+def test_reference_shape_is_enforced() -> None:
+    for mutate in (
+        lambda r: r.update(tolerance=0.5),
+        lambda r: r.update(min_points=9),
+        lambda r: r.update(kind="bond"),
+        lambda r: r["points"].append(dict(r["points"][0])),
+        lambda r: r["sources"][0].update(sha256="zz"),
+        lambda r: r.update(accepted_exchanges=[]),
+    ):
+        ref = _reference()
+        mutate(ref)
+        with pytest.raises(driver.DriverError):
+            driver.parse_config(_probe_config(ref))
+
+
+def test_cli_offline_probe_and_apply(tmp_path: Path) -> None:
+    cfg = tmp_path / "c.json"
+    cfg.write_bytes(_probe_config())
+    rec = _recorded(tmp_path, {"ASB.WA": _equity_chart("ASB.WA", GOOD)})
+    stage = tmp_path / "stage"
+    assert (
+        driver.main(
+            [
+                "probe",
+                "--config",
+                str(cfg),
+                "--stage-root",
+                str(stage),
+                "--run-id",
+                "cli-probe",
+                "--recorded-dir",
+                str(rec),
+            ]
+        )
+        == 0
+    )
+    out = tmp_path / "confirmed.json"
+    assert (
+        driver.main(
+            [
+                "apply-admissions",
+                "--config",
+                str(cfg),
+                "--probe-run",
+                str(stage / "cli-probe"),
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    assert (
+        driver.parse_config(out.read_bytes()).resolution_for("ASB").status
+        == "CONFIRMED"
+    )  # type: ignore[union-attr]
+    assert (
+        driver.main(
+            [
+                "apply-admissions",
+                "--config",
+                str(cfg),
+                "--probe-run",
+                str(stage / "cli-probe"),
+                "--out",
+                str(out),
+            ]
+        )
+        == 1
+    )
+
+
+def test_retained_chart_derive_out_is_cutoff_clean(tmp_path: Path) -> None:
+    raw = FakeChart(extra_day=True).chart(
+        "EURUSD=X",
+        int(datetime(2026, 8, 31, 12, tzinfo=timezone.utc).timestamp()),
+        int(datetime(2026, 10, 9, 12, tzinfo=timezone.utc).timestamp()),
+    )
+    artifact = tmp_path / "chart.json"
+    artifact.write_bytes(raw)
+    common: dict[str, Any] = dict(
+        manifest=None,
+        cutoff=date(2026, 10, 9),
+        calendar="weekday",
+        min_rows=10,
+        max_missing_weekdays=3,
+        kind="chart",
+        symbol="EURUSD=X",
+        start=date(2026, 9, 1),
+    )
+    flagged = driver.verify_retained(artifact, **common)
+    assert any("after the declared through" in p for p in flagged["problems"])
+    out = tmp_path / "derived.json"
+    clean = driver.verify_retained(artifact, derive_out=out, **common)
+    assert clean["problems"] == []
+    assert clean["derived_sha256"] == driver.sha256_hex(out.read_bytes())
+    assert artifact.read_bytes() == raw
+    with pytest.raises(FileExistsError):
+        driver.verify_retained(artifact, derive_out=out, **common)

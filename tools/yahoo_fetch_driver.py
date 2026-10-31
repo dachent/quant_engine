@@ -241,6 +241,22 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class Reference:
+    """Independent identity and price reference for one unresolved id."""
+
+    kind: str
+    name: str
+    name_tokens: tuple[str, ...]
+    country: str
+    currency: str
+    accepted_exchanges: tuple[str, ...]
+    tolerance: float
+    min_points: int
+    points: tuple[tuple[date, float], ...]
+    sources: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class Resolution:
     symbol_id: str
     status: str
@@ -248,6 +264,7 @@ class Resolution:
     candidates: tuple[Candidate, ...]
     search_query: str | None
     evidence: Mapping[str, Any] | None
+    reference: Reference | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +317,12 @@ _GROUP_REQUIRED = {
     "min_rows",
     "max_missing_weekdays",
 }
+_DERIVED_OPTIONAL = {
+    "symbols_from",
+    "symbols_must_include",
+    "start_offset_days_before_inception",
+}
+_DERIVED_SOURCES = frozenset({"tt-source-manifest"})
 _GROUP_OPTIONAL = {
     "calendar",
     "datasets",
@@ -308,7 +331,7 @@ _GROUP_OPTIONAL = {
     "first_bar_tolerance_days",
     "allowed_last_bar_lag_days",
     "exceptions",
-}
+} | _DERIVED_OPTIONAL
 
 
 def _parse_group(raw: object, cutoff: date, index: int) -> Group:
@@ -406,7 +429,7 @@ def _parse_resolution(raw: object, index: int) -> Resolution:
         raw,
         {"id", "status", "resolved_ticker", "candidates"},
         f"symbol_resolution[{index}]",
-        {"search_query", "evidence"},
+        {"search_query", "evidence", "reference"},
     )
     symbol_id = _ticker(value["id"], "symbol_resolution.id")
     status = value["status"]
@@ -460,10 +483,188 @@ def _parse_resolution(raw: object, index: int) -> Resolution:
         tuple(candidates),
         None if query is None else str(query),
         evidence if isinstance(evidence, dict) else None,
+        None
+        if value.get("reference") is None
+        else _parse_reference(value["reference"], symbol_id),
     )
 
 
-def parse_config(raw: bytes, *, cutoff_override: str | None = None) -> Config:
+def _parse_reference(raw: object, symbol_id: str) -> Reference:
+    value = _strict(
+        raw,
+        {
+            "kind",
+            "name",
+            "name_tokens",
+            "country",
+            "currency",
+            "accepted_exchanges",
+            "tolerance",
+            "min_points",
+            "points",
+            "sources",
+        },
+        f"{symbol_id}.reference",
+    )
+    if value["kind"] not in {"equity", "fx"}:
+        raise DriverError(f"{symbol_id}.reference.kind must be equity or fx")
+    tokens = value["name_tokens"]
+    exchanges = value["accepted_exchanges"]
+    if (
+        not isinstance(tokens, list)
+        or not tokens
+        or not all(isinstance(t, str) and t.strip() for t in tokens)
+        or not isinstance(exchanges, list)
+        or not exchanges
+        or not all(isinstance(e, str) and e.strip() for e in exchanges)
+    ):
+        raise DriverError(f"{symbol_id}.reference tokens or exchanges are invalid")
+    tolerance = value["tolerance"]
+    if (
+        isinstance(tolerance, bool)
+        or not isinstance(tolerance, (int, float))
+        or not 0 < tolerance <= 0.1
+    ):
+        raise DriverError(f"{symbol_id}.reference.tolerance must be in (0, 0.1]")
+    min_points = _int(value["min_points"], f"{symbol_id}.reference.min_points", 1)
+    points_raw = value["points"]
+    if not isinstance(points_raw, list) or len(points_raw) < min_points:
+        raise DriverError(f"{symbol_id}.reference has fewer points than min_points")
+    points: list[tuple[date, float]] = []
+    for item in points_raw:
+        point = _strict(item, {"date", "value"}, f"{symbol_id}.reference.points")
+        number = point["value"]
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(number)
+            or number <= 0
+        ):
+            raise DriverError(f"{symbol_id}.reference point value is invalid")
+        points.append(
+            (_day(point["date"], f"{symbol_id}.reference.points"), float(number))
+        )
+    if len({d for d, _ in points}) != len(points):
+        raise DriverError(f"{symbol_id}.reference repeats a date")
+    sources_raw = value["sources"]
+    if not isinstance(sources_raw, list) or not sources_raw:
+        raise DriverError(f"{symbol_id}.reference needs sources")
+    sources = []
+    for item in sources_raw:
+        src = _strict(
+            item, {"artifact", "sha256", "note"}, f"{symbol_id}.reference.sources"
+        )
+        if not isinstance(src["sha256"], str) or not _SHA.fullmatch(src["sha256"]):
+            raise DriverError(f"{symbol_id}.reference source sha256 is invalid")
+        _text(src["artifact"], f"{symbol_id}.reference.sources.artifact")
+        _text(src["note"], f"{symbol_id}.reference.sources.note")
+        sources.append(src)
+    return Reference(
+        kind=str(value["kind"]),
+        name=_text(value["name"], f"{symbol_id}.reference.name"),
+        name_tokens=tuple(t.lower() for t in tokens),
+        country=_text(value["country"], f"{symbol_id}.reference.country"),
+        currency=_text(value["currency"], f"{symbol_id}.reference.currency"),
+        accepted_exchanges=tuple(exchanges),
+        tolerance=float(tolerance),
+        min_points=min_points,
+        points=tuple(sorted(points)),
+        sources=tuple(sources),
+    )
+
+
+def derive_tt_inputs(manifest_path: Path, end: date) -> dict[str, Any]:
+    """Target price symbols and live inception from a TT source manifest.
+
+    Replays ``quant_engine.turingtrader.source_manifest._target_symbols``: the
+    symbols held in the snapshot at or before live inception plus every symbol in a
+    snapshot dated after inception up to ``end``. ``BRK.B`` becomes the provider
+    ticker ``BRK-B``.
+    """
+    body = manifest_path.read_bytes()
+    try:
+        manifest = json.loads(body.decode("utf-8"))
+        inception = _day(manifest["portfolio"]["live_inception"], "live_inception")
+        components = manifest["selected_components"]
+        symbols: set[str] = set()
+        for component in components:
+            prior = None
+            within = []
+            for snapshot in component["dated_holdings"]["snapshots"]:
+                observed = _day(snapshot["observed_date"], "snapshot date")
+                if observed <= inception:
+                    prior = snapshot
+                elif observed <= end:
+                    within.append(snapshot)
+            if prior is None:
+                raise DriverError("TT dated holdings lack a state at live inception")
+            for snapshot in (prior, *within):
+                symbols.update(str(symbol).upper() for symbol in snapshot["weights"])
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DriverError("TT source manifest shape differs") from exc
+    if not symbols:
+        raise DriverError("TT source manifest names no price symbols")
+    provider = sorted({"BRK-B" if s == "BRK.B" else s for s in symbols})
+    return {
+        "symbols": provider,
+        "inception": inception.isoformat(),
+        "end": end.isoformat(),
+        "manifest_sha256": sha256_hex(body),
+    }
+
+
+def _materialize(
+    value: dict[str, Any], cutoff: date, tt_manifest: Path | None
+) -> dict[str, Any]:
+    """Fill derived group fields from their declared source; refuse hand lists."""
+    derivations: dict[str, Any] = {}
+    for group in value["groups"]:
+        if not isinstance(group, dict) or "symbols_from" not in group:
+            continue
+        source = group["symbols_from"]
+        gid = group.get("group_id")
+        if source not in _DERIVED_SOURCES:
+            raise DriverError(f"{gid}: symbols_from is unsupported")
+        if "symbols" in group or "start" in group:
+            raise DriverError(f"{gid}: a derived group must not list symbols or start")
+        if tt_manifest is None:
+            raise DriverError(
+                f"{gid}: needs --tt-source-manifest to derive its symbols"
+            )
+        through = group.get("through")
+        end = cutoff if through == "cutoff" else _day(through, f"{gid}.through")
+        key = f"{source}:{end.isoformat()}"
+        derived = derivations.get(key)
+        if derived is None:
+            derived = derive_tt_inputs(tt_manifest, end)
+            derivations[key] = derived
+        missing = sorted(
+            set(group.get("symbols_must_include", [])) - set(derived["symbols"])
+        )
+        if missing:
+            raise DriverError(
+                f"{gid}: the derived symbol set lacks required {missing}; "
+                "the TT source manifest is stale or incomplete"
+            )
+        offset = group.get("start_offset_days_before_inception")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 1:
+            raise DriverError(f"{gid}: start_offset_days_before_inception is required")
+        group["symbols"] = list(derived["symbols"])
+        group["start"] = (
+            date.fromisoformat(derived["inception"]) - timedelta(days=offset)
+        ).isoformat()
+    if derivations:
+        value["derivations"] = derivations
+    return value
+
+
+def parse_config(
+    raw: bytes,
+    *,
+    cutoff_override: str | None = None,
+    tt_source_manifest: Path | None = None,
+    resolved: bool = False,
+) -> Config:
     try:
         document = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -472,7 +673,7 @@ def parse_config(raw: bytes, *, cutoff_override: str | None = None) -> Config:
         document,
         {"schema_version", "run_label", "cutoff", "groups"},
         "config",
-        {"symbol_resolution", "limits", "note"},
+        {"symbol_resolution", "limits", "note", "derivations"},
     )
     if value["schema_version"] != SCHEMA_VERSION:
         raise DriverError("config schema_version is unsupported")
@@ -485,6 +686,16 @@ def parse_config(raw: bytes, *, cutoff_override: str | None = None) -> Config:
     groups_raw = value["groups"]
     if not isinstance(groups_raw, list) or not groups_raw:
         raise DriverError("config groups must be a non-empty list")
+    if resolved:
+        if any(
+            isinstance(g, dict) and "symbols_from" in g and "symbols" not in g
+            for g in groups_raw
+        ):
+            raise DriverError("a staged config must carry its resolved symbols")
+    else:
+        if "derivations" in value:
+            raise DriverError("derivations are written by the driver, not supplied")
+        _materialize(value, cutoff, tt_source_manifest)
     groups = tuple(_parse_group(item, cutoff, i) for i, item in enumerate(groups_raw))
     if len({g.group_id for g in groups}) != len(groups):
         raise DriverError("config repeats a group_id")
@@ -636,6 +847,26 @@ class LiveChart:  # pragma: no cover - live only, never run by the repository te
             "https://query1.finance.yahoo.com/v1/finance/search?"
             f"q={quote(query, safe='')}&quotesCount=10&newsCount=0"
         )
+
+
+class RecordedChart:
+    """Offline transport: previously recorded Yahoo chart responses from a directory.
+
+    ``<dir>/<TICKER with unsafe characters replaced by _>.chart.json``. A ticker
+    with no recording raises, so a candidate without a series stays unresolved.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+
+    def chart(self, symbol: str, period1: int, period2: int) -> bytes:
+        path = self._directory / f"{_safe_name(symbol)}.chart.json"
+        if not path.is_file() or path.is_symlink():
+            raise DriverError(f"no recorded response for {symbol}")
+        return path.read_bytes()
+
+    def search(self, query: str) -> bytes:
+        raise DriverError("no recorded search responses")
 
 
 # -------------------------------------------------------------------- adapter
@@ -849,7 +1080,7 @@ def analyze_raw_csv(
 
 
 def parse_chart(
-    raw: bytes, symbol: str
+    raw: bytes, symbol: str, *, require_midnight: bool = True
 ) -> tuple[list[tuple[date, float | None]], dict[str, Any]]:
     try:
         document = json.loads(raw.decode("utf-8"))
@@ -882,7 +1113,7 @@ def parse_chart(
         if isinstance(stamp, bool) or not isinstance(stamp, int):
             raise DriverError("chart timestamp is invalid")
         local = datetime.fromtimestamp(stamp, zone)
-        if (local.hour, local.minute, local.second) != (0, 0, 0):
+        if require_midnight and (local.hour, local.minute, local.second) != (0, 0, 0):
             raise DriverError("chart bar is not at local midnight")
         if close is not None and (
             isinstance(close, bool)
@@ -931,6 +1162,39 @@ def analyze_chart(
     entry["provider_meta"] = info
     entry["bars_before_start_ignored"] = sum(1 for d, _ in observed if d < group.start)
     return entry
+
+
+def trim_chart(raw: bytes, through: date, symbol: str) -> tuple[bytes, int]:
+    """Cutoff-clean derived chart: every bar dated after ``through`` removed.
+
+    Returns the derived bytes and the number of bars dropped. The raw response is
+    never altered; the derived file keeps the response shape the FX tool reads.
+    """
+    observed, _ = parse_chart(raw, symbol)
+    keep = [i for i, (d, _) in enumerate(observed) if d <= through]
+    document = json.loads(raw.decode("utf-8"))
+    body = document["chart"]["result"][0]
+
+    def cut(values: Any) -> Any:
+        return [values[i] for i in keep] if isinstance(values, list) else values
+
+    body["timestamp"] = cut(body["timestamp"])
+    for block in ("quote", "adjclose"):
+        for series in body["indicators"].get(block, []):
+            for key in list(series):
+                series[key] = cut(series[key])
+    derived = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
+    return derived.encode("utf-8"), len(observed) - len(keep)
+
+
+def chart_entry(
+    group: Group, raw: bytes, symbol_id: str, ticker: str
+) -> tuple[dict[str, Any], bytes]:
+    """Coverage entry computed on the cutoff-clean derived file, plus that file."""
+    derived, dropped = trim_chart(raw, group.through, ticker)
+    entry = analyze_chart(group, derived, symbol_id, ticker)
+    entry["raw_bars_after_through_dropped"] = dropped
+    return entry, derived
 
 
 # ------------------------------------------------------------------- staging
@@ -1169,13 +1433,17 @@ def run_fetch(
             for symbol_id, ticker in pairs:
                 try:
                     raw = metered.chart(ticker, period1, period2)
-                    entries.append(analyze_chart(group, raw, symbol_id, ticker))
+                    entry, derived = chart_entry(group, raw, symbol_id, ticker)
+                    entries.append(entry)
                 except GovernanceError:
                     raise
                 except (DriverError, OSError) as exc:
                     failures.append(f"{group.group_id}/{symbol_id}: {exc}")
                     continue
                 files[f"raw/{group.group_id}/{_safe_name(ticker)}.chart.json"] = raw
+                files[f"derived/{group.group_id}/{_safe_name(ticker)}.chart.json"] = (
+                    derived
+                )
         for entry in entries:
             for message in entry["failures"]:
                 failures.append(f"{group.group_id}/{entry['id']}: {message}")
@@ -1223,6 +1491,100 @@ def run_fetch(
 # ---------------------------------------------------------------------- probe
 
 
+_PENCE = {"GBp", "GBX"}
+ADMISSION_RULE = "admission-rule-v1"
+
+
+def judge_candidate(ref: Reference, ticker: str, raw: bytes) -> dict[str, Any]:
+    """Admit a candidate only if currency, exchange, name and prices all agree.
+
+    The series is judged against the independent reference: provider currency
+    (pence quotes are rescaled by 100 and read as GBP), provider exchange code in
+    the accepted set, every name token in the provider's long or short name, and the
+    close on each reference date within ``tolerance`` with at least ``min_points``
+    dates present and none outside tolerance.
+    """
+    observed, info = parse_chart(raw, ticker, require_midnight=False)
+    closes = {d: v for d, v in observed if v is not None}
+    scale = 0.01 if info.get("currency") in _PENCE else 1.0
+    currency = "GBP" if info.get("currency") in _PENCE else str(info.get("currency"))
+    name = f"{info.get('long_name') or ''} {info.get('short_name') or ''}".lower()
+    matched: list[dict[str, Any]] = []
+    mismatched: list[dict[str, Any]] = []
+    absent: list[str] = []
+    for day, value in ref.points:
+        close = closes.get(day)
+        if close is None:
+            absent.append(day.isoformat())
+            continue
+        shown = close * scale
+        error = abs(shown - value) / value
+        record = {
+            "date": day.isoformat(),
+            "reference": value,
+            "provider": round(shown, 8),
+            "relative_error": round(error, 6),
+        }
+        (matched if error <= ref.tolerance else mismatched).append(record)
+    checks = {
+        "currency": {
+            "pass": currency.upper() == ref.currency.upper(),
+            "provider": info.get("currency"),
+            "reference": ref.currency,
+        },
+        "exchange": {
+            "pass": info.get("exchange_name") in ref.accepted_exchanges,
+            "provider": info.get("exchange_name"),
+            "accepted": list(ref.accepted_exchanges),
+        },
+        "name": {
+            "pass": all(token in name for token in ref.name_tokens),
+            "provider": name.strip(),
+            "tokens": list(ref.name_tokens),
+        },
+        "price_points": {
+            "pass": len(matched) >= ref.min_points and not mismatched,
+            "matched": matched,
+            "mismatched": mismatched,
+            "absent": absent,
+            "tolerance": ref.tolerance,
+            "min_points": ref.min_points,
+        },
+    }
+    failed = sorted(name for name, check in checks.items() if not check["pass"])
+    return {
+        "ticker": ticker,
+        "rule": ADMISSION_RULE,
+        "verdict": "REJECTED" if failed else "ADMITTED",
+        "failed": failed,
+        "checks": checks,
+    }
+
+
+def _resolution_of(item: dict[str, Any]) -> dict[str, Any]:
+    admitted = [
+        c
+        for c in item["candidates"]
+        if c.get("judgement", {}).get("verdict") == "ADMITTED"
+    ]
+    if len(admitted) == 1:
+        return {
+            "status": "ADMITTED",
+            "ticker": admitted[0]["ticker"],
+            "raw_file": admitted[0]["raw_file"],
+            "raw_sha256": admitted[0]["raw_sha256"],
+        }
+    if len(admitted) > 1:
+        return {"status": "AMBIGUOUS", "tickers": [c["ticker"] for c in admitted]}
+    reasons = sorted(
+        {
+            c.get("judgement", {}).get("verdict", "NO_JUDGEMENT")
+            for c in item["candidates"]
+        }
+    )
+    return {"status": "UNRESOLVED", "candidate_verdicts": reasons}
+
+
 def run_probe(
     config: Config,
     *,
@@ -1248,6 +1610,8 @@ def run_probe(
             raise DriverError(
                 f"{entry.symbol_id} is in the resolution table but in no group"
             )
+        if entry.reference is not None:
+            start = min(start, entry.reference.points[0][0])
         period1 = int(
             datetime.combine(
                 start - timedelta(days=1), time(12), tzinfo=timezone.utc
@@ -1271,7 +1635,9 @@ def run_probe(
                 raw = metered.chart(candidate.ticker, period1, period2)
                 name = f"raw/{_safe_name(entry.symbol_id)}/{_safe_name(candidate.ticker)}.chart.json"
                 files[name] = raw
-                observed, info = parse_chart(raw, candidate.ticker)
+                observed, info = parse_chart(
+                    raw, candidate.ticker, require_midnight=False
+                )
                 closes = [d for d, v in observed if v is not None]
                 record.update(
                     result="FETCHED",
@@ -1281,11 +1647,20 @@ def run_probe(
                     rows=len(closes),
                     first_bar=min(closes).isoformat() if closes else None,
                     last_bar=max(closes).isoformat() if closes else None,
+                    judgement=(
+                        judge_candidate(entry.reference, candidate.ticker, raw)
+                        if entry.reference is not None
+                        else {"verdict": "NO_REFERENCE"}
+                    ),
                 )
             except GovernanceError:
                 raise
             except (DriverError, OSError) as exc:
-                record.update(result="FETCH_ERROR", error=str(exc))
+                record.update(
+                    result="FETCH_ERROR",
+                    error=str(exc),
+                    judgement={"verdict": "NO_SERIES"},
+                )
             item["candidates"].append(record)
         if entry.search_query:
             raw = metered.search(entry.search_query)
@@ -1300,8 +1675,25 @@ def run_probe(
             item["note"] = (
                 "NO_CANDIDATES: nothing to try; supply a candidate or a search_query"
             )
+        item["resolution"] = _resolution_of(item)
         report.append(item)
     files["probe-report.json"] = pretty({"label": PROBE_LABEL, "items": report})
+    files["admissions.json"] = pretty(
+        {
+            "rule": ADMISSION_RULE,
+            "admitted": [
+                {"id": i["id"], **i["resolution"]}
+                for i in report
+                if i["resolution"]["status"] == "ADMITTED"
+            ],
+            "not_admitted": [
+                {"id": i["id"], **i["resolution"]}
+                for i in report
+                if i["resolution"]["status"] != "ADMITTED"
+            ],
+        }
+    )
+    files["config.json"] = config.effective_bytes
     header = {
         "kind": "yahoo-probe-run",
         "cutoff": config.cutoff.isoformat(),
@@ -1313,6 +1705,36 @@ def run_probe(
         "label": PROBE_LABEL,
     }
     return _commit_run(stage_root, run_id, files, header)
+
+
+def apply_admissions(config_bytes: bytes, probe_dir: Path, **parse: Any) -> bytes:
+    """Config with every admitted id marked CONFIRMED, from a verified probe run.
+
+    The probe must have judged exactly this config (same effective hash). Only ids
+    the admission rule admitted change; their evidence names the probe run and the
+    raw response hash.
+    """
+    verify_run(probe_dir)
+    config = parse_config(config_bytes, **parse)
+    manifest = _load_json(probe_dir / MANIFEST_NAME)
+    if manifest.get("config_effective_sha256") != config.sha256:
+        raise DriverError("the probe judged a different config")
+    admissions = _load_json(probe_dir / "admissions.json")
+    document = json.loads(config.effective_bytes.decode("utf-8"))
+    by_id = {e["id"]: e for e in document.get("symbol_resolution", [])}
+    for item in admissions["admitted"]:
+        entry = by_id[item["id"]]
+        if entry["status"] != "UNRESOLVED":
+            raise DriverError(f"{item['id']} is not UNRESOLVED in this config")
+        entry["status"] = "CONFIRMED"
+        entry["resolved_ticker"] = item["ticker"]
+        entry["evidence"] = {
+            "probe_run_id": probe_dir.name,
+            "raw_sha256": item["raw_sha256"],
+            "confirmed_by": f"yahoo_fetch_driver:{ADMISSION_RULE}",
+            "note": "currency, exchange, name and reference prices agree",
+        }
+    return pretty(document)
 
 
 # ----------------------------------------------------------------- governance
@@ -1498,6 +1920,35 @@ def _verify_artifact_pair(
         problems.append(f"{label}: rows differ from the raw staging")
 
 
+def _verify_probe_judgements(run_dir: Path, report: Mapping[str, Any]) -> list[str]:
+    """Re-judge every fetched candidate from its raw bytes and compare."""
+    problems: list[str] = []
+    config = parse_config((run_dir / "config.json").read_bytes(), resolved=True)
+    for item in report.get("items", []):
+        entry = config.resolution_for(item["id"])
+        if entry is None:
+            problems.append(f"probe item {item['id']} is not in the config")
+            continue
+        for cand in item.get("candidates", []):
+            if cand.get("result") != "FETCHED" or entry.reference is None:
+                continue
+            raw = (run_dir / cand["raw_file"]).read_bytes()
+            again = judge_candidate(entry.reference, cand["ticker"], raw)
+            if canonical(again) != canonical(cand.get("judgement")):
+                problems.append(f"probe judgement differs for {cand['ticker']}")
+        if canonical(_resolution_of(item)) != canonical(item.get("resolution")):
+            problems.append(f"probe resolution differs for {item['id']}")
+    admissions = _load_json(run_dir / "admissions.json")
+    expected = [
+        {"id": i["id"], **i["resolution"]}
+        for i in report.get("items", [])
+        if i["resolution"]["status"] == "ADMITTED"
+    ]
+    if canonical(admissions.get("admitted")) != canonical(expected):
+        problems.append("admissions.json differs from the probe report")
+    return problems
+
+
 def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
     """Re-derive every claim of a staged run from its bytes; raise listing all problems."""
     problems: list[str] = []
@@ -1545,13 +1996,14 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
                     != cand["raw_sha256"]
                 ):
                     problems.append(f"probe raw hash differs for {cand['ticker']}")
+        problems.extend(_verify_probe_judgements(run_dir, report))
         if problems:
             raise DriverError("; ".join(problems))
         return {"kind": kind, "status": "VERIFIED_NOT_ADMITTED", "run_id": run_dir.name}
     if kind != "yahoo-fetch-run":
         raise DriverError("run kind is unknown")
     config_bytes = (run_dir / "config.json").read_bytes()
-    config = parse_config(config_bytes)
+    config = parse_config(config_bytes, resolved=True)
     if config.effective_bytes != config_bytes or config.sha256 != manifest.get(
         "config_effective_sha256"
     ):
@@ -1588,17 +2040,21 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
                     run_dir, group, dataset, pairs, raw_rows, problems
                 )
         else:
-            entries = [
-                analyze_chart(
-                    group,
-                    (
-                        run_dir / f"raw/{group.group_id}/{_safe_name(t)}.chart.json"
-                    ).read_bytes(),
-                    i,
-                    t,
+            entries = []
+            for i, t in pairs:
+                raw = (
+                    run_dir / f"raw/{group.group_id}/{_safe_name(t)}.chart.json"
+                ).read_bytes()
+                entry, derived = chart_entry(group, raw, i, t)
+                entries.append(entry)
+                staged = (
+                    run_dir / f"derived/{group.group_id}/{_safe_name(t)}.chart.json"
                 )
-                for i, t in pairs
-            ]
+                if staged.read_bytes() != derived:
+                    problems.append(
+                        f"{group.group_id}/{i}: derived file is not the cutoff-clean "
+                        "trim of the raw response"
+                    )
         groups_out.append(
             {"group_id": group.group_id, "kind": group.kind, "symbols": entries}
         )
@@ -1640,6 +2096,7 @@ def verify_retained(
     symbol: str | None = None,
     max_null_closes: int = 0,
     sha256_expected: str | None = None,
+    derive_out: Path | None = None,
 ) -> dict[str, Any]:
     """Offline re-verification of a tape already on disk (never fetches)."""
     body = artifact.read_bytes()
@@ -1662,6 +2119,16 @@ def verify_retained(
             first_bar_tolerance_days,
             max_null_closes,
         )
+        if derive_out is not None:
+            entry, derived = chart_entry(group, body, symbol, symbol)
+            _write_new(derive_out, derived)
+            return {
+                "artifact_sha256": sha256_hex(body),
+                "derived_sha256": sha256_hex(derived),
+                "derived_size_bytes": len(derived),
+                "symbols": [entry],
+                "problems": list(entry["failures"]),
+            }
         entry = analyze_chart(group, body, symbol, symbol)
         return {
             "artifact_sha256": sha256_hex(body),
@@ -1781,24 +2248,38 @@ def _parser() -> argparse.ArgumentParser:
         ("fetch", "governed live fetch of every config group"),
         (
             "probe",
-            "governed live probe of unresolved-symbol candidates (admits nothing)",
+            "judge unresolved-symbol candidates against their references; live "
+            "(governed) or from --recorded-dir",
         ),
     ):
         cmd = sub.add_parser(name, help=help_text)
         cmd.add_argument("--config", type=Path, required=True)
         cmd.add_argument("--stage-root", type=Path, required=True)
         cmd.add_argument("--run-id", required=True)
-        cmd.add_argument("--governance", type=Path, required=True)
+        cmd.add_argument("--governance", type=Path, required=name == "fetch")
         cmd.add_argument(
             "--cutoff", default=None, help="override config cutoff (ISO date)"
         )
+        cmd.add_argument("--tt-source-manifest", type=Path, default=None)
         if name == "fetch":
             cmd.add_argument("--allow-unresolved", action="store_true")
+        else:
+            cmd.add_argument("--recorded-dir", type=Path, default=None)
     check = sub.add_parser(
         "config-check", help="validate a config and print its resolution table"
     )
     check.add_argument("--config", type=Path, required=True)
     check.add_argument("--cutoff", default=None)
+    check.add_argument("--tt-source-manifest", type=Path, default=None)
+    apply = sub.add_parser(
+        "apply-admissions",
+        help="write a config with the probe's admitted ids CONFIRMED (create-only)",
+    )
+    apply.add_argument("--config", type=Path, required=True)
+    apply.add_argument("--probe-run", type=Path, required=True)
+    apply.add_argument("--out", type=Path, required=True)
+    apply.add_argument("--cutoff", default=None)
+    apply.add_argument("--tt-source-manifest", type=Path, default=None)
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
     )
@@ -1821,6 +2302,12 @@ def _parser() -> argparse.ArgumentParser:
     retained.add_argument(
         "--report", type=Path, default=None, help="create-only report path"
     )
+    retained.add_argument(
+        "--derive-out",
+        type=Path,
+        default=None,
+        help="chart only: create-only cutoff-clean derived file",
+    )
     return parser
 
 
@@ -1828,13 +2315,19 @@ def _config_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _load_config(args: argparse.Namespace) -> Config:
+    return parse_config(
+        _config_bytes(args.config),
+        cutoff_override=args.cutoff,
+        tt_source_manifest=args.tt_source_manifest,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "config-check":
-            config = parse_config(
-                _config_bytes(args.config), cutoff_override=args.cutoff
-            )
+            config = _load_config(args)
             print(
                 json.dumps(
                     {
@@ -1854,6 +2347,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                     indent=2,
                 )
             )
+            return 0
+        if args.command == "apply-admissions":
+            _write_new(
+                args.out,
+                apply_admissions(
+                    _config_bytes(args.config),
+                    args.probe_run,
+                    cutoff_override=args.cutoff,
+                    tt_source_manifest=args.tt_source_manifest,
+                ),
+            )
+            print(f"wrote {args.out}")
+            return 0
+        if args.command == "probe" and args.recorded_dir is not None:
+            path = run_probe(
+                _load_config(args),
+                stage_root=args.stage_root,
+                run_id=args.run_id,
+                chart=RecordedChart(args.recorded_dir),
+                now=datetime.now(timezone.utc),
+            )
+            print(f"staged {path}")
             return 0
         if args.command == "verify":
             print(
@@ -1878,6 +2393,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 symbol=args.symbol,
                 max_null_closes=args.max_null_closes,
                 sha256_expected=args.sha256,
+                derive_out=args.derive_out,
             )
             payload = pretty(result)
             if args.report is not None:
@@ -1887,6 +2403,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "symbols": len(result["symbols"]),
                 "problems": result["problems"],
             }
+            if "derived_sha256" in result:
+                summary["derived_sha256"] = result["derived_sha256"]
+                summary["derived_size_bytes"] = result["derived_size_bytes"]
             print(json.dumps(summary, indent=2))
             return 1 if result["problems"] else 0
         return _live(args)
@@ -1897,7 +2416,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _live(args: argparse.Namespace) -> int:  # pragma: no cover - live only
     raw = _config_bytes(args.config)
-    config = parse_config(raw, cutoff_override=args.cutoff)
+    config = _load_config(args)
+    if args.governance is None:
+        raise DriverError("a live read needs --governance evidence")
     now = datetime.now(timezone.utc)
     if args.command == "fetch":
         preflight(config, allow_unresolved=args.allow_unresolved)
