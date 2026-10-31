@@ -427,3 +427,82 @@ def test_label_flows_from_evidence_provenance_and_is_validated(
         ):
             make("c.json", bad)
         assert not (tmp_path / "outside" / "c.json").exists()
+
+
+def test_live_resume_with_a_different_cutoff_does_not_consume_the_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    canonical_governance_root: Path,
+) -> None:
+    monkeypatch.setattr(pipeline, "FULL_START_MS", 1722384000000)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    MatrixportExtractor(
+        workspace,
+        mode="full",
+        run_id="20260901T000000.000Z",
+        transport=FixtureTransport(),
+        cutoff=CUTOFF,
+        clock_ms=lambda: LATER_MS,
+    ).close()
+    other = "2026-09-16"
+    evidence = _evidence(tmp_path, cutoff=other)
+    with pytest.raises(ExtractionError, match="different cutoff"):
+        MatrixportExtractor(
+            workspace,
+            mode="full",
+            run_id="20260901T000000.000Z",
+            resume=True,
+            governance_evidence=evidence,
+            cutoff=other,
+            clock_ms=lambda: LATER_MS,
+        )
+    assert not canonical_governance_root.exists() or not list(
+        canonical_governance_root.glob("*.json")
+    )
+
+
+def test_incremental_base_never_ends_after_the_requested_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline, "FULL_START_MS", 1722384000000)
+    later = MatrixportExtractor(
+        tmp_path,
+        mode="full",
+        run_id="20260901T000000.000Z",
+        transport=FixtureTransport(),
+        cutoff=CUTOFF,
+        captured_after_cutoff_label="test",
+        clock_ms=lambda: LATER_MS,
+    )
+    try:
+        later.extract()
+    finally:
+        later.close()
+    (later.run_dir / "reports" / "verification.json").write_bytes(b'{"ok": true}')
+    earlier = MatrixportExtractor(
+        tmp_path,
+        mode="incremental",
+        run_id="20260902T000000.000Z",
+        transport=FixtureTransport(),
+        cutoff="2026-09-16",
+        captured_after_cutoff_label="test",
+        clock_ms=lambda: LATER_MS,
+    )
+    try:
+        assert earlier.previous_run_dir is None
+    finally:
+        earlier.close()
+    same_day = MatrixportExtractor(
+        tmp_path,
+        mode="incremental",
+        run_id="20260903T000000.000Z",
+        transport=FixtureTransport(),
+        cutoff="2026-09-18",
+        captured_after_cutoff_label="test",
+        clock_ms=lambda: LATER_MS,
+    )
+    try:
+        assert same_day.previous_run_dir == later.run_dir
+    finally:
+        same_day.close()

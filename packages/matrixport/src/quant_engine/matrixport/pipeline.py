@@ -481,6 +481,8 @@ class MatrixportExtractor:
                 self.capture_label = capture_label(governance_evidence)
             except EvidenceGenerationError as error:
                 raise ExtractionError(str(error)) from None
+            if resume:
+                self._require_resumable_binding()
             governance = authorize_live_read(
                 governance_evidence,
                 operation=live_operation,
@@ -570,6 +572,20 @@ class MatrixportExtractor:
     def close(self) -> None:
         self.storage.close()
 
+    def _require_resumable_binding(self) -> None:
+        """Refuse a cutoff or label mismatch on resume before any approval is spent."""
+        database = self.run_dir / "state" / DATABASE_NAME
+        if not database.is_file():
+            return
+        with RunStorage(database) as storage:
+            row = storage.get_run(self.run_id)
+        if row is None:
+            return
+        if recorded_cutoff(row) != self.cutoff:
+            raise ExtractionError("Cannot resume a run with a different cutoff")
+        if recorded_capture_label(row) != self.capture_label:
+            raise ExtractionError("Cannot resume a run with a different capture label")
+
     def _find_previous_completed(self) -> tuple[Path | None, int | None]:
         previous: list[tuple[int, Path]] = []
         if not self.output_root.exists():
@@ -588,7 +604,13 @@ class MatrixportExtractor:
             try:
                 with RunStorage(database) as storage:
                     row = storage.get_run(directory.name)
-                    if row and row["status"] == "COMPLETED":
+                    # a base that ends after this run's window would seed later
+                    # observations into an earlier cutoff
+                    if (
+                        row
+                        and row["status"] == "COMPLETED"
+                        and int(row["run_end_ms"]) <= self.run_end_ms
+                    ):
                         previous.append((int(row["run_end_ms"]), directory))
             except Exception:
                 continue
