@@ -77,12 +77,49 @@ def _normalize(value: Any, patterns: list[tuple[re.Pattern[str], str]]) -> Any:
     return value
 
 
-def _normalize_gates(body: dict[str, Any], anchor: Path) -> None:
+def _tokenise_path_fields(value: Any, base: re.Pattern[str]) -> Any:
+    """``value`` with ``base`` replaced by ``<ROOT>`` where it is the prefix of a ``path`` field.
+
+    Only a string held under a key named ``path`` is touched, and only when ``base`` is the
+    whole leading path (ends at a separator or at the end of the string); the same text in any
+    other field, or a different root or relative path, stays raw and keeps the digest apart."""
+
+    if isinstance(value, list):
+        return [_tokenise_path_fields(item, base) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "path" and isinstance(item, str):
+            text = item.replace("\\", "/")
+            match = base.match(text)
+            out[key] = "<ROOT>" + text[match.end() :] if match else item
+        else:
+            out[key] = _tokenise_path_fields(item, base)
+    return out
+
+
+def _normalize_gates(
+    body: dict[str, Any], anchor: Path, real_anchor: Path | None = None
+) -> None:
     """Gate files sit beside their spec (real ``production`` vs ``replica-production``) and the
     rebind contract embeds root paths, so neither the path nor the raw digest can match.
     Each gate is compared by its file name and by the digest of its content with the gate
     directory and the workspace anchor replaced by tokens; the directory is read from the
-    gate's own path, never hardcoded. An unreadable file keeps its recorded digest."""
+    gate's own path, never hardcoded. An unreadable file keeps its recorded digest.
+
+    A replica's gates are produced from the shared real ledger receipt, so they carry the
+    real workspace's absolute paths in their ``path`` fields (``finality_evidence.path``);
+    for a replica ``real_anchor`` is that real workspace and is tokenised, as a path prefix
+    in ``path`` fields only, to the same ``<ROOT>`` the real spec's own anchor becomes."""
+
+    real_base = (
+        re.compile(
+            re.escape(real_anchor.as_posix().rstrip("/")) + r"(?=/|$)", re.IGNORECASE
+        )
+        if real_anchor is not None
+        else None
+    )
 
     for gate in body.get("gates", []):
         path = Path(str(gate["path"]))
@@ -92,6 +129,8 @@ def _normalize_gates(body: dict[str, Any], anchor: Path) -> None:
             raw = path.read_bytes()
             try:
                 content: Any = _normalize(json.loads(raw.decode("utf-8")), patterns)
+                if real_base is not None:
+                    content = _tokenise_path_fields(content, real_base)
                 gate["sha256"] = hashlib.sha256(
                     canonical_json_bytes(content)
                 ).hexdigest()
@@ -102,18 +141,22 @@ def _normalize_gates(body: dict[str, Any], anchor: Path) -> None:
             pass
 
 
-def topology(spec: PipelineSpec, anchor: Path) -> dict[str, Any]:
+def topology(
+    spec: PipelineSpec, anchor: Path, real_anchor: Path | None = None
+) -> dict[str, Any]:
     """Everything about a spec that must be equal between the real run and its replica.
 
     ``anchor`` is the workspace root of that spec (the replica root for the replica).
     Paths below it are normalized away; the complete spec otherwise has to match (nodes,
     dependency edges, command arguments, gates, companions, state and write paths), except
-    ``created_at``. The raw spec digest differs by design and is not compared.
+    ``created_at``. The raw spec digest differs by design and is not compared. For a replica
+    spec ``real_anchor`` is the real workspace its gates were produced under (see
+    :func:`_normalize_gates`).
     """
 
     body = spec.to_dict()
     body.pop("created_at", None)
-    _normalize_gates(body, anchor)
+    _normalize_gates(body, anchor, real_anchor)
     normalized = _normalize(body, _patterns((anchor, "<ROOT>")))
     node_ids = sorted(node.node_id for node in spec.nodes)
     return {
@@ -187,7 +230,9 @@ def build_receipt(
         "real_anchor": real_anchor.as_posix(),
         "real_topology": topology(real_spec, real_anchor),
         "replica_spec_sha256": replica_spec.spec_sha256,
-        "replica_topology": topology(replica_spec, replica_anchor(replica_spec)),
+        "replica_topology": topology(
+            replica_spec, replica_anchor(replica_spec), real_anchor
+        ),
         "schema_version": SCHEMA_VERSION,
         "steps": steps,
     }
