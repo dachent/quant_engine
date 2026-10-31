@@ -22,10 +22,10 @@ from quant_engine.core.credentials import (
 from quant_engine.portfolio123 import capture_api as api
 from quant_engine.portfolio123.capture_catalog import CaptureRefusal
 
-KEY_ID_SECRET = "portfolio123-api-key-id"
-KEY_SECRET = "portfolio123-api-key"
-EXISTING_SECRET = "portfolio123-api"
-_VALUES = {KEY_ID_SECRET: "synthetic-id-value", KEY_SECRET: "synthetic-key-value"}
+ID_NAME = "portfolio123-api-key-id"
+KEY_NAME = "portfolio123-api-key"
+SINGLE_NAME = "portfolio123-api"
+_VALUES = {ID_NAME: "synthetic-id-value", KEY_NAME: "synthetic-key-value"}
 
 
 class _Runner:
@@ -58,37 +58,37 @@ def _code(config: dict[str, Any], **kwargs: Any) -> str:
 
 def test_two_distinct_secrets_resolve_with_the_existing_resolver() -> None:
     runner = _Runner()
-    config = _config(KEY_ID_SECRET, KEY_SECRET)
+    config = _config(ID_NAME, KEY_NAME)
     values = api.resolve_api_credentials(
         config, sources=sources_from_config(config, runner=runner)
     )
     assert set(values) == {"key_id", "key"}
-    assert values["key_id"].reveal() == _VALUES[KEY_ID_SECRET]
-    assert values["key"].reveal() == _VALUES[KEY_SECRET]
-    assert sorted(runner.names) == sorted([KEY_ID_SECRET, KEY_SECRET])
+    assert values["key_id"].reveal() == _VALUES[ID_NAME]
+    assert values["key"].reveal() == _VALUES[KEY_NAME]
+    assert sorted(runner.names) == sorted([ID_NAME, KEY_NAME])
     assert "synthetic" not in repr(values)
 
 
 def test_the_two_names_are_valid_key_vault_secret_names() -> None:
     source = KeyVaultSource(("helper",), runner=_Runner())
-    for name in (KEY_ID_SECRET, KEY_SECRET, EXISTING_SECRET):
+    for name in (ID_NAME, KEY_NAME, SINGLE_NAME):
         assert source.read(name, None)
 
 
 def test_one_secret_cannot_serve_both_fields() -> None:
     # Same secret for both fields: refused before any read, not silently duplicated.
     runner = _Runner()
-    config = _config(EXISTING_SECRET, EXISTING_SECRET)
+    config = _config(SINGLE_NAME, SINGLE_NAME)
     assert (
         _code(config, sources=sources_from_config(config, runner=runner))
         == "CREDENTIAL_PLAN_SHARED_SECRET"
     )
     assert runner.names == []
     # Asking the Key Vault source for a sub-field of the single secret is refused.
-    sub_field = _config(EXISTING_SECRET, EXISTING_SECRET, ', field = "key"')
+    sub_field = _config(SINGLE_NAME, SINGLE_NAME, ', field = "key"')
     assert _code(sub_field) == "CREDENTIAL_PLAN_SHARED_SECRET"
     with pytest.raises(CredentialError):
-        KeyVaultSource(("helper",), runner=_Runner()).read(EXISTING_SECRET, "key")
+        KeyVaultSource(("helper",), runner=_Runner()).read(SINGLE_NAME, "key")
     # A shared secret in a mixed plan is refused as well.
-    mixed = _config(KEY_ID_SECRET, KEY_ID_SECRET)
+    mixed = _config(ID_NAME, ID_NAME)
     assert _code(mixed) == "CREDENTIAL_PLAN_SHARED_SECRET"
