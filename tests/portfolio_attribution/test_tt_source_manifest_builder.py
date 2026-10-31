@@ -521,3 +521,22 @@ def test_planner_refuses_bad_input() -> None:
         planner.order_batch([_o("A", "1")], [_o("A", "1")], Decimal(1))
     with pytest.raises(ValueError):
         planner.order_batch([], [], Decimal(-1))
+
+
+def test_live_fallback_requires_matching_published_weights() -> None:
+    comp = {
+        "slug": "s",
+        "current_holdings": [{"symbol": "A", "weight": 1.0}],
+        "dated_holdings": {
+            "snapshots": [
+                {"observed_date": "2026-01-01", "weights": {"A": 0.5, "B": 0.5}},
+                {"observed_date": "2026-01-02", "weights": {"A": 0.5}},
+            ]
+        },
+    }
+    (flag,) = builder._holdings_validation([comp], 0.005, 0.02)["flags"]
+    assert flag["class"] == "SYMBOL_DROP"
+    assert flag["fallback"] == {
+        "kind": "LAST_COMPLETE_ROW",
+        "observed_date": "2026-01-01",
+    }

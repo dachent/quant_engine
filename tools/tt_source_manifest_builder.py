@@ -415,8 +415,9 @@ def _holdings_validation(
     weight equals the missing mass.  Any other short row is ``ROUNDING_OR_CASH``
     and a row above 100% is ``OVER_ALLOCATION``; neither is truncation.
     The fallback for a truncated row is the live portfolio-holdings (latest row,
-    live complete and containing every symbol of the row), else the nearest
-    complete prior row, else the nearest complete next row.
+    live complete, containing every symbol of the row with the published weight
+    of each within the explain tolerance), else the nearest complete prior row,
+    else the nearest complete next row.
     """
     flags: list[dict[str, Any]] = []
     counts: dict[str, dict[str, int]] = {}
@@ -470,6 +471,9 @@ def _holdings_validation(
                 and latest
                 and live_ok
                 and symbols <= set(live)
+                and all(
+                    abs(float(live[k]) - snap["weights"][k]) <= explain for k in symbols
+                )
             ):
                 fallback = {"kind": "LIVE_PORTFOLIO_HOLDINGS"}
             elif neighbours:
