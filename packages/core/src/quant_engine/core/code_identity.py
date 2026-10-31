@@ -189,13 +189,14 @@ def _commit_tree(repo: Path, commit: str) -> str:
     return _git(repo, "rev-parse", f"{commit}^{{tree}}")
 
 
-def verify_candidate_identity(repo: Path, claimed: str) -> str:
-    """Build-time check at the candidate checkout; returns the matched scheme.
+def verify_candidate_identity(repo: Path, claimed: str, scheme: str) -> None:
+    """Plan/build-time check at the candidate checkout under ``scheme``.
 
     The merge commit does not exist yet, so no attestation is required here. A tree
     identity is only ever *promoted* through ``verify_promotion_identity``.
     """
-    return classify_identity(repo, claimed)
+    if live_identity(repo, validate_scheme(scheme)) != claimed:
+        raise CodeIdentityError("repository differs from the bound code identity")
 
 
 def verify_promotion_identity(

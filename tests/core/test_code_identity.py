@@ -278,6 +278,20 @@ def test_tree_manifest_has_a_distinct_id_and_cannot_be_unmarked() -> None:
         ReleaseManifest.from_json_bytes(canonical_json_bytes(payload))
 
 
+def test_candidate_verification_needs_no_attestation_but_binds_the_tree(
+    repo: Path,
+) -> None:
+    git(repo, "checkout", "-b", "pr")
+    candidate = commit_file(repo, "a.txt", "fix\n", "candidate")
+    tree = ci.head_tree(repo)
+    ci.verify_candidate_identity(repo, tree, ci.TREE_SCHEME)
+    ci.verify_candidate_identity(repo, candidate, ci.COMMIT_SCHEME)
+    with pytest.raises(ci.CodeIdentityError):
+        ci.verify_candidate_identity(repo, candidate, ci.TREE_SCHEME)
+    with pytest.raises(ci.CodeIdentityError):
+        ci.verify_candidate_identity(repo, "1" * 40, ci.TREE_SCHEME)
+
+
 def _runtime_contract(repo: Path, tmp_path: Path, value: str) -> dict[str, Any]:
     exe = tmp_path / "python.exe"
     exe.write_bytes(b"exe")
@@ -318,13 +332,21 @@ def test_pipeline_runtime_gate_enforces_scheme_and_attestation(
             spec(candidate, ci.COMMIT_SCHEME),
         )
     contract = _runtime_contract(repo, tmp_path, tree)
+    # Plan/build (no promote) binds the tree only: no merge attestation can exist yet.
+    core_pipeline._verify_portfolio_runtime(contract, spec(tree, ci.TREE_SCHEME))
     with pytest.raises(core_pipeline.PipelineValidationError, match="mandatory"):
-        core_pipeline._verify_portfolio_runtime(contract, spec(tree, ci.TREE_SCHEME))
+        core_pipeline._verify_portfolio_runtime(
+            contract, spec(tree, ci.TREE_SCHEME), promote=True
+        )
     ci.write_merge_attestation(
         repo, candidate_commit=candidate, base_ref="main", state_root=state
     )
-    core_pipeline._verify_portfolio_runtime(contract, spec(tree, ci.TREE_SCHEME))
+    core_pipeline._verify_portfolio_runtime(
+        contract, spec(tree, ci.TREE_SCHEME), promote=True
+    )
     with pytest.raises(core_pipeline.PipelineValidationError):
         core_pipeline._verify_portfolio_runtime(
-            {**contract, "release_commit": merged}, spec(tree, ci.TREE_SCHEME)
+            {**contract, "release_commit": merged},
+            spec(tree, ci.TREE_SCHEME),
+            promote=True,
         )

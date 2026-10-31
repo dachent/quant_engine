@@ -25,6 +25,7 @@ from quant_engine.core.code_identity import (
     COMMIT_SCHEME,
     CodeIdentityError,
     validate_scheme,
+    verify_candidate_identity,
     verify_promotion_identity,
 )
 from quant_engine.core.contracts import (
@@ -2716,7 +2717,9 @@ def _git_output(repo_root: Path, *args: str) -> str:
     return completed.stdout.decode("utf-8", errors="strict").strip()
 
 
-def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -> None:
+def _verify_portfolio_runtime(
+    contract: Mapping[str, Any], spec: PipelineSpec, *, promote: bool = False
+) -> None:
     runtime = _object(contract["runtime"], "portfolio runtime")
     executable = runtime["executable_path"]
     lock = runtime["lock_path"]
@@ -2739,14 +2742,22 @@ def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -
     elif spec.code_commit != contract["release_commit"]:
         raise PipelineValidationError("portfolio repository HEAD differs")
     else:
+        # git-tree-v2. Plan/build run at the candidate checkout, before any merge
+        # commit exists, so they bind the tree only; the mandatory merge attestation
+        # is checked where the release is promoted (`execute --commit`).
         try:
-            verify_promotion_identity(
-                repo_root,
-                spec.code_commit,
-                spec.code_identity_scheme,
-                state_root=spec.state_root,
-                lock_path=lock,
-            )
+            if promote:
+                verify_promotion_identity(
+                    repo_root,
+                    spec.code_commit,
+                    spec.code_identity_scheme,
+                    state_root=spec.state_root,
+                    lock_path=lock,
+                )
+            else:
+                verify_candidate_identity(
+                    repo_root, spec.code_commit, spec.code_identity_scheme
+                )
         except CodeIdentityError as exc:
             raise PipelineValidationError(f"portfolio repository {exc}") from exc
     if _git_output(repo_root, "status", "--porcelain=v1", "--untracked-files=all"):
@@ -2754,13 +2765,13 @@ def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -
 
 
 def _validate_portfolio_orchestration(
-    spec: PipelineSpec, *, verify_runtime: bool
+    spec: PipelineSpec, *, verify_runtime: bool, promote: bool = False
 ) -> dict[str, Any] | None:
     contract = _portfolio_contract(spec)
     if contract is None:
         return None
     if verify_runtime:
-        _verify_portfolio_runtime(contract, spec)
+        _verify_portfolio_runtime(contract, spec, promote=promote)
     by_id = {item.node_id: item for item in spec.nodes}
     ancestors = _node_ancestors(spec)
     runtime = _object(contract["runtime"], "portfolio runtime")
@@ -4815,7 +4826,7 @@ def execute_pipeline(
         companion_contents = {
             item.companion_id: item.source_path.read_bytes() for item in spec.companions
         }
-        _validate_portfolio_orchestration(spec, verify_runtime=True)
+        _validate_portfolio_orchestration(spec, verify_runtime=True, promote=True)
         _require_executable_product(spec)
         _validate_commit_authorization(commit_authorization, spec)
         journal = commit_release(
