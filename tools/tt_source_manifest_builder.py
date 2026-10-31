@@ -532,10 +532,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     vane_day = _day(args.min_market_vane_date or args.min_capture_date, "vane date")
     if VANE_OBJECT in records:
         vane_prov: dict[str, Any] = {
-            "captured_at_utc": records[VANE_OBJECT].last_modified_utc
-            or next(
+            "captured_at_utc": next(
                 c for c in captures if c.role == records[VANE_OBJECT].source
             ).captured_at_utc,
+            "source_last_modified_utc": records[VANE_OBJECT].last_modified_utc,
             "source": "CAPTURE_INVENTORY",
         }
     else:
@@ -600,6 +600,21 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                     f"symbols {absent}; pass --price-tape-gap-label to accept the gap"
                 )
             target_end = min(tape_end, chart_last)
+            # A symbol the tape never carries limits the target to the days
+            # before any holdings snapshot first needs it.
+            first_needed = [
+                date.fromisoformat(snap["observed_date"])
+                for row in base["selected_components"]
+                for snap in row["dated_holdings"]["snapshots"]
+                if date.fromisoformat(snap["observed_date"])
+                > date.fromisoformat(inception)
+                and {"BRK.B" if a == "BRK-B" else a for a in absent}
+                & set(snap["weights"])
+            ]
+            if first_needed:
+                target_end = min(
+                    target_end, date.fromordinal(min(first_needed).toordinal() - 1)
+                )
             gap = {
                 "absent_symbols_through_chart_end": absent,
                 "chart_last_date": chart_last.isoformat(),
@@ -829,6 +844,15 @@ def read_compat(manifest: Path, components: Sequence[str]) -> dict[str, Any]:
                 "source_manifest_id": loaded["source_manifest_id"],
             }
     result["accepted"] = accepted
+    # Both readers consume dated snapshots exactly as published.  Flagged rows
+    # are NOT applied or replaced for them; acceptance does not mean clean.
+    flags = (
+        _json_file(manifest, "manifest")
+        .get(PROVENANCE_KEY, {})
+        .get("holdings_row_validation", {})
+        .get("flags", [])
+    )
+    result["truncated_row_flags_not_applied_by_readers"] = len(flags)
     return result
 
 

@@ -47,7 +47,12 @@ def _holdings(rows: list[tuple[str, str]]) -> list[list[str]]:
     return [["Date", "Allocation"], *[[d, a] for d, a in rows]]
 
 
-def _capture(tmp_path: Path, *, truncated_slug: str | None = None) -> tuple[Path, Path]:
+def _capture(
+    tmp_path: Path,
+    *,
+    truncated_slug: str | None = None,
+    late_symbol_slug: str | None = None,
+) -> tuple[Path, Path]:
     jroot = tmp_path / "run"
     troot = tmp_path / "run-txt"
     jroot.mkdir()
@@ -73,6 +78,8 @@ def _capture(tmp_path: Path, *, truncated_slug: str | None = None) -> tuple[Path
             ("8/31/2026 4:00:00 PM", "SPY=60.00%, BIL=40.00%"),
             ("9/1/2026 4:00:00 PM", "SPY=50.00%, BIL=50.00%"),
         ]
+        if slug == late_symbol_slug:
+            history[-1] = ("9/1/2026 4:00:00 PM", "SPY=50.00%, XYZ=50.00%")
         if slug == truncated_slug:
             history = [
                 ("8/30/2026 4:00:00 PM", "SPY=60.00%, BIL=40.00%"),
@@ -311,6 +318,27 @@ def test_price_tape_gap_needs_label(tmp_path: Path) -> None:
         "tape_observed_end": "2026-08-31",
     }
     assert builder.main(["verify", "--out-dir", str(tmp_path / "out")]) == 0
+
+
+def test_gap_label_covers_a_symbol_the_tape_never_carries(tmp_path: Path) -> None:
+    jroot, troot = _capture(tmp_path, late_symbol_slug=SLUGS[0])
+    assert builder.main(_args(tmp_path, jroot, troot)) == 2
+    argv = _args(tmp_path, jroot, troot, price_tape_gap_label="xyz-not-on-tape")
+    assert builder.main(argv) == 0
+    manifest = _manifest(tmp_path)
+    assert manifest["price_tape"]["target"]["observed_end"] == "2026-08-31"
+    gap = manifest[builder.PROVENANCE_KEY]["price_tape_gap"]
+    assert gap["absent_symbols_through_chart_end"] == ["XYZ"]
+    assert builder.main(["verify", "--out-dir", str(tmp_path / "out")]) == 0
+
+
+def test_market_vane_provenance_keeps_capture_and_modified_times(
+    tmp_path: Path,
+) -> None:
+    assert _build(tmp_path) == 0
+    vane = _manifest(tmp_path)[builder.PROVENANCE_KEY]["market_vane"]
+    assert vane["captured_at_utc"] == "2026-09-03T02:39:48Z"
+    assert vane["source_last_modified_utc"] == "2026-09-02T01:00:00Z"
 
 
 def test_verify_detects_tamper(tmp_path: Path) -> None:
