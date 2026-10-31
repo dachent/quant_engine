@@ -859,7 +859,7 @@ def _index_move(
         and predecessor.get("status") == "RESOLVED"
         and "hwm_current_index" in predecessor["values"]
     ):
-        return "Its movement against the previous release is not attributed beyond this timing."
+        return "Its movement against the previous release is not attributed to a named cause."
     before = _dec(predecessor["values"]["hwm_current_index"])
     now = _dec(current)
     head = (
@@ -869,7 +869,7 @@ def _index_move(
     prior = _path_by_date(predecessor.get("hwm_index_path"))
     later = _path_by_date(current_path)
     if not prior or not later:
-        return head + "; the move is not attributed beyond this timing."
+        return head + "; the move is not attributed to a named cause."
     last_prior, last_now = max(prior), max(later)
     # the paths must end on the figures printed above, else no split is stated
     if (
@@ -879,7 +879,7 @@ def _index_move(
         or later[last_now].quantize(Decimal("0.0001"))
         != now.quantize(Decimal("0.0001"))
     ):
-        return head + "; the move is not attributed beyond this timing."
+        return head + "; the move is not attributed to a named cause."
     restated = later[last_prior] - prior[last_prior]
     extension = later[last_now] - later[last_prior]
     common = sorted(set(prior) & set(later))
@@ -888,12 +888,19 @@ def _index_move(
         for d in common
         if later[d].quantize(Decimal("0.0001")) != prior[d].quantize(Decimal("0.0001"))
     ]
-    parts = (
-        f"; of this {restated:+.2f} is the restatement of the previous release's own last "
-        f"date {last_prior} ({later[last_prior]:.4f} now against {prior[last_prior]:.4f}) "
-        f"and {extension:+.2f} is the movement from {last_prior} to {last_now}; the two "
-        f"paths differ on {len(differing)} of {len(common)} common dates"
+    restatement = (
+        f"the restatement of the previous release's own last date {last_prior} "
+        f"({later[last_prior]:.4f} now against {prior[last_prior]:.4f})"
     )
+    if last_now == last_prior:
+        # both releases end on the same date: there is no movement between dates to state
+        split = f"; all of this is {restatement}"
+    else:
+        split = (
+            f"; of this {restated:+.2f} is {restatement} and {extension:+.2f} is the "
+            f"movement from {last_prior} to {last_now}"
+        )
+    parts = f"{split}; the two paths differ on {len(differing)} of {len(common)} common dates"
     revisions = _derived_scope(derived_patches, member_accounts)
     if differing and all(d in revisions for d in differing):
         named = "; ".join(f"{d} ({revisions[d]})" for d in differing)
@@ -905,11 +912,16 @@ def _index_move(
             "revision."
         )
     if differing:
+        where = (
+            f" ({differing[0]})"
+            if len(differing) == 1
+            else f" (first {differing[0]}, last {differing[-1]})"
+        )
         return (
             head
             + parts
-            + f" (first {differing[0]}, last {differing[-1]}); that difference is not "
-            "attributed beyond this timing."
+            + where
+            + "; that difference is not attributed to a named cause."
         )
     return head + parts + "; the move is the extension of the path only."
 

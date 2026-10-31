@@ -321,15 +321,28 @@ def _build_component(c: Mapping[str, Any], base: float | None) -> dict[str, Any]
     }
 
 
+DAYS_BASIS: Final = "INCLUSIVE_OF_BOTH_ENDPOINTS"
 _LABEL_DAYS: Final = re.compile(r",\s*(\d+)\s+days\s*$")
+_NOTE_DAYS: Final = re.compile(r"\b(\d+)\s*(?:days|d)\b")
+
+
+def _inclusive_days(start: date, end: date) -> int:
+    """The one window length in this block: calendar days counting both endpoints."""
+
+    return (end - start).days + 1
+
+
+def _days_text(calendar_days: int) -> str:
+    return f"{calendar_days} calendar days inclusive"
 
 
 def _window_label(label: str, calendar_days: int, audit_days: object) -> str:
     """Re-state a trailing ", N days" in an audit label from the window's own dates.
 
     The audit's ``days`` is an observation count, the window's calendar span is derived
-    from its start and end: when both are given and differ, the label prints both so the
-    word "days" is never ambiguous. The audit text itself stays verbatim in the input.
+    from its start and end and counts both endpoints: when both are given and differ, the
+    label prints both so the word "days" is never ambiguous. The audit text itself stays
+    verbatim in the input.
     """
 
     match = _LABEL_DAYS.search(label)
@@ -341,8 +354,35 @@ def _window_label(label: str, calendar_days: int, audit_days: object) -> str:
         and not isinstance(audit_days, bool)
         and audit_days != calendar_days
     ):
-        return f"{stem}, {calendar_days} calendar days ({audit_days} observations)"
-    return f"{stem}, {calendar_days} calendar days"
+        return f"{stem}, {_days_text(calendar_days)} ({audit_days} observations)"
+    return f"{stem}, {_days_text(calendar_days)}"
+
+
+def _note_text(note: str, spans: Sequence[tuple[int, object]]) -> str:
+    """Re-word the day counts of a pass-through audit note from the windows' own fields.
+
+    ``spans`` pairs each window's calendar days with the audit's own count for it. A number
+    followed by "days" or "d" that is such an audit count (and not that window's calendar
+    span) is an observation count; one that is a calendar span is stated as inclusive
+    calendar days. Any other number, and a number that could be either, is left as written.
+    """
+
+    observations = {
+        int(audit)
+        for calendar, audit in spans
+        if isinstance(audit, int) and not isinstance(audit, bool) and audit != calendar
+    }
+    calendars = {calendar for calendar, _audit in spans}
+
+    def reword(match: re.Match[str]) -> str:
+        number = int(match.group(1))
+        if number in observations and number not in calendars:
+            return f"{number} observations"
+        if number in calendars and number not in observations:
+            return _days_text(number)
+        return match.group(0)
+
+    return _NOTE_DAYS.sub(reword, note)
 
 
 def _build_window(
@@ -414,13 +454,15 @@ def _build_window(
         "window_id": _text(w.get("window_id"), "window_id"),
         "label": _window_label(
             _text(w.get("label"), "label"),
-            (end - start).days + 1,
+            _inclusive_days(start, end),
             w.get("days"),
         ),
         "kind": w["kind"],
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "days": (end - start).days + 1,
+        "days": _inclusive_days(start, end),
+        "days_basis": DAYS_BASIS,
+        "days_text": _days_text(_inclusive_days(start, end)),
         "view": _text(w.get("view"), "view"),
         "account_return_pct": _round(account),
         "model_return_pct": _round(model),
@@ -660,7 +702,17 @@ def build_model_vs_actual(
                 "windows": [w for w in windows if w["kind"] == "ALIGNED"],
                 "epochs": [w for w in windows if w["kind"] == "EPOCH"],
                 "unavailable": unavailable,
-                "notes": [_text(n, "note") for n in item.get("notes") or []],
+                "notes": [
+                    _note_text(
+                        _text(n, "note"),
+                        [
+                            (b["days"], a.get("days"))
+                            for a, b in zip(item["windows"], built, strict=True)
+                        ],
+                    )
+                    for n in item.get("notes") or []
+                ],
+                "notes_verbatim": [_text(n, "note") for n in item.get("notes") or []],
             }
         )
     for strategy in strategies:

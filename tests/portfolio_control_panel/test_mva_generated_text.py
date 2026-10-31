@@ -103,7 +103,10 @@ def test_a_day_count_in_an_audit_label_is_restated_from_the_window_dates() -> No
     block, _raw, _sha = _build(audit)
     built = block["strategies"][0]["windows"][0]
     assert built["days"] == 60  # 2026-01-02 .. 2026-03-02 inclusive
-    assert built["label"] == "Aligned window, 60 calendar days (211 observations)"
+    assert (
+        built["label"]
+        == "Aligned window, 60 calendar days inclusive (211 observations)"
+    )
     # the audit text itself stays verbatim in the input
     assert window["label"] == "Aligned window, 211 days"
 
