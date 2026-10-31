@@ -176,9 +176,16 @@ consumes, under a new create-only output root:
   `capture_date_utc_offset_days`, the driver manifest and evidence hashes, the
   official-close file hashes, counts, NAV row counts, and `unverified_shapes`.
 
-Before the binding is written the adapter runs the frozen consumer's own
-`_current_snapshot` and `_terminal_transaction_history_coverage` over the written
-files, so a binding exists only if generation would accept those inputs.
+Before the binding is written the adapter re-checks over the written files the
+date rules the frozen consumer applies (snapshot observation UTC date and every
+position as-of equal the cutoff; the terminal manifest finishes no later than the
+cutoff in New York time; every page of an account requests one interval whose end
+equals that finish date). The tests run the frozen `_current_snapshot`,
+`_terminal_transaction_history_coverage` and NAV reader over the same files, and
+show that the driver's own UTC-stamped manifest is refused. With `--base-spec` the
+composed spec is also offered to `build_generation` and the outcome
+(`ACCEPTED` or `REFUSED` with the reason) is reported; a refusal there (for
+example manual sources dated for another cutoff) does not undo the bound output.
 
 It refuses: a run that does not verify; a labelled exception run; a cutoff that
 differs from the run evidence; a capture whose New York date is not the cutoff

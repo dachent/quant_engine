@@ -1402,6 +1402,17 @@ def _load(path: Path, label: str) -> dict[str, Any]:
         raise DriverError(f"{label} is not strict JSON") from exc
 
 
+# Public names for sibling tools (the architecture check forbids importing another
+# module's private helpers).
+canonical_bytes = _canonical
+json_object = _object
+json_objects = _objects
+text_value = _text
+decimal_value = _decimal_or_none
+aware_utc = _aware_utc
+load_json_file = _load
+
+
 def _check_as_of(
     row: Mapping[str, Any], cutoff: date, label: object, name: str
 ) -> None:

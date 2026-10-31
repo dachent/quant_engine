@@ -94,7 +94,10 @@ def _balances(extra_day: str | None = None) -> dict[str, Any]:
 
 
 class FakeTransport:
-    def __init__(self, *, holdings: Any = None, balances: Any = None) -> None:
+    def __init__(
+        self, *, holdings: Any = None, balances: Any = None, to_date: str = "06/13/2031"
+    ) -> None:
+        self._to_date = to_date
         self._holdings = holdings if holdings is not None else _holdings()
         self._balances = balances if balances is not None else _balances()
 
@@ -118,7 +121,7 @@ class FakeTransport:
             "brokerageTransactions": [row],
             "bookmark": None,
             "fromDate": "06/13/2026",
-            "toDate": "06/13/2031",
+            "toDate": self._to_date,
         }
 
 
@@ -556,7 +559,9 @@ def test_a_transaction_manifest_the_frozen_consumer_refuses_is_refused(
         driver._TRANSACTION_CAPTURE, "capture_transaction_history", next_day
     )
     run_dir = _run(tmp_path)
-    with pytest.raises(ingest.IngestError, match="frozen generation refuses"):
+    with pytest.raises(
+        ingest.IngestError, match="terminal capture interval is not within"
+    ):
         _ingest(tmp_path, run_dir)
 
 
@@ -720,6 +725,8 @@ def test_cli_success_and_refusal(
     printed = json.loads(capsys.readouterr().out)
     assert printed["capture_date_utc_offset_days"] == 1
     assert printed["as_of_date"] == "2031-06-13"
+    # the synthetic base spec has no manual sources: the frozen build says so
+    assert printed["generation_build"]["status"] == "REFUSED"
     assert (tmp_path / "composed.json").is_file()
     assert "binding_sha256" in printed and "spec_sha256" in printed
     assert ingest.main(arguments) == 2
@@ -728,3 +735,26 @@ def test_cli_success_and_refusal(
     lonely[lonely.index("--output-root") + 1] = str(tmp_path / "other-out")
     assert ingest.main([*lonely, "--base-spec", str(_base_spec(tmp_path))]) == 2
     assert "go together" in capsys.readouterr().out
+
+
+def test_requested_end_must_equal_the_new_york_finish_date(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path, FakeTransport(to_date="06/12/2031"))
+    with pytest.raises(ingest.IngestError, match="requested end differs"):
+        _ingest(tmp_path, run_dir)
+
+
+def test_snapshot_dating_is_rechecked_over_the_written_file(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    _ingest(tmp_path, run_dir)
+    path = tmp_path / "ingest/current/current-snapshot.json"
+    document = _json(path)
+    ingest._check_snapshot_dating(path, CUTOFF)
+    document["observed_at"] = "2031-06-14T03:59:00+00:00"
+    path.write_bytes(driver.canonical_bytes(document))
+    with pytest.raises(ingest.IngestError, match="UTC date differs"):
+        ingest._check_snapshot_dating(path, CUTOFF)
+    document["observed_at"] = CUTOFF.close_utc.isoformat()
+    document["positions"][0]["as_of_date"] = "2031-06-14"
+    path.write_bytes(driver.canonical_bytes(document))
+    with pytest.raises(ingest.IngestError, match="as-of differs"):
+        ingest._check_snapshot_dating(path, CUTOFF)

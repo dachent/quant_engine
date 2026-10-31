@@ -33,8 +33,11 @@ position has no official close.
 Refusals: a driver run that does not verify (including raw re-derivation), a
 labelled (exception) run, a cutoff that differs from the run evidence, a capture
 whose New York date is not the cutoff date, a held position without an official
-close, and anything the frozen generation functions refuse on the written
-files. Output is create-only; the binding is written last.
+close, and bound files that break the date rules the frozen generation applies
+(re-checked here over the written files; the tests run the frozen functions
+themselves over the same files). With ``--base-spec`` the composed spec is also
+offered to ``build_generation`` and the outcome is reported. Output is
+create-only; the binding is written last.
 """
 
 from __future__ import annotations
@@ -56,12 +59,9 @@ from quant_engine.core import strict_json_loads
 from quant_engine.schwab import (
     SchwabGenerationError,
     SchwabReadError,
+    build_generation,
     read_holdings_v2_current_snapshot,
     write_current_snapshot,
-)
-from quant_engine.schwab.generation import (
-    _current_snapshot,
-    _terminal_transaction_history_coverage,
 )
 
 import schwab_capture_driver as driver
@@ -92,7 +92,7 @@ def _sha256(payload: bytes) -> str:
 
 def _load(path: Path, label: str) -> dict[str, Any]:
     try:
-        return driver._load(path, label)
+        return driver.load_json_file(path, label)
     except driver.DriverError as exc:
         raise IngestError(str(exc)) from exc
 
@@ -155,15 +155,15 @@ def _capture_binding(
     balances: Mapping[str, Any],
     cutoff: driver.Cutoff,
 ) -> dict[str, object]:
-    capture = driver._object(positions.get("capture"), "positions capture")
-    balance_capture = driver._object(balances.get("capture"), "balances capture")
+    capture = driver.json_object(positions.get("capture"), "positions capture")
+    balance_capture = driver.json_object(balances.get("capture"), "balances capture")
     try:
-        captured = driver._aware_utc(capture.get("captured_at_utc"), "captured_at_utc")
+        captured = driver.aware_utc(capture.get("captured_at_utc"), "captured_at_utc")
         recomputed = driver.assess_timing(
             captured, cutoff, exception_label=None
         ).to_dict()
         balance_recomputed = driver.assess_timing(
-            driver._aware_utc(
+            driver.aware_utc(
                 balance_capture.get("captured_at_utc"), "balances captured_at_utc"
             ),
             cutoff,
@@ -189,7 +189,7 @@ def _positions_by_identity(
 ) -> dict[tuple[str, str], Decimal]:
     result: dict[tuple[str, str], Decimal] = {}
     for row in rows:
-        quantity = driver._decimal_or_none(row.get("quantity"))
+        quantity = driver.decimal_value(row.get("quantity"))
         if quantity is None:
             raise IngestError("position quantity is missing")
         result[(str(row["account_id"]), str(row["symbol"]))] = quantity
@@ -224,7 +224,7 @@ def ingest(
     balances = _load(run_dir / "normalized/balances.json", "balances")
 
     run_cutoff = driver.parse_cutoff(
-        driver._object(manifest["cutoff"], "cutoff").get("as_of_date")
+        driver.json_object(manifest["cutoff"], "cutoff").get("as_of_date")
     )
     if run_cutoff != cutoff:
         raise IngestError("expected cutoff differs from the driver run evidence")
@@ -237,9 +237,9 @@ def ingest(
         raise IngestError("crosswalk scope differs from the driver run")
     capture = _capture_binding(positions, balances, cutoff)
 
-    held = driver._objects(positions.get("positions"), "positions")
-    sweeps = driver._objects(positions.get("sweep_vehicles"), "sweep vehicles")
-    cash_rows = driver._objects(positions.get("cash_balances"), "cash balances")
+    held = driver.json_objects(positions.get("positions"), "positions")
+    sweeps = driver.json_objects(positions.get("sweep_vehicles"), "sweep vehicles")
+    cash_rows = driver.json_objects(positions.get("cash_balances"), "cash balances")
     symbols = sorted({str(row["symbol"]) for row in held})
     closes, close_hashes = official_closes(closes_dir, cutoff.as_of_date)
     missing = [symbol for symbol in symbols if symbol not in closes]
@@ -281,7 +281,7 @@ def ingest(
     if snapshot.sweep_vehicle_count < len(sweeps) + len(cash_rows):
         raise IngestError("snapshot sweep rows differ from the verified driver run")
     quoted = {
-        (str(row["account_id"]), str(row["symbol"])): driver._decimal_or_none(
+        (str(row["account_id"]), str(row["symbol"])): driver.decimal_value(
             row.get("market_value_usd")
         )
         for row in held
@@ -334,14 +334,8 @@ def ingest(
         ROOT_NAV: str((output_root / "nav").resolve()),
         ROOT_TERMINAL: str((output_root / "terminal").resolve()),
     }
-    _preflight(
-        current_source,
-        transaction_manifest,
-        roots,
-        cutoff,
-        accounts,
-        transaction_sources,
-    )
+    _check_snapshot_dating(current_dir / "current-snapshot.json", cutoff)
+    _check_transaction_dating(output_root / "terminal", sorted(accounts), cutoff)
 
     fragment: dict[str, object] = {
         "as_of_date": cutoff.as_of_date.isoformat(),
@@ -353,7 +347,7 @@ def ingest(
         ),
         "transaction_history_manifest": transaction_manifest,
     }
-    fragment_bytes = driver._canonical(fragment)
+    fragment_bytes = driver.canonical_bytes(fragment)
     record(
         "spec-fragment.json",
         "SPEC_FRAGMENT",
@@ -399,7 +393,7 @@ def ingest(
         "transaction_manifest": tx_rule,
         "unverified_shapes": list(driver.UNVERIFIED_SHAPES),
     }
-    _write_new(output_root / "ingest-binding.json", driver._canonical(binding))
+    _write_new(output_root / "ingest-binding.json", driver.canonical_bytes(binding))
     return binding
 
 
@@ -500,9 +494,9 @@ def _write_terminal(
     source = run_dir / "transactions"
     child = _load(source / "manifest.json", "transaction manifest")
     destination = output_root / "terminal"
-    listed = driver._objects(child.get("artifacts"), "transaction artifacts")
+    listed = driver.json_objects(child.get("artifacts"), "transaction artifacts")
     for entry in listed:
-        relative = driver._text(entry.get("path"), "transaction artifact path")
+        relative = driver.text_value(entry.get("path"), "transaction artifact path")
         if relative.startswith("/") or ".." in relative.split("/"):
             raise IngestError("transaction artifact path is unsafe")
         payload = (source / relative).read_bytes()
@@ -515,7 +509,7 @@ def _write_terminal(
     rewritten["started_at"] = _new_york(child.get("started_at"), "started_at")
     rewritten["finished_at"] = _new_york(child.get("finished_at"), "finished_at")
     manifest_meta = _write_new(
-        destination / "manifest.json", driver._canonical(rewritten)
+        destination / "manifest.json", driver.canonical_bytes(rewritten)
     )
     record("terminal/manifest.json", "TRANSACTION_MANIFEST", manifest_meta)
     sources: list[tuple[dict[str, object], Path]] = []
@@ -559,36 +553,81 @@ def _write_terminal(
     return sources, transaction_manifest, rule
 
 
-def _preflight(
-    current_source: Mapping[str, object],
-    transaction_manifest: Mapping[str, object],
-    roots: Mapping[str, str],
-    cutoff: driver.Cutoff,
-    accounts: set[str],
-    transaction_sources: Sequence[tuple[dict[str, object], Path]],
-) -> None:
-    """Run the frozen consumer's own checks over the files just written."""
+def _check_snapshot_dating(path: Path, cutoff: driver.Cutoff) -> None:
+    """The frozen consumer compares the UTC date of every as-of and observation."""
 
-    paths = {name: Path(value) for name, value in roots.items()}
+    document = driver.load_json_file(path, "current snapshot")
+    observed = driver.aware_utc(document.get("observed_at"), "observed_at")
+    if observed.date() != cutoff.as_of_date:
+        raise IngestError("snapshot observation UTC date differs from the cutoff")
+    for row in driver.json_objects(document.get("positions"), "snapshot positions"):
+        if row.get("as_of_date") != cutoff.as_of_date.isoformat():
+            raise IngestError("snapshot position as-of differs from the cutoff")
+        if driver.aware_utc(row.get("observed_at"), "observed_at") != observed:
+            raise IngestError("snapshot position observation differs")
+
+
+def _check_transaction_dating(
+    terminal: Path, accounts: Sequence[str], cutoff: driver.Cutoff
+) -> None:
+    """Mirror the frozen terminal-history date rules over the bound package.
+
+    The consumer requires every page of an account to request the same interval,
+    the interval end to equal the manifest finish date, and the finish date not
+    to be later than the generation as-of date.
+    """
+
+    manifest = driver.load_json_file(terminal / "manifest.json", "terminal manifest")
     try:
-        _current_snapshot(
-            dict(current_source),
-            roots=paths,
-            generation_as_of=cutoff.as_of_date,
-            account_ids=accounts,
+        started = datetime.fromisoformat(str(manifest["started_at"]))
+        finished = datetime.fromisoformat(str(manifest["finished_at"]))
+    except (KeyError, ValueError) as exc:
+        raise IngestError("terminal manifest times are invalid") from exc
+    if (
+        started.tzinfo is None
+        or finished.tzinfo is None
+        or started > finished
+        or finished.date() > cutoff.as_of_date
+    ):
+        raise IngestError("terminal capture interval is not within the cutoff date")
+    for internal in accounts:
+        names = sorted(
+            path.name
+            for path in (terminal / "pages" / internal).glob("*.json")
+            if ".request." not in path.name
         )
-        _terminal_transaction_history_coverage(
-            dict(transaction_manifest),
-            roots=paths,
-            generation_as_of=cutoff.as_of_date,
-            account_ids=accounts,
-            transaction_sources=[
-                (str(source["account_id"]), path)
-                for source, path in transaction_sources
-            ],
-        )
-    except SchwabGenerationError as exc:
-        raise IngestError(f"frozen generation refuses the bound files: {exc}") from exc
+        if not names:
+            raise IngestError("terminal pages are missing")
+        windows: set[tuple[date, date]] = set()
+        for name in names:
+            page = driver.load_json_file(
+                terminal / "pages" / internal / name, "terminal page"
+            )
+            try:
+                window = (
+                    _provider_day(page.get("fromDate")),
+                    _provider_day(page.get("toDate")),
+                )
+            except driver.DriverError as exc:
+                raise IngestError(f"terminal page interval is invalid: {exc}") from exc
+            windows.add(window)
+        if len(windows) != 1:
+            raise IngestError("terminal page interval changes across pages")
+        start, end = next(iter(windows))
+        if start > end or end != finished.date():
+            raise IngestError(
+                "terminal requested end differs from the New York finish date"
+            )
+
+
+def _provider_day(value: object) -> date:
+    text = driver.text_value(value, "date")
+    for pattern in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, pattern).date()
+        except ValueError:
+            continue
+    raise driver.DriverError("date has an unsupported format")
 
 
 # --------------------------------------------------------------------------- #
@@ -611,21 +650,21 @@ def compose_spec(
         raise IngestError("base spec schema version is unsupported")
     given = {
         str(item.get("external_account_id")): str(item.get("internal_account_id"))
-        for item in driver._objects(base.get("crosswalk"), "base crosswalk")
+        for item in driver.json_objects(base.get("crosswalk"), "base crosswalk")
     }
     if given != dict(crosswalk):
         raise IngestError("base spec crosswalk differs from the run crosswalk")
-    roots = dict(driver._object(base.get("roots"), "base roots"))
-    new_roots = driver._object(fragment["roots"], "fragment roots")
+    roots = dict(driver.json_object(base.get("roots"), "base roots"))
+    new_roots = driver.json_object(fragment["roots"], "fragment roots")
     if set(roots) & set(new_roots):
         raise IngestError("base spec already uses an ingest root id")
     roots.update(new_roots)
     sources = [
         item
-        for item in driver._objects(base.get("sources"), "base sources")
+        for item in driver.json_objects(base.get("sources"), "base sources")
         if item.get("role") not in _REPLACED_ROLES
     ]
-    sources.extend(driver._objects(fragment["sources"], "fragment sources"))
+    sources.extend(driver.json_objects(fragment["sources"], "fragment sources"))
     composed = dict(base)
     composed.update(
         {
@@ -636,7 +675,21 @@ def compose_spec(
             "transaction_history_manifest": fragment["transaction_history_manifest"],
         }
     )
-    return driver._canonical(composed)
+    return driver.canonical_bytes(composed)
+
+
+def _generation_build(spec: Path) -> dict[str, str]:
+    """Report, without writing, whether the frozen generation accepts the spec.
+
+    A refusal is information for the owner (the base spec's manual sources may
+    not match this cutoff); it does not undo the bound ingest output.
+    """
+
+    try:
+        build_generation(spec)
+    except SchwabGenerationError as exc:
+        return {"reason": str(exc), "status": "REFUSED"}
+    return {"status": "ACCEPTED"}
 
 
 # --------------------------------------------------------------------------- #
@@ -676,7 +729,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "binding_sha256": _sha256(
                 (args.output_root / "ingest-binding.json").read_bytes()
             ),
-            "capture_date_utc_offset_days": driver._object(
+            "capture_date_utc_offset_days": driver.json_object(
                 binding["capture"], "capture"
             )["capture_date_utc_offset_days"],
             "counts": binding["counts"],
@@ -689,6 +742,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             except FileExistsError as exc:
                 raise IngestError("spec output already exists") from exc
             result["spec_sha256"] = _sha256(payload)
+            result["generation_build"] = _generation_build(args.spec_out)
     except (driver.DriverError, IngestError, SchwabGenerationError) as exc:
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         return 2

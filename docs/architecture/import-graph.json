@@ -549,6 +549,11 @@
       1
     ],
     [
+      "schwab_capture_ingest",
+      "schwab_capture_driver",
+      1
+    ],
+    [
       "sleeve_inputs",
       "nested_strategy_tag_map",
       1
