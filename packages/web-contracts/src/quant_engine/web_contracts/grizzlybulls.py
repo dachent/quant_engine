@@ -468,9 +468,12 @@ def classify(
     if parsed.path.rstrip("/") in DENIED_PATHS:
         return "denied", None
     try:
-        return "routed", contract.route(method, url).capability
+        endpoint = contract.route(method, url)
+        if endpoint.validate_query is not None:
+            endpoint.validate_query(endpoint.query(url))
     except WebContractError:
         return "unrouted", None
+    return "routed", endpoint.capability
 
 
 def summarize_capability(capability: str, raw: bytes) -> dict[str, object]:

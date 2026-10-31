@@ -306,3 +306,36 @@ def test_compare_series_reports_the_withheld_tail() -> None:
         "2030-01-09T14:00:00",
         "2030-01-10T07:00:00",
     ]
+
+
+def test_fill_matches_only_the_signal_in_force_and_ignores_hypothetical() -> None:
+    from tools.grizzlybulls_schwab_crosscheck import crosscheck, load_fills
+
+    rows = [
+        ("2030-01-02 11:00 ET", "Sell", "100"),
+        ("2030-01-03 07:00 ET", "Rebuy", "101"),
+        ("2030-01-04 14:00 ET", "Sell", "102"),
+        ("2030-01-07 15:00 ET", "Hypothetical Sell", "103"),
+    ]
+    series = parse_trade_history_csv(history_csv(rows[:3]))
+    # A Buy fill on 01-05 follows the 01-04 Sell: the 01-03 Rebuy is obsolete.
+    fills, held = load_fills(
+        _catalog([("2030-01-05", "Buy", "10")], held="10"), "account-1", "SPXL"
+    )
+    assert crosscheck(series, fills, held)["unmatched_fills"] == ["2030-01-05"]
+    # a trailing Hypothetical Sell must not flip the vendor state timeline
+    with_hypo = parse_trade_history_csv(history_csv(rows[:2] + rows[3:]))
+    fills, held = load_fills(
+        _catalog([("2030-01-03", "Buy", "10")], held="10"), "account-1", "SPXL"
+    )
+    report = crosscheck(with_hypo, fills, held)
+    assert report["weekday_state_disagreement_days"] == 0
+
+
+def test_explicit_slug_replaces_the_default() -> None:
+    from tools.grizzlybulls_capture import _parser
+
+    args = _parser().parse_args(
+        ["capture", "--cdp-url", "http://x", "--output-root", "o", "--slug", "a-model"]
+    )
+    assert args.slug == ["a-model"]

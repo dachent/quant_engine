@@ -94,18 +94,25 @@ def crosscheck(
     unmatched_fills: list[str] = []
     for fill in fills:
         want_long = fill.side == "Buy"
-        prior = [
-            e for e in signals if e.long == want_long and e.moment.date() <= fill.day
-        ]
-        if not prior or (fill.day - prior[-1].moment.date()).days > max_lag_days:
+        # Fills carry only a date. The signals that can explain one are the last
+        # signal before that day (still in force) and any signal on the day; an
+        # older same-side signal the model has since reversed does not count.
+        before = [e for e in signals if e.moment.date() < fill.day][-1:]
+        same_day = [e for e in signals if e.moment.date() == fill.day]
+        candidates = [e for e in before + same_day if e.long == want_long]
+        if (
+            not candidates
+            or (fill.day - candidates[-1].moment.date()).days > max_lag_days
+        ):
             unmatched_fills.append(fill.day.isoformat())
             continue
+        matched = candidates[-1]
         matches.append(
             {
                 "fill": fill.day.isoformat(),
                 "side": fill.side,
-                "signal": prior[-1].moment.isoformat(),
-                "lag_days": (fill.day - prior[-1].moment.date()).days,
+                "signal": matched.moment.isoformat(),
+                "lag_days": (fill.day - matched.moment.date()).days,
             }
         )
     first, last = fills[0].day, max(fills[-1].day, series.last.date())
@@ -113,7 +120,7 @@ def crosscheck(
     held = final_quantity - sum(
         (f.quantity if f.side == "Buy" else -f.quantity for f in fills), Decimal(0)
     )
-    signal_state = _signal_long_on(series, window)
+    signal_state = _signal_long_on(SignalSeries(series.kind, tuple(signals)), window)
     disagreement: list[str] = []
     cursor, quantity = 0, held
     for day in window:

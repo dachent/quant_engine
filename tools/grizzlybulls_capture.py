@@ -43,6 +43,10 @@ from quant_engine.web_contracts import (
 STATUS_COMPLETE = "COMPLETE"
 STATUS_FAILED = "FAILED_REQUIRED_CAPABILITY"
 STATUS_MISSING = "INCOMPLETE_MISSING_CAPABILITY"
+_RECORD_TYPES = frozenset(
+    {"application/json", "text/csv", "text/plain", "text/html", "application/csv"}
+)
+_DEFAULT_SLUG = "vix-ta-macro-advanced"
 _MENU_BUTTON = "Download model trade history CSV"
 _MENU_ITEMS = (
     ("blended", "Blended history (backtest + live)"),
@@ -104,8 +108,8 @@ class Recorder:
     """Decide per response what, if anything, is persisted. Pure: no browser."""
 
     def __init__(self, root: Path, *, mode: str) -> None:
-        if mode not in {"discover", "capture"}:
-            raise GrizzlyCaptureError("mode must be discover or capture")
+        if mode not in {"discover", "capture", "record"}:
+            raise GrizzlyCaptureError("mode must be discover, capture or record")
         assert_output_root(root)
         root.mkdir(parents=True)
         self.root = root
@@ -126,6 +130,7 @@ class Recorder:
         content_type: str,
         request_header_names: Sequence[str],
         read_body: Any,
+        response_header_names: Sequence[str] = (),
     ) -> None:
         """Record one response. ``read_body`` is called only when allowed."""
 
@@ -145,6 +150,9 @@ class Recorder:
             "verdict": verdict,
             "capability": capability,
             "request_header_names": names,
+            "response_header_names": sorted(
+                {n.casefold() for n in response_header_names}
+            ),
         }
         if capability in _QUERY_VALUE_CAPABILITIES:
             # slug and mode are validated vocabulary, not secrets.
@@ -154,6 +162,8 @@ class Recorder:
             return
         if self.mode == "discover":
             self._discover(entry, read_body)
+        elif self.mode == "record":
+            self._record_all(entry, capability, read_body)
         elif verdict == "routed" and capability is not None:
             self._persist_raw(entry, capability, names, read_body)
 
@@ -172,6 +182,34 @@ class Recorder:
                 entry["body_first_line_columns"] = (
                     len(first[0].split(",")) if first else 0
                 )
+
+    def _record_all(
+        self, entry: dict[str, object], capability: str | None, read_body: Any
+    ) -> None:
+        """Raw body for every non-identity response of a readable type, plus shape."""
+
+        if entry["content_type"] not in _RECORD_TYPES:
+            return
+        try:
+            body = bytes(read_body())
+        except Exception:  # noqa: BLE001 - redirects and aborted loads have no body
+            entry["body_note"] = "unreadable"
+            return
+        status = entry["status"]
+        if isinstance(status, int) and status >= 400:
+            entry["error_body"] = body[:500].decode("utf-8", "replace")
+        if not body:
+            return
+        if entry["content_type"] == "application/json":
+            try:
+                entry["body_shape"] = shape_of(parse_json_bytes(body))
+            except WebContractError:
+                entry["body_shape"] = "not-json"
+        name = f"{entry['ordinal']:04d}-{capability or 'other'}.body"
+        record = _write_new(self.root / "raw" / name, body)
+        entry.update(record)
+        entry["raw_path"] = f"raw/{name}"
+        self.artifacts.append({"path": f"raw/{name}", **record})
 
     def _fail(self, entry: dict[str, object], reason: str) -> None:
         capability = str(entry["capability"])
@@ -220,7 +258,13 @@ class Recorder:
             raw_path = entry.get("raw_path")
             if not isinstance(raw_path, str):
                 continue
-            capability = str(entry["capability"])
+            label = entry.get("capability")
+            status = entry.get("status")
+            if not isinstance(label, str) or not (
+                isinstance(status, int) and 200 <= status < 300
+            ):
+                continue
+            capability = label
             raw = (self.root / raw_path).read_bytes()
             record: dict[str, object] = {
                 "raw_path": raw_path,
@@ -243,7 +287,7 @@ class Recorder:
                     tag = f"{capability}:{query.get('slug')}:{query.get('mode', '')}"
                 captured.update({capability, tag})
             derived.append(record)
-        if self.mode == "capture":
+        if self.mode in {"capture", "record"}:
             self.artifacts.append(
                 {
                     "path": "derived/summary.json",
@@ -271,6 +315,8 @@ class Recorder:
     def _status(self, captured: set[str], expected_slugs: Sequence[str]) -> str:
         if self.mode == "discover":
             return "DISCOVERY"
+        if self.mode == "record":
+            return "RECORD"
         if self.failures:
             return STATUS_FAILED
         needed = {"models.catalog"}
@@ -297,7 +343,7 @@ def verify_run(root: Path) -> dict[str, object]:
         payload = (root / path).read_bytes()
         if hashlib.sha256(payload).hexdigest() != item["sha256"]:
             raise GrizzlyCaptureError(f"artifact hash differs: {path}")
-    if manifest["mode"] == "capture":
+    if manifest["mode"] in {"capture", "record"}:
         derived = json.loads((root / "derived" / "summary.json").read_text("utf-8"))
         for record in derived:
             fresh = summarize_capability(
@@ -331,11 +377,12 @@ def _cdp_run(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
                 content_type=response.headers.get("content-type", ""),
                 request_header_names=headers,
                 read_body=response.body,
+                response_header_names=list(response.headers),
             )
 
         context.on("response", on_response)
         page = context.new_page()
-        for slug in args.slug:
+        for slug in args.slug or [_DEFAULT_SLUG]:
             if re.fullmatch(SLUG_PATTERN, slug) is None:
                 raise GrizzlyCaptureError("slug is invalid")
             page.goto(f"{ORIGIN}/models/{slug}", wait_until="networkidle")
@@ -357,17 +404,17 @@ def _cdp_run(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
             # Fallback: the owner clicks the menu items in the attached tab.
             page.wait_for_timeout(args.manual_seconds * 1000)
         page.close()
-    return recorder.finish(expected_slugs=args.slug)
+    return recorder.finish(expected_slugs=args.slug or [_DEFAULT_SLUG])
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("discover", "capture"):
+    for name in ("discover", "capture", "record"):
         item = sub.add_parser(name)
         item.add_argument("--cdp-url", required=True)
         item.add_argument("--output-root", required=True, type=Path)
-        item.add_argument("--slug", action="append", default=["vix-ta-macro-advanced"])
+        item.add_argument("--slug", action="append")
         item.add_argument("--manual-seconds", type=int, default=0)
         item.add_argument("--click-menu", action="store_true")
         item.add_argument("--passive", action="store_true")
@@ -383,7 +430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         result = {"status": _cdp_run(args)["status"]}
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0 if result["status"] in {STATUS_COMPLETE, "DISCOVERY"} else 1
+    return 0 if result["status"] in {STATUS_COMPLETE, "DISCOVERY", "RECORD"} else 1
 
 
 if __name__ == "__main__":

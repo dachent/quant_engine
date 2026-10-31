@@ -294,3 +294,14 @@ def test_owner_exports_validate_against_the_contract() -> None:  # pragma: no co
     body = json.loads(path.read_bytes())
     assert len(parse_model_page(body).events) == 443
     assert sanitization_audit(body)["data_fields_masked"] == []
+
+
+def test_invalid_query_values_are_not_routed() -> None:
+    base = f"{ORIGIN}/api/modelTradeHistory"
+    for url in (
+        f"{base}?slug=x-model&mode=all",
+        f"{base}?slug=../x&mode=live",
+        f"{ORIGIN}/api/modelsHistorical?slug=A_B",
+        f"{ORIGIN}/_next/data/B/models/x-model.json?slug=%2e%2e",
+    ):
+        assert classify("GET", url, GRIZZLYBULLS_CONTRACT)[0] == "unrouted"
