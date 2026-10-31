@@ -4306,6 +4306,7 @@ def _accounts(
     current_epoch_account_details: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     raw_observation_coverage: Mapping[str, str] | None = None,
+    derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     latest = _latest_nav(catalog)
     synthetic_controls = strategy_product_controls is not None and all(
@@ -4361,6 +4362,9 @@ def _accounts(
             "role": role,
             "status": status,
         }
+        value_basis = _derived_value_basis(derived_values, account_id, as_of)
+        if value_basis is not None:
+            account_row["value_basis"] = value_basis
         if current_epoch_account_details is not None:
             detail = current_epoch_account_details.get(account_id)
             account_row["account_label"] = detail["account_label"] if detail else None
@@ -7158,7 +7162,9 @@ MARKET_VALUE_REASON_PREFIX: Final = "SOURCE_SNAPSHOT_MARKET_VALUE_"
 
 
 def _positions(
-    catalog: Mapping[str, Any], current_account_ids: set[str] | None = None
+    catalog: Mapping[str, Any],
+    current_account_ids: set[str] | None = None,
+    derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows = _objects(catalog.get("positions"), "positions")
     if current_account_ids is not None:
@@ -7237,6 +7243,12 @@ def _positions(
                 },
             }
         )
+        # A value the finality evidence declares derived is not "captured": the row says
+        # how it was valued and keeps the capture date and clock it was held under.
+        value_basis = _derived_value_basis(derived_values, account_id, as_of_date)
+        if value_basis is not None:
+            accepted[-1]["value_basis"] = value_basis
+            accepted[-1]["as_of_basis"] = value_basis["basis"]
     return sorted(
         accepted,
         key=lambda item: (
@@ -10104,11 +10116,15 @@ def build_report_data(
         current_account_ids,
         "provider_admissions",
     )
+    derived_values = _derived_value_index(
+        None if source_clock_authority is None else source_clock_authority[0]
+    )
     account_summary = _accounts(
         catalog,
         strategy_product_controls,
         current_epoch_account_details,
         raw_observation_coverage=raw_observation_coverage,
+        derived_values=derived_values,
     )
     # B4: the report never compared a strategy value with its accounts.  The account
     # rows come from the NAV facts, the strategy values from the baseline block; a
@@ -10209,6 +10225,7 @@ def build_report_data(
         "positions": _positions(
             catalog,
             current_account_ids,
+            derived_values,
         ),
         "provider_admissions": provider_admissions,
         "provider_coverage": catalog.get("provider_coverage", []),
