@@ -18,6 +18,8 @@ is ever printed except counts, hashes, and stable reason codes.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -33,7 +35,11 @@ import stat
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from quant_engine.core import StrictJSONError, strict_json_object
+from quant_engine.core import (
+    StrictJSONError,
+    canonical_json_bytes,
+    strict_json_object,
+)
 from quant_engine.portfolio123.capture_catalog import (
     FORM_FILE,
     FORM_HAR,
@@ -43,7 +49,14 @@ from quant_engine.portfolio123.capture_catalog import (
     capture_contract,
     catalog_sha256,
     evidence_status,
+    html_routes,
+    match_html_route,
     route_for,
+)
+from quant_engine.portfolio123.capture_html import (
+    ROWS_PER_PAGE,
+    HtmlRefusal,
+    parse_transactions_page,
 )
 from quant_engine.portfolio123.capture_shapes import (
     ShapeError,
@@ -75,6 +88,7 @@ _STRUCTURAL = frozenset(
     part
     for path in (
         *(item.path for item in capture_contract().endpoints),
+        *(item.path for item in html_routes() if item.path is not None),
         *(item.path for item in PORTFOLIO123_CONTRACT.endpoints),
     )
     for part in path.split("/")
@@ -119,6 +133,7 @@ class StageRequest:
     captured_at: datetime | None = None
     session_expires_at: datetime | None = None
     allow_partial: bool = False
+    strategy_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -338,7 +353,11 @@ def _classify(
             disposition = _MATCHED
             matched.append(entry)
         except WebContractError:
-            disposition = _FOREIGN if origin_class == _FOREIGN else _UNREVIEWED
+            if match_html_route(method, url) is not None:
+                disposition = _MATCHED
+                matched.append(entry)
+            else:
+                disposition = _FOREIGN if origin_class == _FOREIGN else _UNREVIEWED
         inventory[(disposition, method, template, keys, status, mime)] += 1
     return entries, matched, inventory
 
@@ -403,6 +422,160 @@ def inventory_har(
     return {"inventory_sha256": _sha256(data), "routes": len(rows), **totals}
 
 
+def _header_values(request: Mapping[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    headers = request.get("headers")
+    if not isinstance(headers, list):
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", "request headers")
+    for item in headers:
+        name = item.get("name") if isinstance(item, dict) else None
+        value = item.get("value") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "request headers")
+        lowered = name.casefold()
+        if lowered == "cookie" and lowered in result:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "duplicate session header")
+        result.setdefault(lowered, value)
+    return result
+
+
+def _html_body(response: Mapping[str, Any]) -> bytes:
+    content = response.get("content")
+    if not isinstance(content, dict):
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", "response content")
+    mime = content.get("mimeType")
+    text = content.get("text")
+    if (
+        not isinstance(mime, str)
+        or mime.split(";")[0].strip().casefold() != "text/html"
+        or not isinstance(text, str)
+    ):
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", "html content")
+    if content.get("encoding") == "base64":
+        try:
+            return base64.b64decode(text, validate=True)
+        except (binascii.Error, ValueError):
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "html encoding") from None
+    return text.encode("utf-8")
+
+
+def strategy_hash(strategy_id: str) -> str:
+    """The identifier-free binding of a strategy id (never the id itself)."""
+
+    return _sha256(b"p123-strategy:" + strategy_id.encode())
+
+
+def _html_records(
+    entries: Sequence[dict[str, Any]], *, captured_at: datetime, expires_at: datetime
+) -> tuple[list[ExtractedResponse], dict[str, tuple[str, ...]]]:
+    """Admit HTML list pages: same gates as the JSON extractor, then the parser."""
+
+    try:
+        SessionEnvelope(captured_at, expires_at).validate()
+    except WebContractError as exc:
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", str(exc)) from None
+    records: list[ExtractedResponse] = []
+    sequences: dict[str, tuple[str, ...]] = {}
+    for entry in entries:
+        request, response = entry["request"], entry["response"]
+        url = str(request["url"])
+        matched = match_html_route(str(request["method"]), url)
+        if matched is None:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "route")
+        route, strategy, offset = matched
+        if len(_header_values(request).get("cookie", "").strip()) < 16:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "session evidence")
+        status = response["status"]
+        if status < 200 or status >= 300:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "status")
+        try:
+            page = parse_transactions_page(
+                _html_body(response), strategy=strategy, offset=offset
+            )
+        except HtmlRefusal as exc:
+            raise CaptureRefusal(exc.code, route.capability) from None
+        request_sha = _sha256(
+            canonical_json_bytes(
+                {
+                    "capability": route.capability,
+                    "method": "GET",
+                    "origin": ORIGIN,
+                    "path": urlsplit(url).path,
+                    "query": {"offset": str(offset), "portid": strategy},
+                }
+            )
+        )
+        sequences[request_sha] = page.sequences
+        records.append(
+            ExtractedResponse(
+                capability=route.capability,
+                captured_at=captured_at,
+                request_sha256=request_sha,
+                response={
+                    "strategy_sha256": strategy_hash(strategy),
+                    "offset": offset,
+                    "first": page.first,
+                    "last": page.last,
+                    "total": page.total,
+                    "rows": list(page.rows),
+                },
+                status=status,
+            )
+        )
+    return records, sequences
+
+
+def _check_html_pages(
+    capability: str,
+    responses: Sequence[ExtractedResponse],
+    sequences: Mapping[str, tuple[str, ...]],
+    declared: tuple[str, ...],
+) -> dict[str, object]:
+    """Offset pagination: consistent totals, 50-row steps, no gaps, no repeats.
+
+    The strategies found must be exactly the ones the owner declared (by hash).
+    """
+
+    by_strategy: dict[str, list[ExtractedResponse]] = {}
+    for item in responses:
+        body = item.response
+        if not isinstance(body, dict):
+            raise CaptureRefusal("SHAPE_REFUSED", capability)
+        by_strategy.setdefault(str(body["strategy_sha256"]), []).append(item)
+    if not declared:
+        raise CaptureRefusal("STRATEGIES_REQUIRED", capability)
+    if set(by_strategy) != set(declared):
+        raise CaptureRefusal("STRATEGY_MISMATCH", capability)
+    pages = rows = page_count = 0
+    complete = True
+    for group in by_strategy.values():
+        bodies = [item.response for item in group if isinstance(item.response, dict)]
+        totals = {int(body["total"]) for body in bodies}
+        if len(totals) != 1:
+            raise CaptureRefusal("PAGINATION_INCONSISTENT", capability)
+        (total,) = totals
+        offsets = {int(body["offset"]) for body in bodies}
+        expected = set(range(0, total, ROWS_PER_PAGE))
+        if len(offsets) != len(bodies) or not offsets <= expected:
+            raise CaptureRefusal("PAGINATION_INCONSISTENT", capability)
+        seen = [seq for item in group for seq in sequences[item.request_sha256]]
+        if len(set(seen)) != len(seen):
+            raise CaptureRefusal("DUPLICATE_ROWS", capability)
+        pages += len(bodies)
+        rows += sum(len(body["rows"]) for body in bodies)
+        page_count += len(expected)
+        complete = complete and offsets == expected
+    return {
+        "records": pages,
+        "pages_seen": pages,
+        "page_count": page_count,
+        "strategies": len(by_strategy),
+        "strategy_sha256s": sorted(by_strategy),
+        "rows": rows,
+        "coverage": "COMPLETE" if complete else "PARTIAL",
+    }
+
+
 def _normalize_har(
     source: bytes,
     *,
@@ -410,19 +583,36 @@ def _normalize_har(
     captured_at: datetime,
     expires_at: datetime,
     allow_partial: bool,
+    strategy_hashes: tuple[str, ...] = (),
 ) -> _Derived:
     contract = capture_contract()
     entries, matched, inventory = _classify(source)
     if not matched:
         raise CaptureRefusal("NO_REVIEWED_ROUTES")
-    try:
-        extracted = extract_har(
-            {"log": {"entries": matched}},
-            provider=contract,
-            session=SessionEnvelope(captured_at, expires_at),
+    html_entries: list[dict[str, Any]] = []
+    json_entries: list[dict[str, Any]] = []
+    for entry in matched:
+        method, url = _entry_facts(entry)[:2]
+        target = html_entries if match_html_route(method, url) else json_entries
+        target.append(entry)
+    extracted: list[ExtractedResponse] = []
+    if json_entries:
+        try:
+            extracted.extend(
+                extract_har(
+                    {"log": {"entries": json_entries}},
+                    provider=contract,
+                    session=SessionEnvelope(captured_at, expires_at),
+                )
+            )
+        except WebContractError as exc:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", str(exc)) from None
+    sequences: dict[str, tuple[str, ...]] = {}
+    if html_entries:
+        pages, sequences = _html_records(
+            html_entries, captured_at=captured_at, expires_at=expires_at
         )
-    except WebContractError as exc:
-        raise CaptureRefusal("HAR_ENTRY_REJECTED", str(exc)) from None
+        extracted.extend(pages)
     unique: dict[tuple[str, str], ExtractedResponse] = {}
     duplicates = 0
     for item in extracted:
@@ -451,11 +641,14 @@ def _normalize_har(
                 validate_shape(item.response, _shape(route))
             except ShapeError as exc:
                 raise CaptureRefusal("SHAPE_REFUSED", f"{capability} {exc}") from None
-        summary[capability] = (
-            _check_page_set(capability, group)
-            if route.paginated
-            else {"records": len(group), "coverage": "COMPLETE"}
-        )
+        if route.html is not None:
+            summary[capability] = _check_html_pages(
+                capability, group, sequences, strategy_hashes
+            )
+        elif route.paginated:
+            summary[capability] = _check_page_set(capability, group)
+        else:
+            summary[capability] = {"records": len(group), "coverage": "COMPLETE"}
     complete = all(item["coverage"] == "COMPLETE" for item in summary.values())
     if not complete and not allow_partial:
         raise CaptureRefusal("COVERAGE_PARTIAL")
@@ -553,6 +746,7 @@ def _derive(
     expires_at: datetime | None,
     allow_partial: bool,
     suffix: str,
+    strategy_hashes: tuple[str, ...] = (),
 ) -> _Derived:
     if form == FORM_HAR:
         if expires_at is None:
@@ -563,6 +757,7 @@ def _derive(
             captured_at=captured_at,
             expires_at=expires_at,
             allow_partial=allow_partial,
+            strategy_hashes=strategy_hashes,
         )
     if form == FORM_FILE and len(capabilities) == 1:
         return _normalize_file(
@@ -596,6 +791,13 @@ def stage_run(request: StageRequest) -> RunSummary:
     source = _read_regular_file(request.source, MAX_SOURCE_BYTES)
     suffix = ".har" if request.form == FORM_HAR else request.source.suffix.casefold()
     scope = tuple(sorted(request.capabilities))
+    html_scope = any(route_for(item).html is not None for item in scope)
+    if request.strategy_ids and not (html_scope and request.form == FORM_HAR):
+        raise CaptureRefusal("STRATEGY_IDS_UNEXPECTED")
+    if any(
+        re.fullmatch(r"[1-9][0-9]{0,11}", item) is None for item in request.strategy_ids
+    ) or len(set(request.strategy_ids)) != len(request.strategy_ids):
+        raise CaptureRefusal("STRATEGY_IDS_INVALID")
     derived = _derive(
         source,
         form=request.form,
@@ -604,6 +806,7 @@ def stage_run(request: StageRequest) -> RunSummary:
         expires_at=expires_at,
         allow_partial=request.allow_partial,
         suffix=suffix,
+        strategy_hashes=tuple(sorted(strategy_hash(i) for i in request.strategy_ids)),
     )
     run_dir = _run_directory(request.staging_root, request.run_id)
     _private_directory(request.staging_root / RUN_DIRECTORY)
@@ -733,6 +936,30 @@ def _check_records(normalized: bytes, scope: tuple[str, ...], form: str) -> None
         raise CaptureRefusal("RECORDS_INVALID")
 
 
+def _manifest_strategy_hashes(
+    manifest: Mapping[str, Any], scope: Sequence[object]
+) -> tuple[str, ...]:
+    """The declared strategy hashes of an HTML capability, from its own summary."""
+
+    found: set[str] = set()
+    capabilities = manifest["capabilities"]
+    for item in scope:
+        if route_for(str(item)).html is None:
+            continue
+        info = capabilities.get(str(item)) if isinstance(capabilities, dict) else None
+        hashes = info.get("strategy_sha256s") if isinstance(info, dict) else None
+        if (
+            not isinstance(hashes, list)
+            or not hashes
+            or not all(
+                isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes
+            )
+        ):
+            raise CaptureRefusal("MANIFEST_INVALID")
+        found.update(str(h) for h in hashes)
+    return tuple(sorted(found))
+
+
 def verify_run(
     staging_root: Path,
     run_id: str,
@@ -830,6 +1057,7 @@ def verify_run(
         expires_at=None if expires is None else _parse_time(expires),
         allow_partial=bool(manifest["allow_partial"]),
         suffix=str(source_info["suffix"]),
+        strategy_hashes=_manifest_strategy_hashes(manifest, scope),
     )
     if (
         derived.normalized != contents.get("normalized/records.json")

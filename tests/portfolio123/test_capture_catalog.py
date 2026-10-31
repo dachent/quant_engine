@@ -16,7 +16,6 @@ from p123_capture_fixtures import (
     PREDICTOR,
     SCREEN,
     SIMULATION,
-    transactions_page,
 )
 from quant_engine.portfolio123.capture_shapes import (
     canonical_bytes as canonical_json_bytes,
@@ -202,7 +201,6 @@ def test_synthetic_fixtures_validate_against_their_shapes() -> None:
         "simulation.result": SIMULATION,
         "designer-model.json": _redacted_designer(),
         "billing.credit-table": CREDITS,
-        "transactions.account": transactions_page(1, 1, 2, 2),
     }
     for capability, body in bodies.items():
         shape = catalog.route_for(capability).shape
@@ -337,7 +335,8 @@ def test_unverified_rows_are_still_marked_and_never_enable_a_real_route() -> Non
             continue
         route = catalog.route_for(capability)
         assert route.verdict == "UNVERIFIED"
-        assert "placeholder" in route.evidence.lower()
+        text = route.evidence.lower()
+        assert "placeholder" in text or "stays unverified" in text
     # No observed real route is matched by an unverified placeholder.
     for real in (
         "/transact_list.jsp?portid=1&offset=0",

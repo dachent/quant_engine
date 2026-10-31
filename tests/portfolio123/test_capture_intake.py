@@ -19,7 +19,6 @@ from p123_capture_fixtures import (
     entry,
     predictor_entry,
     standard_entries,
-    transactions_page,
     write_har,
 )
 from quant_engine.portfolio123.capture_shapes import (
@@ -202,48 +201,6 @@ def test_duplicates_dedupe_only_when_identical(root: Path, tmp_path: Path) -> No
         root, tmp_path, conflict, ("aifactor.predictor",), run_id="run-two"
     )
     assert _refusal(request) == "CONFLICTING_DUPLICATE"
-
-
-def _pages(*numbers: int, page_count: int = 3, total: int = 5) -> list[dict[str, Any]]:
-    sizes = {1: 2, 2: 2, 3: 1}
-    return [
-        entry(
-            f"{ORIGIN}/app/account/transactions/9006?page={n}",
-            transactions_page(n, page_count, total, sizes[n]),
-        )
-        for n in numbers
-    ]
-
-
-def test_complete_pagination_is_accepted_and_partial_is_refused(
-    root: Path, tmp_path: Path
-) -> None:
-    scope = ("transactions.account",)
-    complete = stage_run(_har_request(root, tmp_path, _pages(1, 2, 3), scope))
-    assert complete.capabilities["transactions.account"]["coverage"] == "COMPLETE"
-    request = _har_request(root, tmp_path, _pages(1, 3), scope, run_id="run-two")
-    assert _refusal(request) == "COVERAGE_PARTIAL"
-    partial = stage_run(
-        _har_request(
-            root, tmp_path, _pages(1, 3), scope, run_id="run-three", allow_partial=True
-        )
-    )
-    assert not partial.complete
-    with pytest.raises(CaptureRefusal) as caught:
-        verify_run(root, "run-three")
-    assert caught.value.code == "COVERAGE_PARTIAL"
-    assert not verify_run(root, "run-three", require_complete=False).complete
-
-
-def test_inconsistent_pagination_totals_are_refused(root: Path, tmp_path: Path) -> None:
-    mixed = _pages(1, 2) + [
-        entry(
-            f"{ORIGIN}/app/account/transactions/9006?page=3",
-            transactions_page(3, 4, 5, 1),
-        )
-    ]
-    request = _har_request(root, tmp_path, mixed, ("transactions.account",))
-    assert _refusal(request) == "PAGINATION_INCONSISTENT"
 
 
 def test_session_envelope_and_paths_are_enforced(root: Path, tmp_path: Path) -> None:

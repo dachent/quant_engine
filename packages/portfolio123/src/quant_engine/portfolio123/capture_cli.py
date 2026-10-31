@@ -56,6 +56,15 @@ def _parser() -> argparse.ArgumentParser:
         if form == FORM_HAR:
             stage.add_argument("--session-expires-at", type=_time, required=True)
             stage.add_argument("--allow-partial", action="store_true")
+            if name == "stage-har":
+                stage.add_argument(
+                    "--strategy-id",
+                    action="append",
+                    default=[],
+                    dest="strategy_ids",
+                    help="strategy id the transactions HTML capture must cover "
+                    "(repeat for each; stored only as a hash)",
+                )
     inventory = commands.add_parser("inventory-har", help="route templates only")
     inventory.add_argument("--staging-root", type=Path, required=True)
     inventory.add_argument("--run-id", required=True)
@@ -104,6 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     captured_at=args.captured_at,
                     session_expires_at=getattr(args, "session_expires_at", None),
                     allow_partial=getattr(args, "allow_partial", False),
+                    strategy_ids=tuple(getattr(args, "strategy_ids", ())),
                 )
             ).to_dict()
         else:
