@@ -18,6 +18,8 @@ is ever printed except counts, hashes, and stable reason codes.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -33,7 +35,11 @@ import stat
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from quant_engine.core import StrictJSONError, strict_json_object
+from quant_engine.core import (
+    StrictJSONError,
+    canonical_json_bytes,
+    strict_json_object,
+)
 from quant_engine.portfolio123.capture_catalog import (
     FORM_FILE,
     FORM_HAR,
@@ -43,7 +49,14 @@ from quant_engine.portfolio123.capture_catalog import (
     capture_contract,
     catalog_sha256,
     evidence_status,
+    html_routes,
+    match_html_route,
     route_for,
+)
+from quant_engine.portfolio123.capture_html import (
+    ROWS_PER_PAGE,
+    HtmlRefusal,
+    parse_transactions_page,
 )
 from quant_engine.portfolio123.capture_shapes import (
     ShapeError,
@@ -75,6 +88,7 @@ _STRUCTURAL = frozenset(
     part
     for path in (
         *(item.path for item in capture_contract().endpoints),
+        *(item.path for item in html_routes() if item.path is not None),
         *(item.path for item in PORTFOLIO123_CONTRACT.endpoints),
     )
     for part in path.split("/")
@@ -338,7 +352,11 @@ def _classify(
             disposition = _MATCHED
             matched.append(entry)
         except WebContractError:
-            disposition = _FOREIGN if origin_class == _FOREIGN else _UNREVIEWED
+            if match_html_route(method, url) is not None:
+                disposition = _MATCHED
+                matched.append(entry)
+            else:
+                disposition = _FOREIGN if origin_class == _FOREIGN else _UNREVIEWED
         inventory[(disposition, method, template, keys, status, mime)] += 1
     return entries, matched, inventory
 
@@ -403,6 +421,145 @@ def inventory_har(
     return {"inventory_sha256": _sha256(data), "routes": len(rows), **totals}
 
 
+def _header_values(request: Mapping[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    headers = request.get("headers")
+    if not isinstance(headers, list):
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", "request headers")
+    for item in headers:
+        name = item.get("name") if isinstance(item, dict) else None
+        value = item.get("value") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not isinstance(value, str):
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "request headers")
+        lowered = name.casefold()
+        if lowered == "cookie" and lowered in result:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "duplicate session header")
+        result.setdefault(lowered, value)
+    return result
+
+
+def _html_body(response: Mapping[str, Any]) -> bytes:
+    content = response.get("content")
+    if not isinstance(content, dict):
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", "response content")
+    mime = content.get("mimeType")
+    text = content.get("text")
+    if (
+        not isinstance(mime, str)
+        or mime.split(";")[0].strip().casefold() != "text/html"
+        or not isinstance(text, str)
+    ):
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", "html content")
+    if content.get("encoding") == "base64":
+        try:
+            return base64.b64decode(text, validate=True)
+        except (binascii.Error, ValueError):
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "html encoding") from None
+    return text.encode("utf-8")
+
+
+def _html_records(
+    entries: Sequence[dict[str, Any]], *, captured_at: datetime, expires_at: datetime
+) -> tuple[list[ExtractedResponse], dict[str, tuple[str, ...]]]:
+    """Admit HTML list pages: same gates as the JSON extractor, then the parser."""
+
+    try:
+        SessionEnvelope(captured_at, expires_at).validate()
+    except WebContractError as exc:
+        raise CaptureRefusal("HAR_ENTRY_REJECTED", str(exc)) from None
+    records: list[ExtractedResponse] = []
+    sequences: dict[str, tuple[str, ...]] = {}
+    for entry in entries:
+        request, response = entry["request"], entry["response"]
+        url = str(request["url"])
+        matched = match_html_route(str(request["method"]), url)
+        if matched is None:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "route")
+        route, strategy, offset = matched
+        if len(_header_values(request).get("cookie", "").strip()) < 16:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "session evidence")
+        status = response["status"]
+        if status < 200 or status >= 300:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", "status")
+        try:
+            page = parse_transactions_page(
+                _html_body(response), strategy=strategy, offset=offset
+            )
+        except HtmlRefusal as exc:
+            raise CaptureRefusal(exc.code, route.capability) from None
+        request_sha = _sha256(
+            canonical_json_bytes(
+                {
+                    "capability": route.capability,
+                    "method": "GET",
+                    "origin": ORIGIN,
+                    "path": urlsplit(url).path,
+                    "query": {"offset": str(offset), "portid": strategy},
+                }
+            )
+        )
+        sequences[request_sha] = page.sequences
+        records.append(
+            ExtractedResponse(
+                capability=route.capability,
+                captured_at=captured_at,
+                request_sha256=request_sha,
+                response={
+                    "strategy_sha256": _sha256(b"p123-strategy:" + strategy.encode()),
+                    "offset": offset,
+                    "first": page.first,
+                    "last": page.last,
+                    "total": page.total,
+                    "rows": list(page.rows),
+                },
+                status=status,
+            )
+        )
+    return records, sequences
+
+
+def _check_html_pages(
+    capability: str,
+    responses: Sequence[ExtractedResponse],
+    sequences: Mapping[str, tuple[str, ...]],
+) -> dict[str, object]:
+    """Offset pagination: consistent totals, 50-row steps, no gaps, no repeats."""
+
+    by_strategy: dict[str, list[ExtractedResponse]] = {}
+    for item in responses:
+        body = item.response
+        if not isinstance(body, dict):
+            raise CaptureRefusal("SHAPE_REFUSED", capability)
+        by_strategy.setdefault(str(body["strategy_sha256"]), []).append(item)
+    pages = rows = page_count = 0
+    complete = True
+    for group in by_strategy.values():
+        bodies = [item.response for item in group if isinstance(item.response, dict)]
+        totals = {int(body["total"]) for body in bodies}
+        if len(totals) != 1:
+            raise CaptureRefusal("PAGINATION_INCONSISTENT", capability)
+        (total,) = totals
+        offsets = {int(body["offset"]) for body in bodies}
+        expected = set(range(0, total, ROWS_PER_PAGE))
+        if len(offsets) != len(bodies) or not offsets <= expected:
+            raise CaptureRefusal("PAGINATION_INCONSISTENT", capability)
+        seen = [seq for item in group for seq in sequences[item.request_sha256]]
+        if len(set(seen)) != len(seen):
+            raise CaptureRefusal("DUPLICATE_ROWS", capability)
+        pages += len(bodies)
+        rows += sum(len(body["rows"]) for body in bodies)
+        page_count += len(expected)
+        complete = complete and offsets == expected
+    return {
+        "records": pages,
+        "pages_seen": pages,
+        "page_count": page_count,
+        "strategies": len(by_strategy),
+        "rows": rows,
+        "coverage": "COMPLETE" if complete else "PARTIAL",
+    }
+
+
 def _normalize_har(
     source: bytes,
     *,
@@ -415,14 +572,30 @@ def _normalize_har(
     entries, matched, inventory = _classify(source)
     if not matched:
         raise CaptureRefusal("NO_REVIEWED_ROUTES")
-    try:
-        extracted = extract_har(
-            {"log": {"entries": matched}},
-            provider=contract,
-            session=SessionEnvelope(captured_at, expires_at),
+    html_entries: list[dict[str, Any]] = []
+    json_entries: list[dict[str, Any]] = []
+    for entry in matched:
+        method, url = _entry_facts(entry)[:2]
+        target = html_entries if match_html_route(method, url) else json_entries
+        target.append(entry)
+    extracted: list[ExtractedResponse] = []
+    if json_entries:
+        try:
+            extracted.extend(
+                extract_har(
+                    {"log": {"entries": json_entries}},
+                    provider=contract,
+                    session=SessionEnvelope(captured_at, expires_at),
+                )
+            )
+        except WebContractError as exc:
+            raise CaptureRefusal("HAR_ENTRY_REJECTED", str(exc)) from None
+    sequences: dict[str, tuple[str, ...]] = {}
+    if html_entries:
+        pages, sequences = _html_records(
+            html_entries, captured_at=captured_at, expires_at=expires_at
         )
-    except WebContractError as exc:
-        raise CaptureRefusal("HAR_ENTRY_REJECTED", str(exc)) from None
+        extracted.extend(pages)
     unique: dict[tuple[str, str], ExtractedResponse] = {}
     duplicates = 0
     for item in extracted:
@@ -451,11 +624,12 @@ def _normalize_har(
                 validate_shape(item.response, _shape(route))
             except ShapeError as exc:
                 raise CaptureRefusal("SHAPE_REFUSED", f"{capability} {exc}") from None
-        summary[capability] = (
-            _check_page_set(capability, group)
-            if route.paginated
-            else {"records": len(group), "coverage": "COMPLETE"}
-        )
+        if route.html is not None:
+            summary[capability] = _check_html_pages(capability, group, sequences)
+        elif route.paginated:
+            summary[capability] = _check_page_set(capability, group)
+        else:
+            summary[capability] = {"records": len(group), "coverage": "COMPLETE"}
     complete = all(item["coverage"] == "COMPLETE" for item in summary.values())
     if not complete and not allow_partial:
         raise CaptureRefusal("COVERAGE_PARTIAL")

@@ -16,7 +16,6 @@ from p123_capture_fixtures import (
     PREDICTOR,
     SCREEN,
     SIMULATION,
-    transactions_page,
 )
 from quant_engine.portfolio123.capture_shapes import (
     canonical_bytes as canonical_json_bytes,
@@ -89,7 +88,7 @@ _REVIEW_TABLE = {
     "aifactor.model": ("UNVERIFIED", "UNVERIFIED"),
     "screen.definition": ("UNVERIFIED", "UNVERIFIED"),
     "simulation.result": ("UNVERIFIED", "UNVERIFIED"),
-    "transactions.account": ("DIFFERS", "UNVERIFIED"),
+    "transactions.account": ("DIFFERS", "CONFIRMED"),
     "transactions.download": ("DIFFERS", "CONFIRMED"),
     "designer-model.json": ("DIFFERS", "CONFIRMED"),
     "billing.credit-table": ("UNVERIFIED", "UNVERIFIED"),
@@ -202,7 +201,6 @@ def test_synthetic_fixtures_validate_against_their_shapes() -> None:
         "simulation.result": SIMULATION,
         "designer-model.json": _redacted_designer(),
         "billing.credit-table": CREDITS,
-        "transactions.account": transactions_page(1, 1, 2, 2),
     }
     for capability, body in bodies.items():
         shape = catalog.route_for(capability).shape

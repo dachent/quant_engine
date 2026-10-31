@@ -24,8 +24,16 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
+import re
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
+from quant_engine.portfolio123.capture_html import (
+    ROWS_PER_PAGE,
+    TRANSACTIONS_TABLE,
+    TYPES,
+    HtmlTable,
+)
 from quant_engine.portfolio123.capture_shapes import (
     Choice,
     Obj,
@@ -93,6 +101,7 @@ class CaptureRoute:
     evidence: str = ""
     query_values: tuple[tuple[str, str], ...] = ()
     redact: frozenset[str] = frozenset()
+    html: HtmlTable | None = None
 
     def __post_init__(self) -> None:
         if self.verdict not in ROUTE_STATUS or self.finding not in FINDINGS:
@@ -111,6 +120,14 @@ class CaptureRoute:
             raise CaptureRefusal("CATALOG_INVALID", "file route needs media types")
         if not set(self.file_media) <= set(MEDIA_TYPES):
             raise CaptureRefusal("CATALOG_INVALID", "media type")
+        if self.html is not None and (
+            FORM_HAR not in self.forms
+            or self.shape is None
+            or not self.paginated
+            or self.html.page_param not in self.query_keys
+            or self.html.id_param not in self.query_keys
+        ):
+            raise CaptureRefusal("CATALOG_INVALID", "html route")
         if "json" in self.file_media and self.shape is None:
             raise CaptureRefusal("CATALOG_INVALID", "json file needs a shape")
         if "csv" in self.file_media and not self.csv_columns:
@@ -133,6 +150,7 @@ class CaptureRoute:
             "evidence": self.evidence,
             "query_values": [list(item) for item in self.query_values],
             "redact": sorted(self.redact),
+            "html": None if self.html is None else self.html.describe(),
             "route_status": ROUTE_STATUS[self.verdict],
             "shape_status": SHAPE_STATUS[self.verdict],
         }
@@ -141,21 +159,6 @@ class CaptureRoute:
 _PREDICTION = Obj({"ticker": "str", "score": "num", "rank": "int"})
 _FEATURE = Obj({"name": "str", "weight": "num"})
 _NAV_POINT = Obj({"date": "date", "value": "num"})
-_TRANSACTION = Obj(
-    {
-        "trade_date": "date",
-        "ticker": "str",
-        "action": Choice(("BUY", "SELL", "DIVIDEND", "FEE")),
-        "quantity": "num",
-        "price": "num",
-        "commission": "num",
-    }
-)
-
-# REAL shape of the designer-model route (CONFIRMED from the preserved 2026-09-12
-# capture: field names and types only).  Third-party personal data (the designer
-# profile and the comment threads) is replaced by the redaction marker before the
-# shape check, in HAR and file form alike, so those two fields are declared "str".
 _RETURN_STATS = Obj(
     {
         "downDev": "num",
@@ -255,6 +258,35 @@ _DESIGNER_MODEL = Obj(
             Obj({"name": "str", "values": Seq("num", min_items=2, max_items=2)})
         ),
         "volatility90": "num",
+    }
+)
+
+# Normalized page of the strategy transactions HTML list (the parser's output).  The
+# row fields are the REAL table columns (Date, Type, Ticker with its market suffix,
+# Shares, Price, Amount, Tot Fees, Rank, Note); the first column (a row sequence
+# number), the TRADE column, every link, and the strategy id are checked and dropped.
+_TRANSACTION_ROW = Obj(
+    {
+        "date": "date",
+        "type": Choice(TYPES),
+        "ticker": "str",
+        "market": "str",
+        "shares": "num?",
+        "price": "num?",
+        "amount": "num?",
+        "tot_fees": "num?",
+        "rank": "num?",
+        "note": "str",
+    }
+)
+_TRANSACTIONS_PAGE = Obj(
+    {
+        "strategy_sha256": "str",
+        "offset": "int",
+        "first": "int",
+        "last": "int",
+        "total": "int",
+        "rows": Seq(_TRANSACTION_ROW, min_items=1, max_items=ROWS_PER_PAGE),
     }
 )
 
@@ -376,31 +408,33 @@ CATALOG: tuple[CaptureRoute, ...] = (
     ),
     CaptureRoute(
         "transactions.account",
-        "Account or live-book transactions",
+        "Strategy transactions list (HTML)",
         (FORM_HAR,),
-        "Open the transactions tab and page to the end, export the HAR.",
-        path="/app/account/transactions/{account_id}",
-        path_pattern=r"/app/account/transactions/[1-9][0-9]*",
-        query_keys=frozenset({"page"}),
-        shape=Obj(
-            {
-                "page": "int",
-                "page_count": "int",
-                "total": "int",
-                "transactions": Seq(_TRANSACTION),
-            }
-        ),
+        "Open the transactions tab, page to the end (50 rows per page), export the HAR.",
+        path="/transact_list.jsp",
+        path_pattern=r"/transact_list\.jsp",
+        query_keys=frozenset({"portid", "offset"}),
+        shape=_TRANSACTIONS_PAGE,
         paginated=True,
+        html=TRANSACTIONS_TABLE,
+        verdict=VERDICT_CONFIRMED,
         finding="DIFFERS",
         evidence=(
-            "No JSON account transactions route appears in 92 preserved HARs. The real "
-            "transactions list is GET /transact_list.jsp?portid=&offset= : an HTML "
-            "table, 50 rows per page, offset pagination (not page), a header of the "
-            "form first - last of total, and columns Date, Type, Ticker, Shares, "
-            "Price, Amount, Tot Fees, Rank, Note. It is strategy-scoped and the "
-            "response is not JSON, so the JSON-only extractor cannot admit it; the "
-            "reviewed CSV download covers the same rows. The placeholder stays "
-            "fail-closed and unusable for a real export."
+            "Route GET /transact_list.jsp?portid=&offset= and the table structure were "
+            "read from eight preserved HTML responses of one strategy (status 200, "
+            "text/html, request carries a session header, offsets 1400 to 1750 step "
+            "50): a pager row (position text, total count, page links, a page-size "
+            "selector fixed at 50, a download link), a header row Date, Type, Ticker, "
+            "Shares, Price, Amount, Tot Fees, Rank, Note, TRADE after a blank first "
+            "column, and 50 data rows of 11 cells (date link, BUY/SELL/DIV/SPLIT label, "
+            "ticker box with a market suffix, comma-grouped numbers that are empty on "
+            "dividends and splits, free-text note, empty TRADE cell). All eight parse "
+            "and agree with the pager. The first page may omit offset. NOT observed: "
+            "the last page of a strategy, a strategy with no transactions, other "
+            "strategies, other transaction types, a non-empty TRADE cell; each of these "
+            "refuses the page. The HTML header differs from the CSV download header "
+            "(Ticker, Tot Fees, Note versus Symbol, TotFees, Notes). Admission is "
+            "through the fail-closed parser in capture_html, not the JSON extractor."
         ),
     ),
     CaptureRoute(
@@ -541,7 +575,47 @@ def endpoint_contract(route: CaptureRoute) -> EndpointContract:
 
 
 def har_routes() -> tuple[CaptureRoute, ...]:
-    return tuple(item for item in CATALOG if item.path is not None)
+    """Routes the JSON extractor may admit (HTML routes are admitted by capture_html)."""
+
+    return tuple(
+        item for item in CATALOG if item.path is not None and item.html is None
+    )
+
+
+def html_routes() -> tuple[CaptureRoute, ...]:
+    return tuple(item for item in CATALOG if item.html is not None)
+
+
+def match_html_route(method: str, url: str) -> tuple[CaptureRoute, str, int] | None:
+    """Match a request to a reviewed HTML route: (route, strategy id, offset).
+
+    The query must be exactly ``portid`` or ``portid`` plus ``offset``, each once;
+    the first page may omit ``offset``.  Anything else is not a reviewed request.
+    """
+
+    parsed = urlsplit(url)
+    if method.upper() != "GET" or f"{parsed.scheme}://{parsed.netloc}" != ORIGIN:
+        return None
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    query = {key.casefold(): value for key, value in pairs}
+    if parsed.fragment or len(query) != len(pairs):
+        return None
+    for route in html_routes():
+        table = route.html
+        if table is None or route.path_pattern is None:
+            continue
+        if re.fullmatch(route.path_pattern, parsed.path) is None:
+            continue
+        strategy = query.get(table.id_param, "")
+        offset = query.get(table.page_param, "0")
+        if (
+            set(query) - {table.page_param} != {table.id_param}
+            or re.fullmatch(r"[1-9][0-9]{0,11}", strategy) is None
+            or re.fullmatch(r"[0-9]{1,9}", offset) is None
+        ):
+            return None
+        return route, strategy, int(offset)
+    return None
 
 
 def capture_contract() -> ProviderContract:

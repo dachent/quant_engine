@@ -8,7 +8,7 @@ account transactions, designer-model JSON, and billing evidence. It complements
 the network, or calls the API. The owner exports; the code stages, normalizes, and
 verifies offline.
 
-## Status: two capabilities CONFIRMED from preserved evidence, the rest UNVERIFIED
+## Status: three capabilities CONFIRMED from preserved evidence, the rest UNVERIFIED
 
 The catalog was reviewed offline against preserved real bytes (2026-09 captures
 under the private portfolio data root: 92 HARs, the raw JSON and HTML pages, the
@@ -20,7 +20,7 @@ and response field names and types were taken; no value or identifier was copied
 |---|---|---|---|
 | `designer-model.json` | DIFFERS | CONFIRMED | Real route is `GET /spr/strategy/model/{id}?dm=true` (not `/app/investment/model`); real response has 37 top-level fields, MM/DD/YYYY dates, and personal data (designer profile, comment threads) that is now redacted. Verified byte-for-byte against the preserved capture in HAR and file form. |
 | `transactions.download` | DIFFERS | CONFIRMED | Real header is `Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes`, identical in ten captures (route is the reviewed `strategy.transactions`). |
-| `transactions.account` | DIFFERS | UNVERIFIED | No JSON account-transactions route in 92 HARs. The real list is `GET /transact_list.jsp?portid=&offset=`, an HTML table, 50 rows per page, `offset` (not `page`), strategy-scoped. The JSON-only extractor cannot admit it; use the reviewed CSV download. |
+| `transactions.account` | DIFFERS | CONFIRMED | No JSON account-transactions route in 92 HARs. The real list is `GET /transact_list.jsp?portid=&offset=`, server-rendered HTML (a pager row, a `rowTwo` header row, 50 data rows of 11 cells), strategy-scoped. Eight preserved pages of one strategy (offsets 1400 to 1750) parse and agree with their pager. Admitted by the fail-closed HTML parser (`capture_html`), see "HTML transactions list" below; the last page, an empty strategy, other strategies and other transaction types are NOT observed and refuse. |
 | `aifactor.predictor` | UNVERIFIED | UNVERIFIED | No capture contains an AI Factor page or response. Only the menu link `/sv/opener/AIFACTOR/{cat}` and the user flags `aiFactorEnabled` / `hasAiFactor` were seen. |
 | `aifactor.model` | UNVERIFIED | UNVERIFIED | Same; the design intake records the predictor definition as in no capture. |
 | `screen.definition` | UNVERIFIED | UNVERIFIED | Only the list `/app/opener/SCR` and a `.../screen/summary/{n}/revert` copy-to-screen action link (a mutation: never capture or follow it). |
@@ -323,8 +323,9 @@ anything the sample cannot decide (mixed types, data-keyed objects) is written a
 `"<MIXED:...>"` or `"<KEYED:...>"`, which is not a valid shape, so a row cannot be
 applied without a human finishing it. `transactions.account` is an HTML table: the
 draft records its header labels, data rows per page, and `offset` pagination, and
-states `requires_code_change` because the capture extractor and `CaptureRoute`
-admit JSON shapes and CSV columns only. Dates, optional fields, and nullability are
+compares them with the catalog row (which already admits that route through
+`capture_html`; an HTML route with no catalog HTML row states `requires_code_change`).
+Dates, optional fields, and nullability are
 inferred from the observed sample only; the reviewer confirms against the raw bodies.
 
 Commands (Edge debug port 9333, the dedicated profile the owner already signed in to):
@@ -348,3 +349,53 @@ always records that warning at the end.
 `discover` and `capture` run until Ctrl-C (or `--max-seconds`) and then write the
 manifest. Nothing in this section was run against the live site: the proof is a
 fake CDP transport replaying synthetic events built from the known route templates.
+
+## HTML transactions list (`transactions.account`)
+
+`GET /transact_list.jsp?portid=<id>&offset=<n>` (the first page may omit `offset`) is
+HTML, so it bypasses the JSON extractor (and the JSON `capture_contract`, which still
+refuses this route) and goes through `capture_html.parse_transactions_page`, which uses
+only the standard-library `html.parser` and refuses on anything unexpected.
+
+Same gates as a JSON entry: HAR form only, status 2xx (any other status on a matched
+route refuses the run), a session header of at least 16 characters (name and length
+only; it is never stored outside the raw HAR), `text/html`, session bounds.
+
+Accepted structure (all from preserved real pages): exactly one `TableData` table with
+a `thead` (pager row, `rowTwo` header row) and a `tbody` of data rows; `table`, `thead`,
+`tbody`, `tr`, `th`, `td` explicitly closed with no stray end tags inside; header cells
+`(blank), Date, Type, Ticker, Shares, Price, Amount, Tot Fees, Rank, Note, TRADE`; pager
+text `A - B of N`; page links, the download link, and the date links all bound to the
+requested strategy; a page-size selection of 50 when one is selected; 11 cells per row;
+date link text `MM/DD/YY` (or four-digit year) equal to the link's own date; type in
+`BUY, SELL, DIV, SPLIT`; ticker box with a `:MARKET` suffix; comma-grouped numbers (empty
+allowed for shares, price, amount, fees, rank); a note of at most 200 characters; an empty
+TRADE cell. Declared range must equal the request: `A = offset + 1`, `B = min(offset + 50,
+N)`, with exactly `B - A + 1` rows (a short page that is not the last, rows beyond the
+declared end, and an empty page all refuse); duplicate row sequence numbers refuse.
+
+Refusal codes: `TABLE_NOT_FOUND`, `TABLE_AMBIGUOUS`, `TABLE_MALFORMED`, `TABLE_STRUCTURE`,
+`HEADER_UNREVIEWED`, `PAGER_UNREVIEWED`, `PAGER_INCONSISTENT`, `ROWS_PER_PAGE_UNREVIEWED`,
+`LINK_UNREVIEWED`, `LINK_STRATEGY_MISMATCH`, `DATE_UNREVIEWED`, `DATE_LINK_MISMATCH`,
+`TYPE_UNREVIEWED`, `TICKER_UNREVIEWED`, `NUMBER_UNREVIEWED`, `CELL_STRUCTURE`,
+`ROW_CELL_COUNT`, `ROW_SEQUENCE_UNREVIEWED`, `NOTE_TOO_LONG`, `TRADE_CELL_UNREVIEWED`,
+`OFFSET_MISMATCH`, `SHORT_PAGE_NOT_LAST`, `ROWS_AFTER_DECLARED_END`, `EMPTY_PAGE`,
+`DUPLICATE_ROWS`, `HTML_NOT_UTF8`, `HTML_TOO_LARGE`, `REQUEST_UNREVIEWED`.
+
+Normalized record per page (no identifiers: the strategy id becomes a hash, the row
+sequence number, the TRADE column, and every link are checked and dropped): `strategy_sha256`,
+`offset`, `first`, `last`, `total`, and rows with `date` (ISO), `type`, `ticker`, `market`,
+`shares`, `price`, `amount`, `tot_fees`, `rank` (nullable numbers), `note`.
+
+Completeness per strategy: one `total` on every page, offsets only on 50-row steps up to
+`N`, each offset once (identical duplicate pages dedupe, differing ones refuse), no repeated
+row sequence number across pages, and every offset from 0 to the last present. Anything
+less is `COVERAGE_PARTIAL` (refused unless `--allow-partial`, which `verify` still
+refuses by default). A run is `REVIEWED_SHAPES` only when every capability in scope is
+CONFIRMED.
+
+The HTML header differs from the CSV download header (`Ticker`, `Tot Fees`, `Note` versus
+`Symbol`, `TotFees`, `Notes`), and the HTML date has a two-digit year; downstream joins
+must map them explicitly. Conformance check against the preserved bytes (counts only): the
+eight real pages stage with `allow_partial` as 8 records, 400 rows, 1 strategy, 56 pages
+expected, PARTIAL, `REVIEWED_SHAPES`, and strict `verify` refuses with `COVERAGE_PARTIAL`.

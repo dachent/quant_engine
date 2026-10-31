@@ -1416,7 +1416,8 @@ def _candidate(
             "no values. Reviewer to confirm against the raw capture."
         ),
     }
-    if media == "html":
+    current = _current_row(capability)
+    if media == "html" and not (current and current.get("html")):
         row["requires_code_change"].append(
             "HTML response admission: the capture extractor and CaptureRoute admit "
             "JSON shapes and CSV columns only"
