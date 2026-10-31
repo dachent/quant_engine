@@ -19,7 +19,12 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from .catalog import ENDPOINTS, Endpoint, catalog_rows, get_endpoint
 from .credentials import ApiCredentials, load_credentials, plan_identity
 from .exporters import export_datasets, write_csv
-from .evidence import EvidenceGenerationError, bound_cutoff, cutoff_end_ms
+from .evidence import (
+    EvidenceGenerationError,
+    bound_cutoff,
+    capture_label,
+    cutoff_end_ms,
+)
 from .governance import authorize_live_read
 from .normalization import enrich_timestamps, normalize_rows
 from .pagination import DAY_MS, paginate_rfq_bisection, utc_time_windows
@@ -39,6 +44,14 @@ from .valuation import build_daily_valuation
 
 
 DEFAULT_CREDENTIAL_TARGET = "BIT.com-API"
+# Requests that take no time window (the catalog allowed_params has no time or date
+# key and _single passes none), so they return state at call time.
+SNAPSHOT_PATHS = (
+    "/mapi/v1/wallet/balance",
+    "/mapi/v1/wallet/currencies",
+    "/strategy/api/v2/user/holding",
+    "/strategy/api/v2/user/holding/volume",
+)
 
 
 def _credential_label(
@@ -69,6 +82,22 @@ def recorded_cutoff(run: Mapping[str, Any]) -> str | None:
     stored = json.loads(str(run.get("metadata_json") or "{}"))
     value = stored.get("cutoff")
     return str(value) if value else None
+
+
+def recorded_capture_label(run: Mapping[str, Any]) -> str | None:
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    value = stored.get("captured_after_cutoff_label")
+    return str(value) if value else None
+
+
+def recorded_captures(run: Mapping[str, Any]) -> dict[str, int]:
+    """Path -> UTC ms at which each current-state request was captured."""
+
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    return {
+        str(path): int(item["captured_at_ms"])
+        for path, item in dict(stored.get("captures") or {}).items()
+    }
 
 
 def recorded_credential_identity(run: Mapping[str, Any]) -> str:
@@ -423,6 +452,7 @@ class MatrixportExtractor:
         governance_evidence: str | Path | None = None,
         live_operation: str = "extract",
         cutoff: str | None = None,
+        captured_after_cutoff_label: str | None = None,
         clock_ms: Callable[[], int] = utc_now_ms,
         reporter: Callable[[str], None] | None = None,
     ) -> None:
@@ -434,6 +464,8 @@ class MatrixportExtractor:
         self.run_dir = self.output_root / self.run_id
         governance = None
         self.cutoff = cutoff
+        self.capture_label = captured_after_cutoff_label
+        self._clock_ms = clock_ms
         if transport is None:
             if governance_evidence is None:
                 raise ExtractionError("live-read governance evidence is required")
@@ -446,6 +478,7 @@ class MatrixportExtractor:
                     mode=mode,
                     now_ms=clock_ms(),
                 )
+                self.capture_label = capture_label(governance_evidence)
             except EvidenceGenerationError as error:
                 raise ExtractionError(str(error)) from None
             governance = authorize_live_read(
@@ -474,6 +507,10 @@ class MatrixportExtractor:
                 )
             self.mode = str(existing["mode"])
             self.run_end_ms = int(existing["run_end_ms"])
+            if recorded_capture_label(existing) != self.capture_label:
+                raise ExtractionError(
+                    "Cannot resume a run with a different capture label"
+                )
             if recorded_cutoff(existing) != cutoff:
                 raise ExtractionError("Cannot resume a run with a different cutoff")
             if str(existing["extractor_hash"]) != self.extractor_hash:
@@ -513,6 +550,8 @@ class MatrixportExtractor:
                         credentials, credentials_config
                     ),
                     "cutoff": cutoff,
+                    "captured_after_cutoff_label": self.capture_label,
+                    "captures": {},
                     "history_semantics": "all_api_reachable_history_to_frozen_run_end",
                     "timezone": "UTC",
                 },
@@ -883,6 +922,8 @@ class MatrixportExtractor:
         call = self._safe_call(path, params, core=core)
         if call is None:
             return []
+        if path in SNAPSHOT_PATHS:
+            self._record_capture(path)
         rows = rows_from_payload(
             call.payload, candidates=candidates, mapping_key=mapping_key
         )
@@ -895,6 +936,26 @@ class MatrixportExtractor:
             details={"row_count": len(rows)},
         )
         return rows
+
+    def _record_capture(self, path: str) -> None:
+        """Record when a current-state request was captured (first capture wins).
+
+        Taken after the call returns, from the extractor clock, so the recorded
+        time is never earlier than the request. A cached response on resume keeps
+        the time already recorded.
+        """
+        run = self.storage.get_run(self.run_id) or {}
+        stored = json.loads(str(run.get("metadata_json") or "{}"))
+        captures = dict(stored.get("captures") or {})
+        if path in captures:
+            return
+        moment = self._clock_ms()
+        stamp = datetime.fromtimestamp(moment / 1000, timezone.utc)
+        captures[path] = {
+            "captured_at_ms": moment,
+            "captured_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        }
+        self.storage.merge_run_metadata(self.run_id, {"captures": captures})
 
     def _offset(
         self,

@@ -23,6 +23,9 @@ from .pipeline import (
     live_auth_test,
     _credential_identity,
     recorded_credential_identity,
+    SNAPSHOT_PATHS,
+    recorded_capture_label,
+    recorded_captures,
     recorded_cutoff,
     validate_run_id,
 )
@@ -102,6 +105,13 @@ def _parser() -> argparse.ArgumentParser:
         "--scope-path",
         action="append",
         help="assert the scope: repeat for every GET path; must equal the catalog reads",
+    )
+    gen.add_argument(
+        "--captured-after-cutoff-label",
+        help=(
+            "explicit reason the current-state requests may be captured after the "
+            "cutoff day; without it verify refuses such a run"
+        ),
     )
     gen.add_argument("--out", required=True, type=Path)
 
@@ -210,6 +220,16 @@ def _require_recorded_cutoff(run_dir: Path, run_id: str, cutoff: str | None) -> 
             raise CredentialError("The recorded cutoff is invalid") from None
         if int(run["run_end_ms"]) > limit:
             raise CredentialError("The run window extends past its cutoff")
+        captures = recorded_captures(run)
+        missing = [path for path in SNAPSHOT_PATHS if path not in captures]
+        if missing and run["status"] == "COMPLETED":
+            raise CredentialError("The run did not record its capture times")
+        late = [path for path, at_ms in captures.items() if at_ms > limit]
+        if late and recorded_capture_label(run) is None:
+            raise CredentialError(
+                "Current-state requests were captured after the cutoff day "
+                "and the evidence carries no captured_after_cutoff_label"
+            )
 
 
 def _verify(
@@ -267,6 +287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             expires_at=args.expires_at,
                             max_requests=args.max_requests,
                             max_window_hours=args.max_window_hours,
+                            captured_after_cutoff_label=args.captured_after_cutoff_label,
                             scope_paths=(
                                 tuple(args.scope_path) if args.scope_path else None
                             ),

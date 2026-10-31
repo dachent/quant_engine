@@ -58,8 +58,25 @@ class EvidenceRequest:
     expires_at: str
     max_requests: int
     max_window_hours: float = DEFAULT_MAX_WINDOW_HOURS
+    captured_after_cutoff_label: str | None = None
     scope_paths: tuple[str, ...] | None = None
     credentials_config: Path | None = None
+
+
+def _clean_label(label: str | None) -> str | None:
+    """An explicit, human-readable reason a capture may follow the cutoff day."""
+    if label is None:
+        return None
+    if (
+        not isinstance(label, str)
+        or not label.strip()
+        or len(label) > 200
+        or any(ord(ch) < 32 for ch in label)
+    ):
+        raise EvidenceGenerationError(
+            "captured_after_cutoff_label must be 1-200 printable characters"
+        )
+    return label.strip()
 
 
 def _require_mode(operation: str, mode: str | None) -> str | None:
@@ -226,6 +243,9 @@ def build_evidence(
         "schema_version": 1,
         "kind": "matrixport-governance-evidence-provenance",
         "cutoff": request.cutoff,
+        "captured_after_cutoff_label": _clean_label(
+            request.captured_after_cutoff_label
+        ),
         "operation": request.operation,
         "mode": mode,
         "generated_at": _utc_text(current),
@@ -410,3 +430,16 @@ def bound_cutoff(
         else int(datetime.now(timezone.utc).timestamp() * 1000),
     )
     return cutoff
+
+
+def capture_label(evidence_path: str | Path) -> str | None:
+    """The sidecar's ``captured_after_cutoff_label`` (call after ``bound_cutoff``)."""
+    try:
+        record = json.loads(
+            _sidecar_path(Path(evidence_path)).read_bytes().decode("utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise EvidenceGenerationError(
+            "evidence provenance sidecar is missing or unreadable"
+        ) from None
+    return _clean_label(record.get("captured_after_cutoff_label"))

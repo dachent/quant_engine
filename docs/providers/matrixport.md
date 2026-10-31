@@ -123,9 +123,18 @@ millisecond of the cutoff day (UTC), capped at the clock, instead of the current
 time, so no windowed request extends past it. The cutoff is stored in the run
 metadata: `--resume` refuses a different or missing cutoff, and `verify
 [--cutoff D]` refuses a mismatched cutoff or a recorded window past its cutoff.
-Limit: endpoints that return current state (wallet balance and currencies, strategy
-holdings snapshots) cannot be time-bounded by the request; they reflect the
-moment of the call.
+Current-state requests take no time window, from the code: the catalog
+(`catalog.py`) allows no time or date parameter for `wallet/balance` (415-422),
+`wallet/currencies` (407-413) or `strategy/user/holding/volume` (181-188), and the
+holding snapshot allows only `is_cleared`, `is_holding` and `product_id` (172-179);
+`pipeline.py` calls them through `_single` (912-922) with no params (holding
+1153-1160, wallet 1661-1668) and `transport.py:207` rejects any parameter not in
+the allowlist. They therefore reflect the moment of the call. Each call's UTC
+capture time is recorded in the run metadata (`captures`). `verify` refuses a
+cutoff-bound run whose capture time is after the cutoff day's end (UTC), or that
+did not record capture times, unless the evidence provenance carries an explicit
+`captured_after_cutoff_label` (`governance-evidence --captured-after-cutoff-label
+TEXT`), which is then recorded in the run metadata.
 
 Receipt transitions are durable before a live request is permitted. On POSIX,
 the adapter fsyncs the receipt's containing directory after exclusive creation

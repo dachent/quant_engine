@@ -14,6 +14,7 @@ import pytest
 
 from quant_engine.matrixport import cli, pipeline
 from quant_engine.matrixport.evidence import (
+    capture_label,
     EvidenceGenerationError,
     EvidenceRequest,
     bound_cutoff,
@@ -229,6 +230,7 @@ def test_verify_refuses_a_cutoff_mismatch_and_a_window_past_the_cutoff(
         run_id="20260901T000000.000Z",
         transport=FixtureTransport(),
         cutoff=CUTOFF,
+        captured_after_cutoff_label="labelled for the test",
         clock_ms=lambda: LATER_MS,
     )
     try:
@@ -267,3 +269,161 @@ def test_evidence_field_set_is_unchanged_by_cutoff_enforcement(
         "catalog",
         "metering",
     }
+
+
+NOON_MS = int(datetime(2026, 9, 17, 12, tzinfo=timezone.utc).timestamp() * 1000)
+SNAPSHOTS = (
+    "/mapi/v1/wallet/balance",
+    "/mapi/v1/wallet/currencies",
+    "/strategy/api/v2/user/holding",
+    "/strategy/api/v2/user/holding/volume",
+)
+
+
+def _extract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, clock: int, label=None
+) -> Path:
+    monkeypatch.setattr(pipeline, "FULL_START_MS", 1722384000000)
+    monkeypatch.chdir(tmp_path)
+    extractor = MatrixportExtractor(
+        tmp_path,
+        mode="full",
+        run_id="20260901T000000.000Z",
+        transport=FixtureTransport(),
+        cutoff=CUTOFF,
+        captured_after_cutoff_label=label,
+        clock_ms=lambda: clock,
+    )
+    try:
+        extractor.extract()
+    finally:
+        extractor.close()
+    return tmp_path / "output" / "20260901T000000.000Z"
+
+
+def _run(run_dir: Path) -> dict:
+    storage = RunStorage(run_dir / "state" / pipeline.DATABASE_NAME)
+    try:
+        return storage.get_run(run_dir.name) or {}
+    finally:
+        storage.close()
+
+
+def test_current_state_requests_record_captured_at_in_run_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _extract(tmp_path, monkeypatch, clock=NOON_MS)
+    metadata = json.loads(_run(run_dir)["metadata_json"])
+    assert sorted(metadata["captures"]) == sorted(SNAPSHOTS)
+    assert metadata["captures"][SNAPSHOTS[0]] == {
+        "captured_at_ms": NOON_MS,
+        "captured_at": "2026-09-17T12:00:00.000Z",
+    }
+    assert metadata["captured_after_cutoff_label"] is None
+    assert pipeline.recorded_captures(_run(run_dir)) == {p: NOON_MS for p in SNAPSHOTS}
+
+
+def test_verify_accepts_captures_inside_the_cutoff_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _extract(tmp_path, monkeypatch, clock=NOON_MS)
+    cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
+
+
+def test_verify_refuses_late_captures_without_a_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _extract(tmp_path, monkeypatch, clock=LATER_MS)
+    # history windows still end at the cutoff day end; the snapshots do not
+    assert _run(run_dir)["run_end_ms"] == CUTOFF_END_MS
+    with pytest.raises(cli.CredentialError, match="captured_after_cutoff_label"):
+        cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
+
+
+def test_verify_accepts_late_captures_with_an_explicit_label_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    label = "R3 starts 2026-09-17; capture after that day's close"
+    run_dir = _extract(tmp_path, monkeypatch, clock=LATER_MS, label=label)
+    cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
+    metadata = json.loads(_run(run_dir)["metadata_json"])
+    assert metadata["captured_after_cutoff_label"] == label
+    assert all(
+        item["captured_at_ms"] == LATER_MS for item in metadata["captures"].values()
+    )
+
+
+def test_verify_refuses_a_completed_run_missing_capture_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _extract(tmp_path, monkeypatch, clock=NOON_MS)
+    storage = RunStorage(run_dir / "state" / pipeline.DATABASE_NAME)
+    try:
+        storage._connection.execute(
+            "UPDATE runs SET metadata_json = json_remove(metadata_json, '$.captures')"
+        )
+        storage._connection.commit()
+    finally:
+        storage.close()
+    with pytest.raises(cli.CredentialError, match="capture times"):
+        cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
+
+
+def test_resume_refuses_a_different_capture_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline, "FULL_START_MS", 1722384000000)
+    MatrixportExtractor(
+        tmp_path,
+        mode="full",
+        run_id="20260901T000000.000Z",
+        transport=FixtureTransport(),
+        cutoff=CUTOFF,
+        captured_after_cutoff_label="one",
+        clock_ms=lambda: LATER_MS,
+    ).close()
+    with pytest.raises(ExtractionError, match="capture label"):
+        MatrixportExtractor(
+            tmp_path,
+            mode="full",
+            run_id="20260901T000000.000Z",
+            resume=True,
+            transport=FixtureTransport(),
+            cutoff=CUTOFF,
+            captured_after_cutoff_label="two",
+            clock_ms=lambda: LATER_MS,
+        )
+
+
+def test_label_flows_from_evidence_provenance_and_is_validated(
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+
+    def make(name: str, label):
+        out = tmp_path / "outside"
+        out.mkdir(exist_ok=True)
+        write_evidence(
+            EvidenceRequest(
+                operation="extract",
+                mode="full",
+                cutoff=CUTOFF,
+                review_url=REVIEW,
+                review_identity="synthetic-reviewer",
+                issued_at=(now - timedelta(minutes=1)).isoformat(),
+                expires_at=(now + timedelta(hours=1)).isoformat(),
+                max_requests=5000,
+                captured_after_cutoff_label=label,
+            ),
+            out / name,
+        )
+        return out / name
+
+    assert capture_label(make("a.json", None)) is None
+    assert capture_label(make("b.json", "  R3 post-close  ")) == "R3 post-close"
+    for bad in ("", "   ", "x" * 201, "line\nbreak"):
+        with pytest.raises(
+            EvidenceGenerationError, match="captured_after_cutoff_label"
+        ):
+            make("c.json", bad)
+        assert not (tmp_path / "outside" / "c.json").exists()
