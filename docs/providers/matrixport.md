@@ -85,6 +85,34 @@ consumed approval cannot be resumed or retried; obtain a new review artifact
 instead. `auth-test`, `extract`, and `run` all require
 `--governance-evidence <operator-supplied.json>`.
 
+### Assembling and checking the evidence file
+
+`governance-evidence` assembles the evidence JSON so a live capture needs no
+hand-written file; `verify-evidence` re-checks one without consuming it. Neither
+approves anything: the reviewed authority must already exist in the governing
+issue, and the generator refuses a missing or malformed review URL.
+
+```powershell
+quant-engine-matrixport [--credentials-config PLAN.toml] governance-evidence `
+  --operation extract --mode full --cutoff 2026-09-17 `
+  --review-url https://github.com/dachent/quant_engine/issues/<n>#issuecomment-<id> `
+  --review-identity <reviewer> --issued-at <RFC3339> --expires-at <RFC3339> `
+  --max-requests <n> [--max-window-hours 24] --out C:\absolute\outside\repo\evidence.json
+quant-engine-matrixport verify-evidence C:\absolute\outside\repo\evidence.json
+```
+
+It computes the terms and catalog hashes and the scope (exactly the live-enabled
+catalog reads for `extract`/`run`, or the single Wallet balance read for
+`auth-test`). It refuses an expired authority, a window longer than
+`--max-window-hours`, a scope (`--scope-path`, optional assertion) that differs
+from the catalog, a request ceiling below one call per endpoint, a relative or
+in-repository output path, and any existing output (create-only). The gate's
+field set is exact, so the cutoff and the credential-source identity
+(`plan:<digest>` of the ordered references, never a name or value) go in a
+`<name>.provenance.json` sidecar. `verify-evidence` runs the gate's own
+validator (`validate_live_read_evidence`, which `authorize_live_read` calls), then
+re-derives hashes and scope, and reports a consumed receipt as a failure.
+
 Receipt transitions are durable before a live request is permitted. On POSIX,
 the adapter fsyncs the receipt's containing directory after exclusive creation
 and after each atomic replacement. Windows does not support that POSIX

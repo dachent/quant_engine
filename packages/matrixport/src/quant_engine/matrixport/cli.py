@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .credentials import CredentialError, load_credentials
+from .evidence import (
+    DEFAULT_MAX_WINDOW_HOURS,
+    EvidenceGenerationError,
+    EvidenceRequest,
+    verify_evidence,
+    write_evidence,
+)
 from .pipeline import (
     DATABASE_NAME,
     MatrixportExtractor,
@@ -65,6 +72,37 @@ def _parser() -> argparse.ArgumentParser:
         "verify", help="Verify raw, state, CSV, XLSX, and privacy"
     )
     verify.add_argument("--run-id", required=True)
+
+    gen = subcommands.add_parser(
+        "governance-evidence",
+        help="Assemble (never approve) a single-use live-read evidence file",
+    )
+    gen.add_argument(
+        "--operation", required=True, choices=("auth-test", "extract", "run")
+    )
+    gen.add_argument("--mode", choices=("full", "incremental"))
+    gen.add_argument("--cutoff", required=True, help="YYYY-MM-DD")
+    gen.add_argument("--review-url", required=True)
+    gen.add_argument("--review-identity", required=True)
+    gen.add_argument("--issued-at", required=True)
+    gen.add_argument("--expires-at", required=True)
+    gen.add_argument("--max-requests", required=True, type=int)
+    gen.add_argument("--max-window-hours", type=float, default=DEFAULT_MAX_WINDOW_HOURS)
+    gen.add_argument(
+        "--scope-path",
+        action="append",
+        help="assert the scope: repeat for every GET path; must equal the catalog reads",
+    )
+    gen.add_argument("--out", required=True, type=Path)
+
+    check = subcommands.add_parser(
+        "verify-evidence",
+        help="Validate an evidence file with the live gate's validator, unconsumed",
+    )
+    check.add_argument("evidence", type=Path)
+    check.add_argument(
+        "--max-window-hours", type=float, default=DEFAULT_MAX_WINDOW_HOURS
+    )
 
     run = subcommands.add_parser("run", help="Extract, export, and verify")
     run.add_argument("--full", action="store_true", required=True)
@@ -174,6 +212,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "governance-evidence":
+            print(
+                canonical_json(
+                    write_evidence(
+                        EvidenceRequest(
+                            operation=args.operation,
+                            mode=args.mode,
+                            cutoff=args.cutoff,
+                            review_url=args.review_url,
+                            review_identity=args.review_identity,
+                            issued_at=args.issued_at,
+                            expires_at=args.expires_at,
+                            max_requests=args.max_requests,
+                            max_window_hours=args.max_window_hours,
+                            scope_paths=(
+                                tuple(args.scope_path) if args.scope_path else None
+                            ),
+                            credentials_config=args.credentials_config,
+                        ),
+                        args.out,
+                    )
+                )
+            )
+            return 0
+        if args.command == "verify-evidence":
+            print(
+                canonical_json(
+                    verify_evidence(
+                        args.evidence, max_window_hours=args.max_window_hours
+                    )
+                )
+            )
+            return 0
         if args.command == "catalog":
             csv_path, json_path = export_catalog(_workspace())
             print(
@@ -252,6 +323,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0 if result["ok"] else 2
+    except EvidenceGenerationError as error:
+        print(
+            canonical_json(
+                {"ok": False, "error": "EvidenceRefused", "message": str(error)}
+            ),
+            file=sys.stderr,
+        )
+        return 4
     except CredentialError as error:
         print(
             canonical_json(
