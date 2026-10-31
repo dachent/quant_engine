@@ -4407,6 +4407,21 @@ def _build_base_analytics(
     return base_spec, base_source, decomposition_generation_id
 
 
+def _weekly_history_coverage_arguments(correlation_source: Path) -> tuple[str, ...]:
+    """Name the governed history coverage that carries the accepted multi-day spans.
+
+    A weekly line built without them omits measured holding-period returns, so a
+    current dependence source must supply them.  Legacy sources carry no receipt.
+    """
+
+    if not (correlation_source / "dependence-source.json").is_file():
+        return ()
+    coverage = correlation_source / "history-coverage.json"
+    if not coverage.is_file():
+        raise VerticalBuildError("current dependence source lacks history coverage")
+    return ("--history-coverage", str(coverage))
+
+
 def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
@@ -4723,6 +4738,10 @@ def build_analytics(
     )
     correlation_generation_id = _generation_id(
         correlation.get("generation_id"), "correlation generation_id"
+    )
+    gap_fill_arguments = (
+        *gap_fill_arguments,
+        *_weekly_history_coverage_arguments(correlation_source),
     )
     weekly_root = output_root / "weekly-returns"
     built = _tool(

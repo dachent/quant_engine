@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from typing import Any
 import sys
 
 import pytest
@@ -1192,3 +1193,314 @@ def test_vendor_gap_fills_recipe_pin_becomes_the_panel_arguments(
     assert arguments[0] == "--vendor-gap-fills"
     assert arguments[2] == "--vendor-gap-fills-sha256"
     assert arguments[3] == definition["sha256"]
+
+
+# --- accepted multi-day spans (N1) -------------------------------------------------
+# All values below are synthetic.  A span is an accepted holding-period return whose
+# end date has no daily row, so the weekly line must compound it into the week that
+# contains its end date and the line must telescope to the governed epoch return.
+
+SPAN_SERIES = "Span Strategy"
+PLAIN_SERIES = "Plain Strategy"
+SPAN_DAILY = {
+    "2026-07-20": "0.01",
+    "2026-07-21": "0.02",
+    "2026-07-24": "0.005",
+    "2026-07-28": "-0.01",
+    "2026-07-29": "0.02",
+}
+# (start, end, return): the second span crosses the ISO week boundary.
+SPAN_LINKS = (
+    ("2026-07-21", "2026-07-23", "-0.03"),
+    ("2026-07-24", "2026-07-27", "0.015"),
+)
+SPAN_TOLERANCE = Decimal("1e-24")
+
+
+def _span_coverage(
+    path: Path,
+    *,
+    links: tuple[tuple[str, str, str], ...] = SPAN_LINKS,
+    daily_sha: str | None = None,
+    epoch_shift: Decimal = Decimal(0),
+    strategy_id: str = "span-s",
+) -> Path:
+    daily = [(date.fromisoformat(day), Decimal(r)) for day, r in SPAN_DAILY.items()]
+    daily_wealth = Decimal(1)
+    for _day, value in daily:
+        daily_wealth *= 1 + value
+    epoch_wealth = daily_wealth
+    for _start, _end, value in links:
+        epoch_wealth *= 1 + Decimal(value)
+    _write_json(
+        path,
+        {
+            "strategies": [
+                {"series_id": SPAN_SERIES, "strategy_id": "span-s"},
+                {"series_id": PLAIN_SERIES, "strategy_id": "plain-s"},
+                {"series_id": None, "strategy_id": "excluded-s"},
+            ],
+            "epoch_hpr_receipts": [
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "strategy_id": strategy_id,
+                    "receipt": {
+                        "daily_cumulative_return": str(daily_wealth - 1),
+                        "daily_return_series_sha256": daily_sha
+                        or weekly._canonical_series_sha256(daily),
+                        "epoch_cumulative_return": str(epoch_wealth - 1 + epoch_shift),
+                        "span_return_receipts": [
+                            {
+                                "return": value,
+                                "span_days": (
+                                    date.fromisoformat(end) - date.fromisoformat(start)
+                                ).days,
+                                "span_end_date": end,
+                                "span_start_date": start,
+                            }
+                            for start, end, value in links
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    return path
+
+
+def _span_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    rows = [
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": value,
+            "series_id": SPAN_SERIES,
+            "strategy_version": "v-span",
+        }
+        for day, value in SPAN_DAILY.items()
+    ]
+    rows.append(
+        {
+            "date": "2026-07-13",
+            "evidence_layer": "BACKTEST",
+            "return": "0.02",
+            "series_id": SPAN_SERIES,
+            "strategy_version": "v-span",
+        }
+    )
+    rows.extend(
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.001",
+            "series_id": PLAIN_SERIES,
+            "strategy_version": "v-plain",
+        }
+        for day in ("2026-07-20", "2026-07-21", "2026-07-22")
+    )
+    strategy_returns = tmp_path / "strategy-returns.csv"
+    _write_csv(
+        strategy_returns,
+        ["series_id", "date", "return", "evidence_layer", "strategy_version"],
+        rows,
+    )
+
+    def composition(series: str, live: int, backtest: int) -> dict[str, object]:
+        return {
+            "backtest_observations_used": backtest,
+            "live_inception": "2026-07-20",
+            "live_observations": live,
+            "strategy_version": "v-span" if series == SPAN_SERIES else "v-plain",
+        }
+
+    correlation = {
+        "analytics_schema_version": 2,
+        "complete_through": "2026-07-31",
+        "default_evidence_mode": "LIVE_ONLY",
+        "dependence_modes": {
+            "LIVE_ONLY": {
+                "series_composition": {
+                    SPAN_SERIES: composition(SPAN_SERIES, 5, 0),
+                    PLAIN_SERIES: composition(PLAIN_SERIES, 3, 0),
+                }
+            },
+            "LIVE_PLUS_BACKTEST": {
+                "series_composition": {
+                    SPAN_SERIES: composition(SPAN_SERIES, 5, 1),
+                    PLAIN_SERIES: composition(PLAIN_SERIES, 3, 0),
+                }
+            },
+        },
+        "source": {
+            "artifact_id": "provider-rollforward/layered-strategy-returns.csv",
+            "sha256": _sha(strategy_returns),
+            "size_bytes": strategy_returns.stat().st_size,
+        },
+    }
+    correlation_source = tmp_path / "correlation.json"
+    _write_json(correlation_source, correlation)
+    correlation_root = tmp_path / "correlation-root"
+    manifest = GenerationManifest.build(
+        as_of_date=EXECUTION_DATE,
+        adapter=AdapterIdentity("synthetic-correlation", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic layered strategy evidence",
+            fact_types=("layered strategy returns",),
+            observed_start=date(2026, 7, 13),
+            observed_end=date(2026, 7, 31),
+        ),
+        artifacts=(
+            SourceArtifact.from_path(
+                strategy_returns,
+                artifact_id="provider-rollforward/layered-strategy-returns.csv",
+                as_of_date=EXECUTION_DATE,
+                schema_name="portfolio-layered-strategy-returns",
+                schema_version="2",
+            ),
+            SourceArtifact.from_path(
+                correlation_source,
+                artifact_id="normalized/correlation.json",
+                as_of_date=EXECUTION_DATE,
+                schema_name="portfolio-correlation-analytics",
+                schema_version="2",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(correlation_root, manifest)
+    (manifest_path.parent / "correlation.json").write_bytes(
+        correlation_source.read_bytes()
+    )
+    publish_generation(correlation_root, manifest.generation_id)
+    return correlation_root, strategy_returns, _plan_fixture(tmp_path)
+
+
+def _span_series(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(
+        row for row in payload["series"] if row["series_id"] == f"strategy:{name}"
+    )
+
+
+def _line_end(values: dict[str, str], start: str | None = None) -> Decimal:
+    wealth = Decimal(1)
+    for week in sorted(values):
+        if start is None or week >= start:
+            wealth *= 1 + Decimal(values[week])
+    return wealth
+
+
+def test_accepted_spans_compound_into_the_week_containing_their_end(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+    coverage = _span_coverage(tmp_path / "history-coverage.json")
+    payload, paths = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, None, coverage
+    )
+    assert coverage in paths
+    row = _span_series(payload, SPAN_SERIES)
+    first = Decimal("1.01") * Decimal("1.02") * Decimal("0.97") * Decimal("1.005")
+    second = Decimal("1.015") * Decimal("0.99") * Decimal("1.02")
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        values = row["values_by_mode"][mode]
+        # week 07-20 holds the 07-23 span; week 07-27 holds the span that ends on
+        # 07-27 even though it starts in the prior week.
+        assert abs(Decimal(values["2026-07-20"]) - (first - 1)) < SPAN_TOLERANCE
+        assert abs(Decimal(values["2026-07-27"]) - (second - 1)) < SPAN_TOLERANCE
+    assert row["values_by_mode"]["LIVE_PLUS_BACKTEST"]["2026-07-13"] == "0.02"
+    meta = row["observation_meta_by_mode"]["LIVE_ONLY"]
+    assert meta["2026-07-20"][0] == 4 and meta["2026-07-27"][0] == 3
+    spans = row["mode_coverage"]["LIVE_ONLY"]["accepted_multi_day_spans"]
+    assert spans == [
+        {"end": "2026-07-23", "start": "2026-07-21"},
+        {"end": "2026-07-27", "start": "2026-07-24"},
+    ]
+    plain = _span_series(payload, PLAIN_SERIES)
+    assert "accepted_multi_day_spans" not in plain["mode_coverage"]["LIVE_ONLY"]
+
+
+def test_weekly_line_telescopes_to_the_product_of_accepted_links(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+    coverage = _span_coverage(tmp_path / "history-coverage.json")
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, None, coverage
+    )
+    values = _span_series(payload, SPAN_SERIES)["values_by_mode"]["LIVE_ONLY"]
+    daily = [Decimal(value) for value in SPAN_DAILY.values()]
+    spans = [Decimal(value) for _start, _end, value in SPAN_LINKS]
+    # the end value of the line equals the governed compounded return of every link
+    governed = Decimal(1)
+    for value in [*daily, *spans]:
+        governed *= 1 + value
+    assert abs(_line_end(values) - governed) < SPAN_TOLERANCE
+    # and the ratio over a whole-week window equals the links ending in that window
+    last_week = Decimal("1.015") * Decimal("0.99") * Decimal("1.02")
+    assert abs(_line_end(values, "2026-07-27") - last_week) < SPAN_TOLERANCE
+    assert (
+        abs(_line_end(values) / _line_end(values, "2026-07-27") - governed / last_week)
+        < SPAN_TOLERANCE
+    )
+    # without the governed coverage the same builder omits both measured spans
+    bare, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, None, None
+    )
+    bare_values = _span_series(bare, SPAN_SERIES)["values_by_mode"]["LIVE_ONLY"]
+    assert abs(_line_end(bare_values) - governed) > Decimal("0.01")
+
+
+def test_accepted_spans_are_refused_when_they_do_not_bind(tmp_path: Path) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+
+    def build(coverage: Path) -> None:
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, None, coverage
+        )
+
+    with pytest.raises(weekly.WeeklyReturnError, match="bind the live daily path"):
+        build(_span_coverage(tmp_path / "a.json", daily_sha="0" * 64))
+    with pytest.raises(weekly.WeeklyReturnError, match="do not telescope"):
+        build(_span_coverage(tmp_path / "b.json", epoch_shift=Decimal("0.001")))
+    with pytest.raises(weekly.WeeklyReturnError, match="unknown strategy"):
+        build(_span_coverage(tmp_path / "c.json", strategy_id="missing-s"))
+    with pytest.raises(weekly.WeeklyReturnError, match="daily observation"):
+        build(
+            _span_coverage(
+                tmp_path / "d.json", links=(("2026-07-27", "2026-07-29", "0.01"),)
+            )
+        )
+    with pytest.raises(weekly.WeeklyReturnError, match="not a multi-day span"):
+        build(
+            _span_coverage(
+                tmp_path / "e.json", links=(("2026-07-22", "2026-07-23", "0.01"),)
+            )
+        )
+    with pytest.raises(weekly.WeeklyReturnError, match="overlap"):
+        build(
+            _span_coverage(
+                tmp_path / "f.json",
+                links=(
+                    ("2026-07-21", "2026-07-24", "0.01"),
+                    ("2026-07-22", "2026-07-26", "0.01"),
+                ),
+            )
+        )
+
+
+def test_release_builder_passes_the_history_coverage_to_the_weekly_stage(
+    tmp_path: Path,
+) -> None:
+    import portfolio_release_builder as builder
+
+    # a legacy source carries no dependence receipt and so no span authority
+    assert builder._weekly_history_coverage_arguments(tmp_path) == ()
+    (tmp_path / "dependence-source.json").write_bytes(b"{}\n")
+    with pytest.raises(builder.VerticalBuildError, match="history coverage"):
+        builder._weekly_history_coverage_arguments(tmp_path)
+    (tmp_path / "history-coverage.json").write_bytes(b"{}\n")
+    assert builder._weekly_history_coverage_arguments(tmp_path) == (
+        "--history-coverage",
+        str(tmp_path / "history-coverage.json"),
+    )
