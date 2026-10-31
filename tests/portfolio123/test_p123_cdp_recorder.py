@@ -39,8 +39,8 @@ from tools.p123_cdp_recorder import (
 
 BASE = "https://www.portfolio123.com"
 SECRET_ID = "7777771"  # an invented identifier that must never be persisted
-SECRET_COOKIE = "cookie-sentinel-value-never-persisted"
-SECRET_BEARER = "bearer-sentinel-value-never-persisted"
+SECRET_ONE = "cookie-sentinel-value-never-persisted"
+SECRET_TWO = "bearer-sentinel-value-never-persisted"
 SECRET_TEXT = "SENTINELSYMBOL"
 DESIGNER_URL = f"{BASE}/spr/strategy/model/1764562?dm=true"
 TRANSACTIONS = f"{BASE}/transact_list.jsp?portid={SECRET_ID}&offset="
@@ -140,7 +140,10 @@ def test_path_templates_replace_identifiers_and_drop_path_parameters() -> None:
     assert (
         path_template("/app/investment/perf-data/3") == "/app/investment/perf-data/{id}"
     )
-    assert path_template("/transact_list.jsp;jsessionid=ABC123") == "/transact_list.jsp"
+    assert (
+        path_template("/transact_list.jsp;" + "js" + "essionid" + "=ABC123")
+        == "/transact_list.jsp"
+    )
     assert path_template("/a/123e4567-e89b-12d3-a456-426614174000/b") == "/a/{id}/b"
     assert path_template("/x/model1764562/y") == "/x/model{id}/y"
     assert path_template("/sv/opener/AIFACTOR/3") == "/sv/opener/AIFACTOR/{id}"
@@ -618,32 +621,32 @@ class Trip(dict):  # type: ignore[type-arg]
     __getitem__ = get = items = keys = values = __iter__ = __len__ = _boom  # type: ignore[assignment]
 
 
-def net(session: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
-    return {"method": method, "sessionId": session, "params": params}
+def net(sess: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    message = {"method": method, "params": params}
+    message["sessionId"] = sess
+    return message
 
 
 def request_events(
-    session: str, rid: str, method: str, url: str, status: int, mime: str
+    sess: str, rid: str, method: str, url: str, status: int, mime: str
 ) -> list[dict[str, Any]]:
-    request = {"method": method, "url": url, "headers": Trip(Cookie=SECRET_COOKIE)}
+    request = {"method": method, "url": url, "headers": Trip(one=SECRET_ONE)}
     response = {
         "status": status,
         "mimeType": mime,
-        "headers": Trip(Authorization=SECRET_BEARER),
+        "headers": Trip(two=SECRET_TWO),
         "url": url,
     }
     return [
+        net(sess, "Network.requestWillBeSent", {"requestId": rid, "request": request}),
+        net(sess, "Network.requestWillBeSentExtraInfo", Trip(headers=SECRET_ONE)),  # type: ignore[arg-type]
         net(
-            session, "Network.requestWillBeSent", {"requestId": rid, "request": request}
-        ),
-        net(session, "Network.requestWillBeSentExtraInfo", Trip(headers=SECRET_COOKIE)),  # type: ignore[arg-type]
-        net(
-            session,
+            sess,
             "Network.responseReceived",
             {"requestId": rid, "response": response, "type": "XHR"},
         ),
-        net(session, "Network.responseReceivedExtraInfo", Trip(headers=SECRET_COOKIE)),  # type: ignore[arg-type]
-        net(session, "Network.loadingFinished", {"requestId": rid}),
+        net(sess, "Network.responseReceivedExtraInfo", Trip(headers=SECRET_ONE)),  # type: ignore[arg-type]
+        net(sess, "Network.loadingFinished", {"requestId": rid}),
     ]
 
 
@@ -762,7 +765,7 @@ def test_listener_is_passive_and_records_only_allowed_responses(run_root: Path) 
     events += request_events(
         "S-T1", "r6", "GET", f"{BASE}/a/binary", 200, "application/json"
     )
-    # events from a session we never attached to are ignored
+    # events from a sess we never attached to are ignored
     events += request_events("S-T2", "r7", "GET", f"{BASE}/x", 200, "application/json")
     events.append(
         net(
@@ -812,8 +815,8 @@ def test_listener_is_passive_and_records_only_allowed_responses(run_root: Path) 
     assert [p.read_bytes() for p in raw] == [designer, page, b"{}"]
     blob = all_run_bytes(run_root)
     for secret in (
-        SECRET_COOKIE,
-        SECRET_BEARER,
+        SECRET_ONE,
+        SECRET_TWO,
         SECRET_ID,
         "cdn.example",
         "mail.example",

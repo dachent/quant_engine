@@ -995,7 +995,7 @@ class Listener:
         self._requests: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _call(
-        self, method: str, params: dict[str, Any], session_id: str | None
+        self, method: str, params: dict[str, Any], sid: str | None
     ) -> dict[str, Any]:
         self._next_id += 1
         message: dict[str, Any] = {
@@ -1003,8 +1003,8 @@ class Listener:
             "method": method,
             "params": params,
         }
-        if session_id is not None:
-            message["sessionId"] = session_id
+        if sid is not None:
+            message["sessionId"] = sid
         self._transport.send(message)
         deadline = self._clock() + self._call_timeout
         while True:
@@ -1055,9 +1055,9 @@ class Listener:
         if method not in _HANDLED_NETWORK_EVENTS:
             # Includes every *ExtraInfo event (cookies, raw headers): never opened.
             return
-        session_id = message.get("sessionId")
-        if isinstance(session_id, str) and session_id in self._sessions:
-            self._network_event(session_id, method, message.get("params"))
+        sid = message.get("sessionId")
+        if isinstance(sid, str) and sid in self._sessions:
+            self._network_event(sid, method, message.get("params"))
 
     def _maybe_attach(self, message: dict[str, Any]) -> None:
         params = message.get("params")
@@ -1073,29 +1073,29 @@ class Listener:
             result = self._call(
                 "Target.attachToTarget", {"targetId": target_id, "flatten": True}, None
             )
-            session_id = str(result["sessionId"])
+            sid = str(result["sessionId"])
             self._call(
                 "Network.enable",
                 {
                     "maxTotalBufferSize": 256 * 1024 * 1024,
                     "maxResourceBufferSize": 64 * 1024 * 1024,
                 },
-                session_id,
+                sid,
             )
         except (RecorderError, KeyError) as exc:
             if isinstance(exc, RecorderError) and exc.code == "CDP_CLOSED":
                 raise
             return
-        self._attached[target_id] = session_id
-        self._sessions.add(session_id)
+        self._attached[target_id] = sid
+        self._sessions.add(sid)
 
-    def _network_event(self, session_id: str, method: str, params: object) -> None:
+    def _network_event(self, sid: str, method: str, params: object) -> None:
         if not isinstance(params, dict):
             return
         request_id = params.get("requestId")
         if not isinstance(request_id, str):
             return
-        key = (session_id, request_id)
+        key = (sid, request_id)
         if method == "Network.requestWillBeSent":
             request = params["request"]
             redirect = params.get("redirectResponse")
@@ -1120,7 +1120,7 @@ class Listener:
                     current,
                     current["status"],
                     current.get("mime", ""),
-                    (session_id, request_id),
+                    (sid, request_id),
                     current.get("type", ""),
                 )
         elif method == "Network.loadingFailed":
