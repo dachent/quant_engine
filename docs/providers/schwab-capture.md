@@ -254,17 +254,28 @@ recorded in the binding:
   also records the tolerance, the largest observed difference, the symbols with
   a dividend or split in the pulled window (CSV `dividend` column and the run's
   coverage entries) and the closes' fetch time. Closes must come from a verified
-  Yahoo fetch run: `--official-closes-dir` is `<run>/official-closes` and the
-  run's `MANIFEST.json` (`kind` `yahoo-fetch-run`, the cutoff, every run file
-  bound by SHA-256 and size, no unbound file) must verify; the fetch time is
-  `fetch_completed_utc` when the manifest has it, else `created_at_utc` (PR 702
-  is adding `fetch_started_utc`/`fetch_completed_utc` and an
-  `official-closes-manifest.json`, which is not consumed yet). An unlabelled (R3)
-  run refuses closes that are not a verified Yahoo run or whose fetch time is
-  unrecorded, and refuses a fetch before the cutoff close; both are allowed only
-  for a labelled historical replay and are then recorded as
-  `UNVERIFIED_HISTORICAL_REPLAY_ONLY` and `UNRECORDED`. The Yahoo driver's own
-  `verify` additionally rebuilds the files from the raw bars; run it as well.
+  Yahoo fetch run (PR 702, head b1b036fa): `--official-closes-dir` is
+  `<run>/official-closes` and
+  - the run's `MANIFEST.json` (`kind` `yahoo-fetch-run`, the cutoff, every run
+    file bound by SHA-256 and size, no unbound file) must verify;
+  - the sidecar `official-closes/official-closes-manifest.json` (`kind`
+    `yahoo-official-closes-manifest`, `run_id`, `cutoff`, `fetch_started_utc`,
+    `fetch_completed_utc` as `Z` timestamps, `config_effective_sha256`,
+    `name_rule`, and per file `symbol`, `file`, `sha256`, `size_bytes`,
+    `first_bar`, `last_bar`, `cutoff_bar`, `cutoff_close`) must list every
+    `<SYMBOL>_yahoo_daily.csv` with matching bytes, no file may be missing, each
+    `cutoff_close` must equal the file's own cutoff row, and its run id and
+    completion time must agree with the run manifest;
+  - the fetch must start no earlier than the cutoff close and complete after it
+    starts. The Yahoo file for Berkshire is `BRK.B_yahoo_daily.csv` (Schwab
+    `BRK/B`, Yahoo `BRK-B`; sidecar symbol `BRK.B`).
+  An unlabelled (R3) run refuses closes that are not a verified Yahoo run, a
+  missing sidecar, or an unrecorded fetch time; these are allowed only for a
+  labelled historical replay and are then recorded as
+  `UNVERIFIED_HISTORICAL_REPLAY_ONLY`, sidecar `ABSENT` and `UNRECORDED`. A
+  sidecar that is present but wrong, or any fetch before the cutoff close, is
+  refused in every mode. The Yahoo driver's own `verify` additionally rebuilds the
+  files from the raw bars; run it as well.
 - Symbol aliases map the provider's spelling to the spelling of the
   `<SYMBOL>_yahoo_daily.csv` files. The Yahoo driver (PR 702) writes `BRK.B` for
   `BRK-B`, so all three Berkshire spellings map to `BRK.B`. A symbol that is

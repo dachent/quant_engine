@@ -43,7 +43,8 @@ _TX = {"at": TRANSACTION_CAPTURED_AT}
 QUOTE_MS = int(datetime(2031, 6, 14, 3, 47, 14, tzinfo=timezone.utc).timestamp() * 1000)
 REVIEW = "https://github.com/dachent/quant_engine/issues/1#issuecomment-1"
 OFFICIAL_CLOSE = "25.00"
-FETCHED_AT = "2031-06-14T10:00:00Z"  # after the cutoff close
+STARTED_AT = "2031-06-14T09:00:00Z"  # after the cutoff close (20:00Z on 06-13)
+FETCHED_AT = "2031-06-14T10:00:00Z"
 
 
 def _crosswalk() -> dict[str, str]:
@@ -251,6 +252,12 @@ def _run(
     return tmp_path / "staging" / run_id
 
 
+def _pretty(document: object) -> bytes:
+    """The Yahoo driver's ``pretty``: sorted keys, indent 2, trailing newline."""
+
+    return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def _closes(
     tmp_path: Path,
     *,
@@ -258,14 +265,18 @@ def _closes(
     value: str = OFFICIAL_CLOSE,
     brk: str | None = None,
     dividend: str | None = None,
-    fetched: str | None = FETCHED_AT,
-    completed: str | None = None,
+    started: str | None = STARTED_AT,
+    completed: str | None = FETCHED_AT,
+    created: str | None = FETCHED_AT,
+    sidecar: bool = True,
+    sidecar_edit: Any = None,
     splits: list[str] | None = None,
     plain: bool = False,
     cutoff: str = "2031-06-13",
 ) -> Path:
-    """Official closes laid out as a Yahoo fetch run (``MANIFEST.json`` binds
-    every file), or, with ``plain``, as a bare directory of files."""
+    """Official closes laid out as PR 702's fetch run: ``MANIFEST.json`` binds
+    every file and ``official-closes/official-closes-manifest.json`` is built the
+    way ``official_manifest`` writes it; with ``plain`` a bare directory."""
 
     run = tmp_path / ("closes-plain" if plain else "yahoo-run")
     if run.exists():
@@ -281,18 +292,56 @@ def _closes(
             f"2031-06-13,1,1,1,{close},{close},1,{paid}\n"
         ).encode("utf-8")
 
+    closes_by_symbol: dict[str, str] = {}
     if brk is not None:
         files[f"{brk}_yahoo_daily.csv"] = csv_text(OFFICIAL_CLOSE)
+        closes_by_symbol[brk] = OFFICIAL_CLOSE
     for index in range(1, ACCOUNT_COUNT + 1):
         symbol = f"SYN{index}"
         if symbol == skip or (brk is not None and index == 1):
             continue
         paid = dividend if dividend and index == 2 else ""
         files[f"{symbol}_yahoo_daily.csv"] = csv_text(value, paid)
+        closes_by_symbol[symbol] = value
     for name, payload in files.items():
         (directory / name).write_bytes(payload)
     if plain:
         return directory
+    timestamps = started is not None and completed is not None
+    if sidecar and timestamps:
+        entries = []
+        for name in sorted(closes_by_symbol):
+            body = files[f"{name}_yahoo_daily.csv"]
+            entries.append(
+                {
+                    "symbol": name,
+                    "file": f"{name}_yahoo_daily.csv",
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                    "size_bytes": len(body),
+                    "first_bar": "2031-06-12",
+                    "last_bar": "2031-06-13",
+                    "cutoff_bar": cutoff,
+                    "cutoff_close": closes_by_symbol[name],
+                }
+            )
+        document: dict[str, Any] = {
+            "schema_version": 1,
+            "kind": "yahoo-official-closes-manifest",
+            "run_id": "synthetic-yahoo-run",
+            "cutoff": cutoff,
+            "fetch_started_utc": started,
+            "fetch_completed_utc": completed,
+            "config_effective_sha256": "0" * 64,
+            "close_column": "close = raw daily Close (split-adjusted by Yahoo, not dividend-adjusted)",
+            "name_rule": "Schwab symbol with '/' written as '.' (BRK/B -> BRK.B_yahoo_daily.csv)",
+            "files": entries,
+        }
+        if sidecar_edit is not None:
+            sidecar_edit(document)
+        files["official-closes-manifest.json"] = _pretty(document)
+        (directory / "official-closes-manifest.json").write_bytes(
+            files["official-closes-manifest.json"]
+        )
     bound = {f"official-closes/{name}": payload for name, payload in files.items()}
     if splits is not None:
         coverage = {
@@ -317,10 +366,10 @@ def _closes(
             for name, p in sorted(bound.items())
         },
     }
-    if fetched is not None:
-        manifest["created_at_utc"] = fetched
-    if completed is not None:
-        manifest["fetch_started_utc"] = "2031-06-14T09:00:00Z"
+    if created is not None:
+        manifest["created_at_utc"] = created
+    if timestamps:
+        manifest["fetch_started_utc"] = started
         manifest["fetch_completed_utc"] = completed
     (run / "MANIFEST.json").write_bytes(json.dumps(manifest).encode("utf-8"))
     return directory
@@ -1249,20 +1298,24 @@ def test_verified_yahoo_run_provenance_and_corporate_events_are_recorded(
     provenance = market["official_closes_provenance"]
     assert provenance["status"] == ingest.PROVENANCE_VERIFIED
     assert provenance["run_id"] == "synthetic-yahoo-run"
-    assert provenance["fetch_basis"] == "created_at_utc"
+    assert provenance["fetch_basis"] == "official-closes-manifest.fetch_completed_utc"
+    assert provenance["sidecar_status"] == "VERIFIED"
+    assert provenance["sidecar"]["run_id"] == "synthetic-yahoo-run"
     assert provenance["manifest_sha256"]
 
 
-def test_fetch_completed_is_preferred_over_the_run_creation_time(
-    tmp_path: Path,
-) -> None:
+def test_the_sidecar_fetch_times_are_the_recorded_times(tmp_path: Path) -> None:
     run_dir = _run(tmp_path)
-    closes = _closes(tmp_path, completed="2031-06-14T09:30:00Z")
+    closes = _closes(
+        tmp_path,
+        started="2031-06-14T09:00:00Z",
+        completed="2031-06-14T09:30:00Z",
+        created="2031-06-14T11:00:00Z",
+    )
     binding = _ingest(tmp_path, run_dir, closes_dir=closes)
     market = binding["market_value"]
     assert isinstance(market, dict)
     provenance = market["official_closes_provenance"]
-    assert provenance["fetch_basis"] == "fetch_completed_utc"
     assert provenance["fetch_started_utc"] == "2031-06-14T09:00:00+00:00"
     assert market["official_closes_fetched_at_utc"] == "2031-06-14T09:30:00+00:00"
 
@@ -1278,8 +1331,97 @@ def test_r3_runs_refuse_closes_that_are_not_a_verified_yahoo_run(
 
 def test_r3_runs_refuse_closes_with_an_unrecorded_fetch_time(tmp_path: Path) -> None:
     run_dir = _run(tmp_path)
-    with pytest.raises(ingest.IngestError, match="fetch timestamp is unrecorded"):
-        _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, fetched=None))
+    with pytest.raises(
+        ingest.IngestError, match="official-closes-manifest.json is missing"
+    ):
+        _ingest(
+            tmp_path,
+            run_dir,
+            closes_dir=_closes(tmp_path, started=None, completed=None),
+        )
+
+
+def test_r3_runs_refuse_a_missing_sidecar_but_a_labelled_replay_may_omit_it(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path)
+    with pytest.raises(
+        ingest.IngestError, match="official-closes-manifest.json is missing"
+    ):
+        _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, sidecar=False))
+    (tmp_path / "replay").mkdir()
+    replay = _run(tmp_path / "replay", label="HISTORICAL_REPLAY_LABELLED")
+    binding = _ingest(
+        tmp_path / "replay", replay, closes_dir=_closes(tmp_path, sidecar=False)
+    )
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    assert market["official_closes_provenance"]["sidecar_status"] == "ABSENT"
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (
+            lambda d: d["files"][0].update(sha256="0" * 64),
+            "differs from its sidecar entry",
+        ),
+        (
+            lambda d: d["files"][0].update(size_bytes=1),
+            "differs from its sidecar entry",
+        ),
+        (lambda d: d["files"][0].update(cutoff_close="26.00"), "sidecar cutoff close"),
+        (
+            lambda d: d["files"][0].update(cutoff_bar="2031-06-12"),
+            "sidecar cutoff close",
+        ),
+        (
+            lambda d: d["files"][0].update(file="OTHER_yahoo_daily.csv"),
+            "entry is invalid",
+        ),
+        (lambda d: d["files"].pop(), "not all listed"),
+        (
+            lambda d: d["files"].append(
+                dict(d["files"][0], symbol="GHOST", file="GHOST_yahoo_daily.csv")
+            ),
+            "absent",
+        ),
+        (lambda d: d.update(cutoff="2031-06-12"), "not for this cutoff"),
+        (lambda d: d.update(kind="other"), "not for this cutoff"),
+        (
+            lambda d: d.update(fetch_started_utc="2031-06-14T09:00:00+00:00"),
+            "Z timestamp",
+        ),
+        (
+            lambda d: d.update(fetch_completed_utc="2031-06-14T08:00:00Z"),
+            "completed before it started",
+        ),
+        (
+            lambda d: d.update(fetch_started_utc="2031-06-13T19:00:00Z"),
+            "before the cutoff close",
+        ),
+    ],
+)
+def test_a_bad_sidecar_is_refused_even_for_a_labelled_replay(
+    tmp_path: Path, edit: Any, message: str
+) -> None:
+    run_dir = _run(tmp_path, label="HISTORICAL_REPLAY_LABELLED")
+    closes = _closes(tmp_path, sidecar_edit=edit)
+    with pytest.raises(ingest.IngestError, match=message):
+        _ingest(tmp_path, run_dir, closes_dir=closes)
+
+
+def test_the_sidecar_lists_the_berkshire_file_by_its_dotted_name(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(holdings=_holdings(brk=True)))
+    closes = _closes(tmp_path, brk="BRK.B")
+    sidecar = json.loads((closes / "official-closes-manifest.json").read_text("utf-8"))
+    assert "BRK.B" in {entry["symbol"] for entry in sidecar["files"]}
+    binding = _ingest(tmp_path, run_dir, closes_dir=closes)
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    assert market["aliases_used"] == {"BRK/B": "BRK.B"}
 
 
 def test_a_labelled_historical_replay_may_use_unverified_unrecorded_closes(
@@ -1303,7 +1445,9 @@ def test_a_tampered_or_unbound_yahoo_run_is_refused_even_when_labelled(
     target = closes / "SYN1_yahoo_daily.csv"
     original = target.read_bytes()
     target.write_bytes(original.replace(b"25.00", b"26.00"))
-    with pytest.raises(ingest.IngestError, match="differs from its manifest"):
+    with pytest.raises(
+        ingest.IngestError, match="differs from its (manifest|sidecar entry)"
+    ):
         _ingest(tmp_path, run_dir, closes_dir=closes)
     target.write_bytes(original)
     stray = closes.parent / "raw-extra.csv"
@@ -1312,7 +1456,9 @@ def test_a_tampered_or_unbound_yahoo_run_is_refused_even_when_labelled(
         _ingest(tmp_path, run_dir, closes_dir=closes)
     stray.unlink()
     wrong = _closes(tmp_path, cutoff="2031-06-12")
-    with pytest.raises(ingest.IngestError, match="not a Yahoo run for the cutoff"):
+    with pytest.raises(
+        ingest.IngestError, match="(not a Yahoo run for the cutoff|not for this cutoff)"
+    ):
         _ingest(tmp_path, run_dir, closes_dir=wrong)
 
 
@@ -1326,6 +1472,22 @@ def test_r3_success_needs_every_held_symbol_from_the_yahoo_run(tmp_path: Path) -
 
 def test_fetch_timestamp_before_the_cutoff_close_is_refused(tmp_path: Path) -> None:
     run_dir = _run(tmp_path)
-    closes = _closes(tmp_path, fetched="2031-06-13T19:00:00Z")
+    closes = _closes(
+        tmp_path,
+        started="2031-06-13T18:00:00Z",
+        completed="2031-06-13T19:00:00Z",
+        created="2031-06-13T19:00:00Z",
+    )
+    with pytest.raises(ingest.IngestError, match="fetched before the cutoff close"):
+        _ingest(tmp_path, run_dir, closes_dir=closes)
+
+
+def test_a_fetch_that_started_before_the_cutoff_close_is_refused(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path)
+    closes = _closes(
+        tmp_path, started="2031-06-13T19:00:00Z", completed="2031-06-14T09:00:00Z"
+    )
     with pytest.raises(ingest.IngestError, match="fetched before the cutoff close"):
         _ingest(tmp_path, run_dir, closes_dir=closes)

@@ -139,6 +139,8 @@ _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9./-]{0,15}\Z")
 _EXCEPTION_LABEL = re.compile(r"[A-Z][A-Z0-9_]{5,63}\Z")
 YAHOO_RUN_KIND = "yahoo-fetch-run"
 YAHOO_MANIFEST = "MANIFEST.json"
+YAHOO_SIDECAR = "official-closes-manifest.json"
+YAHOO_SIDECAR_KIND = "yahoo-official-closes-manifest"
 PROVENANCE_VERIFIED = "VERIFIED_YAHOO_RUN_BINDING"
 PROVENANCE_UNVERIFIED = "UNVERIFIED_HISTORICAL_REPLAY_ONLY"
 
@@ -261,11 +263,92 @@ def _coverage_entries(node: object) -> list[dict[str, Any]]:
     return found
 
 
+def _z_time(value: object, name: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise IngestError(f"official closes sidecar {name} is not a Z timestamp")
+    try:
+        return driver.aware_utc(value, name)
+    except driver.DriverError as exc:
+        raise IngestError(f"official closes sidecar {name} is invalid") from exc
+
+
+def _read_sidecar(
+    directory: Path,
+    day: date,
+    hashes: Mapping[str, str],
+    sizes: Mapping[str, int],
+    closes: Mapping[str, Decimal],
+) -> dict[str, object] | None:
+    """Verify the Yahoo driver's ``official-closes-manifest.json`` sidecar.
+
+    Format (PR 702, ``official_manifest``): ``schema_version`` 1, ``kind``
+    ``yahoo-official-closes-manifest``, ``run_id``, ``cutoff``,
+    ``fetch_started_utc`` and ``fetch_completed_utc`` (``Z`` timestamps),
+    ``config_effective_sha256``, ``close_column``, ``name_rule`` and ``files``:
+    one entry per ``<SYMBOL>_yahoo_daily.csv`` with ``symbol``, ``file``,
+    ``sha256``, ``size_bytes``, ``first_bar``, ``last_bar``, ``cutoff_bar`` and
+    ``cutoff_close``. Every CSV must be listed with matching bytes and every
+    listed file must exist, the cutoff close must equal the file's own cutoff row,
+    the fetch must not precede the cutoff close and must complete after it starts.
+    Returns ``None`` when the directory has no sidecar.
+    """
+
+    path = directory / YAHOO_SIDECAR
+    if not path.is_file():
+        return None
+    body = path.read_bytes()
+    sidecar = driver.load_json_file(path, "official closes sidecar")
+    if (
+        sidecar.get("kind") != YAHOO_SIDECAR_KIND
+        or sidecar.get("schema_version") != 1
+        or sidecar.get("cutoff") != day.isoformat()
+    ):
+        raise IngestError("official closes sidecar is not for this cutoff")
+    started = _z_time(sidecar.get("fetch_started_utc"), "fetch_started_utc")
+    completed = _z_time(sidecar.get("fetch_completed_utc"), "fetch_completed_utc")
+    if completed < started:
+        raise IngestError("official closes fetch completed before it started")
+    listed = driver.json_objects(sidecar.get("files"), "official closes sidecar files")
+    seen: set[str] = set()
+    for entry in listed:
+        symbol = driver.text_value(entry.get("symbol"), "sidecar symbol")
+        name = f"{symbol}_yahoo_daily.csv"
+        if entry.get("file") != name or symbol in seen:
+            raise IngestError("official closes sidecar file entry is invalid")
+        seen.add(symbol)
+        if symbol not in hashes:
+            raise IngestError("official closes sidecar lists a file that is absent")
+        if (
+            entry.get("sha256") != hashes[symbol]
+            or entry.get("size_bytes") != sizes[symbol]
+        ):
+            raise IngestError("official close file differs from its sidecar entry")
+        cutoff_close = entry.get("cutoff_close")
+        if (cutoff_close is None) != (symbol not in closes) or (
+            cutoff_close is not None
+            and (
+                entry.get("cutoff_bar") != day.isoformat()
+                or Decimal(str(cutoff_close)) != closes[symbol]
+            )
+        ):
+            raise IngestError("official close differs from its sidecar cutoff close")
+    if seen != set(hashes):
+        raise IngestError("official close files are not all listed in the sidecar")
+    return {
+        "config_effective_sha256": sidecar.get("config_effective_sha256"),
+        "fetch_completed_utc": completed.isoformat(),
+        "fetch_started_utc": started.isoformat(),
+        "run_id": sidecar.get("run_id"),
+        "sha256": _sha256(body),
+    }
+
+
 def official_closes(directory: Path, day: date) -> CloseSet:
     """Closes of ``day`` from ``<SYMBOL>_yahoo_daily.csv`` plus their evidence."""
 
     closes: dict[str, Decimal] = {}
     hashes: dict[str, str] = {}
+    sizes: dict[str, int] = {}
     dividends: set[str] = set()
     if not directory.is_dir():
         raise IngestError("official closes directory is missing")
@@ -274,6 +357,8 @@ def official_closes(directory: Path, day: date) -> CloseSet:
             raise IngestError("official close file is linked or not a file")
         symbol = path.name[: -len("_yahoo_daily.csv")]
         payload = path.read_bytes()
+        sizes[symbol] = len(payload)
+        hashes[symbol] = _sha256(payload)
         found: set[Decimal] = set()
         reader = csv.DictReader(io.StringIO(payload.decode("utf-8-sig"), newline=""))
         for row in reader:
@@ -296,7 +381,7 @@ def official_closes(directory: Path, day: date) -> CloseSet:
             raise IngestError("official close is conflicting for a date")
         if found:
             closes[symbol] = next(iter(found))
-            hashes[symbol] = _sha256(payload)
+    sidecar = _read_sidecar(directory, day, hashes, sizes, closes)
     verified = _yahoo_run(directory, day)
     if verified is None:
         provenance: dict[str, object] = {
@@ -310,6 +395,21 @@ def official_closes(directory: Path, day: date) -> CloseSet:
         splits: frozenset[str] = frozenset()
     else:
         provenance, splits = verified
+    provenance["sidecar"] = None if sidecar is None else sidecar
+    provenance["sidecar_status"] = "ABSENT" if sidecar is None else "VERIFIED"
+    if sidecar is not None:
+        if verified is not None and (
+            provenance.get("run_id") != sidecar["run_id"]
+            or (
+                provenance.get("fetch_completed_utc") is not None
+                and provenance["fetch_basis"] == "fetch_completed_utc"
+                and provenance["fetch_completed_utc"] != sidecar["fetch_completed_utc"]
+            )
+        ):
+            raise IngestError("official closes sidecar differs from the run manifest")
+        provenance["fetch_basis"] = "official-closes-manifest.fetch_completed_utc"
+        provenance["fetch_completed_utc"] = sidecar["fetch_completed_utc"]
+        provenance["fetch_started_utc"] = sidecar["fetch_started_utc"]
     fetched = provenance["fetch_completed_utc"]
     return CloseSet(
         closes,
@@ -593,15 +693,22 @@ def ingest(
                 "official closes are not a verified Yahoo run "
                 "(allowed only for a labelled historical replay)"
             )
+        if close_set.provenance["sidecar_status"] != "VERIFIED":
+            raise IngestError(
+                "official-closes-manifest.json is missing "
+                "(allowed only for a labelled historical replay)"
+            )
         if close_set.fetched_at is None:
             raise IngestError(
                 "official closes fetch timestamp is unrecorded "
                 "(allowed only for a labelled historical replay)"
             )
-    if close_set.fetched_at is not None and (
-        datetime.fromisoformat(close_set.fetched_at) < cutoff.close_utc
-    ):
-        raise IngestError("official closes were fetched before the cutoff close")
+    for key in ("fetch_started_utc", "fetch_completed_utc"):
+        recorded = close_set.provenance.get(key)
+        if recorded is not None and (
+            datetime.fromisoformat(str(recorded)) < cutoff.close_utc
+        ):
+            raise IngestError("official closes were fetched before the cutoff close")
     reader_closes: dict[str, Decimal] = {}
     aliases_used: dict[str, str] = {}
     missing: list[str] = []
