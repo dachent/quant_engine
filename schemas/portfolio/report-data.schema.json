@@ -2222,7 +2222,7 @@
                 "provider_comparison_reason": {"type": ["string", "null"]},
                 "cost_rate_denominator_basis": {"const": "CURRENT_CUTOFF"},
                 "cost_rate_status": {"enum": ["AVAILABLE_AT_CUTOFF_SLEEVE_VALUE", "NOT_READY_SLEEVE_VALUE_NOT_DATED_AT_CUTOFF", "NOT_READY_SLEEVE_VALUE_UNAVAILABLE", "UNAVAILABLE_NO_COST_AMOUNT"]},
-                "fees_status": {"enum": ["EVIDENCED_PRE_TAX", "UPPER_BOUND_CONTRACT_CAP_PRE_TAX", "UNAVAILABLE"]}
+                "fees_status": {"enum": ["EVIDENCED_PRE_TAX", "UPPER_BOUND_CONTRACT_CAP_PRE_TAX", "DOCUMENTED_RATE_NOT_DOLLAR", "UNAVAILABLE"]}
               },
               "allOf": [
                 {

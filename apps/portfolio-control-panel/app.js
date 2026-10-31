@@ -178,6 +178,9 @@
     PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY: "Partial: causal attribution ready, reconciliation not ready",
     PARTIAL_RECONCILIATION_ATTRIBUTION_NOT_READY: "Partial: reconciliation ready, causal attribution not ready",
     UPPER_BOUND_CONTRACT_CAP_PRE_TAX: "Upper bound (contract cap)",
+    DOCUMENTED_RATE_NOT_DOLLAR: "Documented percent rate (no dollar cost)",
+    documented_rate_percent: "Documented percent rate",
+    documented_rate_tier_unsettled: "Percent-based; fee tier not settled",
     DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV: "Diagnostic proxy not official provider NAV",
     // F15: `implementation_gap_status` carries the producer's lower-case audit tokens.
     tested: "Tested",
@@ -325,7 +328,9 @@
   };
   // Q1: the cost label is the status AND the amount over its period, never the status slug alone.  The producer publishes
   // one annual pre-tax external amount; an unpublished amount is said to be unpublished.
-  const costAmountText = (row) => (number(row.annual_external_cost_usd) == null ? "annual amount not published" : `${currencyExact(row.annual_external_cost_usd)} per year`);
+  // A percent-based row (documented rates) has no dollar amount by design; it says so instead of "not published".
+  const isPercentCost = (row) => typeof row.cost_status === "string" && row.cost_status.startsWith("documented_rate");
+  const costAmountText = (row) => (number(row.annual_external_cost_usd) == null ? (isPercentCost(row) ? "no dollar amount (percent-based)" : "annual amount not published") : `${currencyExact(row.annual_external_cost_usd)} per year`);
   // N2: the producer states, per strategy row, which account scope its return, drawdown, current value and weight carry
   // (`return_scope_label`); it is printed beside the row it qualifies, verbatim.
   const scopeNote = (row) => (typeof row?.return_scope_label === "string" && row.return_scope_label ? `<span class="cell-secondary">${safe(row.return_scope_label)}</span>` : "");
@@ -342,7 +347,9 @@
   };
   const costComponentsMarkup = (row) => (Array.isArray(row.cost_components) ? row.cost_components.map((item) => `<span class="cell-secondary">${safe(costComponentLine(item))}</span>`).join("") : "");
   const costDisclosure = (row) => {
-    const amount = number(row.annual_external_cost_usd) == null ? "Pre-tax cost unavailable" : `${currencyExact(row.annual_external_cost_usd)} annually`;
+    const amount = number(row.annual_external_cost_usd) == null ? (isPercentCost(row) ? "No dollar cost (percent-based)" : "Pre-tax cost unavailable") : `${currencyExact(row.annual_external_cost_usd)} annually`;
+    // The producer builds the percent-rate sentence from the row's own fields; it is printed verbatim.
+    const rateSentence = typeof row.cost_rate_disclosure === "string" && row.cost_rate_disclosure ? `<span class="cell-secondary">${safe(row.cost_rate_disclosure)}</span>` : "";
     // N64: a rate divides by the sleeve value at the cutoff and says which date that value
     // and the cost schedule carry.  A report older than schema 4 publishes neither date.
     const rateStatus = typeof row.cost_rate_status === "string" ? row.cost_rate_status : null;
@@ -356,7 +363,7 @@
     } else {
       rate = `${pct(row.annual_external_cost_rate_pre_tax, 2)} of sleeve value (denominator date not published by this report schema)`;
     }
-    return `<span class="cell-primary">${safe(costLabel(row))}</span>${costComponentsMarkup(row)}<span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
+    return `<span class="cell-primary">${safe(costLabel(row))}</span>${costComponentsMarkup(row)}${rateSentence}<span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
   };
   // N55: who authorized the current benchmark assignment.  An owner-made override is
   // named explicitly; a row that has never been overridden retains the prior status quo

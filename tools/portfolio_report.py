@@ -1613,6 +1613,8 @@ COST_EVIDENCE_KEYS: Final = (
     "declared",
     "execution_cost",
 )
+# Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
+COST_RATE_KEYS: Final = ("fee_rates",)
 
 
 def _plain_words(code: object) -> str:
@@ -1692,6 +1694,10 @@ def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
 FEES_STATUS_EVIDENCED: Final = "EVIDENCED_PRE_TAX"
 FEES_STATUS_UPPER_BOUND: Final = "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
 FEES_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
+# A percent-based cost: documented rates exist, no dollar cost does.
+FEES_STATUS_DOCUMENTED_RATE: Final = "DOCUMENTED_RATE_NOT_DOLLAR"
+COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
+COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 
 
 def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None:
@@ -1700,17 +1706,113 @@ def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None
     A cost amount exists for both a known cost (``known_fixed``, ``known_gold_api``)
     and a contract cap (``conservative_1pct_contract_cap``); only the first is
     evidence of a cost.  A cap is the most the contract allows, so it is labelled
-    as the upper bound it is.  ``None`` means an amount whose status names neither.
+    as the upper bound it is.  A documented percent rate has no dollar amount and
+    is labelled as a rate, never as evidence of a cost or a cap; a percent row that
+    carries an amount, or whose tier is unsettled, is never labelled as a rate.
+    ``None`` means an amount whose status names neither.
     """
 
+    text = cost_status if isinstance(cost_status, str) else ""
+    if text == COST_STATUS_DOCUMENTED_RATE:
+        return FEES_STATUS_DOCUMENTED_RATE if annual_cost is None else None
     if annual_cost is None:
         return FEES_STATUS_UNAVAILABLE
-    text = cost_status if isinstance(cost_status, str) else ""
     if text.startswith("known"):
         return FEES_STATUS_EVIDENCED
     if text.endswith("contract_cap"):
         return FEES_STATUS_UPPER_BOUND
     return None
+
+
+def _percent_text(rate: object) -> str:
+    """A fraction rate as percent text (``0.2`` -> ``20%``, ``0.035`` -> ``3.5%``)."""
+
+    percent = (Decimal(str(rate)) * 100).normalize()
+    return f"{percent:f}%"
+
+
+_PLACEMENT_WORDS: Final = {
+    "INSIDE_VEHICLE_NAV": "inside the vehicle NAV",
+    "OUTSIDE_BILLED": "billed outside the NAV",
+    "NOT_STATED_IN_DOCUMENTATION": "not stated in the documentation",
+}
+
+
+def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
+    """The sentence a percent-based cost row discloses, built only from its fields.
+
+    ``None`` for a row that is not percent-based.  A row whose tier is unsettled
+    claims no rate.  Otherwise every number, tier label, placement and source page
+    in the sentence is read from ``fee_rates``; a rate the documentation does not
+    state is said not to be stated, never filled in.
+    """
+
+    status = cost.get("cost_status")
+    rates = cost.get("fee_rates")
+    unsettled = "the fee tier is not settled, so no rate is claimed"
+    if not isinstance(rates, Mapping):
+        if status == COST_STATUS_TIER_UNSETTLED:
+            return f"Percent-based cost: {unsettled}; no dollar cost is published."
+        return None
+    if rates.get("tier") == "TIER_UNSETTLED":
+        return f"Percent-based cost: {unsettled}; no dollar cost is published."
+    tier = next(
+        (
+            row
+            for row in rates.get("tier_table") or []
+            if isinstance(row, Mapping) and row.get("tier") == rates.get("tier")
+        ),
+        None,
+    )
+    if tier is None:
+        return None
+
+    def part(name: str, rate: object, mechanism: str = "") -> str:
+        if rate is None:
+            return f"{name} fee not stated in the documentation"
+        return f"{name} fee {_percent_text(rate)}{mechanism}"
+
+    mechanism = tier.get("performance_mechanism")
+    mechanism_text = (
+        f" (high-water mark: {mechanism})"
+        if mechanism
+        else " (high-water mark and assessment period not stated in the documentation)"
+    )
+    performance_rate = tier.get("performance_rate")
+    pieces = [
+        part("management", tier.get("management_rate")),
+        part(
+            "performance",
+            performance_rate,
+            mechanism_text if performance_rate is not None else "",
+        ),
+    ]
+    placement = _PLACEMENT_WORDS.get(str(rates.get("placement")))
+    sentence = (
+        f"Documented rates, {tier.get('label')} ({tier.get('applies_to')}): "
+        + "; ".join(pieces)
+        + (f"; fee placement: {placement}" if placement else "")
+    )
+    redemption = rates.get("redemption")
+    if isinstance(redemption, Mapping):
+        words = _PLACEMENT_WORDS.get(str(redemption.get("placement")), "")
+        sentence += (
+            f"; redemption fee {_percent_text(redemption.get('rate'))} "
+            f"(placement: {words})"
+        )
+    lock = rates.get("lock")
+    if isinstance(lock, Mapping):
+        sentence += f"; lock {lock.get('days')} days"
+    pages = sorted(
+        {
+            f"{source.get('artifact')} p.{source.get('page')}"
+            for source in tier.get("sources") or []
+            if isinstance(source, Mapping)
+        }
+    )
+    if pages:
+        sentence += f"; sources: {', '.join(pages)}"
+    return f"{sentence}; no dollar cost is published."
 
 
 COST_RATE_AVAILABLE: Final = "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"
@@ -1771,7 +1873,11 @@ def _cutoff_cost_rate(
         "fees_status": fees_status_for_cost(cost.get("cost_status"), amount_text),
     }
     if amount_text is None:
-        result["cost_rate_reason"] = "no annual cost amount is evidenced"
+        result["cost_rate_reason"] = (
+            "the cost is a documented percent rate; no dollar amount is published"
+            if result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
+            else "no annual cost amount is evidenced"
+        )
         return result
     if value_text is None or strategy.get("capital_status") != "AVAILABLE":
         result["cost_rate_status"] = COST_RATE_NO_SLEEVE_VALUE
@@ -2397,7 +2503,9 @@ def _merge_attribution(
             )
         )
         cost_evidence: dict[str, Any] = {
-            key: cost[key] for key in COST_EVIDENCE_KEYS if key in cost
+            key: cost[key]
+            for key in (*COST_EVIDENCE_KEYS, *COST_RATE_KEYS)
+            if key in cost
         }
         components = cost_components(cost)
         result.append(
@@ -2488,6 +2596,11 @@ def _merge_attribution(
                 "after_tax_status": cost.get("after_tax_status"),
                 "fees_status": cost.get("fees_status"),
                 **cost_evidence,
+                **(
+                    {"cost_rate_disclosure": disclosure}
+                    if (disclosure := cost_rate_disclosure(cost)) is not None
+                    else {}
+                ),
                 **({"cost_components": components} if components else {}),
                 **(
                     {}
