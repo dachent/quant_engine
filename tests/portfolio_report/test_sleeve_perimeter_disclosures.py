@@ -483,17 +483,17 @@ def test_the_hwm_index_move_is_stated_only_from_the_predecessor_and_the_report(
             "strategy_id": "product",
             "strategy_capital_usd": "250",
             "aggregate_capital_usd": "800",
-            "hwm_current_index": "168.8632",
+            "hwm_current_index": "100.0000",
         },
     }
     rows = _rows()
     shown = next(
         i["value"]
-        for i in _compose(sources, rows, hwm_current_index="170.9635")["items"]
+        for i in _compose(sources, rows, hwm_current_index="102.0000")["items"]
         if i["item"] == "HWM member series"
     )
     assert (
-        "The index is 170.9635 against 168.8632 in the previous release (+2.10, +1.24%)"
+        "The index is 102.0000 against 100.0000 in the previous release (+2.00, +2.00%)"
         in shown
     )
     # without the report's index, or without a resolved predecessor, the move is left unattributed

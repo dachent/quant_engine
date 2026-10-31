@@ -669,9 +669,9 @@ def test_flow_gate_lists_every_provider_with_accepted_flow_records(
 def _cost_strategy(**fields: Any) -> dict[str, Any]:
     row = {
         "after_tax_status": "UNAVAILABLE_TAX_LOT_RATE_AND_REALIZATION_EVIDENCE_INCOMPLETE",
-        "annual_external_cost_usd": "3590",
+        "annual_external_cost_usd": "1000",
         "cost_status": "known_gold_api",
-        "current_value_usd": "51233.9",
+        "current_value_usd": "20000",
         "design_status": "X",
         "economic_family": "F",
         "fees_status": "EVIDENCED_PRE_TAX",
@@ -693,10 +693,10 @@ def _capital_payload(*strategies: dict[str, Any]) -> dict[str, Any]:
 
 def test_cost_rate_names_its_denominator_date_and_schedule_date(tmp_path: Path) -> None:
     strategy = _cost_strategy(
-        annual_external_cost_rate_pre_tax="0.07007",
+        annual_external_cost_rate_pre_tax="0.05",
         cost_rate_denominator_as_of_date=CUTOFF,
         cost_rate_denominator_basis="CURRENT_CUTOFF",
-        cost_rate_denominator_usd="51233.9",
+        cost_rate_denominator_usd="20000",
         cost_rate_reason=None,
         cost_rate_status="AVAILABLE_AT_CUTOFF_SLEEVE_VALUE",
         cost_schedule_as_of_date="2026-07-25",
@@ -705,7 +705,7 @@ def test_cost_rate_names_its_denominator_date_and_schedule_date(tmp_path: Path) 
         _run(tmp_path, _capital_payload(strategy), "renderCapital"), "#strategy-table"
     )
 
-    assert "7.01% of sleeve value at Sep 17, 2026" in cost
+    assert "5.00% of sleeve value at Sep 17, 2026" in cost
     assert "cost schedule as of Jul 25, 2026" in cost
     assert "of current sleeve" not in cost
 

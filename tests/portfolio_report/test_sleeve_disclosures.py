@@ -292,9 +292,9 @@ def _compose(
         rows=rows,
         invested_capital={
             "current_by_strategy": [
-                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "73130.957"}
+                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "1250.5"}
             ],
-            "current_aggregate_usd": "393491.77",
+            "current_aggregate_usd": "5000.25",
         },
         sleeve_accounts={S1: PARENT, S2: PARENT, f"{PARENT}-s3": PARENT},
         product_strategies=["p123-ai-factor"],
@@ -353,9 +353,9 @@ def test_the_predecessor_comparison_is_read_by_hash_and_pointer_or_omitted(
     previous = {
         "invested_capital": {
             "current_by_strategy": [
-                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "55748.4"}
+                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "1000.4"}
             ],
-            "current_aggregate_usd": "376109.21",
+            "current_aggregate_usd": "4000.21",
         }
     }
     data_root = tmp_path / "root"
@@ -382,7 +382,7 @@ def test_the_predecessor_comparison_is_read_by_hash_and_pointer_or_omitted(
     text = next(
         i["value"] for i in result["items"] if i["item"] == "Sleeve capital basis"
     )
-    assert "55,748.40" in text and "376,109.21" in text and "31.2%" in text
+    assert "1,000.40" in text and "4,000.21" in text and "+250.10, +25.0%" in text
     # an unreachable, mis-hashed or unresolvable predecessor is omitted, never guessed
     assert (
         disclosures._resolve_predecessor(entry, None)["reason"]
@@ -453,3 +453,260 @@ def test_a_bound_measured_on_a_replaced_parent_epoch_is_read_against_the_strateg
         "entry": f"timestamp bound p123-ai-factor on {PARENT}",
         "reason": "NO_REPORT_ROW_FOR_THE_MEASURED_EPOCH",
     } in absent["omitted"]
+
+
+def _committed_release(
+    data_root: Path, release_id: str, panel_generation_id: str, **overrides: Any
+) -> None:
+    """A synthetic committed release authority: pointer, manifest, journal."""
+
+    coordination = data_root / disclosures.COORDINATION_RELATIVE
+    release_dir = coordination / "releases" / release_id
+    release_dir.mkdir(parents=True)
+    manifest = json.dumps(
+        {
+            "release_id": release_id,
+            "targets": [
+                {"root_id": "provider-ledger", "proposed_generation_id": "l" * 64},
+                {
+                    "root_id": "portfolio-panel",
+                    "proposed_generation_id": panel_generation_id,
+                },
+            ],
+        }
+    ).encode()
+    (release_dir / "release.json").write_bytes(manifest)
+    (release_dir / "journal.json").write_bytes(
+        json.dumps(
+            {"release_id": release_id, "state": overrides.get("journal", "COMMITTED")}
+        ).encode()
+    )
+    (coordination / "CURRENT_RELEASE.json").write_bytes(
+        json.dumps(
+            {
+                "release_id": release_id,
+                "release_manifest_sha256": overrides.get("sha", _sha(manifest)),
+                "state": overrides.get("state", "COMMITTED"),
+            }
+        ).encode()
+    )
+
+
+def _pinned_predecessor() -> dict[str, Any]:
+    inputs = json.loads((INPUTS_DIR / "disclosure-inputs.json").read_bytes())
+    return dict(inputs["predecessor_comparison"])
+
+
+def test_the_pinned_predecessor_must_be_the_committed_current_release_panel(
+    tmp_path: Path,
+) -> None:
+    """The predecessor of the next release is the release committed at freeze time.
+
+    A stale pin (the release before the committed one) still hashes cleanly, so only a
+    comparison with the committed CURRENT_RELEASE authority can see it.  Synthetic
+    release authorities only: the identifiers are the repository's own pins.
+    """
+
+    pinned = _pinned_predecessor()
+    release_id = str(pinned["release_id"])
+    panel = str(pinned["panel_generation_id"])
+    assert len(release_id) == len(panel) == 64
+    current = tmp_path / "current"
+    _committed_release(current, release_id, panel)
+    disclosures.check_predecessor_is_current_release(pinned, current)
+    # the whole preparation path applies the same gate when a data root is supplied
+    sources = disclosures.build_sources(
+        facts_paths=[],
+        inputs_path=INPUTS_DIR / "disclosure-inputs.json",
+        predecessor_data_root=current,
+    )
+    assert sources["predecessor"]["reason"] == "PREDECESSOR_GENERATION_NOT_REACHABLE"
+
+    # the committed release moved on: the pin is now the previous release and is refused
+    newer = tmp_path / "newer"
+    _committed_release(newer, "a" * 64, "b" * 64)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.check_predecessor_is_current_release(pinned, newer)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.build_sources(
+            facts_paths=[],
+            inputs_path=INPUTS_DIR / "disclosure-inputs.json",
+            predecessor_data_root=newer,
+        )
+
+    # the release id alone is not enough: the panel generation must match as well
+    other_panel = tmp_path / "other-panel"
+    _committed_release(other_panel, release_id, "c" * 64)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.check_predecessor_is_current_release(pinned, other_panel)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"state": "PREPARED"}, "not COMMITTED"),
+        ({"journal": "PREPARED"}, "not a committed release"),
+        ({"sha": "0" * 64}, "differs from its pointer"),
+    ],
+)
+def test_an_uncommitted_or_altered_release_authority_is_refused(
+    tmp_path: Path, overrides: dict[str, str], message: str
+) -> None:
+    pinned = _pinned_predecessor()
+    _committed_release(
+        tmp_path,
+        str(pinned["release_id"]),
+        str(pinned["panel_generation_id"]),
+        **overrides,
+    )
+    with pytest.raises(disclosures.DisclosureError, match=message):
+        disclosures.check_predecessor_is_current_release(pinned, tmp_path)
+
+
+def test_a_data_root_without_a_published_release_authority_is_refused(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(disclosures.DisclosureError, match="not published"):
+        disclosures.check_predecessor_is_current_release(
+            _pinned_predecessor(), tmp_path
+        )
+
+
+def _synthetic_panel(data_root: Path, panel_generation_id: str) -> bytes:
+    document = {
+        "invested_capital": {
+            "current_by_strategy": [
+                {"strategy_id": "p123-ai-factor", "invested_capital_usd": "1000.4"}
+            ],
+            "current_aggregate_usd": "4000.21",
+        },
+        "hwm_governed_proof": {"current_index": "100.0000"},
+    }
+    raw = json.dumps(document).encode()
+    path = (
+        data_root
+        / "dataPortfolio"
+        / "control-panel"
+        / "generations"
+        / panel_generation_id
+        / "data"
+        / "dashboard_data.json"
+    )
+    path.parent.mkdir(parents=True)
+    path.write_bytes(raw)
+    return raw
+
+
+def _generate(data_root: Path, out: Path, *flags: str) -> int:
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(
+                REPOSITORY_ROOT / "ops/mvp2-release/scripts/build_disclosure_inputs.py"
+            ),
+            "--data-root",
+            str(data_root),
+            "--out",
+            str(out),
+            *flags,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode
+
+
+def test_disclosure_inputs_and_sources_are_derived_from_and_bound_to_current_release(
+    tmp_path: Path,
+) -> None:
+    """The generator derives the predecessor from CURRENT_RELEASE; a stale pin fails.
+
+    Synthetic release authority and panel generation only.  The inputs file, the
+    sources document built from it and the committed release agree by id and data sha;
+    once the committed release moves on, the inputs, the sources and the generator's
+    --check all refuse.
+    """
+
+    root = tmp_path / "root"
+    release, panel = "d" * 64, "e" * 64
+    _committed_release(root, release, panel)
+    data = _synthetic_panel(root, panel)
+    out_dir = tmp_path / "inputs"
+    out_dir.mkdir()
+    (out_dir / "timestamp-delta-result.txt").write_bytes(
+        (INPUTS_DIR / "timestamp-delta-result.txt").read_bytes()
+    )
+    out = out_dir / "disclosure-inputs.json"
+    assert _generate(root, out) == 0
+    inputs = json.loads(out.read_bytes())
+    entry = inputs["predecessor_comparison"]
+    assert (entry["release_id"], entry["panel_generation_id"]) == (release, panel)
+    assert entry["data_file"]["sha256"] == _sha(data)
+    assert _generate(root, out, "--check") == 0
+    # the generator's own derivation equals the tool's
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_disclosure_inputs_under_test",
+        REPOSITORY_ROOT / "ops/mvp2-release/scripts/build_disclosure_inputs.py",
+    )
+    assert spec is not None and spec.loader is not None
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    assert generator.committed_release_panel(root) == (
+        disclosures.committed_release_panel(root)
+    )
+
+    sources = disclosures.build_sources(
+        facts_paths=[], inputs_path=out, predecessor_data_root=root
+    )
+    assert sources["predecessor"]["status"] == "RESOLVED"
+    assert sources["predecessor"]["values"] == {
+        "strategy_id": "p123-ai-factor",
+        "strategy_capital_usd": "1000.4",
+        "aggregate_capital_usd": "4000.21",
+        "hwm_current_index": "100.0000",
+    }
+    disclosures.check_sources_bound_to_current_release(sources, inputs, root)
+
+    # a later release is committed: every stale binding is refused
+    _committed_release(root, "f" * 64, "9" * 64)
+    assert _generate(root, out, "--check") == 1
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.check_sources_bound_to_current_release(sources, inputs, root)
+    with pytest.raises(disclosures.DisclosureError, match="not the committed CURRENT"):
+        disclosures.build_sources(
+            facts_paths=[], inputs_path=out, predecessor_data_root=root
+        )
+
+    # without a committed release authority nothing is derived
+    assert _generate(tmp_path / "empty", out_dir / "other.json") == 1
+
+
+@pytest.mark.parametrize("record", ["CURRENT_RELEASE.json", "release.json"])
+def test_a_symlinked_release_authority_record_is_refused(
+    tmp_path: Path, record: str
+) -> None:
+    pinned = _pinned_predecessor()
+    release = str(pinned["release_id"])
+    root = tmp_path / "root"
+    _committed_release(root, release, str(pinned["panel_generation_id"]))
+    coordination = root / disclosures.COORDINATION_RELATIVE
+    real = (
+        coordination / record
+        if record == "CURRENT_RELEASE.json"
+        else coordination / "releases" / release / record
+    )
+    moved = tmp_path / f"moved-{record}"
+    real.rename(moved)
+    try:
+        real.symlink_to(moved)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises(disclosures.DisclosureError, match="symlink"):
+        disclosures.committed_release_panel(root)
+    assert _generate(root, tmp_path / "out.json") == 1

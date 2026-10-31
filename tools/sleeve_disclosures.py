@@ -457,6 +457,105 @@ def _resolve_predecessor(
     }
 
 
+COORDINATION_RELATIVE: Final = Path("dataPortfolio") / "releases-refresh-2026"
+PANEL_ROOT_ID: Final = "portfolio-panel"
+
+
+def committed_release_panel(data_root: Path) -> tuple[str, str]:
+    """The committed CURRENT_RELEASE id and its portfolio-panel generation id.
+
+    Reads the committed release authority (pointer, manifest hash, journal state, the
+    panel target's generation) and refuses when any of it is missing or not committed.
+    """
+
+    coordination = data_root / COORDINATION_RELATIVE
+    pointer_path = coordination / "CURRENT_RELEASE.json"
+    if pointer_path.is_symlink():
+        raise DisclosureError("CURRENT_RELEASE.json must not be a symlink")
+    if not pointer_path.is_file():
+        raise DisclosureError("predecessor release authority is not published")
+    pointer = _object(pointer_path.read_bytes(), "CURRENT_RELEASE pointer")
+    release_id = str(pointer.get("release_id"))
+    if pointer.get("state") != "COMMITTED":
+        raise DisclosureError("CURRENT_RELEASE is not COMMITTED")
+    directory = coordination / "releases" / release_id
+    manifest_path = directory / "release.json"
+    journal_path = directory / "journal.json"
+    if manifest_path.is_symlink() or journal_path.is_symlink():
+        raise DisclosureError("retained release records must not be symlinks")
+    if not manifest_path.is_file() or not journal_path.is_file():
+        raise DisclosureError("CURRENT_RELEASE names a release that is not retained")
+    raw = manifest_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != pointer.get("release_manifest_sha256"):
+        raise DisclosureError("CURRENT_RELEASE manifest differs from its pointer")
+    manifest = _object(raw, "current release manifest")
+    journal = _object(journal_path.read_bytes(), "current release journal")
+    if (
+        manifest.get("release_id") != release_id
+        or journal.get("release_id") != release_id
+        or journal.get("state") != "COMMITTED"
+    ):
+        raise DisclosureError("CURRENT_RELEASE is not a committed release")
+    panels = [
+        item.get("proposed_generation_id")
+        for item in manifest.get("targets", [])
+        if isinstance(item, Mapping) and item.get("root_id") == PANEL_ROOT_ID
+    ]
+    if len(panels) != 1:
+        raise DisclosureError("current release does not name one panel generation")
+    return release_id, str(panels[0])
+
+
+def check_predecessor_is_current_release(
+    entry: Mapping[str, Any], data_root: Path
+) -> None:
+    """Refuse a predecessor that is not the committed CURRENT_RELEASE panel generation.
+
+    The comparison the report states ("against X in the previous release") is only true
+    when the pinned predecessor IS the release that is committed when the next one is
+    frozen.  A stale pin still hashes cleanly, so the byte-pin check cannot see it; the
+    release id and the panel generation must equal the committed ones.  ``entry`` is a
+    ``predecessor_comparison`` block or the ``predecessor`` block of the disclosure
+    sources document: both carry ``release_id`` and ``panel_generation_id``.
+    """
+
+    release_id, panel = committed_release_panel(data_root)
+    if (
+        entry.get("release_id") != release_id
+        or entry.get("panel_generation_id") != panel
+    ):
+        raise DisclosureError(
+            "disclosure predecessor is not the committed CURRENT_RELEASE panel: "
+            f"pinned release {str(entry.get('release_id'))[:8]} panel "
+            f"{str(entry.get('panel_generation_id'))[:8]}, committed release "
+            f"{release_id[:8]} panel {panel[:8]}"
+        )
+
+
+def check_sources_bound_to_current_release(
+    sources: Mapping[str, Any], inputs: Mapping[str, Any], data_root: Path
+) -> None:
+    """A written sleeve-disclosure-sources document and its inputs name CURRENT_RELEASE.
+
+    Id and data-file sha: the inputs pin the data file the sources were read from, and
+    both name the committed release and its panel generation.
+    """
+
+    entry = inputs.get("predecessor_comparison")
+    block = sources.get("predecessor")
+    if not isinstance(entry, Mapping) or not isinstance(block, Mapping):
+        raise DisclosureError("no predecessor comparison to bind to CURRENT_RELEASE")
+    check_predecessor_is_current_release(entry, data_root)
+    check_predecessor_is_current_release(block, data_root)
+    data_file = entry.get("data_file")
+    if (
+        block.get("status") != "RESOLVED"
+        or not isinstance(data_file, Mapping)
+        or block.get("data_file_sha256") != data_file.get("sha256")
+    ):
+        raise DisclosureError("disclosure sources do not carry the pinned data file")
+
+
 def build_sources(
     *,
     facts_paths: Sequence[Path],
@@ -542,6 +641,8 @@ def build_sources(
         }
     predecessor = inputs.get("predecessor_comparison")
     if isinstance(predecessor, Mapping):
+        if predecessor_data_root is not None:
+            check_predecessor_is_current_release(predecessor, predecessor_data_root)
         sources["predecessor"] = _resolve_predecessor(
             predecessor, predecessor_data_root
         )
