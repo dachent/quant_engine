@@ -105,3 +105,16 @@ or deleted.
 Record only sanitized counts, the generation ID, catalog SHA-256, code commit,
 and check results in GitHub. Do not paste source paths, external account
 identifiers, private strategy catalog values, corrections, or financial data.
+
+## Captured design references
+
+A design slot may carry a `p123-capture-design:<sha256>` reference. The builder then
+requires the slot to be `EVIDENCED`, to name by hash the admitted
+`normalized/records.json` of a staged Portfolio123 owner capture (with that run's
+`manifest.json` admitted beside it), and to carry the reference recomputed from those
+bytes: AI Factor predictor and model records only, from a complete run parsed with
+reviewed shapes. Each response is re-validated against the CONFIRMED catalog shape,
+and the source group must pin both files in `expected_hashes` (the owner's
+attestation). Any other reference text is unchanged. Print the reference of a
+staged run with `python tools/portfolio_provenance.py capture-design-ref --run-dir
+<run>`. See `docs/providers/p123-capture.md` for what the capture must contain.

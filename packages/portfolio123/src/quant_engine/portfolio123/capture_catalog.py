@@ -1,18 +1,27 @@
 """Catalog of Portfolio123 captures that the reviewed web contract does not cover.
 
-STATUS: every route path and response shape below is an UNVERIFIED placeholder.
-Nothing here was observed on the provider.  The routes exist so that parsers,
-staging, and verification can be built and tested offline against synthetic
-fixtures; an owner-supplied HAR is first inventoried (route templates only), the
-real routes are then reviewed, and only after that review does a catalog entry
-become a contract entry.  The catalog never enables a route by itself: it is
+STATUS: each row carries a ``verdict`` and a ``finding``.  A ``CONFIRMED`` row
+was compared offline with preserved real bytes (2026-09 captures: route template,
+method, query keys, response field names and types, never values or identifiers).
+An ``UNVERIFIED`` row is still an invented placeholder: no preserved evidence
+contains its response, so it exists only so that parsers, staging, and
+verification can be tested against synthetic fixtures and it can never describe
+a real export.  ``finding`` records how the original placeholder compared with
+the evidence: ``CONFIRMED`` (matched), ``DIFFERS`` (contradicted by the evidence;
+a confirmed row was corrected, an unverified row stays fail-closed), or
+``UNVERIFIED`` (the evidence is silent).  A run is marked ``REVIEWED_SHAPES``
+only when every capability in its scope is ``CONFIRMED``.
+
+An owner-supplied HAR is first inventoried (route templates only), the real
+routes are then reviewed, and only after that review does a catalog entry become
+a contract entry.  The catalog never enables a route by itself: it is
 contract-ready (:func:`capture_contract` and :func:`proposed_contract` build
 ``ProviderContract`` objects) and has no effect on ``PORTFOLIO123_CONTRACT``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 from typing import Any
@@ -21,9 +30,11 @@ from quant_engine.portfolio123.capture_shapes import (
     Choice,
     Obj,
     Seq,
+    ShapeError,
     Spec,
     canonical_bytes,
     describe,
+    validate_shape,
 )
 from quant_engine.web_contracts import (
     PORTFOLIO123_CONTRACT,
@@ -35,8 +46,19 @@ from quant_engine.web_contracts import (
 
 
 ORIGIN = "https://www.portfolio123.com"
-ROUTE_STATUS = "UNVERIFIED_PLACEHOLDER"
-SHAPE_STATUS = "UNVERIFIED_SYNTHETIC"
+VERDICT_CONFIRMED = "CONFIRMED"
+VERDICT_UNVERIFIED = "UNVERIFIED"
+FINDINGS = ("CONFIRMED", "DIFFERS", "UNVERIFIED")
+ROUTE_STATUS = {
+    VERDICT_CONFIRMED: "CONFIRMED_PRESERVED_BYTES",
+    VERDICT_UNVERIFIED: "UNVERIFIED_PLACEHOLDER",
+}
+SHAPE_STATUS = {
+    VERDICT_CONFIRMED: "CONFIRMED_PRESERVED_BYTES",
+    VERDICT_UNVERIFIED: "UNVERIFIED_SYNTHETIC",
+}
+EVIDENCE_REVIEWED = "REVIEWED_SHAPES"
+EVIDENCE_UNVERIFIED = "UNVERIFIED_SYNTHETIC_SHAPES"
 FORM_HAR = "har"
 FORM_FILE = "file"
 MEDIA_TYPES = ("csv", "json", "pdf")
@@ -66,8 +88,21 @@ class CaptureRoute:
     csv_columns: tuple[tuple[str, ...], ...] = ()
     paginated: bool = False
     api_operation: str | None = None
+    verdict: str = VERDICT_UNVERIFIED
+    finding: str = "UNVERIFIED"
+    evidence: str = ""
+    query_values: tuple[tuple[str, str], ...] = ()
+    redact: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
+        if self.verdict not in ROUTE_STATUS or self.finding not in FINDINGS:
+            raise CaptureRefusal("CATALOG_INVALID", "verdict")
+        if self.verdict == VERDICT_CONFIRMED and self.finding == "UNVERIFIED":
+            raise CaptureRefusal("CATALOG_INVALID", "confirmed row without a finding")
+        if not self.evidence.strip():
+            raise CaptureRefusal("CATALOG_INVALID", "evidence note")
+        if not {key for key, _ in self.query_values} <= self.query_keys:
+            raise CaptureRefusal("CATALOG_INVALID", "query value for an unknown key")
         if not self.forms or not set(self.forms) <= {FORM_HAR, FORM_FILE}:
             raise CaptureRefusal("CATALOG_INVALID", "forms")
         if FORM_HAR in self.forms and (self.path is None or self.shape is None):
@@ -93,8 +128,13 @@ class CaptureRoute:
             "csv_columns": [list(item) for item in self.csv_columns],
             "paginated": self.paginated,
             "api_operation": self.api_operation,
-            "route_status": ROUTE_STATUS,
-            "shape_status": SHAPE_STATUS,
+            "verdict": self.verdict,
+            "finding": self.finding,
+            "evidence": self.evidence,
+            "query_values": [list(item) for item in self.query_values],
+            "redact": sorted(self.redact),
+            "route_status": ROUTE_STATUS[self.verdict],
+            "shape_status": SHAPE_STATUS[self.verdict],
         }
 
 
@@ -111,16 +151,125 @@ _TRANSACTION = Obj(
         "commission": "num",
     }
 )
+
+# REAL shape of the designer-model route (CONFIRMED from the preserved 2026-09-12
+# capture: field names and types only).  Third-party personal data (the designer
+# profile and the comment threads) is replaced by the redaction marker before the
+# shape check, in HAR and file form alike, so those two fields are declared "str".
+_RETURN_STATS = Obj(
+    {
+        "downDev": "num",
+        "maxDd": "num",
+        "sharpe": "num",
+        "sortino": "num",
+        "stdDev": "num",
+    }
+)
+_WINDOW_STATS = Obj(
+    {
+        "annRet": "num",
+        "annRetBench": "num",
+        "bench": _RETURN_STATS,
+        "beta": "num",
+        "model": _RETURN_STATS,
+    }
+)
+_TRADE_STATS = Obj(
+    {"biggest": "num", "daysAvg": "num", "retAvg": "num", "trades": "int"}
+)
+_DESIGNER_REDACT = frozenset({"designerinfo", "comments"})
 _DESIGNER_MODEL = Obj(
     {
-        "model_id": "int",
+        "backtestDisabled": "bool",
+        "benchmark": "str",
+        "benchmarkUid": "int",
+        "comments": "str",
+        "context": "null",
+        "currency": "str",
+        "desc": "str",
+        "designerModel": Obj(
+            {
+                "attachment": "str",
+                "backtestAgreement": "bool",
+                "cost": "num",
+                "designerInfo": "str",
+                "img": "str",
+                "isLiveBookAsset": "bool",
+                "isStrategyAsset": "bool",
+                "maxSubs": "int",
+                "okmsg": "null",
+                "pUid": "int",
+                "revisions": Seq(
+                    Obj(
+                        {
+                            "insert_dt": "us_date",
+                            "reason": "str",
+                            "revision_uid": "int",
+                            "update_dt": "date",
+                        }
+                    )
+                ),
+                "status": "str",
+                "subs": "int",
+                "subscription": Obj(
+                    {
+                        "cancelled": "bool",
+                        "nextBillDt": "us_date",
+                        "portfolioUid": "int",
+                        "startDt": "date",
+                        "type": "str",
+                    }
+                ),
+            }
+        ),
+        "editable": "bool",
+        "endDt": "us_date",
+        "hasRebalTran": "int",
+        "hedgeEnabled": "bool",
+        "holdingsAvg": "num",
+        "inceptionDt": "us_date",
+        "lastRebal": "us_date",
+        "lastRebalanceToday": "bool",
+        "launchDt": "us_date",
+        "liquidationValue": "num",
+        "maxdd90": "num",
+        "mkttypeUid": "int",
         "name": "str",
-        "inception": "date",
-        "rebalance": "str",
-        "buy_rules": Seq("str"),
-        "sell_rules": Seq("str"),
-        "positions": Seq(Obj({"ticker": "str", "weight": "num"})),
+        "pctHedgeAvg": "num",
+        "portUid": "int",
+        "rebalFreq": "str",
+        "refLiquidity": "num",
+        "riskScore": "int",
+        "stats3y": _WINDOW_STATS,
+        "statsInception": _WINDOW_STATS,
+        "statsLaunch": _WINDOW_STATS,
+        "topData": Seq(Obj({"label": "str", "tooltip": "int?", "value": "str"})),
+        "tradesTtm": "int",
+        "tradingAll": Obj(
+            {"biggest": "num?", "daysAvg": "num", "retAvg": "num", "trades": "int"}
+        ),
+        "tradingCommitment": "int",
+        "tradingLose": _TRADE_STATS,
+        "tradingWin": _TRADE_STATS,
+        "trailingReturns": Seq(
+            Obj({"name": "str", "values": Seq("num", min_items=2, max_items=2)})
+        ),
+        "volatility90": "num",
     }
+)
+
+# REAL header of the strategy transactions CSV download (CONFIRMED: one identical
+# header across ten preserved captures).
+_TRANSACTIONS_HEADER = (
+    "Date",
+    "Symbol",
+    "Type",
+    "Shares",
+    "Price",
+    "Amount",
+    "TotFees",
+    "Rank",
+    "Notes",
 )
 
 CATALOG: tuple[CaptureRoute, ...] = (
@@ -143,6 +292,13 @@ CATALOG: tuple[CaptureRoute, ...] = (
         ),
         # Candidate API route for a declared HAR gap: UNVERIFIED, not allow-listed.
         api_operation="ai_factor_predict",
+        evidence=(
+            "No preserved capture contains an AI Factor page or response, so route and "
+            "shape are an invented placeholder. Only the site navigation was observed: "
+            "the AI Factor list opens at /sv/opener/AIFACTOR/{cat} (a Svelte page), and "
+            "the signed-in user object carries the optional flags aiFactorEnabled and "
+            "hasAiFactor. The p123api operation name has no reviewed source."
+        ),
     ),
     CaptureRoute(
         "aifactor.model",
@@ -162,6 +318,11 @@ CATALOG: tuple[CaptureRoute, ...] = (
                 "validation": Obj({"metric": "str", "value": "num"}),
             }
         ),
+        evidence=(
+            "No preserved capture contains an AI Factor model page or response (the "
+            "2026-10-16 design intake records the predictor definition as in no "
+            "capture). Route and shape are an invented placeholder."
+        ),
     ),
     CaptureRoute(
         "screen.definition",
@@ -178,6 +339,13 @@ CATALOG: tuple[CaptureRoute, ...] = (
                 "rules": Seq("str", min_items=1),
             },
             optional={"ranking_system_id": "int?"},
+        ),
+        evidence=(
+            "No preserved request or response for a screen. Observed only in page "
+            "links: the screen list /app/opener/SCR, and a copy-to-screen action link "
+            "under /app/screen/summary/{n}/revert that creates a screen and must never "
+            "be captured or followed. The universe page /app/universe/summary/{n} is a "
+            "sibling family. Route and shape remain an invented placeholder."
         ),
     ),
     CaptureRoute(
@@ -197,6 +365,14 @@ CATALOG: tuple[CaptureRoute, ...] = (
                 "statistics": Obj({"total_return": "num", "max_drawdown": "num"}),
             }
         ),
+        evidence=(
+            "No JSON simulation response preserved. Observed: POST /port_simul6.jsp "
+            "(an HTML settings page, status 200, many requests) and the list link "
+            "/app/opener/SIM. The NAV curve of a live book arrives as JSON from "
+            "GET /app/investment/perf-data/{n}?init= (columns of a data array, not the "
+            "invented nav object), which is a different capability. Route and shape "
+            "remain an invented placeholder."
+        ),
     ),
     CaptureRoute(
         "transactions.account",
@@ -215,6 +391,17 @@ CATALOG: tuple[CaptureRoute, ...] = (
             }
         ),
         paginated=True,
+        finding="DIFFERS",
+        evidence=(
+            "No JSON account transactions route appears in 92 preserved HARs. The real "
+            "transactions list is GET /transact_list.jsp?portid=&offset= : an HTML "
+            "table, 50 rows per page, offset pagination (not page), a header of the "
+            "form first - last of total, and columns Date, Type, Ticker, Shares, "
+            "Price, Amount, Tot Fees, Rank, Note. It is strategy-scoped and the "
+            "response is not JSON, so the JSON-only extractor cannot admit it; the "
+            "reviewed CSV download covers the same rows. The placeholder stays "
+            "fail-closed and unusable for a real export."
+        ),
     ),
     CaptureRoute(
         "transactions.download",
@@ -222,17 +409,41 @@ CATALOG: tuple[CaptureRoute, ...] = (
         (FORM_FILE,),
         "Use the transactions download control and save the file unmodified.",
         file_media=("csv",),
-        csv_columns=(("Date", "Ticker", "Action", "Shares", "Price", "Commission"),),
+        csv_columns=(_TRANSACTIONS_HEADER,),
+        verdict=VERDICT_CONFIRMED,
+        finding="DIFFERS",
+        evidence=(
+            "Header taken from ten preserved downloads of the reviewed route "
+            "GET /p123/DownloadPortTrans?portid= (strategy.transactions): identical "
+            "nine columns Date, Symbol, Type, Shares, Price, Amount, TotFees, Rank, "
+            "Notes. The placeholder header (Ticker, Action, Commission) differed."
+        ),
     ),
     CaptureRoute(
         "designer-model.json",
         "Designer model definition",
         (FORM_HAR, FORM_FILE),
         "Export the designer model JSON, or open the model page and export the HAR.",
-        path="/app/investment/model/{model_id}",
-        path_pattern=r"/app/investment/model/[1-9][0-9]*",
+        path="/spr/strategy/model/{model_id}",
+        path_pattern=r"/spr/strategy/model/[1-9][0-9]*",
+        query_keys=frozenset({"dm"}),
+        query_values=(("dm", "true"),),
         shape=_DESIGNER_MODEL,
         file_media=("json",),
+        verdict=VERDICT_CONFIRMED,
+        finding="DIFFERS",
+        redact=_DESIGNER_REDACT,
+        evidence=(
+            "Route, method, and the single query key dm=true from the recorded request "
+            "of the 2026-09-12 capture; shape from the preserved response (two "
+            "byte-identical copies). One model, one capture: every field is required, "
+            "optional or nullable fields are not distinguishable, and the status was "
+            "not stored (a parsed JSON body implies success). Dates are MM/DD/YYYY. "
+            "The placeholder route (/app/investment/model), shape, and date format "
+            "all differed. The designer profile and comments are third-party personal "
+            "data and are redacted. The sibling performance route .../perf is a "
+            "separate capability, not catalogued."
+        ),
     ),
     CaptureRoute(
         "billing.credit-table",
@@ -247,6 +458,13 @@ CATALOG: tuple[CaptureRoute, ...] = (
                 "rows": Seq(Obj({"operation": "str", "credits": "num"}), min_items=1),
             }
         ),
+        evidence=(
+            "No preserved credit-table page or response. Observed: the account menu "
+            "links /sv/account-settings/billing and /sv/account-settings/dataminer-api "
+            "(Svelte pages), and the signed-in user object (GET /spr/user) carries an "
+            "integer apiQuota and a boolean hasApiKey whose meaning (cap or remaining) "
+            "is not established. Route and shape remain an invented placeholder."
+        ),
     ),
     CaptureRoute(
         "billing.invoice",
@@ -255,6 +473,10 @@ CATALOG: tuple[CaptureRoute, ...] = (
         "Download each statement or invoice from the billing page, unmodified.",
         file_media=("csv", "pdf"),
         csv_columns=(("Invoice Date", "Description", "Amount", "Currency"),),
+        evidence=(
+            "No preserved statement or invoice file; the CSV columns are an invented "
+            "placeholder."
+        ),
     ),
 )
 
@@ -278,12 +500,19 @@ def catalog_sha256() -> str:
     return hashlib.sha256(canonical_bytes(catalog_rows())).hexdigest()
 
 
-def _query_validator(keys: frozenset[str]) -> Callable[[Mapping[str, Any]], None]:
+def _query_validator(
+    keys: frozenset[str], literals: tuple[tuple[str, str], ...] = ()
+) -> Callable[[Mapping[str, Any]], None]:
+    fixed = dict(literals)
+
+    def accepted(key: str, item: object) -> bool:
+        text = str(item)
+        if key in fixed:
+            return text == fixed[key]
+        return text.isdigit() and text.isascii() and int(text) > 0
+
     def validate(value: Mapping[str, Any]) -> None:
-        digits = all(
-            str(value.get(key, "")).isdigit() and int(value[key]) > 0 for key in keys
-        )
-        if set(value) != keys or not digits:
+        if set(value) != keys or not all(accepted(key, value[key]) for key in keys):
             raise WebContractError("Portfolio123 query differs from the reviewed shape")
 
     return validate
@@ -301,7 +530,11 @@ def endpoint_contract(route: CaptureRoute) -> EndpointContract:
         path=route.path,
         path_pattern=route.path_pattern,
         query_keys=route.query_keys,
-        validate_query=_query_validator(route.query_keys) if route.query_keys else None,
+        validate_query=(
+            _query_validator(route.query_keys, route.query_values)
+            if route.query_keys
+            else None
+        ),
         semantic_effect=SemanticEffect.READ_ONLY,
         authentication_header="cookie",
     )
@@ -317,9 +550,51 @@ def capture_contract() -> ProviderContract:
     return ProviderContract(
         provider="portfolio123",
         endpoints=tuple(endpoint_contract(item) for item in har_routes()),
-        sensitive_fields=PORTFOLIO123_CONTRACT.sensitive_fields,
+        sensitive_fields=redacted_fields(),
         api_fallback=False,
     )
+
+
+def redacted_fields() -> frozenset[str]:
+    """Reviewed sensitive fields plus the capture-specific redactions."""
+
+    extra = frozenset(key for item in CATALOG for key in item.redact)
+    return PORTFOLIO123_CONTRACT.sensitive_fields | extra
+
+
+def is_confirmed(capability: str) -> bool:
+    return route_for(capability).verdict == VERDICT_CONFIRMED
+
+
+def evidence_status(scope: Sequence[str]) -> str:
+    """``REVIEWED_SHAPES`` only when every capability in scope is CONFIRMED."""
+
+    if scope and all(is_confirmed(item) for item in scope):
+        return EVIDENCE_REVIEWED
+    return EVIDENCE_UNVERIFIED
+
+
+def verify_confirmed_shape(capability: str, response: object) -> None:
+    """Check a normalized response against the CONFIRMED catalog shape, now.
+
+    Raises ``CaptureRefusal`` with ``CAPABILITY_UNKNOWN``, ``SHAPE_NOT_REVIEWED``
+    (the row is not CONFIRMED), or ``SHAPE_REFUSED``.  Consumers outside the package
+    (the provenance admission) use this instead of trusting a manifest's own claims.
+    """
+
+    route = route_for(capability)
+    if route.verdict != VERDICT_CONFIRMED or route.shape is None:
+        raise CaptureRefusal("SHAPE_NOT_REVIEWED", capability)
+    try:
+        validate_shape(response, route.shape)
+    except ShapeError:
+        raise CaptureRefusal("SHAPE_REFUSED", capability) from None
+
+
+def findings() -> dict[str, tuple[str, str]]:
+    """Per capability: (finding about the original placeholder, current verdict)."""
+
+    return {item.capability: (item.finding, item.verdict) for item in CATALOG}
 
 
 def proposed_contract() -> ProviderContract:
@@ -328,6 +603,6 @@ def proposed_contract() -> ProviderContract:
     return ProviderContract(
         provider="portfolio123",
         endpoints=PORTFOLIO123_CONTRACT.endpoints + capture_contract().endpoints,
-        sensitive_fields=PORTFOLIO123_CONTRACT.sensitive_fields,
+        sensitive_fields=redacted_fields(),
         api_fallback=False,
     )

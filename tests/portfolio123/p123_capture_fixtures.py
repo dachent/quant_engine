@@ -1,7 +1,9 @@
 """Synthetic fixtures for the Portfolio123 capture tests.
 
-Every value is invented.  Real provider shapes are UNVERIFIED; these bodies
-exist only to exercise parsers that must refuse anything else.
+Every value is invented.  Field names and types of the designer-model body and the
+transactions CSV header are the REAL, preserved-evidence shapes; every other body
+is an UNVERIFIED placeholder.  These bodies exist only to exercise parsers that
+must refuse anything else.
 """
 
 from __future__ import annotations
@@ -55,14 +57,99 @@ SIMULATION: dict[str, Any] = {
     ],
     "statistics": {"total_return": 0.105, "max_drawdown": -0.02},
 }
+_STATS = {"downDev": 0.5, "maxDd": -0.25, "sharpe": 1.5, "sortino": 2.0, "stdDev": 0.5}
+_WINDOW = {
+    "annRet": 0.25,
+    "annRetBench": 0.125,
+    "bench": dict(_STATS),
+    "beta": 0.75,
+    "model": dict(_STATS),
+}
+_TRADES = {"biggest": 0.5, "daysAvg": 10.0, "retAvg": 0.0625, "trades": 12}
+# Personal strings below are invented; the capture must redact both objects.
+DESIGNER_PERSON = "Synthetic Designer Person"
+DESIGNER_COMMENT = "Synthetic commenter remark"
+# The designer-model route shape (REAL field names and types, invented values).
 DESIGNER: dict[str, Any] = {
-    "model_id": 9005,
+    "backtestDisabled": False,
+    "benchmark": "SYN",
+    "benchmarkUid": 9100,
+    "comments": [
+        {
+            "commentUid": 1,
+            "dt": "2029-01-01",
+            "replies": [],
+            "txt": DESIGNER_COMMENT,
+            "userSName": DESIGNER_PERSON,
+        }
+    ],
+    "context": None,
+    "currency": "USD",
+    "desc": "Synthetic description of a synthetic model.",
+    "designerModel": {
+        "attachment": "",
+        "backtestAgreement": True,
+        "cost": 10.0,
+        "designerInfo": {"fullName": DESIGNER_PERSON, "userUid": 1},
+        "img": "",
+        "isLiveBookAsset": False,
+        "isStrategyAsset": True,
+        "maxSubs": 5,
+        "okmsg": None,
+        "pUid": 9005,
+        "revisions": [
+            {
+                "insert_dt": "01/02/2029",
+                "reason": "Synthetic revision",
+                "revision_uid": 3,
+                "update_dt": "2029-01-03",
+            }
+        ],
+        "status": "live",
+        "subs": 2,
+        "subscription": {
+            "cancelled": False,
+            "nextBillDt": "02/01/2030",
+            "portfolioUid": 9006,
+            "startDt": "2029-06-01",
+            "type": "paid",
+        },
+    },
+    "editable": False,
+    "endDt": "12/31/2029",
+    "hasRebalTran": 0,
+    "hedgeEnabled": False,
+    "holdingsAvg": 20.5,
+    "inceptionDt": "01/03/2028",
+    "lastRebal": "12/28/2029",
+    "lastRebalanceToday": False,
+    "launchDt": "06/01/2029",
+    "liquidationValue": 1000.0,
+    "maxdd90": -0.1,
+    "mkttypeUid": 7,
     "name": "Synthetic designer model",
-    "inception": "2028-01-03",
-    "rebalance": "weekly",
-    "buy_rules": ["Synthetic buy rule"],
-    "sell_rules": [],
-    "positions": [{"ticker": "AAAA", "weight": 0.5}],
+    "pctHedgeAvg": 0.0,
+    "portUid": 9005,
+    "rebalFreq": "Every 4 Weeks",
+    "refLiquidity": 500.0,
+    "riskScore": 3,
+    "stats3y": dict(_WINDOW),
+    "statsInception": dict(_WINDOW),
+    "statsLaunch": dict(_WINDOW),
+    "topData": [
+        {"label": "Synthetic label", "tooltip": None, "value": "10%"},
+        {"label": "Another label", "tooltip": 4, "value": "5"},
+    ],
+    "tradesTtm": 40,
+    "tradingAll": {"biggest": None, "daysAvg": 12.0, "retAvg": 0.03, "trades": 24},
+    "tradingCommitment": 1,
+    "tradingLose": dict(_TRADES),
+    "tradingWin": dict(_TRADES),
+    "trailingReturns": [
+        {"name": "1 Mon", "values": [0.01, 0.005]},
+        {"name": "3 Mon", "values": [0.03, 0.02]},
+    ],
+    "volatility90": 0.2,
 }
 CREDITS: dict[str, Any] = {
     "plan": "synthetic plan",
@@ -139,7 +226,7 @@ def standard_entries() -> list[dict[str, Any]]:
         entry(f"{ORIGIN}/app/ai-factor/model/9002", MODEL),
         entry(f"{ORIGIN}/app/screen/9003", SCREEN),
         entry(f"{ORIGIN}/app/simulation/9004", SIMULATION),
-        entry(f"{ORIGIN}/app/investment/model/9005", DESIGNER),
+        entry(f"{ORIGIN}/spr/strategy/model/9005?dm=true", DESIGNER),
         entry(f"{ORIGIN}/app/billing/credits", CREDITS),
         # Noise a real browser export carries: inventoried, never parsed.
         entry(f"{ORIGIN}/static/app.js", None, raw_text="not json"),
@@ -157,9 +244,9 @@ STANDARD_SCOPE = (
 )
 
 TRANSACTIONS_CSV = (
-    "Date,Ticker,Action,Shares,Price,Commission\n"
-    "2029-06-01,AAAA,BUY,10,12.5,1.0\n"
-    "2029-06-02,BBBB,SELL,5,20.0,1.0\n"
+    "Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes\n"
+    "2029-06-01,AAAA,Buy,10,12.5,125.0,1.0,5,\n"
+    "2029-06-02,BBBB,Sell,5,20.0,100.0,1.0,,\n"
 )
 INVOICE_CSV = (
     "Invoice Date,Description,Amount,Currency\n2029-07-01,Synthetic charge,10.00,USD\n"

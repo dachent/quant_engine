@@ -80,7 +80,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             result: dict[str, object] = {
                 "catalog_sha256": catalog_sha256(),
                 "capabilities": sorted(item.capability for item in CATALOG),
-                "evidence_status": "UNVERIFIED_SYNTHETIC_SHAPES",
+                "verdicts": {
+                    item.capability: item.verdict
+                    for item in sorted(CATALOG, key=lambda row: row.capability)
+                },
             }
         elif args.command == "inventory-har":
             result = inventory_har(

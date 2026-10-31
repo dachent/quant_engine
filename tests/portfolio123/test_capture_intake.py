@@ -329,7 +329,7 @@ def capture_fixture_designer() -> dict[str, Any]:
         (
             "transactions.download",
             "tx.csv",
-            b"Date,Ticker,Action,Shares,Price,Commission\n",
+            TRANSACTIONS_CSV.splitlines(keepends=True)[0].encode(),
             "EXPORT_HAS_NO_ROWS",
         ),
         ("transactions.download", "tx.pdf", b"%PDF-1.7", "MEDIA_TYPE_REFUSED"),
