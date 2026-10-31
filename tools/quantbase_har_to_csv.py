@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections import Counter
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 import hashlib
 import io
 import json
@@ -245,8 +247,58 @@ _STATS_ORDER: Final = (
 )
 
 
+_TIMESTAMP_FIELDS: Final = (
+    "time",
+    "date",
+    "completed_at",
+    "filled_at",
+    "created_at",
+    "submitted_at",
+    "updated_at",
+    "canceled_at",
+)
+_SNAPSHOT_FILES: Final = frozenset(
+    {
+        "accounts.csv",
+        "dashboard_total_wins.csv",
+        "partner_status.csv",
+        "projections_all_live_funds.csv",
+        "ssg_all_funds_stats.csv",
+        "user_profile.csv",
+    }
+)
+
+
 class QuantbaseCsvError(ValueError):
     """The Quantbase HAR-to-CSV conversion failed closed."""
+
+
+def _observation_day(value: object, name: str) -> date:
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return datetime.strptime(text, "%m/%d/%Y").date()
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+    raise QuantbaseCsvError(f"{name} holds a value that is not a date")
+
+
+class _Cutoff:
+    """The financial cutoff: later observations are excluded and counted."""
+
+    def __init__(self, day: date) -> None:
+        self.day = day
+        self.excluded: Counter[str] = Counter()
+
+    def keeps(self, dataset: str, day: date) -> bool:
+        if day <= self.day:
+            return True
+        self.excluded[dataset] += 1
+        return False
 
 
 def _canonical(value: object) -> bytes:
@@ -384,7 +436,11 @@ def _bound_responses(
             _Response(
                 item.capability,
                 item.request_sha256,
-                {key: query[key] for key in ("fund", "title") if key in query},
+                {
+                    key: query[key]
+                    for key in ("fund", "title", "end_day")
+                    if key in query
+                },
                 json.loads(entry["response"]["content"]["text"]),
             )
         )
@@ -431,6 +487,10 @@ def _by_title(
                 raise QuantbaseCsvError(f"{capability} request lacks a fund title")
             groups.setdefault(title, []).append(item)
     for title, group in groups.items():
+        if len({item.request_sha256 for item in group}) != 1:
+            raise QuantbaseCsvError(
+                f"{capability} holds more than one request per fund"
+            )
         if len({_canonical(item.body) for item in group}) != 1:
             raise QuantbaseCsvError(f"{capability} conflicts for a repeated fund")
         result[title] = group[0].body
@@ -465,7 +525,7 @@ def _accounts(body: object) -> bytes:
     return _csv_bytes(HEADERS["accounts"], rows)
 
 
-def _account_activity(body: object) -> bytes:
+def _account_activity(body: object, cutoff: _Cutoff) -> bytes:
     header = HEADERS["account_activity"]
     allowed = frozenset(header) - {"activity_type"}
     document = _exact(body, frozenset({"data"}), "accounts.activity")
@@ -478,6 +538,13 @@ def _account_activity(body: object) -> bytes:
                 "accounts.activity item keys differ: "
                 f"extra={sorted(set(item) - allowed)}"
             )
+        days = [
+            _observation_day(item[field], f"accounts.activity.{field}")
+            for field in _TIMESTAMP_FIELDS
+            if item.get(field) not in (None, "")
+        ]
+        if days and not cutoff.keeps("account_activity", max(days)):
+            continue
         rows.append(
             [
                 record["type"] if column == "activity_type" else item.get(column)
@@ -487,18 +554,21 @@ def _account_activity(body: object) -> bytes:
     return _csv_bytes(header, rows)
 
 
-def _price_rows(body: object, name: str) -> list[list[object]]:
+def _price_rows(body: object, name: str, cutoff: _Cutoff) -> list[list[object]]:
     keys = frozenset(HEADERS["dashboard_pricehistory"])
-    return [
-        [
-            _exact(item, keys, name)[column]
-            for column in HEADERS["dashboard_pricehistory"]
-        ]
-        for item in _array(body, name)
-    ]
+    rows: list[list[object]] = []
+    for item in _array(body, name):
+        record = _exact(item, keys, name)
+        if cutoff.keeps(
+            "dashboard_pricehistory", _observation_day(record["time"], name)
+        ):
+            rows.append(
+                [record[column] for column in HEADERS["dashboard_pricehistory"]]
+            )
+    return rows
 
 
-def _dashboard(body: object) -> tuple[dict[str, bytes], str | None]:
+def _dashboard(body: object, cutoff: _Cutoff) -> tuple[dict[str, bytes], str | None]:
     document = _exact(body, frozenset({"data"}), "portfolio.dashboard")
     data = _exact(
         document["data"], frozenset({"funds_data", "top_wins"}), "dashboard.data"
@@ -514,7 +584,7 @@ def _dashboard(body: object) -> tuple[dict[str, bytes], str | None]:
             raise QuantbaseCsvError("dashboard fund titles collide on file names")
         files[name] = _csv_bytes(
             HEADERS["dashboard_pricehistory"],
-            _price_rows(fund["pricehistory"], "dashboard.pricehistory"),
+            _price_rows(fund["pricehistory"], "dashboard.pricehistory", cutoff),
         )
         holdings = _array(fund["holdings"], "dashboard.holdings")
         if holdings:
@@ -539,7 +609,7 @@ def _dashboard(body: object) -> tuple[dict[str, bytes], str | None]:
     }
     for title, value in funds.items():
         wins = value["wins"]
-        if wins is None:
+        if wins is None or (isinstance(wins, dict) and not wins.get("total")):
             continue
         marks = _exact(
             wins, frozenset({"total", "biggest", "longest"}), "dashboard.wins"
@@ -580,11 +650,15 @@ def _volatis_stats(body: object) -> bytes:
     return _key_value([(key, data[key]) for key in _STATS_ORDER])
 
 
-def _rebalance_rows(body: object) -> list[list[object]]:
+def _rebalance_rows(body: object, cutoff: _Cutoff) -> list[list[object]]:
     document = _exact(body, frozenset({"data"}), "funds.rebalance-history")
     data = _object(document["data"], "funds.rebalance-history.data")
     rows: list[list[object]] = []
     for day, entry in sorted(data.items()):
+        if not cutoff.keeps(
+            "rebalance_history", _observation_day(day, "rebalance date")
+        ):
+            continue
         composition = _array(
             _exact(entry, frozenset({"composition"}), "rebalance entry")["composition"],
             "rebalance composition",
@@ -608,7 +682,7 @@ def _partner_status(body: object) -> bytes:
 
 
 def _invest(
-    body: object, mode: str, dashboard: object
+    body: object, mode: str, dashboard: object, cutoff: _Cutoff
 ) -> tuple[dict[str, bytes], dict[str, int]]:
     document = _exact(body, frozenset({"pageProps", "__N_SSG"}), "funds.invest")
     props = _exact(
@@ -630,9 +704,11 @@ def _invest(
         if (title, row["time"]) in seen:
             raise QuantbaseCsvError("fundPriceData repeats a fund and time")
         seen.add((title, row["time"]))
-        series.setdefault(title, []).append(
-            [title, row["fund_id"], row["value"], row["time"]]
-        )
+        rows = series.setdefault(title, [])
+        if cutoff.keeps(
+            "ssg_pricehistory", _observation_day(row["time"], "fundPriceData")
+        ):
+            rows.append([title, row["fund_id"], row["value"], row["time"]])
     if mode == "account-level":
         if VOLATIS_TITLE not in series:
             raise QuantbaseCsvError("public series lacks the Volatis fund id")
@@ -648,6 +724,7 @@ def _invest(
             for row in _price_rows(
                 _object(account, "dashboard Volatis")["pricehistory"],
                 "dashboard.pricehistory",
+                _Cutoff(cutoff.day),
             )
         ]
     files: dict[str, bytes] = {}
@@ -691,10 +768,15 @@ _SUPPORTED: Final = frozenset(
 
 
 def derive_csv_files(
-    responses: Sequence[_Response], volatis_pricehistory: str
+    responses: Sequence[_Response], volatis_pricehistory: str, cutoff_day: date
 ) -> tuple[dict[str, bytes], dict[str, object]]:
-    """Return ``{file name: bytes}`` and value-free derivation facts."""
+    """Return ``{file name: bytes}`` and value-free derivation facts.
 
+    Time-series rows dated after ``cutoff_day`` are excluded (the raw HAR stays as
+    source evidence); capture-time snapshots are written as captured.
+    """
+
+    cutoff = _Cutoff(cutoff_day)
     if volatis_pricehistory not in VOLATIS_MODES:
         raise QuantbaseCsvError("volatis price history mode is not recognised")
     present = {item.capability for item in responses}
@@ -717,9 +799,9 @@ def derive_csv_files(
 
     add("user_profile.csv", _user_profile(need("users.profile")))
     add("accounts.csv", _accounts(need("accounts.linked")))
-    add("account_activity.csv", _account_activity(need("accounts.activity")))
+    add("account_activity.csv", _account_activity(need("accounts.activity"), cutoff))
     dashboard_body = need("portfolio.dashboard")
-    dashboard_files, wins_source = _dashboard(dashboard_body)
+    dashboard_files, wins_source = _dashboard(dashboard_body, cutoff)
     for name, content in dashboard_files.items():
         add(name, content)
     partner = _single(responses, "partners.status")
@@ -728,12 +810,18 @@ def derive_csv_files(
     stats = _by_title(responses, "funds.statistics", "fund")
     if set(stats) != {VOLATIS_TITLE}:
         raise QuantbaseCsvError("funds.statistics must hold exactly the Volatis fund")
+    for item in responses:
+        if item.capability == "funds.statistics" and (
+            _observation_day(item.query.get("end_day"), "statistics end_day")
+            > cutoff.day
+        ):
+            raise QuantbaseCsvError("funds.statistics window ends after the cutoff")
     add("volatis_strategy_stats.csv", _volatis_stats(stats[VOLATIS_TITLE]))
     rebalances = _by_title(responses, "funds.rebalance-history", "title")
     if VOLATIS_TITLE not in rebalances:
         raise QuantbaseCsvError("capture lacks the Volatis rebalance history")
     for title, body in sorted(rebalances.items()):
-        rows = _rebalance_rows(body)
+        rows = _rebalance_rows(body, cutoff)
         if title == VOLATIS_TITLE:
             add(
                 "volatis_strategy_rebalance_history.csv",
@@ -745,7 +833,7 @@ def derive_csv_files(
                 _csv_bytes(HEADERS["fund_rebalance"], rows),
             )
     invest_files, invest_facts = _invest(
-        need("funds.invest"), volatis_pricehistory, dashboard_body
+        need("funds.invest"), volatis_pricehistory, dashboard_body, cutoff
     )
     for name, content in invest_files.items():
         add(name, content)
@@ -754,6 +842,7 @@ def derive_csv_files(
             f"required datasets missing: {sorted(REQUIRED_FILES - set(files))}"
         )
     facts: dict[str, object] = {
+        "excluded_after_cutoff": dict(sorted(cutoff.excluded.items())),
         "total_wins_source_fund": wins_source,
         "volatis_pricehistory": volatis_pricehistory,
         **invest_facts,
@@ -847,7 +936,9 @@ def _derive(
 
     root, manifest, record, report = _load_intake(intake_dir)
     responses = _bound_responses(root, manifest, record)
-    csv_files, facts = derive_csv_files(responses, volatis_pricehistory)
+    csv_files, facts = derive_csv_files(
+        responses, volatis_pricehistory, manifest.cutoff
+    )
     intake_id = str(record["intake_id"])
     outputs: dict[str, bytes] = {
         f"source/csv/{name}": content for name, content in csv_files.items()
@@ -863,6 +954,7 @@ def _derive(
         for name, content in sorted(csv_files.items())
     ]
     conversion = {
+        "capture_date": manifest.session.captured_at.date().isoformat(),
         "converter": CONVERTER_ID,
         "csv_file_count": len(datasets),
         "csv_record_count": sum(int(item["rows"]) for item in datasets),
@@ -873,6 +965,12 @@ def _derive(
         "intake_id": intake_id,
         "manifest_sha256": record["manifest_sha256"],
         "records_sha256": report["records_sha256"],
+        "snapshot_files": sorted(
+            name
+            for name in csv_files
+            if name in _SNAPSHOT_FILES
+            or (name.startswith("dashboard_") and name.endswith("_holdings.csv"))
+        ),
         "runbook_sha256": _sha256(outputs["source/RUNBOOK_QUANTBASE.md"]),
         "schema_version": SCHEMA_VERSION,
     }
@@ -917,7 +1015,10 @@ def _output_dir(root: Path, out_root: Path, intake_id: str) -> Path:
             raise QuantbaseCsvError(
                 "out-root must be disjoint from the repository and the intake"
             )
-    return base / _OUTPUT_DIR / intake_id
+    holder = base / _OUTPUT_DIR
+    if holder.is_symlink() or (holder.exists() and not holder.is_dir()):
+        raise QuantbaseCsvError("output directory is linked or not a directory")
+    return holder / intake_id
 
 
 def convert(
@@ -934,7 +1035,8 @@ def convert(
         "conversion-report.json",
         "native-manifest.json",
     ]
-    target.mkdir(parents=True)
+    target.parent.mkdir(exist_ok=True)
+    target.mkdir()
     try:
         for relative in order:
             path = target / relative
