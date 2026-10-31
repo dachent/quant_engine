@@ -128,6 +128,13 @@ def resolve_api_credentials(
         raise CaptureRefusal("CREDENTIAL_PLAN_INVALID") from None
     if set(plan.fields) != CREDENTIAL_FIELDS:
         raise CaptureRefusal("CREDENTIAL_FIELDS_INVALID")
+    # The resolver returns one whole secret per candidate (the Key Vault source has
+    # no sub-fields), so one secret cannot serve both fields: it would hand the same
+    # value to key_id and key.  The two fields need two distinct secrets.
+    if {(c.source, c.name) for c in plan.fields["key_id"]} & {
+        (c.source, c.name) for c in plan.fields["key"]
+    }:
+        raise CaptureRefusal("CREDENTIAL_PLAN_SHARED_SECRET")
     try:
         values = CredentialResolver(
             sources if sources is not None else sources_from_config(config)

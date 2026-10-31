@@ -42,12 +42,14 @@ from quant_engine.portfolio123.capture_catalog import (
     CaptureRoute,
     capture_contract,
     catalog_sha256,
+    evidence_status,
     route_for,
 )
 from quant_engine.portfolio123.capture_shapes import (
     ShapeError,
     Spec,
     canonical_bytes,
+    redact_keys,
     validate_shape,
 )
 from quant_engine.web_contracts import (
@@ -84,7 +86,6 @@ _MATCHED = "MATCHED"
 _UNREVIEWED = "UNREVIEWED_ROUTE"
 _REPARSE_POINT = 0x0400
 _BINARY = getattr(os, "O_BINARY", 0)
-EVIDENCE_STATUS = "UNVERIFIED_SYNTHETIC_SHAPES"
 _MANIFEST_KEYS = frozenset(
     {
         "schema_version",
@@ -520,7 +521,9 @@ def _normalize_file(
     }
     if media == "json":
         try:
-            parsed = strict_json_object(source, label="export")
+            parsed = redact_keys(
+                strict_json_object(source, label="export"), route.redact
+            )
             validate_shape(parsed, _shape(route))
         except StrictJSONError:
             raise CaptureRefusal("SOURCE_NOT_STRICT_JSON") from None
@@ -634,7 +637,7 @@ def stage_run(request: StageRequest) -> RunSummary:
             "run_id": request.run_id,
             "form": request.form,
             "catalog_sha256": catalog_sha256(),
-            "evidence_status": EVIDENCE_STATUS,
+            "evidence_status": evidence_status(scope),
             "scope": list(scope),
             "captured_at": captured_at.isoformat(),
             "session_expires_at": None
@@ -681,6 +684,14 @@ def _parse_time(value: object) -> datetime:
     if parsed.tzinfo is None:
         raise CaptureRefusal("MANIFEST_INVALID")
     return parsed
+
+
+def _unknown(capability: str) -> bool:
+    try:
+        route_for(capability)
+    except CaptureRefusal:
+        return True
+    return False
 
 
 def _check_records(normalized: bytes, scope: tuple[str, ...], form: str) -> None:
@@ -749,7 +760,6 @@ def verify_run(
         or manifest["kind"] != KIND
         or manifest["run_id"] != run_id
         or manifest["restricted"] is not True
-        or manifest["evidence_status"] != EVIDENCE_STATUS
         or manifest["raw_contains_session_material"]
         is not (manifest["form"] == FORM_HAR)
         or not isinstance(manifest["allow_partial"], bool)
@@ -799,6 +809,12 @@ def verify_run(
         raise CaptureRefusal("SOURCE_HASH_MISMATCH")
     scope = manifest["scope"]
     if not isinstance(scope, list) or scope != sorted(scope):
+        raise CaptureRefusal("MANIFEST_INVALID")
+    if not all(isinstance(item, str) for item in scope) or any(
+        _unknown(str(item)) for item in scope
+    ):
+        raise CaptureRefusal("MANIFEST_INVALID")
+    if manifest["evidence_status"] != evidence_status(scope):
         raise CaptureRefusal("MANIFEST_INVALID")
     expires = manifest["session_expires_at"]
     _check_records(
