@@ -79,6 +79,7 @@ from zoneinfo import ZoneInfo
 
 from quant_engine.core import canonical_json_bytes, strict_json_loads
 from quant_engine.schwab import (
+    CurrentSnapshot,
     SchwabGenerationError,
     SchwabReadError,
     build_generation,
@@ -781,12 +782,7 @@ def ingest(
 
     current_dir = output_root / "current"
     current_dir.mkdir()
-    snapshot_bytes = canonical_json_bytes(
-        {
-            **json.loads(current_snapshot_bytes(snapshot)),
-            "valuation_cutoff": cutoff.as_of_date.isoformat(),
-        }
-    )
+    snapshot_bytes = snapshot_document_bytes(snapshot, cutoff.as_of_date)
     snapshot_meta = _write_new(current_dir / "current-snapshot.json", snapshot_bytes)
     digest, size = str(snapshot_meta["sha256"]), int(str(snapshot_meta["size_bytes"]))
     record(
@@ -936,6 +932,17 @@ def _without_zero_quantity_rows(raw: object) -> tuple[dict[str, Any], int]:
             dropped += len(rows) - len(kept)
             group["holdingsRows"] = kept
     return document, dropped
+
+
+def snapshot_document_bytes(snapshot: CurrentSnapshot, cutoff_day: date) -> bytes:
+    """The schema-2 snapshot document with the explicit ``valuation_cutoff``."""
+
+    return canonical_json_bytes(
+        {
+            **json.loads(current_snapshot_bytes(snapshot)),
+            "valuation_cutoff": cutoff_day.isoformat(),
+        }
+    )
 
 
 def _market_value(row: Mapping[str, object]) -> object:
