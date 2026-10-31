@@ -36,6 +36,23 @@ stale or incomplete. A hand list on such a group is refused. The derivation (man
 sha256, end, inception) is written into the effective config, so the config hash binds
 it, and `verify` re-parses the staged config as already resolved.
 
+## Official closes for the Schwab ingest
+
+A daily `yfinance` group with `history` and `official_closes: {}` also emits
+`official-closes/<SYMBOL>_yahoo_daily.csv`, the format `tools/schwab_generation.py`
+(`_official_closes`) and the Schwab capture ingest read: header
+`date,open,high,low,close,adjclose,volume,dividend`, one row per bar. The ingest values
+a position as quantity x the `close` column of the cutoff date, so `close` is the raw
+daily Close (`raw/<group>/history.csv` column `Close`, text copied unchanged; Yahoo's
+`Close` is split-adjusted, not dividend-adjusted) and `adjclose` is `Adj Close`. The
+`history_adjusted` artifact has `Close = Adj Close` and must never feed a valuation.
+Files from several groups are merged into one directory; two groups disagreeing on a
+bar refuse the run, and every name must have a bar on the cutoff date. A group with
+`symbols_from: "schwab-positions"` takes its symbols from `--schwab-positions
+<run>/normalized/positions.json` (`/` and `.` become `-` for Yahoo; the file name is the
+Schwab symbol with `/` written as `.`). `verify` rebuilds each file from the raw CSV and
+rejects any difference.
+
 ## Symbol resolution and admission
 
 An id in `symbol_resolution` is fetched only through `resolved_ticker`, which requires
@@ -98,7 +115,7 @@ Close = Adj Close).
 python tools/yahoo_fetch_driver.py config-check --config <config> [--cutoff D] [--tt-source-manifest M]
 python tools/yahoo_fetch_driver.py probe  --config <config> --stage-root <root> --run-id <id> (--governance <evidence.json> | --recorded-dir <dir>) [--cutoff D] [--tt-source-manifest M]
 python tools/yahoo_fetch_driver.py apply-admissions --config <config> --probe-run <root>/<id> --out <new-config> [--cutoff D] [--tt-source-manifest M]
-python tools/yahoo_fetch_driver.py fetch  --config <config> --stage-root <root> --run-id <id> --governance <evidence.json> [--cutoff D] [--tt-source-manifest M] [--allow-unresolved]
+python tools/yahoo_fetch_driver.py fetch  --config <config> --stage-root <root> --run-id <id> --governance <evidence.json> [--cutoff D] [--tt-source-manifest M] [--schwab-positions P] [--allow-unresolved]
 python tools/yahoo_fetch_driver.py verify <root>/<id>
 python tools/yahoo_fetch_driver.py verify-retained --artifact A [--manifest M] --cutoff D --min-rows N --max-missing-weekdays N [--calendar every_day] [--kind chart --symbol S --start D --max-null-closes N [--derive-out path]] [--report path]
 ```

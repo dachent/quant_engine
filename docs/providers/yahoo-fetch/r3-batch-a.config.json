@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "run_label": "r3-batch-a",
-  "note": "R3 Batch A public Yahoo pull (pull list ids VTMA-P1..P3, QSI-P1, TT-P1/LEV-P1, VOL-P1, ROB-P2, EU-P2). The cutoff is data and defaults to the delivery's owner-selected EOD 2026-09-17 (AGENTS.md); pull-list windows to 2026-10-09 are a separately authorized incremental refresh and need an explicit --cutoff. tt-daily symbols and start are DERIVED from the TT source manifest (--tt-source-manifest), never listed. EU ids stay UNRESOLVED until probe admits a candidate against its reference.",
+  "note": "R3 Batch A public Yahoo pull (pull list ids VTMA-P1..P3, QSI-P1, TT-P1/LEV-P1, VOL-P1, ROB-P2, EU-P2). The cutoff is data and defaults to the delivery's owner-selected EOD 2026-09-17 (AGENTS.md); pull-list windows to 2026-10-09 are a separately authorized incremental refresh and need an explicit --cutoff. tt-daily symbols and start are DERIVED from the TT source manifest (--tt-source-manifest), never listed. EU ids stay UNRESOLVED until probe admits a candidate against its reference. held-closes derives the held equity symbols from the Schwab driver run (--schwab-positions) and emits official-closes/<SYMBOL>_yahoo_daily.csv (raw daily Close) for the Schwab ingest.",
   "cutoff": "2026-09-17",
   "limits": {
     "batch_size": 20,
@@ -11,6 +11,20 @@
     "retry_backoff_seconds": 2.0
   },
   "groups": [
+    {
+      "group_id": "held-closes",
+      "kind": "yfinance",
+      "symbols_from": "schwab-positions",
+      "start_offset_days_before_through": 10,
+      "interval": "1d",
+      "through": "cutoff",
+      "datasets": [
+        "history"
+      ],
+      "min_rows": 5,
+      "max_missing_weekdays": 3,
+      "official_closes": {}
+    },
     {
       "group_id": "vtma-spxl-60m",
       "kind": "yfinance",

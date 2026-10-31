@@ -72,6 +72,7 @@ VALID_INTERVALS = frozenset(
 _TICKER = re.compile(r"[A-Za-z0-9^][A-Za-z0-9^.=\-]{0,23}\Z")
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,79}\Z")
 _LABEL = re.compile(r"[A-Z][A-Z0-9_]{5,63}\Z")
+_OFFICIAL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,23}\Z")
 _GROUP_ID = re.compile(r"[a-z0-9][a-z0-9-]{1,47}\Z")
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _REVIEW = re.compile(
@@ -232,6 +233,7 @@ class Group:
     first_bar_tolerance_days: int
     allowed_last_bar_lag_days: int
     exceptions: tuple[ExceptionLabel, ...]
+    official_names: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -321,8 +323,9 @@ _DERIVED_OPTIONAL = {
     "symbols_from",
     "symbols_must_include",
     "start_offset_days_before_inception",
+    "start_offset_days_before_through",
 }
-_DERIVED_SOURCES = frozenset({"tt-source-manifest"})
+_DERIVED_SOURCES = frozenset({"tt-source-manifest", "schwab-positions"})
 _GROUP_OPTIONAL = {
     "calendar",
     "datasets",
@@ -331,6 +334,7 @@ _GROUP_OPTIONAL = {
     "first_bar_tolerance_days",
     "allowed_last_bar_lag_days",
     "exceptions",
+    "official_closes",
 } | _DERIVED_OPTIONAL
 
 
@@ -395,6 +399,31 @@ def _parse_group(raw: object, cutoff: date, index: int) -> Group:
         exceptions.append(
             ExceptionLabel(entry["symbol"], entry["rule"], entry["label"])
         )
+    official_names: dict[str, str] | None = None
+    if "official_closes" in value:
+        official = _strict(
+            value["official_closes"],
+            set(),
+            f"{group_id}.official_closes",
+            {"names"},
+        )
+        if kind != "yfinance" or interval != "1d" or "history" not in datasets_raw:
+            raise DriverError(
+                f"{group_id}: official closes need a daily yfinance group with history"
+            )
+        names = official.get("names", {})
+        if (
+            not isinstance(names, dict)
+            or not set(names) <= set(symbols)
+            or not all(
+                isinstance(v, str) and _OFFICIAL_NAME.fullmatch(v)
+                for v in names.values()
+            )
+        ):
+            raise DriverError(f"{group_id}: official_closes.names is invalid")
+        official_names = {t: str(names.get(t, t)) for t in symbols}
+        if len(set(official_names.values())) != len(official_names):
+            raise DriverError(f"{group_id}: official close names collide")
     return Group(
         group_id=group_id,
         kind=str(kind),
@@ -421,6 +450,7 @@ def _parse_group(raw: object, cutoff: date, index: int) -> Group:
             f"{group_id}.allowed_last_bar_lag_days",
         ),
         exceptions=tuple(exceptions),
+        official_names=official_names,
     )
 
 
@@ -613,8 +643,39 @@ def derive_tt_inputs(manifest_path: Path, end: date) -> dict[str, Any]:
     }
 
 
+def derive_schwab_positions(positions_path: Path) -> dict[str, Any]:
+    """Held equity symbols of a verified Schwab driver run (``normalized/positions.json``).
+
+    Provider tickers replace ``/`` and ``.`` by ``-`` (``BRK/B`` -> ``BRK-B``); the
+    official-close file name is the Schwab symbol with ``/`` written as ``.`` (a file
+    name cannot hold ``/``); if Schwab spells it differently the ingest refuses the
+    missing close.
+    """
+    body = positions_path.read_bytes()
+    try:
+        document = json.loads(body.decode("utf-8"))
+        symbols = {str(row["symbol"]) for row in document["positions"]}
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DriverError("Schwab positions file shape differs") from exc
+    if not symbols:
+        raise DriverError("Schwab positions file holds no positions")
+    names = {
+        re.sub(r"[./]", "-", sym): sym.replace("/", ".") for sym in sorted(symbols)
+    }
+    if len(names) != len(symbols):
+        raise DriverError("two held symbols map to one provider ticker")
+    return {
+        "symbols": sorted(names),
+        "names": names,
+        "positions_sha256": sha256_hex(body),
+    }
+
+
 def _materialize(
-    value: dict[str, Any], cutoff: date, tt_manifest: Path | None
+    value: dict[str, Any],
+    cutoff: date,
+    tt_manifest: Path | None,
+    schwab_positions: Path | None = None,
 ) -> dict[str, Any]:
     """Fill derived group fields from their declared source; refuse hand lists."""
     derivations: dict[str, Any] = {}
@@ -627,6 +688,35 @@ def _materialize(
             raise DriverError(f"{gid}: symbols_from is unsupported")
         if "symbols" in group or "start" in group:
             raise DriverError(f"{gid}: a derived group must not list symbols or start")
+        if source == "schwab-positions":
+            if schwab_positions is None:
+                raise DriverError(
+                    f"{gid}: needs --schwab-positions to derive its symbols"
+                )
+            through_s = group.get("through")
+            end_s = (
+                cutoff if through_s == "cutoff" else _day(through_s, f"{gid}.through")
+            )
+            offset_s = group.get("start_offset_days_before_through")
+            if (
+                isinstance(offset_s, bool)
+                or not isinstance(offset_s, int)
+                or offset_s < 1
+            ):
+                raise DriverError(
+                    f"{gid}: start_offset_days_before_through is required"
+                )
+            held = derive_schwab_positions(schwab_positions)
+            derivations[f"{source}:{end_s.isoformat()}"] = {
+                "positions_sha256": held["positions_sha256"],
+                "end": end_s.isoformat(),
+                "symbols": held["symbols"],
+            }
+            group["symbols"] = list(held["symbols"])
+            group["start"] = (end_s - timedelta(days=offset_s)).isoformat()
+            if "official_closes" in group:
+                group["official_closes"] = {"names": dict(held["names"])}
+            continue
         if tt_manifest is None:
             raise DriverError(
                 f"{gid}: needs --tt-source-manifest to derive its symbols"
@@ -663,6 +753,7 @@ def parse_config(
     *,
     cutoff_override: str | None = None,
     tt_source_manifest: Path | None = None,
+    schwab_positions: Path | None = None,
     resolved: bool = False,
 ) -> Config:
     try:
@@ -695,7 +786,7 @@ def parse_config(
     else:
         if "derivations" in value:
             raise DriverError("derivations are written by the driver, not supplied")
-        _materialize(value, cutoff, tt_source_manifest)
+        _materialize(value, cutoff, tt_source_manifest, schwab_positions)
     groups = tuple(_parse_group(item, cutoff, i) for i, item in enumerate(groups_raw))
     if len({g.group_id for g in groups}) != len(groups):
         raise DriverError("config repeats a group_id")
@@ -1265,6 +1356,87 @@ def _namespace(
     )
 
 
+OFFICIAL_COLUMNS = (
+    "date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "adjclose",
+    "volume",
+    "dividend",
+)
+
+
+def official_close_rows(
+    group: Group, raw: bytes, pairs: Sequence[tuple[str, str]]
+) -> dict[str, dict[str, list[str]]]:
+    """Per official-close name, ``date -> [open, high, low, close, adjclose, volume, dividend]``.
+
+    Values are the raw CSV text, unchanged. ``close`` is the raw daily ``Close`` column
+    (split-adjusted by Yahoo, not dividend-adjusted); ``adjclose`` is ``Adj Close``.
+    """
+    names = group.official_names or {}
+    out: dict[str, dict[str, list[str]]] = {}
+    for row in csv.DictReader(io.StringIO(raw.decode("utf-8"), newline="")):
+        ticker = row["Ticker"]
+        if ticker not in names:
+            continue
+        out.setdefault(names[ticker], {})[row["Date"][:10]] = [
+            row["Open"],
+            row["High"],
+            row["Low"],
+            row["Close"],
+            row["Adj Close"],
+            row["Volume"],
+            row["Dividends"],
+        ]
+    return out
+
+
+def merge_official(
+    parts: Sequence[dict[str, dict[str, list[str]]]],
+) -> dict[str, dict[str, list[str]]]:
+    merged: dict[str, dict[str, list[str]]] = {}
+    for part in parts:
+        for name, rows in part.items():
+            target = merged.setdefault(name, {})
+            for day, values in rows.items():
+                if target.setdefault(day, values) != values:
+                    raise DriverError(f"{name}: groups disagree on the {day} bar")
+    return merged
+
+
+def official_files(merged: Mapping[str, Mapping[str, list[str]]]) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    for name in sorted(merged):
+        lines = [",".join(OFFICIAL_COLUMNS)]
+        lines += [",".join([day, *merged[name][day]]) for day in sorted(merged[name])]
+        files[f"official-closes/{name}_yahoo_daily.csv"] = (
+            "\n".join(lines) + "\n"
+        ).encode("utf-8")
+    return files
+
+
+def official_coverage(
+    merged: Mapping[str, Mapping[str, list[str]]], cutoff: date
+) -> tuple[dict[str, Any], list[str]]:
+    failures = []
+    names: dict[str, Any] = {}
+    for name in sorted(merged):
+        days = sorted(merged[name])
+        at_cutoff = merged[name].get(cutoff.isoformat())
+        names[name] = {
+            "first": days[0],
+            "last": days[-1],
+            "cutoff_close": None if at_cutoff is None else at_cutoff[3],
+            "cutoff_adjclose": None if at_cutoff is None else at_cutoff[4],
+        }
+        if at_cutoff is None:
+            failures.append(f"official close for {name} has no bar on {cutoff}")
+    return {"column": "close = raw daily Close", "names": names}, failures
+
+
 def build_tape(
     adapter: Any,
     group: Group,
@@ -1370,6 +1542,7 @@ def run_fetch(
     coverage_groups: list[dict[str, Any]] = []
     files: dict[str, bytes] = {}
     not_fetched: list[dict[str, str]] = []
+    official_parts: list[dict[str, dict[str, list[str]]]] = []
     adapter = (
         load_adapter() if any(g.kind == "yfinance" for g in config.groups) else None
     )
@@ -1413,6 +1586,8 @@ def run_fetch(
             try:
                 entries = analyze_raw_csv(group, raw_csv, pairs)
                 files.update(build_tape(adapter, group, config, frame, tickers))
+                if group.official_names is not None:
+                    official_parts.append(official_close_rows(group, raw_csv, pairs))
             except DriverError as exc:
                 failures.append(f"{group.group_id}: {exc}")
                 continue
@@ -1450,11 +1625,21 @@ def run_fetch(
         coverage_groups.append(
             {"group_id": group.group_id, "kind": group.kind, "symbols": entries}
         )
-    coverage = {
+    coverage: dict[str, Any] = {
         "cutoff": config.cutoff.isoformat(),
         "groups": coverage_groups,
         "not_fetched": not_fetched,
     }
+    if official_parts:
+        try:
+            merged = merge_official(official_parts)
+            coverage["official_closes"], official_failures = official_coverage(
+                merged, config.cutoff
+            )
+            failures.extend(official_failures)
+            files.update(official_files(merged))
+        except DriverError as exc:
+            failures.append(str(exc))
     if failures:
         path = _reject(
             stage_root,
@@ -2018,6 +2203,7 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
         )
     stored = _load_json(run_dir / "coverage.json")
     groups_out: list[dict[str, Any]] = []
+    official_parts: list[dict[str, dict[str, list[str]]]] = []
     for group in config.groups:
         try:
             pairs = _pairs_from(config, group, manifest)
@@ -2039,6 +2225,8 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
                 _verify_artifact_pair(
                     run_dir, group, dataset, pairs, raw_rows, problems
                 )
+            if group.official_names is not None:
+                official_parts.append(official_close_rows(group, raw_bytes, pairs))
         else:
             entries = []
             for i, t in pairs:
@@ -2062,11 +2250,36 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
             problems.extend(
                 f"{group.group_id}/{entry['id']}: {m}" for m in entry["failures"]
             )
-    recomputed = {
+    recomputed: dict[str, Any] = {
         "cutoff": config.cutoff.isoformat(),
         "groups": groups_out,
         "not_fetched": manifest.get("not_fetched", []),
     }
+    if official_parts:
+        try:
+            merged = merge_official(official_parts)
+            recomputed["official_closes"], official_failures = official_coverage(
+                merged, config.cutoff
+            )
+            problems.extend(official_failures)
+            for name, expected in official_files(merged).items():
+                staged_file = run_dir / name
+                if not staged_file.is_file() or staged_file.read_bytes() != expected:
+                    problems.append(
+                        f"{name} is not the raw-Close file of the raw bytes"
+                    )
+            staged_names = (
+                {
+                    p.relative_to(run_dir).as_posix()
+                    for p in (run_dir / "official-closes").glob("*")
+                }
+                if (run_dir / "official-closes").is_dir()
+                else set()
+            )
+            if staged_names != set(official_files(merged)):
+                problems.append("official-closes holds files the raw bytes do not give")
+        except DriverError as exc:
+            problems.append(str(exc))
     if canonical(recomputed) != canonical(stored):
         problems.append(
             "coverage.json differs from coverage re-derived from the raw bytes"
@@ -2261,6 +2474,7 @@ def _parser() -> argparse.ArgumentParser:
             "--cutoff", default=None, help="override config cutoff (ISO date)"
         )
         cmd.add_argument("--tt-source-manifest", type=Path, default=None)
+        cmd.add_argument("--schwab-positions", type=Path, default=None)
         if name == "fetch":
             cmd.add_argument("--allow-unresolved", action="store_true")
         else:
@@ -2271,6 +2485,7 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--config", type=Path, required=True)
     check.add_argument("--cutoff", default=None)
     check.add_argument("--tt-source-manifest", type=Path, default=None)
+    check.add_argument("--schwab-positions", type=Path, default=None)
     apply = sub.add_parser(
         "apply-admissions",
         help="write a config with the probe's admitted ids CONFIRMED (create-only)",
@@ -2280,6 +2495,7 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--out", type=Path, required=True)
     apply.add_argument("--cutoff", default=None)
     apply.add_argument("--tt-source-manifest", type=Path, default=None)
+    apply.add_argument("--schwab-positions", type=Path, default=None)
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
     )
@@ -2320,6 +2536,7 @@ def _load_config(args: argparse.Namespace) -> Config:
         _config_bytes(args.config),
         cutoff_override=args.cutoff,
         tt_source_manifest=args.tt_source_manifest,
+        schwab_positions=args.schwab_positions,
     )
 
 
@@ -2356,6 +2573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.probe_run,
                     cutoff_override=args.cutoff,
                     tt_source_manifest=args.tt_source_manifest,
+                    schwab_positions=args.schwab_positions,
                 ),
             )
             print(f"wrote {args.out}")

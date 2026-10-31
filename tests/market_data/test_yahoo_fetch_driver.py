@@ -1235,3 +1235,130 @@ def test_retained_chart_derive_out_is_cutoff_clean(tmp_path: Path) -> None:
     assert artifact.read_bytes() == raw
     with pytest.raises(FileExistsError):
         driver.verify_retained(artifact, derive_out=out, **common)
+
+
+# ----------------------------------------------- official closes (Schwab ingest)
+
+
+def _positions(tmp_path: Path, symbols: list[str]) -> Path:
+    path = tmp_path / "positions.json"
+    path.write_text(json.dumps({"positions": [{"symbol": s} for s in symbols]}))
+    return path
+
+
+def _held_config() -> bytes:
+    group = _group("held-closes", symbols_from="schwab-positions", datasets=["history"])
+    del group["symbols"], group["start"]
+    group.update(
+        start_offset_days_before_through=10,
+        min_rows=5,
+        official_closes={},
+    )
+    return _config([group])
+
+
+def test_official_close_files_carry_the_raw_close_not_adj_close(tmp_path: Path) -> None:
+    positions = _positions(tmp_path, ["SPY", "BRK/B", "SPY"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    group = config.groups[0]
+    assert group.symbols == ("BRK-B", "SPY")
+    assert group.official_names == {"BRK-B": "BRK.B", "SPY": "SPY"}
+    run = driver.run_fetch(
+        config,
+        stage_root=tmp_path / "s",
+        run_id="held-run",
+        yf=FakeYF(),
+        chart=FakeChart(),
+        now=NOW,
+    )
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    files = sorted(p.name for p in (run / "official-closes").iterdir())
+    assert files == ["BRK.B_yahoo_daily.csv", "SPY_yahoo_daily.csv"]
+    spy = (run / "official-closes/SPY_yahoo_daily.csv").read_text().splitlines()
+    assert spy[0] == "date,open,high,low,close,adjclose,volume,dividend"
+    last = spy[-1].split(",")
+    assert last[0] == CUTOFF
+    close, adj = float(last[4]), float(last[5])
+    assert adj == pytest.approx(close * 0.98)  # the fake gives Adj Close = 0.98 x Close
+    assert close != adj
+    raw = (run / "raw/held-closes/history.csv").read_text().splitlines()
+    header = raw[0].split(",")
+    spy_last = [r.split(",") for r in raw[1:] if r.startswith("SPY,")][-1]
+    assert header[5] == "Close" and header[6] == "Adj Close"
+    assert (
+        spy_last[5] == last[4]
+    )  # official `close` is the raw `Close` column, text for text
+    coverage = json.loads((run / "coverage.json").read_text())["official_closes"]
+    assert coverage["names"]["SPY"]["cutoff_close"] == last[4]
+
+
+def test_the_schwab_ingest_reader_takes_the_driver_files(tmp_path: Path) -> None:
+    from decimal import Decimal
+
+    schwab_generation = importlib.import_module("schwab_generation")
+    positions = _positions(tmp_path, ["SPY", "SPXL"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    run = driver.run_fetch(
+        config,
+        stage_root=tmp_path / "s",
+        run_id="ingest-run",
+        yf=FakeYF(),
+        chart=FakeChart(),
+        now=NOW,
+    )
+    closes = schwab_generation._official_closes(
+        run / "official-closes", date(2026, 10, 9)
+    )
+    assert set(closes) == {"SPXL", "SPY"}
+    raw = {
+        r.split(",")[0]: r.split(",")[5]
+        for r in (run / "raw/held-closes/history.csv").read_text().splitlines()[1:]
+        if r.split(",")[1].startswith(CUTOFF)
+    }
+    assert closes["SPY"] == Decimal(raw["SPY"])
+    assert closes["SPY"] != Decimal(raw["SPY"]) * Decimal("0.98")
+
+
+def test_official_close_file_tamper_and_missing_cutoff_bar(tmp_path: Path) -> None:
+    positions = _positions(tmp_path, ["SPY"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    run = driver.run_fetch(
+        config,
+        stage_root=tmp_path / "s",
+        run_id="tamper-run",
+        yf=FakeYF(),
+        chart=FakeChart(),
+        now=NOW,
+    )
+    target = run / "official-closes/SPY_yahoo_daily.csv"
+    original = target.read_bytes()
+    lines = original.decode().splitlines()
+    cols = lines[-1].split(",")
+    cols[4] = cols[5]  # swap the raw close for the adjusted close
+    target.write_bytes(("\n".join([*lines[:-1], ",".join(cols)]) + "\n").encode())
+    _rewrite_manifest(run, "official-closes/SPY_yahoo_daily.csv")
+    with pytest.raises(driver.DriverError, match="raw-Close file"):
+        driver.verify_run(run)
+    labelled = json.loads(_held_config())
+    labelled["groups"][0]["exceptions"] = []
+    with pytest.raises(driver.DriverError, match="rejected"):
+        driver.run_fetch(
+            config,
+            stage_root=tmp_path / "s2",
+            run_id="late-run",
+            yf=FakeYF(drop_after={"SPY": date(2026, 10, 7)}),
+            chart=FakeChart(),
+            now=NOW,
+        )
+
+
+def test_official_closes_need_a_daily_history_group_and_schwab_positions(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(driver.DriverError, match="needs --schwab-positions"):
+        driver.parse_config(_held_config())
+    bad = json.loads(_config([_group(interval="60m", official_closes={})]))
+    with pytest.raises(driver.DriverError, match="official closes need"):
+        driver.parse_config(json.dumps(bad).encode())
+    with pytest.raises(driver.DriverError, match="no positions"):
+        driver.parse_config(_held_config(), schwab_positions=_positions(tmp_path, []))
