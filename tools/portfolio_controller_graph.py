@@ -177,6 +177,11 @@ _PATH_STAGES = {
     # Stages an unpublished derived-return candidate from retained bytes; the weekly
     # builder reads only the pinned generation it is handed, never this tool.
     "tools/portfolio_grizzly_signal_replay.py": [],
+    # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
+    # create-only run directory; no stage reads it, only a pinned run it is handed.
+    "tools/grizzlybulls_capture.py": [],
+    # Offline signal-vs-fill comparison report; informational, never a stage input.
+    "tools/grizzlybulls_schwab_crosscheck.py": [],
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],

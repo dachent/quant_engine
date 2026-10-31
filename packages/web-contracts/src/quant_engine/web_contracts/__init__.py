@@ -13,6 +13,7 @@ from quant_engine.web_contracts.extract import (
     canonical_extraction,
     extract_har,
 )
+from quant_engine.web_contracts.grizzlybulls import GRIZZLYBULLS_CONTRACT
 from quant_engine.web_contracts.provenance import SOURCE_ANCHORS
 from quant_engine.web_contracts.portfolio123 import PORTFOLIO123_CONTRACT
 from quant_engine.web_contracts.quantbase import (
@@ -26,6 +27,7 @@ __version__ = "0.1.0"
 __all__ = [
     "EndpointContract",
     "ExtractedResponse",
+    "GRIZZLYBULLS_CONTRACT",
     "ProviderContract",
     "PORTFOLIO123_CONTRACT",
     "QUANTBASE_CONTRACT",

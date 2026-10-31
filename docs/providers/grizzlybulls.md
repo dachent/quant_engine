@@ -51,3 +51,49 @@ reviewing terms would require a separately approved provider issue.
 Recovery is non-destructive: leave the rejected branch and private source
 artifacts unchanged and do not advance any provider, strategy, portfolio, or
 publication pointer.
+
+## VTMA capture (issue #705, reopens the route for these endpoints only)
+
+Issue #705 (`PROVIDER-GB-VTMA-CAPTURE-001`) is the separately approved provider
+issue that #195 required. It admits only the READ_ONLY GET routes in
+`quant_engine.web_contracts.grizzlybulls`: `/api/models`, the Next.js
+`models.json` and `<slug>.json` pages, `/api/modelTradeHistory?slug=&mode=`
+(`mode` is `blended` or `live`; the page's "Download CSV" menu) and
+`/api/modelsHistorical?slug=` (optional; it returned HTTP 500 on 2026-10-30).
+`/api/user`, `/api/login`, `/api/logout` and `/api/create-portal-link` are never
+routed, read, or recorded. The rejection manifest above is unchanged.
+
+Raw response bytes are the evidence. The parsed summary is a derived layer, and
+the contract does not use `extract._sanitize` for output because its token and
+name rules mask legitimate data; `sanitization_audit` lists every value it would
+have masked and fails the run if any data field would change.
+
+### Operator steps
+
+1. Start a dedicated Edge or Chrome profile with a debug port, for example
+   `msedge --user-data-dir=<scratch profile> --remote-debugging-port=9333`, open
+   `https://grizzlybulls.com/models/vix-ta-macro-advanced`, and sign in yourself.
+   No agent handles the password or token.
+2. Discovery (only if a route changes): run
+   `python tools/grizzlybulls_capture.py discover --cdp-url http://127.0.0.1:9333 --output-root <new dir> --click-menu`.
+   It records method, path, query key names, status, content type, request header
+   names, and a type skeleton of JSON bodies; never values, tokens, or cookies.
+3. Capture:
+   `python tools/grizzlybulls_capture.py capture --cdp-url http://127.0.0.1:9333 --output-root <new dir> --slug vix-ta-macro-advanced`
+   (capture always clicks the menu items). The driver loads the model page, clicks the
+   page's own menu items so the page makes its own authenticated requests, and
+   stores each routed body untouched under `raw/` with a SHA-256. The output root
+   must not exist and must be outside any Git worktree and outside a synced
+   scratch root; use the governed data root for retained evidence.
+4. Verify: `python tools/grizzlybulls_capture.py verify --run-root <dir>`.
+5. Compare with Schwab (offline, informational):
+   `python tools/grizzlybulls_schwab_crosscheck.py --signals-csv <raw live history body> --schwab-catalog <generation>/schwab-generation.json --account-id account-61092059d066f056`.
+   Signals are not fills: the report gives lag, unmatched events and daily
+   long/flat disagreement, and gates nothing.
+
+Success test: the manifest status is `COMPLETE` (catalog, model page, and both
+`blended` and `live` history for every requested slug), `failures` is empty,
+`verify` passes, both history bodies parse as the trade-history CSV with monotonic,
+alternating signals from the reviewed vocabulary (`Buy`, `Sell`, `Rebuy`,
+`Hypothetical Sell`), and the last signal date reaches the page's stated end date.
+`INCOMPLETE_MISSING_CAPABILITY` and `FAILED_REQUIRED_CAPABILITY` exit non-zero.
