@@ -27,7 +27,10 @@ from quant_engine.core import (
     runtime_environment_sha256,
 )
 from quant_engine.core import CacheBaseError, run_storage, verify_if_promoted
-from quant_engine.core import code_identity
+from quant_engine.core import (
+    CODE_IDENTITY_COMMIT_SCHEME as COMMIT_SCHEME,
+    CODE_IDENTITY_TREE_SCHEME as TREE_SCHEME,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
 from quant_engine.portfolio_ledger import (
@@ -4447,19 +4450,15 @@ def _release_identity(repo: Path, claimed: object) -> tuple[str, str]:
     """
     head = _git(repo, "rev-parse", "HEAD")
     if claimed == head:
-        return head, code_identity.COMMIT_SCHEME
+        return head, COMMIT_SCHEME
     tree = _git(repo, "rev-parse", "HEAD^{tree}")
     if claimed == tree and len(tree) == 40:
-        return tree, code_identity.TREE_SCHEME
+        return tree, TREE_SCHEME
     raise MaterializationError("repository must be clean at the recipe commit")
 
 
 def _spec_identity_fields(scheme: str) -> dict[str, str]:
-    return (
-        {}
-        if scheme == code_identity.COMMIT_SCHEME
-        else {"code_identity_scheme": scheme}
-    )
+    return {} if scheme == COMMIT_SCHEME else {"code_identity_scheme": scheme}
 
 
 def _validate_output_path_budget(output_root: Path, recipe: Mapping[str, Any]) -> None:
@@ -7994,8 +7993,8 @@ def _parser() -> argparse.ArgumentParser:
     attended_cmd.add_argument("--evaluated-on")
     attended_cmd.add_argument(
         "--code-identity-scheme",
-        choices=(code_identity.COMMIT_SCHEME, code_identity.TREE_SCHEME),
-        default=code_identity.COMMIT_SCHEME,
+        choices=(COMMIT_SCHEME, TREE_SCHEME),
+        default=COMMIT_SCHEME,
         help=(
             "release code identity: git-commit-v1 binds HEAD (default, legacy); "
             "git-tree-v2 binds HEAD^{tree} so a PR-head candidate can be promoted "
@@ -8331,10 +8330,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         REPOSITORY_ROOT,
                         "rev-parse",
                         "HEAD^{tree}"
-                        if getattr(
-                            args, "code_identity_scheme", code_identity.COMMIT_SCHEME
-                        )
-                        == code_identity.TREE_SCHEME
+                        if getattr(args, "code_identity_scheme", COMMIT_SCHEME)
+                        == TREE_SCHEME
                         else "HEAD",
                     ),
                     resume=args.resume,
