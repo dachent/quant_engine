@@ -1,79 +1,80 @@
 {
-  "capital_anchors": [
-    {
-      "account_id": "account-58e75e8d952fa1b8",
-      "amount": {
-        "currency": "USD",
-        "status": "AVAILABLE",
-        "value": "25027.43294966"
-      },
-      "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
-      "event_date": "2025-11-11",
-      "evidence_layer": "ACCOUNT_LIVE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-      "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
-      "mapping_status": "MAPPED",
-      "nav_recognition_date": "2025-11-13",
-      "nav_source_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "provider_id": "quantbase",
-      "record_id": "quantbase-capital-anchor:2025-11-11T04:43:37.477490+00:00",
-      "source_artifact_id": "source/csv/account_activity.csv",
-      "source_record_id": "2025-11-11T04:43:37.477490+00:00",
-      "strategy_id": "volatis-strategy"
-    }
-  ],
-  "nav_observations": [
-    {
-      "account_id": "account-58e75e8d952fa1b8",
-      "as_of_date": "2025-11-12",
-      "evidence_layer": "ACCOUNT_LIVE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-      "mapping_status": "MAPPED",
-      "market_value": {
-        "currency": "USD",
-        "status": "AVAILABLE",
-        "value": "29930.57"
-      },
-      "nav": {
-        "currency": "USD",
-        "status": "AVAILABLE",
-        "value": "29930.57"
-      },
-      "provider_id": "quantbase",
-      "record_id": "quantbase:2025-11-12",
-      "source_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "source_record_id": "2025-11-12",
-      "strategy_id": "volatis-strategy",
-      "value_basis": "ACCOUNT_TOTAL"
-    },
-    {
-      "account_id": "account-58e75e8d952fa1b8",
-      "as_of_date": "2025-11-13",
-      "evidence_layer": "ACCOUNT_LIVE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-      "mapping_status": "MAPPED",
-      "market_value": {
-        "currency": "USD",
-        "status": "AVAILABLE",
-        "value": "51561.59"
-      },
-      "nav": {
-        "currency": "USD",
-        "status": "AVAILABLE",
-        "value": "51561.59"
-      },
-      "provider_id": "quantbase",
-      "record_id": "quantbase:2025-11-13",
-      "source_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "source_record_id": "2025-11-13",
-      "strategy_id": "volatis-strategy",
-      "value_basis": "ACCOUNT_TOTAL"
-    }
-  ],
-  "provenance": {
-    "note": "verbatim raw nav_observations and capital_anchors rows for account-58e75e8d952fa1b8 (volatis-strategy), independent of any strategy_returns computation; used as the A6 independent oracle.",
-    "source_generation_id": "28cae8f06c86ad6bf11001db62e942d031e99702038632b981d8456d9696676a",
-    "source_path": "dataPortfolio/provider-ledger/generations/28cae8f06c86ad6bf11001db62e942d031e99702038632b981d8456d9696676a/provider-ledger.json",
-    "source_sha256": "6438ceebf7abce7faa534b07e299322df169be2c3fac55c8b6357e50183978c5"
+ "capital_anchors": [
+  {
+   "account_id": "account-58e75e8d952fa1b8",
+   "amount": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "19676.567785022692"
+   },
+   "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+   "event_date": "2025-11-11",
+   "evidence_layer": "ACCOUNT_LIVE",
+   "generation_id": "df065f376cbafa72b180495f77a559d528f2f386ef9180af7fb7e0fe609f2410",
+   "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+   "mapping_status": "MAPPED",
+   "nav_recognition_date": "2025-11-13",
+   "nav_source_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+   "provider_id": "quantbase",
+   "record_id": "quantbase-capital-anchor:2025-11-11T04:43:37.477490+00:00",
+   "source_artifact_id": "source/csv/account_activity.csv",
+   "source_record_id": "2025-11-11T04:43:37.477490+00:00",
+   "strategy_id": "volatis-strategy"
   }
+ ],
+ "nav_observations": [
+  {
+   "account_id": "account-58e75e8d952fa1b8",
+   "as_of_date": "2025-11-12",
+   "evidence_layer": "ACCOUNT_LIVE",
+   "generation_id": "df065f376cbafa72b180495f77a559d528f2f386ef9180af7fb7e0fe609f2410",
+   "mapping_status": "MAPPED",
+   "market_value": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "23531.414134"
+   },
+   "nav": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "23531.414134"
+   },
+   "provider_id": "quantbase",
+   "record_id": "quantbase:2025-11-12",
+   "source_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+   "source_record_id": "2025-11-12",
+   "strategy_id": "volatis-strategy",
+   "value_basis": "ACCOUNT_TOTAL"
+  },
+  {
+   "account_id": "account-58e75e8d952fa1b8",
+   "as_of_date": "2025-11-13",
+   "evidence_layer": "ACCOUNT_LIVE",
+   "generation_id": "df065f376cbafa72b180495f77a559d528f2f386ef9180af7fb7e0fe609f2410",
+   "mapping_status": "MAPPED",
+   "market_value": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "40537.722058"
+   },
+   "nav": {
+    "currency": "USD",
+    "status": "AVAILABLE",
+    "value": "40537.722058"
+   },
+   "provider_id": "quantbase",
+   "record_id": "quantbase:2025-11-13",
+   "source_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+   "source_record_id": "2025-11-13",
+   "strategy_id": "volatis-strategy",
+   "value_basis": "ACCOUNT_TOTAL"
+  }
+ ],
+ "provenance": {
+  "note": "verbatim raw nav_observations and capital_anchors rows for account-58e75e8d952fa1b8 (volatis-strategy), independent of any strategy_returns computation; used as the A6 independent oracle.",
+  "source_generation_id": "78fa1d402d3d8f540cbf39b5362980c063eef996d1eadee811204404f0966ee9",
+  "source_path": "dataPortfolio/provider-ledger/generations/78fa1d402d3d8f540cbf39b5362980c063eef996d1eadee811204404f0966ee9/provider-ledger.json",
+  "source_sha256": "e89d2349a2453cc376ba3c7f225ea48ee40e7d8a27207515b037ef2f6572c927",
+  "synthetic_note": "synthetic stand-in generated by tests/acceptance/make_synthetic_fixtures.py (issue 696); ids, labels and USD amounts are remapped, dimensionless ratios are unchanged; the real originals are in the governed data root"
+ }
 }

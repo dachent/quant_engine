@@ -9531,7 +9531,7 @@ def _manifest_row(**overrides: Any) -> dict[str, Any]:
         "internal_out": "0.00",
         "withdrawn": "0.00",
         "net_capital": "50000.00",
-        "current_value": "56832.54",
+        "current_value": "44681.742948",
         "gain": "6832.54",
         "mwr": "0.1367",
         "annualized_mwr": "0.2237",
@@ -10555,7 +10555,7 @@ def test_account_manifest_blocked_flows_through_build_and_verify(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "manifest",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     built_with = panel.build_candidate(
@@ -10756,7 +10756,7 @@ def test_financial_mode_requires_separately_selected_flow_coverage(
 ) -> None:
     """Omitting the receipt input must not let financial mode treat flows as zero."""
     manifest_path, authority = _produce_manifest(
-        tmp_path / "manifest", "56832.54", accepted_baseline_root=inputs["baseline"]
+        tmp_path / "manifest", "44681.742948", accepted_baseline_root=inputs["baseline"]
     )
     with pytest.raises(
         panel.ControlPanelValidationError,
@@ -10812,7 +10812,9 @@ def test_financial_manifest_rejects_mutated_flow_coverage_input(
 def test_financial_mode_does_not_reuse_generic_report_baseline(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    manifest_path, authority = _produce_manifest(tmp_path / "baseline-seam", "56832.54")
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "baseline-seam", "44681.742948"
+    )
     with pytest.raises(
         panel.ControlPanelValidationError,
         match="independently selected baseline root",
@@ -10861,7 +10863,7 @@ def test_financial_mode_rejects_manifest_from_a_different_as_of_candidate(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "date-seam",
-        "56832.54",
+        "44681.742948",
         as_of="2026-07-29",
         accepted_baseline_root=inputs["baseline"],
     )
@@ -10893,7 +10895,7 @@ def test_financial_mode_rejects_manifest_outside_usd_reporting_perimeter(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "eur-seam",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
         accounting_currency="EUR",
     )
@@ -10926,7 +10928,7 @@ def test_financial_mode_rejects_self_consistent_unapproved_policy_path(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "canonical",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     copied_policy = tmp_path / "copied-policy.json"
@@ -10959,7 +10961,7 @@ def test_financial_mode_rejects_report_unbound_manifest_baseline(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     manifest_path, authority = _produce_manifest(
-        tmp_path / "foreign-baseline", "56832.54"
+        tmp_path / "foreign-baseline", "44681.742948"
     )
 
     with pytest.raises(
@@ -11033,7 +11035,7 @@ def test_financial_mode_rebuild_rejects_independent_authority_drift(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / drifted_authority,
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     if drifted_authority == "ledger":
@@ -11107,7 +11109,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "status-downgrade",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -11173,7 +11175,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
 def test_account_manifest_snapshot_bytes_are_read_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest_path, _ = _produce_manifest(tmp_path / "snapshot", "56832.54")
+    manifest_path, _ = _produce_manifest(tmp_path / "snapshot", "44681.742948")
     original_read_bytes = Path.read_bytes
     reads = 0
 
@@ -11958,7 +11960,7 @@ def test_account_manifest_money_identity_fails_closed(
 def test_account_manifest_epoch_continuity_fails_closed(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    first = _manifest_row(strategy_id="strategy-a", current_value="56832.54")
+    first = _manifest_row(strategy_id="strategy-a", current_value="44681.742948")
     successor = _manifest_row(
         strategy_id="strategy-b",
         effective_start="2026-08-14",
@@ -11988,13 +11990,13 @@ def test_account_manifest_epoch_continuity_fails_closed(
 def test_account_manifest_v1_rollover_is_rejected(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    first = _manifest_row(strategy_id="strategy-a", current_value="56832.54")
+    first = _manifest_row(strategy_id="strategy-a", current_value="44681.742948")
     successor = _manifest_row(
         strategy_id="strategy-b",
         effective_start="2026-08-14",
-        **{"opening_capital": "56832.54"},
-        invested="56832.54",
-        net_capital="56832.54",
+        **{"opening_capital": "44681.742948"},
+        invested="44681.742948",
+        net_capital="44681.742948",
         current_value="57100.00",
         gain="267.46",
     )
@@ -12351,7 +12353,7 @@ def _financial_manifest_kwargs(
     target_dir: Path, accepted_baseline_root: Path
 ) -> dict[str, Any]:
     manifest_path, authority = _produce_manifest(
-        target_dir, "56832.54", accepted_baseline_root=accepted_baseline_root
+        target_dir, "44681.742948", accepted_baseline_root=accepted_baseline_root
     )
     return {
         "account_manifest_path": manifest_path,
@@ -12825,7 +12827,7 @@ def test_account_manifest_producer_to_publish_blocked_seam(
     verify -> publish, and distinct manifests must yield distinct panels."""
     manifest_path, authority = _produce_manifest(
         tmp_path / "primary",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     built = panel.build_candidate(
@@ -15302,7 +15304,7 @@ def test_a_rejected_lineage_suppresses_the_version_four_cost_rate_fields() -> No
         "annual_external_cost_rate_pre_tax": "0.07",
         "cost_rate_status": "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE",
         "cost_rate_reason": None,
-        "cost_rate_denominator_usd": "51233.9",
+        "cost_rate_denominator_usd": "40280.09218",
         "cost_rate_denominator_as_of_date": "2026-09-17",
         "cost_rate_denominator_basis": "CURRENT_CUTOFF",
         "cost_schedule_as_of_date": "2026-07-25",

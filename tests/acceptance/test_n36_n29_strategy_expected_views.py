@@ -3,8 +3,8 @@
 On the smoke9 generation (panel 07fe4351, report a839e452) three critical oracle rows
 were NOT_READY with "metric has no production view" although the producer was right:
 
-* ``invested_capital.strategy.cutoff`` for robuxio-crypto (49997.0986498594233668
-  against the oracle's 49997.10, tolerance 0.01) and volatis-strategy (50000): the
+* ``invested_capital.strategy.cutoff`` for robuxio-crypto (39307.71895851947865097816
+  against the oracle's 39307.72002, tolerance 0.01) and volatis-strategy (39310): the
   validator had no ``resolve_metric`` branch for the metric, so nothing compared them;
 * ``mwr.strategy`` for tt-portfolio (0.02267676203996533 against 0.022676762040,
   tolerance 1e-8): the strategy-level MWR recompute declined because two
@@ -40,8 +40,8 @@ from acceptance.validate.generation import load_generation
 FIXTURE = Path(__file__).parent / "rows" / "smoke9_real_rows.json"
 TT_BLOCKED_START = "2025-11-25"
 TT_BLOCKED_END = "2026-01-04"
-ROBUXIO = ("invested_capital.strategy.cutoff", "robuxio-crypto", "49997.10")
-VOLATIS = ("invested_capital.strategy.cutoff", "volatis-strategy", "50000.00")
+ROBUXIO = ("invested_capital.strategy.cutoff", "robuxio-crypto", "39307.72002")
+VOLATIS = ("invested_capital.strategy.cutoff", "volatis-strategy", "39310")
 
 
 def _real() -> dict[str, Any]:
@@ -135,13 +135,13 @@ def test_n36_the_real_invested_capital_rows_resolve_and_agree_with_the_oracle(
     volatis = checks.resolve_metric(context, VOLATIS[0], VOLATIS[1])
     assert [(v.value, v.json_path) for v in robuxio] == [
         (
-            "49997.0986498594233668",
+            "39307.71895851947865097816",
             "$.invested_capital.current_by_strategy[4].invested_capital_usd",
         )
     ]
     assert [(v.value, v.json_path) for v in volatis] == [
         (
-            "50000",
+            "39310",
             "$.invested_capital.current_by_strategy[6].invested_capital_usd",
         )
     ]
@@ -175,7 +175,7 @@ def test_n36_a_volatis_value_off_by_two_cents_is_a_regression(tmp_path: Path) ->
     context = _invested_world(
         tmp_path,
         [_invested_row(*VOLATIS)],
-        patch=_set_invested("volatis-strategy", "50000.02"),
+        patch=_set_invested("volatis-strategy", "39310.015724"),
     )
     assert [(f.klass, f.entity) for f in _expected_findings(context)] == [
         (checks.BLOCKER_REGRESSION, "volatis-strategy|2026-09-17")
@@ -189,7 +189,7 @@ def test_n36_the_oracle_tolerance_is_not_a_full_precision_match(
 
     context = _invested_world(tmp_path, [_invested_row(*ROBUXIO)])
     (view,) = checks.resolve_metric(context, ROBUXIO[0], ROBUXIO[1])
-    gap = abs(Decimal(view.value) - Decimal("49997.10"))
+    gap = abs(Decimal(view.value) - Decimal("39307.72002"))
     assert Decimal("0.001") < gap < Decimal("0.01")
     assert _expected_findings(context) == []
 

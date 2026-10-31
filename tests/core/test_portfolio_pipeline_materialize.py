@@ -5501,39 +5501,39 @@ def test_capital_gate_fails_closed_on_an_unreadable_registry(
 # generation): seven SYSTEMATIC strategies, their member NAVs, and the OWNER_318
 # derived custody cash lines the producer adds to robuxio-crypto and
 # volatis-strategy (portfolio_baseline._build_current_capital).  The published
-# strategy value is NAV + cash; the systematic total is 426101.61285957407210153065004
-# and the NAV-only sum is exactly the cash total (1973.918694572) lower.
+# strategy value is NAV + cash; the systematic total is 335001.088030197135486223397061448
+# and the NAV-only sum is exactly the cash total (1551.8948776725064) lower.
 _CUSTODY_BOOK: tuple[tuple[str, tuple[tuple[str, str], ...], str | None], ...] = (
-    ("grizzlybears-vtma", (("account-61092059d066f056", "51233.9"),), None),
-    ("p123-ai-factor", (("account-1b44c987969b9e47", "57200.875514128"),), None),
-    ("p123-eu", (("account-d69701da9143c430", "45464.686880028"),), None),
+    ("grizzlybears-vtma", (("account-61092059d066f056", "40280.09218"),), None),
+    ("p123-ai-factor", (("account-fdc2ab079a1b528d", "44971.3283292074336"),), None),
+    ("p123-eu", (("account-b1e024144369db48", "35744.3368250780136"),), None),
     (
         "qsi",
         (
-            ("account-38b653b91ff43a10", "48309.42"),
-            ("account-98f5986706ed53c5", "10628.97"),
+            ("account-38b653b91ff43a10", "37980.866004"),
+            ("account-4b0af91b8b321bea", "8356.496214"),
         ),
         None,
     ),
     (
         "robuxio-crypto",
-        (("account-d2e5821e608e25f1", "51126.09177084639756872065004"),),
-        "93.97474435567453281",
+        (("account-d2e5821e608e25f1", "40195.333350239437768528175061448"),),
+        "73.882944012431317695222",
     ),
     (
         "tt-portfolio",
         (
-            ("account-702c489650e59956", "3.81"),
-            ("account-a13937e26b8ae46d", "14520.86"),
-            ("account-c63d2a487e019790", "74492.29"),
-            ("account-cff10c44aedcf5e8", "12054.51"),
+            ("account-702c489650e59956", "2.995422"),
+            ("account-a13937e26b8ae46d", "11416.300132"),
+            ("account-4f916ac94694f24e", "58565.838398"),
+            ("account-723f83d32c51308c", "9477.255762"),
         ),
         None,
     ),
     (
         "volatis-strategy",
-        (("account-58e75e8d952fa1b8", "59092.28"),),
-        "1879.943950216",
+        (("account-58e75e8d952fa1b8", "46458.350536"),),
+        "1478.0119336598192",
     ),
 )
 # The weights baseline 347ed499 publishes, verbatim.
@@ -5546,8 +5546,8 @@ _CUSTODY_PUBLISHED_WEIGHTS = {
     "tt-portfolio": "0.2372003929337603452714571839230204",
     "volatis-strategy": "0.143093154567124318785452543586923",
 }
-_CUSTODY_SYSTEMATIC = "426101.61285957407210153065004"
-_CUSTODY_NAV_ONLY_SYSTEMATIC = "424127.69416500239756872065004"
+_CUSTODY_SYSTEMATIC = "335001.088030197135486223397061448"
+_CUSTODY_NAV_ONLY_SYSTEMATIC = "333449.193152524884968528175061448"
 
 
 def _custody_cash_line(account_id: str, value: str) -> dict[str, Any]:
@@ -5703,7 +5703,7 @@ def test_capital_gate_adds_the_owner_318_derived_custody_cash_lines() -> None:
     """The release tail's refusal, on its own numbers: the producer publishes each
     strategy at NAV + derived custody cash (OWNER_318), so the gate's recompute
     must add the same cash lines.  Unmodified, it recomputed NAV only and refused
-    426101.61285957407210153065004 against 424127.69416500239756872065004."""
+    335001.088030197135486223397061448 against 333449.193152524884968528175061448."""
 
     baseline = _custody_cash_baseline()
     assert (
@@ -5718,8 +5718,8 @@ def test_capital_gate_adds_the_owner_318_derived_custody_cash_lines() -> None:
     assert evidence["component_mismatches"] == []
     assert evidence["systematic_total_usd"] == _CUSTODY_SYSTEMATIC
     assert evidence["derived_cash_usd"] == {
-        "robuxio-crypto": "93.97474435567453281",
-        "volatis-strategy": "1879.943950216",
+        "robuxio-crypto": "73.882944012431317695222",
+        "volatis-strategy": "1478.0119336598192",
     }
     assert accepted is True
     assert evidence["identity_status"] == "NOT_READY"
@@ -5772,7 +5772,7 @@ def test_capital_gate_refuses_a_cash_line_its_own_events_do_not_sum_to() -> None
     honest = _custody_cash_baseline()
     tampered = copy.deepcopy(honest)
     line = _set_volatis_cash(tampered, "1979.943950216")
-    assert line["events"][0]["signed_usd"] == "1879.943950216"
+    assert line["events"][0]["signed_usd"] == "1478.0119336598192"
     capital = tampered["current_capital"]
     for row in capital["strategies"]:
         if row["strategy_id"] == "volatis-strategy":

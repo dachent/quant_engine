@@ -413,10 +413,10 @@ def test_a6_the_isolated_day_return_is_the_capital_identity_of_the_day(
     rows = _volatis_rows()
     published = Decimal(rows[DAY]["return"])
     assert abs(published - independent) < Decimal("1e-20")
-    # the deposit is real: the day begins at about 54958 after ending the day before at
-    # about 29931, and its neighbours are quiet (the A6 shape: one isolated move)
-    assert Decimal(rows[DAY]["beginning_capital"]) > Decimal("54000")
-    assert Decimal(rows["2025-11-12"]["beginning_capital"]) < Decimal("30000")
+    # the deposit is real: the day begins at about 43207.9796 after ending the day before at
+    # about 23531.7522, and its neighbours are quiet (the A6 shape: one isolated move)
+    assert Decimal(rows[DAY]["beginning_capital"]) > Decimal("42454.8")
+    assert Decimal(rows["2025-11-12"]["beginning_capital"]) < Decimal("23586")
     assert abs(Decimal(rows["2025-11-12"]["return"])) < Decimal("0.01")
     assert abs(Decimal(rows[NEXT_DAY]["return"])) < Decimal("0.01")
     context = _a6_world(tmp_path, expected=independent)

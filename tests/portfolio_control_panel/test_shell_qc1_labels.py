@@ -751,7 +751,7 @@ def test_snapshot_weight_names_the_recorded_perimeter_it_divides_by(
     payload["allocations"] = [
         {
             "as_of_date": "2026-08-16",
-            "current_value_usd": "56832.54",
+            "current_value_usd": "44681.742948",
             "scope": "SYSTEMATIC",
             "strategy_id": "grizzlybears-vtma",
             "strategy_name": "GrizzlyBears VTMA",

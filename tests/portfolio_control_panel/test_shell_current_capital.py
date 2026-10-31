@@ -165,7 +165,7 @@ def test_not_ready_components_are_hatched_and_the_ring_claims_no_sizes(
     dom = _run(
         tmp_path,
         _command_payload(
-            systematic="425056.98", reserve=None, retained=None, total=None
+            systematic="334179.797676", reserve=None, retained=None, total=None
         ),
         "renderCommand",
     )
@@ -183,7 +183,7 @@ def test_not_ready_components_are_hatched_and_the_ring_claims_no_sizes(
     assert "Not ready" in legend["reserve"]["body"]
     assert "is-hatched" in legend["reserve"]["body"]
     assert "is-hatched" not in legend["systematic"]["body"]
-    assert "$425,057" in legend["systematic"]["body"]
+    assert "$334,180" in legend["systematic"]["body"]
     kpis = dom["#command-kpis"]["innerHTML"]
     assert "Systematic plus reserve" not in kpis
     assert "Not ready" in kpis
@@ -298,7 +298,7 @@ def test_capital_view_kpi_does_not_call_a_missing_total_an_accepted_baseline(
     tmp_path: Path,
 ) -> None:
     payload = _command_payload(
-        systematic="425056.98", reserve=None, retained=None, total=None
+        systematic="334179.797676", reserve=None, retained=None, total=None
     )
     payload["counts"].update({"accounts": 12})
     payload["fact_status"] = {"positions": "AVAILABLE"}
@@ -316,7 +316,7 @@ def test_allocation_table_labels_the_dated_snapshot_basis(tmp_path: Path) -> Non
     payload["allocations"] = [
         {
             "as_of_date": "2026-08-16",
-            "current_value_usd": "56832.54",
+            "current_value_usd": "44681.742948",
             "scope": "SYSTEMATIC",
             "strategy_id": "grizzlybears-vtma",
             "strategy_name": "GrizzlyBears VTMA",
@@ -397,11 +397,11 @@ def _manifest_row(account_id: str, basis: str) -> dict[str, Any]:
         "account_id": account_id,
         "account_label": f"Label {account_id}",
         "annualized_return_on_net_capital": "0.1",
-        "current_value": "48120.06",
+        "current_value": "37831.991172",
         "end": "2026-09-17",
         "gain": "0",
-        "invested": "48120.06",
-        "net_capital": "48120.06",
+        "invested": "37831.991172",
+        "net_capital": "37831.991172",
         "observation_linked_return": "0.05",
         "observed_hwm_index": "1.1",
         "observed_max_drawdown": "-0.02",
@@ -508,7 +508,7 @@ def test_lineage_mismatch_command_text_keeps_the_words_the_interaction_qa_forbid
     """
 
     payload = _command_payload(
-        systematic="425056.98", reserve=None, retained=None, total=None
+        systematic="334179.797676", reserve=None, retained=None, total=None
     )
     payload["meta"] = {
         "performance_lineage": {
