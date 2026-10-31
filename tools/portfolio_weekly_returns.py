@@ -307,8 +307,10 @@ class AcceptedSpans:
 
     spans: dict[str, tuple[AcceptedSpan, ...]]
     daily_sha256: dict[str, str]
+    observed_end: dict[str, date]
 
 
+DEPENDENCE_RECEIPT_NAME: Final = "dependence-source.json"
 SPAN_TELESCOPE_TOLERANCE: Final = Decimal("1e-18")
 
 
@@ -321,7 +323,22 @@ def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
     """
 
     if path is None:
-        return AcceptedSpans({}, {}), []
+        return AcceptedSpans({}, {}, {}), []
+    # The coverage is authority only as the dependence source packaged it: the
+    # sibling receipt must name this exact file by hash and size.
+    receipt_path = path.parent / DEPENDENCE_RECEIPT_NAME
+    receipt_document = _load_json(receipt_path, "dependence source receipt")
+    authority = receipt_document.get("history_authority")
+    declared = authority.get("coverage") if isinstance(authority, dict) else None
+    actual_hash, actual_size = hash_file(path)
+    if (
+        not isinstance(declared, dict)
+        or declared.get("sha256") != actual_hash
+        or declared.get("size_bytes") != actual_size
+    ):
+        raise WeeklyReturnError(
+            "history coverage differs from the dependence source receipt"
+        )
     coverage = _load_json(path, "history coverage")
     series_by_strategy: dict[str, str] = {}
     for entry in _objects(coverage.get("strategies"), "history strategies"):
@@ -332,6 +349,7 @@ def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
             )
     spans: dict[str, tuple[AcceptedSpan, ...]] = {}
     daily_sha: dict[str, str] = {}
+    observed_end: dict[str, date] = {}
     for item in _objects(coverage.get("epoch_hpr_receipts"), "epoch HPR receipts"):
         if item.get("evidence_layer") != "ACCOUNT_LIVE":
             continue
@@ -378,7 +396,13 @@ def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
         daily_sha[series_id] = _text(
             receipt.get("daily_return_series_sha256"), "daily path sha"
         )
-    return AcceptedSpans(spans, daily_sha), [path]
+        try:
+            observed_end[series_id] = date.fromisoformat(
+                _text(receipt.get("observed_end"), "epoch HPR observed_end")
+            )
+        except ValueError as exc:
+            raise WeeklyReturnError("epoch HPR observed_end is invalid") from exc
+    return AcceptedSpans(spans, daily_sha, observed_end), [receipt_path, path]
 
 
 def _correlation_inputs(
@@ -719,7 +743,7 @@ def _strategy_rows(
             (observed_date, _decimal(row.get("return"), "strategy return"))
         )
 
-    accepted = accepted_spans or AcceptedSpans({}, {})
+    accepted = accepted_spans or AcceptedSpans({}, {}, {})
     unknown_spans = sorted(set(accepted.spans) - set(compositions["LIVE_ONLY"]))
     if unknown_spans:
         raise WeeklyReturnError(
@@ -755,7 +779,12 @@ def _strategy_rows(
             selected = live if mode == "LIVE_ONLY" else [*backtest, *live]
             span_links: list[AcceptedSpan] = []
             if series_id in accepted.spans:
-                if accepted.daily_sha256[series_id] != _canonical_series_sha256(live):
+                # The receipt hashes the whole epoch.  Where the epoch runs past the
+                # common cutoff the returns source is projected to it and cannot
+                # reproduce that hash; the receipt binding above is the authority.
+                if accepted.observed_end[series_id] <= as_of and accepted.daily_sha256[
+                    series_id
+                ] != (_canonical_series_sha256(live)):
                     raise WeeklyReturnError(
                         f"accepted spans do not bind the live daily path: {series_id}"
                     )

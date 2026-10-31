@@ -1224,6 +1224,8 @@ def _span_coverage(
     daily_sha: str | None = None,
     epoch_shift: Decimal = Decimal(0),
     strategy_id: str = "span-s",
+    observed_end: str = "2026-07-29",
+    bind: bool = True,
 ) -> Path:
     daily = [(date.fromisoformat(day), Decimal(r)) for day, r in SPAN_DAILY.items()]
     daily_wealth = Decimal(1)
@@ -1249,6 +1251,7 @@ def _span_coverage(
                         "daily_return_series_sha256": daily_sha
                         or weekly._canonical_series_sha256(daily),
                         "epoch_cumulative_return": str(epoch_wealth - 1 + epoch_shift),
+                        "observed_end": observed_end,
                         "span_return_receipts": [
                             {
                                 "return": value,
@@ -1263,6 +1266,19 @@ def _span_coverage(
                     },
                 }
             ],
+        },
+    )
+    # the dependence source packages this file by hash and size
+    digest = _sha(path)
+    _write_json(
+        path.parent / "dependence-source.json",
+        {
+            "history_authority": {
+                "coverage": {
+                    "sha256": digest if bind else "0" * 64,
+                    "size_bytes": path.stat().st_size,
+                }
+            }
         },
     )
     return path
@@ -1562,3 +1578,35 @@ def test_weekly_spans_must_equal_the_manifest_links_exactly(tmp_path: Path) -> N
     _write_json(gone, {"rows": [{"observation_trace": {"links": []}}]})
     with pytest.raises(builder.VerticalBuildError, match="manifest link"):
         builder._verify_weekly_spans_against_manifest(weekly_root, gone)
+
+
+def test_accepted_spans_bind_to_the_dependence_source_and_the_common_cutoff(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+
+    def build(coverage: Path) -> dict[str, Any]:
+        payload, _ = weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, None, coverage
+        )
+        return payload
+
+    # a coverage the dependence source receipt does not name is not authority
+    with pytest.raises(weekly.WeeklyReturnError, match="dependence source receipt"):
+        build(_span_coverage(tmp_path / "unbound.json", bind=False))
+    unbound = tmp_path / "other" / "history-coverage.json"
+    unbound.parent.mkdir()
+    _span_coverage(unbound)
+    (unbound.parent / "dependence-source.json").unlink()
+    with pytest.raises(weekly.WeeklyReturnError, match="dependence source receipt"):
+        build(unbound)
+    # an epoch that runs past the common cutoff cannot reproduce its full-epoch daily
+    # hash from the projected returns, so only the receipt binding applies
+    ragged = build(
+        _span_coverage(
+            tmp_path / "ragged.json", daily_sha="0" * 64, observed_end="2026-08-15"
+        )
+    )
+    values = _span_series(ragged, SPAN_SERIES)["values_by_mode"]["LIVE_ONLY"]
+    first = Decimal("1.01") * Decimal("1.02") * Decimal("0.97") * Decimal("1.005")
+    assert abs(Decimal(values["2026-07-20"]) - (first - 1)) < SPAN_TOLERANCE
