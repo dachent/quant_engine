@@ -1132,3 +1132,70 @@ def test_any_2xx_status_makes_a_route_a_candidate(tmp_path: Path) -> None:
         "/spr/aifactor/model/{id}"
     ]
     assert model["candidates"][0]["status_counts"] == {"206": 1}
+
+
+class _IdleTransport(FakeTransport):
+    """Replies to calls, then idles (timeouts) before the browser closes."""
+
+    def __init__(self, idle_polls: int) -> None:
+        super().__init__({})
+        self.idle = idle_polls
+
+    def receive(self, timeout: float) -> dict[str, Any] | None:
+        if self.inbound:
+            return self.inbound.popleft()
+        if self.idle > 0:
+            self.idle -= 1
+            return None
+        raise RecorderError("CDP_CLOSED")
+
+
+def _ticking() -> Any:
+    state = {"t": 0.0}
+
+    def clock() -> float:
+        state["t"] += 10.0
+        return state["t"]
+
+    return clock
+
+
+def test_zero_entries_warns_once_after_n_seconds(
+    run_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = Recorder(run_root, mode="discover")
+    Listener(_IdleTransport(20), recorder, warn_after=30.0, clock=_ticking()).run()
+    manifest = recorder.finish()
+    assert [w["code"] for w in manifest["warnings"]] == ["NO_ENTRIES_RECORDED"]
+    assert "after 30 s" in manifest["warnings"][0]["text"]
+    assert "start it FIRST" in manifest["warnings"][0]["text"]
+    err = capsys.readouterr().err
+    assert err.count("WARNING NO_ENTRIES_RECORDED") == 1
+    assert verify_run(run_root)["status"] == "DISCOVERY"
+
+
+def test_no_warning_when_something_was_recorded(
+    run_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = Recorder(run_root, mode="discover")
+    feed(recorder, "GET", f"{BASE}/a/b", b"{}")
+    Listener(_IdleTransport(20), recorder, warn_after=30.0, clock=_ticking()).run()
+    assert recorder.finish()["warnings"] == []
+    assert capsys.readouterr().err == ""
+
+
+def test_empty_run_always_records_a_warning_even_if_disabled(
+    run_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    recorder = Recorder(run_root, mode="capture")
+    Listener(_IdleTransport(3), recorder, warn_after=0, clock=_ticking()).run()
+    manifest = recorder.finish()
+    assert [w["code"] for w in manifest["warnings"]] == ["NO_ENTRIES_RECORDED"]
+    assert "WARNING NO_ENTRIES_RECORDED" in capsys.readouterr().err
+
+
+def test_warn_after_option_defaults_to_30() -> None:
+    args = rec._parser().parse_args(
+        ["discover", "--cdp-url", "http://127.0.0.1:9333", "--output-root", "C:/x"]
+    )
+    assert args.warn_after_seconds == 30.0

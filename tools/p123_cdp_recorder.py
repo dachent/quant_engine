@@ -108,6 +108,12 @@ ALLOWED_CDP_METHODS = frozenset(
 )
 
 #: What the run directory says about itself; verify requires it unchanged.
+NO_ENTRIES_TEXT = (
+    "no same-origin response was recorded. The recorder only sees NEW traffic: "
+    "start it FIRST, then load or reload the pages (open a new tab or reload "
+    "after it is running)."
+)
+DEFAULT_WARN_AFTER_SECONDS = 30.0
 SAFETY = {
     "passive": True,
     "navigates": False,
@@ -548,6 +554,13 @@ class Recorder:
         self.oversize: Counter[str] = Counter()
         self.unreadable = 0
         self.browser_closed = False
+        self.warnings: list[dict[str, str]] = []
+
+    def warn(self, code: str, text: str) -> None:
+        """Print a warning to stderr and keep it for the manifest."""
+
+        self.warnings.append({"code": code, "text": text})
+        print(f"WARNING {code}: {text}", file=sys.stderr, flush=True)
 
     def handle(
         self,
@@ -616,6 +629,10 @@ class Recorder:
             {"path": name, **_write_new(self.root / name, _canonical(self.entries))}
         )
         recorded = [e for e in self.entries if "body_sha256" in e]
+        if not self.entries and not any(
+            w["code"] == "NO_ENTRIES_RECORDED" for w in self.warnings
+        ):
+            self.warn("NO_ENTRIES_RECORDED", NO_ENTRIES_TEXT)
         failures = bool(self.unreadable or self.oversize)
         manifest: dict[str, Any] = {
             "schema": SCHEMA,
@@ -645,6 +662,7 @@ class Recorder:
                 "identity_not_recorded": sum(self.identity.values()),
             },
             "browser_closed": self.browser_closed,
+            "warnings": self.warnings,
             "routes": route_summary(self.entries),
             "pagination": pagination_summary(self.entries),
             "MUTATION_LIKE_NOT_RECORDED": [
@@ -999,12 +1017,15 @@ class Listener:
         recorder: Recorder,
         *,
         max_seconds: float = 0.0,
+        warn_after: float = DEFAULT_WARN_AFTER_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         call_timeout: float = 20.0,
     ) -> None:
         self._transport = GuardedTransport(transport)
         self._recorder = recorder
         self._max_seconds = max_seconds
+        self._warn_after = warn_after
+        self._warned = False
         self._clock = clock
         self._call_timeout = call_timeout
         self._next_id = 0
@@ -1045,8 +1066,20 @@ class Listener:
         try:
             self._call("Target.setDiscoverTargets", {"discover": True}, None)
             while True:
-                if self._max_seconds and self._clock() - started >= self._max_seconds:
+                elapsed = self._clock() - started
+                if self._max_seconds and elapsed >= self._max_seconds:
                     return
+                if (
+                    self._warn_after
+                    and not self._warned
+                    and elapsed >= self._warn_after
+                    and not self._recorder.entries
+                ):
+                    self._warned = True
+                    self._recorder.warn(
+                        "NO_ENTRIES_RECORDED",
+                        f"after {self._warn_after:g} s: " + NO_ENTRIES_TEXT,
+                    )
                 message = (
                     self._pending.popleft()
                     if self._pending
@@ -1657,7 +1690,12 @@ def _live(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover
     )
     transport = WebSocketTransport(args.cdp_url)
     try:
-        Listener(transport, recorder, max_seconds=args.max_seconds).run()
+        Listener(
+            transport,
+            recorder,
+            max_seconds=args.max_seconds,
+            warn_after=args.warn_after_seconds,
+        ).run()
     except KeyboardInterrupt:
         pass
     finally:
@@ -1670,6 +1708,7 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "status": manifest["status"],
         "mode": manifest["mode"],
         "counts": manifest["counts"],
+        "warnings": manifest.get("warnings", []),
         "routes": [
             {k: r[k] for k in ("path_template", "status", "media_type", "count")}
             for r in manifest["routes"][:80]
@@ -1693,6 +1732,13 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--cdp-url", required=True)
         item.add_argument("--output-root", required=True, type=Path)
         item.add_argument("--max-seconds", type=float, default=0.0)
+        item.add_argument(
+            "--warn-after-seconds",
+            type=float,
+            default=DEFAULT_WARN_AFTER_SECONDS,
+            help="warn once if nothing was recorded after this many seconds "
+            "(default 30; 0 disables)",
+        )
         item.add_argument(
             "--include-identity",
             action="append",

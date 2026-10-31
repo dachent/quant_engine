@@ -337,6 +337,14 @@ python tools/p123_cdp_recorder.py verify   --run-root <governed root>\capture-1
 python tools/p123_cdp_recorder.py propose-catalog --discover <governed root>\discover-1 --raw-run <governed root>\capture-1 --out <governed root>\catalog-draft
 ```
 
+**Start the recorder FIRST, then load or reload the pages.** It only sees NEW
+traffic: a page that finished loading before the recorder attached produces nothing
+(a smoke run attached after page load recorded 0 entries; opening a new tab or
+reloading after it was running recorded them). If nothing is recorded after
+`--warn-after-seconds` (default 30; 0 disables) the recorder prints
+`WARNING NO_ENTRIES_RECORDED` and writes it to the manifest `warnings`; an empty run
+always records that warning at the end.
+
 `discover` and `capture` run until Ctrl-C (or `--max-seconds`) and then write the
 manifest. Nothing in this section was run against the live site: the proof is a
 fake CDP transport replaying synthetic events built from the known route templates.
