@@ -20,10 +20,23 @@ What it refuses, by design:
 * unknown response shapes, duplicate identities, accounts outside the crosswalk,
   and overwriting any staged file.
 
-The Holdings-V2 field names beyond those in the repository's synthetic fixtures
-(notably the per-row price date) and the historical-balance response shape are
-UNVERIFIED against a live response. The driver fails closed on anything else.
-Nothing here is exercised live by the repository tests.
+Shapes were compared with the preserved real raw evidence under
+``dataSchwab`` (the 2026-09-17 Holdings-V2 response, the SPA bundle recorded in
+the 2026-07-31 HAR, and the 16 retained historical-balance responses):
+
+* Holdings-V2 is a POST of ``/api/is.Holdings/V1/Holdings/HoldingV2`` (an empty
+  ``Schwab-Client-Ids`` header reads every account); the per-row date is
+  ``price.priceDate`` (``MM/DD/YYYY``), not a top-level ``priceDate``; the
+  cash group also holds one quantity-less summary row per account.
+* ``marketValue.val`` equals ``qty.qty * price.price`` and ``price.price`` is the
+  provider's last trade (``closePrice`` is the PRIOR close), so it is recorded
+  as a provider-quoted value and never as the official close.
+* ``balances.historical`` is a GET without a query; the response is
+  ``{"histories": {"M/D/YYYY": {"AccountValue": number}}}`` and ends the day
+  before the capture date.
+
+What remains UNVERIFIED is listed in ``UNVERIFIED_SHAPES``. The driver fails
+closed on anything else. Nothing here is exercised live by the repository tests.
 """
 
 from __future__ import annotations
@@ -81,11 +94,31 @@ TERMS_TEXT = (
     "zero-retry transport; and a durable pre-network request reservation."
 )
 TERMS_SHA256 = hashlib.sha256(TERMS_TEXT.encode("utf-8")).hexdigest()
+HOLDINGS_V2_PATH = "/api/is.Holdings/V1/Holdings/HoldingV2"
+MARKET_VALUE_BASIS = "PROVIDER_QUOTED_QTY_TIMES_PRICE_NOT_OFFICIAL_CLOSE"
 UNVERIFIED_SHAPES = (
-    "holdings.v2 row price date field (priceDate)",
-    "holdings.v2 route path (owner supplied)",
-    "balances.historical request query and response shape",
+    "holdings.v2 request body: key names are in the SPA bundle, the subset the "
+    "service requires was not retained",
+    "holdings.v2 empty Schwab-Client-Ids scoping of the all-accounts POST",
+    "balances.historical last series date for a capture taken near midnight New York",
+    "holdings.v2 security groups other than Equity, ETF and Cash",
 )
+_HOLDINGS_BODY_KEYS = frozenset(
+    {
+        "entitlement",
+        "featureFlags",
+        "fetchSettings",
+        "groupByCallPut",
+        "groupBySecurityType",
+        "groupByStrategy",
+        "groupByUnderlying",
+        "isExtendedPricing",
+        "isNWE",
+        "selectedColumns",
+        "sortSettings",
+    }
+)
+_MAX_BODY_BYTES = 4096
 
 _MAX_EVIDENCE_BYTES = 64 * 1024
 _MAX_REQUESTS = 10_000
@@ -175,9 +208,14 @@ def catalog() -> tuple[CatalogEntry, ...]:
             "balances.historical",
             "GET",
             _contract_path("balances.historical"),
-            "REVIEWED_CONTRACT_PATH_UNVERIFIED_QUERY",
+            "CONFIRMED_PATH_NO_QUERY",
         ),
-        CatalogEntry("holdings.v2", "GET", None, "OWNER_SUPPLIED_UNVERIFIED"),
+        CatalogEntry(
+            "holdings.v2",
+            "POST",
+            HOLDINGS_V2_PATH,
+            "CONFIRMED_PATH_METHOD_BODY_UNVERIFIED",
+        ),
         CatalogEntry(
             "transactions.history",
             "POST",
@@ -422,6 +460,16 @@ def _row_key(item: Mapping[str, object]) -> tuple[str, str]:
     return (str(item["account_id"]), str(item["symbol"]))
 
 
+def _quoted_at(value: object) -> str | None:
+    """The provider's quote instant (``tradeTimeMs``, epoch milliseconds)."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DriverError("holdings quote time is not epoch milliseconds")
+    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat()
+
+
 def normalize_holdings(
     raw: object,
     *,
@@ -442,6 +490,7 @@ def normalize_holdings(
     identities: set[tuple[str, str]] = set()
     positions: list[dict[str, object]] = []
     sweeps: list[dict[str, object]] = []
+    cash_balances: list[dict[str, object]] = []
     zero_quantity_rows = 0
     refusals: dict[str, int] = {}
 
@@ -466,6 +515,27 @@ def normalize_holdings(
             if kind is None:
                 raise DriverError("holdings group is unsupported")
             for row in _objects(group.get("holdingsRows"), "holdings rows"):
+                if kind == "cash" and "qty" not in row and row.get("rowType") == 3:
+                    # The provider's per-account cash-and-cash-investments summary
+                    # row carries no quantity, price or date: it is a balance, not
+                    # a position (preserved 2026-09-17 bytes: one per account).
+                    if any(item["account_id"] == internal for item in cash_balances):
+                        raise DriverError("holdings cash summary is duplicated")
+                    cash_value = _decimal_or_none(
+                        _object(row.get("marketValue"), "holdings cash value").get(
+                            "val"
+                        )
+                    )
+                    if cash_value is None:
+                        refuse("cash_balance_missing")
+                        continue
+                    cash_balances.append(
+                        {
+                            "account_id": internal,
+                            "cash_investments_usd": _dec_text(cash_value),
+                        }
+                    )
+                    continue
                 symbol_value = row.get("dataSymbol")
                 if not isinstance(symbol_value, str) or not symbol_value.strip():
                     symbol_value = _object(row.get("symbol"), "holdings symbol").get(
@@ -494,10 +564,27 @@ def normalize_holdings(
                 if market_value is None:
                     refuse("market_value_null_for_held_position")
                     continue
-                if row.get("priceDate") is None:
+                price_object = row.get("price")
+                if (
+                    price_object is None
+                    or _object(price_object, "holdings price").get("priceDate") is None
+                ):
                     refuse("as_of_missing")
                     continue
-                as_of = _provider_date(row.get("priceDate"), "holdings price date")
+                price_fields = _object(price_object, "holdings price")
+                as_of = _provider_date(
+                    price_fields.get("priceDate"), "holdings price date"
+                )
+                price = _decimal_or_none(price_fields.get("price"))
+                if price is None:
+                    refuse("price_missing")
+                    continue
+                if abs(market_value - quantity * price) > Decimal("0.01"):
+                    # Confirmed in the preserved bytes for every priced row: the
+                    # value is quantity times the quoted price. A row that breaks
+                    # that relation is a shape this driver has not seen.
+                    refuse("market_value_differs_from_quantity_times_price")
+                    continue
                 try:
                     as_of_fields = _as_of_fields(as_of, cutoff, label)
                 except DriverError:
@@ -515,7 +602,9 @@ def normalize_holdings(
                     "account_id": internal,
                     "cost_basis_usd": None if cost is None else _dec_text(cost),
                     "market_value_usd": _dec_text(market_value),
+                    "price_usd": _dec_text(price),
                     "quantity": _dec_text(quantity),
+                    "quoted_at_utc": _quoted_at(row.get("tradeTimeMs")),
                     "symbol": symbol,
                     **as_of_fields,
                 }
@@ -545,12 +634,15 @@ def normalize_holdings(
         raise DriverError("holdings response contains no held positions")
     positions.sort(key=_row_key)
     sweeps.sort(key=_row_key)
+    cash_balances.sort(key=lambda item: str(item["account_id"]))
     return {
         "accounts": sorted(set(crosswalk.values())),
         "as_of_basis": _as_of_basis(timing),
         "capture": timing.to_dict(),
+        "cash_balances": cash_balances,
         "cutoff": cutoff.to_dict(),
         "exception_label": label,
+        "market_value_basis": MARKET_VALUE_BASIS,
         "normalizer_version": NORMALIZER_VERSION,
         "positions": positions,
         "provider": "SCHWAB",
@@ -560,6 +652,41 @@ def normalize_holdings(
         "unverified_shapes": list(UNVERIFIED_SHAPES),
         "zero_quantity_rows_omitted": zero_quantity_rows,
     }
+
+
+def parse_balance_history(document: object) -> dict[date, Decimal]:
+    """Parse one ``balances.historical`` response into calendar date to value.
+
+    Confirmed shape (16 retained responses): the only top-level key is
+    ``histories``; each key is an ``M/D/YYYY`` date and each value is exactly
+    ``{"AccountValue": <number>}``. Anything else is refused.
+    """
+
+    root = _object(document, "balance response")
+    if set(root) != {"histories"}:
+        raise DriverError("balance response has an unexpected field set")
+    histories = _object(root["histories"], "balance histories")
+    observed: dict[date, Decimal] = {}
+    for key, item in histories.items():
+        try:
+            day = datetime.strptime(key, "%m/%d/%Y").date()
+        except ValueError as exc:
+            raise DriverError("balance date is not M/D/YYYY") from exc
+        row = _object(item, "balance row")
+        if set(row) != {"AccountValue"}:
+            raise DriverError("balance row has an unexpected field set")
+        raw_value = row["AccountValue"]
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise DriverError("balance value is not a number")
+        value = _decimal_or_none(raw_value)
+        if value is None:
+            raise DriverError("balance value is null")
+        if day in observed and observed[day] != value:
+            raise DriverError("balance date is conflicting")
+        observed[day] = value
+    if not observed:
+        raise DriverError("balance response has no rows")
+    return observed
 
 
 def normalize_balances(
@@ -576,23 +703,13 @@ def normalize_balances(
     for internal in sorted(raw_by_account):
         if _ACCOUNT_ID.fullmatch(internal) is None:
             raise DriverError("balance account id is invalid")
-        document = _object(raw_by_account[internal], "balance response")
-        observed: dict[date, Decimal] = {}
-        for item in _objects(document.get("historicalBalances"), "balance rows"):
-            day = _provider_date(item.get("date"), "balance date")
-            value = _decimal_or_none(item.get("accountValue"))
-            if value is None:
-                raise DriverError("balance value is null")
-            if day in observed and observed[day] != value:
-                raise DriverError("balance date is conflicting")
-            observed[day] = value
-        if not observed:
-            raise DriverError("balance response has no rows")
+        observed = parse_balance_history(raw_by_account[internal])
         selected = cutoff.as_of_date if cutoff.as_of_date in observed else max(observed)
         rows.append(
             {
                 "account_id": internal,
                 "account_value_usd": _dec_text(observed[selected]),
+                "series_last_date": max(observed).isoformat(),
                 **_as_of_fields(selected, cutoff, label),
             }
         )
@@ -622,6 +739,7 @@ class ApprovedRequest:
     method: str
     path: str
     query: Mapping[str, str]
+    body: Mapping[str, object] | None = None
 
 
 @dataclass
@@ -694,6 +812,41 @@ def _strict_keys(value: dict[str, Any], keys: set[str], name: str) -> None:
         raise GovernanceError(f"governance {name} has an invalid field set")
 
 
+def _json_safe(value: object, depth: int = 0) -> bool:
+    if depth > 3:
+        return False
+    if value is None or isinstance(value, (bool, int)):
+        return True
+    if isinstance(value, str):
+        return len(value) <= 200
+    if isinstance(value, list):
+        return len(value) <= 64 and all(_json_safe(item, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return len(value) <= 32 and all(
+            isinstance(key, str) and len(key) <= 64 and _json_safe(item, depth + 1)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _parse_body(capability: str, value: object) -> dict[str, object] | None:
+    """The only request body the driver does not build itself: holdings.v2."""
+
+    if capability != "holdings.v2":
+        if value is not None:
+            raise GovernanceError("governance scope body is only for holdings.v2")
+        return None
+    if not isinstance(value, dict) or not value:
+        raise GovernanceError("governance holdings.v2 body must be a nonempty object")
+    if not set(value) <= _HOLDINGS_BODY_KEYS or not _json_safe(value):
+        raise GovernanceError(
+            "governance holdings.v2 body is outside the reviewed keys"
+        )
+    if len(_canonical(value)) > _MAX_BODY_BYTES:
+        raise GovernanceError("governance holdings.v2 body is too large")
+    return dict(value)
+
+
 def _parse_requests(value: object) -> tuple[ApprovedRequest, ...]:
     entries = {entry.capability: entry for entry in catalog()}
     approved: list[ApprovedRequest] = []
@@ -702,7 +855,9 @@ def _parse_requests(value: object) -> tuple[ApprovedRequest, ...]:
         raise GovernanceError("governance scope.requests must be a list")
     for item in value:
         row = _object(item, "scope request")
-        _strict_keys(row, {"capability", "method", "path", "query"}, "scope request")
+        _strict_keys(
+            row, {"body", "capability", "method", "path", "query"}, "scope request"
+        )
         capability = row["capability"]
         entry = entries.get(capability) if isinstance(capability, str) else None
         if entry is None or capability in seen:
@@ -730,8 +885,16 @@ def _parse_requests(value: object) -> tuple[ApprovedRequest, ...]:
             raise GovernanceError("governance scope query is invalid")
         if method == "POST" and query:
             raise GovernanceError("governance scope POST carries no query")
+        if capability == "balances.historical" and query:
+            raise GovernanceError("governance scope balances.historical has no query")
         approved.append(
-            ApprovedRequest(str(capability), str(method), path, dict(query))
+            ApprovedRequest(
+                str(capability),
+                str(method),
+                path,
+                dict(query),
+                _parse_body(str(capability), row["body"]),
+            )
         )
     if seen != set(entries):
         raise GovernanceError("governance scope must name every catalog read")
@@ -1064,7 +1227,10 @@ def run_capture(
     # The book may be read at any moment between request and response, so the
     # request start must already be inside the allowed window (not only the end).
     assess_timing(now(), cutoff, exception_label=label)
-    status, holdings_raw = governed.get(holdings_req.path, holdings_req.query, None)
+    # Empty Schwab-Client-Ids reads every account (the SPA's "all accounts" call).
+    status, holdings_raw = governed.post(
+        holdings_req.path, dict(holdings_req.body or {}), ""
+    )
     holdings_at = now()
     _single_ok(status, "holdings")
     artifacts.append(
@@ -1333,6 +1499,25 @@ def _verify_run(
     brows = _objects(balances.get("balances"), "balances")
     if sorted(str(row["account_id"]) for row in brows) != accounts:
         raise DriverError("balance accounts differ from the manifest scope")
+    if balances.get("exception_label") != label:
+        raise DriverError("balances label differs from the manifest")
+    balances_captured = _aware_utc(
+        _object(balances.get("capture"), "balances capture").get("captured_at_utc"),
+        "balances captured_at_utc",
+    )
+    if label is None and not (
+        cutoff.close_utc
+        <= balances_captured
+        <= cutoff.close_utc + timedelta(hours=DEFAULT_MAX_CAPTURE_LAG_HOURS)
+    ):
+        raise DriverError("balances capture time is outside the cutoff window")
+    cash = _objects(positions.get("cash_balances"), "cash balances")
+    if sorted(str(row["account_id"]) for row in cash) != sorted(
+        {str(row["account_id"]) for row in cash}
+    ) or not {str(row["account_id"]) for row in cash} <= set(accounts):
+        raise DriverError("cash balance scope differs from the manifest")
+    if any(_decimal_or_none(row.get("cash_investments_usd")) is None for row in cash):
+        raise DriverError("cash balance value is null")
     for brow in brows:
         if _decimal_or_none(brow.get("account_value_usd")) is None:
             raise DriverError("balance value is null")
@@ -1367,6 +1552,21 @@ def _verify_run(
         )
         if _canonical(again) != _canonical(positions):
             raise DriverError("positions do not reproduce from the raw response")
+        raw_balances = {
+            internal: strict_json_loads(
+                (run_dir / f"raw/balances.historical/{internal}.json").read_bytes(),
+                label="raw balances",
+            )
+            for internal in accounts
+        }
+        again_balances = normalize_balances(
+            raw_balances,
+            cutoff=cutoff,
+            timing=assess_timing(balances_captured, cutoff, exception_label=label),
+            exception_label=label,
+        )
+        if _canonical(again_balances) != _canonical(balances):
+            raise DriverError("balances do not reproduce from the raw responses")
     return {
         "account_count": len(accounts),
         "artifact_count": len(listed),
