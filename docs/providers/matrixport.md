@@ -113,6 +113,20 @@ field set is exact, so the cutoff and the credential-source identity
 validator (`validate_live_read_evidence`, which `authorize_live_read` calls), then
 re-derives hashes and scope, and reports a consumed receipt as a failure.
 
+### Cutoff binding
+
+`extract` and `run` require `--cutoff YYYY-MM-DD`, which must equal the cutoff in
+the evidence's `<name>.provenance.json` sidecar (the sidecar must name the same
+evidence bytes, operation and mode). The check runs before the evidence is
+consumed, so a refusal costs no approval. The run window then ends at the last
+millisecond of the cutoff day (UTC), capped at the clock, instead of the current
+time, so no windowed request extends past it. The cutoff is stored in the run
+metadata: `--resume` refuses a different or missing cutoff, and `verify
+[--cutoff D]` refuses a mismatched cutoff or a recorded window past its cutoff.
+Limit: endpoints that return current state (wallet balance and currencies, strategy
+holdings snapshots) cannot be time-bounded by the request; they reflect the
+moment of the call.
+
 Receipt transitions are durable before a live request is permitted. On POSIX,
 the adapter fsyncs the receipt's containing directory after exclusive creation
 and after each atomic replacement. Windows does not support that POSIX

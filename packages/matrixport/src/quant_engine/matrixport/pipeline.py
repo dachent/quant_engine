@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from .catalog import ENDPOINTS, Endpoint, catalog_rows, get_endpoint
 from .credentials import ApiCredentials, load_credentials, plan_identity
 from .exporters import export_datasets, write_csv
+from .evidence import EvidenceGenerationError, bound_cutoff, cutoff_end_ms
 from .governance import authorize_live_read
 from .normalization import enrich_timestamps, normalize_rows
 from .pagination import DAY_MS, paginate_rfq_bisection, utc_time_windows
@@ -60,6 +61,14 @@ def _credential_identity(
     if credentials_config is None and credentials is not None:
         return "injected-credentials"
     return plan_identity(credentials_config)
+
+
+def recorded_cutoff(run: Mapping[str, Any]) -> str | None:
+    """The cutoff a run was bound to, or None for runs that predate it."""
+
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    value = stored.get("cutoff")
+    return str(value) if value else None
 
 
 def recorded_credential_identity(run: Mapping[str, Any]) -> str:
@@ -413,6 +422,8 @@ class MatrixportExtractor:
         transport: ReadOnlyTransport | None = None,
         governance_evidence: str | Path | None = None,
         live_operation: str = "extract",
+        cutoff: str | None = None,
+        clock_ms: Callable[[], int] = utc_now_ms,
         reporter: Callable[[str], None] | None = None,
     ) -> None:
         if mode not in {"full", "incremental"}:
@@ -422,9 +433,21 @@ class MatrixportExtractor:
         self.run_id = validate_run_id(run_id) if run_id is not None else utc_run_id()
         self.run_dir = self.output_root / self.run_id
         governance = None
+        self.cutoff = cutoff
         if transport is None:
             if governance_evidence is None:
                 raise ExtractionError("live-read governance evidence is required")
+            # checked before the evidence is consumed, so a refusal costs no approval
+            try:
+                bound_cutoff(
+                    governance_evidence,
+                    cutoff,
+                    operation=live_operation,
+                    mode=mode,
+                    now_ms=clock_ms(),
+                )
+            except EvidenceGenerationError as error:
+                raise ExtractionError(str(error)) from None
             governance = authorize_live_read(
                 governance_evidence,
                 operation=live_operation,
@@ -451,6 +474,8 @@ class MatrixportExtractor:
                 )
             self.mode = str(existing["mode"])
             self.run_end_ms = int(existing["run_end_ms"])
+            if recorded_cutoff(existing) != cutoff:
+                raise ExtractionError("Cannot resume a run with a different cutoff")
             if str(existing["extractor_hash"]) != self.extractor_hash:
                 raise ExtractionError("Cannot resume a run with changed extractor code")
             if str(existing["config_hash"]) != self.config_hash:
@@ -467,7 +492,13 @@ class MatrixportExtractor:
             if existing is not None:
                 raise ExtractionError(f"Run already exists: {self.run_id}")
             self.mode = mode
-            self.run_end_ms = utc_now_ms()
+            if cutoff is None:
+                self.run_end_ms = clock_ms()
+            else:
+                try:
+                    self.run_end_ms = cutoff_end_ms(cutoff, clock_ms())
+                except EvidenceGenerationError as error:
+                    raise ExtractionError(str(error)) from None
             self.storage.create_run(
                 self.run_id,
                 mode=mode,
@@ -481,6 +512,7 @@ class MatrixportExtractor:
                     "credential_identity": _credential_identity(
                         credentials, credentials_config
                     ),
+                    "cutoff": cutoff,
                     "history_semantics": "all_api_reachable_history_to_frozen_run_end",
                     "timezone": "UTC",
                 },

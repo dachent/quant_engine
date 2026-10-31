@@ -11,6 +11,7 @@ from .evidence import (
     DEFAULT_MAX_WINDOW_HOURS,
     EvidenceGenerationError,
     EvidenceRequest,
+    cutoff_end_ms,
     verify_evidence,
     write_evidence,
 )
@@ -22,6 +23,7 @@ from .pipeline import (
     live_auth_test,
     _credential_identity,
     recorded_credential_identity,
+    recorded_cutoff,
     validate_run_id,
 )
 from .storage import RunStorage
@@ -64,6 +66,11 @@ def _parser() -> argparse.ArgumentParser:
         "--resume", metavar="RUN_ID", help="Resume an interrupted RUNNING run"
     )
     extract.add_argument("--governance-evidence", required=True)
+    extract.add_argument(
+        "--cutoff",
+        required=True,
+        help="YYYY-MM-DD; must equal the cutoff in the evidence provenance sidecar",
+    )
 
     export = subcommands.add_parser("export", help="Generate CSV and XLSX outputs")
     export.add_argument("--run-id", required=True)
@@ -72,6 +79,9 @@ def _parser() -> argparse.ArgumentParser:
         "verify", help="Verify raw, state, CSV, XLSX, and privacy"
     )
     verify.add_argument("--run-id", required=True)
+    verify.add_argument(
+        "--cutoff", help="refuse unless the run was bound to this cutoff"
+    )
 
     gen = subcommands.add_parser(
         "governance-evidence",
@@ -107,6 +117,11 @@ def _parser() -> argparse.ArgumentParser:
     run = subcommands.add_parser("run", help="Extract, export, and verify")
     run.add_argument("--full", action="store_true", required=True)
     run.add_argument("--governance-evidence", required=True)
+    run.add_argument(
+        "--cutoff",
+        required=True,
+        help="YYYY-MM-DD; must equal the cutoff in the evidence provenance sidecar",
+    )
     return parser
 
 
@@ -154,6 +169,7 @@ def _extract(args: argparse.Namespace) -> int:
         resume=bool(args.resume),
         credentials_config=args.credentials_config,
         governance_evidence=args.governance_evidence,
+        cutoff=args.cutoff,
         reporter=_report,
     )
     try:
@@ -174,10 +190,35 @@ def _extract(args: argparse.Namespace) -> int:
     return 0
 
 
-def _verify(run_id: str, config_path: Path | None = None) -> tuple[int, dict[str, Any]]:
+def _require_recorded_cutoff(run_dir: Path, run_id: str, cutoff: str | None) -> None:
+    """A cutoff-bound run must match the cutoff asked for and end inside it."""
+
+    storage = RunStorage(run_dir / "state" / DATABASE_NAME)
+    try:
+        run = storage.get_run(run_id)
+    finally:
+        storage.close()
+    if run is None:
+        return
+    recorded = recorded_cutoff(run)
+    if cutoff is not None and recorded != cutoff:
+        raise CredentialError("The run was not bound to the requested cutoff")
+    if recorded is not None:
+        try:
+            limit = cutoff_end_ms(recorded, 2**62)
+        except EvidenceGenerationError:
+            raise CredentialError("The recorded cutoff is invalid") from None
+        if int(run["run_end_ms"]) > limit:
+            raise CredentialError("The run window extends past its cutoff")
+
+
+def _verify(
+    run_id: str, config_path: Path | None = None, cutoff: str | None = None
+) -> tuple[int, dict[str, Any]]:
     validate_run_id(run_id)
     run_dir = _workspace() / "output" / run_id
     _require_recorded_credentials(run_dir, run_id, config_path)
+    _require_recorded_cutoff(run_dir, run_id, cutoff)
     result = verify_run(run_dir, _secret_needles(config_path))
     release_path = run_dir / "reports" / "release_status.json"
     try:
@@ -271,7 +312,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "verify":
-            return _verify(args.run_id, args.credentials_config)[0]
+            return _verify(args.run_id, args.credentials_config, args.cutoff)[0]
         if args.command == "run":
             credentials = load_credentials(args.credentials_config)
             extractor = MatrixportExtractor(
@@ -281,6 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 credentials_config=args.credentials_config,
                 governance_evidence=args.governance_evidence,
                 live_operation="run",
+                cutoff=args.cutoff,
                 reporter=_report,
             )
             try:
