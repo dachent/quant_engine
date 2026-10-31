@@ -13,7 +13,18 @@ from quant_engine.web_contracts.extract import (
     canonical_extraction,
     extract_har,
 )
-from quant_engine.web_contracts.grizzlybulls import GRIZZLYBULLS_CONTRACT
+from quant_engine.web_contracts.grizzlybulls import (
+    GRIZZLYBULLS_CONTRACT,
+    ORIGIN,
+    SLUG_PATTERN,
+    SignalSeries,
+    build_contract,
+    classify,
+    parse_json_bytes,
+    parse_trade_history_csv,
+    sanitization_audit,
+    summarize_capability,
+)
 from quant_engine.web_contracts.provenance import SOURCE_ANCHORS
 from quant_engine.web_contracts.portfolio123 import PORTFOLIO123_CONTRACT
 from quant_engine.web_contracts.quantbase import (
@@ -28,6 +39,15 @@ __all__ = [
     "EndpointContract",
     "ExtractedResponse",
     "GRIZZLYBULLS_CONTRACT",
+    "ORIGIN",
+    "SLUG_PATTERN",
+    "SignalSeries",
+    "build_contract",
+    "classify",
+    "parse_json_bytes",
+    "parse_trade_history_csv",
+    "sanitization_audit",
+    "summarize_capability",
     "ProviderContract",
     "PORTFOLIO123_CONTRACT",
     "QUANTBASE_CONTRACT",

@@ -28,8 +28,8 @@ import sys
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from quant_engine.web_contracts import WebContractError
-from quant_engine.web_contracts.grizzlybulls import (
+from quant_engine.web_contracts import (
+    WebContractError,
     ORIGIN,
     SLUG_PATTERN,
     build_contract,

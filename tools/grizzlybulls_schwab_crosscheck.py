@@ -20,10 +20,7 @@ import json
 from pathlib import Path
 import sys
 
-from quant_engine.web_contracts.grizzlybulls import (
-    SignalSeries,
-    parse_trade_history_csv,
-)
+from quant_engine.web_contracts import SignalSeries, parse_trade_history_csv
 
 
 class CrosscheckError(ValueError):
