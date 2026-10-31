@@ -2751,7 +2751,7 @@ def _verify_portfolio_runtime(
                     repo_root,
                     spec.code_commit,
                     spec.code_identity_scheme,
-                    state_root=spec.state_root,
+                    coordination_root=spec.coordination_root,
                     lock_path=lock,
                 )
             else:

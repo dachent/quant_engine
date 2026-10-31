@@ -23,8 +23,10 @@ change between cycles and this document is not regenerated automatically.
   equal to `git rev-parse HEAD^{tree}`. Before `execute --commit` (and the replica
   commit) run, from the same repo root checked out at the merge commit,
   `python -m quant_engine.core.code_identity attest --repo <root>
-  --candidate-commit <PR head> --base-ref origin/main --state-root <spec state
-  root>`. The attestation is mandatory; any tree, merged-commit or runtime-lock
+  --candidate-commit <PR head> --base-ref origin/main --coordination-root
+  <coordination root of the spec being committed>` (real and replica specs each
+  read `<their coordination root>/merge-attestation.json`; a replica copy made
+  after the attestation inherits it). The attestation is mandatory; any tree, merged-commit or runtime-lock
   difference refuses. Never reinterpret an old release id under the other scheme.
 - **Generation ids bind `repository_sha`.** Two runs at different SHAs with
   cold caches produce different generation ids for identical content (layered

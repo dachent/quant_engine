@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import hashlib
 import json
+import shutil
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -108,13 +109,13 @@ def test_promotion_requires_a_mandatory_matching_attestation(
 
     def verify() -> Any:
         return ci.verify_promotion_identity(
-            repo, tree, ci.TREE_SCHEME, state_root=state, lock_path=lock
+            repo, tree, ci.TREE_SCHEME, coordination_root=state, lock_path=lock
         )
 
     with pytest.raises(ci.CodeIdentityError, match="mandatory"):
         verify()
     att = ci.write_merge_attestation(
-        repo, candidate_commit=candidate, base_ref="main", state_root=state
+        repo, candidate_commit=candidate, base_ref="main", coordination_root=state
     )
     assert (att.tree, att.merged_commit, att.candidate_commit) == (
         tree,
@@ -124,7 +125,7 @@ def test_promotion_requires_a_mandatory_matching_attestation(
     assert verify() == att
     with pytest.raises(ci.CodeIdentityError, match="already exists"):
         ci.write_merge_attestation(
-            repo, candidate_commit=candidate, base_ref="main", state_root=state
+            repo, candidate_commit=candidate, base_ref="main", coordination_root=state
         )
 
 
@@ -149,7 +150,7 @@ def test_promotion_refuses_every_attestation_difference(
         body = att if isinstance(att, bytes) else att.to_json_bytes()
         (state / ci.ATTESTATION_FILENAME).write_bytes(body)
         ci.verify_promotion_identity(
-            repo, tree, ci.TREE_SCHEME, state_root=state, lock_path=lock
+            repo, tree, ci.TREE_SCHEME, coordination_root=state, lock_path=lock
         )
 
     verify(good, "good")
@@ -185,12 +186,16 @@ def test_promotion_refuses_when_the_live_tree_differs(
     candidate, _merged, tree = merged_candidate(repo)
     state = tmp_path / "state"
     ci.write_merge_attestation(
-        repo, candidate_commit=candidate, base_ref="main", state_root=state
+        repo, candidate_commit=candidate, base_ref="main", coordination_root=state
     )
     commit_file(repo, "later.txt", "drift\n", "drift")
     with pytest.raises(ci.CodeIdentityError, match="tree differs"):
         ci.verify_promotion_identity(
-            repo, tree, ci.TREE_SCHEME, state_root=state, lock_path=repo / "uv.lock"
+            repo,
+            tree,
+            ci.TREE_SCHEME,
+            coordination_root=state,
+            lock_path=repo / "uv.lock",
         )
 
 
@@ -203,13 +208,19 @@ def test_attestation_writer_refuses_different_tree_and_unmerged_head(
     commit_file(repo, "b.txt", "different\n", "main moved")
     with pytest.raises(ci.CodeIdentityError, match="candidate tree differs"):
         ci.write_merge_attestation(
-            repo, candidate_commit=candidate, base_ref="main", state_root=tmp_path / "s"
+            repo,
+            candidate_commit=candidate,
+            base_ref="main",
+            coordination_root=tmp_path / "s",
         )
     git(repo, "checkout", "-b", "side")
     side_head = commit_file(repo, "c.txt", "side\n", "side")
     with pytest.raises(ci.CodeIdentityError, match="not contained"):
         ci.write_merge_attestation(
-            repo, candidate_commit=side_head, base_ref="main", state_root=tmp_path / "t"
+            repo,
+            candidate_commit=side_head,
+            base_ref="main",
+            coordination_root=tmp_path / "t",
         )
 
 
@@ -220,7 +231,7 @@ def test_legacy_scheme_still_binds_head_and_needs_no_attestation(
     lock = repo / "uv.lock"
     assert (
         ci.verify_promotion_identity(
-            repo, head, ci.COMMIT_SCHEME, state_root=tmp_path, lock_path=lock
+            repo, head, ci.COMMIT_SCHEME, coordination_root=tmp_path, lock_path=lock
         )
         is None
     )
@@ -228,11 +239,11 @@ def test_legacy_scheme_still_binds_head_and_needs_no_attestation(
     # A tree value is never accepted under the legacy scheme, and vice versa.
     with pytest.raises(ci.CodeIdentityError):
         ci.verify_promotion_identity(
-            repo, tree, ci.COMMIT_SCHEME, state_root=tmp_path, lock_path=lock
+            repo, tree, ci.COMMIT_SCHEME, coordination_root=tmp_path, lock_path=lock
         )
     with pytest.raises(ci.CodeIdentityError):
         ci.verify_promotion_identity(
-            repo, merged, ci.TREE_SCHEME, state_root=tmp_path, lock_path=lock
+            repo, merged, ci.TREE_SCHEME, coordination_root=tmp_path, lock_path=lock
         )
 
 
@@ -320,7 +331,7 @@ def test_pipeline_runtime_gate_enforces_scheme_and_attestation(
 
     def spec(value: str, scheme: str) -> Any:
         return SimpleNamespace(
-            code_commit=value, code_identity_scheme=scheme, state_root=state
+            code_commit=value, code_identity_scheme=scheme, coordination_root=state
         )
 
     legacy = _runtime_contract(repo, tmp_path, merged)
@@ -338,11 +349,34 @@ def test_pipeline_runtime_gate_enforces_scheme_and_attestation(
         core_pipeline._verify_portfolio_runtime(
             contract, spec(tree, ci.TREE_SCHEME), promote=True
         )
+    # The gate reads <spec.coordination_root>/merge-attestation.json only: an
+    # attestation under any other directory (e.g. the retained-cache state root) is
+    # not found.
+    decoy = tmp_path / "elsewhere"
     ci.write_merge_attestation(
-        repo, candidate_commit=candidate, base_ref="main", state_root=state
+        repo, candidate_commit=candidate, base_ref="main", coordination_root=decoy
+    )
+    with pytest.raises(core_pipeline.PipelineValidationError, match="mandatory"):
+        core_pipeline._verify_portfolio_runtime(
+            contract, spec(tree, ci.TREE_SCHEME), promote=True
+        )
+    ci.write_merge_attestation(
+        repo, candidate_commit=candidate, base_ref="main", coordination_root=state
     )
     core_pipeline._verify_portfolio_runtime(
         contract, spec(tree, ci.TREE_SCHEME), promote=True
+    )
+    # A replica copy of the coordination root carries the attestation with it.
+    replica = tmp_path / "replica-coordination"
+    shutil.copytree(state, replica)
+    core_pipeline._verify_portfolio_runtime(
+        contract,
+        SimpleNamespace(
+            code_commit=tree,
+            code_identity_scheme=ci.TREE_SCHEME,
+            coordination_root=replica,
+        ),
+        promote=True,
     )
     with pytest.raises(core_pipeline.PipelineValidationError):
         core_pipeline._verify_portfolio_runtime(

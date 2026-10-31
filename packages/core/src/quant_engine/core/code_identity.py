@@ -170,8 +170,8 @@ class MergeAttestation:
         )
 
 
-def attestation_path(state_root: Path) -> Path:
-    return state_root / ATTESTATION_FILENAME
+def attestation_path(coordination_root: Path) -> Path:
+    return coordination_root / ATTESTATION_FILENAME
 
 
 def _file_sha256(path: Path) -> str:
@@ -204,7 +204,7 @@ def verify_promotion_identity(
     claimed: str,
     scheme: str,
     *,
-    state_root: Path,
+    coordination_root: Path,
     lock_path: Path,
 ) -> MergeAttestation | None:
     """Runtime check before execute/commit.
@@ -223,7 +223,7 @@ def verify_promotion_identity(
     live_tree = head_tree(repo)
     if live_tree != claimed:
         raise CodeIdentityError("repository tree differs from the bound code identity")
-    path = attestation_path(state_root)
+    path = attestation_path(coordination_root)
     try:
         raw = path.read_bytes()
     except OSError as exc:
@@ -247,7 +247,7 @@ def write_merge_attestation(
     *,
     candidate_commit: str,
     base_ref: str,
-    state_root: Path,
+    coordination_root: Path,
 ) -> MergeAttestation:
     """Create-only: record the merged HEAD as the attestation for a candidate.
 
@@ -272,7 +272,7 @@ def write_merge_attestation(
         merged_commit=merged,
         runtime_lock_sha256=_file_sha256(repo / "uv.lock"),
     )
-    path = attestation_path(state_root)
+    path = attestation_path(coordination_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with path.open("xb") as handle:
@@ -293,14 +293,14 @@ def main(argv: list[str] | None = None) -> int:
     attest.add_argument("--repo", type=Path, required=True)
     attest.add_argument("--candidate-commit", required=True)
     attest.add_argument("--base-ref", required=True)
-    attest.add_argument("--state-root", type=Path, required=True)
+    attest.add_argument("--coordination-root", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         att = write_merge_attestation(
             args.repo,
             candidate_commit=args.candidate_commit,
             base_ref=args.base_ref,
-            state_root=args.state_root,
+            coordination_root=args.coordination_root,
         )
     except CodeIdentityError as exc:
         print(f"refused: {exc}", file=sys.stderr)
