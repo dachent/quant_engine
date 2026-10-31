@@ -123,3 +123,8 @@ def test_each_place_that_states_the_same_window_states_its_convention() -> None:
     assert comparison["days_text"] == "59 days exclusive (end minus start)"
     # the two counts differ by exactly one, and each says why
     assert inclusive["days"] - comparison["days"] == 1
+
+
+def test_a_one_day_window_is_singular() -> None:
+    assert mva._days_text(1) == "1 calendar day inclusive"
+    assert mva._days_text(2) == "2 calendar days inclusive"

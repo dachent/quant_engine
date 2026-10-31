@@ -333,7 +333,8 @@ def _inclusive_days(start: date, end: date) -> int:
 
 
 def _days_text(calendar_days: int) -> str:
-    return f"{calendar_days} calendar days inclusive"
+    unit = "day" if calendar_days == 1 else "days"
+    return f"{calendar_days} calendar {unit} inclusive"
 
 
 def _window_label(label: str, calendar_days: int, audit_days: object) -> str:

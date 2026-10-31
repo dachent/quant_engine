@@ -2322,7 +2322,7 @@
         "end": { "type": "string", "format": "date" },
         "days": { "type": "integer", "minimum": 1 },
         "days_basis": { "const": "INCLUSIVE_OF_BOTH_ENDPOINTS" },
-        "days_text": { "type": "string", "pattern": "^[0-9]+ calendar days inclusive$" },
+        "days_text": { "type": "string", "pattern": "^[0-9]+ calendar days? inclusive$" },
         "view": { "type": "string", "minLength": 1 },
         "account_return_pct": { "type": "number" },
         "model_return_pct": { "type": "number" },
