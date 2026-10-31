@@ -17,6 +17,7 @@ import tt_source_manifest_builder as builder  # noqa: E402
 
 SLUGS = builder.GOVERNED_SLUGS
 CHART_LAST = "09/01/2026"
+WORKBOOK_SHA = hashlib.sha256(b"synthetic-workbook").hexdigest()
 
 
 def _put(root: Path, name: str, value: object) -> bytes:
@@ -52,6 +53,8 @@ def _capture(
     *,
     truncated_slug: str | None = None,
     late_symbol_slug: str | None = None,
+    drift_slug: str | None = None,
+    latest_short_slug: str | None = None,
 ) -> tuple[Path, Path]:
     jroot = tmp_path / "run"
     troot = tmp_path / "run-txt"
@@ -80,10 +83,14 @@ def _capture(
         ]
         if slug == late_symbol_slug:
             history[-1] = ("9/1/2026 4:00:00 PM", "SPY=50.00%, XYZ=50.00%")
+        if slug == drift_slug:
+            history[0] = ("8/31/2026 4:00:00 PM", "SPY=58.00%, BIL=40.00%")
+        if slug == latest_short_slug:
+            history[-1] = ("9/1/2026 4:00:00 PM", "SPY=50.00%")
         if slug == truncated_slug:
             history = [
                 ("8/30/2026 4:00:00 PM", "SPY=60.00%, BIL=40.00%"),
-                ("8/31/2026 4:00:00 PM", "SPY=50.00%"),
+                ("8/31/2026 4:00:00 PM", "SPY=60.00%"),
                 ("9/1/2026 4:00:00 PM", "SPY=50.00%, BIL=50.00%"),
             ]
         files: dict[str, object] = {
@@ -186,6 +193,7 @@ def _args(tmp_path: Path, jroot: Path, troot: Path, **extra: str) -> list[str]:
         "--live-inception", "2026-08-31",
         "--price-tape", str(tape),
         "--price-tape-manifest", str(man),
+        "--owner-workbook-sha256", WORKBOOK_SHA,
     ]  # fmt: skip
     for key, value in extra.items():
         argv += [f"--{key.replace('_', '-')}", value]
@@ -358,13 +366,14 @@ def test_verify_detects_edited_provenance(tmp_path: Path) -> None:
     assert builder.main(["verify", "--out-dir", str(out)]) == 2
 
 
-def test_truncated_allocation_row_is_flagged_not_normalised(tmp_path: Path) -> None:
+def test_dropped_position_row_is_truncated_not_normalised(tmp_path: Path) -> None:
     jroot, troot = _capture(tmp_path, truncated_slug=SLUGS[-1])
     assert builder.main(_args(tmp_path, jroot, troot)) == 0
     manifest = _manifest(tmp_path)
-    flags = manifest[builder.PROVENANCE_KEY]["holdings_row_validation"]["flags"]
-    assert flags == [
+    validation = manifest[builder.PROVENANCE_KEY]["holdings_row_validation"]
+    assert validation["flags"] == [
         {
+            "class": "SYMBOL_DROP",
             "fallback": {"kind": "LAST_COMPLETE_ROW", "observed_date": "2026-08-30"},
             "fallback_corroborated_by_live_portfolio_holdings": False,
             "flag": "TRUNCATED_ROW",
@@ -372,18 +381,88 @@ def test_truncated_allocation_row_is_flagged_not_normalised(tmp_path: Path) -> N
             "slug": SLUGS[-1],
         }
     ]
+    assert validation["counts_by_class"] == {SLUGS[-1]: {"SYMBOL_DROP": 1}}
     snapshots = manifest["selected_components"][-1]["dated_holdings"]["snapshots"]
-    assert {"SPY": 0.5} in [row["weights"] for row in snapshots]
+    assert {"SPY": 0.6} in [row["weights"] for row in snapshots]
     assert builder.main(["verify", "--out-dir", str(tmp_path / "out")]) == 0
 
 
-def test_tolerance_is_recorded_data_and_wide_values_still_flag(tmp_path: Path) -> None:
+def test_rounding_or_cash_row_is_not_truncation(tmp_path: Path) -> None:
+    jroot, troot = _capture(tmp_path, drift_slug=SLUGS[1])
+    assert builder.main(_args(tmp_path, jroot, troot)) == 0
+    validation = _manifest(tmp_path)[builder.PROVENANCE_KEY]["holdings_row_validation"]
+    assert [f["flag"] for f in validation["flags"]] == ["ALLOCATION_SUM_OFF"]
+    assert validation["counts_by_class"] == {SLUGS[1]: {"ROUNDING_OR_CASH": 1}}
+
+
+def test_latest_short_row_is_explained_by_live_holdings(tmp_path: Path) -> None:
+    jroot, troot = _capture(tmp_path, latest_short_slug=SLUGS[2])
+    assert builder.main(_args(tmp_path, jroot, troot)) == 0
+    (flag,) = _manifest(tmp_path)[builder.PROVENANCE_KEY]["holdings_row_validation"][
+        "flags"
+    ]
+    assert flag["class"] == "LIVE_SYMBOL_MISSING"
+    assert flag["flag"] == "TRUNCATED_ROW"
+    assert flag["fallback"] == {"kind": "LIVE_PORTFOLIO_HOLDINGS"}
+
+
+def test_over_allocation_class_and_tolerances_are_data() -> None:
+    comp = {
+        "slug": "s",
+        "current_holdings": [{"symbol": "A", "weight": 1.0}],
+        "dated_holdings": {
+            "snapshots": [
+                {"observed_date": "2026-01-01", "weights": {"A": 1.0}},
+                {"observed_date": "2026-01-02", "weights": {"A": 1.2}},
+            ]
+        },
+    }
+    narrow = builder._holdings_validation([comp], 0.005, 0.02)
+    assert narrow["counts_by_class"] == {"s": {"OVER_ALLOCATION": 1}}
+    assert narrow["allocation_sum_tolerance"] == 0.005
+    assert builder._holdings_validation([comp], 0.3, 0.02)["flags"] == []
+
+
+def test_tolerance_is_recorded_data(tmp_path: Path) -> None:
     jroot, troot = _capture(tmp_path, truncated_slug=SLUGS[0])
     argv = _args(tmp_path, jroot, troot, allocation_sum_tolerance="0.49")
     assert builder.main(argv) == 0
     validation = _manifest(tmp_path)[builder.PROVENANCE_KEY]["holdings_row_validation"]
     assert validation["allocation_sum_tolerance"] == 0.49
-    assert [f["slug"] for f in validation["flags"]] == [SLUGS[0]]
+    assert validation["flags"] == []
+
+
+def test_caller_supplied_labels_record_the_owner_workbook(tmp_path: Path) -> None:
+    assert _build(tmp_path) == 0
+    caller = _manifest(tmp_path)[builder.PROVENANCE_KEY]["caller_supplied"]
+    assert caller["portfolio_version"] == "synthetic-v1"
+    assert caller["live_inception"] == "2026-08-31"
+    assert caller["component_weights"]["owner_workbook_sha256"] == WORKBOOK_SHA
+    assert caller["component_weights"]["basis"] == "EQUAL_1_OVER_N"
+
+
+def test_vane_capture_dir_supplies_the_status(tmp_path: Path) -> None:
+    jroot, troot = _capture(tmp_path)
+    vane = jroot / "tt-market-vane__status.json"
+    data = vane.read_bytes()
+    path = jroot / "capture-manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["objects"] = [
+        r for r in manifest["objects"] if r["object"] != "tt-market-vane__status.json"
+    ]
+    path.write_text(json.dumps(manifest))
+    vane.unlink()
+    vroot = tmp_path / "run-vane"
+    vroot.mkdir()
+    (vroot / "tt-market-vane__status.json").write_bytes(data)
+    row = _row("tt-market-vane/status.json", data, "Wed, 02 Sep 2026 01:00:00 GMT")
+    row["captured_at_utc"] = "2026-09-03T03:00:00+00:00"
+    (vroot / "capture-manifest.json").write_text(json.dumps({"objects": [row]}))
+    argv = _args(tmp_path, jroot, troot, vane_capture_dir=str(vroot))
+    assert builder.main(argv) == 0
+    prov = _manifest(tmp_path)[builder.PROVENANCE_KEY]
+    assert prov["market_vane"]["source"] == "CAPTURE_INVENTORY"
+    assert prov["market_vane"]["captured_at_utc"] == "2026-09-03T03:00:00Z"
 
 
 def test_legacy_shape_requires_flag(tmp_path: Path) -> None:

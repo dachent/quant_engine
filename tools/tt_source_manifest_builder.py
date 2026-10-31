@@ -60,13 +60,20 @@ GOVERNED_SLUGS: Final = (
 )
 SHAPE_NATIVE: Final = "NATIVE_HASHED_CAPTURE"
 SHAPE_LEGACY: Final = "LEGACY_CAPTURE_WITHOUT_OBJECT_HASHES"
-#: Largest accepted distance of a holdings-history allocation row from 100%,
-#: as a fraction of 1.0 (0.01 is one percentage point).  The retained history
-#: legitimately drifts below 100% by a fraction of a point in older rows, so the
-#: default is deliberately wider than rounding noise yet far tighter than a
-#: truncated row (a single position published at 50% or 69%).  The value in use
-#: is recorded in the manifest; rows outside it are flagged, never rescaled.
-DEFAULT_ALLOCATION_SUM_TOLERANCE: Final = 0.01
+#: Declared data (recorded in every manifest), not a classifier.  A row whose
+#: weights sum to 100% within this band is complete.  Published weights carry two
+#: decimals, so the band is wider than per-position rounding but far narrower
+#: than a dropped position.
+DEFAULT_ALLOCATION_SUM_TOLERANCE: Final = 0.005
+#: A short row is explained by a dropped position when the missing mass equals
+#: that position's weight in the neighbouring complete row (or the live
+#: portfolio-holdings for the latest row) within this band.
+DEFAULT_EXPLAIN_TOLERANCE: Final = 0.02
+CLASS_SYMBOL_DROP: Final = "SYMBOL_DROP"
+CLASS_LIVE_SYMBOL_MISSING: Final = "LIVE_SYMBOL_MISSING"
+CLASS_ROUNDING_OR_CASH: Final = "ROUNDING_OR_CASH"
+CLASS_OVER_ALLOCATION: Final = "OVER_ALLOCATION"
+TRUNCATION_CLASSES: Final = (CLASS_SYMBOL_DROP, CLASS_LIVE_SYMBOL_MISSING)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -206,6 +213,15 @@ def _load_capture(root: Path, role: str, *, legacy: bool) -> _Capture:
     stamp = payload.get("captured_at_utc")
     if stamp is None and legacy:
         stamp = payload.get("captured_at")
+    if stamp is None:
+        # A single-object capture may stamp each object instead of the file.
+        stamps = [
+            _utc(row.get("captured_at_utc"), "capture object")
+            for row in payload["objects"]
+            if isinstance(row, dict)
+        ]
+        if stamps:
+            stamp = max(stamps)
     captured_at = _utc(stamp, "capture")
     records: dict[str, _Record] = {}
     for row in payload["objects"]:
@@ -387,58 +403,112 @@ def _chart_last(payload: Mapping[str, Any]) -> date:
 
 
 def _holdings_validation(
-    components: Sequence[Mapping[str, Any]], tolerance: float
+    components: Sequence[Mapping[str, Any]], tolerance: float, explain: float
 ) -> dict[str, Any]:
-    """Flag allocation rows that do not sum to 100%; never alter a row.
+    """Classify allocation rows that do not sum to 100%; never alter a row.
 
-    The fallback is the last complete row before the flagged one; when none
-    exists the live portfolio-holdings endpoint stands in if it is complete.
-    ``corroborated`` says the live portfolio-holdings matches the fallback row.
+    The class is derived from the data, not from a size cut-off.  A short row is
+    TRUNCATED (``SYMBOL_DROP``) when its symbols are a strict subset of the
+    nearest complete neighbouring row and the missing mass equals the dropped
+    symbols' weight there; the latest row is TRUNCATED (``LIVE_SYMBOL_MISSING``)
+    when the live portfolio-holdings carry symbols the row lacks and their
+    weight equals the missing mass.  Any other short row is ``ROUNDING_OR_CASH``
+    and a row above 100% is ``OVER_ALLOCATION``; neither is truncation.
+    The fallback for a truncated row is the live portfolio-holdings (latest row,
+    live complete and containing every symbol of the row), else the nearest
+    complete prior row, else the nearest complete next row.
     """
-
-    def complete(weights: Mapping[str, float]) -> bool:
-        return abs(sum(weights.values()) - 1.0) <= tolerance
-
     flags: list[dict[str, Any]] = []
+    counts: dict[str, dict[str, int]] = {}
     for row in components:
-        snapshots = row["dated_holdings"]["snapshots"]
-        live = {str(item["symbol"]): item["weight"] for item in row["current_holdings"]}
-        live_complete = all(w is not None for w in live.values()) and complete(
-            {k: float(v) for k, v in live.items() if v is not None}
+        slug = str(row["slug"])
+        snaps = row["dated_holdings"]["snapshots"]
+        sums = [sum(s["weights"].values()) for s in snaps]
+        done = [abs(total - 1.0) <= tolerance for total in sums]
+        live = {str(i["symbol"]): i["weight"] for i in row["current_holdings"]}
+        live_ok = all(w is not None for w in live.values()) and (
+            abs(sum(float(w) for w in live.values() if w is not None) - 1.0)
+            <= tolerance
         )
-        good = [s for s in snapshots if complete(s["weights"])]
-        for snap in snapshots:
-            if complete(snap["weights"]):
+        for i, snap in enumerate(snaps):
+            if done[i]:
                 continue
-            prior = [g for g in good if g["observed_date"] < snap["observed_date"]]
+            symbols = set(snap["weights"])
+            shortfall = 1.0 - sums[i]
+            neighbours: list[tuple[str, Mapping[str, Any]]] = []
+            prior = next((j for j in range(i - 1, -1, -1) if done[j]), None)
+            after = next((j for j in range(i + 1, len(snaps)) if done[j]), None)
+            if prior is not None:
+                neighbours.append(("LAST_COMPLETE_ROW", snaps[prior]))
+            if after is not None:
+                neighbours.append(("NEXT_COMPLETE_ROW", snaps[after]))
+            latest = i == len(snaps) - 1
+            cls = CLASS_ROUNDING_OR_CASH
+            if shortfall < 0:
+                cls = CLASS_OVER_ALLOCATION
+            else:
+                for _, nb in neighbours:
+                    dropped = set(nb["weights"]) - symbols
+                    if (
+                        dropped
+                        and symbols < set(nb["weights"])
+                        and abs(shortfall - sum(nb["weights"][k] for k in dropped))
+                        <= explain
+                    ):
+                        cls = CLASS_SYMBOL_DROP
+                        break
+                if cls == CLASS_ROUNDING_OR_CASH and latest and live_ok:
+                    absent = set(live) - symbols
+                    if absent and (
+                        abs(shortfall - sum(float(live[k]) for k in absent)) <= explain
+                    ):
+                        cls = CLASS_LIVE_SYMBOL_MISSING
             corroborated = False
-            if prior:
-                fallback: dict[str, Any] = {
-                    "kind": "LAST_COMPLETE_ROW",
-                    "observed_date": prior[-1]["observed_date"],
-                }
-                weights = prior[-1]["weights"]
+            fallback: dict[str, Any]
+            if (
+                cls in TRUNCATION_CLASSES
+                and latest
+                and live_ok
+                and symbols <= set(live)
+            ):
+                fallback = {"kind": "LIVE_PORTFOLIO_HOLDINGS"}
+            elif neighbours:
+                kind, nb = neighbours[0]
+                fallback = {"kind": kind, "observed_date": nb["observed_date"]}
                 corroborated = (
-                    live_complete
-                    and set(live) == set(weights)
+                    live_ok
+                    and set(live) == set(nb["weights"])
                     and all(
-                        abs(float(live[k]) - weights[k]) <= tolerance for k in weights
+                        abs(float(live[k]) - nb["weights"][k]) <= tolerance
+                        for k in nb["weights"]
                     )
                 )
-            elif live_complete:
+            elif live_ok:
                 fallback = {"kind": "LIVE_PORTFOLIO_HOLDINGS"}
             else:
                 fallback = {"kind": "NONE"}
             flags.append(
                 {
+                    "class": cls,
                     "fallback": fallback,
                     "fallback_corroborated_by_live_portfolio_holdings": corroborated,
-                    "flag": "TRUNCATED_ROW",
+                    "flag": (
+                        "TRUNCATED_ROW"
+                        if cls in TRUNCATION_CLASSES
+                        else "ALLOCATION_SUM_OFF"
+                    ),
                     "observed_date": snap["observed_date"],
-                    "slug": row["slug"],
+                    "slug": slug,
                 }
             )
-    return {"allocation_sum_tolerance": tolerance, "flags": flags}
+            by_class = counts.setdefault(slug, {})
+            by_class[cls] = by_class.get(cls, 0) + 1
+    return {
+        "allocation_sum_tolerance": tolerance,
+        "counts_by_class": counts,
+        "explain_tolerance": explain,
+        "flags": flags,
+    }
 
 
 def _sealed(payload: dict[str, Any]) -> bytes:
@@ -458,9 +528,22 @@ def _provenance(
     vane: Mapping[str, Any],
     gap: Mapping[str, Any] | None,
     holdings_rows: Mapping[str, Any],
+    workbook_sha: str,
+    portfolio_version: str,
+    live_inception: str,
 ) -> dict[str, Any]:
     return {
         "builder": BUILDER,
+        "caller_supplied": {
+            "component_weights": {
+                "basis": "EQUAL_1_OVER_N",
+                "owner_workbook_filename": "TuringTrader Strategies Data byAPI.xlsx",
+                "owner_workbook_sha256": workbook_sha,
+                "source": "owner workbook dgst_tt_portfolio allocation column",
+            },
+            "live_inception": live_inception,
+            "portfolio_version": portfolio_version,
+        },
         "builder_version": BUILDER_VERSION,
         "capture_shape": SHAPE_LEGACY if legacy else SHAPE_NATIVE,
         "captures": [
@@ -502,8 +585,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     if not version:
         raise BuilderError("--portfolio-version is required")
     tolerance = float(args.allocation_sum_tolerance)
-    if not 0.0 <= tolerance < 0.5:
-        raise BuilderError("--allocation-sum-tolerance must be in [0, 0.5)")
+    explain = float(args.explain_tolerance)
+    if not (0.0 <= tolerance < 0.5 and 0.0 <= explain < 0.5):
+        raise BuilderError("allocation tolerances must be in [0, 0.5)")
+    workbook_sha = str(args.owner_workbook_sha256 or "")
+    if not _SHA256.fullmatch(workbook_sha):
+        raise BuilderError("--owner-workbook-sha256 must be a sha256")
     out_dir = Path(args.out_dir)
     partial = out_dir.with_name(out_dir.name + ".partial")
     if out_dir.exists() or partial.exists():
@@ -512,6 +599,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     captures = [_load_capture(capture_dir, "json", legacy=legacy)]
     if args.txt_capture_dir:
         captures.append(_load_capture(Path(args.txt_capture_dir), "txt", legacy=legacy))
+    if args.vane_capture_dir:
+        captures.append(
+            _load_capture(Path(args.vane_capture_dir), "vane", legacy=legacy)
+        )
     for item in captures:
         if _day(item.captured_at_utc[:10], "capture date") < min_day:
             raise BuilderError(
@@ -650,8 +741,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             vane=vane_prov,
             gap=gap,
             holdings_rows=_holdings_validation(
-                payload["selected_components"], tolerance
+                payload["selected_components"], tolerance, explain
             ),
+            workbook_sha=workbook_sha,
+            portfolio_version=version,
+            live_inception=inception,
         )
         content = _sealed(payload)
         _write_new(partial / MANIFEST_NAME, content)
@@ -791,7 +885,9 @@ def verify_dir(out_dir: Path) -> dict[str, Any]:
         raise BuilderError("manifest replay differs from the re-hashed capture")
     validation = provenance.get("holdings_row_validation")
     if not isinstance(validation, dict) or validation != _holdings_validation(
-        selected, float(validation.get("allocation_sum_tolerance", -1.0))
+        selected,
+        float(validation.get("allocation_sum_tolerance", -1.0)),
+        float(validation.get("explain_tolerance", -1.0)),
     ):
         raise BuilderError("holdings row validation differs from the manifest rows")
     weights = [float(row["portfolio_weight"]) for row in selected]
@@ -806,10 +902,7 @@ def verify_dir(out_dir: Path) -> dict[str, Any]:
         "capture_shape": provenance["capture_shape"],
         "chart_last_date": chart_last.isoformat(),
         "price_tape_gap": gap,
-        "truncated_row_counts": {
-            slug: sum(1 for flag in validation["flags"] if flag["slug"] == slug)
-            for slug in slugs
-        },
+        "holdings_counts_by_class": validation["counts_by_class"],
     }
 
 
@@ -844,15 +937,12 @@ def read_compat(manifest: Path, components: Sequence[str]) -> dict[str, Any]:
                 "source_manifest_id": loaded["source_manifest_id"],
             }
     result["accepted"] = accepted
-    # Both readers consume dated snapshots exactly as published.  Flagged rows
-    # are NOT applied or replaced for them; acceptance does not mean clean.
-    flags = (
+    result["holdings_counts_by_class"] = (
         _json_file(manifest, "manifest")
         .get(PROVENANCE_KEY, {})
         .get("holdings_row_validation", {})
-        .get("flags", [])
+        .get("counts_by_class", {})
     )
-    result["truncated_row_flags_not_applied_by_readers"] = len(flags)
     return result
 
 
@@ -877,8 +967,20 @@ def _parser() -> argparse.ArgumentParser:
         "--allocation-sum-tolerance",
         type=float,
         default=DEFAULT_ALLOCATION_SUM_TOLERANCE,
-        help="fraction of 1.0 a holdings row may differ from 100%% (default 0.01)",
+        help="fraction of 1.0 within which a holdings row is complete",
     )
+    b.add_argument(
+        "--explain-tolerance",
+        type=float,
+        default=DEFAULT_EXPLAIN_TOLERANCE,
+        help="fraction within which a dropped position explains a short row",
+    )
+    b.add_argument(
+        "--owner-workbook-sha256",
+        required=True,
+        help="sha256 of the owner workbook the caller-supplied labels come from",
+    )
+    b.add_argument("--vane-capture-dir", help="capture dir holding the market vane")
     b.add_argument("--accept-legacy-capture-shape", action="store_true")
     v = sub.add_parser("verify", help="re-hash and shape-check a built directory")
     v.add_argument("--out-dir", required=True)
