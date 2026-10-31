@@ -48,8 +48,10 @@ ACCOUNT_RE = re.compile(r"account-([0-9a-f]{16})")
 ASSIGNMENT_RE = re.compile(r"assignment-([0-9a-f]{20})")
 TXN_RE = re.compile(r"txn-([0-9a-f]{24})")
 HEX64_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
-OWNER_IN_TEXT_RE = re.compile('(?P<pre>•\d{4} — [^()"\n]+? )\((?P<owner>[A-Z][a-z]+)\)')
-FOUR_IN_TEXT_RE = re.compile(r"\b(IBKR|Schwab|Fidelity|Alpaca) (•)?(\d{4})\b")
+OWNER_IN_TEXT_RE = re.compile(
+    r"(?P<pre>\u2022\d{4} \u2014 [^()\"\n]+? )\((?P<owner>[A-Z][a-z]+)\)"
+)
+FOUR_IN_TEXT_RE = re.compile(r"\b(IBKR|Schwab|Fidelity|Alpaca) (\u2022)?(\d{4})\b")
 MONEY_KEYS = frozenset(
     {
         "amount",
