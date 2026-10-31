@@ -137,6 +137,8 @@ _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _US_DATE_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
 _LABEL_RE = re.compile(r"[A-Za-z][A-Za-z0-9 %/#._()-]{0,40}")
 _PLAIN_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_FIELD_PUNCT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.$@:-]*")
+_TICKER_RE = re.compile(r"[A-Z][A-Z0-9.\-_]{0,9}")
 
 
 # ---------------------------------------------------------------------------
@@ -293,10 +295,27 @@ def _scalar_kind(value: object) -> str:
     return "str"
 
 
-def _keyed(keys: Sequence[str]) -> bool:
-    return len(keys) > MAX_KEYS_BEFORE_KEYED or any(
-        key.isdigit() or len(key) > 64 or _ISO_DATE_RE.fullmatch(key) for key in keys
+def _data_like_key(key: str) -> bool:
+    """A key that looks like data (id, date, ticker, name with spaces), not a field."""
+
+    return bool(
+        key.isdigit()
+        or len(key) > 40
+        or _ISO_DATE_RE.fullmatch(key)
+        or _US_DATE_RE.fullmatch(key)
+        or _TICKER_RE.fullmatch(key)
+        or not _PLAIN_KEY_RE.fullmatch(key)
+        and not _FIELD_PUNCT_RE.fullmatch(key)
     )
+
+
+def _keyed(keys: Sequence[str]) -> bool:
+    """Collapse maps keyed by data. Plain lowercase words cannot be told apart from
+    field names; that residual risk is why discover output is restricted evidence."""
+
+    if len(keys) > MAX_KEYS_BEFORE_KEYED:
+        return True
+    return 2 * sum(_data_like_key(key) for key in keys) >= len(keys) > 0
 
 
 def shape_of(value: object, depth: int = 0) -> Any:
@@ -1236,10 +1255,14 @@ def _field_names(shape: Any) -> Any:
     return {k: _field_names(v) for k, v in shape.items() if k != "$optional"}
 
 
+def _has_2xx(slot: Mapping[str, Any]) -> bool:
+    return any(200 <= int(code) < 300 for code in slot["status"])
+
+
 def _template_pattern(template: str, noun: str) -> tuple[str, str]:
     path = template.replace("{id}", "{" + noun + "_id}")
     pattern = "/".join(
-        "[1-9][0-9]*" if part == "{id}" else re.escape(part)
+        "[1-9][0-9]*".join(re.escape(piece) for piece in part.split("{id}"))
         for part in template.split("/")
     )
     return path, pattern
@@ -1365,8 +1388,10 @@ def _candidate(
             "HTML response admission: the capture extractor and CaptureRoute admit "
             "JSON shapes and CSV columns only"
         )
-    if media == "json" and not slot["status"].get(200):
-        row["requires_code_change"].append("no 200 observed")
+    if "{id}" in template:
+        row["notes"] = [
+            "ids are assumed numeric ([1-9][0-9]*); widen if the capture shows otherwise"
+        ]
     return row
 
 
@@ -1455,7 +1480,7 @@ def build_proposal(
                 score = 3
             else:
                 score = _matches(capability, template, key[1])
-            if score == 0 or not slot["status"].get(200):
+            if score == 0 or not _has_2xx(slot):
                 continue
             drift = (
                 bool(raw_entries) and first.get(key, {}).get("shape") != slot["shape"]
@@ -1485,7 +1510,7 @@ def build_proposal(
             {
                 key[0]
                 for key, slot in allr.items()
-                if slot["status"].get(200)
+                if _has_2xx(slot)
                 and all(_matches(c, key[0], key[1]) == 0 for c in CAPABILITY_HINTS)
                 and not re.fullmatch(r"/spr/strategy/model/\{id\}", key[0])
             }

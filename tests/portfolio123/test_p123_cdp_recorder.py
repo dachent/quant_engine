@@ -1084,3 +1084,51 @@ def test_generated_spec_source_is_valid_and_fails_closed_on_mixed_types() -> Non
         == 'Obj(\n    {\n        "a": "<MIXED:int|str>",\n    }\n)'
     )
     assert '"<KEYED' in rec._spec_source(shape_of({str(n): 1 for n in range(3)}))
+
+
+def test_small_maps_keyed_by_tickers_or_names_are_collapsed() -> None:
+    shape = shape_of(
+        {
+            "positions": {"AAPL": {"q": 1}, "MSFT": {"q": 2}},
+            "named": {"Apple Inc": 1, "Strategy One": 2},
+            "single": {"BRK.B": 1},
+            "record": {"daysAvg": 1.0, "retAvg": 2.0, "trades": 3},
+        }
+    )
+    assert shape["positions"] == {"$keyed": {"q": "int"}, "$keys": 2}
+    assert shape["named"] == {"$keyed": "int", "$keys": 2}
+    assert shape["single"] == {"$keyed": "int", "$keys": 1}
+    assert set(shape["record"]) == {"daysAvg", "retAvg", "trades"}
+    blob = json.dumps(shape)
+    for leaked in ("AAPL", "MSFT", "Apple", "Strategy", "BRK"):
+        assert leaked not in blob
+
+
+def test_embedded_id_patterns_match_the_observed_route() -> None:
+    import re
+
+    path, pattern = rec._template_pattern(path_template("/x/model1764562/y"), "model")
+    assert path == "/x/model{model_id}/y"
+    assert re.fullmatch(pattern, "/x/model1764562/y")
+    assert not re.fullmatch(pattern, "/x/model{id}/y")
+
+
+def test_any_2xx_status_makes_a_route_a_candidate(tmp_path: Path) -> None:
+    recorder = Recorder(tmp_path / "d", mode="discover")
+    feed(
+        recorder,
+        "GET",
+        f"{BASE}/spr/aifactor/model/42",
+        json.dumps({"id": 1}).encode(),
+        status=206,
+    )
+    recorder.finish()
+    entries = json.loads((tmp_path / "d" / "discovery.json").read_text("utf-8"))
+    proposal = build_proposal(entries)
+    model = next(
+        r for r in proposal["capabilities"] if r["capability"] == "aifactor.model"
+    )
+    assert [c["route_template"] for c in model["candidates"]] == [
+        "/spr/aifactor/model/{id}"
+    ]
+    assert model["candidates"][0]["status_counts"] == {"206": 1}

@@ -293,6 +293,11 @@ Safety rules, enforced in code and pinned by `tests/portfolio123/test_p123_cdp_r
   and the `/spr/user` segment `user`) are not recorded unless
   `--include-identity <word>` names them; they appear as
   `IDENTITY_BILLING_NOT_RECORDED` with the template only.
+- Body shapes keep field names, so objects keyed by data collapse to `$keyed`: more
+  than 64 keys, or at least half the keys numeric, dates, uppercase ticker-like, or
+  containing spaces or other non-identifier characters. A map keyed by plain lowercase
+  words cannot be told apart from field names, so `discover` output is still treated
+  as restricted evidence and is kept only in the governed root.
 - Path templates replace identifiers (digit runs, UUIDs, long hex or token-like
   segments) with `{id}` and drop path parameters such as `;jsessionid=`.
 - The run directory (`--output-root`) must be absolute, new, outside any Git
