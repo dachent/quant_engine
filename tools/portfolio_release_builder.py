@@ -5422,11 +5422,15 @@ def _verified_epoch_manifest_panel_arguments(
     )
 
 
-# The manifest link factors and the history span receipts come from different
-# arithmetic (the Matrixport generation's 28-significant-digit Decimal context versus
-# the receipt's longer quotient), so they agree exactly at this many significant
-# digits, the same precision at which the weekly line compounds.
-SPAN_FACTOR_SIGNIFICANT_DIGITS = 28
+# Largest absolute difference accepted between a manifest link factor and
+# ``1 + return`` of the matching weekly span.  The two are the same measured quantity
+# computed by different arithmetic: the manifest factor is a 40-digit quotient of the
+# Matrixport generation's NAVs, the receipt return a longer quotient of the same
+# endpoints.  On the pass-24 data they are about 5e-28 apart.  The bound is 1e-26,
+# roughly twenty times that and fourteen orders below any real drift (a 1e-12 relative
+# change fails); an absolute bound is used so the result does not depend on where a
+# significant-digit rounding boundary falls.
+SPAN_FACTOR_TOLERANCE = Decimal("1e-26")
 
 
 def _verify_weekly_spans_against_manifest(
@@ -5436,8 +5440,7 @@ def _verify_weekly_spans_against_manifest(
 
     The weekly stage reads its spans from the governed history coverage because the
     account manifest is staged later.  Once the manifest exists, each span must match
-    the ``observation_trace.links`` factor of the same interval at 28 significant
-    digits, so any drift between the two authorities stops the build.
+    the ``observation_trace.links`` factor of the same interval within SPAN_FACTOR_TOLERANCE, so any drift between the two authorities stops the build.
     """
 
     if account_strategy_manifest is None:
@@ -5477,9 +5480,10 @@ def _verify_weekly_spans_against_manifest(
             matched = False
             for factor_text in candidates:
                 with localcontext() as context:
-                    context.prec = SPAN_FACTOR_SIGNIFICANT_DIGITS
+                    context.prec = 60
                     expected = Decimal(1) + Decimal(str(span["return"]))
-                    matched = matched or expected == +Decimal(factor_text)
+                    gap = abs(expected - Decimal(factor_text))
+                    matched = matched or gap <= SPAN_FACTOR_TOLERANCE
             if not matched:
                 raise VerticalBuildError(
                     "weekly accepted span differs from the account manifest link: "

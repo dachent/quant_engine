@@ -1580,6 +1580,80 @@ def test_weekly_spans_must_equal_the_manifest_links_exactly(tmp_path: Path) -> N
         builder._verify_weekly_spans_against_manifest(weekly_root, gone)
 
 
+def test_span_tolerance_passes_arithmetic_noise_and_fails_real_drift(
+    tmp_path: Path,
+) -> None:
+    import portfolio_release_builder as builder
+
+    assert builder.SPAN_FACTOR_TOLERANCE == Decimal("1e-26")
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+
+    def published(index: int, first_return: str) -> Path:
+        links = (
+            ("2026-07-21", "2026-07-23", first_return),
+            SPAN_LINKS[1],
+        )
+        coverage = _span_coverage(tmp_path / f"cov-{index}.json", links=links)
+        root = tmp_path / f"weekly-{index}"
+        candidate = weekly.build_candidate(
+            correlation_root, strategy_returns, plan_bundle, root, None, coverage
+        )
+        weekly.publish(
+            correlation_root,
+            strategy_returns,
+            plan_bundle,
+            Path(candidate["candidate_dir"]),
+            root,
+            None,
+            coverage,
+        )
+        return root
+
+    def manifest(first_factor: str, index: int) -> Path:
+        path = tmp_path / f"manifest-{index}.json"
+        _write_json(
+            path,
+            {
+                "rows": [
+                    {
+                        "observation_trace": {
+                            "links": [
+                                {
+                                    "start_date": "2026-07-21",
+                                    "end_date": "2026-07-23",
+                                    "factor": first_factor,
+                                },
+                                {
+                                    "start_date": "2026-07-24",
+                                    "end_date": "2026-07-27",
+                                    "factor": "1.015",
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+        return path
+
+    # a real pair is about 5e-28 apart: same quantity, different arithmetic
+    noisy = "0.9700000000000000000000000005"
+    root = published(0, "-0.03")
+    assert builder._verify_weekly_spans_against_manifest(root, manifest(noisy, 0)) == 2
+    # 1e-12 relative drift in the manifest source fails
+    drifted_manifest = str(Decimal("0.97") * (1 + Decimal("1e-12")))
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(
+            root, manifest(drifted_manifest, 1)
+        )
+    # 1e-12 relative drift in the weekly (history receipt) source fails
+    drifted_weekly = published(2, str(Decimal("-0.03") * (1 + Decimal("1e-12"))))
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(
+            drifted_weekly, manifest("0.97", 2)
+        )
+
+
 def test_accepted_spans_bind_to_the_dependence_source_and_the_common_cutoff(
     tmp_path: Path,
 ) -> None:
