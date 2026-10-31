@@ -88,7 +88,7 @@ _REVIEW_TABLE = {
     "aifactor.model": ("UNVERIFIED", "UNVERIFIED"),
     "screen.definition": ("UNVERIFIED", "UNVERIFIED"),
     "simulation.result": ("UNVERIFIED", "UNVERIFIED"),
-    "transactions.account": ("DIFFERS", "CONFIRMED"),
+    "transactions.account": ("DIFFERS", "UNVERIFIED"),
     "transactions.download": ("DIFFERS", "CONFIRMED"),
     "designer-model.json": ("DIFFERS", "CONFIRMED"),
     "billing.credit-table": ("UNVERIFIED", "UNVERIFIED"),
@@ -335,7 +335,8 @@ def test_unverified_rows_are_still_marked_and_never_enable_a_real_route() -> Non
             continue
         route = catalog.route_for(capability)
         assert route.verdict == "UNVERIFIED"
-        assert "placeholder" in route.evidence.lower()
+        text = route.evidence.lower()
+        assert "placeholder" in text or "stays unverified" in text
     # No observed real route is matched by an unverified placeholder.
     for real in (
         "/transact_list.jsp?portid=1&offset=0",

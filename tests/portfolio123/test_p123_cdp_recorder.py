@@ -949,7 +949,7 @@ def test_propose_catalog_builds_draft_rows_from_known_and_synthetic_routes(
     assert transactions["html_profile"]["header_cells"][-1] == "TRADE"
     # the reviewed catalog row already admits this HTML route
     assert not transactions["requires_code_change"]
-    assert by_cap["transactions.account"]["change"]["change"] == "CONFIRMS_EXISTING"
+    assert by_cap["transactions.account"]["change"]["change"] == "SAME_ROUTE_UNVERIFIED"
 
     predictor = by_cap["aifactor.predictor"]["candidates"][0]
     assert predictor["route_template"] == "/spr/aifactor/predictor/{id}/predictions"

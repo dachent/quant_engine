@@ -209,10 +209,13 @@ def _number(text: str) -> float | None:
     if _NUMBER.fullmatch(text) is None:
         raise HtmlRefusal("NUMBER_UNREVIEWED")
     try:
-        value = float(Decimal(text.replace(",", "")))
-    except (InvalidOperation, ValueError):
+        exact = Decimal(text.replace(",", ""))
+        value = float(exact)
+    except (InvalidOperation, ValueError, OverflowError):
         raise HtmlRefusal("NUMBER_UNREVIEWED") from None
-    if not math.isfinite(value):
+    # Normalized numbers are JSON floats: refuse any value a float cannot hold exactly
+    # (more than about 15 significant digits) instead of silently changing the source.
+    if not math.isfinite(value) or Decimal(repr(value)) != exact:
         raise HtmlRefusal("NUMBER_UNREVIEWED")
     return value
 
@@ -220,6 +223,8 @@ def _number(text: str) -> float | None:
 def _numeric_cell(cell: _El) -> float | None:
     children = cell.elements()
     if len(children) > 1 or any(c.tag != "span" or c.elements() for c in children):
+        raise HtmlRefusal("CELL_STRUCTURE")
+    if children and cell.own_text():
         raise HtmlRefusal("CELL_STRUCTURE")
     return _number(cell.text())
 

@@ -417,7 +417,6 @@ CATALOG: tuple[CaptureRoute, ...] = (
         shape=_TRANSACTIONS_PAGE,
         paginated=True,
         html=TRANSACTIONS_TABLE,
-        verdict=VERDICT_CONFIRMED,
         finding="DIFFERS",
         evidence=(
             "Route GET /transact_list.jsp?portid=&offset= and the table structure were "
@@ -429,10 +428,13 @@ CATALOG: tuple[CaptureRoute, ...] = (
             "column, and 50 data rows of 11 cells (date link, BUY/SELL/DIV/SPLIT label, "
             "ticker box with a market suffix, comma-grouped numbers that are empty on "
             "dividends and splits, free-text note, empty TRADE cell). All eight parse "
-            "and agree with the pager. The first page may omit offset. NOT observed: "
-            "the last page of a strategy, a strategy with no transactions, other "
-            "strategies, other transaction types, a non-empty TRADE cell; each of these "
-            "refuses the page. The HTML header differs from the CSV download header "
+            "and agree with the pager. The first page may omit offset. NOT observed, "
+            "so the verdict stays UNVERIFIED and a run is never REVIEWED_SHAPES: the "
+            "last page of a strategy (a short page whose range ends at the total), a "
+            "strategy with no transactions, other strategies, other transaction types, "
+            "a non-empty TRADE cell. The parser accepts a short last page that agrees "
+            "with its pager and refuses the rest; the verdict flips to CONFIRMED when a "
+            "preserved capture shows a last page. The HTML header differs from the CSV download header "
             "(Ticker, Tot Fees, Note versus Symbol, TotFees, Notes). Admission is "
             "through the fail-closed parser in capture_html, not the JSON extractor."
         ),

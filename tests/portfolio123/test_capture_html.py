@@ -181,6 +181,8 @@ def request(
     **kwargs: Any,
 ) -> StageRequest:
     source = write_har(tmp_path / f"{run_id}.har", entries)
+    if "transactions.account" in scope:
+        kwargs.setdefault("strategy_ids", (STRATEGY,))
     return StageRequest(root, run_id, "har", source, scope, NOW, EXPIRES, **kwargs)
 
 
@@ -399,14 +401,18 @@ def test_refusal_messages_carry_a_code_and_never_page_content() -> None:
 
 def test_html_route_is_outside_the_json_contract() -> None:
     route = catalog.route_for("transactions.account")
-    assert route.html is not None and route.verdict == "CONFIRMED"
+    assert route.html is not None and route.verdict == "UNVERIFIED"
     assert route not in catalog.har_routes()
     assert route in catalog.html_routes()
     with pytest.raises(Exception):
         catalog.capture_contract().route(
             "GET", f"{ORIGIN}/transact_list.jsp?portid={STRATEGY}&offset=50"
         )
-    assert catalog.evidence_status(["transactions.account"]) == "REVIEWED_SHAPES"
+    # the last-page shape is not in any preserved byte: never REVIEWED_SHAPES yet
+    assert (
+        catalog.evidence_status(["transactions.account"])
+        == "UNVERIFIED_SYNTHETIC_SHAPES"
+    )
     assert (
         catalog.evidence_status(["transactions.account", "aifactor.model"])
         == "UNVERIFIED_SYNTHETIC_SHAPES"
@@ -445,11 +451,12 @@ def test_request_matching(method: str, url: str, expected: Any) -> None:
 # --- staging: HAR run, completeness, forgery -------------------------------
 
 
-def test_complete_run_stages_verifies_and_is_reviewed(
+def test_complete_run_stages_and_verifies_but_is_not_yet_reviewed(
     root: Path, tmp_path: Path
 ) -> None:
     summary = stage_run(request(root, tmp_path, pages()))
-    info = summary.capabilities["transactions.account"]
+    info = dict(summary.capabilities["transactions.account"])
+    assert len(info.pop("strategy_sha256s")) == 1  # type: ignore[call-overload]
     assert info == {
         "records": 3,
         "pages_seen": 3,
@@ -463,7 +470,7 @@ def test_complete_run_stages_verifies_and_is_reviewed(
     assert verified.manifest_sha256 == summary.manifest_sha256
     run = root / "p123-capture" / "html-run"
     manifest = json.loads((run / "manifest.json").read_text("utf-8"))
-    assert manifest["evidence_status"] == "REVIEWED_SHAPES"
+    assert manifest["evidence_status"] == "UNVERIFIED_SYNTHETIC_SHAPES"
     assert manifest["scope"] == list(SCOPE) and manifest["restricted"] is True
     normalized = (run / "normalized" / "records.json").read_bytes().decode()
     records = json.loads(normalized)["records"]
@@ -553,11 +560,12 @@ def test_offset_beyond_the_declared_end_or_off_step_refuses(
 
 def test_two_strategies_are_checked_independently(root: Path, tmp_path: Path) -> None:
     both = pages(120) + pages(70, OTHER)
-    summary = stage_run(request(root, tmp_path, both))
+    ids = (STRATEGY, OTHER)
+    summary = stage_run(request(root, tmp_path, both, strategy_ids=ids))
     info = summary.capabilities["transactions.account"]
     assert (info["strategies"], info["rows"], info["page_count"]) == (2, 190, 5)
     broken = pages(120) + pages(70, OTHER, skip=(50,))
-    req = request(root, tmp_path, broken, run_id="run-two")
+    req = request(root, tmp_path, broken, run_id="run-two", strategy_ids=ids)
     assert refusal(req) == "COVERAGE_PARTIAL"
 
 
@@ -613,7 +621,7 @@ def test_html_and_json_capabilities_stage_together(root: Path, tmp_path: Path) -
     manifest = json.loads(
         (root / "p123-capture" / "html-run" / "manifest.json").read_text("utf-8")
     )
-    assert manifest["evidence_status"] == "REVIEWED_SHAPES"
+    assert manifest["evidence_status"] == "UNVERIFIED_SYNTHETIC_SHAPES"
     assert (
         refusal(request(root, tmp_path, pages(30), scope, run_id="r-two"))
         == "SCOPE_MISMATCH"
@@ -662,3 +670,111 @@ def test_forged_manifest_with_rebound_hashes_fails_rederivation(
     with pytest.raises(CaptureRefusal) as caught:
         verify_run(root, "html-run")
     assert caught.value.code == "REDERIVATION_MISMATCH"
+
+
+# --- review findings: binding, mixed content, precision --------------------
+
+
+def test_run_must_cover_exactly_the_declared_strategies(
+    root: Path, tmp_path: Path
+) -> None:
+    entries = pages(30)
+    assert (
+        refusal(request(root, tmp_path, entries, strategy_ids=()))
+        == "STRATEGIES_REQUIRED"
+    )
+    wrong = request(root, tmp_path, entries, run_id="r-wrong", strategy_ids=(OTHER,))
+    assert refusal(wrong) == "STRATEGY_MISMATCH"
+    extra = request(
+        root, tmp_path, entries, run_id="r-extra", strategy_ids=(STRATEGY, OTHER)
+    )
+    assert refusal(extra) == "STRATEGY_MISMATCH"
+    unrelated = pages(30, OTHER)
+    req = request(root, tmp_path, entries + unrelated, run_id="r-more")
+    assert refusal(req) == "STRATEGY_MISMATCH"
+    assert (
+        refusal(request(root, tmp_path, entries, run_id="r-bad", strategy_ids=("x",)))
+        == "STRATEGY_IDS_INVALID"
+    )
+    dup = request(
+        root, tmp_path, entries, run_id="r-dup", strategy_ids=(STRATEGY, STRATEGY)
+    )
+    assert refusal(dup) == "STRATEGY_IDS_INVALID"
+    designer = entry(f"{ORIGIN}/spr/strategy/model/9005?dm=true", DESIGNER)
+    unexpected = request(
+        root,
+        tmp_path,
+        [designer],
+        ("designer-model.json",),
+        run_id="r-un",
+        strategy_ids=(STRATEGY,),
+    )
+    assert refusal(unexpected) == "STRATEGY_IDS_UNEXPECTED"
+
+
+def test_manifest_binds_strategies_by_hash_and_verify_rechecks_them(
+    root: Path, tmp_path: Path
+) -> None:
+    from quant_engine.portfolio123.capture_intake import strategy_hash
+    from quant_engine.portfolio123.capture_shapes import canonical_bytes
+
+    stage_run(request(root, tmp_path, pages(30)))
+    run = root / "p123-capture" / "html-run"
+    manifest = json.loads((run / "manifest.json").read_text("utf-8"))
+    info = manifest["capabilities"]["transactions.account"]
+    assert info["strategy_sha256s"] == [strategy_hash(STRATEGY)]
+    assert STRATEGY not in (run / "manifest.json").read_text("utf-8").replace(
+        strategy_hash(STRATEGY), ""
+    )
+    info["strategy_sha256s"] = [strategy_hash(OTHER)]
+    (run / "manifest.json").write_bytes(canonical_bytes(manifest))
+    with pytest.raises(CaptureRefusal) as caught:
+        verify_run(root, "html-run")
+    assert caught.value.code == "STRATEGY_MISMATCH"
+    del info["strategy_sha256s"]
+    (run / "manifest.json").write_bytes(canonical_bytes(manifest))
+    with pytest.raises(CaptureRefusal) as caught:
+        verify_run(root, "html-run")
+    assert caught.value.code == "MANIFEST_INVALID"
+
+
+def test_cli_declares_strategies(
+    root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from quant_engine.portfolio123 import capture_cli
+
+    source = write_har(tmp_path / "cli.har", pages(30))
+    args = [
+        "stage-har",
+        "--staging-root",
+        str(root),
+        "--run-id",
+        "cli-run",
+        "--input",
+        str(source),
+        "--captured-at",
+        NOW.isoformat(),
+        "--session-expires-at",
+        EXPIRES.isoformat(),
+        "--capability",
+        "transactions.account",
+        "--strategy-id",
+        STRATEGY,
+    ]
+    assert capture_cli.main(args) == 0
+    capsys.readouterr()
+    again = [*args[:4], "cli-two", *args[5:-1], OTHER]
+    assert capture_cli.main(again) != 0
+    assert "STRATEGY_MISMATCH" in capsys.readouterr().err
+
+
+def test_numeric_cells_reject_mixed_content_and_inexact_decimals() -> None:
+    mixed = _mutated(
+        '<td style="text-align:right">12.50</td>', "<td>1<span>2</span></td>"
+    )
+    assert _code(mixed) == "CELL_STRUCTURE"
+    assert _code(_mutated("12.50", "9007199254740993")) == "NUMBER_UNREVIEWED"
+    assert _code(_mutated("12.50", "0.1234567890123456789")) == "NUMBER_UNREVIEWED"
+    exact = parse(_mutated("12.50", "123456789012345.5"))
+    assert exact.rows[0]["price"] == 123456789012345.5
+    assert parse(_mutated("12.50", "0.30")).rows[0]["price"] == 0.3

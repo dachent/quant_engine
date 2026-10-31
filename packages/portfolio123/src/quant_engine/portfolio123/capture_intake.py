@@ -133,6 +133,7 @@ class StageRequest:
     captured_at: datetime | None = None
     session_expires_at: datetime | None = None
     allow_partial: bool = False
+    strategy_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -458,6 +459,12 @@ def _html_body(response: Mapping[str, Any]) -> bytes:
     return text.encode("utf-8")
 
 
+def strategy_hash(strategy_id: str) -> str:
+    """The identifier-free binding of a strategy id (never the id itself)."""
+
+    return _sha256(b"p123-strategy:" + strategy_id.encode())
+
+
 def _html_records(
     entries: Sequence[dict[str, Any]], *, captured_at: datetime, expires_at: datetime
 ) -> tuple[list[ExtractedResponse], dict[str, tuple[str, ...]]]:
@@ -505,7 +512,7 @@ def _html_records(
                 captured_at=captured_at,
                 request_sha256=request_sha,
                 response={
-                    "strategy_sha256": _sha256(b"p123-strategy:" + strategy.encode()),
+                    "strategy_sha256": strategy_hash(strategy),
                     "offset": offset,
                     "first": page.first,
                     "last": page.last,
@@ -522,8 +529,12 @@ def _check_html_pages(
     capability: str,
     responses: Sequence[ExtractedResponse],
     sequences: Mapping[str, tuple[str, ...]],
+    declared: tuple[str, ...],
 ) -> dict[str, object]:
-    """Offset pagination: consistent totals, 50-row steps, no gaps, no repeats."""
+    """Offset pagination: consistent totals, 50-row steps, no gaps, no repeats.
+
+    The strategies found must be exactly the ones the owner declared (by hash).
+    """
 
     by_strategy: dict[str, list[ExtractedResponse]] = {}
     for item in responses:
@@ -531,6 +542,10 @@ def _check_html_pages(
         if not isinstance(body, dict):
             raise CaptureRefusal("SHAPE_REFUSED", capability)
         by_strategy.setdefault(str(body["strategy_sha256"]), []).append(item)
+    if not declared:
+        raise CaptureRefusal("STRATEGIES_REQUIRED", capability)
+    if set(by_strategy) != set(declared):
+        raise CaptureRefusal("STRATEGY_MISMATCH", capability)
     pages = rows = page_count = 0
     complete = True
     for group in by_strategy.values():
@@ -555,6 +570,7 @@ def _check_html_pages(
         "pages_seen": pages,
         "page_count": page_count,
         "strategies": len(by_strategy),
+        "strategy_sha256s": sorted(by_strategy),
         "rows": rows,
         "coverage": "COMPLETE" if complete else "PARTIAL",
     }
@@ -567,6 +583,7 @@ def _normalize_har(
     captured_at: datetime,
     expires_at: datetime,
     allow_partial: bool,
+    strategy_hashes: tuple[str, ...] = (),
 ) -> _Derived:
     contract = capture_contract()
     entries, matched, inventory = _classify(source)
@@ -625,7 +642,9 @@ def _normalize_har(
             except ShapeError as exc:
                 raise CaptureRefusal("SHAPE_REFUSED", f"{capability} {exc}") from None
         if route.html is not None:
-            summary[capability] = _check_html_pages(capability, group, sequences)
+            summary[capability] = _check_html_pages(
+                capability, group, sequences, strategy_hashes
+            )
         elif route.paginated:
             summary[capability] = _check_page_set(capability, group)
         else:
@@ -727,6 +746,7 @@ def _derive(
     expires_at: datetime | None,
     allow_partial: bool,
     suffix: str,
+    strategy_hashes: tuple[str, ...] = (),
 ) -> _Derived:
     if form == FORM_HAR:
         if expires_at is None:
@@ -737,6 +757,7 @@ def _derive(
             captured_at=captured_at,
             expires_at=expires_at,
             allow_partial=allow_partial,
+            strategy_hashes=strategy_hashes,
         )
     if form == FORM_FILE and len(capabilities) == 1:
         return _normalize_file(
@@ -770,6 +791,13 @@ def stage_run(request: StageRequest) -> RunSummary:
     source = _read_regular_file(request.source, MAX_SOURCE_BYTES)
     suffix = ".har" if request.form == FORM_HAR else request.source.suffix.casefold()
     scope = tuple(sorted(request.capabilities))
+    html_scope = any(route_for(item).html is not None for item in scope)
+    if request.strategy_ids and not (html_scope and request.form == FORM_HAR):
+        raise CaptureRefusal("STRATEGY_IDS_UNEXPECTED")
+    if any(
+        re.fullmatch(r"[1-9][0-9]{0,11}", item) is None for item in request.strategy_ids
+    ) or len(set(request.strategy_ids)) != len(request.strategy_ids):
+        raise CaptureRefusal("STRATEGY_IDS_INVALID")
     derived = _derive(
         source,
         form=request.form,
@@ -778,6 +806,7 @@ def stage_run(request: StageRequest) -> RunSummary:
         expires_at=expires_at,
         allow_partial=request.allow_partial,
         suffix=suffix,
+        strategy_hashes=tuple(sorted(strategy_hash(i) for i in request.strategy_ids)),
     )
     run_dir = _run_directory(request.staging_root, request.run_id)
     _private_directory(request.staging_root / RUN_DIRECTORY)
@@ -907,6 +936,30 @@ def _check_records(normalized: bytes, scope: tuple[str, ...], form: str) -> None
         raise CaptureRefusal("RECORDS_INVALID")
 
 
+def _manifest_strategy_hashes(
+    manifest: Mapping[str, Any], scope: Sequence[object]
+) -> tuple[str, ...]:
+    """The declared strategy hashes of an HTML capability, from its own summary."""
+
+    found: set[str] = set()
+    capabilities = manifest["capabilities"]
+    for item in scope:
+        if route_for(str(item)).html is None:
+            continue
+        info = capabilities.get(str(item)) if isinstance(capabilities, dict) else None
+        hashes = info.get("strategy_sha256s") if isinstance(info, dict) else None
+        if (
+            not isinstance(hashes, list)
+            or not hashes
+            or not all(
+                isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes
+            )
+        ):
+            raise CaptureRefusal("MANIFEST_INVALID")
+        found.update(str(h) for h in hashes)
+    return tuple(sorted(found))
+
+
 def verify_run(
     staging_root: Path,
     run_id: str,
@@ -1004,6 +1057,7 @@ def verify_run(
         expires_at=None if expires is None else _parse_time(expires),
         allow_partial=bool(manifest["allow_partial"]),
         suffix=str(source_info["suffix"]),
+        strategy_hashes=_manifest_strategy_hashes(manifest, scope),
     )
     if (
         derived.normalized != contents.get("normalized/records.json")

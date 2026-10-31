@@ -1460,7 +1460,9 @@ def _compare_existing(
         )
     else:
         info["change"] = (
-            "REPLACE_PLACEHOLDER"
+            "SAME_ROUTE_UNVERIFIED"
+            if same_route and current["verdict"] != "CONFIRMED"
+            else "REPLACE_PLACEHOLDER"
             if current["verdict"] != "CONFIRMED"
             else "CHANGED_ROW"
         )
