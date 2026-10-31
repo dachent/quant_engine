@@ -110,7 +110,9 @@ def _repo_roots(path: Path) -> list[Path]:
 def _check_output_path(out: Path) -> Path:
     if not out.is_absolute():
         raise EvidenceGenerationError("output path must be absolute")
+    # resolve symlinks in the directory so the repository exclusion sees the real location
     resolved = Path(os.path.abspath(out))
+    resolved = resolved.parent.resolve() / resolved.name
     if resolved.suffix != ".json":
         raise EvidenceGenerationError("output path must end in .json")
     for root in _repo_roots(Path(__file__).resolve().parent):
@@ -267,7 +269,14 @@ def write_evidence(
     except GovernanceError as error:
         target.unlink(missing_ok=True)
         raise EvidenceGenerationError(f"gate validator rejected the file: {error}")
-    _create_only(sidecar, (canonical_json(provenance) + "\n").encode("utf-8"))
+    try:
+        _create_only(sidecar, (canonical_json(provenance) + "\n").encode("utf-8"))
+    except OSError:
+        # never leave a consumable evidence file without its provenance
+        target.unlink(missing_ok=True)
+        raise EvidenceGenerationError(
+            "provenance sidecar could not be created"
+        ) from None
     return {
         "ok": True,
         "evidence": str(target),

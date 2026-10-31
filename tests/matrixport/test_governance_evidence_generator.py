@@ -382,3 +382,45 @@ def test_cli_generates_then_verifies_and_reports_refusals(
     assert printed["ok"] is True and printed["evidence"] == str(out)
     assert cli.main(["verify-evidence", str(out)]) == 0
     assert cli.main([*base, "--review-url", REVIEW]) == 4
+
+
+def test_output_through_a_link_into_the_repo_is_refused(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(repo / "docs", target_is_directory=True)
+    except OSError:
+        import subprocess
+
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(repo / "docs")],
+            capture_output=True,
+        )
+        if made.returncode != 0:
+            pytest.skip("cannot create a directory link here")
+    with pytest.raises(EvidenceGenerationError, match="outside"):
+        write_evidence(_request(), link / "evidence.json")
+    assert not (repo / "docs" / "evidence.json").exists()
+
+
+def test_sidecar_failure_removes_the_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_engine.matrixport import evidence as module
+
+    real = module._create_only
+    calls: list[Path] = []
+
+    def flaky(path: Path, content: bytes) -> None:
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real(path, content)
+
+    monkeypatch.setattr(module, "_create_only", flaky)
+    out = _out(tmp_path)
+    with pytest.raises(EvidenceGenerationError, match="sidecar"):
+        write_evidence(_request(), out)
+    assert not out.exists()
+    monkeypatch.setattr(module, "_create_only", real)
+    write_evidence(_request(), out)
