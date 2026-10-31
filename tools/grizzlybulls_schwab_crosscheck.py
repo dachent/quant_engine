@@ -152,6 +152,32 @@ def crosscheck(
     }
 
 
+def compare_series(first: SignalSeries, second: SignalSeries) -> dict[str, object]:
+    """Match two vendor signal series on (timestamp, action); report the gap."""
+
+    other = {(e.moment, e.action): e for e in second.events}
+    mine = {(e.moment, e.action) for e in first.events}
+    matched = [e for e in first.events if (e.moment, e.action) in other]
+    diffs = [
+        abs(e.price - other[(e.moment, e.action)].price)  # type: ignore[operator]
+        for e in matched
+        if e.price is not None and other[(e.moment, e.action)].price is not None
+    ]
+    extra = sorted(e.moment for e in second.events if (e.moment, e.action) not in mine)
+    return {
+        "first_rows": len(first.events),
+        "second_rows": len(second.events),
+        "matched_rows": len(matched),
+        "match_rate_of_first": len(matched) / len(first.events),
+        "max_price_diff": str(max(diffs)) if diffs else None,
+        "only_in_first": len(first.events) - len(matched),
+        "only_in_second": len(extra),
+        "second_extra_range": [extra[0].isoformat(), extra[-1].isoformat()]
+        if extra
+        else None,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--signals-csv", required=True, type=Path)

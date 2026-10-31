@@ -290,3 +290,19 @@ def test_crosscheck_flags_unmatched_fill_and_refuses_bad_catalogs() -> None:
         load_fills(_catalog([], "1"), "account-1", "SPXL")
     with pytest.raises(CrosscheckError):
         load_fills([], "a", "b")
+
+
+def test_compare_series_reports_the_withheld_tail() -> None:
+    from tools.grizzlybulls_schwab_crosscheck import compare_series
+
+    full = parse_trade_history_csv(history_csv(ROWS))
+    head = parse_trade_history_csv(history_csv(ROWS[:2]))
+    report = compare_series(head, full)
+    assert report["matched_rows"] == 2
+    assert report["match_rate_of_first"] == 1.0
+    assert report["max_price_diff"] == "0.0"
+    assert report["only_in_second"] == 2
+    assert report["second_extra_range"] == [
+        "2030-01-09T14:00:00",
+        "2030-01-10T07:00:00",
+    ]

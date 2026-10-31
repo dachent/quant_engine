@@ -339,7 +339,7 @@ def _cdp_run(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
             if re.fullmatch(SLUG_PATTERN, slug) is None:
                 raise GrizzlyCaptureError("slug is invalid")
             page.goto(f"{ORIGIN}/models/{slug}", wait_until="networkidle")
-            if args.command != "capture" and not args.click_menu:
+            if args.passive or (args.command != "capture" and not args.click_menu):
                 continue
             # The page makes its own authenticated request; this driver never
             # reads the token and never issues a request of its own.
@@ -370,6 +370,7 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--slug", action="append", default=["vix-ta-macro-advanced"])
         item.add_argument("--manual-seconds", type=int, default=0)
         item.add_argument("--click-menu", action="store_true")
+        item.add_argument("--passive", action="store_true")
     check = sub.add_parser("verify")
     check.add_argument("--run-root", required=True, type=Path)
     return parser

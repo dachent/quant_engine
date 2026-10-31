@@ -97,3 +97,17 @@ Success test: the manifest status is `COMPLETE` (catalog, model page, and both
 alternating signals from the reviewed vocabulary (`Buy`, `Sell`, `Rebuy`,
 `Hypothetical Sell`), and the last signal date reaches the page's stated end date.
 `INCOMPLETE_MISSING_CAPABILITY` and `FAILED_REQUIRED_CAPABILITY` exit non-zero.
+
+### Observed 2026-10-30
+
+- Gated calls carry only `authorization` and `emailverified` headers; no global key.
+- `/api/modelTradeHistory` (both modes) answered HTTP 500
+  `Unable to generate model trade history export` for every slug while an invalid
+  mode answered 400 and an unauthenticated call answered 401; `/api/modelsHistorical`
+  answered 500 even unauthenticated. The failure is server-side, so capture reports
+  `FAILED_REQUIRED_CAPABILITY` until the vendor fixes it. `--passive` records a
+  manual click without driving one, to compare with the driver.
+- The signed-in page body (`models/<slug>.json`) and its rendered table hold the
+  first 462 events; the page withholds the last 20 rows. Its summary counts the full
+  log, so `compare_series` against a retained blended CSV reports the withheld tail
+  (match rate of the shared rows and the extra date range).
