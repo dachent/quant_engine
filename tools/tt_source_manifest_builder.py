@@ -70,10 +70,18 @@ DEFAULT_ALLOCATION_SUM_TOLERANCE: Final = 0.005
 #: portfolio-holdings for the latest row) within this band.
 DEFAULT_EXPLAIN_TOLERANCE: Final = 0.02
 CLASS_SYMBOL_DROP: Final = "SYMBOL_DROP"
+CLASS_LIVE_OVERRIDE: Final = "LIVE_HOLDINGS_OVERRIDE"
+CLASS_EXIT_TRANSITION: Final = "EXIT_TRANSITION"
+CLASS_UNRESOLVED_DROP: Final = "UNRESOLVED_DROP"
+CLASS_OUT_OF_SCOPE: Final = "OUT_OF_SCOPE_BEFORE_INCEPTION"
 CLASS_LIVE_SYMBOL_MISSING: Final = "LIVE_SYMBOL_MISSING"
 CLASS_ROUNDING_OR_CASH: Final = "ROUNDING_OR_CASH"
 CLASS_OVER_ALLOCATION: Final = "OVER_ALLOCATION"
-TRUNCATION_CLASSES: Final = (CLASS_SYMBOL_DROP, CLASS_LIVE_SYMBOL_MISSING)
+TRUNCATION_CLASSES: Final = (
+    CLASS_SYMBOL_DROP,
+    CLASS_LIVE_SYMBOL_MISSING,
+    CLASS_LIVE_OVERRIDE,
+)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -403,22 +411,35 @@ def _chart_last(payload: Mapping[str, Any]) -> date:
 
 
 def _holdings_validation(
-    components: Sequence[Mapping[str, Any]], tolerance: float, explain: float
+    components: Sequence[Mapping[str, Any]],
+    tolerance: float,
+    explain: float,
+    inception: str,
+    citations: Mapping[str, str],
 ) -> dict[str, Any]:
     """Classify allocation rows that do not sum to 100%; never alter a row.
 
-    The class is derived from the data, not from a size cut-off.  A short row is
-    TRUNCATED (``SYMBOL_DROP``) when its symbols are a strict subset of the
-    nearest complete neighbouring row and the missing mass equals the dropped
-    symbols' weight there; the latest row is TRUNCATED (``LIVE_SYMBOL_MISSING``)
-    when the live portfolio-holdings carry symbols the row lacks and their
-    weight equals the missing mass.  Any other short row is ``ROUNDING_OR_CASH``
-    and a row above 100% is ``OVER_ALLOCATION``; neither is truncation.
-    The fallback for a truncated row is the live portfolio-holdings (latest row,
-    live complete, containing every symbol of the row with the published weight
-    of each within the explain tolerance), else the nearest complete prior row,
-    else the nearest complete next row.
+    Every class is derived from the data, never from a size cut-off.
+
+    * Rows dated before the component's inception anchor (its last snapshot on
+      or before ``inception``) are ``OUT_OF_SCOPE_BEFORE_INCEPTION``: they cannot
+      reach any input and are not defects.
+    * A short row whose symbols are a strict subset of the nearest complete prior
+      row and whose missing mass equals the dropped weight is a dropped
+      position.  If the dropped symbols are back in the next complete row the
+      row is ``SYMBOL_DROP`` (truncation, bracketed); if the next complete row
+      lacks them the position really exited and the mass is cash until the next
+      row (``EXIT_TRANSITION``, not truncation); with no next complete row it is
+      ``UNRESOLVED_DROP``.
+    * The latest short row whose date equals the component's last-rebalance
+      marker, with complete live portfolio-holdings containing every row symbol,
+      is ``LIVE_HOLDINGS_OVERRIDE``: the live holdings are the post-rebalance
+      state and win over the older complete row.  Without the marker, live
+      holdings that explain the missing mass give ``LIVE_SYMBOL_MISSING``.
+    * Any other short row is ``ROUNDING_OR_CASH``; a row above 100% is
+      ``OVER_ALLOCATION``.
     """
+    start = date.fromisoformat(inception)
     flags: list[dict[str, Any]] = []
     counts: dict[str, dict[str, int]] = {}
     for row in components:
@@ -431,34 +452,63 @@ def _holdings_validation(
             abs(sum(float(w) for w in live.values() if w is not None) - 1.0)
             <= tolerance
         )
+        before = [
+            snap["observed_date"]
+            for snap in snaps
+            if date.fromisoformat(snap["observed_date"]) <= start
+        ]
+        anchor = before[-1] if before else snaps[0]["observed_date"]
+        marker = str(row.get("last_rebalance") or "")
         for i, snap in enumerate(snaps):
             if done[i]:
                 continue
             symbols = set(snap["weights"])
             shortfall = 1.0 - sums[i]
-            neighbours: list[tuple[str, Mapping[str, Any]]] = []
             prior = next((j for j in range(i - 1, -1, -1) if done[j]), None)
             after = next((j for j in range(i + 1, len(snaps)) if done[j]), None)
+            neighbours: list[tuple[str, Mapping[str, Any]]] = []
             if prior is not None:
                 neighbours.append(("LAST_COMPLETE_ROW", snaps[prior]))
             if after is not None:
                 neighbours.append(("NEXT_COMPLETE_ROW", snaps[after]))
             latest = i == len(snaps) - 1
+            extra: dict[str, Any] = {}
             cls = CLASS_ROUNDING_OR_CASH
-            if shortfall < 0:
+            if snap["observed_date"] < anchor:
+                cls = CLASS_OUT_OF_SCOPE
+            elif shortfall < 0:
                 cls = CLASS_OVER_ALLOCATION
             else:
-                for _, nb in neighbours:
-                    dropped = set(nb["weights"]) - symbols
+                if prior is not None:
+                    base = snaps[prior]["weights"]
+                    dropped = set(base) - symbols
                     if (
                         dropped
-                        and symbols < set(nb["weights"])
-                        and abs(shortfall - sum(nb["weights"][k] for k in dropped))
-                        <= explain
+                        and symbols < set(base)
+                        and abs(shortfall - sum(base[k] for k in dropped)) <= explain
                     ):
-                        cls = CLASS_SYMBOL_DROP
-                        break
-                if cls == CLASS_ROUNDING_OR_CASH and latest and live_ok:
+                        if after is None:
+                            cls = CLASS_UNRESOLVED_DROP
+                        elif dropped <= set(snaps[after]["weights"]):
+                            cls = CLASS_SYMBOL_DROP
+                        else:
+                            cls = CLASS_EXIT_TRANSITION
+                        extra["dropped_symbols"] = sorted(dropped)
+                if (
+                    latest
+                    and live_ok
+                    and symbols <= set(live)
+                    and marker == snap["observed_date"]
+                    and cls
+                    in (
+                        CLASS_UNRESOLVED_DROP,
+                        CLASS_EXIT_TRANSITION,
+                        CLASS_SYMBOL_DROP,
+                        CLASS_ROUNDING_OR_CASH,
+                    )
+                ):
+                    cls = CLASS_LIVE_OVERRIDE
+                elif cls == CLASS_ROUNDING_OR_CASH and latest and live_ok:
                     absent = set(live) - symbols
                     if absent and (
                         abs(shortfall - sum(float(live[k]) for k in absent)) <= explain
@@ -466,15 +516,41 @@ def _holdings_validation(
                         cls = CLASS_LIVE_SYMBOL_MISSING
             corroborated = False
             fallback: dict[str, Any]
-            if (
-                cls in TRUNCATION_CLASSES
-                and latest
-                and live_ok
-                and symbols <= set(live)
-                and all(
-                    abs(float(live[k]) - snap["weights"][k]) <= explain for k in symbols
+            if cls == CLASS_LIVE_OVERRIDE:
+                hashes = row["endpoint_hashes"]
+                superseded = (
+                    {
+                        "kind": neighbours[0][0],
+                        "observed_date": neighbours[0][1]["observed_date"],
+                    }
+                    if neighbours
+                    else None
                 )
-            ):
+                fallback = {
+                    "kind": "LIVE_HOLDINGS_OVERRIDE",
+                    "sources": {
+                        "last_rebalance_marker": {
+                            "filename": hashes["last-rebalance.txt"]["filename"],
+                            "sha256": hashes["last-rebalance.txt"]["sha256"],
+                            "value": marker,
+                        },
+                        "live_portfolio_holdings": {
+                            "filename": hashes["portfolio-holdings.json"]["filename"],
+                            "sha256": hashes["portfolio-holdings.json"]["sha256"],
+                        },
+                    },
+                    "superseded_fallback": superseded,
+                    "why_older_row_lost": (
+                        f"the row is dated {snap['observed_date']}, the same day as "
+                        f"the last-rebalance marker; the live portfolio-holdings are "
+                        f"complete, contain every symbol of the row and are the "
+                        f"post-rebalance state, so they win over the older complete "
+                        f"row"
+                    ),
+                }
+                if slug in citations:
+                    fallback["citation"] = citations[slug]
+            elif cls == CLASS_LIVE_SYMBOL_MISSING and live_ok and symbols <= set(live):
                 fallback = {"kind": "LIVE_PORTFOLIO_HOLDINGS"}
             elif neighbours:
                 kind, nb = neighbours[0]
@@ -494,6 +570,7 @@ def _holdings_validation(
             flags.append(
                 {
                     "class": cls,
+                    **extra,
                     "fallback": fallback,
                     "fallback_corroborated_by_live_portfolio_holdings": corroborated,
                     "flag": (
@@ -512,6 +589,8 @@ def _holdings_validation(
         "counts_by_class": counts,
         "explain_tolerance": explain,
         "flags": flags,
+        "live_inception": inception,
+        "override_citations": dict(citations),
     }
 
 
@@ -592,6 +671,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     explain = float(args.explain_tolerance)
     if not (0.0 <= tolerance < 0.5 and 0.0 <= explain < 0.5):
         raise BuilderError("allocation tolerances must be in [0, 0.5)")
+    citations: dict[str, str] = {}
+    for item in args.override_citation or []:
+        slug_name, _, text = str(item).partition("=")
+        if not slug_name.strip() or not text.strip():
+            raise BuilderError("--override-citation must be SLUG=TEXT")
+        citations[slug_name.strip()] = text.strip()
     workbook_sha = str(args.owner_workbook_sha256 or "")
     if not _SHA256.fullmatch(workbook_sha):
         raise BuilderError("--owner-workbook-sha256 must be a sha256")
@@ -745,7 +830,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             vane=vane_prov,
             gap=gap,
             holdings_rows=_holdings_validation(
-                payload["selected_components"], tolerance, explain
+                payload["selected_components"],
+                tolerance,
+                explain,
+                inception,
+                citations,
             ),
             workbook_sha=workbook_sha,
             portfolio_version=version,
@@ -892,6 +981,8 @@ def verify_dir(out_dir: Path) -> dict[str, Any]:
         selected,
         float(validation.get("allocation_sum_tolerance", -1.0)),
         float(validation.get("explain_tolerance", -1.0)),
+        str(validation.get("live_inception", "")),
+        dict(validation.get("override_citations", {})),
     ):
         raise BuilderError("holdings row validation differs from the manifest rows")
     weights = [float(row["portfolio_weight"]) for row in selected]
@@ -983,6 +1074,11 @@ def _parser() -> argparse.ArgumentParser:
         "--owner-workbook-sha256",
         required=True,
         help="sha256 of the owner workbook the caller-supplied labels come from",
+    )
+    b.add_argument(
+        "--override-citation",
+        action="append",
+        help="SLUG=TEXT citing outside evidence for a live-holdings override",
     )
     b.add_argument("--vane-capture-dir", help="capture dir holding the market vane")
     b.add_argument("--accept-legacy-capture-shape", action="store_true")
