@@ -207,6 +207,22 @@ with a non-null `wins.total` supplies the `total_*` rows (Volatis in the retaine
 capture, not the `Total` fund, whose values differ); the source fund is named in
 `conversion-report.json`.
 
+Cutoff. The manifest cutoff is the financial cutoff (repository policy: a later
+capture timestamp does not change it; later source evidence is preserved and
+post-cutoff financial observations are excluded). Time-series rows dated after the
+cutoff are therefore left out of the CSVs while the raw HAR keeps them:
+`ssg_*_pricehistory` and the dashboard price history by `time`, rebalance history by
+date key, and account activity by the latest of a row's timestamps
+(`time`, `date`, `completed_at`, `filled_at`, `created_at`, `submitted_at`,
+`updated_at`, `canceled_at`; a row with none is kept). Counts per dataset are in
+`conversion-report.json` (`derivation.excluded_after_cutoff`). `funds.statistics`
+whose `end_day` is after the cutoff is refused, not filtered. Capture-time snapshots
+(`user_profile`, `accounts`, `partner_status`, dashboard holdings and wins, the two
+fund-metadata tables) have no observation date and are written as captured; the
+report names them (`snapshot_files`) and the capture date so the owner can rule on
+them. An output directory that is a link, or whose `quantbase-har-csv` ancestor is a
+link, is refused.
+
 Refusals (fail closed): an intake that does not verify; records that differ from
 `normalized/records.json`; a capability with no CSV role (`funds.catalog`,
 `funds.index`, `funds.projections`) or a missing required one; a key the pinned
