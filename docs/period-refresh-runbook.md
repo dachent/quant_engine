@@ -16,6 +16,18 @@ change between cycles and this document is not regenerated automatically.
   commit all execute from the same repo HEAD, clean tree. Any code fix
   mid-cycle (including acceptance/validator fixes) forces the affected steps
   to re-run at the new SHA.
+- **Code identity is versioned (RELEASE-HASHTIME-001 cut 5).** `git-commit-v1`
+  (default; R1 and R2) binds `HEAD`; `git-tree-v2` binds `HEAD^{tree}` so a
+  candidate built at the PR head survives the merge. Opt in with
+  `attended --code-identity-scheme git-tree-v2` and a recipe `release_commit`
+  equal to `git rev-parse HEAD^{tree}`. Before `execute --commit` (and the replica
+  commit) run, from the same repo root checked out at the merge commit,
+  `python -m quant_engine.core.code_identity attest --repo <root>
+  --candidate-commit <PR head> --base-ref origin/main --coordination-root
+  <coordination root of the spec being committed>` (real and replica specs each
+  read `<their coordination root>/merge-attestation.json`; a replica copy made
+  after the attestation inherits it). The attestation is mandatory; any tree, merged-commit or runtime-lock
+  difference refuses. Never reinterpret an old release id under the other scheme.
 - **Generation ids bind `repository_sha`.** Two runs at different SHAs with
   cold caches produce different generation ids for identical content (layered
   history -> decomposition plan bundle -> lens generations -> panel candidate

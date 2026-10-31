@@ -7930,3 +7930,23 @@ def test_the_product_strategy_rule_is_one_shared_helper() -> None:
     assert lifecycle_fields.is_retained_history_only(rows[1])
     assert not lifecycle_fields.is_retained_history_only(rows[0])
     assert not lifecycle_fields.is_retained_history_only(rows[3])
+
+
+def test_release_identity_binds_commit_or_tree_and_refuses_anything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head, tree = "a" * 40, "b" * 40
+    answers = {("rev-parse", "HEAD"): head, ("rev-parse", "HEAD^{tree}"): tree}
+    monkeypatch.setattr(
+        materializer, "_git", lambda _repo, *args: answers.get(args, "")
+    )
+    repo = Path(".")
+    assert materializer._release_identity(repo, head) == (head, "git-commit-v1")
+    assert materializer._release_identity(repo, tree) == (tree, "git-tree-v2")
+    for wrong in ("c" * 40, "", None):
+        with pytest.raises(materializer.MaterializationError):
+            materializer._release_identity(repo, wrong)
+    assert materializer._spec_identity_fields("git-commit-v1") == {}
+    assert materializer._spec_identity_fields("git-tree-v2") == {
+        "code_identity_scheme": "git-tree-v2"
+    }
