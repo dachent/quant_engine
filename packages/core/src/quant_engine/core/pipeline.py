@@ -21,6 +21,12 @@ import time
 from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
 
 from quant_engine.core.authority import FreshnessPolicy
+from quant_engine.core.code_identity import (
+    COMMIT_SCHEME,
+    CodeIdentityError,
+    validate_scheme,
+    verify_promotion_identity,
+)
 from quant_engine.core.contracts import (
     CoverageStatus,
     GenerationManifest,
@@ -443,6 +449,9 @@ class PipelineSpec:
     gates: tuple[PipelineGate, ...]
     companions: tuple[PipelineCompanion, ...]
     schema_version: int = _SCHEMA_VERSION
+    # Absent (legacy) means git-commit-v1; only git-tree-v2 is ever serialized, so
+    # every committed spec keeps the identical bytes and spec_sha256.
+    code_identity_scheme: str = COMMIT_SCHEME
 
     @property
     def spec_sha256(self) -> str:
@@ -477,6 +486,12 @@ class PipelineSpec:
         }
 
     def to_dict(self) -> dict[str, object]:
+        value = self._legacy_dict()
+        if self.code_identity_scheme != COMMIT_SCHEME:
+            value["code_identity_scheme"] = self.code_identity_scheme
+        return value
+
+    def _legacy_dict(self) -> dict[str, object]:
         return {
             "as_of_date": self.as_of_date.isoformat(),
             "code_commit": self.code_commit,
@@ -498,23 +513,28 @@ class PipelineSpec:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PipelineValidationError("pipeline spec is not JSON") from exc
         raw = _object(decoded, "pipeline spec")
-        _strict(
-            raw,
-            {
-                "as_of_date",
-                "code_commit",
-                "companions",
-                "coordination_root",
-                "created_at",
-                "gates",
-                "nodes",
-                "pipeline_id",
-                "roots",
-                "schema_version",
-                "state_root",
-            },
-            "pipeline spec",
-        )
+        spec_keys = {
+            "as_of_date",
+            "code_commit",
+            "companions",
+            "coordination_root",
+            "created_at",
+            "gates",
+            "nodes",
+            "pipeline_id",
+            "roots",
+            "schema_version",
+            "state_root",
+        }
+        if "code_identity_scheme" in raw:
+            spec_keys.add("code_identity_scheme")
+        _strict(raw, spec_keys, "pipeline spec")
+        try:
+            scheme = validate_scheme(raw.get("code_identity_scheme", COMMIT_SCHEME))
+        except CodeIdentityError as exc:
+            raise PipelineValidationError(str(exc)) from exc
+        if scheme == COMMIT_SCHEME and "code_identity_scheme" in raw:
+            raise PipelineValidationError("legacy code identity must be unmarked")
         if raw["schema_version"] != _SCHEMA_VERSION:
             raise PipelineValidationError("pipeline schema version is unsupported")
         try:
@@ -573,6 +593,7 @@ class PipelineSpec:
             nodes=nodes,
             gates=gates,
             companions=companions,
+            code_identity_scheme=scheme,
         )
         spec.ordered_nodes
         return spec
@@ -2710,9 +2731,18 @@ def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -
     repo_root = runtime["repo_root"]
     if not isinstance(repo_root, Path) or not repo_root.is_dir():
         raise PipelineValidationError("portfolio repository root is invalid")
-    head = _git_output(repo_root, "rev-parse", "HEAD")
-    if head != spec.code_commit or head != contract["release_commit"]:
+    if spec.code_commit != contract["release_commit"]:
         raise PipelineValidationError("portfolio repository HEAD differs")
+    try:
+        verify_promotion_identity(
+            repo_root,
+            spec.code_commit,
+            spec.code_identity_scheme,
+            state_root=spec.state_root,
+            lock_path=lock,
+        )
+    except CodeIdentityError as exc:
+        raise PipelineValidationError(f"portfolio repository {exc}") from exc
     if _git_output(repo_root, "status", "--porcelain=v1", "--untracked-files=all"):
         raise PipelineValidationError("portfolio repository is not clean")
 
@@ -4745,6 +4775,7 @@ def execute_pipeline(
             roots={key: spec.roots[key] for key in spec.release_generations},
             proposed_generations=spec.release_generations,
             code_commit=spec.code_commit,
+            code_identity_scheme=spec.code_identity_scheme,
             created_at=spec.created_at,
             gates=(*gate_evidence, GateEvidence("pipeline-evidence", evidence_hash)),
             companions=tuple(companions),
@@ -4765,7 +4796,10 @@ def execute_pipeline(
     else:
         release_id = existing_release
         manifest, _ = read_release(spec.coordination_root, release_id)
-        if manifest.code_commit != spec.code_commit:
+        if (
+            manifest.code_commit != spec.code_commit
+            or manifest.code_identity_scheme != spec.code_identity_scheme
+        ):
             raise PipelineValidationError("prepared release code commit differs")
     _, existing_journal = read_release(spec.coordination_root, release_id)
     state = existing_journal.state
