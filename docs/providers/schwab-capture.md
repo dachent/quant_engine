@@ -26,12 +26,10 @@ fake transport and invented values.
   cutoff close (16:00 America/New_York on the cutoff date). Only an explicit
   `exception_label` in the approved evidence admits an offset, and then every
   affected row carries the label and `as_of_offset_days`.
-- A capture before the close, or more than 8 hours after it, without that same
-  label. The R2 pattern (an end-of-day book captured at 23:59 New York, stored
-  under the next UTC date) is accepted and recorded: rows keep the cutoff
-  `as_of_date`, and the output records `capture_date_utc`,
-  `capture_date_new_york`, `captured_at_utc`, `capture_lag_hours` and
-  `as_of_basis = CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE`.
+- Any capture outside the one unlabelled mode (see "Capture modes"), and a cutoff
+  that is not a trading day, without the approved label. Every output records
+  `capture_mode`, `capture_date_utc`, `capture_date_new_york`, `captured_at_utc`,
+  `capture_lag_hours`, `next_session_open_utc` and an `as_of_basis`.
 - A held position (nonzero quantity), including a sweep row, whose market value
   is null, missing, or not a finite decimal, a row without a price or whose
   value is not quantity times its quoted price, and a cash summary row without a
@@ -52,6 +50,27 @@ Raw responses can contain provider account ids and are restricted evidence
 outside synced bulk storage, and summarise it only with
 `tools/restricted_evidence_summary.py`. Normalized output and the manifest use
 internal account ids only.
+
+## Capture modes
+
+Coordinator ruling: capture after the cutoff day has closed and before the next
+trading session's first price update.
+
+| Mode | Window (New York) | Acceptance |
+| --- | --- | --- |
+| `NEXT_SESSION_PRE_OPEN` | at or after the cutoff close, on a later calendar date, before 09:30 on the next trading day after the cutoff | accepted unlabelled. Friday cutoff: Saturday, Sunday or Monday before 09:30 (accepted), Monday 09:30 or later (refused); holiday weekends use the next trading day (Friday before Labor Day: Tuesday before 09:30) |
+| `SAME_DAY_POST_CLOSE` | cutoff date, at or after 16:00 | only with the approved exception label (fallback: balance row at the cutoff minus one day, official-close NAV derivation) |
+| `BEFORE_CLOSE`, `AFTER_NEXT_SESSION_OPEN` | otherwise | only with the label, mode recorded |
+
+In the accepted mode every priced row must carry `price.priceDate` equal to the
+cutoff, and every account's `balances.historical` series must hold an OBSERVED
+row at the cutoff (the series ends the day before the capture date, which is the
+cutoff for a Saturday capture; a missing cutoff row is refused unless labelled).
+Valuation is unchanged: quantity times the official close of the cutoff date,
+never the provider value. The trading calendar is the regular NYSE full-day
+closures (`nyse_holidays`: New Year, MLK, Presidents, Good Friday, Memorial,
+Juneteenth, Independence, Labor, Thanksgiving, Christmas, with weekend
+observance); ad hoc closures and 13:00 early closes are not modelled.
 
 ## Commands
 
@@ -139,8 +158,9 @@ from the nested object, treats the cash summary row as an account balance, parse
 with each row's `price_usd` and `quoted_at_utc`; it checks value = quantity times
 price and re-derives balances from raw in `verify`. Because the series ends the
 day before the capture date, a capture on the cutoff date has no balance row at
-the cutoff and is refused unless labelled; the cutoff-day NAV then comes from
-the official-close derivation as in R2.
+the cutoff and is refused unless labelled; the preferred mode captures after the
+cutoff day so the cutoff row is observed. The same-day fallback keeps the R2
+official-close NAV derivation.
 
 Still UNVERIFIED (also written to every manifest as `unverified_shapes`): the
 Holdings-V2 body subset the service requires, the empty `Schwab-Client-Ids`
@@ -158,8 +178,11 @@ consumes, under a new create-only output root:
   frozen `read_holdings_v2_current_snapshot` over the raw response. Positions are
   valued at quantity times the **official close** of the cutoff date from
   `<SYMBOL>_yahoo_daily.csv` files; the provider-quoted value is never used. The
-  snapshot `observed_at` is the valuation instant (the cutoff close), whose UTC
-  date is always the cutoff date, so the frozen consumer's date check holds.
+  snapshot `observed_at` is the real capture instant and `as_of_date` is its UTC
+  date (the frozen consumer requires them to agree and the terminal manifest to
+  finish no later than it); the valuation cutoff is recorded as
+  `valuation_cutoff` in the binding. For a Friday cutoff and a Saturday capture
+  the generation as-of is Saturday, as R2's was one day after its cutoff.
   Zero-quantity rows are removed from the raw response before the frozen reader
   sees it (the driver omits them before reading their price fields). The emitted
   `sweep_vehicle_count` counts quantity rows only: the frozen reader also counts
@@ -167,7 +190,9 @@ consumes, under a new create-only output root:
   the adapter emits 1) and the adapter requires the reader's raw count to
   reconcile with the verified run.
 - `nav/<account>.csv`: eight `WCH_NAV_CSV` files from the raw `histories`, columns
-  `account_id,account_name,date,account_value`, rows up to the cutoff.
+  `account_id,account_name,date,account_value`, rows up to the cutoff (an observed
+  row at the cutoff is required; the labelled same-day fallback may end the day
+  before and the binding says `cutoff_row_present: false`).
 - `terminal/`: the terminal transaction package (pages, normalized rows, and the
   manifest re-emitted with `started_at` and `finished_at` expressed at the New
   York offset, the same instants, so the frozen consumer compares the New York
@@ -187,18 +212,19 @@ consumes, under a new create-only output root:
 Before the binding is written the adapter re-checks over the written files the
 date rules the frozen consumer applies (snapshot observation UTC date and every
 position as-of equal the cutoff; the terminal manifest finishes no later than the
-cutoff in New York time; every page of an account requests one interval whose end
-equals that finish date). The tests run the frozen `_current_snapshot`,
+as-of date in New York time; every page of an account requests one interval whose
+end equals that finish date). The tests run the frozen `_current_snapshot`,
 `_terminal_transaction_history_coverage` and NAV reader over the same files, and
-show that the driver's own UTC-stamped manifest is refused. With `--base-spec` the
+show that for a Saturday 23:00 New York capture (Sunday in UTC) the driver's own
+UTC-stamped manifest is refused while the New York rendering is accepted. With `--base-spec` the
 composed spec is also offered to `build_generation` and the outcome
 (`ACCEPTED` or `REFUSED` with the reason) is reported; a refusal there (for
 example manual sources dated for another cutoff) does not undo the bound output.
 
-It refuses: a run that does not verify; a labelled exception run; a cutoff that
-differs from the run evidence; a capture whose New York date is not the cutoff
-date; a held position with no official close (names the count and the symbols);
-and any output that already exists. A refused run leaves no binding and needs a
+It refuses: a run that does not verify; a labelled run that is not the same-day
+fallback (and an unlabelled run that is not the next-session mode); a cutoff that
+differs from the run evidence; a held position with no official close (names the
+count and the symbols); and any output that already exists. A refused run leaves no binding and needs a
 new output root.
 
 ## Design notes

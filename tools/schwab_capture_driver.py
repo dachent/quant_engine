@@ -12,8 +12,11 @@ What it refuses, by design:
 * holdings whose per-row as-of date differs from the declared cutoff close,
   unless the run carries an explicit exception label (the rows are then labelled
   with their offset);
-* a capture taken before the cutoff close, or later than the allowed lag after
-  it, unless the same explicit label is present;
+* a capture outside the one unlabelled mode (after the cutoff day has closed,
+  on a later New York date, and before 09:30 New York of the next trading day:
+  Friday cutoff with Saturday, Sunday or Monday-morning capture, or a holiday
+  weekend); same-day post-close, pre-close and after-open captures need the
+  approved exception label;
 * any held position (nonzero quantity) whose market value is null, missing or
   not a finite decimal. The older Holdings-V2 normalizer in
   ``quant_engine.schwab`` records such rows as unavailable; this driver does not;
@@ -86,7 +89,7 @@ SCHEMA_VERSION = 1
 NORMALIZER_VERSION = "schwab-capture-normalizer-1"
 CLOSE_TIME_ZONE = "America/New_York"
 CLOSE_LOCAL_TIME = time(16, 0)
-DEFAULT_MAX_CAPTURE_LAG_HOURS = 8
+OPEN_LOCAL_TIME = time(9, 30)
 TERMS_VERSION = "schwab-live-read-terms-v1"
 TERMS_TEXT = (
     "Schwab live reads require one current, reviewed, single-use approval; "
@@ -295,6 +298,81 @@ def _label(value: object) -> str | None:
     return value
 
 
+def _easter(year: int) -> date:
+    """Gregorian Easter Sunday (anonymous algorithm)."""
+
+    a, b, c = year % 19, year // 100, year % 100
+    d, e = b // 4, b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = c // 4, c % 4
+    el = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * el) // 451
+    month = (h + el - 7 * m + 114) // 31
+    day = (h + el - 7 * m + 114) % 31 + 1
+    return date(year, month, day)
+
+
+def _nth_weekday(year: int, month: int, weekday: int, nth: int) -> date:
+    """The nth (1-based) weekday of a month; nth -1 is the last."""
+
+    if nth > 0:
+        first = date(year, month, 1)
+        return first + timedelta(days=(weekday - first.weekday()) % 7 + 7 * (nth - 1))
+    following = date(year + (month == 12), month % 12 + 1, 1)
+    last = following - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _observed(day: date) -> date:
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def nyse_holidays(year: int) -> frozenset[date]:
+    """Regular NYSE full-day closures of one year (ad hoc closures are not modelled)."""
+
+    days = {
+        _nth_weekday(year, 1, 0, 3),
+        _nth_weekday(year, 2, 0, 3),
+        _easter(year) - timedelta(days=2),
+        _nth_weekday(year, 5, 0, -1),
+        _observed(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),
+        _nth_weekday(year, 11, 3, 4),
+        _observed(date(year, 12, 25)),
+    }
+    new_year = date(year, 1, 1)
+    if new_year.weekday() != 5:  # a Saturday New Year is not observed on Friday
+        days.add(_observed(new_year))
+    if year >= 2022:
+        days.add(_observed(date(year, 6, 19)))
+    return frozenset(days)
+
+
+def is_trading_day(day: date) -> bool:
+    return day.weekday() < 5 and day not in nyse_holidays(day.year)
+
+
+def next_trading_day(day: date) -> date:
+    """The first trading day strictly after ``day``."""
+
+    candidate = day + timedelta(days=1)
+    while not is_trading_day(candidate):
+        candidate += timedelta(days=1)
+    return candidate
+
+
+MODE_NEXT_SESSION = "NEXT_SESSION_PRE_OPEN"
+MODE_SAME_DAY = "SAME_DAY_POST_CLOSE"
+MODE_BEFORE_CLOSE = "BEFORE_CLOSE"
+MODE_AFTER_OPEN = "AFTER_NEXT_SESSION_OPEN"
+
+
 @dataclass(frozen=True)
 class CaptureTiming:
     """Capture time against the declared close; recorded on every output."""
@@ -304,13 +382,17 @@ class CaptureTiming:
     lag_hours: Decimal
     capture_date_utc: date
     capture_date_new_york: date
+    mode: str
+    next_session_open_utc: datetime
 
     def to_dict(self) -> dict[str, object]:
         return {
             "capture_date_new_york": self.capture_date_new_york.isoformat(),
             "capture_date_utc": self.capture_date_utc.isoformat(),
             "capture_lag_hours": format(self.lag_hours, "f"),
+            "capture_mode": self.mode,
             "captured_at_utc": self.captured_at.isoformat(),
+            "next_session_open_utc": self.next_session_open_utc.isoformat(),
         }
 
 
@@ -319,24 +401,54 @@ def assess_timing(
     cutoff: Cutoff,
     *,
     exception_label: str | None,
-    max_lag_hours: int = DEFAULT_MAX_CAPTURE_LAG_HOURS,
 ) -> CaptureTiming:
+    """Classify a capture against the cutoff close and the next session open.
+
+    Unlabelled captures must fall after the cutoff day has closed and before the
+    first price update of the next trading session (09:30 New York), on a later
+    New York calendar date: Friday cutoff with a Saturday, a Sunday or a Monday
+    08:00 capture, or a holiday weekend. A same-day post-close capture, a capture
+    before the close and a capture after the next open all need the approved
+    exception label.
+    """
+
     if captured_at.tzinfo is None:
         raise DriverError("capture time must be timezone-aware")
     captured = captured_at.astimezone(timezone.utc)
+    new_york = ZoneInfo(CLOSE_TIME_ZONE)
+    capture_day = captured.astimezone(new_york).date()
+    next_open = datetime.combine(
+        next_trading_day(cutoff.as_of_date), OPEN_LOCAL_TIME, tzinfo=new_york
+    ).astimezone(timezone.utc)
+    if captured < cutoff.close_utc:
+        mode = MODE_BEFORE_CLOSE
+    elif capture_day == cutoff.as_of_date:
+        mode = MODE_SAME_DAY
+    elif captured < next_open:
+        mode = MODE_NEXT_SESSION
+    else:
+        mode = MODE_AFTER_OPEN
     lag = Decimal((captured - cutoff.close_utc).total_seconds()) / Decimal(3600)
     timing = CaptureTiming(
         captured_at=captured,
         cutoff=cutoff,
         lag_hours=lag.quantize(Decimal("0.01")),
         capture_date_utc=captured.date(),
-        capture_date_new_york=captured.astimezone(ZoneInfo(CLOSE_TIME_ZONE)).date(),
+        capture_date_new_york=capture_day,
+        mode=mode,
+        next_session_open_utc=next_open,
     )
     if exception_label is None:
-        if captured < cutoff.close_utc:
+        if not is_trading_day(cutoff.as_of_date):
+            raise DriverError("cutoff date is not a trading day")
+        if mode == MODE_BEFORE_CLOSE:
             raise DriverError("capture precedes the declared cutoff close")
-        if lag > Decimal(max_lag_hours):
-            raise DriverError("capture is later than the allowed lag after the close")
+        if mode == MODE_SAME_DAY:
+            raise DriverError(
+                "same-day post-close capture needs an approved exception label"
+            )
+        if mode == MODE_AFTER_OPEN:
+            raise DriverError("capture is after the next session open")
     return timing
 
 
@@ -451,9 +563,10 @@ def _as_of_fields(
 
 
 def _as_of_basis(timing: CaptureTiming) -> str:
-    if timing.captured_at >= timing.cutoff.close_utc:
-        return "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE"
-    return "CAPTURED_BEFORE_DECLARED_CLOSE_LABELLED"
+    return {
+        MODE_NEXT_SESSION: "CAPTURED_AFTER_CLOSE_BEFORE_NEXT_SESSION_OPEN",
+        MODE_SAME_DAY: "CAPTURED_SAME_DAY_AFTER_CLOSE_LABELLED",
+    }.get(timing.mode, "CAPTURED_OUTSIDE_STANDARD_WINDOW_LABELLED")
 
 
 def _row_key(item: Mapping[str, object]) -> tuple[str, str]:
@@ -477,14 +590,11 @@ def normalize_holdings(
     cutoff: Cutoff,
     captured_at: datetime,
     exception_label: str | None = None,
-    max_lag_hours: int = DEFAULT_MAX_CAPTURE_LAG_HOURS,
 ) -> dict[str, object]:
     """Normalize one Holdings-V2 response; refuse null value on held positions."""
 
     label = _label(exception_label)
-    timing = assess_timing(
-        captured_at, cutoff, exception_label=label, max_lag_hours=max_lag_hours
-    )
+    timing = assess_timing(captured_at, cutoff, exception_label=label)
     payload = _object(raw, "holdings response")
     seen_accounts: set[str] = set()
     identities: set[tuple[str, str]] = set()
@@ -1501,12 +1611,8 @@ def _verify_run(
         _check_as_of(row, cutoff.as_of_date, label, "position")
     capture = _object(positions.get("capture"), "capture")
     captured = _aware_utc(capture.get("captured_at_utc"), "captured_at_utc")
-    if label is None and not (
-        cutoff.close_utc
-        <= captured
-        <= cutoff.close_utc + timedelta(hours=DEFAULT_MAX_CAPTURE_LAG_HOURS)
-    ):
-        raise DriverError("positions capture time is outside the cutoff window")
+    if assess_timing(captured, cutoff, exception_label=label).to_dict() != capture:
+        raise DriverError("positions capture block differs from its capture time")
     brows = _objects(balances.get("balances"), "balances")
     if sorted(str(row["account_id"]) for row in brows) != accounts:
         raise DriverError("balance accounts differ from the manifest scope")
@@ -1516,12 +1622,11 @@ def _verify_run(
         _object(balances.get("capture"), "balances capture").get("captured_at_utc"),
         "balances captured_at_utc",
     )
-    if label is None and not (
-        cutoff.close_utc
-        <= balances_captured
-        <= cutoff.close_utc + timedelta(hours=DEFAULT_MAX_CAPTURE_LAG_HOURS)
+    if (
+        assess_timing(balances_captured, cutoff, exception_label=label).to_dict()
+        != balances["capture"]
     ):
-        raise DriverError("balances capture time is outside the cutoff window")
+        raise DriverError("balances capture block differs from its capture time")
     cash = _objects(positions.get("cash_balances"), "cash balances")
     if sorted(str(row["account_id"]) for row in cash) != sorted(
         {str(row["account_id"]) for row in cash}

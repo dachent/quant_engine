@@ -8,7 +8,7 @@ to accept the adapter's output. No test reaches a network or a credential.
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -31,8 +31,14 @@ CUTOFF = driver.parse_cutoff("2031-06-13")
 ACCOUNT_COUNT = 8
 # 23:59 New York on the cutoff date lands on the next UTC date (the R2 pattern).
 LATE_EVENING = datetime(2031, 6, 14, 3, 59, tzinfo=timezone.utc)
-TRANSACTION_CAPTURED_AT = "2031-06-14T03:59:30+00:00"
-GOVERNANCE_NOW = datetime(2031, 6, 14, 3, 58, tzinfo=timezone.utc)
+# The cutoff 2031-06-13 is a Friday. The preferred, unlabelled mode is a capture
+# after that day closed and before the next session opens: Saturday 08:00 New York.
+SATURDAY = datetime(2031, 6, 14, 12, 0, tzinfo=timezone.utc)
+SATURDAY_NIGHT = datetime(2031, 6, 15, 3, 0, tzinfo=timezone.utc)  # 23:00 New York
+MONDAY_EARLY = datetime(2031, 6, 16, 12, 0, tzinfo=timezone.utc)  # 08:00 New York
+TRANSACTION_CAPTURED_AT = "2031-06-14T12:00:30+00:00"
+GOVERNANCE_NOW = datetime(2031, 6, 14, 11, 58, tzinfo=timezone.utc)
+_TX = {"at": TRANSACTION_CAPTURED_AT}
 QUOTE_MS = int(datetime(2031, 6, 14, 3, 47, 14, tzinfo=timezone.utc).timestamp() * 1000)
 REVIEW = "https://github.com/dachent/quant_engine/issues/1#issuecomment-1"
 OFFICIAL_CLOSE = "25.00"
@@ -103,7 +109,7 @@ def _balances(extra_day: str | None = None) -> dict[str, Any]:
 
 class FakeTransport:
     def __init__(
-        self, *, holdings: Any = None, balances: Any = None, to_date: str = "06/13/2031"
+        self, *, holdings: Any = None, balances: Any = None, to_date: str = "06/14/2031"
     ) -> None:
         self._to_date = to_date
         self._holdings = holdings if holdings is not None else _holdings()
@@ -185,18 +191,21 @@ def _targets() -> list[AccountTarget]:
 
 
 @pytest.fixture(autouse=True)
-def _fixed_transaction_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+def _fixed_transaction_clock(monkeypatch: pytest.MonkeyPatch) -> Any:
     """The transaction tool stamps wall-clock time; pin it to the capture."""
 
     real = driver._TRANSACTION_CAPTURE.capture_transaction_history
 
     def pinned(**kwargs: Any) -> Any:
-        kwargs.setdefault("captured_at", TRANSACTION_CAPTURED_AT)
+        kwargs.setdefault("captured_at", _TX["at"])
         return real(**kwargs)
 
     monkeypatch.setattr(
         driver._TRANSACTION_CAPTURE, "capture_transaction_history", pinned
     )
+    _TX["at"] = TRANSACTION_CAPTURED_AT
+    yield
+    _TX["at"] = TRANSACTION_CAPTURED_AT
 
 
 def _clock(start: datetime, step: int = 1) -> Any:
@@ -208,7 +217,7 @@ def _run(
     tmp_path: Path,
     transport: FakeTransport | None = None,
     *,
-    start: datetime = LATE_EVENING,
+    start: datetime = SATURDAY,
     step: int = 1,
     label: str | None = None,
     run_id: str = "synthetic-ingest-run",
@@ -271,21 +280,28 @@ def _json(path: Path) -> Any:
 # --------------------------------------------------------------------------- #
 
 
-def test_evening_capture_is_bound_to_the_new_york_cutoff_date(tmp_path: Path) -> None:
+def test_saturday_capture_is_bound_with_the_cutoff_recorded(tmp_path: Path) -> None:
     run_dir = _run(tmp_path)
     binding = _ingest(tmp_path, run_dir)
     capture = binding["capture"]
     assert isinstance(capture, dict)
-    assert binding["as_of_date"] == "2031-06-13"
-    assert capture["capture_date_new_york"] == "2031-06-13"
+    # generation as-of is the capture UTC date; the valuation cutoff is explicit
+    assert binding["as_of_date"] == "2031-06-14"
+    assert binding["valuation_cutoff"] == "2031-06-13"
+    assert capture["capture_mode"] == driver.MODE_NEXT_SESSION
+    assert capture["capture_date_new_york"] == "2031-06-14"
     assert capture["capture_date_utc"] == "2031-06-14"
     assert capture["capture_date_utc_offset_days"] == 1
-    assert binding["as_of_basis"] == "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE"
-    assert binding["snapshot_observed_at"] == CUTOFF.close_utc.isoformat()
+    assert binding["as_of_basis"] == "CAPTURED_AFTER_CLOSE_BEFORE_NEXT_SESSION_OPEN"
+    assert binding["exception_label"] is None
+    assert binding["snapshot_observed_at"] == capture["captured_at_utc"]
     assert binding["snapshot_observed_at_basis"] == ingest.OBSERVED_AT_BASIS
     snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
-    assert snapshot["observed_at"] == CUTOFF.close_utc.isoformat()
-    assert {row["as_of_date"] for row in snapshot["positions"]} == {"2031-06-13"}
+    assert snapshot["observed_at"] == capture["captured_at_utc"]
+    assert {row["as_of_date"] for row in snapshot["positions"]} == {"2031-06-14"}
+    nav = binding["nav"]
+    assert isinstance(nav, dict)
+    assert {v["cutoff_row_present"] for v in nav.values()} == {True}
     assert binding["counts"] == {
         "cash_summary_rows": 8,
         "positions": 8,
@@ -330,10 +346,10 @@ def test_existing_normalizer_refuses_the_same_evening_capture(tmp_path: Path) ->
         )
 
 
-def test_snapshot_matches_the_frozen_path_apart_from_the_dating(
+def test_snapshot_matches_the_frozen_path_apart_from_the_sweep_count(
     tmp_path: Path,
 ) -> None:
-    """Same reader, same closes: only the capture-date binding differs."""
+    """Same reader, same closes: the frozen path accepts the capture-date as-of."""
 
     run_dir = _run(tmp_path)
     _ingest(tmp_path, run_dir)
@@ -341,7 +357,7 @@ def test_snapshot_matches_the_frozen_path_apart_from_the_dating(
     spec.write_bytes(
         json.dumps(
             {
-                "as_of_date": "2031-06-13",
+                "as_of_date": "2031-06-14",
                 "crosswalk": [
                     {"external_account_id": e, "internal_account_id": i}
                     for e, i in _crosswalk().items()
@@ -349,9 +365,12 @@ def test_snapshot_matches_the_frozen_path_apart_from_the_dating(
             }
         ).encode("utf-8")
     )
+    positions = _json(run_dir / "normalized/positions.json")
     receipt = tmp_path / "receipt.json"
     receipt.write_bytes(
-        json.dumps({"captured_at_utc": CUTOFF.close_utc.isoformat()}).encode()
+        json.dumps(
+            {"captured_at_utc": positions["capture"]["captured_at_utc"]}
+        ).encode()
     )
     schwab_generation._holdings_v2_current(
         run_dir / "raw/holdings.v2.json",
@@ -369,18 +388,24 @@ def test_snapshot_matches_the_frozen_path_apart_from_the_dating(
     assert old == new
 
 
-def test_frozen_consumer_accepts_the_bound_files_and_refuses_the_utc_manifest(
-    tmp_path: Path,
-) -> None:
+def test_frozen_consumer_accepts_the_bound_files(tmp_path: Path) -> None:
     run_dir = _run(tmp_path)
     binding = _ingest(tmp_path, run_dir)
+    _assert_frozen_accepts(tmp_path, date(2031, 6, 14))
+    rule = binding["transaction_manifest"]
+    assert isinstance(rule, dict)
+    assert rule["rule"] == ingest.TRANSACTION_MANIFEST_RULE
+    assert rule["finished_at"] == "2031-06-14T08:00:30-04:00"
+
+
+def _assert_frozen_accepts(tmp_path: Path, as_of: date) -> Any:
     fragment = _json(tmp_path / "ingest/spec-fragment.json")
     roots = {name: Path(value) for name, value in fragment["roots"].items()}
     accounts = set(_crosswalk().values())
     _current_snapshot(
         fragment["current_snapshot"],
         roots=roots,
-        generation_as_of=CUTOFF.as_of_date,
+        generation_as_of=as_of,
         account_ids=accounts,
     )
     sources = [
@@ -391,15 +416,30 @@ def test_frozen_consumer_accepts_the_bound_files_and_refuses_the_utc_manifest(
     coverage = _terminal_transaction_history_coverage(
         fragment["transaction_history_manifest"],
         roots=roots,
-        generation_as_of=CUTOFF.as_of_date,
+        generation_as_of=as_of,
         account_ids=accounts,
         transaction_sources=sources,
     )
     assert coverage
-    # The driver's own manifest carries UTC stamps whose date is the next day.
-    utc_roots = {"ingest-terminal": run_dir / "transactions"}
+    return coverage
+
+
+def test_evening_capture_needs_the_ny_rendered_manifest(tmp_path: Path) -> None:
+    """Saturday 23:00 New York is Sunday in UTC: the driver's UTC stamps fail."""
+
+    _TX["at"] = "2031-06-15T03:00:30+00:00"
+    run_dir = _run(tmp_path, start=SATURDAY_NIGHT)
+    binding = _ingest(tmp_path, run_dir)
+    capture = binding["capture"]
+    assert isinstance(capture, dict)
+    assert capture["capture_date_new_york"] == "2031-06-14"
+    assert capture["capture_date_utc"] == "2031-06-15"
+    assert capture["capture_date_utc_offset_days"] == 2
+    assert binding["as_of_date"] == "2031-06-15"
+    _assert_frozen_accepts(tmp_path, date(2031, 6, 15))
+    accounts = set(_crosswalk().values())
     body = (run_dir / "transactions/manifest.json").read_bytes()
-    with pytest.raises(SchwabGenerationError, match="capture interval is invalid"):
+    with pytest.raises(SchwabGenerationError, match="terminal date differs"):
         _terminal_transaction_history_coverage(
             {
                 "expected_sha256": hashlib.sha256(body).hexdigest(),
@@ -407,8 +447,8 @@ def test_frozen_consumer_accepts_the_bound_files_and_refuses_the_utc_manifest(
                 "relative_path": "manifest.json",
                 "root_id": "ingest-terminal",
             },
-            roots=utc_roots,
-            generation_as_of=CUTOFF.as_of_date,
+            roots={"ingest-terminal": run_dir / "transactions"},
+            generation_as_of=date(2031, 6, 15),
             account_ids=accounts,
             transaction_sources=[
                 (
@@ -419,20 +459,90 @@ def test_frozen_consumer_accepts_the_bound_files_and_refuses_the_utc_manifest(
                 for internal in sorted(accounts)
             ],
         )
-    rule = binding["transaction_manifest"]
-    assert isinstance(rule, dict)
-    assert rule["rule"] == ingest.TRANSACTION_MANIFEST_RULE
-    assert rule["finished_at"] == "2031-06-13T23:59:30-04:00"
-    assert rule["original_sha256"] != rule["bound_sha256"]
 
 
-def test_same_day_capture_has_no_utc_offset(tmp_path: Path) -> None:
-    start = datetime(2031, 6, 13, 21, 0, tzinfo=timezone.utc)
-    run_dir = _run(tmp_path, start=start)
-    # the pinned transaction stamp is evening; align it with the same-day capture
+def test_monday_early_capture_is_accepted(tmp_path: Path) -> None:
+    _TX["at"] = "2031-06-16T12:00:30+00:00"
+    run_dir = _run(tmp_path, FakeTransport(to_date="06/16/2031"), start=MONDAY_EARLY)
     binding = _ingest(tmp_path, run_dir)
-    assert isinstance(binding["capture"], dict)
-    assert binding["capture"]["capture_date_utc_offset_days"] == 0
+    capture = binding["capture"]
+    assert isinstance(capture, dict)
+    assert binding["as_of_date"] == "2031-06-16"
+    assert capture["capture_mode"] == driver.MODE_NEXT_SESSION
+    assert capture["capture_date_utc_offset_days"] == 3
+    _assert_frozen_accepts(tmp_path, date(2031, 6, 16))
+
+
+def test_monday_after_the_open_is_refused_by_the_driver(tmp_path: Path) -> None:
+    with pytest.raises(driver.DriverError, match="after the next session open"):
+        _run(tmp_path, start=datetime(2031, 6, 16, 14, 0, tzinfo=timezone.utc))
+    assert not (tmp_path / "staging/synthetic-ingest-run/manifest.json").exists()
+
+
+def test_labelled_same_day_fallback_is_bound_with_a_cutoff_minus_one_nav(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2031, 6, 13, 21, 0, tzinfo=timezone.utc)
+    _TX["at"] = "2031-06-13T21:00:30+00:00"
+    series = {
+        "histories": {
+            "6/11/2031": {"AccountValue": 990},
+            "6/12/2031": {"AccountValue": 995.5},
+        }
+    }
+    run_dir = _run(
+        tmp_path,
+        FakeTransport(balances=series, to_date="06/13/2031"),
+        start=start,
+        label="SAME_DAY_FALLBACK",
+    )
+    binding = _ingest(tmp_path, run_dir)
+    capture = binding["capture"]
+    assert isinstance(capture, dict)
+    assert capture["capture_mode"] == driver.MODE_SAME_DAY
+    assert capture["capture_date_utc_offset_days"] == 0
+    assert binding["as_of_date"] == "2031-06-13"
+    assert binding["exception_label"] == "SAME_DAY_FALLBACK"
+    nav = binding["nav"]
+    assert isinstance(nav, dict)
+    assert {v["cutoff_row_present"] for v in nav.values()} == {False}
+    assert {v["last_date"] for v in nav.values()} == {"2031-06-12"}
+    _assert_frozen_accepts(tmp_path, date(2031, 6, 13))
+
+
+def test_labelled_r2_evening_pattern_records_the_utc_offset(tmp_path: Path) -> None:
+    _TX["at"] = "2031-06-14T03:59:30+00:00"
+    series = {"histories": {"6/12/2031": {"AccountValue": 995.5}}}
+    run_dir = _run(
+        tmp_path,
+        FakeTransport(balances=series, to_date="06/13/2031"),
+        start=LATE_EVENING,
+        label="SAME_DAY_FALLBACK",
+    )
+    binding = _ingest(tmp_path, run_dir)
+    capture = binding["capture"]
+    assert isinstance(capture, dict)
+    assert capture["capture_date_new_york"] == "2031-06-13"
+    assert capture["capture_date_utc"] == "2031-06-14"
+    assert capture["capture_date_utc_offset_days"] == 1
+    assert binding["as_of_date"] == "2031-06-14"
+    _assert_frozen_accepts(tmp_path, date(2031, 6, 14))
+
+
+def test_a_labelled_fallback_without_a_near_cutoff_nav_is_refused(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2031, 6, 13, 21, 0, tzinfo=timezone.utc)
+    _TX["at"] = "2031-06-13T21:00:30+00:00"
+    series = {"histories": {"6/9/2031": {"AccountValue": 990}}}
+    run_dir = _run(
+        tmp_path,
+        FakeTransport(balances=series, to_date="06/13/2031"),
+        start=start,
+        label="SAME_DAY_FALLBACK",
+    )
+    with pytest.raises(ingest.IngestError, match="does not end at or just before"):
+        _ingest(tmp_path, run_dir)
 
 
 # --------------------------------------------------------------------------- #
@@ -550,18 +660,28 @@ def test_a_different_cutoff_is_refused(tmp_path: Path) -> None:
     assert not (tmp_path / "ingest").exists()
 
 
-def test_a_labelled_exception_run_is_refused(tmp_path: Path) -> None:
-    run_dir = _run(tmp_path, label="OWNER_LABELLED_EXCEPTION")
-    with pytest.raises(ingest.IngestError, match="labelled exception run"):
+def test_a_labelled_run_outside_the_same_day_fallback_is_refused(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, label="OWNER_LABELLED_EXCEPTION")  # Saturday capture
+    with pytest.raises(ingest.IngestError, match="same-day post-close fallback"):
         _ingest(tmp_path, run_dir)
 
 
-def test_a_capture_after_new_york_midnight_is_refused(tmp_path: Path) -> None:
-    # exactly 8h after the close: allowed by the driver, but already the next
-    # New York calendar date, so it cannot be bound to the cutoff date.
-    start = CUTOFF.close_utc + timedelta(hours=8)
-    run_dir = _run(tmp_path, start=start, step=0)
-    with pytest.raises(ingest.IngestError, match="New York date differs"):
+def test_ingest_refuses_a_run_whose_capture_mode_was_forged(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    target = run_dir / "normalized/positions.json"
+    document = _json(target)
+    document["capture"]["capture_mode"] = driver.MODE_SAME_DAY
+    payload = driver.canonical_bytes(document)
+    target.write_bytes(payload)
+    manifest = _json(run_dir / "manifest.json")
+    for entry in manifest["artifacts"]:
+        if entry["path"] == "normalized/positions.json":
+            entry["sha256"] = hashlib.sha256(payload).hexdigest()
+            entry["size_bytes"] = len(payload)
+    (run_dir / "manifest.json").write_bytes(driver.canonical_bytes(manifest))
+    with pytest.raises(ingest.IngestError, match="not verified"):
         _ingest(tmp_path, run_dir)
 
 
@@ -572,21 +692,12 @@ def test_crosswalk_scope_must_match_the_run(tmp_path: Path) -> None:
         _ingest(tmp_path, run_dir, crosswalk=smaller)
 
 
-def test_a_transaction_manifest_the_frozen_consumer_refuses_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_transaction_manifest_finishing_after_the_as_of_date_is_refused(
+    tmp_path: Path,
 ) -> None:
-    real = driver._TRANSACTION_CAPTURE.capture_transaction_history
-
-    def next_day(**kwargs: Any) -> Any:
-        return real(**kwargs, captured_at="2031-06-15T03:59:30+00:00")
-
-    monkeypatch.setattr(
-        driver._TRANSACTION_CAPTURE, "capture_transaction_history", next_day
-    )
+    _TX["at"] = "2031-06-16T03:00:00+00:00"  # 23:00 New York on Sunday
     run_dir = _run(tmp_path)
-    with pytest.raises(
-        ingest.IngestError, match="terminal capture interval is not within"
-    ):
+    with pytest.raises(ingest.IngestError, match="later than the as-of date"):
         _ingest(tmp_path, run_dir)
 
 
@@ -630,6 +741,7 @@ def test_nav_files_follow_the_generation_columns_and_drop_later_dates(
     assert isinstance(nav, dict) and len(nav) == 8
     first = nav["account-0000000000000001"]
     assert first == {
+        "cutoff_row_present": True,
         "first_date": "2031-06-11",
         "last_date": "2031-06-13",
         "rows": 3,
@@ -690,7 +802,7 @@ def test_compose_spec_replaces_only_the_driver_fed_parts(tmp_path: Path) -> None
     composed = json.loads(
         ingest.compose_spec(tmp_path / "ingest", _base_spec(tmp_path), _crosswalk())
     )
-    assert composed["as_of_date"] == "2031-06-13"
+    assert composed["as_of_date"] == "2031-06-14"
     assert composed["baseline"] == {"account_count": 8}
     roles = [item["role"] for item in composed["sources"]]
     assert roles.count("MANUAL_POSITION_CSV") == 1
@@ -749,7 +861,7 @@ def test_cli_success_and_refusal(
     assert ingest.main(arguments) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["capture_date_utc_offset_days"] == 1
-    assert printed["as_of_date"] == "2031-06-13"
+    assert printed["as_of_date"] == "2031-06-14"
     # the synthetic base spec has no manual sources: the frozen build says so
     assert printed["generation_build"]["status"] == "REFUSED"
     assert (tmp_path / "composed.json").is_file()
@@ -776,16 +888,18 @@ def test_snapshot_dating_is_rechecked_over_the_written_file(tmp_path: Path) -> N
     _ingest(tmp_path, run_dir)
     path = tmp_path / "ingest/current/current-snapshot.json"
     document = _json(path)
-    ingest._check_snapshot_dating(path, CUTOFF)
-    document["observed_at"] = "2031-06-14T03:59:00+00:00"
+    as_of = date(2031, 6, 14)
+    ingest._check_snapshot_dating(path, as_of)
+    original = document["observed_at"]
+    document["observed_at"] = "2031-06-15T03:59:00+00:00"
     path.write_bytes(driver.canonical_bytes(document))
     with pytest.raises(ingest.IngestError, match="UTC date differs"):
-        ingest._check_snapshot_dating(path, CUTOFF)
-    document["observed_at"] = CUTOFF.close_utc.isoformat()
-    document["positions"][0]["as_of_date"] = "2031-06-14"
+        ingest._check_snapshot_dating(path, as_of)
+    document["observed_at"] = original
+    document["positions"][0]["as_of_date"] = "2031-06-13"
     path.write_bytes(driver.canonical_bytes(document))
     with pytest.raises(ingest.IngestError, match="as-of differs"):
-        ingest._check_snapshot_dating(path, CUTOFF)
+        ingest._check_snapshot_dating(path, as_of)
 
 
 def test_cli_checks_composition_inputs_before_creating_any_output(

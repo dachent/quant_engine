@@ -7,20 +7,26 @@ manifest. ``tools/schwab_generation.py`` consumes a current snapshot, eight
 transaction-history manifest. This adapter is the only bridge between them; it
 changes no generation behaviour.
 
-Dating. The generation requires the capture's UTC date to equal the spec
-``as_of_date`` and the transaction manifest's ``finished_at`` date to equal the
-requested history end. A book captured at 23:59 New York carries the *next* UTC
-date, so the R2 run dated the whole generation one day late. This adapter binds
-``as_of_date`` to the driver's declared cutoff (which the driver has already
-tied to the New York capture date), and records the UTC capture date and its
-offset explicitly instead of rejecting it:
+Capture modes. The preferred plan captures after the cutoff day has closed and
+before the next trading session's first price update (09:30 New York), on a
+later New York date: a Friday cutoff with a Saturday, Sunday or Monday-morning
+capture, or a holiday weekend. Then every priced row still carries the cutoff
+``price.priceDate`` and the balance series (which ends the day before the
+capture date) holds an observed row at the cutoff for every account. A same-day
+post-close capture is bound only as a labelled fallback, whose NAV ends the day
+before the cutoff and needs the official-close derivation that R2 used.
 
-* the snapshot ``observed_at`` is the valuation instant (the cutoff close, whose
-  UTC date is always the cutoff date); the real capture instant, both capture
-  dates and ``capture_date_utc_offset_days`` are written to the binding;
-* the terminal transaction manifest is re-emitted with ``started_at`` and
-  ``finished_at`` expressed at the America/New_York offset, the same instants,
-  so the frozen consumer's date comparison uses the New York date.
+Dating. The frozen generation requires the snapshot observation's UTC date to
+equal the spec ``as_of_date``, the terminal manifest to finish no later than
+that date, and the requested history end (the provider's New York date) to equal
+the manifest finish date. The adapter therefore binds ``as_of_date`` to the UTC
+date of the capture, writes the real capture instant as the snapshot
+``observed_at``, and records the valuation cutoff, both capture dates, the
+offset and the capture mode explicitly in the binding instead of rejecting them
+(the R2 run was dated one day late because this was neither recorded nor
+understood). The terminal transaction manifest is re-emitted with ``started_at``
+and ``finished_at`` expressed at the America/New_York offset, the same instants,
+so its finish date is the New York date the provider used.
 
 Valuation. The Holdings-V2 ``marketValue`` is quantity times the provider's last
 trade (preserved 2026-09-17 bytes: ``price.price`` is not the official close for
@@ -31,13 +37,13 @@ existing ``normalize-holdings-v2`` path does, and the run is refused when a held
 position has no official close.
 
 Refusals: a driver run that does not verify (including raw re-derivation), a
-labelled (exception) run, a cutoff that differs from the run evidence, a capture
-whose New York date is not the cutoff date, a held position without an official
-close, and bound files that break the date rules the frozen generation applies
-(re-checked here over the written files; the tests run the frozen functions
-themselves over the same files). With ``--base-spec`` the composed spec is also
-offered to ``build_generation`` and the outcome is reported. Output is
-create-only; the binding is written last.
+labelled run that is not the same-day fallback, a cutoff that differs from the
+run evidence, a held position without an official close, and bound files that
+break the date rules the frozen generation applies (re-checked here over the
+written files; the tests run the frozen functions themselves over the same
+files). With ``--base-spec`` the composed spec is also offered to
+``build_generation`` and the outcome is reported. Output is create-only; the
+binding is written last.
 """
 
 from __future__ import annotations
@@ -47,7 +53,7 @@ import csv
 from collections.abc import Mapping, Sequence
 import copy
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import hashlib
 import io
@@ -77,7 +83,7 @@ ROOT_CURRENT = "ingest-current"
 ROOT_NAV = "ingest-nav"
 ROOT_TERMINAL = "ingest-terminal"
 VALUATION_BASIS = "OFFICIAL_CLOSE_QUANTITY_TIMES_CLOSE"
-OBSERVED_AT_BASIS = "VALUATION_INSTANT_CUTOFF_CLOSE_NOT_CAPTURE_TIME"
+OBSERVED_AT_BASIS = "CAPTURE_INSTANT_UTC_DATE_IS_GENERATION_AS_OF"
 TRANSACTION_MANIFEST_RULE = "TIMESTAMPS_RE_EXPRESSED_AT_AMERICA_NEW_YORK_SAME_INSTANTS"
 _NEW_YORK = ZoneInfo(driver.CLOSE_TIME_ZONE)
 _REPLACED_ROLES = frozenset({"WCH_NAV_CSV", "WCH_TRANSACTION_JSON"})
@@ -155,28 +161,36 @@ def _capture_binding(
     positions: Mapping[str, Any],
     balances: Mapping[str, Any],
     cutoff: driver.Cutoff,
+    label: str | None,
 ) -> dict[str, object]:
     capture = driver.json_object(positions.get("capture"), "positions capture")
     balance_capture = driver.json_object(balances.get("capture"), "balances capture")
     try:
-        captured = driver.aware_utc(capture.get("captured_at_utc"), "captured_at_utc")
         recomputed = driver.assess_timing(
-            captured, cutoff, exception_label=None
+            driver.aware_utc(capture.get("captured_at_utc"), "captured_at_utc"),
+            cutoff,
+            exception_label=label,
         ).to_dict()
         balance_recomputed = driver.assess_timing(
             driver.aware_utc(
                 balance_capture.get("captured_at_utc"), "balances captured_at_utc"
             ),
             cutoff,
-            exception_label=None,
+            exception_label=label,
         ).to_dict()
     except driver.DriverError as exc:
         raise IngestError(str(exc)) from exc
     if recomputed != capture or balance_recomputed != balance_capture:
         raise IngestError("capture timing differs from the capture time it records")
-    for block in (capture, balance_capture):
-        if block["capture_date_new_york"] != cutoff.as_of_date.isoformat():
-            raise IngestError("capture New York date differs from the cutoff date")
+    expected_mode = driver.MODE_NEXT_SESSION if label is None else driver.MODE_SAME_DAY
+    if capture["capture_mode"] != expected_mode or (
+        balance_capture["capture_mode"] != expected_mode
+    ):
+        raise IngestError(
+            "capture mode is not the next-session pre-open mode"
+            if label is None
+            else "a labelled run is bound only in the same-day post-close fallback"
+        )
     utc_date = date.fromisoformat(str(capture["capture_date_utc"]))
     return {
         **capture,
@@ -229,14 +243,12 @@ def ingest(
     )
     if run_cutoff != cutoff:
         raise IngestError("expected cutoff differs from the driver run evidence")
-    if manifest["exception_label"] is not None:
-        raise IngestError(
-            "a labelled exception run is not bound to a cutoff-dated generation"
-        )
+    label: str | None = manifest["exception_label"]
     accounts = set(crosswalk.values())
     if set(manifest["accounts"]) != accounts or len(accounts) != len(crosswalk):
         raise IngestError("crosswalk scope differs from the driver run")
-    capture = _capture_binding(positions, balances, cutoff)
+    capture = _capture_binding(positions, balances, cutoff, label)
+    as_of = date.fromisoformat(str(capture["capture_date_utc"]))
 
     held = driver.json_objects(positions.get("positions"), "positions")
     sweeps = driver.json_objects(positions.get("sweep_vehicles"), "sweep vehicles")
@@ -259,7 +271,7 @@ def ingest(
         read = read_holdings_v2_current_snapshot(
             raw_holdings,
             crosswalk=crosswalk,
-            captured_at=cutoff.close_utc.isoformat(),
+            captured_at=capture["captured_at_utc"],
             official_closes={symbol: closes[symbol] for symbol in symbols},
             price_date=cutoff.as_of_date,
         )
@@ -323,15 +335,15 @@ def ingest(
     )
 
     nav_sources, nav_summary = _write_nav(
-        run_dir, output_root, cutoff, sorted(accounts), record
+        run_dir, output_root, cutoff, sorted(accounts), record, label is not None
     )
     transaction_sources, transaction_manifest, tx_rule = _write_terminal(
-        run_dir, output_root, cutoff, sorted(accounts), record
+        run_dir, output_root, as_of, sorted(accounts), record
     )
 
     current_source = {
         "artifact_id": "ingest/current-snapshot.json",
-        "as_of_date": cutoff.as_of_date.isoformat(),
+        "as_of_date": as_of.isoformat(),
         "expected_sha256": digest,
         "expected_size_bytes": size,
         "relative_path": "current-snapshot.json",
@@ -344,11 +356,11 @@ def ingest(
         ROOT_NAV: str((output_root / "nav").resolve()),
         ROOT_TERMINAL: str((output_root / "terminal").resolve()),
     }
-    _check_snapshot_dating(current_dir / "current-snapshot.json", cutoff)
-    _check_transaction_dating(output_root / "terminal", sorted(accounts), cutoff)
+    _check_snapshot_dating(current_dir / "current-snapshot.json", as_of)
+    _check_transaction_dating(output_root / "terminal", sorted(accounts), as_of)
 
     fragment: dict[str, object] = {
-        "as_of_date": cutoff.as_of_date.isoformat(),
+        "as_of_date": as_of.isoformat(),
         "current_snapshot": current_source,
         "roots": roots,
         "sources": sorted(
@@ -368,7 +380,7 @@ def ingest(
         "adapter_version": ADAPTER_VERSION,
         "artifacts": sorted(artifacts, key=lambda item: str(item["path"])),
         "as_of_basis": positions["as_of_basis"],
-        "as_of_date": cutoff.as_of_date.isoformat(),
+        "as_of_date": as_of.isoformat(),
         "capture": capture,
         "counts": {
             "cash_summary_rows": len(cash_rows),
@@ -379,6 +391,7 @@ def ingest(
             "zero_quantity_rows_dropped": zero_quantity_rows,
         },
         "cutoff": cutoff.to_dict(),
+        "valuation_cutoff": cutoff.as_of_date.isoformat(),
         "driver": {
             "evidence_sha256": manifest["evidence_sha256"],
             "live_exercised": manifest["live_exercised"],
@@ -399,7 +412,8 @@ def ingest(
         "provider": "SCHWAB",
         "schema_name": "schwab-capture-ingest-binding",
         "schema_version": SCHEMA_VERSION,
-        "snapshot_observed_at": cutoff.close_utc.isoformat(),
+        "exception_label": label,
+        "snapshot_observed_at": capture["captured_at_utc"],
         "snapshot_observed_at_basis": OBSERVED_AT_BASIS,
         "transaction_manifest": tx_rule,
         "unverified_shapes": list(driver.UNVERIFIED_SHAPES),
@@ -461,6 +475,7 @@ def _write_nav(
     cutoff: driver.Cutoff,
     accounts: Sequence[str],
     record: Any,
+    labelled: bool,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     sources: list[dict[str, object]] = []
     summary: dict[str, object] = {}
@@ -476,8 +491,15 @@ def _write_nav(
         kept = sorted(
             (day, value) for day, value in history.items() if day <= cutoff.as_of_date
         )
-        if not kept or kept[-1][0] != cutoff.as_of_date:
-            raise IngestError("balance history has no row at the cutoff")
+        allowed = {cutoff.as_of_date}
+        if labelled:  # same-day fallback: the series ends the day before the cutoff
+            allowed.add(cutoff.as_of_date - timedelta(days=1))
+        if not kept or kept[-1][0] not in allowed:
+            raise IngestError(
+                "balance history has no observed row at the cutoff"
+                if not labelled
+                else "balance history does not end at or just before the cutoff"
+            )
         buffer = io.StringIO(newline="")
         writer = csv.writer(buffer, lineterminator="\n")
         writer.writerow(["account_id", "account_name", "date", "account_value"])
@@ -501,6 +523,7 @@ def _write_nav(
             }
         )
         summary[internal] = {
+            "cutoff_row_present": kept[-1][0] == cutoff.as_of_date,
             "first_date": kept[0][0].isoformat(),
             "last_date": kept[-1][0].isoformat(),
             "rows": len(kept),
@@ -522,7 +545,7 @@ def _new_york(value: object, name: str) -> str:
 def _write_terminal(
     run_dir: Path,
     output_root: Path,
-    cutoff: driver.Cutoff,
+    as_of: date,
     accounts: Sequence[str],
     record: Any,
 ) -> tuple[
@@ -563,7 +586,7 @@ def _write_terminal(
                 {
                     "account_id": internal,
                     "artifact_id": f"ingest/terminal/{relative}",
-                    "as_of_date": cutoff.as_of_date.isoformat(),
+                    "as_of_date": as_of.isoformat(),
                     "expected_record_count": len(rows),
                     "expected_sha256": _sha256(path.read_bytes()),
                     "expected_size_bytes": path.stat().st_size,
@@ -592,22 +615,22 @@ def _write_terminal(
     return sources, transaction_manifest, rule
 
 
-def _check_snapshot_dating(path: Path, cutoff: driver.Cutoff) -> None:
+def _check_snapshot_dating(path: Path, as_of: date) -> None:
     """The frozen consumer compares the UTC date of every as-of and observation."""
 
     document = driver.load_json_file(path, "current snapshot")
     observed = driver.aware_utc(document.get("observed_at"), "observed_at")
-    if observed.date() != cutoff.as_of_date:
-        raise IngestError("snapshot observation UTC date differs from the cutoff")
+    if observed.date() != as_of:
+        raise IngestError("snapshot observation UTC date differs from the as-of date")
     for row in driver.json_objects(document.get("positions"), "snapshot positions"):
-        if row.get("as_of_date") != cutoff.as_of_date.isoformat():
-            raise IngestError("snapshot position as-of differs from the cutoff")
+        if row.get("as_of_date") != as_of.isoformat():
+            raise IngestError("snapshot position as-of differs from the as-of date")
         if driver.aware_utc(row.get("observed_at"), "observed_at") != observed:
             raise IngestError("snapshot position observation differs")
 
 
 def _check_transaction_dating(
-    terminal: Path, accounts: Sequence[str], cutoff: driver.Cutoff
+    terminal: Path, accounts: Sequence[str], as_of: date
 ) -> None:
     """Mirror the frozen terminal-history date rules over the bound package.
 
@@ -626,9 +649,9 @@ def _check_transaction_dating(
         started.tzinfo is None
         or finished.tzinfo is None
         or started > finished
-        or finished.date() > cutoff.as_of_date
+        or finished.date() > as_of
     ):
-        raise IngestError("terminal capture interval is not within the cutoff date")
+        raise IngestError("terminal capture interval is later than the as-of date")
     for internal in accounts:
         names = sorted(
             path.name

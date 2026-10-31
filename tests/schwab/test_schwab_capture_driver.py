@@ -22,11 +22,15 @@ from tools import schwab_capture_driver as driver
 
 
 CUTOFF = driver.parse_cutoff("2031-06-13")
-# 16:00 New York on the cutoff date is 20:00Z (daylight time).
-AFTER_CLOSE = datetime(2031, 6, 13, 21, 0, tzinfo=timezone.utc)
+# The cutoff 2031-06-13 is a Friday; 16:00 New York is 20:00Z (daylight time).
+# AFTER_CLOSE is the one unlabelled capture mode: Saturday 08:00 New York, after
+# the cutoff day closed and before the next session's first price update.
+AFTER_CLOSE = datetime(2031, 6, 14, 12, 0, tzinfo=timezone.utc)
+# Same-day post-close captures are a labelled fallback only.
+SAME_DAY = datetime(2031, 6, 13, 21, 0, tzinfo=timezone.utc)
 # 23:59 New York on the cutoff date lands on the next UTC date (the R2 pattern).
 LATE_EVENING = datetime(2031, 6, 14, 3, 59, tzinfo=timezone.utc)
-NOW = datetime(2031, 6, 13, 21, 30, tzinfo=timezone.utc)
+NOW = datetime(2031, 6, 14, 12, 30, tzinfo=timezone.utc)
 HOLDINGS_PATH = driver.HOLDINGS_V2_PATH
 HOLDINGS_BODY = {"groupBySecurityType": True, "isExtendedPricing": False}
 QUOTE_MS = int(
@@ -121,18 +125,24 @@ def test_holdings_record_market_value_and_as_of_basis() -> None:
     assert cash[0]["cash_investments_usd"] == "12.5"
     assert {row["as_of_date"] for row in rows} == {"2031-06-13"}
     assert {row["as_of_offset_days"] for row in rows} == {0}
-    assert result["as_of_basis"] == "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE"
+    assert result["as_of_basis"] == "CAPTURED_AFTER_CLOSE_BEFORE_NEXT_SESSION_OPEN"
     sweeps = result["sweep_vehicles"]
     assert isinstance(sweeps, list) and len(sweeps) == 1
     assert all("SYNTH-EXT" not in json.dumps(item) for item in (rows, sweeps))
 
 
-def test_r2_pattern_evening_capture_keeps_both_dates() -> None:
-    result = _normalize(_holdings(), captured_at=LATE_EVENING)
+def test_r2_pattern_evening_capture_needs_the_label_and_keeps_both_dates() -> None:
+    with pytest.raises(driver.DriverError, match="needs an approved exception label"):
+        _normalize(_holdings(), captured_at=LATE_EVENING)
+    result = _normalize(
+        _holdings(), captured_at=LATE_EVENING, exception_label="SAME_DAY_FALLBACK"
+    )
     capture = result["capture"]
     assert isinstance(capture, dict)
     assert capture["capture_date_utc"] == "2031-06-14"
     assert capture["capture_date_new_york"] == "2031-06-13"
+    assert capture["capture_mode"] == driver.MODE_SAME_DAY
+    assert result["as_of_basis"] == "CAPTURED_SAME_DAY_AFTER_CLOSE_LABELLED"
     assert {row["as_of_date"] for row in _positions(result)} == {"2031-06-13"}
 
 
@@ -206,11 +216,11 @@ def test_capture_before_close_and_late_capture_are_refused_without_label() -> No
         _normalize(
             _holdings(), captured_at=datetime(2031, 6, 13, 19, 0, tzinfo=timezone.utc)
         )
-    with pytest.raises(driver.DriverError, match="later than the allowed lag"):
-        _normalize(_holdings(), captured_at=AFTER_CLOSE + timedelta(days=2))
+    with pytest.raises(driver.DriverError, match="after the next session open"):
+        _normalize(_holdings(), captured_at=AFTER_CLOSE + timedelta(days=3))
     labelled = _normalize(
         _holdings(),
-        captured_at=AFTER_CLOSE + timedelta(days=2),
+        captured_at=AFTER_CLOSE + timedelta(days=3),
         exception_label="LATE_CAPTURE_LABELLED",
     )
     assert labelled["exception_label"] == "LATE_CAPTURE_LABELLED"
@@ -389,8 +399,8 @@ def test_evidence_is_single_use(tmp_path: Path) -> None:
         (lambda d: d.update(operation="run"), "operation"),
         (lambda d: d.update(extra=1), "field set"),
         (lambda d: d["authority"].update(status="REVOKED"), "CURRENT"),
-        (lambda d: d["authority"].update(expires_at="2031-06-13T20:30:00Z"), "expired"),
-        (lambda d: d["authority"].update(issued_at="2031-06-14T00:00:00Z"), "not yet"),
+        (lambda d: d["authority"].update(expires_at="2031-06-14T12:00:00Z"), "expired"),
+        (lambda d: d["authority"].update(issued_at="2031-06-15T00:00:00Z"), "not yet"),
         (lambda d: d["terms"].update(sha256="0" * 64), "terms"),
         (lambda d: d["catalog"].update(sha256="0" * 64), "catalog"),
         (lambda d: d["review"].update(reference="https://example.invalid/x"), "review"),
@@ -731,7 +741,7 @@ def test_holdings_request_start_before_close_is_refused(tmp_path: Path) -> None:
         [
             datetime(2031, 6, 13, 19, 59, 58, tzinfo=timezone.utc),
             datetime(2031, 6, 13, 19, 59, 59, tzinfo=timezone.utc),
-            datetime(2031, 6, 13, 20, 0, 1, tzinfo=timezone.utc),
+            datetime(2031, 6, 14, 12, 0, 1, tzinfo=timezone.utc),
         ]
         + [NOW] * 50
     )
@@ -800,7 +810,7 @@ def test_offline_normalize_cli_is_create_only(
     output = tmp_path / "out.json"
     arguments = [
         "normalize-holdings", str(raw), str(crosswalk), str(output),
-        "--cutoff", "2031-06-13", "--captured-at", "2031-06-13T21:00:00Z",
+        "--cutoff", "2031-06-13", "--captured-at", "2031-06-14T12:00:00Z",
     ]  # fmt: skip
     assert driver.main(arguments) == 0
     assert json.loads(capsys.readouterr().out)["position_count"] == 3
@@ -979,5 +989,125 @@ def test_verifier_checks_cash_summaries_and_the_balances_window(tmp_path: Path) 
         doc["capture"]["captured_at_utc"] = "2031-06-13T19:00:00+00:00"
 
     _rebind(run_two, "normalized/balances.json", early)
-    with pytest.raises(driver.DriverError, match="balances capture time"):
+    with pytest.raises(driver.DriverError, match="precedes"):
         driver.verify_run(run_two)
+
+
+# --------------------------------------------------------------------------- #
+# Capture modes against the trading calendar
+# --------------------------------------------------------------------------- #
+
+
+def _utc_ny(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    from zoneinfo import ZoneInfo
+
+    local = datetime(
+        year, month, day, hour, minute, tzinfo=ZoneInfo("America/New_York")
+    )
+    return local.astimezone(timezone.utc)
+
+
+def _mode(cutoff: str, captured: datetime, label: str | None = None) -> str:
+    return driver.assess_timing(
+        captured, driver.parse_cutoff(cutoff), exception_label=label
+    ).mode
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "captured"),
+    [
+        ("2031-06-13", _utc_ny(2031, 6, 14, 0, 1)),  # Friday cutoff, Saturday
+        ("2031-06-13", _utc_ny(2031, 6, 14, 23, 59)),  # Saturday evening
+        ("2031-06-13", _utc_ny(2031, 6, 15, 12)),  # Sunday
+        ("2031-06-13", _utc_ny(2031, 6, 16, 8)),  # Monday 08:00 before the open
+        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 29)),
+        ("2031-06-10", _utc_ny(2031, 6, 11, 8)),  # Tuesday cutoff, Wednesday pre-open
+        ("2026-09-04", _utc_ny(2026, 9, 8, 8)),  # Friday before Labor Day, Tuesday
+        ("2026-09-04", _utc_ny(2026, 9, 7, 12)),  # Labor Day itself
+        ("2026-04-02", _utc_ny(2026, 4, 6, 8)),  # Thursday before Good Friday
+        ("2026-12-24", _utc_ny(2026, 12, 25, 11)),  # Christmas Day
+    ],
+)
+def test_next_session_pre_open_captures_are_accepted(
+    cutoff: str, captured: datetime
+) -> None:
+    assert _mode(cutoff, captured) == driver.MODE_NEXT_SESSION
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "captured", "message"),
+    [
+        ("2031-06-13", _utc_ny(2031, 6, 16, 10), "after the next session open"),
+        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 30), "after the next session open"),
+        ("2031-06-13", _utc_ny(2031, 6, 17, 8), "after the next session open"),
+        ("2031-06-10", _utc_ny(2031, 6, 11, 9, 30), "after the next session open"),
+        ("2026-09-04", _utc_ny(2026, 9, 8, 9, 30), "after the next session open"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 16, 0), "same-day post-close"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 23, 59), "same-day post-close"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 15, 59), "precedes"),
+        ("2031-06-14", _utc_ny(2031, 6, 15, 8), "not a trading day"),  # Saturday
+        ("2026-09-07", _utc_ny(2026, 9, 8, 8), "not a trading day"),  # Labor Day
+    ],
+)
+def test_other_capture_modes_are_refused_without_the_label(
+    cutoff: str, captured: datetime, message: str
+) -> None:
+    with pytest.raises(driver.DriverError, match=message):
+        _mode(cutoff, captured)
+    # with the label the mode is recorded rather than refused
+    assert _mode(cutoff, captured, "OWNER_APPROVED_EXCEPTION") in {
+        driver.MODE_AFTER_OPEN,
+        driver.MODE_SAME_DAY,
+        driver.MODE_BEFORE_CLOSE,
+        driver.MODE_NEXT_SESSION,
+    }
+
+
+def test_trading_calendar_holidays() -> None:
+    expected = {
+        2026: {
+            "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+            "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+        },
+        2027: {  # New Year's Day on a Friday; Christmas observed Friday 12-24
+            "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+            "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+        },
+        2028: {  # Saturday New Year's Day is not observed on the Friday
+            "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29",
+            "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25",
+        },
+    }  # fmt: skip
+    for year, days in expected.items():
+        assert {d.isoformat() for d in driver.nyse_holidays(year)} == days
+    assert driver.is_trading_day(driver.parse_cutoff("2027-12-31").as_of_date)
+    assert (
+        driver.next_trading_day(
+            driver.parse_cutoff("2026-09-04").as_of_date
+        ).isoformat()
+        == "2026-09-08"
+    )
+
+
+def test_a_friday_cutoff_run_with_a_saturday_capture_stages_and_verifies(
+    tmp_path: Path,
+) -> None:
+    _, run_dir, _ = _run(tmp_path)
+    positions = json.loads((run_dir / "normalized/positions.json").read_text("utf-8"))
+    assert positions["capture"]["capture_mode"] == driver.MODE_NEXT_SESSION
+    assert positions["capture"]["capture_date_new_york"] == "2031-06-14"
+    assert positions["capture"]["next_session_open_utc"] == "2031-06-16T13:30:00+00:00"
+    assert driver.verify_run(run_dir, crosswalk=_crosswalk())["status"] == "VERIFIED"
+
+
+def test_a_run_without_an_observed_cutoff_balance_row_is_refused(
+    tmp_path: Path,
+) -> None:
+    class Short(FakeTransport):
+        def get(
+            self, path: str, query: Any, provider_account_id: str | None
+        ) -> tuple[int, object]:
+            return 200, {"histories": {"6/12/2031": {"AccountValue": 9}}}
+
+    with pytest.raises(driver.DriverError, match="differs from the declared cutoff"):
+        _run(tmp_path, Short())
