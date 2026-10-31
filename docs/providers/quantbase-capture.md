@@ -252,9 +252,12 @@ of `/api/users/<id>/accounts/activity/` across the declared HARs, its decoded bo
 must be the `{"data": [...]}` shape, every row timestamp must be at or before the
 HAR entry's `startedDateTime`, and the CSV must equal that response row for row
 (same projection as the legacy proof; columns the capture never carried may be
-blank). Unlike the legacy proof the capture may be later than the cutoff, but never
-earlier: `capture date >= as_of_date`, and the proof's `effective_end` is the capture
-date.
+blank), except that rows whose latest timestamp is after the cutoff
+(`as_of_date`) are excluded, exactly as the converter excludes them: the HAR keeps
+later evidence, the generation does not carry post-cutoff observations. The capture
+may be later than the cutoff but never earlier (`capture date >= as_of_date`; the
+legacy proof keeps `==`), and the proof's `effective_end` is the cutoff, not the
+capture date; `record_count` counts the kept rows.
 
 Refused: a role HAR with no or more than one activity request, with no
 `account_activity.csv` artifact, with a CSV that is not the HAR response, with a

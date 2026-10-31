@@ -8367,7 +8367,7 @@ def _quantbase_flow_coverage(
             raise ProviderLedgerError(
                 f"Quantbase account activity row {index} item differs"
             )
-        fields.update(item)
+        row_times: list[datetime] = []
         for field in timestamp_fields:
             raw_timestamp = item.get(field)
             if raw_timestamp is None or raw_timestamp == "":
@@ -8392,7 +8392,13 @@ def _quantbase_flow_coverage(
                 raise ProviderLedgerError(
                     "Quantbase account activity timestamp is invalid"
                 )
-            observed_times.append(parsed_timestamp)
+            row_times.append(parsed_timestamp)
+        if role_har_ids and row_times and max(row_times).date() > manifest.as_of_date:
+            # Later source evidence is preserved in the HAR, but a post-cutoff
+            # observation is not part of the generation (repository policy).
+            continue
+        fields.update(item)
+        observed_times.extend(row_times)
         normalized.append((response_row["type"], item))
     if not observed_times:
         raise ProviderLedgerError("Quantbase account activity date coverage is empty")
@@ -8437,9 +8443,11 @@ def _quantbase_flow_coverage(
     return {
         account_id: {
             "capture_observed_at": capture_observed_at.isoformat(),
-            "effective_end": capture_observed_at.date().isoformat(),
+            "effective_end": (
+                manifest.as_of_date if role_har_ids else capture_observed_at.date()
+            ).isoformat(),
             "effective_start": min(observed_times).date().isoformat(),
-            "record_count": len(response_rows),
+            "record_count": len(normalized) if role_har_ids else len(response_rows),
             "source_artifact_ids": sorted(artifact_ids),
         }
     }

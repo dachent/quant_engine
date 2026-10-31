@@ -62,11 +62,21 @@ def _response() -> dict[str, Any]:
             {
                 "type": "order",
                 "item": {
-                    "created_at": "2026-10-29T11:30:20.072367Z",
+                    "created_at": "2026-10-26T11:30:20.072367Z",
                     "executed": True,
                     "id": "order-1",
                     "status": "F",
                     "type": "BUY",
+                },
+            },
+            {
+                "type": "order",
+                "item": {
+                    "created_at": "2026-10-26T11:30:20.072367Z",
+                    "filled_at": "2026-10-29T09:00:00.000000Z",
+                    "id": "after-cutoff",
+                    "status": "F",
+                    "type": "SELL",
                 },
             },
         ]
@@ -105,6 +115,7 @@ def _fixture(
     as_of: date = date(2026, 10, 27),
     include_csv: bool = True,
     extra_schema: dict[str, tuple[str, str]] | None = None,
+    csv_excludes_later_rows: bool = True,
 ) -> tuple[Path, dict[str, Any], GenerationManifest]:
     run_id = "legacy-20261027-test"
     artifacts = tmp_path / "source-runs" / run_id / "artifacts"
@@ -118,7 +129,10 @@ def _fixture(
         schemas.setdefault(f"source/har/{name}", ("quantbase-native-har", "1"))
     if include_csv:
         (artifacts / "csv" / "account_activity.csv").write_bytes(
-            converter._account_activity(csv_response or _response())
+            converter._account_activity(
+                csv_response or _response(),
+                converter._Cutoff(as_of if csv_excludes_later_rows else date.max),
+            )
         )
         files[CSV_ID] = artifacts / "csv" / "account_activity.csv"
     manifest = GenerationManifest.build(
@@ -158,7 +172,7 @@ def test_a_differently_named_har_gets_the_proof(tmp_path: Path) -> None:
     assert _coverage(root, catalog, manifest) == {
         ACCOUNT: {
             "capture_observed_at": CAPTURE,
-            "effective_end": "2026-10-30",
+            "effective_end": "2026-10-27",
             "effective_start": "2024-07-20",
             "record_count": 2,
             "source_artifact_ids": [CSV_ID, HAR_ID],
@@ -187,7 +201,7 @@ def test_the_proof_admits_flow_coverage_like_the_legacy_one(tmp_path: Path) -> N
         quantbase_flow_coverage=_coverage(root, catalog, manifest),
     )
     assert {(item.effective_start, item.effective_end) for item in admissions} == {
-        (date(2024, 7, 20), date(2026, 10, 30))
+        (date(2024, 7, 20), date(2026, 10, 27))
     }
     assert sorted(item.disposition.value for item in admissions) == [
         "AUTHORITATIVE",
@@ -215,9 +229,23 @@ def test_a_base64_har_body_is_decoded(tmp_path: Path) -> None:
     assert _coverage(root, catalog, manifest)[ACCOUNT]["record_count"] == 2
 
 
-def test_capture_on_the_cutoff_day_is_accepted(tmp_path: Path) -> None:
+def test_capture_on_the_cutoff_day_keeps_every_row(tmp_path: Path) -> None:
     root, catalog, manifest = _fixture(tmp_path, as_of=date(2026, 10, 30))
-    assert _coverage(root, catalog, manifest)[ACCOUNT]["effective_end"] == "2026-10-30"
+    proof = _coverage(root, catalog, manifest)[ACCOUNT]
+    assert (proof["effective_end"], proof["record_count"]) == ("2026-10-30", 3)
+
+
+def test_a_csv_holding_post_cutoff_rows_is_refused(tmp_path: Path) -> None:
+    root, catalog, manifest = _fixture(tmp_path, csv_excludes_later_rows=False)
+    with pytest.raises(ERROR, match="CSV differs from captured response"):
+        _coverage(root, catalog, manifest)
+
+
+def test_the_later_capture_does_not_move_the_effective_end(tmp_path: Path) -> None:
+    root, catalog, manifest = _fixture(tmp_path)
+    proof = _coverage(root, catalog, manifest)[ACCOUNT]
+    assert proof["capture_observed_at"] == CAPTURE
+    assert proof["effective_end"] == "2026-10-27"
 
 
 def test_capture_before_the_cutoff_is_refused(tmp_path: Path) -> None:
