@@ -231,7 +231,7 @@ def test_a_route_that_repeats_a_reviewed_identity_is_refused() -> None:
             "path_pattern": r"/_next/data/[^/]+/funds\.json",
         }
     )
-    with pytest.raises(WebContractError, match="identities must be unique"):
+    with pytest.raises(WebContractError, match="overlap|identities must be unique"):
         build_quantbase_contract(document)
 
 
@@ -348,3 +348,122 @@ def test_the_recorders_propose_contract_draft_validates_and_routes() -> None:
     assert _route(contract, "GET", f"{P}/_next/data/B9/funds/9.json") is not None
     assert _route(contract, "GET", f"{A}/api/funds/?limit=5") is not None
     assert _route(QUANTBASE_CONTRACT, "GET", activity + "?page=2&limit=5") is None
+
+
+# --- review fixes: pattern bypass, overlap, coalesced optional keys --------
+
+
+def _with(
+    *routes: dict[str, Any], extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "routes": list(routes),
+        "extra_query_keys": extra or {},
+    }
+
+
+def test_a_pattern_that_is_not_the_templates_own_is_refused() -> None:
+    bypass = {
+        "capability": "funds.sneaky",
+        "origin": A,
+        "path": "/api/funds/{id}/",
+        "path_pattern": "/api/funds/delete/",
+        "authentication_header": "jwt",
+    }
+    with pytest.raises(WebContractError, match="template's own pattern"):
+        build_quantbase_contract(_with(bypass))
+    wide = dict(bypass, path_pattern="/api/funds/[^/]+/")
+    with pytest.raises(WebContractError, match="template's own pattern"):
+        build_quantbase_contract(_with(wide))
+    unknown = dict(bypass, path="/api/funds/{name}/", path_pattern="/api/funds/[^/]+/")
+    with pytest.raises(WebContractError, match="placeholder"):
+        build_quantbase_contract(_with(unknown))
+    ok = dict(bypass, path_pattern="/api/funds/[0-9]+/")
+    contract = build_quantbase_contract(_with(ok))
+    assert _route(contract, "GET", f"{A}/api/funds/7/") == "funds.sneaky"
+    assert _route(contract, "GET", f"{A}/api/funds/delete/") is None
+
+
+def test_overlapping_matchers_are_refused_at_construction() -> None:
+    shadow = {
+        "capability": "activity.shadow",
+        "origin": A,
+        "path": "/api/users/{id}/accounts/activity/",
+        "path_pattern": "/api/users/[0-9]+/accounts/activity/",
+        "authentication_header": "jwt",
+    }
+    with pytest.raises(WebContractError, match="overlap"):
+        build_quantbase_contract(_with(shadow))
+    template_vs_literal = [
+        FUNDS_ROUTE,
+        {
+            "capability": "funds.twelve",
+            "origin": P,
+            "path": "/_next/data/B/funds/12.json",
+        },
+    ]
+    with pytest.raises(WebContractError, match="overlap"):
+        build_quantbase_contract(_with(*template_vs_literal))
+    id_vs_build = [
+        {
+            "capability": "page.one",
+            "origin": P,
+            "path": "/_next/data/{build_id}/x/{id}.json",
+            "path_pattern": r"/_next/data/[^/]+/x/[0-9]+\.json",
+        },
+        {
+            "capability": "page.two",
+            "origin": P,
+            "path": "/_next/data/{build_id}/x/{build_id}.json",
+            "path_pattern": r"/_next/data/[^/]+/x/[^/]+\.json",
+        },
+    ]
+    with pytest.raises(WebContractError, match="overlap"):
+        build_quantbase_contract(_with(*id_vs_build))
+    # disjoint routes are fine
+    build_quantbase_contract(_with(FUNDS_ROUTE, SEARCH_ROUTE))
+
+
+def test_a_route_may_declare_optional_query_keys() -> None:
+    route = dict(SEARCH_ROUTE, optional_query_keys=["page", "sort"])
+    contract = build_quantbase_contract(_with(route))
+    base = f"{A}/api/funds/search/?q=s"
+    assert _route(contract, "GET", base) == "funds.search"
+    assert _route(contract, "GET", base + "&page=2&sort=a") == "funds.search"
+    assert _route(contract, "GET", base + "&other=1") is None
+    assert _route(contract, "GET", f"{A}/api/funds/search/?page=2") is None
+    for bad in (["q"], ["Page"], ["delete"], "page", ["page", "page"]):
+        with pytest.raises(WebContractError):
+            build_quantbase_contract(_with(dict(SEARCH_ROUTE, optional_query_keys=bad)))
+
+
+def test_the_recorders_coalesced_route_loads_and_routes_every_observed_shape() -> None:
+    def item(keys: list[str]) -> dict[str, Any]:
+        return {
+            "origin": A,
+            "path_template": "/api/widgets/",
+            "query_keys": keys,
+            "count": 1,
+        }
+
+    manifest = {
+        "UNREVIEWED_ROUTE_NOT_RECORDED": [
+            item(["limit"]),
+            item(["limit", "page"]),
+            item([]),
+            {
+                "origin": P,
+                "path_template": "/_next/data/{build_id}/funds/{id}.json",
+                "query_keys": [],
+                "count": 1,
+            },
+        ]
+    }
+    contract = build_quantbase_contract(
+        recorder.build_contract_draft([manifest])["extension"]
+    )
+    for query in ("", "?limit=1", "?limit=1&page=2", "?page=2"):
+        assert _route(contract, "GET", f"{A}/api/widgets/{query}") is not None
+    assert _route(contract, "GET", f"{A}/api/widgets/?zz=1") is None
+    assert _route(contract, "GET", f"{P}/_next/data/B7/funds/9.json") is not None

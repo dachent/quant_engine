@@ -361,12 +361,15 @@ near-miss URL routes. The reviewed routes keep exact query-key matching
 }
 ```
 
-`routes` add GET routes (required `query_keys` must all appear); `extra_query_keys`
+`routes` add GET routes (required `query_keys` must all appear, `optional_query_keys` may); `extra_query_keys`
 makes keys optional on one capability. It fails closed with `WebContractError`: unknown
 keys at any level, a non-portable or repeated key, a capability or route identity that
 repeats a reviewed one, an origin other than the two Quantbase origins, a path outside
 `/api/` (API origin) or `/_next/data/` (page data), a templated path without a
-`path_pattern` or an exact path with one, a pattern with an unbounded wildcard, an API
+`path_pattern`, a pattern that is not exactly the template's own (placeholders `{id}`, `{user_id}`
+become `[0-9]+`, `{build_id}` becomes `[^/]+`, everything else is escaped literally) or an exact
+path with one, any two endpoints that one request can match (sample-based check over every
+endpoint and over each filled from another's literal segments), an API
 route without `authentication_header: "jwt"` or a page-data route with one, any path,
 capability or key containing a mutation word (`track-event`, `delete`, `withdraw`,
 `transfer`, `link`, ...), and extra keys for an unknown capability, for one with a

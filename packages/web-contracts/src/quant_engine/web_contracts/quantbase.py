@@ -174,7 +174,10 @@ _MUTATION_WORDS: tuple[str, ...] = (
 )
 _EXTENSION_KEYS = frozenset({"schema_version", "routes", "extra_query_keys"})
 _ROUTE_REQUIRED = frozenset({"capability", "origin", "path"})
-_ROUTE_OPTIONAL = frozenset({"path_pattern", "query_keys", "authentication_header"})
+_ROUTE_OPTIONAL = frozenset(
+    {"path_pattern", "query_keys", "optional_query_keys", "authentication_header"}
+)
+_PLACEHOLDERS = {"{build_id}": "[^/]+", "{id}": "[0-9]+", "{user_id}": "[0-9]+"}
 _PORTABLE_KEY = re.compile(r"[a-z][a-z0-9_.-]*")
 _PORTABLE_CAPABILITY = re.compile(r"[a-z][a-z0-9._-]{0,127}")
 _ROUTE_PREFIX = {_API_ORIGIN: "/api/", _APP_ORIGIN: "/_next/data/"}
@@ -201,6 +204,24 @@ def _extension_key(key: str, name: str) -> str:
     return key
 
 
+def _canonical_pattern(path: str) -> str:
+    """The one pattern a templated path may declare: placeholders become fixed
+    classes, everything else is escaped literally. Anything else is refused, so a
+    pattern can never admit a path other than an instance of the template."""
+
+    out: list[str] = []
+    for piece in re.split(r"(\{[a-z_]+\})", path):
+        if piece.startswith("{"):
+            if piece not in _PLACEHOLDERS:
+                raise WebContractError("declared path uses an unknown placeholder")
+            out.append(_PLACEHOLDERS[piece])
+        else:
+            if "{" in piece or "}" in piece:
+                raise WebContractError("declared path has a malformed placeholder")
+            out.append(re.escape(piece))
+    return "".join(out)
+
+
 def _declared_route(value: object) -> EndpointContract:
     if not isinstance(value, Mapping) or not all(isinstance(k, str) for k in value):
         raise WebContractError("declared route must be an object")
@@ -222,16 +243,22 @@ def _declared_route(value: object) -> EndpointContract:
     if "{" in path:
         if not isinstance(pattern, str):
             raise WebContractError("a templated path requires a path pattern")
-        if ".*" in pattern or ".+" in pattern:
-            raise WebContractError("path pattern must not use an unbounded wildcard")
-        if not pattern.startswith(re.escape(_ROUTE_PREFIX[origin])):
-            raise WebContractError("path pattern must stay inside the route space")
+        if pattern != _canonical_pattern(path):
+            raise WebContractError("path pattern must be the template's own pattern")
     elif pattern is not None:
         raise WebContractError("an exact path must not declare a path pattern")
     query_keys = frozenset(
         _extension_key(item, "declared route")
         for item in _text_list(value.get("query_keys", []), "query_keys")
     )
+    optional = frozenset(
+        _extension_key(item, "declared route")
+        for item in _text_list(
+            value.get("optional_query_keys", []), "optional_query_keys"
+        )
+    )
+    if optional & query_keys:
+        raise WebContractError("optional query keys repeat required keys")
     header = value.get("authentication_header")
     if origin == _API_ORIGIN:
         if header != "jwt":
@@ -245,9 +272,59 @@ def _declared_route(value: object) -> EndpointContract:
         path=path,
         path_pattern=pattern,
         query_keys=query_keys,
+        optional_query_keys=optional,
         semantic_effect=SemanticEffect.READ_ONLY,
         authentication_header=header,
     )
+
+
+def _fill(path: str, other: str | None = None) -> str:
+    """A concrete path for a template. A placeholder segment takes the aligned
+    literal segment of ``other`` when there is one, so literal-versus-template
+    overlaps (``{id}.json`` against ``12.json``) are exercised too."""
+
+    mine = path.split("/")
+    theirs = other.split("/") if other is not None else []
+    out = []
+    for index, segment in enumerate(mine):
+        if "{" not in segment:
+            out.append(segment)
+        elif len(theirs) == len(mine) and "{" not in theirs[index]:
+            out.append(theirs[index])
+        else:
+            out.append(
+                segment.replace("{build_id}", "B")
+                .replace("{id}", "1")
+                .replace("{user_id}", "1")
+            )
+    return "/".join(out)
+
+
+def _refuse_overlaps(endpoints: tuple[EndpointContract, ...]) -> None:
+    """Refuse a contract in which one request can match two endpoints.
+
+    Sample based: for every endpoint, and for every endpoint filled from every other
+    one's literal segments, build concrete URLs with the required keys and with all
+    keys, and require that exactly one endpoint matches each. This does not prove
+    two arbitrary regular expressions disjoint, but declared patterns are canonical
+    (see ``_canonical_pattern``), which makes overlap a segment-wise question the
+    samples cover.
+    """
+
+    for first in endpoints:
+        for second in (None, *endpoints):
+            if second is first:
+                continue
+            path = _fill(first.path, second.path if second is not None else None)
+            keysets = {first.query_keys, first.query_keys | first.optional_query_keys}
+            for keys in keysets:
+                query = "&".join(f"{key}=v" for key in sorted(keys))
+                url = first.origin + path + (f"?{query}" if query else "")
+                hits = [item for item in endpoints if item.matches("GET", url)]
+                if len(hits) > 1 or (second is None and hits != [first]):
+                    raise WebContractError(
+                        "declared routes overlap: one request matches several endpoints"
+                    )
 
 
 def build_quantbase_contract(
@@ -299,15 +376,19 @@ def build_quantbase_contract(
             _extension_key(item, f"extra for {capability}")
             for item in _text_list(raw, f"extra_query_keys.{capability}")
         )
-        if not keys or keys & target.query_keys:
+        if not keys or keys & (target.query_keys | target.optional_query_keys):
             raise WebContractError("extra query keys must be new and non-empty")
         widened[capability] = keys
     endpoints = tuple(
-        dataclasses.replace(item, optional_query_keys=widened[item.capability])
+        dataclasses.replace(
+            item,
+            optional_query_keys=item.optional_query_keys | widened[item.capability],
+        )
         if item.capability in widened
         else item
         for item in (*_REVIEWED_ENDPOINTS, *routes)
     )
+    _refuse_overlaps(endpoints)
     return ProviderContract(
         provider="quantbase",
         endpoints=endpoints,
