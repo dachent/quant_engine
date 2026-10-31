@@ -115,3 +115,23 @@ itself, and requires `--as-of-date` to equal the manifest cutoff. It does not
 re-run `verify`; run `verify` first. `native-artifacts.json` is informational.
 Interrupted `parse` runs resume over byte-identical partial output (the report is
 written last).
+
+## Declared native manifest and the NAV grid
+
+`quantbase_generation.py plan --native-manifest <file>` (exclusive with
+`--native-intake`) declares a native capture of any date or file name, with no
+code edit: `{"schema_version": 1, "cutoff": "YYYY-MM-DD" (optional), "files":
+[{"role", "path" (absolute), "sha256", "bytes" (optional)}]}`. Roles are
+`native-har`, `account-activity-response`, `account-activity-request-proof` and
+`har-intake-manifest`; the published path (`har/` or `capture/`) and the schema
+contract are derived from the role. Every file is re-hashed; unknown keys or
+roles, hash or size mismatch, unsafe or duplicate names, relative or linked paths
+and a missing `native-har` fail closed. `--as-of-date` must equal a declared
+cutoff. The legacy 2026-09-02 pairs remain the default when no flag is given.
+
+`capture_quantbase_har.last_publishable_grid_date(captured, cutoff, anchor=...,
+step_days=5, label=None)` returns the newest captured on-grid date at or before
+the cutoff plus the grid-predicted date. Off-grid captured rows (provisional
+latest points) are never publishable. It refuses a cutoff before the first grid
+date, interior grid dates missing from the capture, and an off-grid cutoff or a
+cutoff later than the newest captured grid date unless a non-empty `label` says so.

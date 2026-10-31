@@ -1117,6 +1117,114 @@ def _load_native_intake(
     return artifacts, contract, date.fromisoformat(cutoff_text)
 
 
+NATIVE_MANIFEST_SCHEMA_VERSION: Final = 1
+# Declared file roles: role -> (published directory, schema name, schema version).
+NATIVE_ROLES: Final[dict[str, tuple[str, str, str]]] = {
+    "native-har": ("har", "quantbase-native-har", "1"),
+    "account-activity-response": (
+        "capture",
+        "quantbase-account-activity-response",
+        "1",
+    ),
+    "account-activity-request-proof": (
+        "capture",
+        "quantbase-account-activity-request-proof",
+        "1",
+    ),
+    "har-intake-manifest": ("capture", "quantbase-har-intake-manifest", "1"),
+}
+_NATIVE_MANIFEST_KEYS: Final = frozenset({"schema_version", "cutoff", "files"})
+_NATIVE_FILE_KEYS: Final = frozenset({"role", "path", "sha256", "bytes"})
+_NATIVE_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def load_native_manifest(
+    path: Path,
+) -> tuple[list[tuple[str, Path]], dict[str, tuple[str, str]], date | None]:
+    """Build the native declaration from caller-declared roles and hashes.
+
+    A differently dated or differently named capture needs no code edit: the
+    manifest lists each file with its role and SHA-256 (and optionally its size).
+    Every file is re-hashed here and any mismatch, unknown key or role, duplicate
+    name, unsafe name, relative or linked path fails closed. The published
+    relative path and the schema contract are derived from the role, never taken
+    from the manifest, so a manifest cannot widen the contract.
+    """
+
+    manifest_path = Path(path)
+    if (
+        not manifest_path.is_absolute()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+    ):
+        raise QuantbaseGenerationError("native manifest must be a real absolute file")
+    try:
+        document = _object(
+            json.loads(manifest_path.read_text(encoding="utf-8")), "native manifest"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QuantbaseGenerationError("native manifest is not valid JSON") from exc
+    if set(document) - _NATIVE_MANIFEST_KEYS or not {
+        "schema_version",
+        "files",
+    } <= set(document):
+        raise QuantbaseGenerationError("native manifest keys differ from the contract")
+    if document["schema_version"] != NATIVE_MANIFEST_SCHEMA_VERSION:
+        raise QuantbaseGenerationError("native manifest schema version is unsupported")
+    cutoff: date | None = None
+    if "cutoff" in document:
+        try:
+            cutoff = date.fromisoformat(_text(document["cutoff"], "native cutoff"))
+        except ValueError as exc:
+            raise QuantbaseGenerationError("native cutoff is not a date") from exc
+    items = _objects(document["files"], "native files")
+    if not items:
+        raise QuantbaseGenerationError("native manifest declares no files")
+    artifacts: list[tuple[str, Path]] = []
+    contract: dict[str, tuple[str, str]] = {}
+    seen_roles: Counter[str] = Counter()
+    for item in items:
+        if set(item) - _NATIVE_FILE_KEYS or not {"role", "path", "sha256"} <= set(item):
+            raise QuantbaseGenerationError("native file keys differ from the contract")
+        role = _text(item["role"], "native role")
+        if role not in NATIVE_ROLES:
+            raise QuantbaseGenerationError(f"native role is not allowed: {role}")
+        directory, schema_name, schema_version = NATIVE_ROLES[role]
+        file_path = Path(_text(item["path"], "native path"))
+        if not file_path.is_absolute() or file_path.is_symlink():
+            raise QuantbaseGenerationError(
+                "native file path must be absolute, unlinked"
+            )
+        if not file_path.is_file():
+            raise QuantbaseGenerationError(f"native file is missing: {file_path.name}")
+        if _NATIVE_FILE_NAME.fullmatch(file_path.name) is None:
+            raise QuantbaseGenerationError("native file name is unsafe")
+        digest = _text(item["sha256"], "native sha256")
+        if _SHA256.fullmatch(digest) is None:
+            raise QuantbaseGenerationError("native sha256 is malformed")
+        actual, size = hash_file(file_path)
+        if actual != digest or ("bytes" in item and item["bytes"] != size):
+            raise QuantbaseGenerationError(
+                f"native file differs from its declared hash: {file_path.name}"
+            )
+        relative = f"{directory}/{file_path.name}"
+        if relative in contract:
+            raise QuantbaseGenerationError("native file names must be unique")
+        artifacts.append((relative, file_path))
+        contract[relative] = (schema_name, schema_version)
+        seen_roles[role] += 1
+    if seen_roles["native-har"] < 1:
+        raise QuantbaseGenerationError("native manifest declares no native-har file")
+    for singleton in (
+        "account-activity-response",
+        "account-activity-request-proof",
+        "har-intake-manifest",
+    ):
+        if seen_roles[singleton] > 1:
+            raise QuantbaseGenerationError(f"native role repeats: {singleton}")
+    return artifacts, contract, cutoff
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1130,7 +1238,9 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--planning-record-count", type=int, default=PLANNING_RECORD_COUNT
     )
-    plan.add_argument("--native-intake", type=Path)
+    native = plan.add_mutually_exclusive_group()
+    native.add_argument("--native-intake", type=Path)
+    native.add_argument("--native-manifest", type=Path)
     for command in ("build", "stage"):
         child = commands.add_parser(command)
         child.add_argument("plan", type=Path)
@@ -1145,9 +1255,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "plan":
-            native_artifacts, native_contract, intake_cutoff = _load_native_intake(
-                args.native_intake
+            declared = (
+                (load_native_manifest(args.native_manifest))
+                if args.native_manifest is not None
+                else _load_native_intake(args.native_intake)
             )
+            native_artifacts, native_contract, intake_cutoff = declared
             if intake_cutoff is not None and args.as_of_date != intake_cutoff:
                 raise QuantbaseGenerationError(
                     "as-of date must equal the intake manifest cutoff"

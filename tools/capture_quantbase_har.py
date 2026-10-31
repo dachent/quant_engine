@@ -502,6 +502,78 @@ def _grid(manifest: Manifest, newest: date) -> tuple[dict[str, object], list[str
     return block, flags
 
 
+def last_publishable_grid_date(
+    captured: Sequence[date],
+    cutoff: date,
+    *,
+    anchor: date,
+    step_days: int = 5,
+    label: str | None = None,
+    allow_interior_gaps: bool = False,
+) -> dict[str, object]:
+    """Return the last publishable NAV grid date at or before ``cutoff``.
+
+    Quantbase publishes fund NAV on a fixed grid (``anchor`` + k * ``step_days``).
+    Captured dates that fall off the grid are provisional latest-point rows (the
+    2026-07-29 capture ended on an off-grid 2026-07-18 row that the next capture
+    replaced) and are never publishable. ``publishable`` is the newest captured
+    on-grid date at or before the cutoff; ``grid_predicted`` is the newest grid
+    date at or before the cutoff whether or not it was captured.
+
+    Refuses: a non-positive step; no captured on-grid date; a cutoff before the
+    first captured grid date; interior grid dates missing from the capture (unless
+    ``allow_interior_gaps``); an off-grid cutoff, and a cutoff later than the
+    newest captured grid date, unless a non-empty ``label`` says so explicitly.
+    """
+
+    if step_days < 1:
+        raise QuantbaseHarIntakeError("grid step must be at least one day")
+    if label is not None and not label.strip():
+        raise QuantbaseHarIntakeError("grid label must not be empty")
+
+    def aligned(day: date) -> bool:
+        return (day - anchor).days % step_days == 0
+
+    on_grid = sorted({day for day in captured if aligned(day)})
+    off_grid = sorted({day for day in captured if not aligned(day)})
+    if not on_grid:
+        raise QuantbaseHarIntakeError("capture holds no date on the NAV grid")
+    if cutoff < on_grid[0]:
+        raise QuantbaseHarIntakeError("cutoff is before the first captured grid date")
+    eligible = [day for day in on_grid if day <= cutoff]
+    publishable = eligible[-1]
+    expected = {
+        on_grid[0] + timedelta(days=step_days * index)
+        for index in range((on_grid[-1] - on_grid[0]).days // step_days + 1)
+    }
+    missing = sorted(expected - set(on_grid))
+    if missing and not allow_interior_gaps:
+        raise QuantbaseHarIntakeError("capture is missing interior NAV grid dates")
+    flags: list[str] = []
+    if not aligned(cutoff):
+        flags.append("CUTOFF_OFF_NAV_GRID")
+    if cutoff > on_grid[-1]:
+        flags.append("CUTOFF_AFTER_NEWEST_CAPTURED_GRID_DATE")
+    if flags and label is None:
+        raise QuantbaseHarIntakeError(
+            "cutoff is not backed by a captured grid date without a label: "
+            + ",".join(flags)
+        )
+    predicted = cutoff - timedelta(days=(cutoff - anchor).days % step_days)
+    return {
+        "anchor": anchor.isoformat(),
+        "cutoff": cutoff.isoformat(),
+        "flags": flags,
+        "grid_predicted": predicted.isoformat(),
+        "label": label,
+        "missing_interior_grid_dates": [day.isoformat() for day in missing],
+        "newest_captured_grid_date": on_grid[-1].isoformat(),
+        "off_grid_captured_dates": [day.isoformat() for day in off_grid],
+        "publishable": publishable.isoformat(),
+        "step_days": step_days,
+    }
+
+
 def _parse(
     root: Path, manifest: Manifest, record: Mapping[str, Any]
 ) -> dict[str, bytes]:
