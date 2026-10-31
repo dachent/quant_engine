@@ -279,3 +279,117 @@ def test_an_unreadable_gate_file_keeps_its_recorded_digest(tmp_path: Path) -> No
     assert gate.topology(real, tmp_path / "real") != gate.topology(
         replica, tmp_path / "replica"
     )
+
+
+def _evidence_pair(
+    tmp: Path,
+    *,
+    replica_path: str | None = None,
+    replica_extra: dict[str, Any] | None = None,
+    shared: bool = False,
+    **replica_spec: Any,
+) -> tuple[Any, Any]:
+    """Specs whose evidence gate carries real-workspace absolute paths in ``path`` fields, as
+    the gates built from the shared real ledger receipt do (the replica copy keeps them)."""
+
+    real_base, replica_base = tmp / "real", tmp / "replica"
+    _mark(replica_base)
+    real_path = (
+        real_base / "dataA" / "generations" / "g1" / "generation.json"
+    ).as_posix()
+    body = {"finality_evidence": {"path": real_path, "k": 1}, "note": "n"}
+    real, replica = _spec(real_base), _spec(replica_base, **replica_spec)
+    for name, spec, extra in (
+        ("production", real, {}),
+        ("replica-production", replica, replica_extra or {}),
+    ):
+        gate_dir = tmp / "c" / ("shared" if shared else name)
+        gate_dir.mkdir(parents=True, exist_ok=True)
+        item = json.loads(json.dumps(body))
+        if spec is replica and replica_path is not None:
+            item["finality_evidence"]["path"] = replica_path
+        item.update(extra)
+        gate_path = gate_dir / "evidence.json"
+        gate_path.write_text(json.dumps(item), encoding="utf-8")
+        previous = spec.to_dict
+        spec.to_dict = lambda previous=previous, gate_path=gate_path: {
+            **previous(),
+            "gates": [{"gate_id": "evidence", "path": str(gate_path), "sha256": HEX}],
+        }
+    return real, replica
+
+
+def _blocked(tmp: Path, real: Any, replica: Any) -> None:
+    path = _receipt(tmp, real, replica, _steps())
+    with pytest.raises(gate.ReplicaGateError, match="different topology"):
+        gate.verify_receipt(path, real)
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_real_anchor_paths_in_gate_path_fields_normalize_equal(
+    tmp_path: Path, shared: bool
+) -> None:
+    real, replica = _evidence_pair(tmp_path, shared=shared)
+    path = _receipt(tmp_path, real, replica, _steps())
+    assert gate.verify_receipt(path, real)["kind"] == gate.RECEIPT_KIND
+
+
+def test_real_anchor_spelled_with_backslashes_and_other_case_normalizes_equal(
+    tmp_path: Path,
+) -> None:
+    spelled = str(
+        tmp_path / "REAL" / "dataA" / "generations" / "g1" / "generation.json"
+    )
+    real, replica = _evidence_pair(tmp_path, replica_path=spelled.replace("/", "\\"))
+    path = _receipt(tmp_path, real, replica, _steps())
+    assert gate.verify_receipt(path, real)["kind"] == gate.RECEIPT_KIND
+
+
+def test_a_different_root_in_a_gate_path_field_still_blocks(tmp_path: Path) -> None:
+    other = tmp_path / "other" / "dataA" / "generations" / "g1" / "generation.json"
+    real, replica = _evidence_pair(tmp_path, replica_path=other.as_posix())
+    _blocked(tmp_path, real, replica)
+
+
+def test_a_root_sharing_only_the_anchor_text_still_blocks(tmp_path: Path) -> None:
+    lookalike = tmp_path / "real2" / "dataA" / "generations" / "g1" / "generation.json"
+    real, replica = _evidence_pair(tmp_path, replica_path=lookalike.as_posix())
+    _blocked(tmp_path, real, replica)
+
+
+def test_a_different_relative_path_under_the_real_anchor_still_blocks(
+    tmp_path: Path,
+) -> None:
+    moved = tmp_path / "real" / "dataB" / "generations" / "g1" / "generation.json"
+    real, replica = _evidence_pair(tmp_path, replica_path=moved.as_posix())
+    _blocked(tmp_path, real, replica)
+
+
+def test_the_real_anchor_outside_a_path_field_is_not_tokenised(tmp_path: Path) -> None:
+    where = (tmp_path / "real" / "dataA").as_posix()
+    real, replica = _evidence_pair(tmp_path, replica_extra={"note": where})
+    _blocked(tmp_path, real, replica)
+
+
+def test_a_non_path_gate_difference_still_blocks_with_real_anchor_paths(
+    tmp_path: Path,
+) -> None:
+    real, replica = _evidence_pair(tmp_path, replica_extra={"note": "different"})
+    _blocked(tmp_path, real, replica)
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"nodes": ("n1",)},
+        {"nodes": ("n1", "n2", "n3")},
+        {"generations": {"root-a": "b" * 64}},
+        {"generations": {"root-a": HEX, "root-b": HEX}},
+        {"commit": "d" * 40},
+    ],
+)
+def test_topology_differences_still_block_with_real_anchor_paths(
+    tmp_path: Path, other: dict[str, Any]
+) -> None:
+    real, replica = _evidence_pair(tmp_path, **other)
+    _blocked(tmp_path, real, replica)
