@@ -4324,19 +4324,28 @@ def _restate_value_authority(
     coverage: Sequence[Mapping[str, Any]],
     account_summary: Sequence[Mapping[str, Any]],
     positions: Sequence[Mapping[str, Any]],
+    cutoff: str,
 ) -> list[dict[str, Any]]:
     """Re-word the baseline's "provider-reported USD authority" clause from the value labels.
 
     The baseline states that account NAV, positions, allocations and HWM values remain
     provider-reported USD authority. For every value the report labels with a
     ``value_basis`` (derived from official closes) that is not true, so the clause names
-    the labelled values by basis, counted from the account and position rows. With no
-    labelled value the text is unchanged. This is the one generator: the panel gates,
+    the labelled values by basis, counted from the account rows and the CURRENT position
+    rows (the latest accepted snapshot dated at the cutoff, as the panel classifies current
+    holdings; a historical snapshot the patch also covers is not a current position).
+    With no labelled value the text is unchanged. This is the one generator: the panel gates,
     coverage and limitations copy these coverage rows.
     """
 
     counts: dict[str, list[int]] = {}
-    for index, rows in enumerate((account_summary, positions)):
+    current_positions = [
+        row
+        for row in positions
+        if row.get("snapshot_status") == "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+        and row.get("as_of_date") == cutoff
+    ]
+    for index, rows in enumerate((account_summary, current_positions)):
         for row in rows:
             basis = row.get("value_basis")
             if isinstance(basis, Mapping) and isinstance(basis.get("basis"), str):
@@ -4346,7 +4355,7 @@ def _restate_value_authority(
     labelled = "; ".join(
         f"{sum(pair)} {'value' if sum(pair) == 1 else 'values'} labelled {label} "
         f"({_noun(pair[0], 'account NAV', 'account NAVs')} and "
-        f"{_noun(pair[1], 'position', 'positions')})"
+        f"{_noun(pair[1], 'current position', 'current positions')})"
         for label, pair in sorted(counts.items())
     )
     replacement = f"remain USD authority and are provider-reported except {labelled}"
@@ -10218,7 +10227,10 @@ def build_report_data(
         "baseline": baseline_ref,
         "corrections": _corrections(catalog),
         "coverage_data_quality": _restate_value_authority(
-            coverage, account_summary, position_rows
+            coverage,
+            account_summary,
+            position_rows,
+            str(calculation_cutoff_date or catalog.get("as_of_date")),
         ),
         "dependence_analysis": dependence_analysis,
         "dependence_rows": dependence_rows,
