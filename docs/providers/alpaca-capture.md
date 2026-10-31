@@ -170,3 +170,110 @@ below was observed against a real account or response:
 - the side vocabulary for fills (`buy`, `sell`, `sell_short` accepted);
 - journal (`JNL`) cash semantics: treated as cash movement when `net_amount` is
   present.
+
+## Ingest adapter and the native activities package
+
+The driver stages activities but nothing read them. `quant_engine.alpaca.capture
+ingest` is that consumer, and the Alpaca generation reads what it writes.
+
+### Family decision
+
+Native activities ride in the existing **Alpaca provider family**
+(`quant-engine-alpaca`, `alpaca-read-generation`), as an optional
+`native_activities` block of the generation plan. They do not get a new family,
+and they do not modify the retained generation:
+
+- the ledger vocabulary the cash closure needs already lives here
+  (`Transaction`, `ObservedAmount`, USD, `UNMAPPED`), as do the create-only plan,
+  stage, publish, verify, and single-authority cutover steps, the
+  `dataAlpaca` pointer, and the reconciliation shape;
+- a new family would need its own pointer, adapter identity, catalog schema, and
+  acceptance baseline entry, none of which the closure needs;
+- the legacy plan, and so the retained generation, is untouched: the block is
+  added to a plan only when supplied, and a plan without it builds
+  byte-for-byte as before (pinned by tests, and checked against the real
+  retained generation 7942ee08 when the OneDrive tree is present).
+
+A native plan is a **new** plan with its own plan id, run id, and generation id.
+It rebuilds the legacy baseline from the same hash-bound source and adds the
+native transactions beside the legacy order fills, with the native account named
+in `accounts`. It supersedes the retained generation only if someone publishes
+it; this change publishes nothing.
+
+### What it does
+
+```powershell
+python -m quant_engine.alpaca.capture ingest --run-dir <verified-run> `
+  --crosswalk <alpaca-crosswalk.json> --internal-account-id account-<16 hex> `
+  --after 2024-07-20 --until 2025-05-06 --output-root <dir> [--package-id <id>]
+python tools/alpaca_generation.py plan <legacy-root> <dataAlpaca-root> <tracker.csv> `
+  --internal-account-id account-<16 hex> --as-of-date <date> `
+  --native-activities <output-root>/<package-id>
+```
+
+The crosswalk file is `{"schema_version": 1, "provider": "ALPACA", "rows":
+[{"internal_account_id": "account-...", "account_binding_sha256": "<hex>"}]}`,
+one-to-one, holding only the SHA-256 the driver's `plan` prints, never the
+provider identifier.
+
+The package (`native-activities.jsonl`, `native-account.json`, optional
+`native-positions.json`, `native-activities-spec.json`, then
+`ingest-binding.json` last) holds every activity in the generation's native
+row form: category, USD cash amount (reported `net_amount`, or the derived
+`-qty*price` / `+qty*price` leg of a fill, labelled by basis), event date,
+symbol, quantity, price, with provider activity and order ids kept only as
+SHA-256 digests and free-text descriptions dropped. The spec carries exact
+counts and cash totals by category and by activity type (with positive and
+negative counts per type), so the Quantbase cash closure can be recomputed:
+sum `cash_amount` by window, then compare to the account snapshot's `cash`.
+
+The generation turns each row into a ledger transaction of kind
+`ACTIVITY_<TYPE>` (amount `UNAVAILABLE` for security-only rows such as `JNLS`),
+adds a `native_activities` catalog block (summary, account snapshot, positions,
+source run digests, window) and hash-binds every package file as a source
+artifact.
+
+### What it refuses
+
+Every check runs before the first byte is written; a refused run leaves no
+package. The reader re-runs the same checks on every load.
+
+- A run that does not pass `verify_run` (hash, allow-list, pagination replay,
+  raw re-derivation), or whose terminal state is incomplete.
+- A run window that is not bounded on both sides, or that differs from the
+  window the caller declares (`--after`, `--until`).
+- Any activity outside the window (dates inclusive; fills compared as instants),
+  a repeated activity id (and a repeated digest), an unknown type, category,
+  field, or number shape.
+- A non-USD account snapshot or activity row.
+- A pagination chain with a first-page cursor, a page after a short page, a
+  missing or repeated cursor, or a full last page (replayed independently of the
+  verifier from the request manifest).
+- A run whose account binding differs from the crosswalk row for the internal
+  account (checked against both the manifest and the account snapshot), a
+  missing, repeated, or non-one-to-one crosswalk row.
+- A deposit-type (`CSD`) row that removes cash or a withdrawal-type (`CSW`) row
+  that adds it. Signs are otherwise recorded as observed and never reinterpreted.
+- Overwriting an existing package directory; relative or missing output roots.
+- In the generation: a package whose binding differs from the digest pinned in
+  the plan, an altered or extra file, rows out of canonical order, a summary
+  that differs from the rows, a record id collision, a package account that
+  differs from the plan.
+
+### Ingest limits and UNVERIFIED items
+
+- Shapes are synthetic. The retained legacy export fetched zero activities
+  (`alpaca_activities_20260717_145339/REPORT.md`: 0 fetched), so no real activity
+  row exists locally; the only real-world evidence is the legacy exporter's list
+  of requested types (`FILL`, `TRANS`, `DIV`, `INT`, `CIL`, `CS`, `CSD`, `FEE`),
+  of which `TRANS`, `CIL`, and `CS` are not in the driver's table and would be
+  refused by it.
+- The sign convention of `net_amount` for transfers, journals, and fees is
+  unverified; the closure must read the summary's per-type sign counts before
+  trusting any total.
+- A window bound with a time of day is compared as an instant for fills and as a
+  calendar date for non-trade rows (the provider gives those a date only).
+- Fills carry no fee fields in the driver's schema; regulatory and other fees are
+  expected as separate `FEE` rows. Any fee embedded in a fill is not captured.
+- The generation verifier (`verify_published`) rebuilds from the plan, so the
+  package directory named in the plan must remain in place.

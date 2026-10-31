@@ -1,4 +1,4 @@
-"""Command line for the Alpaca capture driver: ``plan``, ``run``, ``verify``.
+"""Command line for the Alpaca capture driver: ``plan``, ``run``, ``verify``, ``ingest``.
 
 ``plan`` and ``verify`` never touch the network or a credential.  ``run``
 refuses unless governance evidence is supplied, consumes it before any secret is
@@ -30,6 +30,7 @@ from quant_engine.alpaca.capture.errors import (
 )
 from quant_engine.alpaca.capture.fetch import GovernedFetcher, HttpsFetcher, RawFetcher
 from quant_engine.alpaca.capture.governance import TERMS_SHA256, authorize_live_read
+from quant_engine.alpaca.capture.ingest import ingest_run, load_crosswalk
 from quant_engine.alpaca.capture.run import run_capture
 from quant_engine.alpaca.capture.util import sha256_text
 from quant_engine.alpaca.capture.verify import verify_run
@@ -73,6 +74,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id")
     verify = commands.add_parser("verify", help="independently verify a staged run")
     verify.add_argument("--run-dir", required=True)
+    ingest = commands.add_parser(
+        "ingest",
+        help="turn a verified run into the native activities package; no network",
+    )
+    ingest.add_argument("--run-dir", required=True)
+    ingest.add_argument("--crosswalk", required=True)
+    ingest.add_argument("--internal-account-id", required=True)
+    ingest.add_argument("--after", required=True)
+    ingest.add_argument("--until", required=True)
+    ingest.add_argument("--output-root", required=True)
+    ingest.add_argument("--package-id")
     return parser
 
 
@@ -95,6 +107,24 @@ def main(
                 }
             )
             return 0 if report.ok else 1
+        if args.command == "ingest":
+            ingested = ingest_run(
+                run_directory=args.run_dir,
+                crosswalk=load_crosswalk(args.crosswalk),
+                internal_account_id=args.internal_account_id,
+                expect_after=args.after,
+                expect_until=args.until,
+                output_root=args.output_root,
+                package_id=args.package_id,
+            )
+            _emit(
+                {
+                    "package": ingested.package_directory.name,
+                    "binding_sha256": ingested.binding_sha256,
+                    "activity_count": ingested.activity_count,
+                }
+            )
+            return 0
         config = _load(args.config)
         capture = capture_config_from_mapping(config)
         plan = credential_plan(config)
