@@ -180,6 +180,9 @@ _PATH_STAGES = {
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],
+    # Stages an unpublished public Yahoo price/FX fetch from a config; consumers read
+    # only the artifacts and manifests they are handed, never this tool.
+    "tools/yahoo_fetch_driver.py": [],
     # Assembles the pinned attribution return-source CSV; the attribution stage reads
     # only the file and manifest the spec pins, never this tool.
     "tools/portfolio_attribution_returns.py": [],

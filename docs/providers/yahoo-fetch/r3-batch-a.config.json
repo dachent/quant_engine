@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "run_label": "r3-batch-a",
+  "note": "R3 Batch A public Yahoo pull (pull list ids VTMA-P1..P3, QSI-P1, TT-P1/LEV-P1, VOL-P1, ROB-P2, EU-P2). The cutoff is data: edit it or pass --cutoff. No date appears in code. Group windows are exchange-session dates; the request end is always cutoff+1 (exclusive).",
+  "cutoff": "2026-10-09",
+  "limits": {
+    "batch_size": 20,
+    "threads": 1,
+    "timeout_seconds": 30,
+    "retry_attempts": 1,
+    "retry_backoff_seconds": 2.0
+  },
+  "groups": [
+    {
+      "group_id": "vtma-spxl-60m",
+      "kind": "yfinance",
+      "symbols": ["SPXL"],
+      "interval": "60m",
+      "start": "2026-01-02",
+      "through": "cutoff",
+      "min_rows": 1000,
+      "max_missing_weekdays": 10
+    },
+    {
+      "group_id": "qsi-daily",
+      "kind": "yfinance",
+      "symbols": ["CURE", "DGP", "EFO", "ERX", "FAS", "SOXL", "SPXL", "SQQQ", "TECL", "TMF", "TQQQ", "TYD", "UGE", "UPW", "UTSL", "BIL"],
+      "interval": "1d",
+      "start": "2025-12-15",
+      "through": "cutoff",
+      "min_rows": 190,
+      "max_missing_weekdays": 12
+    },
+    {
+      "group_id": "vtma-index-daily",
+      "kind": "yfinance",
+      "symbols": ["^GSPC", "SPY", "ES=F"],
+      "interval": "1d",
+      "start": "2025-12-31",
+      "through": "cutoff",
+      "min_rows": 180,
+      "max_missing_weekdays": 12
+    },
+    {
+      "group_id": "vtma-index-60m",
+      "kind": "yfinance",
+      "symbols": ["^GSPC", "SPY", "ES=F"],
+      "interval": "60m",
+      "start": "2025-12-31",
+      "through": "cutoff",
+      "min_rows": 1000,
+      "max_missing_weekdays": 12
+    },
+    {
+      "group_id": "tt-daily",
+      "kind": "yfinance",
+      "symbols": ["UPRO", "UDOW", "UMDD", "TQQQ", "TNA", "JNK", "TIP", "LQD", "IEI", "SHY", "TLH", "TLT", "VIXY", "SPY", "BIL", "XLE", "XLK", "XLU", "XLV", "IBIT", "ABBV", "ABT", "BLK", "BRK-B", "CL", "CMCSA", "COST", "DUK", "GD", "JNJ", "LIN", "LMT", "MA", "MCD", "MDT", "NEE", "PEP", "PFE", "PG", "SCHW", "SO"],
+      "interval": "1d",
+      "start": "2025-11-17",
+      "through": "cutoff",
+      "min_rows": 210,
+      "max_missing_weekdays": 12
+    },
+    {
+      "group_id": "tt-memo-refs",
+      "kind": "yfinance",
+      "symbols": ["DIA", "MDY", "QQQ", "IWM"],
+      "interval": "1d",
+      "start": "2025-11-17",
+      "through": "cutoff",
+      "min_rows": 210,
+      "max_missing_weekdays": 12
+    },
+    {
+      "group_id": "vol-shv-uvxy-sh",
+      "kind": "yfinance",
+      "symbols": ["SHV", "UVXY", "SH"],
+      "interval": "1d",
+      "start": "2024-10-01",
+      "through": "cutoff",
+      "min_rows": 500,
+      "max_missing_weekdays": 20
+    },
+    {
+      "group_id": "vol-qqq-gld-tqqq",
+      "kind": "yfinance",
+      "symbols": ["QQQ", "GLD", "TQQQ"],
+      "interval": "1d",
+      "start": "2025-12-22",
+      "through": "cutoff",
+      "min_rows": 190,
+      "max_missing_weekdays": 12
+    },
+    {
+      "group_id": "rob-usd-daily",
+      "kind": "yfinance",
+      "symbols": ["USDC-USD", "USDT-USD"],
+      "interval": "1d",
+      "start": "2025-12-03",
+      "through": "cutoff",
+      "calendar": "every_day",
+      "datasets": ["history"],
+      "artifact_profile": "capture-v0",
+      "min_rows": 300,
+      "max_missing_weekdays": 0
+    },
+    {
+      "group_id": "rob-usd-1h",
+      "kind": "yfinance",
+      "symbols": ["USDC-USD", "USDT-USD"],
+      "interval": "1h",
+      "start": "2025-12-03",
+      "through": "2025-12-08",
+      "calendar": "every_day",
+      "datasets": ["history"],
+      "min_rows": 100,
+      "max_missing_weekdays": 0
+    },
+    {
+      "group_id": "eu-daily-resolved",
+      "kind": "yfinance",
+      "symbols": ["ELPE.AT", "TRENJ.IS", "ACAST.ST", "COSH.OL", "HSHP", "PNOR.OL", "ZAP.OL", "SMSN.IL"],
+      "interval": "1d",
+      "start": "2026-02-02",
+      "through": "cutoff",
+      "min_rows": 120,
+      "max_missing_weekdays": 25
+    },
+    {
+      "group_id": "eu-daily-pending",
+      "kind": "yfinance",
+      "symbols": ["ASB", "SPG", "KREATE", "BSL", "FDEV", "RFX"],
+      "interval": "1d",
+      "start": "2026-02-02",
+      "through": "cutoff",
+      "min_rows": 120,
+      "max_missing_weekdays": 25
+    },
+    {
+      "group_id": "fx-eurusd-chart",
+      "kind": "chart",
+      "symbols": ["EURUSD=X"],
+      "interval": "1d",
+      "start": "2008-01-01",
+      "through": "cutoff",
+      "min_rows": 4000,
+      "max_missing_weekdays": 40,
+      "max_null_closes": 40
+    },
+    {
+      "group_id": "fx-tryeur-chart",
+      "kind": "chart",
+      "symbols": ["TRYEUR"],
+      "interval": "1d",
+      "start": "2026-02-02",
+      "through": "cutoff",
+      "min_rows": 120,
+      "max_missing_weekdays": 25,
+      "max_null_closes": 25
+    }
+  ],
+  "symbol_resolution": [
+    {
+      "id": "ASB",
+      "status": "UNRESOLVED",
+      "resolved_ticker": null,
+      "candidates": [
+        {"ticker": "ASB.WA", "note": "ASBISc on Warsaw, named as a candidate by the audit; to be tried, not assumed"}
+      ]
+    },
+    {
+      "id": "SPG",
+      "status": "UNRESOLVED",
+      "resolved_ticker": null,
+      "candidates": [
+        {"ticker": "SPG.CO", "note": "Spar Nord on Copenhagen, named as a candidate by the audit; to be tried, not assumed"},
+        {"ticker": "SPNO.CO", "note": "UNVERIFIED author guess for Spar Nord on Copenhagen; to be tried, not assumed"}
+      ]
+    },
+    {
+      "id": "KREATE",
+      "status": "UNRESOLVED",
+      "resolved_ticker": null,
+      "candidates": [
+        {"ticker": "KREATE.HE", "note": "Kreate on Helsinki, named as a candidate by the audit; to be tried, not assumed"}
+      ]
+    },
+    {
+      "id": "BSL",
+      "status": "UNRESOLVED",
+      "resolved_ticker": null,
+      "candidates": []
+    },
+    {
+      "id": "FDEV",
+      "status": "UNRESOLVED",
+      "resolved_ticker": null,
+      "candidates": [
+        {"ticker": "FDEV.L", "note": "UNVERIFIED author guess from the id alone (the audit names no issuer or exchange); to be tried, not assumed"}
+      ]
+    },
+    {
+      "id": "RFX",
+      "status": "UNRESOLVED",
+      "resolved_ticker": null,
+      "candidates": []
+    },
+    {
+      "id": "TRYEUR",
+      "status": "UNRESOLVED",
+      "resolved_ticker": null,
+      "candidates": [
+        {"ticker": "TRYEUR=X", "note": "Yahoo cross rate, EUR per TRY; to be tried, not assumed"},
+        {"ticker": "EURTRY=X", "note": "inverse quote (TRY per EUR); would need inversion, to be tried, not assumed"}
+      ]
+    }
+  ]
+}
