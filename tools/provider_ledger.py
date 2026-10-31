@@ -8259,6 +8259,10 @@ def _quantbase_flow_coverage(
         ):
             raise ProviderLedgerError("Quantbase account activity capture date differs")
         captured_response = _quantbase_har_response(matches[0])
+        if not isinstance(captured_response, Mapping):
+            raise ProviderLedgerError(
+                "Quantbase account activity response shape differs"
+            )
     else:
         proof_id, response_id = current_capture_ids
         proof = verified[proof_id]

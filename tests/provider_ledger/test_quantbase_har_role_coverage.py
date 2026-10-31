@@ -432,3 +432,12 @@ def test_the_retained_legacy_generation_is_byte_identical() -> None:
             RETAINED_BYTES
         )
     assert checked == 1
+
+
+@pytest.mark.parametrize("body", [None, [], "text", 7])
+def test_a_non_object_har_body_is_a_controlled_refusal(
+    tmp_path: Path, body: object
+) -> None:
+    root, catalog, manifest = _fixture(tmp_path, har_entries={HAR_NAME: [_entry(body)]})
+    with pytest.raises(ERROR, match="response shape differs"):
+        _coverage(root, catalog, manifest)
