@@ -582,9 +582,7 @@ def test_every_parent_account_of_a_product_strategy_is_reconciled_or_named(
     assert "exceeds all external capital" not in text
 
 
-def test_the_printed_remainder_is_the_sources_unattributed_amount_rounded_once() -> (
-    None
-):
+def test_the_printed_parts_of_the_perimeter_sentence_foot() -> None:
     reconciliation = {
         "sleeves": [
             {
@@ -607,6 +605,49 @@ def test_the_printed_remainder_is_the_sources_unattributed_amount_rounded_once()
     text = disclosures._perimeter_reconciliation(
         reconciliation, [{"account_id": "p", "gain": "2677.440211142"}]
     )
-    # The shown figures alone would give +27.20; the source says 27.1924.
-    assert "and +27.19 not attributed" in text
-    assert "+27.20" not in text
+    # The printed figures foot (-1,263.56 + 27.20 = -1,236.36); the source value 27.1924 is
+    # shown beside the remainder, rounded individually.
+    assert "and +27.20 not attributed" in text
+    assert "+27.19 not attributed" not in text
+    assert "(rounded individually; unrounded +27.1924)" in text
+    import re
+
+    shown = re.search(
+        r"the (-?[\d,]+\.\d\d) difference is the entry-day differences \((-?[\d,]+\.\d\d)\) "
+        r"and (\+?-?[\d,]+\.\d\d) not attributed",
+        text,
+    )
+    assert shown is not None
+    difference, entries, remainder = (
+        Decimal(g.replace(",", "")) for g in shown.groups()
+    )
+    assert entries + remainder == difference
+
+
+def test_no_rounding_note_is_printed_when_the_printed_parts_already_match_the_source() -> (
+    None
+):
+    reconciliation = {
+        "sleeves": [
+            {
+                "sleeve_id": "s1",
+                "account_id": "p",
+                "gain_from_first_day_nav": "100",
+                "entry_day_difference": "-10",
+            }
+        ],
+        "entry_day_total": "-10",
+        "account_gain": "125",
+        "sleeve_gain_total": "100",
+        "unattributed": "35",
+        "paid_in_after_anchor": "0",
+        "paid_in": "100",
+        "opening_nav": "100",
+        "anchor_day": "2026-01-01",
+        "last_day": "2026-02-01",
+    }
+    text = disclosures._perimeter_reconciliation(
+        reconciliation, [{"account_id": "p", "gain": "100"}]
+    )
+    assert "and +35.00 not attributed" in text
+    assert "rounded individually" not in text

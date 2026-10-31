@@ -795,8 +795,15 @@ def _perimeter_reconciliation(
     unattributed = _dec(reconciliation["unattributed"])
     if abs(remainder - unattributed) >= _CENT:
         raise DisclosureError("the shown perimeter figures do not close")
-    # the printed remainder is the source's own unattributed amount, rounded once
-    remainder = unattributed.quantize(_CENT)
+    # the printed remainder is the difference of the printed rounded figures, so the
+    # sentence foots as printed; when that differs by a cent from the source's own amount
+    # rounded once, the source value is shown beside it
+    source_rounded = unattributed.quantize(_CENT)
+    rounding = (
+        f" (rounded individually; unrounded {unattributed:+,.4f})"
+        if remainder != source_rounded
+        else ""
+    )
     later = _dec(reconciliation["paid_in_after_anchor"])
     withdrawn = _dec(reconciliation.get("withdrawn_after_anchor", "0"))
     left = f", {_usd(withdrawn)} withdrawn" if withdrawn else ""
@@ -809,7 +816,7 @@ def _perimeter_reconciliation(
         f"{_usd(_dec(reconciliation['opening_nav']))} plus {_usd(later)} paid in later{left}); "
         f"the sleeves sum to {sleeves:+,.2f}; the {difference:+,.2f} difference is the "
         f"entry-day differences ({entry_total:+,.2f}) and {remainder:+,.2f} not attributed "
-        "(days before the first sleeve day and the parent remainder)."
+        f"(days before the first sleeve day and the parent remainder){rounding}."
     )
 
 
