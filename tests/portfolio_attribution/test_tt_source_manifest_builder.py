@@ -55,6 +55,7 @@ def _capture(
     late_symbol_slug: str | None = None,
     drift_slug: str | None = None,
     latest_short_slug: str | None = None,
+    other_rebalance_slug: str | None = None,
 ) -> tuple[Path, Path]:
     jroot = tmp_path / "run"
     troot = tmp_path / "run-txt"
@@ -116,7 +117,12 @@ def _capture(
             )
         for obj, text in (
             ("last-update.txt", "2026-09-03T02:57Z"),
-            ("last-rebalance.txt", "September 1, 2026"),
+            (
+                "last-rebalance.txt",
+                "August 31, 2026"
+                if slug == other_rebalance_slug
+                else "September 1, 2026",
+            ),
         ):
             name = f"{slug}__{obj}"
             data = _put(troot, name, text)
@@ -374,6 +380,7 @@ def test_dropped_position_row_is_truncated_not_normalised(tmp_path: Path) -> Non
     assert validation["flags"] == [
         {
             "class": "SYMBOL_DROP",
+            "dropped_symbols": ["BIL"],
             "fallback": {"kind": "LAST_COMPLETE_ROW", "observed_date": "2026-08-30"},
             "fallback_corroborated_by_live_portfolio_holdings": False,
             "flag": "TRUNCATED_ROW",
@@ -395,14 +402,44 @@ def test_rounding_or_cash_row_is_not_truncation(tmp_path: Path) -> None:
     assert validation["counts_by_class"] == {SLUGS[1]: {"ROUNDING_OR_CASH": 1}}
 
 
-def test_latest_short_row_is_explained_by_live_holdings(tmp_path: Path) -> None:
+def test_latest_short_row_on_the_rebalance_day_is_overridden_by_live(
+    tmp_path: Path,
+) -> None:
     jroot, troot = _capture(tmp_path, latest_short_slug=SLUGS[2])
+    argv = _args(
+        tmp_path,
+        jroot,
+        troot,
+        override_citation=f"{SLUGS[2]}=issue 609 NAV-implied evidence",
+    )
+    assert builder.main(argv) == 0
+    (flag,) = _manifest(tmp_path)[builder.PROVENANCE_KEY]["holdings_row_validation"][
+        "flags"
+    ]
+    assert flag["class"] == "LIVE_HOLDINGS_OVERRIDE"
+    assert flag["flag"] == "TRUNCATED_ROW"
+    fallback = flag["fallback"]
+    assert fallback["kind"] == "LIVE_HOLDINGS_OVERRIDE"
+    assert fallback["citation"] == "issue 609 NAV-implied evidence"
+    assert fallback["sources"]["last_rebalance_marker"]["value"] == "2026-09-01"
+    assert len(fallback["sources"]["last_rebalance_marker"]["sha256"]) == 64
+    assert len(fallback["sources"]["live_portfolio_holdings"]["sha256"]) == 64
+    assert "post-rebalance state" in fallback["why_older_row_lost"]
+    assert fallback["superseded_fallback"]["kind"] == "LAST_COMPLETE_ROW"
+    assert builder.main(["verify", "--out-dir", str(tmp_path / "out")]) == 0
+
+
+def test_latest_short_row_without_marker_is_explained_by_live_holdings(
+    tmp_path: Path,
+) -> None:
+    jroot, troot = _capture(
+        tmp_path, latest_short_slug=SLUGS[2], other_rebalance_slug=SLUGS[2]
+    )
     assert builder.main(_args(tmp_path, jroot, troot)) == 0
     (flag,) = _manifest(tmp_path)[builder.PROVENANCE_KEY]["holdings_row_validation"][
         "flags"
     ]
     assert flag["class"] == "LIVE_SYMBOL_MISSING"
-    assert flag["flag"] == "TRUNCATED_ROW"
     assert flag["fallback"] == {"kind": "LIVE_PORTFOLIO_HOLDINGS"}
 
 
@@ -417,10 +454,12 @@ def test_over_allocation_class_and_tolerances_are_data() -> None:
             ]
         },
     }
-    narrow = builder._holdings_validation([comp], 0.005, 0.02)
+    narrow = builder._holdings_validation([comp], 0.005, 0.02, "2026-01-01", {})
     assert narrow["counts_by_class"] == {"s": {"OVER_ALLOCATION": 1}}
     assert narrow["allocation_sum_tolerance"] == 0.005
-    assert builder._holdings_validation([comp], 0.3, 0.02)["flags"] == []
+    assert (
+        builder._holdings_validation([comp], 0.3, 0.02, "2026-01-01", {})["flags"] == []
+    )
 
 
 def test_tolerance_is_recorded_data(tmp_path: Path) -> None:
@@ -523,20 +562,99 @@ def test_planner_refuses_bad_input() -> None:
         planner.order_batch([], [], Decimal(-1))
 
 
-def test_live_fallback_requires_matching_published_weights() -> None:
-    comp = {
+def _comp(
+    rows: list[tuple[str, dict[str, float]]],
+    live: dict[str, float],
+    rebalance: str = "",
+) -> dict[str, Any]:
+    ident = {"filename": "f", "sha256": "0" * 64, "size_bytes": 1}
+    return {
         "slug": "s",
-        "current_holdings": [{"symbol": "A", "weight": 1.0}],
+        "last_rebalance": rebalance,
+        "endpoint_hashes": {
+            "last-rebalance.txt": ident,
+            "portfolio-holdings.json": ident,
+        },
+        "current_holdings": [{"symbol": k, "weight": v} for k, v in live.items()],
         "dated_holdings": {
-            "snapshots": [
-                {"observed_date": "2026-01-01", "weights": {"A": 0.5, "B": 0.5}},
-                {"observed_date": "2026-01-02", "weights": {"A": 0.5}},
-            ]
+            "snapshots": [{"observed_date": d, "weights": w} for d, w in rows]
         },
     }
-    (flag,) = builder._holdings_validation([comp], 0.005, 0.02)["flags"]
-    assert flag["class"] == "SYMBOL_DROP"
-    assert flag["fallback"] == {
+
+
+def _classes(comp: dict[str, Any], inception: str = "2026-01-01") -> list[str]:
+    result = builder._holdings_validation([comp], 0.005, 0.02, inception, {})
+    return [flag["class"] for flag in result["flags"]]
+
+
+def test_latest_row_without_next_evidence_is_unresolved_not_truncation() -> None:
+    comp = _comp(
+        [
+            ("2026-01-01", {"A": 0.5, "B": 0.5}),
+            ("2026-01-02", {"A": 0.5}),
+        ],
+        {"A": 1.0},
+    )
+    assert _classes(comp) == ["UNRESOLVED_DROP"]
+
+
+def test_same_day_rebalance_marker_makes_live_win_over_older_row() -> None:
+    comp = _comp(
+        [
+            ("2026-01-01", {"A": 0.5, "B": 0.5}),
+            ("2026-01-02", {"A": 0.5}),
+        ],
+        {"A": 1.0},
+        rebalance="2026-01-02",
+    )
+    (flag,) = builder._holdings_validation([comp], 0.005, 0.02, "2026-01-01", {})[
+        "flags"
+    ]
+    assert flag["class"] == "LIVE_HOLDINGS_OVERRIDE"
+    assert flag["fallback"]["superseded_fallback"] == {
         "kind": "LAST_COMPLETE_ROW",
         "observed_date": "2026-01-01",
     }
+
+
+def test_exit_followed_by_a_new_position_is_a_transition_not_truncation() -> None:
+    comp = _comp(
+        [
+            ("2026-01-01", {"A": 0.5, "B": 0.5}),
+            ("2026-01-02", {"A": 0.5}),
+            ("2026-01-03", {"A": 0.5, "C": 0.5}),
+        ],
+        {"A": 0.5, "C": 0.5},
+    )
+    assert _classes(comp) == ["EXIT_TRANSITION"]
+    back = _comp(
+        [
+            ("2026-01-01", {"A": 0.5, "B": 0.5}),
+            ("2026-01-02", {"A": 0.5}),
+            ("2026-01-03", {"A": 0.5, "B": 0.5}),
+        ],
+        {"A": 0.5, "B": 0.5},
+    )
+    assert _classes(back) == ["SYMBOL_DROP"]
+
+
+def test_rows_before_the_inception_anchor_are_out_of_scope() -> None:
+    comp = _comp(
+        [
+            ("2025-01-01", {"A": 0.5}),
+            ("2025-12-01", {"A": 0.5}),
+            ("2026-01-01", {"A": 1.0}),
+            ("2026-01-02", {"A": 0.5}),
+        ],
+        {"A": 1.0},
+    )
+    result = builder._holdings_validation([comp], 0.005, 0.02, "2026-01-01", {})
+    assert [f["class"] for f in result["flags"][:2]] == [
+        "OUT_OF_SCOPE_BEFORE_INCEPTION"
+    ] * 2
+    assert result["counts_by_class"]["s"]["OUT_OF_SCOPE_BEFORE_INCEPTION"] == 2
+    assert all(
+        f["flag"] == "ALLOCATION_SUM_OFF"
+        for f in result["flags"]
+        if f["class"] == "OUT_OF_SCOPE_BEFORE_INCEPTION"
+    )
