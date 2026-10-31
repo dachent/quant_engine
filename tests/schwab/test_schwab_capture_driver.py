@@ -22,12 +22,20 @@ from tools import schwab_capture_driver as driver
 
 
 CUTOFF = driver.parse_cutoff("2031-06-13")
-# 16:00 New York on the cutoff date is 20:00Z (daylight time).
-AFTER_CLOSE = datetime(2031, 6, 13, 21, 0, tzinfo=timezone.utc)
+# The cutoff 2031-06-13 is a Friday; 16:00 New York is 20:00Z (daylight time).
+# AFTER_CLOSE is the one unlabelled capture mode: Saturday 08:00 New York, after
+# the cutoff day closed and before the next session's first price update.
+AFTER_CLOSE = datetime(2031, 6, 14, 12, 0, tzinfo=timezone.utc)
+# Same-day post-close captures are a labelled fallback only.
+SAME_DAY = datetime(2031, 6, 13, 21, 0, tzinfo=timezone.utc)
 # 23:59 New York on the cutoff date lands on the next UTC date (the R2 pattern).
 LATE_EVENING = datetime(2031, 6, 14, 3, 59, tzinfo=timezone.utc)
-NOW = datetime(2031, 6, 13, 21, 30, tzinfo=timezone.utc)
-HOLDINGS_PATH = "/api/is.SyntheticHoldings/V2/holdings"
+NOW = datetime(2031, 6, 14, 12, 30, tzinfo=timezone.utc)
+HOLDINGS_PATH = driver.HOLDINGS_V2_PATH
+HOLDINGS_BODY = {"groupBySecurityType": True, "isExtendedPricing": False}
+QUOTE_MS = int(
+    datetime(2031, 6, 13, 23, 47, 14, tzinfo=timezone.utc).timestamp() * 1000
+)
 REVIEW = "https://github.com/dachent/quant_engine/issues/1#issuecomment-1"
 
 
@@ -42,10 +50,13 @@ def _holdings(
     for index, external in enumerate(_crosswalk(), start=1):
         row: dict[str, Any] = {
             "dataSymbol": f"SYN{index}",
-            "qty": {"qty": "3"},
+            "qty": {"qty": 4},
+            "price": {"price": 24.875, "priceDate": price_date},
             "marketValue": {"val": value},
-            "costBasis": {"cstBasis": "27"},
-            "priceDate": price_date,
+            "costBasis": {"cstBasis": 27},
+            "tradeTimeMs": QUOTE_MS,
+            "rowType": 0,
+            "securityType": 1,
         }
         groups: list[dict[str, Any]] = [
             {
@@ -62,10 +73,18 @@ def _holdings(
                     "holdingsRows": [
                         {
                             "dataSymbol": "SYNCASH",
-                            "qty": {"qty": "12"},
-                            "marketValue": {"val": "12"},
-                            "priceDate": price_date,
-                        }
+                            "qty": {"qty": 12},
+                            "price": {"price": 1, "priceDate": price_date},
+                            "marketValue": {"val": 12},
+                            "rowType": 0,
+                            "securityType": 9,
+                        },
+                        {
+                            "marketValue": {"val": 12.5},
+                            "rowType": 3,
+                            "securityType": 9,
+                            "symbol": {"symbol": "Cash & Cash Investments"},
+                        },
                     ],
                 }
             )
@@ -98,20 +117,32 @@ def test_holdings_record_market_value_and_as_of_basis() -> None:
     result = _normalize(_holdings())
     rows = _positions(result)
     assert [row["market_value_usd"] for row in rows] == ["99.50"] * 3
+    assert {row["price_usd"] for row in rows} == {"24.875"}
+    assert {row["quoted_at_utc"] for row in rows} == {"2031-06-13T23:47:14+00:00"}
+    assert result["market_value_basis"] == driver.MARKET_VALUE_BASIS
+    cash = result["cash_balances"]
+    assert isinstance(cash, list) and len(cash) == 1
+    assert cash[0]["cash_investments_usd"] == "12.5"
     assert {row["as_of_date"] for row in rows} == {"2031-06-13"}
     assert {row["as_of_offset_days"] for row in rows} == {0}
-    assert result["as_of_basis"] == "CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE"
+    assert result["as_of_basis"] == "CAPTURED_AFTER_CLOSE_BEFORE_NEXT_SESSION_OPEN"
     sweeps = result["sweep_vehicles"]
     assert isinstance(sweeps, list) and len(sweeps) == 1
     assert all("SYNTH-EXT" not in json.dumps(item) for item in (rows, sweeps))
 
 
-def test_r2_pattern_evening_capture_keeps_both_dates() -> None:
-    result = _normalize(_holdings(), captured_at=LATE_EVENING)
+def test_r2_pattern_evening_capture_needs_the_label_and_keeps_both_dates() -> None:
+    with pytest.raises(driver.DriverError, match="needs an approved exception label"):
+        _normalize(_holdings(), captured_at=LATE_EVENING)
+    result = _normalize(
+        _holdings(), captured_at=LATE_EVENING, exception_label="SAME_DAY_FALLBACK"
+    )
     capture = result["capture"]
     assert isinstance(capture, dict)
     assert capture["capture_date_utc"] == "2031-06-14"
     assert capture["capture_date_new_york"] == "2031-06-13"
+    assert capture["capture_mode"] == driver.MODE_SAME_DAY
+    assert result["as_of_basis"] == "CAPTURED_SAME_DAY_AFTER_CLOSE_LABELLED"
     assert {row["as_of_date"] for row in _positions(result)} == {"2031-06-13"}
 
 
@@ -175,7 +206,7 @@ def test_zero_quantity_rows_may_lack_a_value() -> None:
 def test_missing_price_date_is_refused_not_inferred_from_capture_time() -> None:
     raw = _holdings()
     for account in raw["accounts"]:
-        del account["groupedPositions"][0]["holdingsRows"][0]["priceDate"]
+        del account["groupedPositions"][0]["holdingsRows"][0]["price"]["priceDate"]
     with pytest.raises(driver.DriverError, match="as_of_missing=3"):
         _normalize(raw)
 
@@ -185,11 +216,11 @@ def test_capture_before_close_and_late_capture_are_refused_without_label() -> No
         _normalize(
             _holdings(), captured_at=datetime(2031, 6, 13, 19, 0, tzinfo=timezone.utc)
         )
-    with pytest.raises(driver.DriverError, match="later than the allowed lag"):
-        _normalize(_holdings(), captured_at=AFTER_CLOSE + timedelta(days=2))
+    with pytest.raises(driver.DriverError, match="outside the first-next-date"):
+        _normalize(_holdings(), captured_at=AFTER_CLOSE + timedelta(days=3))
     labelled = _normalize(
         _holdings(),
-        captured_at=AFTER_CLOSE + timedelta(days=2),
+        captured_at=AFTER_CLOSE + timedelta(days=3),
         exception_label="LATE_CAPTURE_LABELLED",
     )
     assert labelled["exception_label"] == "LATE_CAPTURE_LABELLED"
@@ -242,10 +273,10 @@ def test_crosswalk_must_be_one_to_one() -> None:
 
 def _balances_raw(day: str = "06/13/2031") -> dict[str, object]:
     return {
-        "historicalBalances": [
-            {"date": day, "accountValue": "1000.50"},
-            {"date": "06/12/2031", "accountValue": "990"},
-        ]
+        "histories": {
+            day: {"AccountValue": 1000.50},
+            "6/12/2031": {"AccountValue": 990},
+        }
     }
 
 
@@ -258,18 +289,15 @@ def test_balances_select_the_cutoff_row_and_refuse_a_missing_cutoff_row() -> Non
     result = driver.normalize_balances(raw, cutoff=CUTOFF, timing=_timing())
     rows = result["balances"]
     assert isinstance(rows, list)
-    assert {row["account_value_usd"] for row in rows} == {"1000.50"}
+    assert {row["account_value_usd"] for row in rows} == {"1000.5"}
     stale = {
         internal: _balances_raw("06/11/2031") for internal in _crosswalk().values()
     }
-    stale = {
-        k: {"historicalBalances": [{"date": "06/12/2031", "accountValue": "9"}]}
-        for k in stale
-    }
+    stale = {k: {"histories": {"6/12/2031": {"AccountValue": 9}}} for k in stale}
     with pytest.raises(driver.DriverError, match="differs from the declared cutoff"):
         driver.normalize_balances(stale, cutoff=CUTOFF, timing=_timing())
-    null = {"historicalBalances": [{"date": "06/13/2031", "accountValue": None}]}
-    with pytest.raises(driver.DriverError, match="null"):
+    null = {"histories": {"6/13/2031": {"AccountValue": None}}}
+    with pytest.raises(driver.DriverError, match="not a number"):
         driver.normalize_balances(
             {f"account-{1:016x}": null}, cutoff=CUTOFF, timing=_timing()
         )
@@ -291,21 +319,24 @@ def _evidence(**overrides: Any) -> dict[str, Any]:
             "requests": [
                 {
                     "capability": "holdings.v2",
-                    "method": "GET",
+                    "method": "POST",
                     "path": HOLDINGS_PATH,
-                    "query": {"view": "all"},
+                    "query": {},
+                    "body": dict(HOLDINGS_BODY),
                 },
                 {
                     "capability": "balances.historical",
                     "method": "GET",
                     "path": driver._contract_path("balances.historical"),
-                    "query": {"period": "All"},
+                    "query": {},
+                    "body": None,
                 },
                 {
                     "capability": "transactions.history",
                     "method": "POST",
                     "path": driver._contract_path("transactions.history"),
                     "query": {},
+                    "body": None,
                 },
             ],
         },
@@ -345,9 +376,13 @@ def test_catalog_is_read_only_and_tracks_the_reviewed_contract() -> None:
     assert all(entry.safety_class == "read_only" for entry in entries)
     contract = {item.capability: item for item in SCHWAB_CONTRACT.endpoints}
     for entry in entries:
-        if entry.path is not None:
+        if entry.capability in contract:
             assert contract[entry.capability].path == entry.path
             assert contract[entry.capability].method == entry.method
+    # Holdings-V2 is not in the reviewed web contract; its method and path come
+    # from the preserved SPA bundle and the 2026-09-17 capture receipt.
+    holdings = {entry.capability: entry for entry in entries}["holdings.v2"]
+    assert (holdings.method, holdings.path) == ("POST", driver.HOLDINGS_V2_PATH)
     assert driver.catalog_sha256() == driver.catalog_sha256()
 
 
@@ -364,8 +399,8 @@ def test_evidence_is_single_use(tmp_path: Path) -> None:
         (lambda d: d.update(operation="run"), "operation"),
         (lambda d: d.update(extra=1), "field set"),
         (lambda d: d["authority"].update(status="REVOKED"), "CURRENT"),
-        (lambda d: d["authority"].update(expires_at="2031-06-13T20:30:00Z"), "expired"),
-        (lambda d: d["authority"].update(issued_at="2031-06-14T00:00:00Z"), "not yet"),
+        (lambda d: d["authority"].update(expires_at="2031-06-14T12:00:00Z"), "expired"),
+        (lambda d: d["authority"].update(issued_at="2031-06-15T00:00:00Z"), "not yet"),
         (lambda d: d["terms"].update(sha256="0" * 64), "terms"),
         (lambda d: d["catalog"].update(sha256="0" * 64), "catalog"),
         (lambda d: d["review"].update(reference="https://example.invalid/x"), "review"),
@@ -376,15 +411,33 @@ def test_evidence_is_single_use(tmp_path: Path) -> None:
         (lambda d: d.update(exception_label="bad label"), "label"),
         (lambda d: d["scope"].update(account_count=0), "account_count"),
         (lambda d: d["scope"]["requests"].pop(), "every catalog read"),
-        (lambda d: d["scope"]["requests"][0].update(method="POST"), "method"),
+        (lambda d: d["scope"]["requests"][0].update(method="GET"), "method"),
         (
             lambda d: d["scope"]["requests"][0].update(path="/api/is.X/order/place"),
-            "read-only",
+            "catalog",
         ),
         (lambda d: d["scope"]["requests"][0].update(path="/not-api"), "path"),
         (lambda d: d["scope"]["requests"][1].update(path="/api/other"), "catalog"),
+        (lambda d: d["scope"]["requests"][1].update(query={"a": "x"}), "no query"),
         (lambda d: d["scope"]["requests"][0].update(query={"a": "x y"}), "query"),
         (lambda d: d["scope"]["requests"][2].update(query={"a": "x"}), "POST"),
+        (lambda d: d["scope"]["requests"][0].update(body=None), "nonempty object"),
+        (lambda d: d["scope"]["requests"][0].update(body={}), "nonempty object"),
+        (
+            lambda d: d["scope"]["requests"][0].update(body={"cancelOrder": True}),
+            "reviewed keys",
+        ),
+        (
+            lambda d: d["scope"]["requests"][0].update(
+                body={"selectedColumns": ["x" * 300]}
+            ),
+            "reviewed keys",
+        ),
+        (
+            lambda d: d["scope"]["requests"][1].update(body={"a": 1}),
+            "only for holdings",
+        ),
+        (lambda d: d["scope"]["requests"][0].pop("body"), "field set"),
         (
             lambda d: d["scope"]["requests"][0].update(capability="orders.place"),
             "unknown",
@@ -420,15 +473,15 @@ def test_reservation_is_durable_scoped_and_budgeted(tmp_path: Path) -> None:
     document["metering"]["max_requests"] = 2
     governance = _authorize(tmp_path, document)
     with pytest.raises(driver.GovernanceError, match="not approved"):
-        governance.reserve("POST", HOLDINGS_PATH)
+        governance.reserve("GET", HOLDINGS_PATH)
     with pytest.raises(driver.GovernanceError, match="not approved"):
         governance.reserve("GET", "/api/is.Other/V1/read")
-    governance.reserve("GET", HOLDINGS_PATH)
+    governance.reserve("POST", HOLDINGS_PATH)
     receipt = json.loads(governance.receipt_path.read_text(encoding="utf-8"))
     assert receipt["used_requests"] == 1
-    governance.reserve("GET", HOLDINGS_PATH)
+    governance.reserve("POST", HOLDINGS_PATH)
     with pytest.raises(driver.GovernanceError, match="budget"):
-        governance.reserve("GET", HOLDINGS_PATH)
+        governance.reserve("POST", HOLDINGS_PATH)
 
 
 # --------------------------------------------------------------------------- #
@@ -445,14 +498,16 @@ class FakeTransport:
         self, path: str, query: Any, provider_account_id: str | None
     ) -> tuple[int, object]:
         self.calls.append(("GET", path))
-        if path == HOLDINGS_PATH:
-            return 200, self._holdings
+        assert provider_account_id is not None and not query
         return 200, _balances_raw()
 
     def post(
         self, path: str, body: Any, provider_account_id: str
     ) -> tuple[int, object]:
         self.calls.append(("POST", path))
+        if path == HOLDINGS_PATH:
+            assert provider_account_id == "" and body == HOLDINGS_BODY
+            return 200, self._holdings
         row = {
             "action": "Journal",
             "amount": "1.00",
@@ -686,7 +741,7 @@ def test_holdings_request_start_before_close_is_refused(tmp_path: Path) -> None:
         [
             datetime(2031, 6, 13, 19, 59, 58, tzinfo=timezone.utc),
             datetime(2031, 6, 13, 19, 59, 59, tzinfo=timezone.utc),
-            datetime(2031, 6, 13, 20, 0, 1, tzinfo=timezone.utc),
+            datetime(2031, 6, 14, 12, 0, 1, tzinfo=timezone.utc),
         ]
         + [NOW] * 50
     )
@@ -755,7 +810,7 @@ def test_offline_normalize_cli_is_create_only(
     output = tmp_path / "out.json"
     arguments = [
         "normalize-holdings", str(raw), str(crosswalk), str(output),
-        "--cutoff", "2031-06-13", "--captured-at", "2031-06-13T21:00:00Z",
+        "--cutoff", "2031-06-13", "--captured-at", "2031-06-14T12:00:00Z",
     ]  # fmt: skip
     assert driver.main(arguments) == 0
     assert json.loads(capsys.readouterr().out)["position_count"] == 3
@@ -794,3 +849,271 @@ def test_existing_schwab_code_is_byte_for_byte_unchanged(
     root = Path(__file__).resolve().parents[2]
     payload = (root / relative).read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(payload).hexdigest() == digest
+
+
+# --------------------------------------------------------------------------- #
+# Shapes confirmed against preserved real raw evidence (and what they exclude)
+# --------------------------------------------------------------------------- #
+
+
+def test_top_level_price_date_is_not_the_real_shape() -> None:
+    raw = _holdings()
+    for account in raw["accounts"]:
+        row = account["groupedPositions"][0]["holdingsRows"][0]
+        row["priceDate"] = row["price"].pop("priceDate")
+    with pytest.raises(driver.DriverError, match="as_of_missing=3"):
+        _normalize(raw)
+
+
+def test_market_value_must_equal_quantity_times_the_quoted_price() -> None:
+    raw = _holdings()
+    raw["accounts"][1]["groupedPositions"][0]["holdingsRows"][0]["qty"]["qty"] = 5
+    with pytest.raises(
+        driver.DriverError,
+        match="market_value_differs_from_quantity_times_price=1",
+    ):
+        _normalize(raw)
+
+
+def test_a_missing_price_is_refused() -> None:
+    raw = _holdings()
+    del raw["accounts"][0]["groupedPositions"][0]["holdingsRows"][0]["price"]["price"]
+    with pytest.raises(driver.DriverError, match="price_missing=1"):
+        _normalize(raw)
+
+
+def test_cash_summary_rows_are_balances_not_positions() -> None:
+    raw = _holdings()
+    summary = raw["accounts"][0]["groupedPositions"][1]["holdingsRows"][1]
+    summary["marketValue"] = {"val": None}
+    with pytest.raises(driver.DriverError, match="cash_balance_missing=1"):
+        _normalize(raw)
+    raw = _holdings()
+    cash_rows = raw["accounts"][0]["groupedPositions"][1]["holdingsRows"]
+    cash_rows.append(copy.deepcopy(cash_rows[1]))
+    with pytest.raises(driver.DriverError, match="cash summary is duplicated"):
+        _normalize(raw)
+    raw = _holdings()
+    raw["accounts"][0]["groupedPositions"][1]["holdingsRows"][1]["rowType"] = 0
+    with pytest.raises(driver.DriverError, match="quantity"):
+        _normalize(raw)
+    raw = _holdings()
+    equity = raw["accounts"][0]["groupedPositions"][0]["holdingsRows"]
+    equity.append({"rowType": 3, "marketValue": {"val": 1}, "symbol": {"symbol": "X"}})
+    with pytest.raises(driver.DriverError, match="quantity"):
+        _normalize(raw)
+
+
+@pytest.mark.parametrize("value", [True, "1938000000000", -1, 1.5])
+def test_quote_time_must_be_epoch_milliseconds(value: object) -> None:
+    raw = _holdings()
+    raw["accounts"][0]["groupedPositions"][0]["holdingsRows"][0]["tradeTimeMs"] = value
+    with pytest.raises(driver.DriverError, match="epoch milliseconds"):
+        _normalize(raw)
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"historicalBalances": []}, "unexpected field set"),
+        ({"histories": {}, "extra": 1}, "unexpected field set"),
+        ({"histories": {}}, "no rows"),
+        ({"histories": {"2031-06-13": {"AccountValue": 1}}}, "M/D/YYYY"),
+        ({"histories": {"6/13/2031": {"AccountValue": "1"}}}, "not a number"),
+        ({"histories": {"6/13/2031": {"AccountValue": True}}}, "not a number"),
+        ({"histories": {"6/13/2031": {"AccountValue": 1, "x": 2}}}, "unexpected"),
+        ({"histories": {"6/13/2031": 5}}, "object"),
+        (
+            {
+                "histories": {
+                    "6/13/2031": {"AccountValue": 1},
+                    "06/13/2031": {"AccountValue": 2},
+                }
+            },
+            "conflicting",
+        ),
+        ([], "object"),
+    ],
+)
+def test_balance_history_rejects_every_unconfirmed_shape(
+    document: object, message: str
+) -> None:
+    with pytest.raises(driver.DriverError, match=message):
+        driver.parse_balance_history(document)
+
+
+def test_balance_history_accepts_unpadded_and_padded_dates_once() -> None:
+    parsed = driver.parse_balance_history(
+        {
+            "histories": {
+                "1/2/2031": {"AccountValue": 5},
+                "01/02/2031": {"AccountValue": 5},
+            }
+        }
+    )
+    assert list(parsed.values()) == [5]
+
+
+def test_balance_series_last_date_is_recorded_per_account() -> None:
+    raw = {internal: _balances_raw() for internal in _crosswalk().values()}
+    rows = driver.normalize_balances(raw, cutoff=CUTOFF, timing=_timing())["balances"]
+    assert isinstance(rows, list)
+    assert {row["series_last_date"] for row in rows} == {"2031-06-13"}
+
+
+def test_verifier_rederives_balances_from_the_raw_responses(tmp_path: Path) -> None:
+    _, run_dir, _ = _run(tmp_path)
+
+    def other_value(doc: dict[str, Any]) -> None:
+        doc["balances"][0]["account_value_usd"] = "1"
+
+    _rebind(run_dir, "normalized/balances.json", other_value)
+    assert driver.verify_run(run_dir)["status"] == "VERIFIED"  # no crosswalk: no raw
+    with pytest.raises(driver.DriverError, match="balances do not reproduce"):
+        driver.verify_run(run_dir, crosswalk=_crosswalk())
+
+
+def test_verifier_checks_cash_summaries_and_the_balances_window(tmp_path: Path) -> None:
+    _, run_dir, _ = _run(tmp_path)
+
+    def null_cash(doc: dict[str, Any]) -> None:
+        doc["cash_balances"][0]["cash_investments_usd"] = None
+
+    _rebind(run_dir, "normalized/positions.json", null_cash)
+    with pytest.raises(driver.DriverError, match="cash balance value is null"):
+        driver.verify_run(run_dir)
+    (tmp_path / "two").mkdir()
+    _, run_two, _ = _run(tmp_path / "two")
+
+    def early(doc: dict[str, Any]) -> None:
+        doc["capture"]["captured_at_utc"] = "2031-06-13T19:00:00+00:00"
+
+    _rebind(run_two, "normalized/balances.json", early)
+    with pytest.raises(driver.DriverError, match="precedes"):
+        driver.verify_run(run_two)
+
+
+# --------------------------------------------------------------------------- #
+# Capture modes against the trading calendar
+# --------------------------------------------------------------------------- #
+
+
+def _utc_ny(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    from zoneinfo import ZoneInfo
+
+    local = datetime(
+        year, month, day, hour, minute, tzinfo=ZoneInfo("America/New_York")
+    )
+    return local.astimezone(timezone.utc)
+
+
+def _mode(cutoff: str, captured: datetime, label: str | None = None) -> str:
+    return driver.assess_timing(
+        captured, driver.parse_cutoff(cutoff), exception_label=label
+    ).mode
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "captured"),
+    [
+        ("2031-06-13", _utc_ny(2031, 6, 14, 0, 1)),  # Friday cutoff, Saturday
+        ("2031-06-13", _utc_ny(2031, 6, 14, 8)),
+        ("2031-06-13", _utc_ny(2031, 6, 14, 19, 59)),  # still before 20:00
+        ("2031-06-10", _utc_ny(2031, 6, 11, 8)),  # Tuesday cutoff, Wednesday pre-open
+        ("2031-06-10", _utc_ny(2031, 6, 11, 9, 29)),
+        ("2026-09-04", _utc_ny(2026, 9, 5, 12)),  # Friday before Labor Day: Saturday
+        ("2026-04-02", _utc_ny(2026, 4, 3, 8)),  # Thursday cutoff, Good Friday (closed)
+        ("2026-04-02", _utc_ny(2026, 4, 3, 19, 59)),
+        ("2026-12-24", _utc_ny(2026, 12, 25, 11)),  # Christmas Day, first date after
+    ],
+)
+def test_first_next_date_captures_are_accepted(cutoff: str, captured: datetime) -> None:
+    assert _mode(cutoff, captured) == driver.MODE_NEXT_SESSION
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "captured", "message"),
+    [
+        ("2031-06-13", _utc_ny(2031, 6, 14, 20), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 14, 20, 30), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 15, 12), "outside the first-next-date"),  # Sun
+        ("2031-06-13", _utc_ny(2031, 6, 16, 8), "outside the first-next-date"),  # Mon
+        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 29), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 16, 10), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 17, 8), "outside the first-next-date"),
+        ("2031-06-10", _utc_ny(2031, 6, 11, 9, 30), "after the next session open"),
+        ("2031-06-10", _utc_ny(2031, 6, 11, 10), "after the next session open"),
+        ("2031-06-10", _utc_ny(2031, 6, 12, 8), "outside the first-next-date"),
+        ("2026-09-04", _utc_ny(2026, 9, 8, 8), "outside the first-next-date"),
+        ("2026-09-04", _utc_ny(2026, 9, 7, 12), "outside the first-next-date"),
+        ("2026-04-02", _utc_ny(2026, 4, 6, 8), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 16, 0), "same-day post-close"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 23, 59), "same-day post-close"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 15, 59), "precedes"),
+        ("2031-06-14", _utc_ny(2031, 6, 15, 8), "not a trading day"),  # Saturday
+        ("2026-09-07", _utc_ny(2026, 9, 8, 8), "not a trading day"),  # Labor Day
+    ],
+)
+def test_other_capture_modes_are_refused_without_the_label(
+    cutoff: str, captured: datetime, message: str
+) -> None:
+    with pytest.raises(driver.DriverError, match=message):
+        _mode(cutoff, captured)
+    # with the label the mode is recorded rather than refused
+    assert _mode(cutoff, captured, "OWNER_APPROVED_EXCEPTION") in {
+        driver.MODE_OUTSIDE,
+        driver.MODE_SAME_DAY,
+        driver.MODE_BEFORE_CLOSE,
+        driver.MODE_NEXT_SESSION,
+    }
+
+
+def test_trading_calendar_holidays() -> None:
+    expected = {
+        2026: {
+            "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+            "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+        },
+        2027: {  # New Year's Day on a Friday; Christmas observed Friday 12-24
+            "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+            "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+        },
+        2028: {  # Saturday New Year's Day is not observed on the Friday
+            "2028-01-17", "2028-02-21", "2028-04-14", "2028-05-29",
+            "2028-06-19", "2028-07-04", "2028-09-04", "2028-11-23", "2028-12-25",
+        },
+    }  # fmt: skip
+    for year, days in expected.items():
+        assert {d.isoformat() for d in driver.nyse_holidays(year)} == days
+    assert driver.is_trading_day(driver.parse_cutoff("2027-12-31").as_of_date)
+    assert (
+        driver.next_trading_day(
+            driver.parse_cutoff("2026-09-04").as_of_date
+        ).isoformat()
+        == "2026-09-08"
+    )
+
+
+def test_a_friday_cutoff_run_with_a_saturday_capture_stages_and_verifies(
+    tmp_path: Path,
+) -> None:
+    _, run_dir, _ = _run(tmp_path)
+    positions = json.loads((run_dir / "normalized/positions.json").read_text("utf-8"))
+    assert positions["capture"]["capture_mode"] == driver.MODE_NEXT_SESSION
+    assert positions["capture"]["capture_date_new_york"] == "2031-06-14"
+    assert positions["capture"]["capture_date_utc"] == "2031-06-14"
+    assert positions["capture"]["next_session_open_utc"] == "2031-06-16T13:30:00+00:00"
+    assert driver.verify_run(run_dir, crosswalk=_crosswalk())["status"] == "VERIFIED"
+
+
+def test_a_run_without_an_observed_cutoff_balance_row_is_refused(
+    tmp_path: Path,
+) -> None:
+    class Short(FakeTransport):
+        def get(
+            self, path: str, query: Any, provider_account_id: str | None
+        ) -> tuple[int, object]:
+            return 200, {"histories": {"6/12/2031": {"AccountValue": 9}}}
+
+    with pytest.raises(driver.DriverError, match="differs from the declared cutoff"):
+        _run(tmp_path, Short())
