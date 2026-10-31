@@ -1093,6 +1093,12 @@ def _schwab_selected_point_positions(
         financial_observation_date = captured.astimezone(
             ZoneInfo("America/New_York")
         ).date()
+        valuation_cutoff: date | None = None
+        if "valuation_cutoff" in metadata:
+            valuation_cutoff = date.fromisoformat(metadata["valuation_cutoff"])
+            if valuation_cutoff > financial_observation_date:
+                raise ValueError("valuation cutoff is later than the observation")
+            financial_observation_date = valuation_cutoff
         artifact = artifacts[0]
         if (
             artifact["as_of_date"] != day.isoformat()
@@ -1175,6 +1181,11 @@ def _schwab_selected_point_positions(
                 "source_record_id": record_id,
                 "source_artifact_id": artifact["artifact_id"],
                 "generation_id": manifest.generation_id,
+                **(
+                    {"valuation_cutoff": valuation_cutoff.isoformat()}
+                    if valuation_cutoff is not None
+                    else {}
+                ),
             }
         if source["current_position_account_count"] != len(
             {row["account_id"] for row in expected.values()}
@@ -1459,7 +1470,9 @@ def _provider_admission_authority(
                             # Native equality above binds the original UTC date
                             # and clock; EOD selection uses the provider day.
                             days = [
-                                datetime.fromisoformat(row["observed_at"])
+                                date.fromisoformat(row["valuation_cutoff"])
+                                if row.get("valuation_cutoff") is not None
+                                else datetime.fromisoformat(row["observed_at"])
                                 .astimezone(ZoneInfo("America/New_York"))
                                 .date()
                             ]

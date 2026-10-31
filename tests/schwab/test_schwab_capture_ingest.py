@@ -436,13 +436,14 @@ def test_saturday_capture_is_bound_with_the_cutoff_recorded(tmp_path: Path) -> N
     assert capture["capture_date_utc_offset_days"] == 1
     assert binding["as_of_basis"] == "CAPTURED_AFTER_CLOSE_BEFORE_NEXT_SESSION_OPEN"
     assert binding["exception_label"] is None
-    # the baseline reads the observation's New York date as the financial day
-    # (the cutoff); the frozen generation reads its UTC date as the as-of
-    assert binding["snapshot_observed_at"] == "2031-06-14T00:00:00+00:00"
+    # observed_at is provenance: the REAL capture instant. The financial day is the
+    # explicit valuation_cutoff, in the binding and in the snapshot the readers use.
+    assert binding["snapshot_observed_at"] == capture["captured_at_utc"]
     assert binding["snapshot_observed_at_basis"] == ingest.OBSERVED_AT_BASIS
-    assert binding["financial_day_new_york"] == "2031-06-13"
+    assert binding["financial_day"] == "2031-06-13"
     snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
-    assert snapshot["observed_at"] == "2031-06-14T00:00:00+00:00"
+    assert snapshot["observed_at"] == capture["captured_at_utc"]
+    assert snapshot["valuation_cutoff"] == "2031-06-13"
     assert {row["as_of_date"] for row in snapshot["positions"]} == {"2031-06-14"}
     nav = binding["nav"]
     assert isinstance(nav, dict)
@@ -511,6 +512,10 @@ def test_snapshot_matches_the_frozen_path_apart_from_the_sweep_count(
         ).encode("utf-8")
     )
     observed = _json(tmp_path / "ingest/ingest-binding.json")["snapshot_observed_at"]
+    assert (
+        observed
+        == _json(run_dir / "normalized/positions.json")["capture"]["captured_at_utc"]
+    )
     receipt = tmp_path / "receipt.json"
     receipt.write_bytes(json.dumps({"captured_at_utc": observed}).encode())
     schwab_generation._holdings_v2_current(
@@ -526,6 +531,8 @@ def test_snapshot_matches_the_frozen_path_apart_from_the_sweep_count(
     # the frozen reader counts the 8 quantity-less cash summary rows as sweep
     # vehicles; the adapter emits quantity rows only
     assert (old.pop("sweep_vehicle_count"), new.pop("sweep_vehicle_count")) == (8, 0)
+    # the adapter alone adds the explicit valuation cutoff
+    assert new.pop("valuation_cutoff") == "2031-06-13"
     assert old == new
 
 
@@ -662,8 +669,8 @@ def test_labelled_r2_evening_pattern_records_the_utc_offset(tmp_path: Path) -> N
     assert capture["capture_date_utc"] == "2031-06-14"
     assert capture["capture_date_utc_offset_days"] == 1
     assert binding["as_of_date"] == "2031-06-14"
-    assert binding["snapshot_observed_at_basis"] == ingest.OBSERVED_AT_BASIS_CAPTURE
-    assert binding["financial_day_new_york"] == "2031-06-13"
+    assert binding["snapshot_observed_at_basis"] == ingest.OBSERVED_AT_BASIS
+    assert binding["financial_day"] == "2031-06-13"
     _assert_frozen_accepts(tmp_path, date(2031, 6, 14))
     # the driver's own UTC-stamped manifest finishes on the next UTC date and the
     # frozen consumer refuses it; the New York rendering is what it accepts
@@ -1061,16 +1068,18 @@ def test_snapshot_dating_is_rechecked_over_the_written_file(tmp_path: Path) -> N
     document = _json(path)
     as_of, cutoff_day = date(2031, 6, 14), date(2031, 6, 13)
     ingest._check_snapshot_dating(path, as_of, cutoff_day)
-    original = document["observed_at"]
     # UTC date differs from the as-of
     with pytest.raises(ingest.IngestError, match="UTC date differs"):
         ingest._check_snapshot_dating(path, date(2031, 6, 15), cutoff_day)
-    # the New York date (the baseline's financial day) is not the cutoff
-    document["observed_at"] = "2031-06-14T12:00:00+00:00"
+    # the key must name the cutoff
+    with pytest.raises(ingest.IngestError, match="differs from the cutoff"):
+        ingest._check_snapshot_dating(path, as_of, date(2031, 6, 12))
+    # a cutoff later than the observation's New York day is refused
+    document["valuation_cutoff"] = "2031-06-15"
     path.write_bytes(driver.canonical_bytes(document))
-    with pytest.raises(ingest.IngestError, match="financial day"):
-        ingest._check_snapshot_dating(path, as_of, cutoff_day)
-    document["observed_at"] = original
+    with pytest.raises(ingest.IngestError, match="later than the observation"):
+        ingest._check_snapshot_dating(path, as_of, date(2031, 6, 15))
+    document["valuation_cutoff"] = "2031-06-13"
     document["positions"][0]["as_of_date"] = "2031-06-13"
     path.write_bytes(driver.canonical_bytes(document))
     with pytest.raises(ingest.IngestError, match="as-of differs"):

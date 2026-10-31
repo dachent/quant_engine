@@ -5673,3 +5673,115 @@ def test_matrixport_wallet_sleeve_equals_the_product_nav():
     assert "derived_cash" not in row
     assert row["current_value"]["value"] == nav
     _cc_schema_validator("current_capital").validate(block)
+
+
+def _schwab_point_catalog(
+    observed_at: str, native_day: str, valuation_cutoff: str | None
+) -> dict[str, Any]:
+    position: dict[str, Any] = {
+        "account_id": "account-schwab",
+        "as_of_date": native_day,
+        "mapping_status": "MAPPED",
+        "observed_at": observed_at,
+        "provider_id": "schwab",
+        "record_id": "schwab:position-valuation-cutoff",
+        "security_id": "security-schwab-current",
+        "source_artifact_id": "source/schwab-current.json",
+        "source_record_id": "position-valuation-cutoff",
+    }
+    if valuation_cutoff is not None:
+        position["valuation_cutoff"] = valuation_cutoff
+    return {
+        "admissions": [
+            {
+                "account_id": "account-schwab",
+                "account_reconciliation_sha256": "a" * 64,
+                "disposition": "AUTHORITATIVE",
+                "effective_end": native_day,
+                "effective_start": native_day,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "fact_type": "positions",
+                "pool_id": None,
+                "provider_id": "schwab",
+                "strategy_id": None,
+            }
+        ],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [position],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+
+def _facts(catalog: dict[str, Any], baseline_as_of: date) -> list[dict[str, Any]]:
+    result = baseline._provider_ledger_facts(
+        catalog, [{"account_id": "account-schwab"}], [], [], [], [], baseline_as_of
+    )
+    return result[3]
+
+
+SATURDAY = "2026-09-19T12:00:00+00:00"
+
+
+def test_real_saturday_observation_with_a_friday_valuation_cutoff_is_a_friday_row() -> (
+    None
+):
+    rows = _facts(
+        _schwab_point_catalog(SATURDAY, "2026-09-19", "2026-09-18"), date(2026, 9, 18)
+    )
+    assert len(rows) == 1
+    held = rows[0]
+    assert held["as_of_date"] == "2026-09-18"
+    assert held["capture_date"] == "2026-09-19"
+    assert held["observed_at"] == SATURDAY
+    assert held["valuation_cutoff"] == "2026-09-18"
+    assert held["as_of_basis"] == baseline.POSITION_AS_OF_BASIS_CAPTURED_AFTER_CLOSE
+
+
+def test_the_same_saturday_observation_without_a_cutoff_keeps_the_legacy_day() -> None:
+    catalog = _schwab_point_catalog(SATURDAY, "2026-09-19", None)
+    with pytest.raises(
+        baseline.BaselineValidationError,
+        match="provider-ledger fact is newer than baseline",
+    ):
+        _facts(catalog, date(2026, 9, 18))
+    # legacy: the New York day (the 19th) is the financial day when the baseline
+    # reaches it, and the row is then dated the 19th with no relabel
+    held = _facts(catalog, date(2026, 9, 19))[0]
+    assert held["as_of_date"] == "2026-09-19"
+    assert "capture_date" not in held and "valuation_cutoff" not in held
+
+
+def test_a_valuation_cutoff_later_than_the_observed_new_york_day_is_refused() -> None:
+    with pytest.raises(
+        baseline.BaselineValidationError, match="valuation cutoff is later"
+    ):
+        _facts(
+            _schwab_point_catalog(SATURDAY, "2026-09-19", "2026-09-20"),
+            date(2026, 9, 20),
+        )
+
+
+@pytest.mark.parametrize("observed_at", ["2026-09-18T03:59:40.004417+00:00"])
+def test_an_absent_cutoff_reproduces_the_r21_new_york_relabel_exactly(
+    observed_at: str,
+) -> None:
+    """The 09-17 / 09-18 R2.1 shape: with no key the row is byte-for-byte legacy,
+    and a cutoff equal to the New York day only adds the key."""
+
+    legacy = _facts(
+        _schwab_point_catalog(observed_at, "2026-09-18", None), date(2026, 9, 17)
+    )[0]
+    keyed = _facts(
+        _schwab_point_catalog(observed_at, "2026-09-18", "2026-09-17"),
+        date(2026, 9, 17),
+    )[0]
+    assert legacy["as_of_date"] == "2026-09-17"
+    assert legacy["capture_date"] == "2026-09-18"
+    assert legacy["as_of_basis"] == baseline.POSITION_AS_OF_BASIS_CAPTURED_AFTER_CLOSE
+    assert "valuation_cutoff" not in legacy
+    assert {k: v for k, v in keyed.items() if k != "valuation_cutoff"} == legacy
