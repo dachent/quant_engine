@@ -2731,18 +2731,24 @@ def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -
     repo_root = runtime["repo_root"]
     if not isinstance(repo_root, Path) or not repo_root.is_dir():
         raise PipelineValidationError("portfolio repository root is invalid")
-    if spec.code_commit != contract["release_commit"]:
+    if spec.code_identity_scheme == COMMIT_SCHEME:
+        # Legacy git-commit-v1: byte-for-byte the original check.
+        head = _git_output(repo_root, "rev-parse", "HEAD")
+        if head != spec.code_commit or head != contract["release_commit"]:
+            raise PipelineValidationError("portfolio repository HEAD differs")
+    elif spec.code_commit != contract["release_commit"]:
         raise PipelineValidationError("portfolio repository HEAD differs")
-    try:
-        verify_promotion_identity(
-            repo_root,
-            spec.code_commit,
-            spec.code_identity_scheme,
-            state_root=spec.state_root,
-            lock_path=lock,
-        )
-    except CodeIdentityError as exc:
-        raise PipelineValidationError(f"portfolio repository {exc}") from exc
+    else:
+        try:
+            verify_promotion_identity(
+                repo_root,
+                spec.code_commit,
+                spec.code_identity_scheme,
+                state_root=spec.state_root,
+                lock_path=lock,
+            )
+        except CodeIdentityError as exc:
+            raise PipelineValidationError(f"portfolio repository {exc}") from exc
     if _git_output(repo_root, "status", "--porcelain=v1", "--untracked-files=all"):
         raise PipelineValidationError("portfolio repository is not clean")
 
