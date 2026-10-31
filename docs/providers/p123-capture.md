@@ -220,6 +220,8 @@ What admission needs from the capture (all of it is produced by `stage-har`):
 | Bound records | `files` entry for `normalized/records.json` | hash and size equal the admitted bytes |
 | Successful, non-empty responses | each AI Factor record: `status` 2xx, `response` a non-empty object | |
 | Predictor identity | each record's `request_sha256` (hash of method, origin, id-bearing path, query) | part of the design reference |
+| Shapes reviewed in this repository | each AI Factor response re-validated against the catalog row, which must be CONFIRMED now | a self-consistent forged run with invented content is refused |
+| Owner attestation | `expected_hashes` in the source group pins both `manifest.json` and `normalized/records.json` | the run's own claims are not trusted; the owner confirms the hashes |
 
 The design reference is `p123-capture-design:` plus the SHA-256 of the canonical
 JSON of the AI Factor records only (capability, `request_sha256`, sanitized
@@ -231,7 +233,8 @@ What R3 supplies as data in the private provenance specification:
 
 1. A source group for the run: a private root plus the explicit relative paths of
    `<run>/manifest.json` and `<run>/normalized/records.json` (the raw HAR, which
-   holds session material, is not admitted and may be quarantined first).
+   holds session material, is not admitted and may be quarantined first), with an
+   `expected_hashes` entry for each of those two files, confirmed by the owner.
 2. In the `p123-ai-factor` version row, the `design` slot: `status` `EVIDENCED`,
    `artifact_sha256` = SHA-256 of `normalized/records.json`, `source_ids` = that
    group, `version_ref` = the reference printed by:

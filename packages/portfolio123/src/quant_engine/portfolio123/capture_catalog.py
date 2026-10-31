@@ -30,9 +30,11 @@ from quant_engine.portfolio123.capture_shapes import (
     Choice,
     Obj,
     Seq,
+    ShapeError,
     Spec,
     canonical_bytes,
     describe,
+    validate_shape,
 )
 from quant_engine.web_contracts import (
     PORTFOLIO123_CONTRACT,
@@ -570,6 +572,23 @@ def evidence_status(scope: Sequence[str]) -> str:
     if scope and all(is_confirmed(item) for item in scope):
         return EVIDENCE_REVIEWED
     return EVIDENCE_UNVERIFIED
+
+
+def verify_confirmed_shape(capability: str, response: object) -> None:
+    """Check a normalized response against the CONFIRMED catalog shape, now.
+
+    Raises ``CaptureRefusal`` with ``CAPABILITY_UNKNOWN``, ``SHAPE_NOT_REVIEWED``
+    (the row is not CONFIRMED), or ``SHAPE_REFUSED``.  Consumers outside the package
+    (the provenance admission) use this instead of trusting a manifest's own claims.
+    """
+
+    route = route_for(capability)
+    if route.verdict != VERDICT_CONFIRMED or route.shape is None:
+        raise CaptureRefusal("SHAPE_NOT_REVIEWED", capability)
+    try:
+        validate_shape(response, route.shape)
+    except ShapeError:
+        raise CaptureRefusal("SHAPE_REFUSED", capability) from None
 
 
 def findings() -> dict[str, tuple[str, str]]:

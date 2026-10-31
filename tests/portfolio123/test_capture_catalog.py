@@ -350,3 +350,20 @@ def test_unverified_rows_are_still_marked_and_never_enable_a_real_route() -> Non
         for method in ("GET", "POST"):
             with pytest.raises(WebContractError):
                 contract.route(method, catalog.ORIGIN + real)
+
+
+def test_verify_confirmed_shape_is_the_public_revalidation() -> None:
+    from quant_engine import portfolio123
+
+    redacted = _redacted_designer()
+    portfolio123.verify_confirmed_shape("designer-model.json", redacted)
+    drifted = {**redacted, "unreviewed": 1}
+    for capability, body, code in (
+        ("designer-model.json", drifted, "SHAPE_REFUSED"),
+        ("designer-model.json", DESIGNER, "SHAPE_REFUSED"),
+        ("aifactor.predictor", PREDICTOR, "SHAPE_NOT_REVIEWED"),
+        ("absent", {}, "CAPABILITY_UNKNOWN"),
+    ):
+        with pytest.raises(portfolio123.CaptureRefusal) as caught:
+            portfolio123.verify_confirmed_shape(capability, body)
+        assert caught.value.code == code

@@ -33,6 +33,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio123 import CaptureRefusal, verify_confirmed_shape
 
 
 SPEC_SCHEMA_VERSION: Final = 2
@@ -1128,6 +1129,26 @@ def _read_canonical_object(data: bytes, name: str) -> dict[str, Any]:
     return document
 
 
+def _revalidate_capture_shape(capability: str, response: object) -> None:
+    """Re-check a design record against the REVIEWED catalog shape, not the manifest.
+
+    The manifest and records are self-describing, so a consistently regenerated pair
+    could carry invented content. The shape comes from this repository's catalog and
+    the row must be CONFIRMED there; the admitted bytes must match it exactly.
+    """
+
+    try:
+        verify_confirmed_shape(capability, response)
+    except CaptureRefusal as exc:
+        if exc.code == "SHAPE_REFUSED":
+            raise ProvenanceValidationError(
+                "capture record differs from the reviewed catalog shape"
+            ) from exc
+        raise ProvenanceValidationError(
+            "the catalog does not yet review this AI Factor shape"
+        ) from exc
+
+
 def _verify_capture_design(
     manifest_bytes: bytes, records_bytes: bytes, generation_as_of: date
 ) -> str:
@@ -1217,6 +1238,7 @@ def _verify_capture_design(
                 raise ProvenanceValidationError("capture record did not succeed")
             if not isinstance(record["response"], dict) or not record["response"]:
                 raise ProvenanceValidationError("capture design record is empty")
+            _revalidate_capture_shape(capability, record["response"])
             seen.add(capability)
     if seen != set(_CAPTURE_DESIGN_CAPABILITIES):
         raise ProvenanceValidationError("capture lacks a predictor or model record")
@@ -1228,6 +1250,7 @@ def _validate_capture_design_versions(
     *,
     roots: Mapping[str, Path],
     source_records: Sequence[Mapping[str, Any]],
+    source_groups: Sequence[Mapping[str, Any]],
     generation_as_of: date,
 ) -> None:
     """Bind every ``p123-capture-design:`` design reference to a verified capture.
@@ -1235,11 +1258,18 @@ def _validate_capture_design_versions(
     A design slot whose reference uses the prefix must be EVIDENCED, name the
     admitted ``normalized/records.json`` of a staged capture run by hash, and carry
     the reference recomputed from those bytes. The run's ``manifest.json`` must
-    sit beside it in the same admitted source group. A label or a model container
-    cannot produce such a reference.
+    sit beside it in the same admitted source group, and both files must carry an
+    owner-pinned entry in that group's ``expected_hashes`` (the independent
+    attestation: the owner confirms the hashes, the tool does not trust the run's own
+    claims). Each AI Factor response is re-checked against the reviewed catalog
+    shape. A label or a model container cannot produce such a reference.
     """
 
     sources = {str(item["source_id"]): item for item in source_records}
+    pinned = {
+        str(group["source_id"]): _object(group["expected_hashes"], "expected_hashes")
+        for group in source_groups
+    }
     for row in _objects(version_catalog.get("strategies"), "strategy versions"):
         design = _object(row.get("design"), "strategy version design")
         reference = design.get("version_ref")
@@ -1279,6 +1309,14 @@ def _validate_capture_design_versions(
         }:
             raise ProvenanceValidationError(
                 "the capture manifest is not admitted beside the capture records"
+            )
+        owner_pins = pinned[str(source["source_id"])]
+        if not all(
+            isinstance(owner_pins.get(item), str)
+            for item in (relative, manifest_relative)
+        ):
+            raise ProvenanceValidationError(
+                "the capture files need owner-pinned expected hashes in their source group"
             )
         root = roots[str(source["root_id"])]
         records_bytes = _source_path(root, relative).read_bytes()
@@ -1697,6 +1735,7 @@ def build_catalog(
         strategy_version_catalog,
         roots=roots,
         source_records=source_records,
+        source_groups=_objects(spec["source_groups"], "source_groups"),
         generation_as_of=generation_as_of,
     )
     if any(

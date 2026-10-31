@@ -144,6 +144,16 @@ class _Admitted:
                 "files": self.files,
             }
         ]
+        # The owner's independent pins (expected_hashes) for both admitted files.
+        self.groups = [
+            {
+                "source_id": "p123-aifactor-capture",
+                "expected_hashes": {
+                    str(item["relative_path"]): str(item["sha256"])
+                    for item in self.files
+                },
+            }
+        ]
 
     def version_catalog(self, **design: Any) -> dict[str, Any]:
         slot = {
@@ -155,11 +165,14 @@ class _Admitted:
         }
         return {"strategies": [{"strategy_id": "p123-ai-factor", "design": slot}]}
 
-    def validate(self, catalog: dict[str, Any], sources: Any = None) -> None:
+    def validate(
+        self, catalog: dict[str, Any], sources: Any = None, groups: Any = None
+    ) -> None:
         provenance._validate_capture_design_versions(
             catalog,
             roots={"private": self.root},
             source_records=self.sources if sources is None else sources,
+            source_groups=self.groups if groups is None else groups,
             generation_as_of=AS_OF,
         )
 
@@ -443,3 +456,63 @@ def test_a_non_canonical_manifest_is_refused(tmp_path: Path, confirmed: None) ->
         "not canonical",
     )
     shutil.rmtree(tmp_path / "private")
+
+
+def _invented_responses(records: dict[str, Any]) -> None:
+    for item in records["records"]:
+        if item["capability"] in DESIGN:
+            item["response"] = {"invented": 1}
+
+
+def _wrong_type(records: dict[str, Any]) -> None:
+    for item in records["records"]:
+        if item["capability"] == "aifactor.model":
+            item["response"]["horizon_weeks"] = "four"
+
+
+def test_invented_content_is_refused_even_when_everything_is_rebound(
+    tmp_path: Path, confirmed: None
+) -> None:
+    # The reviewer finding: manifest, records, hash binding and reference all
+    # regenerated consistently around fabricated responses.
+    for index, edit in enumerate((_invented_responses, _wrong_type)):
+        run = _stage(tmp_path, _entries(), run_id=f"run-inv-{index}")
+        admitted, reference = _rewritten(tmp_path, run, records_edit=edit)
+        _refuses(
+            admitted,
+            admitted.version_catalog(version_ref=reference),
+            "reviewed catalog shape",
+        )
+        shutil.rmtree(tmp_path / "private")
+
+
+def test_admission_needs_the_catalog_to_review_the_shape_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_design_verdict(monkeypatch, "CONFIRMED")
+    run = _stage(tmp_path, _entries())
+    admitted = _from_run(tmp_path, run)
+    reference = _ref(run)
+    admitted.validate(admitted.version_catalog(version_ref=reference))
+    # The same bytes are refused once the catalog no longer confirms the shapes.
+    _set_design_verdict(monkeypatch, "UNVERIFIED")
+    _refuses(
+        admitted, admitted.version_catalog(version_ref=reference), "does not yet review"
+    )
+
+
+def test_the_owner_must_pin_both_files_in_the_source_group(
+    tmp_path: Path, confirmed: None
+) -> None:
+    run = _stage(tmp_path, _entries())
+    admitted = _from_run(tmp_path, run)
+    catalog = admitted.version_catalog(version_ref=_ref(run))
+    manifest_rel, records_rel = (item["relative_path"] for item in admitted.files)
+    for pins in (
+        {},
+        {records_rel: admitted.records_sha},
+        {manifest_rel: admitted.files[0]["sha256"]},
+    ):
+        groups = [{**admitted.groups[0], "expected_hashes": pins}]
+        with pytest.raises(provenance.ProvenanceValidationError, match="owner-pinned"):
+            admitted.validate(catalog, groups=groups)
