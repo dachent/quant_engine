@@ -1394,6 +1394,12 @@ def _tt_target_snapshots(
     accepted_as_of: date,
 ) -> dict[date, dict[str, float]]:
     component_snapshots: dict[tuple[str, date], dict[str, Decimal]] = {}
+    try:
+        source_manifest = reconciliation.with_truncated_row_fallbacks(
+            source_manifest, accepted_as_of
+        )
+    except reconciliation.ImplementationReconciliationError as exc:
+        raise ReturnAttributionError(str(exc)) from exc
     selected = {
         str(row["slug"]): row
         for row in source_manifest["selected_components"]
