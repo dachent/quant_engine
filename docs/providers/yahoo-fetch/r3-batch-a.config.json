@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "run_label": "r3-batch-a",
-  "note": "R3 Batch A public Yahoo pull (pull list ids VTMA-P1..P3, QSI-P1, TT-P1/LEV-P1, VOL-P1, ROB-P2, EU-P2). The cutoff is data: edit it or pass --cutoff. No date appears in code. Group windows are exchange-session dates; the request end is always cutoff+1 (exclusive).",
-  "cutoff": "2026-10-09",
+  "note": "R3 Batch A public Yahoo pull (pull list ids VTMA-P1..P3, QSI-P1, TT-P1/LEV-P1, VOL-P1, ROB-P2, EU-P2). The cutoff is data and defaults to the delivery's owner-selected EOD 2026-09-17 (AGENTS.md); the pull-list windows that run to 2026-10-09 are a separately authorized incremental refresh and need an explicit --cutoff. No date appears in code. Group windows are exchange-session dates; the request end is always cutoff+1 (exclusive).",
+  "cutoff": "2026-09-17",
   "limits": {
     "batch_size": 20,
     "threads": 1,

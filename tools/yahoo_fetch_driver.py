@@ -37,15 +37,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
-import importlib.util
 import io
 import json
 import math
 from pathlib import Path
 import re
+import runpy
 import sys
 import tempfile
-from types import ModuleType
+from types import SimpleNamespace
 from typing import Any, Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -640,21 +640,17 @@ class LiveChart:  # pragma: no cover - live only, never run by the repository te
 
 # -------------------------------------------------------------------- adapter
 
-_ADAPTER: ModuleType | None = None
+_ADAPTER: SimpleNamespace | None = None
 
 
 def load_adapter() -> Any:
     """Load the maintained yfinance adapter by path (it lives outside the packages)."""
     global _ADAPTER
     if _ADAPTER is None:
-        spec = importlib.util.spec_from_file_location(
-            "quant_engine_yahoo_fetch_driver_adapter", _ADAPTER_PATH
+        namespace = runpy.run_path(
+            str(_ADAPTER_PATH), run_name="quant_engine_yahoo_fetch_driver_adapter"
         )
-        if spec is None or spec.loader is None:  # pragma: no cover - import guard
-            raise DriverError("the Yahoo adapter cannot be loaded")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        _ADAPTER = module
+        _ADAPTER = SimpleNamespace(**namespace)
     return _ADAPTER
 
 
@@ -673,7 +669,7 @@ def evaluate_series(
     group: Group,
     symbol_id: str,
     ticker: str,
-    dates: Sequence[date],
+    stamps: Sequence[str],
     *,
     null_closes: int = 0,
     adjustment: Mapping[str, Any] | None = None,
@@ -689,13 +685,14 @@ def evaluate_series(
         else:
             failures.append(message)
 
-    unique = sorted(set(dates))
-    duplicates = len(dates) - len(unique)
+    unique_stamps = set(stamps)
+    unique = sorted({date.fromisoformat(item[:10]) for item in unique_stamps})
+    duplicates = len(stamps) - len(unique_stamps)
     expected_last = last_expected_session(group.through, group.calendar)
     entry: dict[str, Any] = {
         "id": symbol_id,
         "ticker": ticker,
-        "rows": len(dates),
+        "rows": len(stamps),
         "first_bar": None,
         "last_bar": None,
         "expected_last_session": expected_last.isoformat(),
@@ -714,7 +711,7 @@ def evaluate_series(
         entry["first_bar"] = first.isoformat()
         entry["last_bar"] = last.isoformat()
         if duplicates:
-            failures.append(f"{duplicates} duplicate bar date(s)")
+            failures.append(f"{duplicates} duplicate bar timestamp(s)")
         if first < group.start:
             failures.append("first bar precedes the declared start")
         elif first > group.start + timedelta(days=group.first_bar_tolerance_days):
@@ -738,10 +735,9 @@ def evaluate_series(
             entry["last_bar_status"] = (
                 "REACHED_CUTOFF_SESSION" if late_by <= 0 else "WITHIN_ALLOWED_LAG"
             )
+        seen_days = set(unique)
         missing = [
-            d
-            for d in expected_dates(first, last, group.calendar)
-            if d not in set(unique)
+            d for d in expected_dates(first, last, group.calendar) if d not in seen_days
         ]
         entry["missing_weekday_count"] = len(missing)
         entry["missing_weekdays"] = [d.isoformat() for d in missing[:_MAX_LISTED_DATES]]
@@ -751,10 +747,10 @@ def evaluate_series(
                 "missing_weekdays",
                 f"{len(missing)} missing sessions exceed the allowed {group.max_missing_weekdays}",
             )
-    if len(unique) < group.min_rows and unique:
+    if len(unique_stamps) < group.min_rows and unique:
         waive(
             "min_rows",
-            f"short: {len(unique)} bars is below the minimum {group.min_rows}",
+            f"short: {len(unique_stamps)} bars is below the minimum {group.min_rows}",
         )
     if null_closes > group.max_null_closes:
         waive(
@@ -767,8 +763,12 @@ def evaluate_series(
     return entry
 
 
-def _row_date(text: object) -> date:
-    return date.fromisoformat(str(text)[:10])
+def _stamp(text: object) -> str:
+    """One comparable bar timestamp: ``YYYY-MM-DDTHH:MM:SS`` (CSV and JSON agree)."""
+    value = str(text).replace(" ", "T")
+    if len(value) == 10:
+        value += "T00:00:00"
+    return value[:19]
 
 
 def _number(text: str) -> float | None:
@@ -836,7 +836,12 @@ def analyze_raw_csv(
             group,
             symbol_id,
             ticker,
-            [_row_date(r["Date"]) for r in by_ticker[ticker]],
+            [_stamp(r["Date"]) for r in by_ticker[ticker]],
+            null_closes=sum(
+                1
+                for r in by_ticker[ticker]
+                if _number(r["Close"]) is None or _number(r["Adj Close"]) is None
+            ),
             adjustment=adjustment_summary(by_ticker[ticker], modes),
         )
         for symbol_id, ticker in pairs
@@ -913,7 +918,7 @@ def analyze_chart(
         group,
         symbol_id,
         ticker,
-        [d for d, v in inside if v is not None],
+        [d.isoformat() for d, v in inside if v is not None],
         null_closes=nulls,
         adjustment={
             "mode": "NONE_FX_QUOTE",
@@ -1064,6 +1069,18 @@ def build_tape(
     return files
 
 
+def preflight(
+    config: Config, *, allow_unresolved: bool = False
+) -> list[dict[str, str]]:
+    """Resolve every group before any transport call or evidence is consumed."""
+    skipped: list[dict[str, str]] = []
+    for group in config.groups:
+        skipped.extend(
+            resolve_group(group, config, allow_unresolved=allow_unresolved)[1]
+        )
+    return skipped
+
+
 def run_fetch(
     config: Config,
     *,
@@ -1083,6 +1100,7 @@ def run_fetch(
         stage_root / f"{run_id}.REJECTED.json"
     ).exists():
         raise DriverError("run id is already used (staging is create-only)")
+    preflight(config, allow_unresolved=allow_unresolved)
     meter = _Meter(max_requests)
     failures: list[str] = []
     coverage_groups: list[dict[str, Any]] = []
@@ -1448,7 +1466,7 @@ def _verify_artifact_pair(
         problems.append(f"{label}: coverage claim differs")
     seen: set[tuple[str, str]] = set()
     for row in artifact.get("rows", []):
-        key = (str(row.get("Ticker")), str(row.get("Date"))[:10])
+        key = (str(row.get("Ticker")), _stamp(row.get("Date")))
         raw = raw_rows.get(key)
         if raw is None or key in seen:
             problems.append(f"{label}: row {key} is not one raw row")
@@ -1560,7 +1578,7 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
             raw_bytes = (run_dir / f"raw/{group.group_id}/history.csv").read_bytes()
             entries = analyze_raw_csv(group, raw_bytes, pairs)
             raw_rows = {
-                (r["Ticker"], r["Date"][:10]): r
+                (r["Ticker"], _stamp(r["Date"])): r
                 for r in csv.DictReader(
                     io.StringIO(raw_bytes.decode("utf-8"), newline="")
                 )
@@ -1675,13 +1693,16 @@ def verify_retained(
     if declared_start is None:
         declared_start = _day(document.get("start"), "artifact start")
     tickers = list(document.get("tickers", []))
-    dates: dict[str, list[date]] = {t: [] for t in tickers}
+    dates: dict[str, list[str]] = {t: [] for t in tickers}
+    nulls: dict[str, int] = {t: 0 for t in tickers}
     for row in document.get("rows", []):
         ticker = row.get("Ticker")
         if ticker not in dates:
             problems.append(f"row for unrequested ticker {ticker}")
             continue
-        dates[ticker].append(_row_date(row.get("Date")))
+        dates[ticker].append(_stamp(row.get("Date")))
+        if row.get("Close") is None:
+            nulls[ticker] += 1
     entries = []
     for ticker in tickers:
         group = _retained_group(
@@ -1701,6 +1722,7 @@ def verify_retained(
             ticker,
             ticker,
             dates[ticker],
+            null_closes=nulls[ticker],
             adjustment={
                 "dataset": document.get("dataset"),
                 "note": "from retained rows",
@@ -1877,6 +1899,8 @@ def _live(args: argparse.Namespace) -> int:  # pragma: no cover - live only
     raw = _config_bytes(args.config)
     config = parse_config(raw, cutoff_override=args.cutoff)
     now = datetime.now(timezone.utc)
+    if args.command == "fetch":
+        preflight(config, allow_unresolved=args.allow_unresolved)
     budget = authorize_live(
         args.governance.read_bytes(),
         config=config,

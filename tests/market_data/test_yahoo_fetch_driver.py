@@ -38,6 +38,7 @@ class FakeYF:
         start_after: dict[str, date] | None = None,
         every_day: set[str] | None = None,
         skip_days: dict[str, int] | None = None,
+        null_close: set[str] | None = None,
     ) -> None:
         self.cache = _Cache()
         self.calls: list[list[str]] = []
@@ -46,6 +47,7 @@ class FakeYF:
         self.start_after = start_after or {}
         self.every_day = every_day or set()
         self.skip_days = skip_days or {}
+        self.null_close = null_close or set()
 
     def download(self, **kwargs: Any) -> pd.DataFrame:
         tickers = kwargs["tickers"]
@@ -72,8 +74,16 @@ class FakeYF:
                     days.pop(len(days) // 2)
             if not days:
                 continue
-            idx = pd.DatetimeIndex([pd.Timestamp(d) for d in days], name="Date")
-            n = len(days)
+            if kwargs["interval"] != "1d":
+                stamps = [
+                    pd.Timestamp(d) + pd.Timedelta(hours=9 + h)
+                    for d in days
+                    for h in range(7)
+                ]
+            else:
+                stamps = [pd.Timestamp(d) for d in days]
+            idx = pd.DatetimeIndex(stamps, name="Date")
+            n = len(stamps)
             close = [100.0 + i for i in range(n)]
             frame = pd.DataFrame(
                 {
@@ -88,6 +98,8 @@ class FakeYF:
                 },
                 index=idx,
             )
+            if ticker in self.null_close:
+                frame.iloc[0, frame.columns.get_loc("Close")] = float("nan")
             parts[ticker] = frame
         if not parts:
             return pd.DataFrame()
@@ -756,3 +768,57 @@ def test_cli_refuses_a_broken_run(
     (run / "MANIFEST.json").unlink()
     assert driver.main(["verify", str(run)]) == 1
     assert "Error" in capsys.readouterr().err
+
+
+def test_intraday_bars_are_counted_by_timestamp_not_by_day(tmp_path: Path) -> None:
+    groups = [_group("hourly", interval="60m", min_rows=7 * 20, max_missing_weekdays=3)]
+    run = _fetch(tmp_path, _config(groups), run_id="hourly")
+    entry = json.loads((run / "coverage.json").read_text())["groups"][0]["symbols"][0]
+    assert entry["rows"] == 7 * 29  # 29 weekdays, 7 bars each
+    assert entry["duplicate_dates"] == 0
+    assert entry["status"] == "PASS"
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    short = _config([_group("hourly", interval="60m", min_rows=7 * 30)])
+    _rejected(tmp_path, short, "short", yf=FakeYF())
+
+
+def test_duplicate_intraday_timestamp_is_still_a_duplicate() -> None:
+    group = driver.parse_config(_config()).groups[0]
+    entry = driver.evaluate_series(
+        group,
+        "AAA",
+        "AAA",
+        ["2026-09-01T09:00:00", "2026-09-01T09:00:00"],
+        null_closes=0,
+    )
+    assert any("duplicate" in m for m in entry["failures"])
+
+
+def test_null_raw_close_counts_against_the_null_rule(tmp_path: Path) -> None:
+    _rejected(tmp_path, _config(), "null closes", yf=FakeYF(null_close={"AAA"}))
+    labelled = _config([_group(max_null_closes=1)])
+    run = _fetch(tmp_path, labelled, run_id="nulls", yf=FakeYF(null_close={"AAA"}))
+    entry = json.loads((run / "coverage.json").read_text())["groups"][0]["symbols"][0]
+    assert entry["null_closes"] == 1
+
+
+def test_every_group_is_resolved_before_any_transport_call(tmp_path: Path) -> None:
+    pending = _group("pending", symbols=["ASB"])
+    document = json.loads(_resolution_config())
+    document["groups"] = [_group(), pending]
+    config = driver.parse_config(json.dumps(document).encode())
+    yf = FakeYF()
+    with pytest.raises(driver.DriverError, match="UNRESOLVED"):
+        driver.preflight(config)
+    with pytest.raises(driver.DriverError, match="UNRESOLVED"):
+        driver.run_fetch(
+            config,
+            stage_root=tmp_path / "s",
+            run_id="pre-1",
+            yf=yf,
+            chart=FakeChart(),
+            now=NOW,
+        )
+    assert yf.calls == []
+    assert not (tmp_path / "s" / "pre-1").exists()
+    assert driver.preflight(config, allow_unresolved=True)[0]["id"] == "ASB"
