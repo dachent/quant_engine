@@ -427,8 +427,8 @@ def _holdings_validation(
     * A short row whose symbols are a strict subset of the nearest complete prior
       row and whose missing mass equals the dropped weight is a dropped
       position.  If the dropped symbols are back in the next complete row the
-      row is ``SYMBOL_DROP`` (truncation, bracketed); if the next complete row
-      lacks them the position really exited and the mass is cash until the next
+      row is ``SYMBOL_DROP`` (truncation, bracketed); if the next near-complete
+      row (within the explain band) lacks them the position really exited and the mass is cash until the next
       row (``EXIT_TRANSITION``, not truncation); with no next complete row it is
       ``UNRESOLVED_DROP``.
     * The latest short row whose date equals the component's last-rebalance
@@ -471,6 +471,12 @@ def _holdings_validation(
                 neighbours.append(("LAST_COMPLETE_ROW", snaps[prior]))
             if after is not None:
                 neighbours.append(("NEXT_COMPLETE_ROW", snaps[after]))
+            # Bracket evidence: the next row that is itself near-complete (within
+            # the explain band), so one rounding-short row does not hide it.
+            after_ev = next(
+                (j for j in range(i + 1, len(snaps)) if sums[j] >= 1.0 - explain),
+                None,
+            )
             latest = i == len(snaps) - 1
             extra: dict[str, Any] = {}
             cls = CLASS_ROUNDING_OR_CASH
@@ -487,9 +493,9 @@ def _holdings_validation(
                         and symbols < set(base)
                         and abs(shortfall - sum(base[k] for k in dropped)) <= explain
                     ):
-                        if after is None:
+                        if after_ev is None:
                             cls = CLASS_UNRESOLVED_DROP
-                        elif dropped <= set(snaps[after]["weights"]):
+                        elif dropped <= set(snaps[after_ev]["weights"]):
                             cls = CLASS_SYMBOL_DROP
                         else:
                             cls = CLASS_EXIT_TRANSITION
