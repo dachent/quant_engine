@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .catalog import ENDPOINTS, Endpoint, catalog_rows, get_endpoint
-from .credentials import ApiCredentials, load_credentials
+from .credentials import ApiCredentials, load_credentials, plan_identity
 from .exporters import export_datasets, write_csv
 from .governance import authorize_live_read
 from .normalization import enrich_timestamps, normalize_rows
@@ -38,6 +38,41 @@ from .valuation import build_daily_valuation
 
 
 DEFAULT_CREDENTIAL_TARGET = "BIT.com-API"
+
+
+def _credential_label(
+    credentials: ApiCredentials | None, credentials_config: Path | None
+) -> str:
+    """A non-secret label for where the run's credentials came from."""
+
+    if credentials_config is not None:
+        return "configured-credential-plan"
+    if credentials is not None:
+        return "injected-credentials"
+    return DEFAULT_CREDENTIAL_TARGET
+
+
+def _credential_identity(
+    credentials: ApiCredentials | None, credentials_config: Path | None
+) -> str:
+    """Non-secret identity a run is bound to (resume and verify must match it)."""
+
+    if credentials_config is None and credentials is not None:
+        return "injected-credentials"
+    return plan_identity(credentials_config)
+
+
+def recorded_credential_identity(run: Mapping[str, Any]) -> str:
+    """The identity stored for a run; runs that predate it used the default."""
+
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    return str(
+        stored.get("credential_identity")
+        or stored.get("credential_target")
+        or DEFAULT_CREDENTIAL_TARGET
+    )
+
+
 OUTPUT_FOLDER = "output"
 DATABASE_NAME = "matrixport.sqlite"
 OFFSET_PAGE_SIZE = 50
@@ -374,6 +409,7 @@ class MatrixportExtractor:
         run_id: str | None = None,
         resume: bool = False,
         credentials: ApiCredentials | None = None,
+        credentials_config: Path | None = None,
         transport: ReadOnlyTransport | None = None,
         governance_evidence: str | Path | None = None,
         live_operation: str = "extract",
@@ -421,6 +457,12 @@ class MatrixportExtractor:
                 raise ExtractionError(
                     "Cannot resume a run with a changed endpoint catalog"
                 )
+            if recorded_credential_identity(existing) != _credential_identity(
+                credentials, credentials_config
+            ):
+                raise ExtractionError(
+                    "Cannot resume a run with a different credential source"
+                )
         else:
             if existing is not None:
                 raise ExtractionError(f"Run already exists: {self.run_id}")
@@ -433,7 +475,12 @@ class MatrixportExtractor:
                 extractor_hash=self.extractor_hash,
                 config_hash=self.config_hash,
                 metadata={
-                    "credential_target": DEFAULT_CREDENTIAL_TARGET,
+                    "credential_target": _credential_label(
+                        credentials, credentials_config
+                    ),
+                    "credential_identity": _credential_identity(
+                        credentials, credentials_config
+                    ),
                     "history_semantics": "all_api_reachable_history_to_frozen_run_end",
                     "timezone": "UTC",
                 },
@@ -442,7 +489,8 @@ class MatrixportExtractor:
             self.run_dir / "raw", storage=self.storage, run_id=self.run_id
         )
         self.transport = transport or ReadOnlyTransport(
-            credentials or load_credentials(), governance=governance
+            credentials or load_credentials(credentials_config),
+            governance=governance,
         )
         self.previous_run_dir, self._previous_end_ms = self._find_previous_completed()
         if self.mode == "incremental" and self.previous_run_dir is not None:
@@ -2105,6 +2153,7 @@ def live_auth_test(
     workspace: str | Path,
     governance_evidence: str | Path,
     credentials: ApiCredentials | None = None,
+    credentials_config: Path | None = None,
 ) -> dict[str, Any]:
     governance = authorize_live_read(
         governance_evidence,
@@ -2112,7 +2161,7 @@ def live_auth_test(
         mode=None,
     )
     transport = ReadOnlyTransport(
-        credentials or load_credentials(), governance=governance
+        credentials or load_credentials(credentials_config), governance=governance
     )
     response = transport.get("/mapi/v1/wallet/balance")
     payload = _json_loads(response.content)
@@ -2125,5 +2174,5 @@ def live_auth_test(
         "status_code": response.status_code,
         "request_id": response.request_id,
         "row_count": _row_count(payload),
-        "credential_target": DEFAULT_CREDENTIAL_TARGET,
+        "credential_target": _credential_label(credentials, credentials_config),
     }
