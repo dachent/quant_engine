@@ -227,3 +227,29 @@ def test_the_unavailable_note_counts_only_the_listed_unavailable_entries() -> No
     assert f"{named} of the {len(entries)} unavailable entries name" in note
     assert "with the pull that closes it" not in note
     assert _errors(block) == []
+
+
+def test_the_unavailable_note_lists_the_reasons_of_the_entries_it_counts() -> None:
+    audit = _audit()
+    audit["strategies"][0]["unavailable"].append(
+        {
+            "term": "t2",
+            "reason": "OTHER_REASON",
+            "window_end": None,
+            "replacing_pull": None,
+        }
+    )
+    audit["strategies"][0]["windows"][1]["end"] = (
+        "2026-04-01"  # after the 2026-03-09 cutoff
+    )
+    block, _raw, _sha = _build(audit)
+    entries = [u for s in block["strategies"] for u in s["unavailable"]]
+    reasons: dict[str, int] = {}
+    for entry in entries:
+        key = entry["reason"].split(":", 1)[0]
+        reasons[key] = reasons.get(key, 0) + 1
+    assert len(reasons) >= 3, "fixture must hold several reasons"
+    note = block["notes"][1]
+    for reason, count in reasons.items():
+        assert f"{reason} ({count})" in note
+    assert "has no admitted model leg" not in note

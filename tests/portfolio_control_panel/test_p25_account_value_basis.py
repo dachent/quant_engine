@@ -70,7 +70,9 @@ def test_account_nav_row_with_value_basis_says_so_and_a_plain_row_does_not(
     )
     derived, plain = _rows(table)
 
-    assert LABEL in derived and "captured Sep 18, 2026" in derived
+    assert LABEL in derived
+    assert "as of Sep 17, 2026 (observed Sep 18, 2026)" in derived
+    assert "captured" not in derived
     assert "official closes manifest cccccccc; evidence eeeeeeee" in derived
     assert "no provider finality guarantee" in derived
     assert LABEL not in plain and "captured" not in plain
@@ -86,8 +88,11 @@ def test_account_nav_date_is_the_rows_own_never_a_literal(tmp_path: Path) -> Non
     )
     first, second = _rows(table)
 
-    assert "captured Mar 4, 2026" in first and "Sep 18, 2026" not in table
-    assert "as of Sep 17, 2026" in second
+    assert (
+        "as of Sep 17, 2026 (observed Mar 4, 2026)" in first
+        and "Sep 18, 2026" not in table
+    )
+    assert "as of Sep 17, 2026" in second and "observed" not in second
 
 
 def test_account_nav_label_needs_the_summary_row_of_that_observation(
@@ -131,7 +136,9 @@ def test_reserve_nav_in_the_allocation_table_carries_the_label(tmp_path: Path) -
     )
     unmarked = reserve_row([_summary("r0", role="RESERVE")])
 
-    assert "$98,000" in marked and LABEL in marked and "captured Sep 18, 2026" in marked
+    assert "$98,000" in marked and LABEL in marked
+    assert "as of Sep 17, 2026 (observed Sep 18, 2026)" in marked
+    assert "captured" not in marked
     assert "$98,000" in unmarked and LABEL not in unmarked
 
     # the reserve is an aggregate: one derived member among several is not the aggregate's basis

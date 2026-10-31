@@ -873,18 +873,23 @@
   const positionValueNote = (row) => (number(row.market_value_usd) == null ? `<span class="cell-secondary">${safe(row.market_value_reason ? humanStatus(row.market_value_reason) : "No market value published for this row")}</span>` : "");
   // A row whose value is declared derived says so in a tooltip: the closes manifest and the finality evidence it names.
   const valueBasisTitle = (row) => (row.value_basis ? ` title="${safe(`${humanStatus(row.value_basis.basis)}; official closes manifest ${String(row.value_basis.official_closes_manifest_sha256).slice(0, 8)}; evidence ${String(row.value_basis.finality_evidence_sha256).slice(0, 8)}${row.value_basis.provider_finality_guarantee === false ? "; no provider finality guarantee" : ""}`)}"` : "");
-  const positionBasisNote = (row) => (row.as_of_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
+  // One label for a value the report declares derived, on every surface: the basis, the day the value is for (the row's
+  // as_of_date) and, only when it differs, the day it was observed (capture_date, else observed_at).  The observation day
+  // is never described as the day the close was captured: the close is the as-of day's.
+  const valueBasisLabel = (row) => {
+    const seen = typeof row.capture_date === "string" && row.capture_date !== "" ? row.capture_date.slice(0, 10)
+      : typeof row.observed_at === "string" ? row.observed_at.slice(0, 10) : "";
+    const asOf = typeof row.as_of_date === "string" && row.as_of_date !== "" ? row.as_of_date.slice(0, 10) : "";
+    return `${humanStatus(row.value_basis.basis)}${asOf ? ` as of ${formatDate(asOf)}` : ""}${seen && seen !== asOf ? ` (observed ${formatDate(seen)})` : ""}`;
+  };
+  const positionBasisNote = (row) => (row.value_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(valueBasisLabel(row))}</span>` : row.as_of_basis ? `<span class="cell-secondary"${valueBasisTitle(row)}>${safe(humanStatus(row.as_of_basis))}${row.capture_date ? ` · captured ${safe(formatDate(row.capture_date))}` : ""}</span>` : "");
 
   // An account NAV row whose value the report declares derived says so beside the figure, with the same label and
   // tooltip a position row carries.  The account_summary row is the source: it is matched by account id, and for an
-  // epoch row by its end date as well, because the epoch's current value is that row's observation.  The date printed
-  // is the row's own capture_date, else observed_at, else as_of_date; none is supplied here.
-  const accountBasisNote = (summary) => {
-    if (!summary?.value_basis) return "";
-    const dated = [["capture_date", "captured"], ["observed_at", "observed"], ["as_of_date", "as of"]]
-      .find(([field]) => typeof summary[field] === "string" && summary[field] !== "");
-    return `<span class="cell-secondary"${valueBasisTitle(summary)}>${safe(humanStatus(summary.value_basis.basis))}${dated ? ` · ${dated[1]} ${safe(formatDate(summary[dated[0]]))}` : ""}</span>`;
-  };
+  // epoch row by its end date as well, because the epoch's current value is that row's observation.  The dates printed
+  // are the row's own (valueBasisLabel); none is supplied here.
+  const accountBasisNote = (summary) => (summary?.value_basis
+    ? `<span class="cell-secondary"${valueBasisTitle(summary)}>${safe(valueBasisLabel(summary))}</span>` : "");
   const epochBasisNote = (row) => accountBasisNote(accountDimension.find((summary) => summary.account_id === row.account_id
     && String(summary.as_of_date || "").slice(0, 10) === String(row.end || "").slice(0, 10)));
   // The reserve figure is an aggregate: the note is shown only when every reserve account carries a derived
