@@ -277,3 +277,47 @@ package. The reader re-runs the same checks on every load.
   expected as separate `FEE` rows. Any fee embedded in a fill is not captured.
 - The generation verifier (`verify_published`) rebuilds from the plan, so the
   package directory named in the plan must remain in place.
+
+### Crosswalk authoring (generated, never hand-written)
+
+```powershell
+python -m quant_engine.alpaca.capture crosswalk --plan-digest <account_binding_sha256 from `plan`> `
+  --internal-account-id account-<16 hex> --out <absolute path>
+```
+
+Writes the exact one-row, one-to-one crosswalk the ingest reads, create-only,
+and prints its SHA-256. A digest that is not a lowercase SHA-256, an invalid
+account id, a relative path, or an existing file is refused. Success test:
+`test_generated_crosswalk_is_accepted_by_the_ingest` (the ingest accepts it) and
+`test_a_wrong_plan_digest_is_refused_by_the_ingest`.
+
+### Sign-convention check (run before any total is used)
+
+```powershell
+python -m quant_engine.alpaca.capture signcheck --package-dir <package> `
+  --opening-cash <cash at window start> (--closing-cash <cash at window end> | --closing-from-snapshot) `
+  [--tolerance 0] [--out <absolute report path>]
+```
+
+Exit 0 only when the totals are blessed. It compares the package against an
+independent balance movement, `delta = closing - opening`, where opening cash
+must come from a source other than the activities (a statement or the prior
+capture) and `--closing-from-snapshot` uses the account snapshot `cash` and is
+valid only if no cash movement occurred between the window end and the capture.
+With `S` the package total and `s_T` a type's total:
+
+- as reported, `R0 = delta - S` (zero when the reported signs hold);
+- per type, `R1 = delta - (S - 2 s_T)`: FAIL when `|R1| < |R0|` (flipping that
+  type fits the balance better), PASS otherwise, INCONCLUSIVE when `|s_T|` is
+  within tolerance of zero, DERIVED for FILL (cash leg is qty times price with the
+  side as sign, never flipped);
+- a global inversion of every non-fill type is tested too.
+
+The totals are blessed only if no type fails, no global inversion fits better,
+and `|R0| <= tolerance`. Output is counts, sums, and residuals only (no ids), and
+`--out` writes the same report create-only for the Quantbase 36.49 closure to
+read. A residual that is large relative to a type's total can implicate that type
+(for example a 36.49 residual against a small negative-sum type); read the
+per-type residuals before concluding which it is. Tested with both conventions
+(fee, journal, and global inversion reported with the opposite sign fail; the
+documented convention passes): `tests/alpaca/test_capture_signcheck.py`.

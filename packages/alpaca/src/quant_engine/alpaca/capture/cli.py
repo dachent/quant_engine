@@ -31,6 +31,7 @@ from quant_engine.alpaca.capture.errors import (
 from quant_engine.alpaca.capture.fetch import GovernedFetcher, HttpsFetcher, RawFetcher
 from quant_engine.alpaca.capture.governance import TERMS_SHA256, authorize_live_read
 from quant_engine.alpaca.capture.ingest import ingest_run, load_crosswalk
+from quant_engine.alpaca.capture.signcheck import run_sign_check, write_crosswalk
 from quant_engine.alpaca.capture.run import run_capture
 from quant_engine.alpaca.capture.util import sha256_text
 from quant_engine.alpaca.capture.verify import verify_run
@@ -85,6 +86,23 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--until", required=True)
     ingest.add_argument("--output-root", required=True)
     ingest.add_argument("--package-id")
+    cross = commands.add_parser(
+        "crosswalk",
+        help="write the one-row crosswalk the ingest consumes; no network",
+    )
+    cross.add_argument("--plan-digest", required=True)
+    cross.add_argument("--internal-account-id", required=True)
+    cross.add_argument("--out", required=True)
+    sign = commands.add_parser(
+        "signcheck",
+        help="check reported cash signs against the balance movement; no network",
+    )
+    sign.add_argument("--package-dir", required=True)
+    sign.add_argument("--opening-cash", required=True)
+    sign.add_argument("--closing-cash")
+    sign.add_argument("--closing-from-snapshot", action="store_true")
+    sign.add_argument("--tolerance", default="0")
+    sign.add_argument("--out")
     return parser
 
 
@@ -107,6 +125,25 @@ def main(
                 }
             )
             return 0 if report.ok else 1
+        if args.command == "crosswalk":
+            digest = write_crosswalk(
+                plan_digest=args.plan_digest,
+                internal_account_id=args.internal_account_id,
+                out=args.out,
+            )
+            _emit({"crosswalk_sha256": digest})
+            return 0
+        if args.command == "signcheck":
+            checked = run_sign_check(
+                package_directory=args.package_dir,
+                opening_cash=args.opening_cash,
+                closing_cash=args.closing_cash,
+                closing_from_snapshot=args.closing_from_snapshot,
+                tolerance=args.tolerance,
+                out=args.out,
+            )
+            _emit(checked.to_dict())
+            return 0 if checked.blessed else 1
         if args.command == "ingest":
             ingested = ingest_run(
                 run_directory=args.run_dir,
