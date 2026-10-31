@@ -1230,7 +1230,16 @@ def build_contract_draft(manifests: Sequence[Mapping[str, Any]]) -> dict[str, An
     reviewed = {(e.origin, e.path): e for e in QUANTBASE_CONTRACT.endpoints}
     taken = {e.capability for e in QUANTBASE_CONTRACT.endpoints}
     extra_keys: dict[str, set[str]] = {}
-    routes: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
+    # One declared route per (origin, template): every observed query shape of a new
+    # route is coalesced into required keys (in all shapes) and optional keys (in some),
+    # so the extension never repeats a route identity.
+    shapes: dict[tuple[str, str], list[set[str]]] = {}
+    for origin, template, keys in observed:
+        if (origin, template) not in reviewed and all(
+            _PORTABLE_KEY.fullmatch(k) for k in keys
+        ):
+            shapes.setdefault((origin, template), []).append(set(keys))
+    routes: dict[tuple[str, str], dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
     for (origin, template, keys), count in sorted(observed.items()):
         row: dict[str, Any] = {
@@ -1255,21 +1264,28 @@ def build_contract_draft(manifests: Sequence[Mapping[str, Any]]) -> dict[str, An
                 row["proposal"] = "QUERY_SHAPE_DIFFERS_REVIEW_BY_HAND"
                 row["capability"] = endpoint.capability
         else:
-            capability = suggest_capability(template, taken)
-            taken.add(capability)
-            pattern = _pattern_for(template)
-            route: dict[str, Any] = {
-                "capability": capability,
-                "origin": origin,
-                "path": template,
-                "query_keys": sorted(keys),
-                "authentication_header": "jwt" if origin == API_ORIGIN else None,
-            }
-            if pattern is not None:
-                route["path_pattern"] = pattern
-            routes[(origin, template, keys)] = route
+            route = routes.get((origin, template))
+            if route is None:
+                capability = suggest_capability(template, taken)
+                taken.add(capability)
+                group = shapes[(origin, template)]
+                required = set.intersection(*group)
+                optional = set.union(*group) - required
+                route = {
+                    "capability": capability,
+                    "origin": origin,
+                    "path": template,
+                    "query_keys": sorted(required),
+                    "authentication_header": "jwt" if origin == API_ORIGIN else None,
+                }
+                if optional:
+                    route["optional_query_keys"] = sorted(optional)
+                pattern = _pattern_for(template)
+                if pattern is not None:
+                    route["path_pattern"] = pattern
+                routes[(origin, template)] = route
             row["proposal"] = "NEW_ROUTE"
-            row["capability"] = capability
+            row["capability"] = route["capability"]
         rows.append(row)
     return {
         "schema": DRAFT_SCHEMA,
