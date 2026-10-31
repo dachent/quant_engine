@@ -259,3 +259,92 @@ shapes to `capture_catalog` and marks them CONFIRMED; only then does `stage-har`
 produce a `REVIEWED_SHAPES` run that admission accepts. That review is a small,
 mechanical code change (two catalog rows and their tests), not data, and it must
 land before the run that admission binds is staged.
+
+## Passive CDP recorder for the pre-R3 sitting (`tools/p123_cdp_recorder.py`)
+
+One attended sitting (Block 0) can learn the real routes and response shapes of the
+UNVERIFIED capabilities (`aifactor.predictor`, `aifactor.model`, `screen.definition`,
+`simulation.result`, `transactions.account`) so that R3 stays data-only. The recorder
+attaches to a dedicated Edge or Chrome profile with a loopback debug port that the
+owner signed in to and drove by hand. Nothing here logs in, types, or clicks.
+
+Safety rules, enforced in code and pinned by `tests/portfolio123/test_p123_cdp_recorder.py`:
+
+- Passive. The only messages sent to the browser are `Target.setDiscoverTargets`,
+  `Target.attachToTarget`, `Network.enable`, and `Network.getResponseBody`; a guard
+  refuses everything else (navigate, evaluate, input, fetch interception, cookies)
+  before it leaves the process. It listens to four Network events only.
+- Origin-limited to `https://www.portfolio123.com` (exact host list `ALLOWED_HOSTS`,
+  no port, no userinfo). Only page targets already on that origin are attached.
+  Other-origin responses are counted, never listed.
+- Never reads request headers, cookies, or the Authorization value, and never opens
+  the `*ExtraInfo` events; a test hands the listener header objects that fail the test
+  if touched. Query values are not persisted; the only exceptions are the literals
+  `true`/`false` and integer pagination positions (`offset`, `page`, `limit`, `start`,
+  `size`, `count`).
+- Records only same-origin GET responses. Any non-GET request and any GET whose
+  decoded path or query contains `revert`, `delete`, `remove`, `save`, `submit`,
+  `update`, `create`, `rebalanc`, `trade`, `order`, `subscri`, `cancel`, `logout`,
+  `password`, or `token` is NOT recorded and is listed in the manifest as
+  `MUTATION_LIKE_NOT_RECORDED` (method, path template, reason `NON_GET` or `PATTERN`,
+  count; never the query). The match is a substring match and fails closed, so a few
+  harmless pages (`/app/tradeActivity`) are listed there too.
+- Billing and identity paths (`account`, `profile`, `billing`, `invoice`, `payment`,
+  and the `/spr/user` segment `user`) are not recorded unless
+  `--include-identity <word>` names them; they appear as
+  `IDENTITY_BILLING_NOT_RECORDED` with the template only.
+- Body shapes keep field names, so objects keyed by data collapse to `$keyed`: more
+  than 64 keys, or at least half the keys numeric, dates, uppercase ticker-like, or
+  containing spaces or other non-identifier characters. A map keyed by plain lowercase
+  words cannot be told apart from field names, so `discover` output is still treated
+  as restricted evidence and is kept only in the governed root.
+- Path templates replace identifiers (digit runs, UUIDs, long hex or token-like
+  segments) with `{id}` and drop path parameters such as `;jsessionid=`.
+- The run directory (`--output-root`) must be absolute, new, outside any Git
+  worktree, and not inside a `scratch`/`tmp`/`temp` folder of a cloud-synced root.
+  Files are create-only; `manifest.json` is written last. Raw bodies are restricted
+  evidence (`docs/restricted-evidence-output.md`): keep them only in the governed root
+  the owner chooses. Stdout carries counts and route templates, never contents.
+
+Modes:
+
+| Mode | Writes | Notes |
+|---|---|---|
+| `discover` | `discovery.json`, `manifest.json` | Per response: method, path template, query key names, status, media type, body shape (field names and types; objects keyed by data collapse to `$keyed`; ISO and `MM/DD/YYYY` dates are typed `date`/`us_date`), HTML table header labels and data-row counts, CSV header labels. No body is kept. |
+| `capture` | `raw/NNNNN.body`, `entries.json`, `manifest.json` | Raw bytes of recorded GET JSON, HTML, and CSV responses with one SHA-256 each (bodies over 32 MiB or unreadable are flagged, not recorded). |
+| `verify` | nothing | Re-hashes every file, rejects strays, re-derives every shape and profile from the raw bytes, re-screens every recorded route (a recorded non-GET or mutation-like or identity route fails), and requires the `safety` block unchanged. Exit 0 or `REFUSED <CODE>` with exit 2. |
+| `propose-catalog` | `catalog-diff.draft.{json,md}`, `test_capture_new_rows.py.draft`, `proposal-manifest.json` | Verifies the discover run (and an optional `--raw-run`), maps observed 2xx GET routes to the five capabilities plus a confirmation of `designer-model.json`, compares with the current `catalog_rows()`, and writes a DRAFT. It is never applied. |
+
+`propose-catalog` maps routes by keyword (`CAPABILITY_HINTS`); several candidates mean
+the owner picks one, and `--map CAPABILITY=TEMPLATE` pins a route explicitly. Each
+candidate carries the route template, query keys, response media type, status
+counts, top-level shape, and a generated `Obj(...)`/`Seq(...)` source text in which
+anything the sample cannot decide (mixed types, data-keyed objects) is written as
+`"<MIXED:...>"` or `"<KEYED:...>"`, which is not a valid shape, so a row cannot be
+applied without a human finishing it. `transactions.account` is an HTML table: the
+draft records its header labels, data rows per page, and `offset` pagination, and
+states `requires_code_change` because the capture extractor and `CaptureRoute`
+admit JSON shapes and CSV columns only. Dates, optional fields, and nullability are
+inferred from the observed sample only; the reviewer confirms against the raw bodies.
+
+Commands (Edge debug port 9333, the dedicated profile the owner already signed in to):
+
+```powershell
+msedge.exe --remote-debugging-port=9333 --user-data-dir=<the dedicated profile>
+python tools/p123_cdp_recorder.py discover --cdp-url http://127.0.0.1:9333 --output-root <governed root>\discover-1
+python tools/p123_cdp_recorder.py capture  --cdp-url http://127.0.0.1:9333 --output-root <governed root>\capture-1
+python tools/p123_cdp_recorder.py verify   --run-root <governed root>\capture-1
+python tools/p123_cdp_recorder.py propose-catalog --discover <governed root>\discover-1 --raw-run <governed root>\capture-1 --out <governed root>\catalog-draft
+```
+
+**Start the recorder FIRST, then load or reload the pages.** It only sees NEW
+traffic: a page that finished loading before the recorder attached produces nothing
+(a smoke run attached after page load recorded 0 entries; opening a new tab or
+reloading after it was running recorded them). If nothing is recorded after
+`--warn-after-seconds` (default 30; 0 disables) the recorder prints
+`WARNING NO_ENTRIES_RECORDED` and writes it to the manifest `warnings`; an empty run
+always records that warning at the end.
+
+`discover` and `capture` run until Ctrl-C (or `--max-seconds`) and then write the
+manifest. Nothing in this section was run against the live site: the proof is a
+fake CDP transport replaying synthetic events built from the known route templates.

@@ -2,6 +2,7 @@
 
 from quant_engine.portfolio123.capture_catalog import (
     CaptureRefusal,
+    catalog_rows,
     verify_confirmed_shape,
 )
 from quant_engine.portfolio123.capture import (
@@ -52,6 +53,7 @@ __all__ = [
     "Transport",
     "account_capture_targets",
     "capability_policy",
+    "catalog_rows",
     "create_cutover_plan",
     "cutover_sources",
     "managed_strategy_capture_targets",
