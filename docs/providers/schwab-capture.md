@@ -160,6 +160,12 @@ consumes, under a new create-only output root:
   `<SYMBOL>_yahoo_daily.csv` files; the provider-quoted value is never used. The
   snapshot `observed_at` is the valuation instant (the cutoff close), whose UTC
   date is always the cutoff date, so the frozen consumer's date check holds.
+  Zero-quantity rows are removed from the raw response before the frozen reader
+  sees it (the driver omits them before reading their price fields). The emitted
+  `sweep_vehicle_count` counts quantity rows only: the frozen reader also counts
+  the quantity-less cash summary rows (R2's 9 was 8 summaries and 1 sweep row;
+  the adapter emits 1) and the adapter requires the reader's raw count to
+  reconcile with the verified run.
 - `nav/<account>.csv`: eight `WCH_NAV_CSV` files from the raw `histories`, columns
   `account_id,account_name,date,account_value`, rows up to the cutoff.
 - `terminal/`: the terminal transaction package (pages, normalized rows, and the
@@ -170,7 +176,9 @@ consumes, under a new create-only output root:
   WCH sources and `transaction_history_manifest`, each hash-bound. With
   `--base-spec` and `--spec-out` the fragment is merged into an existing spec
   (crosswalk, baseline and manual sources kept; crosswalk must equal the run's)
-  and written to a separate restricted file because it names provider ids.
+  and written to a separate restricted file because it names provider ids. The
+  base spec and the destination are checked before the create-only ingest root
+  exists, so a corrected retry can reuse the same root.
 - `ingest-binding.json`, written last: `as_of_date` (the cutoff), the full
   capture block with `capture_date_utc`, `capture_date_new_york` and
   `capture_date_utc_offset_days`, the driver manifest and evidence hashes, the

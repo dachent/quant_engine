@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import csv
 from collections.abc import Mapping, Sequence
+import copy
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -249,8 +250,10 @@ def ingest(
             f"symbols={len(missing)} missing={','.join(missing)}"
         )
 
-    raw_holdings = strict_json_loads(
-        (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
+    raw_holdings, dropped_position_rows = _without_zero_quantity_rows(
+        strict_json_loads(
+            (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
+        )
     )
     try:
         read = read_holdings_v2_current_snapshot(
@@ -264,9 +267,18 @@ def ingest(
         raise IngestError(
             f"holdings cannot be valued by the frozen reader: {exc}"
         ) from exc
-    kept = tuple(row for row in read.positions if Decimal(str(row["quantity"])) != 0)
-    zero_quantity_rows = len(read.positions) - len(kept)
-    snapshot = replace(read, positions=kept)
+    # The frozen reader counts every Cash-group row as a sweep vehicle. The
+    # confirmed shape has one quantity-less summary row per account, which is a
+    # balance, so the emitted count is the quantity rows only; the reader's raw
+    # count must reconcile with the verified driver run (summaries, sweeps and
+    # the zero-quantity rows the driver omitted).
+    zero_cash_rows = read.sweep_vehicle_count - len(sweeps) - len(cash_rows)
+    if zero_cash_rows < 0 or dropped_position_rows + zero_cash_rows != positions.get(
+        "zero_quantity_rows_omitted"
+    ):
+        raise IngestError("snapshot rows differ from the verified driver run")
+    zero_quantity_rows = dropped_position_rows + zero_cash_rows
+    snapshot = replace(read, sweep_vehicle_count=len(sweeps))
     if any(_market_value_status(row) != "AVAILABLE" for row in snapshot.positions):
         raise IngestError("a held position has no market value after valuation")
     expected = _positions_by_identity(held)
@@ -278,8 +290,6 @@ def ingest(
         raise IngestError(
             "snapshot positions differ from the verified driver positions"
         )
-    if snapshot.sweep_vehicle_count < len(sweeps) + len(cash_rows):
-        raise IngestError("snapshot sweep rows differ from the verified driver run")
     quoted = {
         (str(row["account_id"]), str(row["symbol"])): driver.decimal_value(
             row.get("market_value_usd")
@@ -363,6 +373,7 @@ def ingest(
         "counts": {
             "cash_summary_rows": len(cash_rows),
             "positions": len(snapshot.positions),
+            "reader_cash_group_rows": read.sweep_vehicle_count,
             "sweep_vehicle_rows": len(sweeps),
             "transaction_accounts": len(transaction_sources),
             "zero_quantity_rows_dropped": zero_quantity_rows,
@@ -395,6 +406,34 @@ def ingest(
     }
     _write_new(output_root / "ingest-binding.json", driver.canonical_bytes(binding))
     return binding
+
+
+def _without_zero_quantity_rows(raw: object) -> tuple[dict[str, Any], int]:
+    """Drop zero-quantity rows of the position groups from a copy of the response.
+
+    The driver omits such rows before it looks at their price fields, so a
+    verified run may hold one with no price date, which the frozen reader would
+    refuse. Cash-group rows are left for the reader, which only counts them.
+    """
+
+    document = copy.deepcopy(driver.json_object(raw, "raw holdings"))
+    dropped = 0
+    for account in driver.json_objects(document.get("accounts"), "accounts"):
+        for group in driver.json_objects(account.get("groupedPositions"), "groups"):
+            if str(group.get("groupName")).casefold() == "cash":
+                continue
+            rows = driver.json_objects(group.get("holdingsRows"), "holdings rows")
+            kept = [
+                row
+                for row in rows
+                if driver.decimal_value(
+                    driver.json_object(row.get("qty"), "quantity").get("qty")
+                )
+                != 0
+            ]
+            dropped += len(rows) - len(kept)
+            group["holdingsRows"] = kept
+    return document, dropped
 
 
 def _market_value(row: Mapping[str, object]) -> object:
@@ -635,6 +674,27 @@ def _provider_day(value: object) -> date:
 # --------------------------------------------------------------------------- #
 
 
+def load_base_spec(base_spec: Path, crosswalk: Mapping[str, str]) -> dict[str, Any]:
+    """Validate a base spec against the run before any output is created."""
+
+    base = _load(base_spec, "base spec")
+    if base.get("schema_version") != 2:
+        raise IngestError("base spec schema version is unsupported")
+    given = {
+        str(item.get("external_account_id")): str(item.get("internal_account_id"))
+        for item in driver.json_objects(base.get("crosswalk"), "base crosswalk")
+    }
+    if given != dict(crosswalk):
+        raise IngestError("base spec crosswalk differs from the run crosswalk")
+    if set(driver.json_object(base.get("roots"), "base roots")) & {
+        ROOT_CURRENT,
+        ROOT_NAV,
+        ROOT_TERMINAL,
+    }:
+        raise IngestError("base spec already uses an ingest root id")
+    return base
+
+
 def compose_spec(
     binding_root: Path, base_spec: Path, crosswalk: Mapping[str, str]
 ) -> bytes:
@@ -645,15 +705,7 @@ def compose_spec(
     """
 
     fragment = _load(binding_root / "spec-fragment.json", "spec fragment")
-    base = _load(base_spec, "base spec")
-    if base.get("schema_version") != 2:
-        raise IngestError("base spec schema version is unsupported")
-    given = {
-        str(item.get("external_account_id")): str(item.get("internal_account_id"))
-        for item in driver.json_objects(base.get("crosswalk"), "base crosswalk")
-    }
-    if given != dict(crosswalk):
-        raise IngestError("base spec crosswalk differs from the run crosswalk")
+    base = load_base_spec(base_spec, crosswalk)
     roots = dict(driver.json_object(base.get("roots"), "base roots"))
     new_roots = driver.json_object(fragment["roots"], "fragment roots")
     if set(roots) & set(new_roots):
@@ -717,6 +769,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if bool(args.base_spec) != bool(args.spec_out):
             raise IngestError("--base-spec and --spec-out go together")
         crosswalk = driver.parse_crosswalk(_load(args.crosswalk, "crosswalk"))
+        if args.base_spec:
+            # Everything about the optional composition that can be known before
+            # the create-only ingest root exists is checked first.
+            if args.spec_out.exists() or not args.spec_out.parent.is_dir():
+                raise IngestError("spec output exists or its directory is missing")
+            load_base_spec(args.base_spec, crosswalk)
         binding = ingest(
             args.run_dir,
             crosswalk=crosswalk,

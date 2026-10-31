@@ -57,12 +57,15 @@ def _row(symbol: str, quantity: int, price: float, price_date: str) -> dict[str,
     }
 
 
-def _holdings(*, zero_row: bool = False) -> dict[str, Any]:
+def _holdings(
+    *, zero_row: bool = False, sweep: bool = False, zero_cash: bool = False
+) -> dict[str, Any]:
     accounts = []
     for index, external in enumerate(_crosswalk(), start=1):
         rows = [_row(f"SYN{index}", 4, 24.875, "06/13/2031")]
         if zero_row and index == 1:
-            rows.append(_row("SYNZERO", 0, 3.5, "06/13/2031"))
+            # the driver omits a zero-quantity row before it reads its price
+            rows.append({"dataSymbol": "SYNZERO", "qty": {"qty": 0}, "rowType": 0})
         groups: list[dict[str, Any]] = [
             {"groupName": "Equity", "securityType": 1, "holdingsRows": rows},
             {
@@ -78,6 +81,11 @@ def _holdings(*, zero_row: bool = False) -> dict[str, Any]:
                 ],
             },
         ]
+        cash_rows = groups[1]["holdingsRows"]
+        if sweep and index == 1:
+            cash_rows.insert(0, _row("SYNSWEEP", 12, 1.0, "06/13/2031"))
+        if zero_cash and index == 2:
+            cash_rows.insert(0, {"dataSymbol": "SYNOLD", "qty": {"qty": 0}})
         accounts.append({"accountId": external, "groupedPositions": groups})
     return {"accounts": accounts}
 
@@ -281,6 +289,7 @@ def test_evening_capture_is_bound_to_the_new_york_cutoff_date(tmp_path: Path) ->
     assert binding["counts"] == {
         "cash_summary_rows": 8,
         "positions": 8,
+        "reader_cash_group_rows": 8,
         "sweep_vehicle_rows": 0,
         "transaction_accounts": 8,
         "zero_quantity_rows_dropped": 0,
@@ -352,9 +361,12 @@ def test_snapshot_matches_the_frozen_path_apart_from_the_dating(
         _closes(tmp_path),
         CUTOFF.as_of_date,
     )
-    assert (tmp_path / "old.json").read_bytes() == (
-        tmp_path / "ingest/current/current-snapshot.json"
-    ).read_bytes()
+    old = _json(tmp_path / "old.json")
+    new = _json(tmp_path / "ingest/current/current-snapshot.json")
+    # the frozen reader counts the 8 quantity-less cash summary rows as sweep
+    # vehicles; the adapter emits quantity rows only
+    assert (old.pop("sweep_vehicle_count"), new.pop("sweep_vehicle_count")) == (8, 0)
+    assert old == new
 
 
 def test_frozen_consumer_accepts_the_bound_files_and_refuses_the_utc_manifest(
@@ -453,13 +465,26 @@ def test_held_position_without_an_official_close_is_refused(tmp_path: Path) -> N
 
 
 def test_zero_quantity_rows_are_dropped_and_counted(tmp_path: Path) -> None:
-    run_dir = _run(tmp_path, FakeTransport(holdings=_holdings(zero_row=True)))
+    holdings = _holdings(zero_row=True, zero_cash=True)
+    run_dir = _run(tmp_path, FakeTransport(holdings=holdings))
     binding = _ingest(tmp_path, run_dir)
     counts = binding["counts"]
     assert isinstance(counts, dict)
-    assert counts["zero_quantity_rows_dropped"] == 1 and counts["positions"] == 8
+    assert counts["zero_quantity_rows_dropped"] == 2 and counts["positions"] == 8
     snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
     assert "SYNZERO" not in {row["symbol"] for row in snapshot["positions"]}
+
+
+def test_the_emitted_sweep_count_excludes_cash_summary_rows(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path, FakeTransport(holdings=_holdings(sweep=True)))
+    binding = _ingest(tmp_path, run_dir)
+    counts = binding["counts"]
+    assert isinstance(counts, dict)
+    assert counts["sweep_vehicle_rows"] == 1 and counts["cash_summary_rows"] == 8
+    assert counts["reader_cash_group_rows"] == 9
+    snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
+    assert snapshot["sweep_vehicle_count"] == 1
+    assert "SYNSWEEP" not in {row["symbol"] for row in snapshot["positions"]}
 
 
 @pytest.mark.parametrize(
@@ -730,6 +755,9 @@ def test_cli_success_and_refusal(
     assert (tmp_path / "composed.json").is_file()
     assert "binding_sha256" in printed and "spec_sha256" in printed
     assert ingest.main(arguments) == 2
+    assert "spec output exists" in capsys.readouterr().out
+    reuse = [*arguments[:-1], str(tmp_path / "composed-again.json")]
+    assert ingest.main(reuse) == 2
     assert "already exists" in capsys.readouterr().out
     lonely = copy.copy(arguments[:-2])
     lonely[lonely.index("--output-root") + 1] = str(tmp_path / "other-out")
@@ -758,3 +786,40 @@ def test_snapshot_dating_is_rechecked_over_the_written_file(tmp_path: Path) -> N
     path.write_bytes(driver.canonical_bytes(document))
     with pytest.raises(ingest.IngestError, match="as-of differs"):
         ingest._check_snapshot_dating(path, CUTOFF)
+
+
+def test_cli_checks_composition_inputs_before_creating_any_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = _run(tmp_path)
+    common = [
+        "ingest", str(run_dir),
+        "--crosswalk", str(_write_crosswalk(tmp_path)),
+        "--cutoff", "2031-06-13",
+        "--official-closes-dir", str(_closes(tmp_path)),
+    ]  # fmt: skip
+    existing = tmp_path / "existing-spec.json"
+    existing.write_bytes(b"{}")
+    out = tmp_path / "preflight-out"
+    code = ingest.main(
+        [*common, "--output-root", str(out), "--base-spec", str(_base_spec(tmp_path)),
+         "--spec-out", str(existing)]
+    )  # fmt: skip
+    assert code == 2 and "spec output exists" in capsys.readouterr().out
+    assert not out.exists()
+    broken = tmp_path / "broken-spec.json"
+    document = _json(_base_spec(tmp_path))
+    document["roots"][ingest.ROOT_CURRENT] = str(tmp_path)
+    broken.write_bytes(json.dumps(document).encode("utf-8"))
+    code = ingest.main(
+        [*common, "--output-root", str(out), "--base-spec", str(broken),
+         "--spec-out", str(tmp_path / "new-spec.json")]
+    )  # fmt: skip
+    assert code == 2 and "already uses" in capsys.readouterr().out
+    assert not out.exists()
+    # the corrected arguments then succeed with the same output root
+    code = ingest.main(
+        [*common, "--output-root", str(out), "--base-spec", str(_base_spec(tmp_path)),
+         "--spec-out", str(tmp_path / "new-spec.json")]
+    )  # fmt: skip
+    assert code == 0 and out.is_dir()
