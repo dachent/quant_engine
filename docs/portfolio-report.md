@@ -82,6 +82,15 @@ longer has, so the report ignores that quotient and the cost mirror under
 - `fees_status` follows `cost_status`: a `known_*` cost is `EVIDENCED_PRE_TAX`, a
   `*_contract_cap` is `UPPER_BOUND_CONTRACT_CAP_PRE_TAX` (a ceiling the contract allows, not
   an observed cost), no amount is `UNAVAILABLE`. A rate over a cap is an upper bound too.
+  A `documented_rate_percent` row with no amount is `DOCUMENTED_RATE_NOT_DOLLAR`: documented
+  percent rates exist, no dollar cost does, and it is neither evidence of a cost nor a cap
+  (a percent row carrying an amount is refused). `documented_rate_tier_unsettled` is
+  `UNAVAILABLE`.
+- A percent-based row also publishes `fee_rates` (the baseline's documented rates) and
+  `cost_rate_disclosure`, one sentence built only from those fields (tier label, management
+  and performance rate, high-water-mark text or "not stated", placement, redemption, lock,
+  source pages); an unsettled tier publishes a sentence that claims no rate. The panel
+  prints the sentence verbatim.
 
 ## Allocation snapshot weights
 
