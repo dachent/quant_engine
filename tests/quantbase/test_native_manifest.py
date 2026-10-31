@@ -142,6 +142,7 @@ def _rewrite(path: Path, mutate: Any) -> Path:
         lambda d: d.update(extra=1),
         lambda d: d.update(schema_version=2),
         lambda d: d.update(cutoff="not-a-date"),
+        lambda d: d.pop("cutoff"),
         lambda d: d.update(files=[]),
         lambda d: d["files"][0].update(role="shell"),
         lambda d: d["files"][0].update(sha256="0" * 64),
@@ -203,3 +204,27 @@ def test_cli_cutoff_must_match_and_flags_are_exclusive(
     assert generation.main([*base, "--as-of-date", "2026-10-27"]) == 0
     with pytest.raises(SystemExit):
         generation.main([*base, "--as-of-date", "2026-10-27", "--native-intake", "x"])
+
+
+def test_account_activity_roles_publish_under_canonical_names(tmp_path: Path) -> None:
+    path = _manifest(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    for role, name in (
+        ("account-activity-response", "resp_20261030.json"),
+        ("account-activity-request-proof", "proof_20261030.json"),
+    ):
+        target = tmp_path / name
+        target.write_bytes(b"{}")
+        document["files"].append(
+            {"role": role, "path": str(target), "sha256": _digest(target)}
+        )
+    path.write_bytes(json.dumps(document).encode())
+    artifacts, contract, _ = generation.load_native_manifest(path)
+    assert {name for name, _ in artifacts} >= {
+        "capture/account-activity-response.json",
+        "capture/account-activity-request-proof.json",
+    }
+    assert contract["capture/account-activity-response.json"] == (
+        "quantbase-account-activity-response",
+        "1",
+    )

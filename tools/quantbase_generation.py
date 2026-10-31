@@ -1118,20 +1118,29 @@ def _load_native_intake(
 
 
 NATIVE_MANIFEST_SCHEMA_VERSION: Final = 1
-# Declared file roles: role -> (published directory, schema name, schema version).
-NATIVE_ROLES: Final[dict[str, tuple[str, str, str]]] = {
-    "native-har": ("har", "quantbase-native-har", "1"),
+# Declared file roles: role -> (published directory, schema name, schema version,
+# fixed published file name or None to keep the source name). Fixed names keep the
+# consumers that resolve artifacts by canonical id (flow coverage) working.
+NATIVE_ROLES: Final[dict[str, tuple[str, str, str, str | None]]] = {
+    "native-har": ("har", "quantbase-native-har", "1", None),
     "account-activity-response": (
         "capture",
         "quantbase-account-activity-response",
         "1",
+        "account-activity-response.json",
     ),
     "account-activity-request-proof": (
         "capture",
         "quantbase-account-activity-request-proof",
         "1",
+        "account-activity-request-proof.json",
     ),
-    "har-intake-manifest": ("capture", "quantbase-har-intake-manifest", "1"),
+    "har-intake-manifest": (
+        "capture",
+        "quantbase-har-intake-manifest",
+        "1",
+        "intake-manifest.json",
+    ),
 }
 _NATIVE_MANIFEST_KEYS: Final = frozenset({"schema_version", "cutoff", "files"})
 _NATIVE_FILE_KEYS: Final = frozenset({"role", "path", "sha256", "bytes"})
@@ -1140,7 +1149,7 @@ _NATIVE_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 def load_native_manifest(
     path: Path,
-) -> tuple[list[tuple[str, Path]], dict[str, tuple[str, str]], date | None]:
+) -> tuple[list[tuple[str, Path]], dict[str, tuple[str, str]], date]:
     """Build the native declaration from caller-declared roles and hashes.
 
     A differently dated or differently named capture needs no code edit: the
@@ -1166,17 +1175,16 @@ def load_native_manifest(
         raise QuantbaseGenerationError("native manifest is not valid JSON") from exc
     if set(document) - _NATIVE_MANIFEST_KEYS or not {
         "schema_version",
+        "cutoff",
         "files",
     } <= set(document):
         raise QuantbaseGenerationError("native manifest keys differ from the contract")
     if document["schema_version"] != NATIVE_MANIFEST_SCHEMA_VERSION:
         raise QuantbaseGenerationError("native manifest schema version is unsupported")
-    cutoff: date | None = None
-    if "cutoff" in document:
-        try:
-            cutoff = date.fromisoformat(_text(document["cutoff"], "native cutoff"))
-        except ValueError as exc:
-            raise QuantbaseGenerationError("native cutoff is not a date") from exc
+    try:
+        cutoff = date.fromisoformat(_text(document["cutoff"], "native cutoff"))
+    except ValueError as exc:
+        raise QuantbaseGenerationError("native cutoff is not a date") from exc
     items = _objects(document["files"], "native files")
     if not items:
         raise QuantbaseGenerationError("native manifest declares no files")
@@ -1189,7 +1197,7 @@ def load_native_manifest(
         role = _text(item["role"], "native role")
         if role not in NATIVE_ROLES:
             raise QuantbaseGenerationError(f"native role is not allowed: {role}")
-        directory, schema_name, schema_version = NATIVE_ROLES[role]
+        directory, schema_name, schema_version, fixed = NATIVE_ROLES[role]
         file_path = Path(_text(item["path"], "native path"))
         if not file_path.is_absolute() or file_path.is_symlink():
             raise QuantbaseGenerationError(
@@ -1207,7 +1215,7 @@ def load_native_manifest(
             raise QuantbaseGenerationError(
                 f"native file differs from its declared hash: {file_path.name}"
             )
-        relative = f"{directory}/{file_path.name}"
+        relative = f"{directory}/{fixed or file_path.name}"
         if relative in contract:
             raise QuantbaseGenerationError("native file names must be unique")
         artifacts.append((relative, file_path))

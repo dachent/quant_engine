@@ -120,14 +120,14 @@ written last).
 
 `quantbase_generation.py plan --native-manifest <file>` (exclusive with
 `--native-intake`) declares a native capture of any date or file name, with no
-code edit: `{"schema_version": 1, "cutoff": "YYYY-MM-DD" (optional), "files":
+code edit: `{"schema_version": 1, "cutoff": "YYYY-MM-DD" (required), "files":
 [{"role", "path" (absolute), "sha256", "bytes" (optional)}]}`. Roles are
 `native-har`, `account-activity-response`, `account-activity-request-proof` and
-`har-intake-manifest`; the published path (`har/` or `capture/`) and the schema
-contract are derived from the role. Every file is re-hashed; unknown keys or
+`har-intake-manifest`; the published path and the schema contract are derived from the role (HAR files
+keep their file name under `har/`; the other roles publish under their canonical
+`capture/` names so flow coverage still resolves them). Every file is re-hashed; unknown keys or
 roles, hash or size mismatch, unsafe or duplicate names, relative or linked paths
-and a missing `native-har` fail closed. `--as-of-date` must equal a declared
-cutoff. The legacy 2026-09-02 pairs remain the default when no flag is given.
+and a missing `native-har` fail closed. `--as-of-date` must equal the cutoff. The legacy 2026-09-02 pairs remain the default when no flag is given.
 
 `capture_quantbase_har.last_publishable_grid_date(captured, cutoff, anchor=...,
 step_days=5, label=None)` returns the newest captured on-grid date at or before
