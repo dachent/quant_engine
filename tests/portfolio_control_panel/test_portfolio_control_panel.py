@@ -702,8 +702,8 @@ def _capital_summary_row(
 # 2026-07-30 figure; nothing is retained excluded.  The report rows and the governed
 # baseline's `current_capital` below are the same numbers.
 FIXTURE_SYSTEMATIC = "7021"
-FIXTURE_RESERVE = "100043.62"
-FIXTURE_TOTAL_LIQUID = "107064.62"
+FIXTURE_RESERVE = "78654.294044"
+FIXTURE_TOTAL_LIQUID = "85675.294044"
 FIXTURE_CAPITAL_DAY = "2026-07-30"
 
 
@@ -775,7 +775,7 @@ def _report() -> dict[str, object]:
     allocations = [
         {
             "as_of_date": "2026-07-30",
-            "current_value_usd": "100043.62",
+            "current_value_usd": "78654.294044",
             "scope": "RESERVE",
             "source_key": "synthetic-summary",
             "strategy_id": None,
@@ -2344,7 +2344,7 @@ def _panel_baseline_catalog(
             "current_value": {
                 "currency": "USD",
                 "status": "AVAILABLE",
-                "value": "100043.62",
+                "value": "78654.294044",
             },
             "scope": "RESERVE",
             "strategy_id": None,

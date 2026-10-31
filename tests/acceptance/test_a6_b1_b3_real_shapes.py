@@ -12,14 +12,14 @@ record, not an absence), and pairs it with a bad control that must fire.
   this beginning capital, the deposit being inside the beginning capital), not the
   deposit read as a gain.
 * B1  flow_count against the capital-flow legs: volatis 11, grizzly 0, qsi 0.
-* B3  the account return inside a benchmark comparison equals the live series
-  (volatis 0.608684540773, p123-eu 0.229795914688).
+* B3  the account return inside a benchmark comparison equals the compounded live
+  series (volatis and p123-eu), recomputed here from the fixture rows.
 """
 
 from __future__ import annotations
 
 import copy
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 from pathlib import Path
 from typing import Any
@@ -184,6 +184,23 @@ def test_b1_mwr_flows_that_do_not_sum_to_the_net_capital_are_a_blocker(
 # ------------------------------------------------------------------------------ B3
 
 
+def _compounded_from_fixture(strategy: str) -> Decimal:
+    """The window compound, recomputed from the fixture rows with plain Decimal."""
+
+    real = _real()
+    metrics = real["benchmark_comparisons"][strategy]["metrics"]
+    total = Decimal(1)
+    with localcontext() as ctx:
+        ctx.prec = 40
+        for row in real["strategy_returns"][strategy]:
+            if (
+                row["evidence_layer"] == "ACCOUNT_LIVE"
+                and metrics["observed_start"] <= row["date"] <= metrics["observed_end"]
+            ):
+                total *= 1 + Decimal(row["return"])
+    return total - 1
+
+
 def _benchmark_world(tmp_path: Path, patch: Any = None) -> checks.Context:
     real = _real()
     returns = copy.deepcopy(real["strategy_returns"])
@@ -230,14 +247,15 @@ def _window(context: checks.Context, strategy: str) -> tuple[Decimal, Decimal, i
 def test_b3_the_benchmark_account_return_is_the_live_series_value(
     tmp_path: Path,
 ) -> None:
-    """volatis 0.608684540773 and p123-eu 0.229795914688 are the compounded live series."""
+    """The shown account returns are the compounded live series (recomputed here)."""
 
     context = _benchmark_world(tmp_path)
-    for strategy, value in ((VOLATIS, "0.608684540773"), (P123_EU, "0.229795914688")):
+    for strategy in (VOLATIS, P123_EU):
         shown, computed, count = _window(context, strategy)
         assert count > 0, strategy
-        assert abs(shown - Decimal(value)) < Decimal("1e-12"), strategy
-        assert abs(computed - Decimal(value)) < Decimal("1e-12"), strategy
+        value = _compounded_from_fixture(strategy)
+        assert abs(shown - value) < Decimal("1e-12"), strategy
+        assert abs(computed - value) < Decimal("1e-12"), strategy
         assert abs(shown - computed) <= checks.RETURN_TOLERANCE, strategy
         displayed = next(
             row
@@ -263,7 +281,7 @@ def _perturb_shown(
 def test_b3_a_benchmark_account_return_off_the_live_series_is_a_blocker(
     tmp_path: Path,
 ) -> None:
-    """Bad control: the comparison says 0.6097, the live series compounds to 0.6087."""
+    """Bad control: the comparison is 0.001 above what the live series compounds to."""
 
     context = _benchmark_world(tmp_path, _perturb_shown)
     findings = list(checks.check_benchmark_account_return(context))
@@ -275,7 +293,8 @@ def test_b3_a_benchmark_account_return_off_the_live_series_is_a_blocker(
             ("B3",),
         )
     ]
-    assert findings[0].message.endswith("by 0.001000000000000000000000000")
+    gap = Decimal(findings[0].message.rsplit(" by ", 1)[1])
+    assert abs(gap - Decimal("0.001")) < Decimal("1e-20")
 
 
 def _drop_a_live_day(
@@ -413,10 +432,13 @@ def test_a6_the_isolated_day_return_is_the_capital_identity_of_the_day(
     rows = _volatis_rows()
     published = Decimal(rows[DAY]["return"])
     assert abs(published - independent) < Decimal("1e-20")
-    # the deposit is real: the day begins at about 43207.9796 after ending the day before at
-    # about 23531.7522, and its neighbours are quiet (the A6 shape: one isolated move)
-    assert Decimal(rows[DAY]["beginning_capital"]) > Decimal("42454.8")
-    assert Decimal(rows["2025-11-12"]["beginning_capital"]) < Decimal("23586")
+    # the deposit is large: the day begins well above the prior day's beginning capital
+    # (it lands inside the beginning capital), and its neighbours are quiet (the A6
+    # shape: one isolated move)
+    assert Decimal(rows[DAY]["beginning_capital"]) > Decimal("1.5") * Decimal(
+        rows["2025-11-12"]["beginning_capital"]
+    )
+    assert published < Decimal("-0.03")
     assert abs(Decimal(rows["2025-11-12"]["return"])) < Decimal("0.01")
     assert abs(Decimal(rows[NEXT_DAY]["return"])) < Decimal("0.01")
     context = _a6_world(tmp_path, expected=independent)

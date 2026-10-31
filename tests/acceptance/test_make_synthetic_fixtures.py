@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -50,23 +49,21 @@ def test_python_scrub_rewrites_only_spec_values(tmp_path: Path) -> None:
     assert "\r" not in out
 
 
-def test_rows_keep_ratios_and_scale_amounts(tmp_path: Path) -> None:
+def test_walk_remaps_ids_labels_and_amounts_but_not_ratios() -> None:
     mapper = gen.Mapper("salt-one")
     document = {
         "provenance": {"run": "C:/Dev/q/real", "note": "x"},
         "rows": [
             {
                 "account_id": REAL,
-                "account_label": "Schwab \u20220042 \u2014 IRA (Alice)",
+                "account_label": "Schwab •0042 — IRA (Alice)",
                 "last_four": "0042",
                 "beginning_capital": "1000",
                 "return": "0.0123456789",
             }
         ],
     }
-    source = tmp_path / "rows.json"
-    source.write_text(json.dumps(document), encoding="ascii")
-    out = json.loads(gen.synthesize_rows(source, mapper))
+    out = gen._walk(document, mapper)
     row = out["rows"][0]
     assert row["account_id"] == mapper.account("0123456789abcdef")
     assert "0042" not in row["account_label"] and "Alice" not in row["account_label"]
@@ -74,4 +71,41 @@ def test_rows_keep_ratios_and_scale_amounts(tmp_path: Path) -> None:
     assert row["beginning_capital"] == mapper.money("1000")
     assert row["return"] == "0.0123456789"
     assert "real" not in out["provenance"]["run"]
-    assert "synthetic_note" in out["provenance"]
+
+
+def test_synthetic_series_obeys_the_capital_identity_and_is_deterministic() -> None:
+    days = ["2025-01-0%d" % n for n in range(1, 8)]
+
+    def rows() -> list[dict[str, str]]:
+        return [
+            {"date": day, "beginning_capital": "1000", "return": "0.001"}
+            for day in days
+        ]
+
+    mapper = gen.Mapper("salt-one")
+    first, second = rows(), rows()
+    flows = [("2025-01-04", Decimal("250"))]
+    navs = gen._series(mapper, "volatis-strategy", first, flows)
+    gen._series(mapper, "volatis-strategy", second, flows)
+    assert first == second
+    other = rows()
+    gen._series(gen.Mapper("salt-two"), "volatis-strategy", other, flows)
+    assert other != first
+    for position, row in enumerate(first):
+        capital = Decimal(row["beginning_capital"])
+        nav = navs[row["date"]]
+        assert abs(nav / capital - 1 - Decimal(row["return"])) < Decimal("1e-30")
+        if position + 1 < len(first):
+            deposit = flows[0][1] if first[position + 1]["date"] == "2025-01-04" else 0
+            following = Decimal(first[position + 1]["beginning_capital"])
+            assert abs(following - nav - deposit) < Decimal("1e-30")
+    assert gen._compound([Decimal("0.1"), Decimal("0.1")]) == Decimal("0.21")
+
+
+def test_an_unlisted_account_id_stops_the_generation() -> None:
+    import pytest
+
+    listed = gen.Mapper("salt-one", frozenset([REAL]), frozenset([OTHER]))
+    assert listed.account("aaaaaaaaaaaaaaaa") == OTHER
+    with pytest.raises(ValueError, match="unlisted account id"):
+        listed.account("bbbbbbbbbbbbbbbb")

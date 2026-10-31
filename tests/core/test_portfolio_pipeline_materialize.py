@@ -1321,7 +1321,7 @@ def _current_capital_fixture(*, reserve_ready: bool = False) -> dict[str, object
     """Hand-written ``current_capital`` for the one-strategy synthetic baseline.
 
     strategy-1 is account-1's NAV 400000.5 @ AS_OF (the audit table below says
-    410272.39, so the two figures can never be confused).  The reserve account's
+    322556.153018, so the two figures can never be confused).  The reserve account's
     only NAV is a 2026-07-14 legacy row: it is capital authority only when
     ``reserve_ready`` admits it AUTHORITATIVE, otherwise the reserve is NOT_READY.
     """
@@ -1478,13 +1478,13 @@ def _fixture(
     ).hexdigest()
     allocations = [
         {
-            "current_value": {"value": "410272.39"},
+            "current_value": {"value": "322556.153018"},
             "pool_id": "systematic-capital",
             "strategy_id": "strategy-1",
             "systematic_weight": "1.00000000000000003060016",
         },
         {
-            "current_value": {"value": "100043.62"},
+            "current_value": {"value": "78654.294044"},
             "pool_id": "reserve-capital",
             "strategy_id": None,
             "systematic_weight": None,
@@ -1513,9 +1513,9 @@ def _fixture(
         },
     ]
     replay = {
-        "reserve_total_usd": "100043.62",
-        "systematic_total_usd": "410272.39",
-        "total_liquid_usd": "510316.01",
+        "reserve_total_usd": "78654.294044",
+        "systematic_total_usd": "322556.153018",
+        "total_liquid_usd": "401210.447062",
     }
     capital = _current_capital_fixture(reserve_ready=reserve_ready)
     baseline_payload = {
@@ -5058,9 +5058,9 @@ def test_semantic_labels_the_snapshot_historical_and_verifies_current_capital(
     snapshot = evidence["audit_snapshot"]
     assert snapshot["status"] == "HISTORICAL_REFERENCE"
     assert snapshot["as_of_date"] == "2026-07-25"
-    assert snapshot["systematic_total_usd"] == "410272.39"
-    assert snapshot["reserve_total_usd"] == "100043.62"
-    assert snapshot["total_liquid_usd"] == "510316.01"
+    assert snapshot["systematic_total_usd"] == "322556.153018"
+    assert snapshot["reserve_total_usd"] == "78654.294044"
+    assert snapshot["total_liquid_usd"] == "401210.447062"
     # The current block is recomputed from nav_observations x assignments.
     current = evidence["current_capital"]
     assert current["valuation_date"] == AS_OF.isoformat()
@@ -5110,7 +5110,7 @@ def _paint_the_audit_reserve(payload: dict[str, object]) -> None:
     capital = payload["current_capital"]
     assert isinstance(capital, dict)
     capital["reserve"]["status"] = "AVAILABLE"
-    capital["reserve"]["current_value"] = _cc_amount("100043.62")
+    capital["reserve"]["current_value"] = _cc_amount("78654.294044")
     capital["reserve"]["as_of_date"] = "2026-07-25"
 
 
@@ -5118,7 +5118,7 @@ def _paint_total_liquid(payload: dict[str, object]) -> None:
     capital = payload["current_capital"]
     assert isinstance(capital, dict)
     capital["total_liquid"]["status"] = "AVAILABLE"
-    capital["total_liquid"]["current_value"] = _cc_amount("510316.01")
+    capital["total_liquid"]["current_value"] = _cc_amount("401210.447062")
     capital["total_liquid"]["as_of_date"] = "2026-07-25"
 
 

@@ -6,20 +6,20 @@ were NOT_READY with "metric has no production view" although the producer was ri
 * ``invested_capital.strategy.cutoff`` for robuxio-crypto (39307.71895851947865097816
   against the oracle's 39307.72002, tolerance 0.01) and volatis-strategy (39310): the
   validator had no ``resolve_metric`` branch for the metric, so nothing compared them;
-* ``mwr.strategy`` for tt-portfolio (0.02267676203996533 against 0.022676762040,
+* ``mwr.strategy`` for tt-portfolio (the recomputed XIRR against the oracle value,
   tolerance 1e-8): the strategy-level MWR recompute declined because two
   ``BLOCKED_ADMISSION`` epoch rows (no cash flows) were not skipped, although the
   oracle leaves the same assignment-only epochs out (R2).
 
-The rows below are the real ones, copied verbatim from the smoke9 report into
-``rows/smoke9_real_rows.json``; the oracle rows are the real v11 rows ($[57], $[58],
-$[75]).  A comparison that agrees is asserted positively (the view or the recomputed
+The rows below are synthetic stand-ins with the smoke9 shape in
+``rows/smoke9_real_rows.json`` (issue 696); the oracle rows keep the v11 row shapes.  A comparison that agrees is asserted positively (the view or the recomputed
 value is read back), not by the absence of a finding.
 """
 
 from __future__ import annotations
 
 import copy
+from datetime import date
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -35,11 +35,29 @@ from test_validate_alignment import (
 from test_validate_generation import CUTOFF, Spec, _policy_fixture, build
 
 from acceptance.validate import checks
+from quant_engine.portfolio_ledger.returns import xirr
 from acceptance.validate.generation import load_generation
 
 FIXTURE = Path(__file__).parent / "rows" / "smoke9_real_rows.json"
+
+
+def _tt_expected() -> str:
+    """The oracle's strategy MWR: the XIRR of the funded tt epochs' pooled cash flows."""
+
+    pairs = [
+        (date.fromisoformat(flow["date"]), Decimal(flow["amount"]))
+        for row in json.loads(FIXTURE.read_text(encoding="ascii"))["tt_twr_mwr"]
+        if row["epoch_output_status"] == "OK"
+        for flow in row["mwr_cashflows"]
+    ]
+    value = xirr(pairs)
+    assert value is not None
+    return format(value.quantize(Decimal("1e-12")), "f")
+
+
 TT_BLOCKED_START = "2025-11-25"
 TT_BLOCKED_END = "2026-01-04"
+TT_EXPECTED = _tt_expected()
 ROBUXIO = ("invested_capital.strategy.cutoff", "robuxio-crypto", "39307.72002")
 VOLATIS = ("invested_capital.strategy.cutoff", "volatis-strategy", "39310")
 
@@ -64,7 +82,7 @@ def _invested_row(metric: str, entity: str, value: str) -> dict[str, Any]:
     }
 
 
-def _tt_mwr_row(value: str = "0.022676762040", pointer: Any = None) -> dict[str, Any]:
+def _tt_mwr_row(value: str = TT_EXPECTED, pointer: Any = None) -> dict[str, Any]:
     """The real v11 oracle row $[75]: ratio, tolerance 1e-8, ITD."""
 
     return {
@@ -157,7 +175,7 @@ def test_n36_an_invested_capital_off_by_two_cents_is_a_regression(
     context = _invested_world(
         tmp_path,
         [_invested_row(*ROBUXIO), _invested_row(*VOLATIS)],
-        patch=_set_invested("robuxio-crypto", "49997.1186498594233668"),
+        patch=_set_invested("robuxio-crypto", "39307.73468251947865097816"),
     )
     findings = _expected_findings(context)
     assert [(f.check_id, f.klass, f.entity) for f in findings] == [
@@ -167,7 +185,7 @@ def test_n36_an_invested_capital_off_by_two_cents_is_a_regression(
             "robuxio-crypto|2026-09-17",
         )
     ]
-    assert findings[0].observed["value"] == "49997.1186498594233668"
+    assert findings[0].observed["value"] == "39307.73468251947865097816"
     assert set(findings[0].defect_ids) == {"B7", "N36"}
 
 
@@ -226,7 +244,7 @@ def _tt_world(
     tmp_path: Path,
     sleeves: list[list[dict[str, Any]]],
     *,
-    expected_value: str = "0.022676762040",
+    expected_value: str = TT_EXPECTED,
     patch: Any = None,
 ) -> tuple[checks.Context, str]:
     """The six real tt-portfolio epoch rows (two blocked) and a synthetic census."""
@@ -274,15 +292,19 @@ def test_n29_the_real_tt_blocked_epochs_are_skipped_and_the_mwr_agrees(
     assert len(blocked) == 2
     assert all(checks.blocked_epochs(context).skips_report_row(r) for r in blocked)
     (view,) = _recomputed(context)
-    assert abs(Decimal(view.value) - Decimal("0.022676762040")) <= Decimal("1e-8")
+    assert abs(Decimal(view.value) - Decimal(TT_EXPECTED)) <= Decimal("1e-8")
     assert view.view.startswith("recomputed:xirr(twr_mwr.mwr_cashflows[tt-portfolio])")
     assert _expected_findings(context) == []
 
 
 def test_n29_a_perturbed_oracle_value_is_a_regression(tmp_path: Path) -> None:
-    """Bad control: 0.0227 against the recomputed 0.02267676204."""
+    """Bad control: an oracle value 0.001 away from the recomputed MWR."""
 
-    context, _ = _tt_world(tmp_path, TT_ONLY, expected_value="0.0227")
+    context, _ = _tt_world(
+        tmp_path,
+        TT_ONLY,
+        expected_value=str(Decimal(TT_EXPECTED) + Decimal("0.001")),
+    )
     findings = _expected_findings(context)
     assert [(f.check_id, f.klass, f.entity) for f in findings] == [
         ("expected.mwr.strategy", checks.BLOCKER_REGRESSION, "tt-portfolio|ITD")
@@ -308,7 +330,7 @@ def test_n29_a_confirmed_blocked_epoch_with_flows_never_enters_the_pool(
 
     context, _ = _tt_world(tmp_path, TT_ONLY, patch=_give_the_blocked_rows_flows)
     (view,) = _recomputed(context)
-    assert abs(Decimal(view.value) - Decimal("0.022676762040")) <= Decimal("1e-8")
+    assert abs(Decimal(view.value) - Decimal(TT_EXPECTED)) <= Decimal("1e-8")
     assert _expected_findings(context) == []
 
 
@@ -334,7 +356,7 @@ def test_n29_an_unconfirmed_blocked_epoch_with_flows_is_not_skipped(
         for _, row in checks.twr_rows(context)
     )
     (view,) = _recomputed(context)
-    assert abs(Decimal(view.value) - Decimal("0.022676762040")) > Decimal("0.001")
+    assert abs(Decimal(view.value) - Decimal(TT_EXPECTED)) > Decimal("0.0001")
     assert [(f.check_id, f.klass) for f in _expected_findings(context)] == [
         ("expected.mwr.strategy", checks.BLOCKER_REGRESSION)
     ]
