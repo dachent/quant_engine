@@ -12,11 +12,11 @@ What it refuses, by design:
 * holdings whose per-row as-of date differs from the declared cutoff close,
   unless the run carries an explicit exception label (the rows are then labelled
   with their offset);
-* a capture outside the one unlabelled mode (after the cutoff day has closed,
-  on a later New York date, and before 09:30 New York of the next trading day:
-  Friday cutoff with Saturday, Sunday or Monday-morning capture, or a holiday
-  weekend); same-day post-close, pre-close and after-open captures need the
-  approved exception label;
+* a capture outside the one unlabelled mode (the first New York calendar date
+  after the cutoff, before 20:00 New York, and before 09:30 when that date is a
+  trading day: a Friday cutoff is captured on Saturday); Sunday, Monday
+  pre-open, Saturday evening, same-day post-close, pre-close and later captures
+  need the approved exception label;
 * any held position (nonzero quantity) whose market value is null, missing or
   not a finite decimal. The older Holdings-V2 normalizer in
   ``quant_engine.schwab`` records such rows as unavailable; this driver does not;
@@ -370,7 +370,8 @@ def next_trading_day(day: date) -> date:
 MODE_NEXT_SESSION = "NEXT_SESSION_PRE_OPEN"
 MODE_SAME_DAY = "SAME_DAY_POST_CLOSE"
 MODE_BEFORE_CLOSE = "BEFORE_CLOSE"
-MODE_AFTER_OPEN = "AFTER_NEXT_SESSION_OPEN"
+MODE_OUTSIDE = "OUTSIDE_STANDARD_WINDOW"
+WINDOW_END_LOCAL_TIME = time(20, 0)
 
 
 @dataclass(frozen=True)
@@ -402,14 +403,15 @@ def assess_timing(
     *,
     exception_label: str | None,
 ) -> CaptureTiming:
-    """Classify a capture against the cutoff close and the next session open.
+    """Classify a capture against the cutoff close and the first date after it.
 
-    Unlabelled captures must fall after the cutoff day has closed and before the
-    first price update of the next trading session (09:30 New York), on a later
-    New York calendar date: Friday cutoff with a Saturday, a Sunday or a Monday
-    08:00 capture, or a holiday weekend. A same-day post-close capture, a capture
-    before the close and a capture after the next open all need the approved
-    exception label.
+    Unlabelled captures must fall on the first New York calendar date after the
+    cutoff (so the capture's UTC date is the same date and the generation as-of is
+    exactly cutoff + 1), before 20:00 New York, and, when that date is a trading
+    day, before 09:30 New York (the first price update of the next session).
+    Friday cutoff: Saturday only. Sunday, Monday before the open, a Saturday
+    evening capture, a same-day post-close capture, a pre-close capture and
+    everything else need the approved exception label.
     """
 
     if captured_at.tzinfo is None:
@@ -420,14 +422,22 @@ def assess_timing(
     next_open = datetime.combine(
         next_trading_day(cutoff.as_of_date), OPEN_LOCAL_TIME, tzinfo=new_york
     ).astimezone(timezone.utc)
+    first_next = cutoff.as_of_date + timedelta(days=1)
+    window_end = datetime.combine(
+        first_next, WINDOW_END_LOCAL_TIME, tzinfo=new_york
+    ).astimezone(timezone.utc)
     if captured < cutoff.close_utc:
         mode = MODE_BEFORE_CLOSE
     elif capture_day == cutoff.as_of_date:
         mode = MODE_SAME_DAY
-    elif captured < next_open:
+    elif (
+        capture_day == first_next
+        and captured < window_end
+        and (not is_trading_day(first_next) or captured < next_open)
+    ):
         mode = MODE_NEXT_SESSION
     else:
-        mode = MODE_AFTER_OPEN
+        mode = MODE_OUTSIDE
     lag = Decimal((captured - cutoff.close_utc).total_seconds()) / Decimal(3600)
     timing = CaptureTiming(
         captured_at=captured,
@@ -447,8 +457,13 @@ def assess_timing(
             raise DriverError(
                 "same-day post-close capture needs an approved exception label"
             )
-        if mode == MODE_AFTER_OPEN:
-            raise DriverError("capture is after the next session open")
+        if mode == MODE_OUTSIDE:
+            if capture_day == first_next and captured < window_end:
+                raise DriverError("capture is after the next session open")
+            raise DriverError(
+                "capture is outside the first-next-date window (cutoff plus one "
+                "calendar date, before 20:00 New York)"
+            )
     return timing
 
 

@@ -216,7 +216,7 @@ def test_capture_before_close_and_late_capture_are_refused_without_label() -> No
         _normalize(
             _holdings(), captured_at=datetime(2031, 6, 13, 19, 0, tzinfo=timezone.utc)
         )
-    with pytest.raises(driver.DriverError, match="after the next session open"):
+    with pytest.raises(driver.DriverError, match="outside the first-next-date"):
         _normalize(_holdings(), captured_at=AFTER_CLOSE + timedelta(days=3))
     labelled = _normalize(
         _holdings(),
@@ -1017,31 +1017,36 @@ def _mode(cutoff: str, captured: datetime, label: str | None = None) -> str:
     ("cutoff", "captured"),
     [
         ("2031-06-13", _utc_ny(2031, 6, 14, 0, 1)),  # Friday cutoff, Saturday
-        ("2031-06-13", _utc_ny(2031, 6, 14, 23, 59)),  # Saturday evening
-        ("2031-06-13", _utc_ny(2031, 6, 15, 12)),  # Sunday
-        ("2031-06-13", _utc_ny(2031, 6, 16, 8)),  # Monday 08:00 before the open
-        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 29)),
+        ("2031-06-13", _utc_ny(2031, 6, 14, 8)),
+        ("2031-06-13", _utc_ny(2031, 6, 14, 19, 59)),  # still before 20:00
         ("2031-06-10", _utc_ny(2031, 6, 11, 8)),  # Tuesday cutoff, Wednesday pre-open
-        ("2026-09-04", _utc_ny(2026, 9, 8, 8)),  # Friday before Labor Day, Tuesday
-        ("2026-09-04", _utc_ny(2026, 9, 7, 12)),  # Labor Day itself
-        ("2026-04-02", _utc_ny(2026, 4, 6, 8)),  # Thursday before Good Friday
-        ("2026-12-24", _utc_ny(2026, 12, 25, 11)),  # Christmas Day
+        ("2031-06-10", _utc_ny(2031, 6, 11, 9, 29)),
+        ("2026-09-04", _utc_ny(2026, 9, 5, 12)),  # Friday before Labor Day: Saturday
+        ("2026-04-02", _utc_ny(2026, 4, 3, 8)),  # Thursday cutoff, Good Friday (closed)
+        ("2026-04-02", _utc_ny(2026, 4, 3, 19, 59)),
+        ("2026-12-24", _utc_ny(2026, 12, 25, 11)),  # Christmas Day, first date after
     ],
 )
-def test_next_session_pre_open_captures_are_accepted(
-    cutoff: str, captured: datetime
-) -> None:
+def test_first_next_date_captures_are_accepted(cutoff: str, captured: datetime) -> None:
     assert _mode(cutoff, captured) == driver.MODE_NEXT_SESSION
 
 
 @pytest.mark.parametrize(
     ("cutoff", "captured", "message"),
     [
-        ("2031-06-13", _utc_ny(2031, 6, 16, 10), "after the next session open"),
-        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 30), "after the next session open"),
-        ("2031-06-13", _utc_ny(2031, 6, 17, 8), "after the next session open"),
+        ("2031-06-13", _utc_ny(2031, 6, 14, 20), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 14, 20, 30), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 15, 12), "outside the first-next-date"),  # Sun
+        ("2031-06-13", _utc_ny(2031, 6, 16, 8), "outside the first-next-date"),  # Mon
+        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 29), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 16, 10), "outside the first-next-date"),
+        ("2031-06-13", _utc_ny(2031, 6, 17, 8), "outside the first-next-date"),
         ("2031-06-10", _utc_ny(2031, 6, 11, 9, 30), "after the next session open"),
-        ("2026-09-04", _utc_ny(2026, 9, 8, 9, 30), "after the next session open"),
+        ("2031-06-10", _utc_ny(2031, 6, 11, 10), "after the next session open"),
+        ("2031-06-10", _utc_ny(2031, 6, 12, 8), "outside the first-next-date"),
+        ("2026-09-04", _utc_ny(2026, 9, 8, 8), "outside the first-next-date"),
+        ("2026-09-04", _utc_ny(2026, 9, 7, 12), "outside the first-next-date"),
+        ("2026-04-02", _utc_ny(2026, 4, 6, 8), "outside the first-next-date"),
         ("2031-06-13", _utc_ny(2031, 6, 13, 16, 0), "same-day post-close"),
         ("2031-06-13", _utc_ny(2031, 6, 13, 23, 59), "same-day post-close"),
         ("2031-06-13", _utc_ny(2031, 6, 13, 15, 59), "precedes"),
@@ -1056,7 +1061,7 @@ def test_other_capture_modes_are_refused_without_the_label(
         _mode(cutoff, captured)
     # with the label the mode is recorded rather than refused
     assert _mode(cutoff, captured, "OWNER_APPROVED_EXCEPTION") in {
-        driver.MODE_AFTER_OPEN,
+        driver.MODE_OUTSIDE,
         driver.MODE_SAME_DAY,
         driver.MODE_BEFORE_CLOSE,
         driver.MODE_NEXT_SESSION,
@@ -1096,6 +1101,7 @@ def test_a_friday_cutoff_run_with_a_saturday_capture_stages_and_verifies(
     positions = json.loads((run_dir / "normalized/positions.json").read_text("utf-8"))
     assert positions["capture"]["capture_mode"] == driver.MODE_NEXT_SESSION
     assert positions["capture"]["capture_date_new_york"] == "2031-06-14"
+    assert positions["capture"]["capture_date_utc"] == "2031-06-14"
     assert positions["capture"]["next_session_open_utc"] == "2031-06-16T13:30:00+00:00"
     assert driver.verify_run(run_dir, crosswalk=_crosswalk())["status"] == "VERIFIED"
 

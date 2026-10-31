@@ -11,6 +11,7 @@ import copy
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ _TX = {"at": TRANSACTION_CAPTURED_AT}
 QUOTE_MS = int(datetime(2031, 6, 14, 3, 47, 14, tzinfo=timezone.utc).timestamp() * 1000)
 REVIEW = "https://github.com/dachent/quant_engine/issues/1#issuecomment-1"
 OFFICIAL_CLOSE = "25.00"
+FETCHED_AT = "2031-06-14T10:00:00Z"  # after the cutoff close
 
 
 def _crosswalk() -> dict[str, str]:
@@ -256,28 +258,71 @@ def _closes(
     value: str = OFFICIAL_CLOSE,
     brk: str | None = None,
     dividend: str | None = None,
+    fetched: str | None = FETCHED_AT,
+    completed: str | None = None,
+    splits: list[str] | None = None,
+    plain: bool = False,
+    cutoff: str = "2031-06-13",
 ) -> Path:
-    directory = tmp_path / "closes"
-    directory.mkdir(exist_ok=True)
+    """Official closes laid out as a Yahoo fetch run (``MANIFEST.json`` binds
+    every file), or, with ``plain``, as a bare directory of files."""
+
+    run = tmp_path / ("closes-plain" if plain else "yahoo-run")
+    if run.exists():
+        shutil.rmtree(run)
+    directory = run if plain else run / "official-closes"
+    directory.mkdir(parents=True)
+    files: dict[str, bytes] = {}
+
+    def csv_text(close: str, paid: str = "") -> bytes:
+        return (
+            "date,open,high,low,close,adjclose,volume,dividend\n"
+            "2031-06-12,1,1,1,24.00,24.00,1,\n"
+            f"2031-06-13,1,1,1,{close},{close},1,{paid}\n"
+        ).encode("utf-8")
+
     if brk is not None:
-        (directory / f"{brk}_yahoo_daily.csv").write_bytes(
-            (
-                "date,open,high,low,close,adjclose,volume,dividend\n"
-                f"2031-06-13,1,1,1,{OFFICIAL_CLOSE},{OFFICIAL_CLOSE},1,\n"
-            ).encode("utf-8")
-        )
+        files[f"{brk}_yahoo_daily.csv"] = csv_text(OFFICIAL_CLOSE)
     for index in range(1, ACCOUNT_COUNT + 1):
         symbol = f"SYN{index}"
         if symbol == skip or (brk is not None and index == 1):
             continue
         paid = dividend if dividend and index == 2 else ""
-        (directory / f"{symbol}_yahoo_daily.csv").write_bytes(
-            (
-                "date,open,high,low,close,adjclose,volume,dividend\n"
-                f"2031-06-12,1,1,1,24.00,24.00,1,\n"
-                f"2031-06-13,1,1,1,{value},{value},1,{paid}\n"
-            ).encode("utf-8")
-        )
+        files[f"{symbol}_yahoo_daily.csv"] = csv_text(value, paid)
+    for name, payload in files.items():
+        (directory / name).write_bytes(payload)
+    if plain:
+        return directory
+    bound = {f"official-closes/{name}": payload for name, payload in files.items()}
+    if splits is not None:
+        coverage = {
+            "groups": [
+                {
+                    "symbols": [
+                        {"id": sym, "adjustment": {"split_event_count": 1}}
+                        for sym in splits
+                    ]
+                }
+            ]
+        }
+        bound["coverage.json"] = json.dumps(coverage).encode("utf-8")
+        (run / "coverage.json").write_bytes(bound["coverage.json"])
+    manifest: dict[str, Any] = {
+        "kind": ingest.YAHOO_RUN_KIND,
+        "schema_version": 1,
+        "run_id": "synthetic-yahoo-run",
+        "cutoff": cutoff,
+        "files": {
+            name: {"sha256": hashlib.sha256(p).hexdigest(), "size_bytes": len(p)}
+            for name, p in sorted(bound.items())
+        },
+    }
+    if fetched is not None:
+        manifest["created_at_utc"] = fetched
+    if completed is not None:
+        manifest["fetch_started_utc"] = "2031-06-14T09:00:00Z"
+        manifest["fetch_completed_utc"] = completed
+    (run / "MANIFEST.json").write_bytes(json.dumps(manifest).encode("utf-8"))
     return directory
 
 
@@ -342,10 +387,13 @@ def test_saturday_capture_is_bound_with_the_cutoff_recorded(tmp_path: Path) -> N
     assert capture["capture_date_utc_offset_days"] == 1
     assert binding["as_of_basis"] == "CAPTURED_AFTER_CLOSE_BEFORE_NEXT_SESSION_OPEN"
     assert binding["exception_label"] is None
-    assert binding["snapshot_observed_at"] == capture["captured_at_utc"]
+    # the baseline reads the observation's New York date as the financial day
+    # (the cutoff); the frozen generation reads its UTC date as the as-of
+    assert binding["snapshot_observed_at"] == "2031-06-14T00:00:00+00:00"
     assert binding["snapshot_observed_at_basis"] == ingest.OBSERVED_AT_BASIS
+    assert binding["financial_day_new_york"] == "2031-06-13"
     snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
-    assert snapshot["observed_at"] == capture["captured_at_utc"]
+    assert snapshot["observed_at"] == "2031-06-14T00:00:00+00:00"
     assert {row["as_of_date"] for row in snapshot["positions"]} == {"2031-06-14"}
     nav = binding["nav"]
     assert isinstance(nav, dict)
@@ -413,13 +461,9 @@ def test_snapshot_matches_the_frozen_path_apart_from_the_sweep_count(
             }
         ).encode("utf-8")
     )
-    positions = _json(run_dir / "normalized/positions.json")
+    observed = _json(tmp_path / "ingest/ingest-binding.json")["snapshot_observed_at"]
     receipt = tmp_path / "receipt.json"
-    receipt.write_bytes(
-        json.dumps(
-            {"captured_at_utc": positions["capture"]["captured_at_utc"]}
-        ).encode()
-    )
+    receipt.write_bytes(json.dumps({"captured_at_utc": observed}).encode())
     schwab_generation._holdings_v2_current(
         run_dir / "raw/holdings.v2.json",
         spec,
@@ -472,57 +516,52 @@ def _assert_frozen_accepts(tmp_path: Path, as_of: date) -> Any:
     return coverage
 
 
-def test_evening_capture_needs_the_ny_rendered_manifest(tmp_path: Path) -> None:
-    """Saturday 23:00 New York is Sunday in UTC: the driver's UTC stamps fail."""
+def test_labelled_modes_outside_the_proven_patterns_are_not_bound(
+    tmp_path: Path,
+) -> None:
+    """The driver stages them with the label; the adapter refuses to bind them."""
 
-    _TX["at"] = "2031-06-15T03:00:30+00:00"
-    run_dir = _run(tmp_path, start=SATURDAY_NIGHT)
-    binding = _ingest(tmp_path, run_dir)
-    capture = binding["capture"]
-    assert isinstance(capture, dict)
-    assert capture["capture_date_new_york"] == "2031-06-14"
-    assert capture["capture_date_utc"] == "2031-06-15"
-    assert capture["capture_date_utc_offset_days"] == 2
-    assert binding["as_of_date"] == "2031-06-15"
-    _assert_frozen_accepts(tmp_path, date(2031, 6, 15))
-    accounts = set(_crosswalk().values())
-    body = (run_dir / "transactions/manifest.json").read_bytes()
-    with pytest.raises(SchwabGenerationError, match="terminal date differs"):
-        _terminal_transaction_history_coverage(
-            {
-                "expected_sha256": hashlib.sha256(body).hexdigest(),
-                "expected_size_bytes": len(body),
-                "relative_path": "manifest.json",
-                "root_id": "ingest-terminal",
-            },
-            roots={"ingest-terminal": run_dir / "transactions"},
-            generation_as_of=date(2031, 6, 15),
-            account_ids=accounts,
-            transaction_sources=[
-                (
-                    internal,
-                    run_dir
-                    / f"transactions/normalized/wch/transactions/{internal}.json",
-                )
-                for internal in sorted(accounts)
-            ],
+    cases = {
+        "sunday": (
+            datetime(2031, 6, 15, 12, 0, tzinfo=timezone.utc),
+            "2031-06-15",
+            "06/15/2031",
+        ),
+        "saturday-night": (SATURDAY_NIGHT, "2031-06-15", "06/14/2031"),
+        "monday": (MONDAY_EARLY, "2031-06-16", "06/16/2031"),
+    }
+    for name, (start, tx_at, to_date) in cases.items():
+        folder = tmp_path / name
+        folder.mkdir()
+        _TX["at"] = f"{tx_at}T12:00:30+00:00"
+        run_dir = _run(
+            folder,
+            FakeTransport(to_date=to_date),
+            start=start,
+            label="OWNER_APPROVED_EXCEPTION",
         )
+        with pytest.raises(ingest.IngestError, match="cannot be bound"):
+            _ingest(folder, run_dir)
 
 
-def test_monday_early_capture_is_accepted(tmp_path: Path) -> None:
-    _TX["at"] = "2031-06-16T12:00:30+00:00"
-    run_dir = _run(tmp_path, FakeTransport(to_date="06/16/2031"), start=MONDAY_EARLY)
-    binding = _ingest(tmp_path, run_dir)
-    capture = binding["capture"]
-    assert isinstance(capture, dict)
-    assert binding["as_of_date"] == "2031-06-16"
-    assert capture["capture_mode"] == driver.MODE_NEXT_SESSION
-    assert capture["capture_date_utc_offset_days"] == 3
-    _assert_frozen_accepts(tmp_path, date(2031, 6, 16))
+def test_monday_pre_open_is_refused_without_the_label(tmp_path: Path) -> None:
+    with pytest.raises(driver.DriverError, match="outside the first-next-date"):
+        _run(tmp_path, FakeTransport(to_date="06/16/2031"), start=MONDAY_EARLY)
+
+
+def test_sunday_and_saturday_evening_are_refused_without_the_label(
+    tmp_path: Path,
+) -> None:
+    starts = (SATURDAY_NIGHT, datetime(2031, 6, 15, 12, 0, tzinfo=timezone.utc))
+    for number, start in enumerate(starts):
+        folder = tmp_path / f"case-{number}"
+        folder.mkdir()
+        with pytest.raises(driver.DriverError, match="outside the first-next-date"):
+            _run(folder, start=start)
 
 
 def test_monday_after_the_open_is_refused_by_the_driver(tmp_path: Path) -> None:
-    with pytest.raises(driver.DriverError, match="after the next session open"):
+    with pytest.raises(driver.DriverError, match="outside the first-next-date"):
         _run(tmp_path, start=datetime(2031, 6, 16, 14, 0, tzinfo=timezone.utc))
     assert not (tmp_path / "staging/synthetic-ingest-run/manifest.json").exists()
 
@@ -574,7 +613,33 @@ def test_labelled_r2_evening_pattern_records_the_utc_offset(tmp_path: Path) -> N
     assert capture["capture_date_utc"] == "2031-06-14"
     assert capture["capture_date_utc_offset_days"] == 1
     assert binding["as_of_date"] == "2031-06-14"
+    assert binding["snapshot_observed_at_basis"] == ingest.OBSERVED_AT_BASIS_CAPTURE
+    assert binding["financial_day_new_york"] == "2031-06-13"
     _assert_frozen_accepts(tmp_path, date(2031, 6, 14))
+    # the driver's own UTC-stamped manifest finishes on the next UTC date and the
+    # frozen consumer refuses it; the New York rendering is what it accepts
+    accounts = set(_crosswalk().values())
+    body = (run_dir / "transactions/manifest.json").read_bytes()
+    with pytest.raises(SchwabGenerationError, match="terminal date differs"):
+        _terminal_transaction_history_coverage(
+            {
+                "expected_sha256": hashlib.sha256(body).hexdigest(),
+                "expected_size_bytes": len(body),
+                "relative_path": "manifest.json",
+                "root_id": "ingest-terminal",
+            },
+            roots={"ingest-terminal": run_dir / "transactions"},
+            generation_as_of=date(2031, 6, 14),
+            account_ids=accounts,
+            transaction_sources=[
+                (
+                    internal,
+                    run_dir
+                    / f"transactions/normalized/wch/transactions/{internal}.json",
+                )
+                for internal in sorted(accounts)
+            ],
+        )
 
 
 def test_a_labelled_fallback_without_a_near_cutoff_nav_is_refused(
@@ -708,12 +773,14 @@ def test_a_different_cutoff_is_refused(tmp_path: Path) -> None:
     assert not (tmp_path / "ingest").exists()
 
 
-def test_a_labelled_run_outside_the_same_day_fallback_is_refused(
-    tmp_path: Path,
-) -> None:
-    run_dir = _run(tmp_path, label="OWNER_LABELLED_EXCEPTION")  # Saturday capture
-    with pytest.raises(ingest.IngestError, match="same-day post-close fallback"):
-        _ingest(tmp_path, run_dir)
+def test_the_unlabelled_as_of_is_exactly_the_cutoff_plus_one(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    binding = _ingest(tmp_path, run_dir)
+    capture = binding["capture"]
+    assert isinstance(capture, dict)
+    assert binding["as_of_date"] == "2031-06-14"
+    assert capture["capture_date_utc"] == capture["capture_date_new_york"]
+    assert capture["capture_date_utc_offset_days"] == 1
 
 
 def test_ingest_refuses_a_run_whose_capture_mode_was_forged(tmp_path: Path) -> None:
@@ -943,18 +1010,22 @@ def test_snapshot_dating_is_rechecked_over_the_written_file(tmp_path: Path) -> N
     _ingest(tmp_path, run_dir)
     path = tmp_path / "ingest/current/current-snapshot.json"
     document = _json(path)
-    as_of = date(2031, 6, 14)
-    ingest._check_snapshot_dating(path, as_of)
+    as_of, cutoff_day = date(2031, 6, 14), date(2031, 6, 13)
+    ingest._check_snapshot_dating(path, as_of, cutoff_day)
     original = document["observed_at"]
-    document["observed_at"] = "2031-06-15T03:59:00+00:00"
-    path.write_bytes(driver.canonical_bytes(document))
+    # UTC date differs from the as-of
     with pytest.raises(ingest.IngestError, match="UTC date differs"):
-        ingest._check_snapshot_dating(path, as_of)
+        ingest._check_snapshot_dating(path, date(2031, 6, 15), cutoff_day)
+    # the New York date (the baseline's financial day) is not the cutoff
+    document["observed_at"] = "2031-06-14T12:00:00+00:00"
+    path.write_bytes(driver.canonical_bytes(document))
+    with pytest.raises(ingest.IngestError, match="financial day"):
+        ingest._check_snapshot_dating(path, as_of, cutoff_day)
     document["observed_at"] = original
     document["positions"][0]["as_of_date"] = "2031-06-13"
     path.write_bytes(driver.canonical_bytes(document))
     with pytest.raises(ingest.IngestError, match="as-of differs"):
-        ingest._check_snapshot_dating(path, as_of)
+        ingest._check_snapshot_dating(path, as_of, cutoff_day)
 
 
 def test_cli_checks_composition_inputs_before_creating_any_output(
@@ -1164,35 +1235,97 @@ def test_a_money_market_position_is_valued_at_one_without_a_close(
     assert "SYNMMF" not in {item["symbol"] for item in market["official_close_files"]}
 
 
-def test_closes_fetch_time_and_corporate_events_are_recorded(tmp_path: Path) -> None:
+def test_verified_yahoo_run_provenance_and_corporate_events_are_recorded(
+    tmp_path: Path,
+) -> None:
     run_dir = _run(tmp_path)
-    closes = _closes(tmp_path, dividend="0.31")
-    (closes / "SYN3_yahoo_daily_raw.json").write_bytes(
-        json.dumps({"chart": {"result": [{"events": {"splits": {"1": {}}}}]}}).encode()
-    )
+    closes = _closes(tmp_path, dividend="0.31", splits=["SYN3"])
     binding = _ingest(tmp_path, run_dir, closes_dir=closes)
     market = binding["market_value"]
     assert isinstance(market, dict)
     assert market["symbols_with_dividend_in_window"] == ["SYN2"]
     assert market["symbols_with_split_in_window"] == ["SYN3"]
+    assert market["official_closes_fetch_status"] == "RECORDED_AFTER_CUTOFF_CLOSE"
+    provenance = market["official_closes_provenance"]
+    assert provenance["status"] == ingest.PROVENANCE_VERIFIED
+    assert provenance["run_id"] == "synthetic-yahoo-run"
+    assert provenance["fetch_basis"] == "created_at_utc"
+    assert provenance["manifest_sha256"]
+
+
+def test_fetch_completed_is_preferred_over_the_run_creation_time(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path)
+    closes = _closes(tmp_path, completed="2031-06-14T09:30:00Z")
+    binding = _ingest(tmp_path, run_dir, closes_dir=closes)
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    provenance = market["official_closes_provenance"]
+    assert provenance["fetch_basis"] == "fetch_completed_utc"
+    assert provenance["fetch_started_utc"] == "2031-06-14T09:00:00+00:00"
+    assert market["official_closes_fetched_at_utc"] == "2031-06-14T09:30:00+00:00"
+
+
+def test_r3_runs_refuse_closes_that_are_not_a_verified_yahoo_run(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path)
+    with pytest.raises(ingest.IngestError, match="not a verified Yahoo run"):
+        _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, plain=True))
+    assert not (tmp_path / "ingest").exists()
+
+
+def test_r3_runs_refuse_closes_with_an_unrecorded_fetch_time(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    with pytest.raises(ingest.IngestError, match="fetch timestamp is unrecorded"):
+        _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, fetched=None))
+
+
+def test_a_labelled_historical_replay_may_use_unverified_unrecorded_closes(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, label="HISTORICAL_REPLAY_LABELLED")
+    binding = _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, plain=True))
+    market = binding["market_value"]
+    assert isinstance(market, dict)
     assert market["official_closes_fetch_status"] == "UNRECORDED"
-    assert market["official_closes_fetched_at_utc"] is None
+    provenance = market["official_closes_provenance"]
+    assert provenance["status"] == ingest.PROVENANCE_UNVERIFIED
+    assert binding["exception_label"] == "HISTORICAL_REPLAY_LABELLED"
+
+
+def test_a_tampered_or_unbound_yahoo_run_is_refused_even_when_labelled(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, label="HISTORICAL_REPLAY_LABELLED")
+    closes = _closes(tmp_path)
+    target = closes / "SYN1_yahoo_daily.csv"
+    original = target.read_bytes()
+    target.write_bytes(original.replace(b"25.00", b"26.00"))
+    with pytest.raises(ingest.IngestError, match="differs from its manifest"):
+        _ingest(tmp_path, run_dir, closes_dir=closes)
+    target.write_bytes(original)
+    stray = closes.parent / "raw-extra.csv"
+    stray.write_bytes(b"x")
+    with pytest.raises(ingest.IngestError, match="does not bind"):
+        _ingest(tmp_path, run_dir, closes_dir=closes)
+    stray.unlink()
+    wrong = _closes(tmp_path, cutoff="2031-06-12")
+    with pytest.raises(ingest.IngestError, match="not a Yahoo run for the cutoff"):
+        _ingest(tmp_path, run_dir, closes_dir=wrong)
+
+
+def test_r3_success_needs_every_held_symbol_from_the_yahoo_run(tmp_path: Path) -> None:
+    """No backsolve path: a symbol absent from the verified run is refused."""
+
+    run_dir = _run(tmp_path)
+    with pytest.raises(ingest.IngestError, match="lacks an official close"):
+        _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, skip="SYN2"))
 
 
 def test_fetch_timestamp_before_the_cutoff_close_is_refused(tmp_path: Path) -> None:
     run_dir = _run(tmp_path)
-    closes = _closes(tmp_path)
-    (closes / "manifest.json").write_bytes(
-        json.dumps({"fetched_at_utc": "2031-06-13T19:00:00Z", "files": []}).encode()
-    )
+    closes = _closes(tmp_path, fetched="2031-06-13T19:00:00Z")
     with pytest.raises(ingest.IngestError, match="fetched before the cutoff close"):
         _ingest(tmp_path, run_dir, closes_dir=closes)
-    (closes / "manifest.json").write_bytes(
-        json.dumps({"fetched_at_utc": "2031-06-14T10:00:00Z", "files": []}).encode()
-    )
-    binding = _ingest(tmp_path, run_dir, closes_dir=closes)
-    market = binding["market_value"]
-    assert isinstance(market, dict)
-    assert market["official_closes_fetched_at_utc"] == "2031-06-14T10:00:00+00:00"
-    assert market["official_closes_fetch_status"] == "RECORDED_AFTER_CUTOFF_CLOSE"
-    assert market["config_sha256"]

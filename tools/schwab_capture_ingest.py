@@ -16,15 +16,19 @@ capture date) holds an observed row at the cutoff for every account. A same-day
 post-close capture is bound only as a labelled fallback, whose NAV ends the day
 before the cutoff and needs the official-close derivation that R2 used.
 
-Dating. The frozen generation requires the snapshot observation's UTC date to
-equal the spec ``as_of_date``, the terminal manifest to finish no later than
-that date, and the requested history end (the provider's New York date) to equal
-the manifest finish date. The adapter therefore binds ``as_of_date`` to the UTC
-date of the capture, writes the real capture instant as the snapshot
-``observed_at``, and records the valuation cutoff, both capture dates, the
-offset and the capture mode explicitly in the binding instead of rejecting them
-(the R2 run was dated one day late because this was neither recorded nor
-understood). The terminal transaction manifest is re-emitted with ``started_at``
+Dating. Two readers constrain the snapshot observation. The frozen generation
+requires its UTC date to equal the spec ``as_of_date`` (and the terminal
+manifest to finish no later than that date, with the requested history end, the
+provider's New York date, equal to the manifest finish date). The baseline
+(``tools/portfolio_baseline.py``) reads the NEW YORK date of the observation as
+the position's financial day and relabels a row whose UTC date is later, which is
+how R2.1 consumed generation as-of 2026-09-18 for cutoff 2026-09-17. For the
+first-next-date mode the adapter therefore writes the observation as the close of
+the cutoff day's extended session (20:00 New York: New York date = cutoff, UTC
+date = cutoff + 1 = the as-of) and records the real capture instant, both capture
+dates, the offset, the valuation cutoff and the mode in the binding. The
+same-day fallback keeps the real capture instant. Any other labelled mode is
+refused by the adapter. The terminal transaction manifest is re-emitted with ``started_at``
 and ``finished_at`` expressed at the America/New_York offset, the same instants,
 so its finish date is the New York date the provider used.
 
@@ -62,7 +66,7 @@ import csv
 from collections.abc import Mapping, Sequence
 import copy
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import hashlib
 import io
@@ -93,7 +97,9 @@ ROOT_CURRENT = "ingest-current"
 ROOT_NAV = "ingest-nav"
 ROOT_TERMINAL = "ingest-terminal"
 VALUATION_BASIS = "OFFICIAL_CLOSE_QUANTITY_TIMES_CLOSE"
-OBSERVED_AT_BASIS = "CAPTURE_INSTANT_UTC_DATE_IS_GENERATION_AS_OF"
+OBSERVED_AT_BASIS = "CUTOFF_DAY_EXTENDED_SESSION_CLOSE_20_00_NEW_YORK"
+OBSERVED_AT_BASIS_CAPTURE = "CAPTURE_INSTANT_SAME_DAY_FALLBACK"
+SESSION_END_LOCAL_TIME = time(20, 0)
 TRANSACTION_MANIFEST_RULE = "TIMESTAMPS_RE_EXPRESSED_AT_AMERICA_NEW_YORK_SAME_INSTANTS"
 _NEW_YORK = ZoneInfo(driver.CLOSE_TIME_ZONE)
 _REPLACED_ROLES = frozenset({"WCH_NAV_CSV", "WCH_TRANSACTION_JSON"})
@@ -129,9 +135,12 @@ def _write_new(path: Path, payload: bytes) -> dict[str, object]:
 # --------------------------------------------------------------------------- #
 
 
-_FETCH_KEYS = ("fetched_at_utc", "fetched_at", "captured_at_utc", "run_finished_at_utc")
 _SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9./-]{0,15}\Z")
 _EXCEPTION_LABEL = re.compile(r"[A-Z][A-Z0-9_]{5,63}\Z")
+YAHOO_RUN_KIND = "yahoo-fetch-run"
+YAHOO_MANIFEST = "MANIFEST.json"
+PROVENANCE_VERIFIED = "VERIFIED_YAHOO_RUN_BINDING"
+PROVENANCE_UNVERIFIED = "UNVERIFIED_HISTORICAL_REPLAY_ONLY"
 
 
 @dataclass(frozen=True)
@@ -143,26 +152,113 @@ class CloseSet:
     dividend_symbols: frozenset[str]
     split_symbols: frozenset[str]
     fetched_at: str | None
+    provenance: dict[str, object]
 
 
-def _events(path: Path) -> tuple[bool, bool]:
-    """Dividend and split events of the retained raw chart response, if any."""
+def _yahoo_run(
+    directory: Path, day: date
+) -> tuple[dict[str, object], frozenset[str]] | None:
+    """Verify the Yahoo run that holds ``directory`` (``<run>/official-closes``).
 
-    if not path.is_file():
-        return False, False
-    try:
-        document = strict_json_loads(path.read_bytes(), label="official raw")
-        result = driver.json_objects(
-            driver.json_object(document, "official raw").get("chart", {}).get("result"),
-            "official raw result",
+    The run manifest (``MANIFEST.json``, kind ``yahoo-fetch-run``) must name the
+    cutoff and bind every file of the run, including each official-close file, by
+    SHA-256 and size, and the run must hold no file the manifest does not bind.
+    Returns ``None`` when the directory is not inside a Yahoo run at all. The
+    Yahoo driver's own ``verify`` also rebuilds the files from the raw bars; that
+    stronger check is the operator's, this one is the ingest's binding check.
+    """
+
+    run = directory.parent
+    manifest_path = run / YAHOO_MANIFEST
+    if directory.name != "official-closes" or not manifest_path.is_file():
+        return None
+    body = manifest_path.read_bytes()
+    manifest = driver.load_json_file(manifest_path, "Yahoo run manifest")
+    if (
+        manifest.get("kind") != YAHOO_RUN_KIND
+        or manifest.get("schema_version") != 1
+        or manifest.get("cutoff") != day.isoformat()
+    ):
+        raise IngestError(
+            "official closes run manifest is not a Yahoo run for the cutoff"
         )
-    except (driver.DriverError, AttributeError) as exc:
-        raise IngestError("official raw response is malformed") from exc
-    events = result[0].get("events") if result else None
-    if events is None:
-        return False, False
-    block = driver.json_object(events, "official raw events")
-    return bool(block.get("dividends")), bool(block.get("splits"))
+    files = driver.json_object(manifest.get("files"), "Yahoo run files")
+    bound: set[str] = set()
+    for name, record in files.items():
+        entry = driver.json_object(record, "Yahoo run file")
+        if name.startswith(("/", "..")) or ".." in name.split("/"):
+            raise IngestError("official closes run file path is unsafe")
+        target = run / name
+        if target.is_symlink() or not target.is_file():
+            raise IngestError("official closes run file is missing")
+        payload = target.read_bytes()
+        if entry.get("sha256") != _sha256(payload) or entry.get("size_bytes") != len(
+            payload
+        ):
+            raise IngestError("official closes run file differs from its manifest")
+        bound.add(name)
+    present = {
+        path.relative_to(run).as_posix()
+        for path in run.rglob("*")
+        if path.is_file() and path.name != YAHOO_MANIFEST
+    }
+    if present != bound:
+        raise IngestError("official closes run holds files its manifest does not bind")
+    started = manifest.get("fetch_started_utc")
+    completed = manifest.get("fetch_completed_utc")
+    created = manifest.get("created_at_utc")
+    try:
+        if completed is not None:
+            fetched = driver.aware_utc(completed, "fetch_completed_utc").isoformat()
+            basis = "fetch_completed_utc"
+        elif created is not None:
+            fetched = driver.aware_utc(created, "created_at_utc").isoformat()
+            basis = "created_at_utc"
+        else:
+            fetched, basis = None, "NONE"
+        recorded_start = (
+            None
+            if started is None
+            else driver.aware_utc(started, "fetch_started_utc").isoformat()
+        )
+    except driver.DriverError as exc:
+        raise IngestError(f"official closes run time is invalid: {exc}") from exc
+    splits: set[str] = set()
+    coverage_path = run / "coverage.json"
+    if "coverage.json" in bound:
+        for entry in _coverage_entries(
+            driver.load_json_file(coverage_path, "coverage")
+        ):
+            adjustment = entry.get("adjustment")
+            if isinstance(adjustment, dict) and adjustment.get("split_event_count"):
+                name = str(entry["id"])
+                splits.update({name, name.replace("-", ".")})
+    return (
+        {
+            "fetch_basis": basis,
+            "fetch_completed_utc": fetched,
+            "fetch_started_utc": recorded_start,
+            "manifest_sha256": _sha256(body),
+            "run_id": manifest.get("run_id"),
+            "status": PROVENANCE_VERIFIED,
+        },
+        frozenset(splits),
+    )
+
+
+def _coverage_entries(node: object) -> list[dict[str, Any]]:
+    """Every per-symbol coverage entry (a dict with an ``id`` and ``adjustment``)."""
+
+    found: list[dict[str, Any]] = []
+    if isinstance(node, dict):
+        if "id" in node and "adjustment" in node:
+            found.append(node)
+        for value in node.values():
+            found.extend(_coverage_entries(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(_coverage_entries(value))
+    return found
 
 
 def official_closes(directory: Path, day: date) -> CloseSet:
@@ -171,7 +267,6 @@ def official_closes(directory: Path, day: date) -> CloseSet:
     closes: dict[str, Decimal] = {}
     hashes: dict[str, str] = {}
     dividends: set[str] = set()
-    splits: set[str] = set()
     if not directory.is_dir():
         raise IngestError("official closes directory is missing")
     for path in sorted(directory.glob("*_yahoo_daily.csv")):
@@ -199,35 +294,31 @@ def official_closes(directory: Path, day: date) -> CloseSet:
                 found.add(value)
         if len(found) > 1:
             raise IngestError("official close is conflicting for a date")
-        raw_dividends, raw_splits = _events(
-            directory / f"{symbol}_yahoo_daily_raw.json"
-        )
-        if raw_dividends:
-            dividends.add(symbol)
-        if raw_splits:
-            splits.add(symbol)
         if found:
             closes[symbol] = next(iter(found))
             hashes[symbol] = _sha256(payload)
+    verified = _yahoo_run(directory, day)
+    if verified is None:
+        provenance: dict[str, object] = {
+            "fetch_basis": "NONE",
+            "fetch_completed_utc": None,
+            "fetch_started_utc": None,
+            "manifest_sha256": None,
+            "run_id": None,
+            "status": PROVENANCE_UNVERIFIED,
+        }
+        splits: frozenset[str] = frozenset()
+    else:
+        provenance, splits = verified
+    fetched = provenance["fetch_completed_utc"]
     return CloseSet(
-        closes, hashes, frozenset(dividends), frozenset(splits), _fetched_at(directory)
+        closes,
+        hashes,
+        frozenset(dividends),
+        splits,
+        None if fetched is None else str(fetched),
+        provenance,
     )
-
-
-def _fetched_at(directory: Path) -> str | None:
-    """The Yahoo run manifest's fetch timestamp, when the run recorded one."""
-
-    path = directory / "manifest.json"
-    if not path.is_file():
-        return None
-    manifest = driver.load_json_file(path, "official closes manifest")
-    for key in _FETCH_KEYS:
-        if key in manifest:
-            try:
-                return driver.aware_utc(manifest[key], key).isoformat()
-            except driver.DriverError as exc:
-                raise IngestError(f"official closes {key} is invalid") from exc
-    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -400,16 +491,17 @@ def _capture_binding(
         raise IngestError(str(exc)) from exc
     if recomputed != capture or balance_recomputed != balance_capture:
         raise IngestError("capture timing differs from the capture time it records")
-    expected_mode = driver.MODE_NEXT_SESSION if label is None else driver.MODE_SAME_DAY
-    if capture["capture_mode"] != expected_mode or (
-        balance_capture["capture_mode"] != expected_mode
+    utc_date = date.fromisoformat(str(capture["capture_date_utc"]))
+    if label is None and (
+        capture["capture_mode"] != driver.MODE_NEXT_SESSION
+        or balance_capture["capture_mode"] != driver.MODE_NEXT_SESSION
+        or utc_date != cutoff.as_of_date + timedelta(days=1)
+        or capture["capture_date_new_york"] != utc_date.isoformat()
     ):
         raise IngestError(
-            "capture mode is not the next-session pre-open mode"
-            if label is None
-            else "a labelled run is bound only in the same-day post-close fallback"
+            "an unlabelled run must be captured on the first date after the "
+            "cutoff, so that the as-of date is the cutoff plus one"
         )
-    utc_date = date.fromisoformat(str(capture["capture_date_utc"]))
     return {
         **capture,
         "balances_captured_at_utc": balance_capture["captured_at_utc"],
@@ -467,13 +559,45 @@ def ingest(
     if set(manifest["accounts"]) != accounts or len(accounts) != len(crosswalk):
         raise IngestError("crosswalk scope differs from the driver run")
     capture = _capture_binding(positions, balances, cutoff, label)
-    as_of = date.fromisoformat(str(capture["capture_date_utc"]))
+    # The snapshot observation must satisfy two readers at once. The frozen
+    # generation needs its UTC date to equal the spec as-of date; the baseline
+    # (tools/portfolio_baseline.py) takes the position's financial day from the
+    # observation's NEW YORK date and relabels a row whose UTC date is later (the
+    # R2.1 pattern). For the first-next-date mode the observation is therefore the
+    # close of the cutoff day's extended session, 20:00 New York, whose New York
+    # date is the cutoff and whose UTC date is cutoff + 1, the as-of. The same-day
+    # fallback keeps the real capture instant (New York date = cutoff).
+    if capture["capture_mode"] == driver.MODE_NEXT_SESSION:
+        snapshot_at = datetime.combine(
+            cutoff.as_of_date, SESSION_END_LOCAL_TIME, tzinfo=_NEW_YORK
+        ).astimezone(timezone.utc)
+        observed_basis = OBSERVED_AT_BASIS
+    elif capture["capture_mode"] == driver.MODE_SAME_DAY:
+        snapshot_at = driver.aware_utc(capture["captured_at_utc"], "captured_at_utc")
+        observed_basis = OBSERVED_AT_BASIS_CAPTURE
+    else:
+        raise IngestError(
+            "a capture outside the first-next-date and same-day modes cannot be "
+            "bound: the baseline would not read its financial day as the cutoff"
+        )
+    as_of = snapshot_at.date()
 
     held = driver.json_objects(positions.get("positions"), "positions")
     sweeps = driver.json_objects(positions.get("sweep_vehicles"), "sweep vehicles")
     cash_rows = driver.json_objects(positions.get("cash_balances"), "cash balances")
     symbols = sorted({str(row["symbol"]) for row in held})
     close_set = official_closes(closes_dir, cutoff.as_of_date)
+    if label is None:
+        if close_set.provenance["status"] != PROVENANCE_VERIFIED:
+            raise IngestError(
+                "official closes are not a verified Yahoo run "
+                "(allowed only for a labelled historical replay)"
+            )
+        if close_set.fetched_at is None:
+            raise IngestError(
+                "official closes fetch timestamp is unrecorded "
+                "(allowed only for a labelled historical replay)"
+            )
     if close_set.fetched_at is not None and (
         datetime.fromisoformat(close_set.fetched_at) < cutoff.close_utc
     ):
@@ -511,7 +635,7 @@ def ingest(
         read = read_holdings_v2_current_snapshot(
             raw_holdings,
             crosswalk=crosswalk,
-            captured_at=capture["captured_at_utc"],
+            captured_at=snapshot_at.isoformat(),
             official_closes=reader_closes,
             price_date=cutoff.as_of_date,
         )
@@ -596,7 +720,9 @@ def ingest(
         ROOT_NAV: str((output_root / "nav").resolve()),
         ROOT_TERMINAL: str((output_root / "terminal").resolve()),
     }
-    _check_snapshot_dating(current_dir / "current-snapshot.json", as_of)
+    _check_snapshot_dating(
+        current_dir / "current-snapshot.json", as_of, cutoff.as_of_date
+    )
     _check_transaction_dating(output_root / "terminal", sorted(accounts), as_of)
 
     fragment: dict[str, object] = {
@@ -656,6 +782,7 @@ def ingest(
                 for symbol in used_files
             ],
             "official_closes_fetched_at_utc": close_set.fetched_at,
+            "official_closes_provenance": close_set.provenance,
             "official_closes_fetch_status": (
                 "UNRECORDED"
                 if close_set.fetched_at is None
@@ -676,8 +803,9 @@ def ingest(
         "schema_name": "schwab-capture-ingest-binding",
         "schema_version": SCHEMA_VERSION,
         "exception_label": label,
-        "snapshot_observed_at": capture["captured_at_utc"],
-        "snapshot_observed_at_basis": OBSERVED_AT_BASIS,
+        "financial_day_new_york": snapshot_at.astimezone(_NEW_YORK).date().isoformat(),
+        "snapshot_observed_at": snapshot_at.isoformat(),
+        "snapshot_observed_at_basis": observed_basis,
         "transaction_manifest": tx_rule,
         "unverified_shapes": list(driver.UNVERIFIED_SHAPES),
     }
@@ -878,11 +1006,14 @@ def _write_terminal(
     return sources, transaction_manifest, rule
 
 
-def _check_snapshot_dating(path: Path, as_of: date) -> None:
-    """The frozen consumer compares the UTC date of every as-of and observation."""
+def _check_snapshot_dating(path: Path, as_of: date, cutoff_day: date) -> None:
+    """The frozen consumer compares the UTC date of every as-of and observation;
+    the baseline reads the New York date of the observation as the financial day."""
 
     document = driver.load_json_file(path, "current snapshot")
     observed = driver.aware_utc(document.get("observed_at"), "observed_at")
+    if observed.astimezone(_NEW_YORK).date() != cutoff_day:
+        raise IngestError("snapshot financial day (New York) differs from the cutoff")
     if observed.date() != as_of:
         raise IngestError("snapshot observation UTC date differs from the as-of date")
     for row in driver.json_objects(document.get("positions"), "snapshot positions"):

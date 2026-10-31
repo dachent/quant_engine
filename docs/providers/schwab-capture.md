@@ -26,7 +26,8 @@ fake transport and invented values.
   cutoff close (16:00 America/New_York on the cutoff date). Only an explicit
   `exception_label` in the approved evidence admits an offset, and then every
   affected row carries the label and `as_of_offset_days`.
-- Any capture outside the one unlabelled mode (see "Capture modes"), and a cutoff
+- Any capture outside the one unlabelled mode (the first New York date after the
+  cutoff and before 20:00; see "Capture modes"), and a cutoff
   that is not a trading day, without the approved label. Every output records
   `capture_mode`, `capture_date_utc`, `capture_date_new_york`, `captured_at_utc`,
   `capture_lag_hours`, `next_session_open_utc` and an `as_of_basis`.
@@ -53,14 +54,15 @@ internal account ids only.
 
 ## Capture modes
 
-Coordinator ruling: capture after the cutoff day has closed and before the next
-trading session's first price update.
+Coordinator ruling: the unlabelled window is the proven +1 pattern only (the R2.1
+baseline already consumes Schwab generation as-of 2026-09-18 for cutoff
+2026-09-17).
 
 | Mode | Window (New York) | Acceptance |
 | --- | --- | --- |
-| `NEXT_SESSION_PRE_OPEN` | at or after the cutoff close, on a later calendar date, before 09:30 on the next trading day after the cutoff | accepted unlabelled. Friday cutoff: Saturday, Sunday or Monday before 09:30 (accepted), Monday 09:30 or later (refused); holiday weekends use the next trading day (Friday before Labor Day: Tuesday before 09:30) |
-| `SAME_DAY_POST_CLOSE` | cutoff date, at or after 16:00 | only with the approved exception label (fallback: balance row at the cutoff minus one day, official-close NAV derivation) |
-| `BEFORE_CLOSE`, `AFTER_NEXT_SESSION_OPEN` | otherwise | only with the label, mode recorded |
+| `NEXT_SESSION_PRE_OPEN` | the first calendar date after the cutoff, at or after midnight and before 20:00, and before 09:30 when that date is a trading day | accepted unlabelled. Friday cutoff: Saturday only (so the capture UTC date equals the New York date and the as-of is exactly the cutoff plus one). A non-trading date after the cutoff (weekend or holiday) is accepted only when it is the first calendar date after the cutoff (Thursday before Good Friday: Good Friday; Christmas Eve: Christmas Day) |
+| `SAME_DAY_POST_CLOSE` | cutoff date, at or after 16:00 | labelled only (fallback: the balance row at the cutoff minus one day and the official-close NAV derivation); bound by the ingest |
+| `BEFORE_CLOSE`, `OUTSIDE_STANDARD_WINDOW` | Sunday, Monday pre-open, Saturday 20:00 or later, a trading day after 09:30, anything later | labelled only; the driver stages them and records the mode, the ingest refuses to bind them (they exceed the proven +1 pattern) |
 
 In the accepted mode every priced row must carry `price.priceDate` equal to the
 cutoff, and every account's `balances.historical` series must hold an OBSERVED
@@ -179,11 +181,15 @@ consumes, under a new create-only output root:
   frozen `read_holdings_v2_current_snapshot` over the raw response. Positions are
   valued at quantity times the **official close** of the cutoff date from
   `<SYMBOL>_yahoo_daily.csv` files; the provider-quoted value is never used. The
-  snapshot `observed_at` is the real capture instant and `as_of_date` is its UTC
-  date (the frozen consumer requires them to agree and the terminal manifest to
-  finish no later than it); the valuation cutoff is recorded as
-  `valuation_cutoff` in the binding. For a Friday cutoff and a Saturday capture
-  the generation as-of is Saturday, as R2's was one day after its cutoff.
+  snapshot `observed_at` satisfies two readers: the frozen generation needs its
+  UTC date to equal the spec as-of, and the baseline
+  (`tools/portfolio_baseline.py`) takes the position's financial day from the
+  observation's NEW YORK date and relabels a row whose UTC date is later (the
+  R2.1 pattern). In the first-next-date mode it is therefore the close of the
+  cutoff day's extended session, 20:00 New York (New York date = cutoff, UTC date
+  = cutoff + 1 = the as-of); the real capture instant, both capture dates, the
+  offset and `valuation_cutoff` are in the binding. The labelled same-day
+  fallback keeps the real capture instant. Readers are traced in the READY note.
   Zero-quantity rows are removed from the raw response before the frozen reader
   sees it (the driver omits them before reading their price fields). The emitted
   `sweep_vehicle_count` counts quantity rows only: the frozen reader also counts
@@ -246,11 +252,19 @@ recorded in the binding:
   `price_ratio_exceptions` names it with an `UPPER_SNAKE_CASE` label and the
   corporate action; applied exceptions are recorded in the binding. The binding
   also records the tolerance, the largest observed difference, the symbols with
-  a dividend or split in the pulled window (CSV `dividend` column and the raw
-  response `events`), and the closes' fetch timestamp from the Yahoo run manifest
-  (`fetched_at_utc`, `fetched_at`, `captured_at_utc` or `run_finished_at_utc`).
-  A timestamp before the cutoff close is refused; a manifest with none is
-  recorded as `UNRECORDED` (the retained 2026-10-30 pull has none).
+  a dividend or split in the pulled window (CSV `dividend` column and the run's
+  coverage entries) and the closes' fetch time. Closes must come from a verified
+  Yahoo fetch run: `--official-closes-dir` is `<run>/official-closes` and the
+  run's `MANIFEST.json` (`kind` `yahoo-fetch-run`, the cutoff, every run file
+  bound by SHA-256 and size, no unbound file) must verify; the fetch time is
+  `fetch_completed_utc` when the manifest has it, else `created_at_utc` (PR 702
+  is adding `fetch_started_utc`/`fetch_completed_utc` and an
+  `official-closes-manifest.json`, which is not consumed yet). An unlabelled (R3)
+  run refuses closes that are not a verified Yahoo run or whose fetch time is
+  unrecorded, and refuses a fetch before the cutoff close; both are allowed only
+  for a labelled historical replay and are then recorded as
+  `UNVERIFIED_HISTORICAL_REPLAY_ONLY` and `UNRECORDED`. The Yahoo driver's own
+  `verify` additionally rebuilds the files from the raw bars; run it as well.
 - Symbol aliases map the provider's spelling to the spelling of the
   `<SYMBOL>_yahoo_daily.csv` files. The Yahoo driver (PR 702) writes `BRK.B` for
   `BRK-B`, so all three Berkshire spellings map to `BRK.B`. A symbol that is
@@ -263,11 +277,13 @@ recorded in the binding:
   symbol held as a position is valued at quantity times 1.00 with no close and
   no Yahoo file.
 
-It refuses: a run that does not verify; a labelled run that is not the same-day
-fallback (and an unlabelled run that is not the next-session mode); a cutoff that
-differs from the run evidence; a held position with no official close (names the
-count and the symbols); and any output that already exists. A refused run leaves no binding and needs a
-new output root.
+It refuses: a run that does not verify; an unlabelled run that is not the
+first-next-date mode (as-of exactly the cutoff plus one); a labelled run in any
+mode other than the first-next-date window or the same-day fallback; a cutoff
+that differs from the run evidence; closes that are not a verified Yahoo run, or
+have an unrecorded fetch time, in an unlabelled run; a held position with no
+official close (names the count and the symbols); and any output that already
+exists. A refused run leaves no binding and needs a new output root.
 
 ## Design notes
 
