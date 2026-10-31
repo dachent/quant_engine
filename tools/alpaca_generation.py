@@ -30,6 +30,12 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("--internal-account-id", required=True)
     plan.add_argument("--as-of-date", type=date.fromisoformat, required=True)
     plan.add_argument("--expected-source-file-count", type=int, default=23)
+    plan.add_argument(
+        "--native-activities",
+        type=Path,
+        default=None,
+        help="ingest package directory from `python -m quant_engine.alpaca.capture ingest`",
+    )
     for command in ("build", "stage"):
         child = commands.add_parser(command)
         child.add_argument("plan", type=Path)
@@ -51,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 internal_account_id=args.internal_account_id,
                 as_of_date=args.as_of_date,
                 expected_source_file_count=args.expected_source_file_count,
+                native_activities=args.native_activities,
             )
         elif args.command == "build":
             catalog, manifest, catalog_bytes = build_generation(args.plan)
