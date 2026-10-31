@@ -119,6 +119,30 @@ def test_trade_history_rejects_header_and_width_drift() -> None:
         parse_trade_history_csv(b"\xff\xfe")
 
 
+def test_signed_in_page_ships_numeric_cells_and_slug() -> None:
+    rows: list[list[object]] = [
+        ["1/2/2030 11:00 AM", "Sell", 100.5, 100.5, 0, 0, 1, 1],
+        ["1/3/2030, 7:00 AM", "Rebuy", 101, 100.5, "", "", 1, 1],
+    ]
+    body = page([])  # type: ignore[arg-type]
+    props = body["pageProps"]
+    assert isinstance(props, dict)
+    del props["key"]
+    props["slug"] = "synthetic"
+    props["sheetData"] = [props["sheetData"][0], *rows]
+    series = parse_model_page(body)
+    assert [e.action for e in series.events] == ["Sell", "Rebuy"]
+    props["sheetData"][1][2] = True
+    with pytest.raises(WebContractError):
+        parse_model_page(body)
+
+
+def test_other_site_pages_are_not_routed() -> None:
+    for name in ("stocks", "premium", "blog", "auth", "models/a-model"):
+        url = f"{ORIGIN}/_next/data/BUILD/{name}.json"
+        assert classify("GET", url, GRIZZLYBULLS_CONTRACT)[0] == "unrouted"
+
+
 def test_model_page_and_hypothetical_tail() -> None:
     series = parse_model_page(page(sheet_rows()))
     assert series.events[-1].action == "Hypothetical Sell"
@@ -172,7 +196,9 @@ def test_contract_routing_is_deny_by_default() -> None:
         "routed",
         "models.catalog",
     )
-    assert classify("GET", f"{ORIGIN}/_next/data/BUILD/x-model.json", contract) == (
+    assert classify(
+        "GET", f"{ORIGIN}/_next/data/BUILD/models/x-model.json?slug=x-model", contract
+    ) == (
         "routed",
         "models.page",
     )

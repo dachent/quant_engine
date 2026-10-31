@@ -55,7 +55,7 @@ def _feed_full(rec: Recorder, history: bytes | None = None) -> None:
         headers=[],
     )
     get(
-        f"/_next/data/B/{SLUG}.json",
+        f"/_next/data/B/models/{SLUG}.json?slug={SLUG}",
         json.dumps(page(sheet_rows())).encode(),
         ctype="application/json",
         headers=[],

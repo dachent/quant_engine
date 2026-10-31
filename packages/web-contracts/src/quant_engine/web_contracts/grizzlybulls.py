@@ -100,8 +100,10 @@ def build_contract() -> ProviderContract:
             ),
             _endpoint(
                 "models.page",
-                "/_next/data/{build_id}/{slug}.json",
-                path_pattern=rf"/_next/data/[^/]+/(?!models\.json$){SLUG_PATTERN}\.json",
+                "/_next/data/{build_id}/models/{slug}.json",
+                path_pattern=rf"/_next/data/[^/]+/models/{SLUG_PATTERN}\.json",
+                query_keys=frozenset({"slug"}),
+                validate_query=_historical_query,
             ),
             _endpoint(
                 "models.history",
@@ -306,8 +308,9 @@ def parse_model_page(body: object) -> SignalSeries:
 
     props = _object(_object(body, "page").get("pageProps"), "pageProps")
     _summary(props.get("summaryData"))
-    if not isinstance(props.get("key"), str) or not isinstance(props.get("doc"), str):
-        raise WebContractError("page key and doc must be text")
+    identity = props.get("slug", props.get("key"))
+    if not isinstance(identity, str) or not isinstance(props.get("doc"), str):
+        raise WebContractError("page slug and doc must be text")
     return _sheet_series(props.get("sheetData"), "model-page")
 
 
@@ -325,13 +328,19 @@ def _sheet_series(sheet: object, kind: str) -> SignalSeries:
         raise WebContractError("sheetData header differs from the reviewed shape")
     rows: list[tuple[str, str, str]] = []
     for row in sheet[1:]:
+        # The public page ships text cells; the signed-in page ships numbers.
         if (
             not isinstance(row, list)
             or len(row) != len(_HISTORY_HEADER)
-            or not all(isinstance(cell, str) for cell in row)
+            or not all(
+                isinstance(cell, (str, int, float)) and not isinstance(cell, bool)
+                for cell in row
+            )
+            or not isinstance(row[0], str)
+            or not isinstance(row[1], str)
         ):
             raise WebContractError("sheetData row differs from the reviewed shape")
-        rows.append((row[0], row[1], row[2]))
+        rows.append((row[0], row[1], str(row[2])))
     return _series(kind, rows)
 
 

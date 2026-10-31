@@ -188,6 +188,8 @@ class Recorder:
     ) -> None:
         status = entry["status"]
         if not isinstance(status, int) or not 200 <= status < 300:
+            # Error bodies are short vendor messages, not data; keep the text.
+            entry["error_body"] = bytes(read_body())[:500].decode("utf-8", "replace")
             self._fail(entry, f"HTTP {status}")
             return
         if capability in _AUTHENTICATED and "authorization" not in header_names:
