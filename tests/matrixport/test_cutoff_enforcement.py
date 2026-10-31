@@ -28,6 +28,7 @@ from quant_engine.matrixport.pipeline import (
 )
 from quant_engine.matrixport.storage import RunStorage
 from test_pipeline_cli import FixtureTransport
+from quant_engine.matrixport.transport import SanitizedResponse
 
 CUTOFF = "2026-09-17"
 CUTOFF_END_MS = (
@@ -506,3 +507,134 @@ def test_incremental_base_never_ends_after_the_requested_cutoff(
         assert same_day.previous_run_dir == later.run_dir
     finally:
         same_day.close()
+
+
+class ChangedHoldings(FixtureTransport):
+    """Returns a different holding, so the base run's holding row stays inherited."""
+
+    def get(self, path, *, params=None):  # type: ignore[no-untyped-def]
+        response = super().get(path, params=params)
+        if path == "/strategy/api/v2/user/holding":
+            body = response.content.replace(b'"p1"', b'"p2"')
+            return SanitizedResponse(
+                response.status_code,
+                body,
+                response.request_id,
+                response.elapsed_ms,
+                "holding",
+            )
+        return response
+
+
+def _seeded_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    base_clock: int,
+    base_label: str | None,
+    new_label: str | None,
+    strip_base_captures: bool = False,
+) -> Path:
+    """A completed base run (cutoff 09-17) and an incremental run (cutoff 09-18)."""
+    monkeypatch.setattr(pipeline, "FULL_START_MS", 1722384000000)
+    monkeypatch.chdir(tmp_path)
+    base = MatrixportExtractor(
+        tmp_path,
+        mode="full",
+        run_id="20260901T000000.000Z",
+        transport=FixtureTransport(),
+        cutoff=CUTOFF,
+        captured_after_cutoff_label=base_label,
+        clock_ms=lambda: base_clock,
+    )
+    try:
+        base.extract()
+    finally:
+        base.close()
+    (base.run_dir / "reports" / "verification.json").write_bytes(b'{"ok": true}')
+    if strip_base_captures:
+        storage = RunStorage(base.run_dir / "state" / pipeline.DATABASE_NAME)
+        try:
+            storage._connection.execute(
+                "UPDATE runs SET metadata_json = json_remove(metadata_json, '$.captures')"
+            )
+            storage._connection.commit()
+        finally:
+            storage.close()
+    new_noon = int(datetime(2026, 9, 18, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    new = MatrixportExtractor(
+        tmp_path,
+        mode="incremental",
+        run_id="20260902T000000.000Z",
+        transport=ChangedHoldings(),
+        cutoff="2026-09-18",
+        captured_after_cutoff_label=new_label,
+        clock_ms=lambda: new_noon,
+    )
+    try:
+        assert new.previous_run_dir == base.run_dir
+        new.extract()
+    finally:
+        new.close()
+    return new.run_dir
+
+
+def test_inherited_rows_are_present_in_the_seeded_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _seeded_pair(
+        tmp_path, monkeypatch, base_clock=NOON_MS, base_label=None, new_label=None
+    )
+    inherited = pipeline.inherited_snapshot_captures(run_dir, run_dir.name)
+    assert ("holdings", "20260901T000000.000Z", NOON_MS) in inherited
+
+
+def test_verify_accepts_inherited_rows_captured_before_the_new_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _seeded_pair(
+        tmp_path, monkeypatch, base_clock=NOON_MS, base_label=None, new_label=None
+    )
+    cli._require_recorded_cutoff(run_dir, run_dir.name, "2026-09-18")
+
+
+def test_verify_refuses_inherited_rows_captured_after_the_new_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _seeded_pair(
+        tmp_path,
+        monkeypatch,
+        base_clock=LATER_MS,
+        base_label="base label",
+        new_label=None,
+    )
+    with pytest.raises(cli.CredentialError, match="Inherited current-state rows"):
+        cli._require_recorded_cutoff(run_dir, run_dir.name, "2026-09-18")
+
+
+def test_verify_accepts_late_inherited_rows_when_the_new_run_is_labelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _seeded_pair(
+        tmp_path,
+        monkeypatch,
+        base_clock=LATER_MS,
+        base_label="base label",
+        new_label="new run label",
+    )
+    cli._require_recorded_cutoff(run_dir, run_dir.name, "2026-09-18")
+
+
+def test_verify_refuses_inherited_rows_whose_base_recorded_no_capture_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _seeded_pair(
+        tmp_path,
+        monkeypatch,
+        base_clock=NOON_MS,
+        base_label=None,
+        new_label=None,
+        strip_base_captures=True,
+    )
+    with pytest.raises(cli.CredentialError, match="Inherited current-state rows"):
+        cli._require_recorded_cutoff(run_dir, run_dir.name, "2026-09-18")

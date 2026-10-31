@@ -24,6 +24,7 @@ from .pipeline import (
     _credential_identity,
     recorded_credential_identity,
     SNAPSHOT_PATHS,
+    inherited_snapshot_captures,
     recorded_capture_label,
     recorded_captures,
     recorded_cutoff,
@@ -229,6 +230,17 @@ def _require_recorded_cutoff(run_dir: Path, run_id: str, cutoff: str | None) -> 
             raise CredentialError(
                 "Current-state requests were captured after the cutoff day "
                 "and the evidence carries no captured_after_cutoff_label"
+            )
+        inherited_late = [
+            (dataset, base_id)
+            for dataset, base_id, at_ms in inherited_snapshot_captures(run_dir, run_id)
+            if at_ms is None or at_ms > limit
+        ]
+        if inherited_late and recorded_capture_label(run) is None:
+            raise CredentialError(
+                "Inherited current-state rows were captured after the cutoff day "
+                "(or without a recorded capture time) and the evidence carries no "
+                "captured_after_cutoff_label"
             )
 
 

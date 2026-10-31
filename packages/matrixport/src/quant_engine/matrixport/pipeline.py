@@ -84,6 +84,47 @@ def recorded_cutoff(run: Mapping[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+SNAPSHOT_DATASETS = {
+    "wallet_balances": "/mapi/v1/wallet/balance",
+    "wallet_currencies": "/mapi/v1/wallet/currencies",
+    "holdings": "/strategy/api/v2/user/holding",
+    "portfolio_snapshots": "/strategy/api/v2/user/holding/volume",
+}
+
+
+def inherited_snapshot_captures(
+    run_dir: Path, run_id: str
+) -> list[tuple[str, str, int | None]]:
+    """Capture times of snapshot rows a run inherited from incremental base runs.
+
+    Returns ``(dataset, base_run_id, captured_at_ms)`` per base run that still
+    supplies a row of a current-state dataset; ``captured_at_ms`` is None when the
+    base run recorded no capture time for that request (or is gone).
+    """
+
+    found: list[tuple[str, str, int | None]] = []
+    with RunStorage(run_dir / "state" / DATABASE_NAME) as storage:
+        names = set(storage.dataset_names(run_id))
+        for dataset, path in SNAPSHOT_DATASETS.items():
+            if dataset not in names:
+                continue
+            bases = {
+                str(item["row"]["source_prior_run_id"])
+                for item in storage.iter_canonical_rows(run_id, dataset)
+                if item["row"].get("source_prior_run_id")
+            }
+            for base_id in sorted(bases):
+                database = run_dir.parent / base_id / "state" / DATABASE_NAME
+                captured: int | None = None
+                if database.is_file():
+                    with RunStorage(database) as base_storage:
+                        base_run = base_storage.get_run(base_id)
+                    if base_run is not None:
+                        captured = recorded_captures(base_run).get(path)
+                found.append((dataset, base_id, captured))
+    return found
+
+
 def recorded_capture_label(run: Mapping[str, Any]) -> str | None:
     stored = json.loads(str(run.get("metadata_json") or "{}"))
     value = stored.get("captured_after_cutoff_label")
