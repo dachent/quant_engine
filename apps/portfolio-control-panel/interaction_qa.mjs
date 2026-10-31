@@ -398,10 +398,21 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
         && rendered.cells[2].secondary === `${row.effective_end || "open"} · ${blocker}`
         && rendered.cells.slice(3).every((cell) => cell.text === "—");
     }
+    // An account NAV the report declares derived (account_summary value_basis, same account and observation day)
+    // carries its basis label and the row's own date beside the Current value.
+    const derivedNote = (() => {
+      const summary = (dashboardData.account_summary || []).find((item) => item.account_id === row.account_id && item.value_basis
+        && String(item.as_of_date || "").slice(0, 10) === String(row.end || "").slice(0, 10));
+      if (!summary) return "";
+      const dated = [["capture_date", "captured"], ["observed_at", "observed"], ["as_of_date", "as of"]]
+        .find(([field]) => typeof summary[field] === "string" && summary[field] !== "");
+      const day = dated ? new Date(`${summary[dated[0]].slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : null;
+      return `Derived from official closes${dated ? ` · ${dated[1]} ${day}` : ""}`;
+    })();
     const expectedNumbers = [
       exactMoney(row.invested) + (row.opening_basis === "PROVIDER_CAPITAL_ANCHOR" ? "sleeve allocation" : ""),
       exactMoney(row.withdrawn), exactMoney(row.net_capital),
-      exactMoney(row.current_value),
+      exactMoney(row.current_value) + derivedNote,
       exactMoney(row.gain) + (row.post_liquidation_income != null ? `incl. post-liquidation income ${exactMoney(row.post_liquidation_income)}` : ""),
       exactPct(row.return_on_net_capital),
       exactPct(row.annualized_return_on_net_capital), exactPct(row.observation_linked_return),
