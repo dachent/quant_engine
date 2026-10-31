@@ -85,7 +85,8 @@ uv run --frozen --no-sync python tools/schwab_capture_driver.py normalize-holdin
 uv run --frozen --no-sync python tools/schwab_capture_driver.py verify <run-dir> [--crosswalk <crosswalk.json>]
 uv run --frozen --no-sync python tools/schwab_capture_ingest.py ingest <run-dir> `
   --crosswalk <crosswalk.json> --cutoff <YYYY-MM-DD> `
-  --official-closes-dir <dir of SYMBOL_yahoo_daily.csv> --output-root <new dir> `
+  --official-closes-dir <dir of SYMBOL_yahoo_daily.csv> --config <ingest-config.json> `
+  --output-root <new dir> `
   [--base-spec <generation spec> --spec-out <new file>]
 ```
 
@@ -220,6 +221,47 @@ UTC-stamped manifest is refused while the New York rendering is accepted. With `
 composed spec is also offered to `build_generation` and the outcome
 (`ACCEPTED` or `REFUSED` with the reason) is reported; a refusal there (for
 example manual sources dated for another cutoff) does not undo the bound output.
+
+### Guards declared as data (`--config`)
+
+The config is required and strict (exact keys, no defaults in code); its hash is
+recorded in the binding:
+
+```json
+{
+  "schema_version": 1,
+  "price_ratio_tolerance": "0.05",
+  "symbol_aliases": {"BRK/B": "BRK.B", "BRK.B": "BRK.B", "BRK-B": "BRK.B"},
+  "cash_equivalent_symbols": ["SWVXX"],
+  "price_ratio_exceptions": {
+    "XYZ": {"label": "SPLIT_2_FOR_1_LABELLED", "corporate_action": "2:1 split on the cutoff date"}
+  }
+}
+```
+
+- Split and mis-scaling guard: for every held symbol the provider's own
+  `price.price` (the driver's `price_usd`) is compared with the official raw
+  Close used for the value; a symbol whose relative difference exceeds the
+  declared tolerance is refused (count and symbols named) unless
+  `price_ratio_exceptions` names it with an `UPPER_SNAKE_CASE` label and the
+  corporate action; applied exceptions are recorded in the binding. The binding
+  also records the tolerance, the largest observed difference, the symbols with
+  a dividend or split in the pulled window (CSV `dividend` column and the raw
+  response `events`), and the closes' fetch timestamp from the Yahoo run manifest
+  (`fetched_at_utc`, `fetched_at`, `captured_at_utc` or `run_finished_at_utc`).
+  A timestamp before the cutoff close is refused; a manifest with none is
+  recorded as `UNRECORDED` (the retained 2026-10-30 pull has none).
+- Symbol aliases map the provider's spelling to the spelling of the
+  `<SYMBOL>_yahoo_daily.csv` files. The Yahoo driver (PR 702) writes `BRK.B` for
+  `BRK-B`, so all three Berkshire spellings map to `BRK.B`. A symbol that is
+  neither a declared cash equivalent nor present (directly or through an alias)
+  in the closes fails closed.
+- Cash equivalents: sweep money-market funds such as SWVXX need no close. R2's
+  treatment is kept: Cash-group quantity rows are not positions (they are counted
+  as sweep vehicles). Each must be a declared cash-equivalent symbol and be
+  priced at exactly the stated 1.00 NAV, otherwise the run is refused; a declared
+  symbol held as a position is valued at quantity times 1.00 with no close and
+  no Yahoo file.
 
 It refuses: a run that does not verify; a labelled run that is not the same-day
 fallback (and an unlabelled run that is not the next-session mode); a cutoff that

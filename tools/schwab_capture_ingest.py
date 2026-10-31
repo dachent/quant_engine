@@ -36,6 +36,15 @@ the cutoff date supplied from ``<SYMBOL>_yahoo_daily.csv`` files, exactly as the
 existing ``normalize-holdings-v2`` path does, and the run is refused when a held
 position has no official close.
 
+Guards declared as data (``--config``, see ``load_config``): the tolerance of the
+provider price against the official close (split and mis-scaling guard), the
+explicit symbol alias table from provider spellings to the spelling of the
+official-close files (the Yahoo driver writes ``BRK.B`` for ``BRK-B``), the
+sweep money-market funds valued at their stated 1.00 NAV without a close (R2
+excluded sweep rows from positions and counted them; nothing here needs Yahoo
+for them), and the labelled corporate-action exceptions. An unmapped symbol
+fails closed.
+
 Refusals: a driver run that does not verify (including raw re-derivation), a
 labelled run that is not the same-day fallback, a cutoff that differs from the
 run evidence, a held position without an official close, and bound files that
@@ -52,13 +61,14 @@ import argparse
 import csv
 from collections.abc import Mapping, Sequence
 import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import hashlib
 import io
 import json
 from pathlib import Path
+import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -119,13 +129,49 @@ def _write_new(path: Path, payload: bytes) -> dict[str, object]:
 # --------------------------------------------------------------------------- #
 
 
-def official_closes(
-    directory: Path, day: date
-) -> tuple[dict[str, Decimal], dict[str, str]]:
-    """Closes of ``day`` from ``<SYMBOL>_yahoo_daily.csv`` plus each file's hash."""
+_FETCH_KEYS = ("fetched_at_utc", "fetched_at", "captured_at_utc", "run_finished_at_utc")
+_SYMBOL = re.compile(r"[A-Z0-9][A-Z0-9./-]{0,15}\Z")
+_EXCEPTION_LABEL = re.compile(r"[A-Z][A-Z0-9_]{5,63}\Z")
+
+
+@dataclass(frozen=True)
+class CloseSet:
+    """Official closes of one day with the evidence that came with them."""
+
+    closes: dict[str, Decimal]
+    hashes: dict[str, str]
+    dividend_symbols: frozenset[str]
+    split_symbols: frozenset[str]
+    fetched_at: str | None
+
+
+def _events(path: Path) -> tuple[bool, bool]:
+    """Dividend and split events of the retained raw chart response, if any."""
+
+    if not path.is_file():
+        return False, False
+    try:
+        document = strict_json_loads(path.read_bytes(), label="official raw")
+        result = driver.json_objects(
+            driver.json_object(document, "official raw").get("chart", {}).get("result"),
+            "official raw result",
+        )
+    except (driver.DriverError, AttributeError) as exc:
+        raise IngestError("official raw response is malformed") from exc
+    events = result[0].get("events") if result else None
+    if events is None:
+        return False, False
+    block = driver.json_object(events, "official raw events")
+    return bool(block.get("dividends")), bool(block.get("splits"))
+
+
+def official_closes(directory: Path, day: date) -> CloseSet:
+    """Closes of ``day`` from ``<SYMBOL>_yahoo_daily.csv`` plus their evidence."""
 
     closes: dict[str, Decimal] = {}
     hashes: dict[str, str] = {}
+    dividends: set[str] = set()
+    splits: set[str] = set()
     if not directory.is_dir():
         raise IngestError("official closes directory is missing")
     for path in sorted(directory.glob("*_yahoo_daily.csv")):
@@ -136,6 +182,13 @@ def official_closes(
         found: set[Decimal] = set()
         reader = csv.DictReader(io.StringIO(payload.decode("utf-8-sig"), newline=""))
         for row in reader:
+            paid = (row.get("dividend") or "").strip()
+            if paid:
+                try:
+                    if Decimal(paid) > 0:
+                        dividends.add(symbol)
+                except ArithmeticError as exc:
+                    raise IngestError("official dividend is not decimal") from exc
             if row.get("date") == day.isoformat():
                 try:
                     value = Decimal(str(row["close"]))
@@ -146,10 +199,175 @@ def official_closes(
                 found.add(value)
         if len(found) > 1:
             raise IngestError("official close is conflicting for a date")
+        raw_dividends, raw_splits = _events(
+            directory / f"{symbol}_yahoo_daily_raw.json"
+        )
+        if raw_dividends:
+            dividends.add(symbol)
+        if raw_splits:
+            splits.add(symbol)
         if found:
             closes[symbol] = next(iter(found))
             hashes[symbol] = _sha256(payload)
-    return closes, hashes
+    return CloseSet(
+        closes, hashes, frozenset(dividends), frozenset(splits), _fetched_at(directory)
+    )
+
+
+def _fetched_at(directory: Path) -> str | None:
+    """The Yahoo run manifest's fetch timestamp, when the run recorded one."""
+
+    path = directory / "manifest.json"
+    if not path.is_file():
+        return None
+    manifest = driver.load_json_file(path, "official closes manifest")
+    for key in _FETCH_KEYS:
+        if key in manifest:
+            try:
+                return driver.aware_utc(manifest[key], key).isoformat()
+            except driver.DriverError as exc:
+                raise IngestError(f"official closes {key} is invalid") from exc
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Data-declared guards
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class IngestConfig:
+    """Guards declared as data, never as defaults in code."""
+
+    price_ratio_tolerance: Decimal
+    symbol_aliases: Mapping[str, str]
+    cash_equivalent_symbols: frozenset[str]
+    price_ratio_exceptions: Mapping[str, tuple[str, str]]
+    sha256: str = ""
+
+
+def _symbol(value: object, name: str) -> str:
+    if not isinstance(value, str) or _SYMBOL.fullmatch(value) is None:
+        raise IngestError(f"{name} is not a valid symbol")
+    return value
+
+
+def load_config(path: Path) -> IngestConfig:
+    """Strict loader. Exact keys: ``schema_version`` 1, ``price_ratio_tolerance``
+    (decimal text, 0 < t <= 0.5), ``symbol_aliases`` (provider spelling to the
+    official-close file spelling), ``cash_equivalent_symbols`` and
+    ``price_ratio_exceptions`` (symbol to ``{"label", "corporate_action"}``)."""
+
+    if path.is_symlink() or not path.is_file():
+        raise IngestError("ingest config is missing")
+    payload = path.read_bytes()
+    document = driver.load_json_file(path, "ingest config")
+    if (
+        set(document)
+        != {
+            "cash_equivalent_symbols",
+            "price_ratio_exceptions",
+            "price_ratio_tolerance",
+            "schema_version",
+            "symbol_aliases",
+        }
+        or document["schema_version"] != 1
+    ):
+        raise IngestError("ingest config has an invalid field set")
+    try:
+        tolerance = Decimal(str(document["price_ratio_tolerance"]))
+    except ArithmeticError as exc:
+        raise IngestError("price ratio tolerance is not decimal") from exc
+    if (
+        not isinstance(document["price_ratio_tolerance"], str)
+        or not tolerance.is_finite()
+        or not Decimal(0) < tolerance <= Decimal("0.5")
+    ):
+        raise IngestError("price ratio tolerance must be decimal text in (0, 0.5]")
+    aliases = {
+        _symbol(key, "alias source"): _symbol(value, "alias target")
+        for key, value in driver.json_object(
+            document["symbol_aliases"], "symbol aliases"
+        ).items()
+    }
+    cash = document["cash_equivalent_symbols"]
+    if not isinstance(cash, list):
+        raise IngestError("cash equivalent symbols must be a list")
+    cash_symbols = frozenset(_symbol(item, "cash equivalent") for item in cash)
+    if len(cash_symbols) != len(cash):
+        raise IngestError("cash equivalent symbols are duplicated")
+    exceptions: dict[str, tuple[str, str]] = {}
+    for key, entry in driver.json_object(
+        document["price_ratio_exceptions"], "price ratio exceptions"
+    ).items():
+        item = driver.json_object(entry, "price ratio exception")
+        label, action = item.get("label"), item.get("corporate_action")
+        if (
+            set(item) != {"corporate_action", "label"}
+            or not isinstance(label, str)
+            or _EXCEPTION_LABEL.fullmatch(label) is None
+            or not isinstance(action, str)
+            or not action.strip()
+            or len(action) > 200
+        ):
+            raise IngestError("price ratio exception must name a label and action")
+        exceptions[_symbol(key, "exception symbol")] = (label, action.strip())
+    return IngestConfig(tolerance, aliases, cash_symbols, exceptions, _sha256(payload))
+
+
+def _price_guard(
+    held: Sequence[Mapping[str, Any]],
+    sweeps: Sequence[Mapping[str, Any]],
+    reader_closes: Mapping[str, Decimal],
+    config: IngestConfig,
+) -> dict[str, object]:
+    """Compare the provider's own price with the value used for each symbol."""
+
+    for row in sweeps:
+        symbol = str(row["symbol"])
+        if symbol not in config.cash_equivalent_symbols:
+            raise IngestError("sweep vehicle is not a declared cash equivalent")
+        if driver.decimal_value(row.get("price_usd")) != 1:
+            raise IngestError("sweep vehicle price differs from the stated 1.00 NAV")
+    deviations: dict[str, Decimal] = {}
+    for row in held:
+        symbol = str(row["symbol"])
+        price = driver.decimal_value(row.get("price_usd"))
+        if price is None:
+            raise IngestError("held position has no provider price")
+        ratio = abs(price / reader_closes[symbol] - 1)
+        deviations[symbol] = max(deviations.get(symbol, Decimal(0)), ratio)
+    offenders: list[str] = []
+    applied: dict[str, dict[str, str]] = {}
+    for symbol, ratio in sorted(deviations.items()):
+        limit = (
+            Decimal(0)
+            if symbol in config.cash_equivalent_symbols
+            else config.price_ratio_tolerance
+        )
+        if ratio <= limit:
+            continue
+        if symbol in config.price_ratio_exceptions and (
+            symbol not in config.cash_equivalent_symbols
+        ):
+            label, action = config.price_ratio_exceptions[symbol]
+            applied[symbol] = {"corporate_action": action, "label": label}
+        else:
+            offenders.append(symbol)
+    if offenders:
+        raise IngestError(
+            "provider price differs from the official close beyond the declared "
+            f"tolerance: symbols={len(offenders)} outside={','.join(offenders)}"
+        )
+    return {
+        "exceptions_applied": applied,
+        "max_deviation_ratio": format(
+            max(deviations.values(), default=Decimal(0)).quantize(Decimal("0.000001")),
+            "f",
+        ),
+        "rows_checked": len(held),
+        "tolerance": format(config.price_ratio_tolerance, "f"),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -223,6 +441,7 @@ def ingest(
     cutoff: driver.Cutoff,
     closes_dir: Path,
     output_root: Path,
+    config: IngestConfig,
 ) -> dict[str, object]:
     """Bind one verified driver run; returns the binding document."""
 
@@ -254,13 +473,34 @@ def ingest(
     sweeps = driver.json_objects(positions.get("sweep_vehicles"), "sweep vehicles")
     cash_rows = driver.json_objects(positions.get("cash_balances"), "cash balances")
     symbols = sorted({str(row["symbol"]) for row in held})
-    closes, close_hashes = official_closes(closes_dir, cutoff.as_of_date)
-    missing = [symbol for symbol in symbols if symbol not in closes]
+    close_set = official_closes(closes_dir, cutoff.as_of_date)
+    if close_set.fetched_at is not None and (
+        datetime.fromisoformat(close_set.fetched_at) < cutoff.close_utc
+    ):
+        raise IngestError("official closes were fetched before the cutoff close")
+    reader_closes: dict[str, Decimal] = {}
+    aliases_used: dict[str, str] = {}
+    missing: list[str] = []
+    for symbol in symbols:
+        if symbol in config.cash_equivalent_symbols:
+            reader_closes[symbol] = Decimal(1)  # the stated NAV, no close needed
+            continue
+        target = config.symbol_aliases.get(symbol, symbol)
+        if target not in close_set.closes:
+            missing.append(symbol)
+            continue
+        reader_closes[symbol] = close_set.closes[target]
+        if target != symbol:
+            aliases_used[symbol] = target
     if missing:
         raise IngestError(
             "held position lacks an official close: "
             f"symbols={len(missing)} missing={','.join(missing)}"
         )
+    guard = _price_guard(held, sweeps, reader_closes, config)
+    used_files = sorted(
+        {config.symbol_aliases.get(s, s) for s in symbols} & set(close_set.closes)
+    )
 
     raw_holdings, dropped_position_rows = _without_zero_quantity_rows(
         strict_json_loads(
@@ -272,7 +512,7 @@ def ingest(
             raw_holdings,
             crosswalk=crosswalk,
             captured_at=capture["captured_at_utc"],
-            official_closes={symbol: closes[symbol] for symbol in symbols},
+            official_closes=reader_closes,
             price_date=cutoff.as_of_date,
         )
     except SchwabReadError as exc:
@@ -401,10 +641,33 @@ def ingest(
         },
         "market_value": {
             "basis": VALUATION_BASIS,
+            "aliases_used": aliases_used,
+            "cash_equivalents": {
+                "basis": "STATED_NAV_1.00_NO_CLOSE_NEEDED",
+                "position_symbols": sorted(
+                    set(symbols) & config.cash_equivalent_symbols
+                ),
+                "sweep_rows": len(sweeps),
+                "sweep_symbols": sorted({str(row["symbol"]) for row in sweeps}),
+            },
+            "config_sha256": config.sha256,
             "official_close_files": [
-                {"file_sha256": close_hashes[symbol], "symbol": symbol}
-                for symbol in symbols
+                {"file_sha256": close_set.hashes[symbol], "symbol": symbol}
+                for symbol in used_files
             ],
+            "official_closes_fetched_at_utc": close_set.fetched_at,
+            "official_closes_fetch_status": (
+                "UNRECORDED"
+                if close_set.fetched_at is None
+                else "RECORDED_AFTER_CUTOFF_CLOSE"
+            ),
+            "price_guard": guard,
+            "symbols_with_dividend_in_window": sorted(
+                close_set.dividend_symbols & set(used_files)
+            ),
+            "symbols_with_split_in_window": sorted(
+                close_set.split_symbols & set(used_files)
+            ),
             "provider_basis": positions["market_value_basis"],
             "provider_quoted_differs_count": quoted_differs,
         },
@@ -780,6 +1043,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--crosswalk", required=True, type=Path)
     run.add_argument("--cutoff", required=True)
     run.add_argument("--official-closes-dir", required=True, type=Path)
+    run.add_argument("--config", required=True, type=Path)
     run.add_argument("--output-root", required=True, type=Path)
     run.add_argument("--base-spec", type=Path)
     run.add_argument("--spec-out", type=Path)
@@ -803,6 +1067,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             crosswalk=crosswalk,
             cutoff=driver.parse_cutoff(args.cutoff),
             closes_dir=args.official_closes_dir,
+            config=load_config(args.config),
             output_root=args.output_root,
         )
         result: dict[str, object] = {

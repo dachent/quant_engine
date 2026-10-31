@@ -64,11 +64,20 @@ def _row(symbol: str, quantity: int, price: float, price_date: str) -> dict[str,
 
 
 def _holdings(
-    *, zero_row: bool = False, sweep: bool = False, zero_cash: bool = False
+    *,
+    zero_row: bool = False,
+    sweep: bool = False,
+    zero_cash: bool = False,
+    brk: bool = False,
+    mmf: bool = False,
+    sweep_price: float = 1.0,
 ) -> dict[str, Any]:
     accounts = []
     for index, external in enumerate(_crosswalk(), start=1):
-        rows = [_row(f"SYN{index}", 4, 24.875, "06/13/2031")]
+        symbol = "BRK/B" if brk and index == 1 else f"SYN{index}"
+        rows = [_row(symbol, 4, 24.875, "06/13/2031")]
+        if mmf and index == 3:
+            rows.append(_row("SYNMMF", 10, 1.0, "06/13/2031"))
         if zero_row and index == 1:
             # the driver omits a zero-quantity row before it reads its price
             rows.append({"dataSymbol": "SYNZERO", "qty": {"qty": 0}, "rowType": 0})
@@ -89,7 +98,7 @@ def _holdings(
         ]
         cash_rows = groups[1]["holdingsRows"]
         if sweep and index == 1:
-            cash_rows.insert(0, _row("SYNSWEEP", 12, 1.0, "06/13/2031"))
+            cash_rows.insert(0, _row("SYNSWEEP", 12, sweep_price, "06/13/2031"))
         if zero_cash and index == 2:
             cash_rows.insert(0, {"dataSymbol": "SYNOLD", "qty": {"qty": 0}})
         accounts.append({"accountId": external, "groupedPositions": groups})
@@ -241,22 +250,59 @@ def _run(
 
 
 def _closes(
-    tmp_path: Path, *, skip: str | None = None, value: str = OFFICIAL_CLOSE
+    tmp_path: Path,
+    *,
+    skip: str | None = None,
+    value: str = OFFICIAL_CLOSE,
+    brk: str | None = None,
+    dividend: str | None = None,
 ) -> Path:
     directory = tmp_path / "closes"
     directory.mkdir(exist_ok=True)
+    if brk is not None:
+        (directory / f"{brk}_yahoo_daily.csv").write_bytes(
+            (
+                "date,open,high,low,close,adjclose,volume,dividend\n"
+                f"2031-06-13,1,1,1,{OFFICIAL_CLOSE},{OFFICIAL_CLOSE},1,\n"
+            ).encode("utf-8")
+        )
     for index in range(1, ACCOUNT_COUNT + 1):
         symbol = f"SYN{index}"
-        if symbol == skip:
+        if symbol == skip or (brk is not None and index == 1):
             continue
+        paid = dividend if dividend and index == 2 else ""
         (directory / f"{symbol}_yahoo_daily.csv").write_bytes(
             (
                 "date,open,high,low,close,adjclose,volume,dividend\n"
-                f"2031-06-12,1,1,1,24.00,24.00,1,0\n"
-                f"2031-06-13,1,1,1,{value},{value},1,0\n"
+                f"2031-06-12,1,1,1,24.00,24.00,1,\n"
+                f"2031-06-13,1,1,1,{value},{value},1,{paid}\n"
             ).encode("utf-8")
         )
     return directory
+
+
+def _config_doc(**overrides: Any) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "schema_version": 1,
+        "price_ratio_tolerance": "0.05",
+        "symbol_aliases": {
+            "BRK/B": "BRK.B",
+            "BRK.B": "BRK.B",
+            "BRK-B": "BRK.B",
+        },
+        "cash_equivalent_symbols": ["SYNSWEEP", "SYNMMF"],
+        "price_ratio_exceptions": {},
+    }
+    document.update(overrides)
+    return document
+
+
+def _config(tmp_path: Path, **overrides: Any) -> ingest.IngestConfig:
+    path = (
+        tmp_path / f"ingest-config-{len(list(tmp_path.glob('ingest-config-*')))}.json"
+    )
+    path.write_bytes(json.dumps(_config_doc(**overrides)).encode("utf-8"))
+    return ingest.load_config(path)
 
 
 def _ingest(tmp_path: Path, run_dir: Path, **overrides: Any) -> dict[str, object]:
@@ -268,6 +314,8 @@ def _ingest(tmp_path: Path, run_dir: Path, **overrides: Any) -> dict[str, object
     arguments.update(overrides)
     if "closes_dir" not in arguments:
         arguments["closes_dir"] = _closes(tmp_path)
+    if "config" not in arguments:
+        arguments["config"] = _config(tmp_path)
     return ingest.ingest(run_dir, **arguments)
 
 
@@ -830,6 +878,12 @@ def test_compose_spec_refuses_a_root_id_collision(tmp_path: Path) -> None:
         ingest.compose_spec(tmp_path / "ingest", path, _crosswalk())
 
 
+def _config_file(tmp_path: Path) -> Path:
+    path = tmp_path / "cli-config.json"
+    path.write_bytes(json.dumps(_config_doc()).encode("utf-8"))
+    return path
+
+
 def _write_crosswalk(tmp_path: Path) -> Path:
     path = tmp_path / "crosswalk.json"
     path.write_bytes(
@@ -854,6 +908,7 @@ def test_cli_success_and_refusal(
         "--crosswalk", str(_write_crosswalk(tmp_path)),
         "--cutoff", "2031-06-13",
         "--official-closes-dir", str(_closes(tmp_path)),
+        "--config", str(_config_file(tmp_path)),
         "--output-root", str(tmp_path / "cli-out"),
         "--base-spec", str(_base_spec(tmp_path)),
         "--spec-out", str(tmp_path / "composed.json"),
@@ -911,6 +966,7 @@ def test_cli_checks_composition_inputs_before_creating_any_output(
         "--crosswalk", str(_write_crosswalk(tmp_path)),
         "--cutoff", "2031-06-13",
         "--official-closes-dir", str(_closes(tmp_path)),
+        "--config", str(_config_file(tmp_path)),
     ]  # fmt: skip
     existing = tmp_path / "existing-spec.json"
     existing.write_bytes(b"{}")
@@ -937,3 +993,206 @@ def test_cli_checks_composition_inputs_before_creating_any_output(
          "--spec-out", str(tmp_path / "new-spec.json")]
     )  # fmt: skip
     assert code == 0 and out.is_dir()
+
+
+# --------------------------------------------------------------------------- #
+# Data-declared guards: price ratio, aliases, sweeps and cash equivalents
+# --------------------------------------------------------------------------- #
+
+
+def test_the_price_ratio_guard_refuses_a_mis_scaled_close(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    with pytest.raises(
+        ingest.IngestError, match="beyond the declared tolerance"
+    ) as raised:
+        _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, value="50.00"))
+    assert "symbols=8" in str(raised.value)
+    assert not (tmp_path / "ingest").exists()
+
+
+def test_a_labelled_corporate_action_exception_is_applied_and_recorded(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path)
+    exceptions = {
+        f"SYN{i}": {"label": "SPLIT_2_FOR_1_LABELLED", "corporate_action": "2:1 split"}
+        for i in range(1, ACCOUNT_COUNT + 1)
+    }
+    binding = _ingest(
+        tmp_path,
+        run_dir,
+        closes_dir=_closes(tmp_path, value="50.00"),
+        config=_config(tmp_path, price_ratio_exceptions=exceptions),
+    )
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    applied = market["price_guard"]["exceptions_applied"]
+    assert set(applied) == set(exceptions)
+    assert applied["SYN1"] == {
+        "corporate_action": "2:1 split",
+        "label": "SPLIT_2_FOR_1_LABELLED",
+    }
+
+
+def test_the_guard_records_the_tolerance_and_largest_deviation(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    binding = _ingest(tmp_path, run_dir)
+    guard = binding["market_value"]["price_guard"]  # type: ignore[index]
+    assert guard["tolerance"] == "0.05" and guard["rows_checked"] == 8
+    assert guard["max_deviation_ratio"] == "0.005000"
+    assert guard["exceptions_applied"] == {}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"price_ratio_tolerance": 0.05}, "decimal text"),
+        ({"price_ratio_tolerance": "0"}, "decimal text"),
+        ({"price_ratio_tolerance": "0.9"}, "decimal text"),
+        ({"price_ratio_tolerance": "x"}, "not decimal"),
+        ({"symbol_aliases": {"brk/b": "BRK.B"}}, "valid symbol"),
+        ({"symbol_aliases": {"BRK/B": ""}}, "valid symbol"),
+        ({"cash_equivalent_symbols": "SWVXX"}, "must be a list"),
+        ({"cash_equivalent_symbols": ["A", "A"]}, "duplicated"),
+        ({"price_ratio_exceptions": {"X": {"label": "bad"}}}, "label and action"),
+        (
+            {
+                "price_ratio_exceptions": {
+                    "X": {"label": "SPLIT_LABEL_X", "corporate_action": " "}
+                }
+            },
+            "label and action",
+        ),
+    ],
+)
+def test_config_is_validated(
+    tmp_path: Path, overrides: dict[str, Any], message: str
+) -> None:
+    path = tmp_path / "c.json"
+    path.write_bytes(json.dumps(_config_doc(**overrides)).encode("utf-8"))
+    with pytest.raises(ingest.IngestError, match=message):
+        ingest.load_config(path)
+    document = _config_doc()
+    del document["price_ratio_tolerance"]
+    path.write_bytes(json.dumps(document).encode("utf-8"))
+    with pytest.raises(ingest.IngestError, match="field set"):
+        ingest.load_config(path)
+    with pytest.raises(ingest.IngestError, match="missing"):
+        ingest.load_config(tmp_path / "absent.json")
+
+
+def test_aliases_map_every_brk_spelling_to_the_yahoo_driver_file_name(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    assert {config.symbol_aliases[k] for k in ("BRK/B", "BRK.B", "BRK-B")} == {"BRK.B"}
+    run_dir = _run(tmp_path, FakeTransport(holdings=_holdings(brk=True)))
+    binding = _ingest(tmp_path, run_dir, closes_dir=_closes(tmp_path, brk="BRK.B"))
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    assert market["aliases_used"] == {"BRK/B": "BRK.B"}
+    assert "BRK.B" in {item["symbol"] for item in market["official_close_files"]}
+    snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
+    assert "BRK/B" in {row["symbol"] for row in snapshot["positions"]}
+
+
+def test_an_unmapped_symbol_fails_closed(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path, FakeTransport(holdings=_holdings(brk=True)))
+    # a close file exists under the Yahoo spelling but nothing maps the provider's
+    closes = _closes(tmp_path, brk="BRK.B")
+    with pytest.raises(ingest.IngestError, match="lacks an official close") as raised:
+        _ingest(
+            tmp_path,
+            run_dir,
+            closes_dir=closes,
+            config=_config(tmp_path, symbol_aliases={}),
+        )
+    assert "BRK/B" in str(raised.value)
+    # an alias whose target file is absent also fails closed
+    with pytest.raises(ingest.IngestError, match="lacks an official close"):
+        _ingest(
+            tmp_path,
+            run_dir,
+            closes_dir=closes,
+            config=_config(tmp_path, symbol_aliases={"BRK/B": "BRK-B"}),
+        )
+
+
+def test_sweep_money_market_funds_are_cash_equivalents_at_the_stated_nav(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(holdings=_holdings(sweep=True)))
+    binding = _ingest(tmp_path, run_dir)  # no close file exists for SYNSWEEP
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    assert market["cash_equivalents"] == {
+        "basis": "STATED_NAV_1.00_NO_CLOSE_NEEDED",
+        "position_symbols": [],
+        "sweep_rows": 1,
+        "sweep_symbols": ["SYNSWEEP"],
+    }
+    with pytest.raises(ingest.IngestError, match="not a declared cash equivalent"):
+        _ingest(
+            tmp_path,
+            run_dir,
+            config=_config(tmp_path, cash_equivalent_symbols=[]),
+            output_root=tmp_path / "ingest-two",
+        )
+
+
+def test_a_sweep_priced_away_from_the_stated_nav_is_refused(tmp_path: Path) -> None:
+    run_dir = _run(
+        tmp_path, FakeTransport(holdings=_holdings(sweep=True, sweep_price=1.01))
+    )
+    with pytest.raises(ingest.IngestError, match="stated 1.00 NAV"):
+        _ingest(tmp_path, run_dir)
+
+
+def test_a_money_market_position_is_valued_at_one_without_a_close(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(holdings=_holdings(mmf=True)))
+    binding = _ingest(tmp_path, run_dir)  # no SYNMMF close file
+    snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
+    values = {
+        row["symbol"]: row["market_value"]["value"] for row in snapshot["positions"]
+    }
+    assert values["SYNMMF"] == "10"
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    assert market["cash_equivalents"]["position_symbols"] == ["SYNMMF"]
+    assert "SYNMMF" not in {item["symbol"] for item in market["official_close_files"]}
+
+
+def test_closes_fetch_time_and_corporate_events_are_recorded(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    closes = _closes(tmp_path, dividend="0.31")
+    (closes / "SYN3_yahoo_daily_raw.json").write_bytes(
+        json.dumps({"chart": {"result": [{"events": {"splits": {"1": {}}}}]}}).encode()
+    )
+    binding = _ingest(tmp_path, run_dir, closes_dir=closes)
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    assert market["symbols_with_dividend_in_window"] == ["SYN2"]
+    assert market["symbols_with_split_in_window"] == ["SYN3"]
+    assert market["official_closes_fetch_status"] == "UNRECORDED"
+    assert market["official_closes_fetched_at_utc"] is None
+
+
+def test_fetch_timestamp_before_the_cutoff_close_is_refused(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path)
+    closes = _closes(tmp_path)
+    (closes / "manifest.json").write_bytes(
+        json.dumps({"fetched_at_utc": "2031-06-13T19:00:00Z", "files": []}).encode()
+    )
+    with pytest.raises(ingest.IngestError, match="fetched before the cutoff close"):
+        _ingest(tmp_path, run_dir, closes_dir=closes)
+    (closes / "manifest.json").write_bytes(
+        json.dumps({"fetched_at_utc": "2031-06-14T10:00:00Z", "files": []}).encode()
+    )
+    binding = _ingest(tmp_path, run_dir, closes_dir=closes)
+    market = binding["market_value"]
+    assert isinstance(market, dict)
+    assert market["official_closes_fetched_at_utc"] == "2031-06-14T10:00:00+00:00"
+    assert market["official_closes_fetch_status"] == "RECORDED_AFTER_CUTOFF_CLOSE"
+    assert market["config_sha256"]
