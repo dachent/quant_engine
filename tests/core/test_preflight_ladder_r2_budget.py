@@ -24,7 +24,7 @@ GEN = "0" * 64
 REAL_OUTPUT_PATHS = (
     # stages\epoch static-snapshot receipt (longest of the r2 run, 183 characters)
     "stages\\epoch\\generations\\" + GEN + "\\receipt\\static-snapshot\\"
-    "account-61092059d066f056\\grizzlybears-vtma\\2026-01-02-2026-09-17.json",
+    "account-5a0baeaef10bedb2\\grizzlybears-vtma\\2026-01-02-2026-09-17.json",
     # deepest decomposition lens (182)
     "stages\\analytics\\decomposition-lenses\\LIVE_PLUS_BACKTEST\\DYNAMIC_FLS\\"
     "multi-asset-style\\generations\\" + GEN + "\\decomposition.json",

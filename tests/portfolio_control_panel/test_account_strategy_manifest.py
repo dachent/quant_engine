@@ -4854,7 +4854,7 @@ def test_classified_flow_preserves_provider_decimal_precision(
                 "amount": {
                     "currency": "USD",
                     "status": "AVAILABLE",
-                    "value": "25027.43294966",
+                    "value": "19676.567785022692",
                 },
             }
         ],
@@ -4865,7 +4865,7 @@ def test_classified_flow_preserves_provider_decimal_precision(
             "source_record_id": "raw-flow-1",
             "account_id": "synthetic-account",
             "event_date": "2026-01-01",
-            "amount": "25027.43294966",
+            "amount": "19676.567785022692",
             "disposition": "EXTERNAL",
         }
     ]
@@ -4874,7 +4874,7 @@ def test_classified_flow_preserves_provider_decimal_precision(
         ledger, events, _flow_classification_rules()
     )
 
-    assert reconciled[0]["amount"] == manifest_module.Decimal("25027.43294966")
+    assert reconciled[0]["amount"] == manifest_module.Decimal("19676.567785022692")
 
 
 @pytest.mark.parametrize(
