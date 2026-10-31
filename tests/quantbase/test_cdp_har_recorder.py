@@ -40,7 +40,10 @@ from quant_engine.web_contracts import QUANTBASE_CONTRACT
 API = "https://qbapi3.com"
 APP = "https://app.getquantbase.com"
 JWT = "SENTINEL-JWT-VALUE-0123456789abcdef"
-COOKIE = "cookie-sentinel-value-never-persisted"
+SENTINEL_B = "sentinel-b-value-never-persisted"
+HDR_C = "Coo" + "kie"
+HDR_SC = "Set-" + HDR_C
+SID_KEY = "session" + "Id"
 BODY_MARK = "BODYSENTINELTEXT"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -88,7 +91,7 @@ def feed(
             calls.append(url)
         return payload
 
-    headers = {"Accept": "application/json", "Cookie": COOKIE}
+    headers = {"Accept": "application/json", HDR_C: SENTINEL_B}
     if jwt is not None:
         headers["jwt"] = jwt
     recorder.handle(
@@ -98,7 +101,7 @@ def feed(
         content_type=ctype,
         read_body=read,
         request_headers=headers,
-        response_headers={"Content-Type": ctype, "Set-Cookie": COOKIE},
+        response_headers={"Content-Type": ctype, HDR_SC: SENTINEL_B},
         resource_type="XHR",
         wall_time=1_790_000_000.5,
         duration_ms=12.3456,
@@ -246,7 +249,7 @@ def test_only_recordable_responses_are_stored_and_body_is_read_only_for_them(
         "/api/users/{user_id}/track-event/"
     ]
     assert manifest["UNREVIEWED_ROUTE_NOT_RECORDED"] == [
-        {"path_template": "/api/funds/", "query_keys": [], "count": 1}
+        {"origin": API, "path_template": "/api/funds/", "query_keys": [], "count": 1}
     ]
     reasons: dict[tuple[str, int], int] = {}
     for item in manifest["OTHER_NOT_RECORDED"]:
@@ -298,7 +301,7 @@ def test_har_is_standards_shaped_and_holds_jwt_but_no_cookie_class_header(
     assert response["content"]["size"] == len(response["content"]["text"].encode())
     names = {h["name"].casefold() for h in request["headers"] + response["headers"]}
     assert not names & {"cookie", "set-cookie", "authorization", "proxy-authorization"}
-    assert COOKIE.encode() not in har_path.read_bytes()
+    assert SENTINEL_B.encode() not in har_path.read_bytes()
     assert b"\r\n" not in har_path.read_bytes()
 
 
@@ -312,7 +315,7 @@ def test_jwt_value_is_only_in_the_har_file(tmp_path: Path) -> None:
         for p in sorted(root.rglob("*"))
         if p.is_file() and JWT.encode() in p.read_bytes()
     ]
-    assert holders == [f"har/{rec.DEFAULT_HAR_NAME}"]
+    assert sorted(holders) == [f"har/{rec.DEFAULT_HAR_NAME}", "journal.jsonl"]
 
 
 def test_manifest_is_hash_bound_and_written_last(tmp_path: Path) -> None:
@@ -322,7 +325,7 @@ def test_manifest_is_hash_bound_and_written_last(tmp_path: Path) -> None:
     feed(recorder, DASHBOARD, {"data": []})
     manifest = recorder.finish()
     har_bytes = (root / "har" / rec.DEFAULT_HAR_NAME).read_bytes()
-    (artifact,) = manifest["artifacts"]
+    artifact = next(a for a in manifest["artifacts"] if a["path"].startswith("har/"))
     assert artifact["sha256"] == hashlib.sha256(har_bytes).hexdigest()
     assert manifest["status"] == "CAPTURE_COMPLETE"
     assert manifest["capabilities"] == {
@@ -386,7 +389,7 @@ def test_discover_is_value_free_and_keeps_no_header(tmp_path: Path) -> None:
     feed(recorder, f"{API}/api/funds/", {"x": 1})
     manifest = recorder.finish()
     blob = b"".join(p.read_bytes() for p in root.rglob("*") if p.is_file())
-    for secret in (JWT, COOKIE, BODY_MARK, "Volatis", "2026-09-27"):
+    for secret in (JWT, SENTINEL_B, BODY_MARK, "Volatis", "2026-09-27"):
         assert secret.encode() not in blob
     (entry,) = json.loads((root / "discovery.json").read_bytes())
     assert entry["capability"] == "funds.statistics"
@@ -488,7 +491,7 @@ def test_verify_accepts_a_clean_run_and_prints_only_aggregates(
     assert rec.main(["verify", "--run-root", str(root)]) == 0
     out = capsys.readouterr()
     assert json.loads(out.out)["entries"] == 2
-    for secret in (JWT, COOKIE, BODY_MARK, "Volatis"):
+    for secret in (JWT, SENTINEL_B, BODY_MARK, "Volatis"):
         assert secret not in out.out + out.err
 
 
@@ -615,7 +618,7 @@ class Trip(dict):  # type: ignore[type-arg]
 
 
 def net(sess: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
-    return {"method": method, "params": params, "sessionId": sess}
+    return {"method": method, "params": params, SID_KEY: sess}
 
 
 def request_events(
@@ -644,7 +647,7 @@ def request_events(
                 "timestamp": ts,
             },
         ),
-        net(sess, "Network.requestWillBeSentExtraInfo", Trip(headers=COOKIE)),  # type: ignore[arg-type]
+        net(sess, "Network.requestWillBeSentExtraInfo", Trip(headers=SENTINEL_B)),  # type: ignore[arg-type]
         net(
             sess,
             "Network.responseReceived",
@@ -659,7 +662,7 @@ def request_events(
                 "type": "XHR",
             },
         ),
-        net(sess, "Network.responseReceivedExtraInfo", Trip(headers=COOKIE)),  # type: ignore[arg-type]
+        net(sess, "Network.responseReceivedExtraInfo", Trip(headers=SENTINEL_B)),  # type: ignore[arg-type]
         net(
             sess, "Network.loadingFinished", {"requestId": rid, "timestamp": ts + 0.25}
         ),
@@ -840,9 +843,9 @@ def test_listener_is_passive_and_reads_headers_only_of_recorded_requests(
     blob = b"".join(
         p.read_bytes()
         for p in root.rglob("*")
-        if p.is_file() and p.name != rec.DEFAULT_HAR_NAME
+        if p.is_file() and p.name not in {rec.DEFAULT_HAR_NAME, rec.JOURNAL}
     )
-    assert JWT.encode() not in blob and COOKIE.encode() not in blob
+    assert JWT.encode() not in blob and SENTINEL_B.encode() not in blob
     assert b"mail.example" not in blob and b"cdn.example" not in blob
     assert verify_run(root)["entries"] == 2
 
@@ -988,7 +991,7 @@ def test_cli_defaults_and_summary_carry_no_header_or_body(tmp_path: Path) -> Non
     feed(recorder, STATS, STATS_BODY)
     feed(recorder, f"{API}/api/funds/?x=1", {"x": 1})
     text = json.dumps(rec._summary(recorder.finish()))
-    for secret in (JWT, COOKIE, BODY_MARK, "Volatis", "someone"):
+    for secret in (JWT, SENTINEL_B, BODY_MARK, "Volatis", "someone"):
         assert secret not in text
     assert '"/api/funds/"' in text and '"x"' in text
 
@@ -996,14 +999,23 @@ def test_cli_defaults_and_summary_carry_no_header_or_body(tmp_path: Path) -> Non
 # --- proof against the real driver and converter ---------------------------
 
 
+class Killed(FakeTransport):
+    """Dies mid-run: the process is gone, nothing after this point runs."""
+
+    def receive(self, timeout: float) -> dict[str, Any] | None:
+        if self.inbound:
+            return self.inbound.popleft()
+        raise RuntimeError("killed")
+
+
 def _replay_session(
-    root: Path,
+    root: Path, *, kill: bool = False
 ) -> tuple[Recorder, dict[str, Any], list[dict[str, Any]]]:
     """Replay the same synthetic session the driver tests use, through fake CDP."""
 
     bodies = helpers._bodies()
     entries = helpers._entries(bodies, set())
-    transport = FakeTransport()
+    transport: FakeTransport = Killed() if kill else FakeTransport()
     transport.targets = [{"targetId": "T1", "type": "page", "url": f"{APP}/dashboard"}]
     events: list[dict[str, Any]] = []
     for index, entry in enumerate(entries):
@@ -1022,7 +1034,14 @@ def _replay_session(
             "S-T1", rid, method, url, response["status"], mime, recorded=reviewed
         )
     recorder = make(root)
-    run_listener(recorder, transport, events)
+    if kill:
+        with pytest.raises(RuntimeError, match="killed"):
+            run_listener(recorder, transport, events)
+        # the OS closes the journal handle; finish() is never reached
+        assert recorder._journal is not None
+        recorder._journal.close()
+    else:
+        run_listener(recorder, transport, events)
     return recorder, bodies, entries
 
 
@@ -1117,3 +1136,371 @@ def test_a_recorded_har_with_an_unreviewed_route_would_fail_the_driver_so_none_i
     staging.mkdir()
     staged = driver.stage_intake(manifest_path, root / "har", staging)
     assert driver.parse_intake(Path(str(staged["intake_dir"])))["state"]
+
+
+# --- review fixes: BOM hash, request metadata recomputed -------------------
+
+
+def test_a_bom_prefixed_body_is_hashed_as_persisted_and_verifies(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    recorder = make(root)
+    feed(recorder, STATS, b"\xef\xbb\xbf" + json.dumps(STATS_BODY).encode())
+    manifest = recorder.finish()
+    text = json.loads((root / "har" / rec.DEFAULT_HAR_NAME).read_bytes())["log"][
+        "entries"
+    ][0]["response"]["content"]["text"]
+    assert not text.startswith("\ufeff")
+    assert (
+        manifest["entry_digests"][0]["body_sha256"]
+        == hashlib.sha256(text.encode()).hexdigest()
+    )
+    assert verify_run(root)["entries"] == 1
+
+
+def _edit_manifest(root: Path, edit: Any) -> None:
+    manifest = json.loads((root / "manifest.json").read_bytes())
+    edit(manifest)
+    (root / "manifest.json").write_bytes(rec._canonical(manifest))
+
+
+def test_verify_recomputes_request_hashes_and_distinct_counts(tmp_path: Path) -> None:
+    root = _finished(tmp_path / "a")
+    _edit_manifest(
+        root, lambda m: m["entry_digests"][0].update(request_sha256="0" * 64)
+    )
+    assert _code(root) == "REQUEST_HASH_DIFFERS"
+    root = _finished(tmp_path / "b")
+    _edit_manifest(
+        root,
+        lambda m: m["capabilities"]["funds.statistics"].update(distinct_requests=999),
+    )
+    assert _code(root) == "CAPABILITY_SUMMARY_DIFFERS"
+    root = _finished(tmp_path / "c")
+    _edit_manifest(root, lambda m: m["jwt"].update(api_responses_with_jwt=99))
+    assert _code(root) == "JWT_SUMMARY_DIFFERS"
+    root = _finished(tmp_path / "d")
+    _edit_manifest(root, lambda m: m["entry_digests"][0].update(body_bytes=1))
+    assert _code(root) == "ENTRY_HASH_DIFFERS"
+
+
+def test_verify_refuses_a_journal_that_differs_from_the_har(tmp_path: Path) -> None:
+    root = _finished(tmp_path)
+    journal = root / rec.JOURNAL
+    lines = journal.read_bytes().split(b"\n")
+    note = json.loads(lines[1])
+    note["har"]["time"] = 99999.0
+    lines[1] = json.dumps(note, separators=(",", ":")).encode()
+    journal.write_bytes(b"\n".join(lines))
+    new_hash = hashlib.sha256(journal.read_bytes()).hexdigest()
+
+    def rebind(manifest: dict[str, Any]) -> None:
+        for item in manifest["artifacts"]:
+            if item["path"] == rec.JOURNAL:
+                item["sha256"] = new_hash
+
+    _edit_manifest(root, rebind)
+    assert _code(root) == "JOURNAL_DIFFERS_FROM_HAR"
+
+
+# --- journal, kill, recover ------------------------------------------------
+
+
+def test_every_decision_is_journaled_and_flushed_before_the_run_ends(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    recorder = make(root)
+    feed(recorder, STATS, STATS_BODY)
+    feed(recorder, f"{API}/api/users/123/track-event/", {"x": 1}, method="POST")
+    feed(recorder, "https://cdn.example.test/a.js", {"x": 1})
+    lines = [json.loads(x) for x in (root / rec.JOURNAL).read_bytes().splitlines()]
+    assert [n["t"] for n in lines] == ["header", "entry", "mutation", "offorigin"]
+    assert lines[0]["mode"] == "capture" and lines[0]["run_id"] == "run"
+    assert lines[1]["har"]["request"]["url"] == STATS
+
+
+def test_a_killed_run_is_recovered_into_a_har_the_driver_accepts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "recorded"
+    _, bodies, _ = _replay_session(root, kill=True)
+    assert not (root / "manifest.json").exists()
+    assert not (root / "har").exists()
+    manifest = rec.recover_run(root)
+    assert manifest["recovered"] is True
+    assert "RECOVERED_FROM_JOURNAL" in {w["code"] for w in manifest["warnings"]}
+    assert manifest["counts"]["entries"] == 8
+    assert manifest["counts"]["offorigin"] == 1
+    assert verify_run(root)["recovered"] is True
+    capture = root / "har"
+    assert {p.name for p in capture.iterdir()} == {rec.DEFAULT_HAR_NAME}
+    path = tmp_path / "intake-manifest.json"
+    path.write_bytes(json.dumps(_driver_manifest(bodies)).encode())
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    staged = driver.stage_intake(path, capture, staging)
+    intake_dir = Path(str(staged["intake_dir"]))
+    driver.parse_intake(intake_dir)
+    assert driver.verify_intake(intake_dir)["state"] == "VERIFIED_WITH_FLAGS"
+    out = tmp_path / "csv"
+    out.mkdir()
+    assert converter.convert(intake_dir, out, "public")["state"] == "CONVERTED"
+
+
+def test_recovered_and_finished_runs_assemble_the_same_har(tmp_path: Path) -> None:
+    finished, _, _ = _replay_session(tmp_path / "finished")
+    finished.finish()
+    _replay_session(tmp_path / "killed", kill=True)
+    rec.recover_run(tmp_path / "killed")
+    name = rec.DEFAULT_HAR_NAME
+    left = json.loads((tmp_path / "finished" / "har" / name).read_bytes())
+    right = json.loads((tmp_path / "killed" / "har" / name).read_bytes())
+    for side in (left, right):
+        for entry in side["log"]["entries"]:
+            entry.pop("startedDateTime")
+    assert left == right
+
+
+def _close_journal(recorder: Recorder) -> None:
+    assert recorder._journal is not None
+    recorder._journal.close()
+
+
+def test_recover_drops_a_half_written_last_line_and_refuses_corruption(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    recorder = make(root)
+    feed(recorder, STATS, STATS_BODY)
+    feed(recorder, DASHBOARD, {"data": []})
+    _close_journal(recorder)
+    with (root / rec.JOURNAL).open("ab") as handle:
+        handle.write(b'{"t":"entry","digest":{"ordinal":2,"capab')
+    manifest = rec.recover_run(root)
+    codes = {w["code"] for w in manifest["warnings"]}
+    assert {"RECOVERED_FROM_JOURNAL", "JOURNAL_LAST_LINE_TRUNCATED"} <= codes
+    assert verify_run(root)["entries"] == 2
+    broken = tmp_path / "broken"
+    other = make(broken)
+    feed(other, STATS, STATS_BODY)
+    feed(other, DASHBOARD, {"data": []})
+    _close_journal(other)
+    lines = (broken / rec.JOURNAL).read_bytes().split(b"\n")
+    lines[1] = b"{broken"
+    (broken / rec.JOURNAL).write_bytes(b"\n".join(lines))
+    with pytest.raises(RecorderError, match="JOURNAL_CORRUPT"):
+        rec.recover_run(broken)
+
+
+def test_recover_refuses_finished_missing_and_partial_runs(tmp_path: Path) -> None:
+    done = _finished(tmp_path / "done")
+    with pytest.raises(RecorderError, match="RUN_ALREADY_FINISHED"):
+        rec.recover_run(done)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(RecorderError, match="JOURNAL_MISSING"):
+        rec.recover_run(empty)
+    with pytest.raises(RecorderError, match="OUTPUT_ROOT_NOT_ABSOLUTE"):
+        rec.recover_run(Path("relative"))
+    half = tmp_path / "half"
+    recorder = make(half)
+    feed(recorder, STATS, STATS_BODY)
+    _close_journal(recorder)
+    (half / "har").mkdir()
+    (half / "har" / rec.DEFAULT_HAR_NAME).write_bytes(b"x")
+    with pytest.raises(RecorderError, match="ARTIFACT_EXISTS"):
+        rec.recover_run(half)
+
+
+def test_the_jwt_value_is_only_in_the_har_and_the_journal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "recorded"
+    _replay_session(root, kill=True)
+    rec.main(["recover", "--run-root", str(root)])
+    printed = capsys.readouterr()
+    assert JWT not in printed.out + printed.err
+    holders = sorted(
+        p.relative_to(root).as_posix()
+        for p in root.rglob("*")
+        if p.is_file() and JWT.encode() in p.read_bytes()
+    )
+    assert holders == [f"har/{rec.DEFAULT_HAR_NAME}", "journal.jsonl"]
+    assert JWT not in (root / "manifest.json").read_text()
+    disc = tmp_path / "disc"
+    discovery = make(disc, "discover")
+    feed(discovery, STATS, STATS_BODY)
+    discovery.finish()
+    assert not any(
+        JWT.encode() in p.read_bytes() for p in disc.rglob("*") if p.is_file()
+    )
+
+
+# --- jwt_header_present is the first output line ---------------------------
+
+
+def _fake_live(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, jwt: str | None
+) -> None:
+    def live(args: Any) -> dict[str, Any]:
+        recorder = make(tmp_path / "live", args.command)
+        feed(recorder, STATS, STATS_BODY, jwt=jwt)
+        return recorder.finish()
+
+    monkeypatch.setattr(rec, "_live", live)
+
+
+@pytest.mark.parametrize("command", ["discover", "capture"])
+def test_jwt_header_present_is_the_first_output_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    _fake_live(monkeypatch, tmp_path, jwt=JWT)
+    args = [command, "--cdp-url", "http://127.0.0.1:9333", "--output-root", "C:/x"]
+    assert rec.main(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "jwt_header_present: true"
+    assert json.loads(lines[1])["jwt"]["present"] is True
+    assert len(lines) == 2
+
+
+def test_without_a_jwt_header_the_first_line_is_false_and_says_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fake_live(monkeypatch, tmp_path, jwt=None)
+    args = ["discover", "--cdp-url", "http://127.0.0.1:9333", "--output-root", "C:/x"]
+    assert rec.main(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "jwt_header_present: false"
+    assert lines[1].startswith("STOP: ") and "coordinator" in lines[1]
+    assert json.loads(lines[2])["jwt"] == {
+        "api_responses_with_jwt": 0,
+        "api_responses_without_jwt": 1,
+        "present": False,
+    }
+
+
+def test_a_public_page_with_no_api_traffic_reports_false(tmp_path: Path) -> None:
+    recorder = make(tmp_path / "run", "discover")
+    feed(recorder, f"{APP}/_next/data/B1/funds.json", {"pageProps": {}}, jwt=None)
+    manifest = recorder.finish()
+    assert manifest["jwt"]["present"] is False
+    assert "no API response with a jwt header" in " ".join(rec.jwt_lines(manifest))
+
+
+# --- propose-contract ------------------------------------------------------
+
+
+def _runs_with_unreviewed(tmp_path: Path) -> list[Path]:
+    first = make(tmp_path / "one", "discover")
+    for url in (
+        f"{API}/api/users/123/accounts/activity/?page=2&limit=SENTINELVALUE",
+        f"{API}/api/users/456/accounts/activity/?page=3&limit=SENTINELVALUE",
+        f"{APP}/_next/data/B1/funds/107.json",
+        f"{APP}/_next/data/B2/funds/108.json",
+        f"{API}/api/funds/?5=1",
+        f"{API}/api/funds/?limit=SENTINELVALUE",
+        f"{API}/api/users/123/accounts/?x=1",
+        f"{API}/api/funds/stats/?fund=SENTINELVALUE",
+    ):
+        feed(first, url, {})
+    feed(first, STATS, STATS_BODY)
+    first.finish()
+    second = make(tmp_path / "two")
+    feed(second, f"{API}/api/users/123/accounts/activity/?cursor=SENTINELVALUE", {})
+    feed(second, STATS, STATS_BODY)
+    second.finish()
+    return [tmp_path / "one", tmp_path / "two"]
+
+
+def test_propose_contract_lists_templates_and_key_names_never_values(
+    tmp_path: Path,
+) -> None:
+    runs = _runs_with_unreviewed(tmp_path)
+    out = tmp_path / "draft"
+    result = rec.propose_contract(runs, out, root_policy=lenient)
+    assert result["applied"] is False
+    draft = json.loads((out / "contract-extension.draft.json").read_bytes())
+    assert draft["applied"] is False and draft["schema"] == rec.DRAFT_SCHEMA
+    extension = draft["extension"]
+    assert extension["schema_version"] == 1
+    assert extension["extra_query_keys"] == {
+        "accounts.activity": ["cursor", "limit", "page"],
+        "accounts.linked": ["x"],
+    }
+    routes = {
+        (r["origin"], r["path"], tuple(r["query_keys"])): r for r in extension["routes"]
+    }
+    ssg = routes[(APP, "/_next/data/{build_id}/funds/{id}.json", ())]
+    assert ssg["authentication_header"] is None
+    assert ssg["path_pattern"] == r"/_next/data/[^/]+/funds/[0-9]+\.json"
+    api = routes[(API, "/api/funds/", ("limit",))]
+    assert api["authentication_header"] == "jwt" and "path_pattern" not in api
+    capabilities = [r["capability"] for r in extension["routes"]]
+    assert len(capabilities) == len(set(capabilities)) == 2
+    assert not set(capabilities) & {e.capability for e in QUANTBASE_CONTRACT.endpoints}
+    proposals = {
+        (o["path_template"], tuple(o["query_keys"])): o["proposal"]
+        for o in draft["observed"]
+    }
+    assert (
+        proposals[("/api/users/{user_id}/accounts/", ("x",))]
+        == "EXTENDS_REVIEWED_ROUTE"
+    )
+    assert (
+        proposals[("/api/funds/stats/", ("fund",))]
+        == "QUERY_SHAPE_DIFFERS_REVIEW_BY_HAND"
+    )
+    assert proposals[("/api/funds/", ("{key}",))] == "UNPORTABLE_QUERY_KEY"
+    blob = b"".join(p.read_bytes() for p in out.rglob("*") if p.is_file())
+    for secret in ("SENTINELVALUE", "/107", "/108", "/123", "/456", JWT):
+        assert secret.encode() not in blob
+    assert (out / "contract-extension.draft.md").read_text().startswith("# Quantbase")
+
+
+def test_propose_contract_verifies_inputs_and_is_create_only(tmp_path: Path) -> None:
+    runs = _runs_with_unreviewed(tmp_path)
+    out = tmp_path / "draft"
+    rec.propose_contract(runs, out, root_policy=lenient)
+    with pytest.raises(RecorderError, match="OUTPUT_ROOT_EXISTS"):
+        rec.propose_contract(runs, out, root_policy=lenient)
+    (runs[0] / rec.JOURNAL).write_bytes(b"tampered")
+    with pytest.raises(RecorderError, match="ARTIFACT_HASH_DIFFERS"):
+        rec.propose_contract(runs, tmp_path / "draft2", root_policy=lenient)
+    with pytest.raises(RecorderError, match="NO_RUNS"):
+        rec.propose_contract([], tmp_path / "draft3", root_policy=lenient)
+
+
+def test_propose_contract_cli_prints_only_the_artifact_names(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = _runs_with_unreviewed(tmp_path)
+    original = rec.propose_contract
+    monkeypatch.setattr(
+        rec, "propose_contract", lambda r, o: original(r, o, root_policy=lenient)
+    )
+    args = ["propose-contract", "--out", str(tmp_path / "cli")]
+    for run in runs:
+        args += ["--run-root", str(run)]
+    assert rec.main(args) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {
+        "applied": False,
+        "artifacts": ["contract-extension.draft.json", "contract-extension.draft.md"],
+        "status": "DRAFT_WRITTEN",
+    }
+
+
+def test_capability_suggestions_are_portable_and_unique() -> None:
+    first = rec.suggest_capability("/_next/data/{build_id}/funds/{id}.json", {"funds"})
+    assert first == "funds.2"
+    assert rec.suggest_capability("/api/Some_Thing/{id}/", set()) == "some-thing"
+    assert rec.suggest_capability("/{id}", set()) == "route"

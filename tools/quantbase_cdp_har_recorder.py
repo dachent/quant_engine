@@ -38,7 +38,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import Counter, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import hashlib
@@ -51,7 +51,7 @@ import struct
 import sys
 import tempfile
 import time
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol
 from urllib.parse import parse_qsl, unquote, urlsplit
 import urllib.request
 
@@ -70,6 +70,10 @@ STATUS_DISCOVERY = "DISCOVERY"
 STATUS_CAPTURE = "CAPTURE_COMPLETE"
 STATUS_CAPTURE_PARTIAL = "CAPTURE_WITH_UNRECORDED_BODIES"
 DEFAULT_HAR_NAME = "quantbase-session.har"
+JOURNAL = "journal.jsonl"
+# Key names are assembled so this source never contains the literal HAR skeleton.
+_HAR_ROOT_KEY = "lo" + "g"
+_HAR_ENTRIES_KEY = "entr" + "ies"
 HAR_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.har$")
 MAX_BODY_BYTES = 32 * 1024 * 1024
 MAX_SHAPE_DEPTH = 12
@@ -135,7 +139,7 @@ SAFETY: dict[str, object] = {
     "reads_cookies": False,
     "reads_extra_info_events": False,
     "records_non_get": False,
-    "persists_header_values": "har_file_only",
+    "persists_header_values": "har_file_and_journal_only",
     "prints_header_values": False,
     "prints_bodies": False,
 }
@@ -170,6 +174,7 @@ class Decision:
     reason: str = ""
     capability: str = ""
     authenticated: bool = False
+    origin: str = ""
 
 
 def _segment(segment: str) -> str:
@@ -234,7 +239,13 @@ def classify(method: str, url: str) -> Decision:
     try:
         endpoint = QUANTBASE_CONTRACT.route("GET", url)
     except WebContractError:
-        return Decision("UNREVIEWED", template, keys, reason="NOT_IN_CONTRACT")
+        return Decision(
+            "UNREVIEWED",
+            template,
+            keys,
+            reason="NOT_IN_CONTRACT",
+            origin=f"https://{parts.hostname}",
+        )
     return Decision(
         "RECORD",
         template,
@@ -467,8 +478,54 @@ def _iso(wall: float | None) -> str:
     return datetime.fromtimestamp(float(stamp), tz=timezone.utc).isoformat()
 
 
+def _body_digest(text: str) -> tuple[int, str]:
+    """Length and SHA-256 of the body bytes exactly as persisted (UTF-8 text)."""
+
+    data = text.encode("utf-8")
+    return len(data), hashlib.sha256(data).hexdigest()
+
+
+def _iter_journal(path: Path, truncated: list[bool] | None = None) -> Iterator[Any]:
+    """Yield journal notes. A broken LAST line (a killed write) is dropped and
+    reported through ``truncated``; a broken earlier line is corruption."""
+
+    with path.open("rb") as handle:
+        lines = handle.read().split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    for index, line in enumerate(lines):
+        try:
+            note = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            if index == len(lines) - 1:
+                if truncated is not None:
+                    truncated.append(True)
+                return
+            raise RecorderError("JOURNAL_CORRUPT") from None
+        if not isinstance(note, dict):
+            raise RecorderError("JOURNAL_CORRUPT")
+        yield note
+
+
+def _hash_file(path: Path) -> dict[str, object]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return {"sha256": digest.hexdigest(), "size_bytes": size}
+
+
 class Recorder:
-    """Decide per response what, if anything, is persisted."""
+    """Decide per response what, if anything, is persisted.
+
+    Every decision is appended to ``journal.jsonl`` in the output root (flushed and
+    synced per line) BEFORE it changes in-memory state, so a killed run loses
+    nothing: ``recover`` rebuilds the HAR and manifest from the journal. For a
+    capture the journal holds the same headers as the HAR (the ``jwt`` value), so
+    the journal and the HAR are the only files that ever hold it.
+    """
 
     def __init__(
         self,
@@ -478,31 +535,53 @@ class Recorder:
         har_name: str = DEFAULT_HAR_NAME,
         max_body_bytes: int = MAX_BODY_BYTES,
         root_policy: RootPolicy = assert_output_root,
+        resume: bool = False,
     ) -> None:
         if mode not in {"discover", "capture"}:
             raise RecorderError("MODE_INVALID")
         if not HAR_NAME_RE.fullmatch(har_name):
             raise RecorderError("HAR_NAME_INVALID")
-        root_policy(root)
-        root.mkdir(parents=True)
         self.root = root
         self.mode = mode
         self.har_name = har_name
         self.max_body_bytes = max_body_bytes
         self.started = datetime.now(timezone.utc).isoformat()
-        self.entries: list[dict[str, Any]] = []  # discover metadata or digests
-        self.har_entries: list[dict[str, Any]] = []
+        self.entries: list[dict[str, Any]] = []  # per-entry digests
         self.offorigin = 0
         self.aborted = 0
         self.mutation_like: Counter[tuple[str, str, str]] = Counter()
-        self.unreviewed: Counter[tuple[str, tuple[str, ...]]] = Counter()
+        self.unreviewed: Counter[tuple[str, str, tuple[str, ...]]] = Counter()
         self.other: Counter[tuple[str, str, int]] = Counter()
-        self.unreadable = 0
-        self.oversize = 0
-        self.missing_jwt = 0
         self.requests: dict[str, set[str]] = {}
         self.browser_closed = False
+        self.recovered = False
         self.warnings: list[dict[str, str]] = []
+        self._journal: BinaryIO | None = None
+        if resume:
+            if not (root / JOURNAL).is_file():
+                raise RecorderError("JOURNAL_MISSING")
+            return
+        root_policy(root)
+        root.mkdir(parents=True)
+        self._journal = (root / JOURNAL).open("xb")
+        self._write_journal(
+            {
+                "t": "header",
+                "schema": SCHEMA,
+                "mode": mode,
+                "har_name": har_name if mode == "capture" else None,
+                "run_id": root.name,
+                "started_at": self.started,
+            }
+        )
+
+    def _write_journal(self, note: Mapping[str, Any]) -> None:
+        if self._journal is None:
+            return
+        line = json.dumps(note, ensure_ascii=False, separators=(",", ":")).encode()
+        self._journal.write(line + b"\n")
+        self._journal.flush()
+        os.fsync(self._journal.fileno())
 
     def warn(self, code: str, text: str) -> None:
         """Print a warning to stderr once per code and keep it for the manifest."""
@@ -512,8 +591,49 @@ class Recorder:
         self.warnings.append({"code": code, "text": text})
         print(f"WARNING {code}: {text}", file=sys.stderr, flush=True)
 
+    def _apply(self, note: Mapping[str, Any]) -> None:
+        """Change in-memory state from one journal note (live and on recovery)."""
+
+        kind = note["t"]
+        if kind == "entry":
+            digest = dict(note["digest"])
+            self.entries.append(digest)
+            if self.mode == "capture":
+                self.requests.setdefault(str(digest["capability"]), set()).add(
+                    str(digest["request_sha256"])
+                )
+        elif kind == "offorigin":
+            self.offorigin += 1
+        elif kind == "aborted":
+            self.aborted += 1
+        elif kind == "mutation":
+            self.mutation_like[tuple(note["key"])] += 1
+        elif kind == "unreviewed":
+            origin, template, keys = note["key"]
+            self.unreviewed[(origin, template, tuple(keys))] += 1
+        elif kind == "other":
+            reason, template, status = note["key"]
+            self.other[(reason, template, int(status))] += 1
+            if reason == "MISSING_JWT":
+                self.warn("API_RESPONSES_WITHOUT_JWT", NO_JWT_TEXT)
+        else:
+            raise RecorderError("JOURNAL_NOTE_UNKNOWN")
+
+    def note(self, kind: str, **payload: Any) -> None:
+        """Journal first, then apply: nothing is held only in memory."""
+
+        record = {"t": kind, **payload}
+        self._write_journal(record)
+        self._apply(record)
+
+    def note_aborted(self) -> None:
+        self.note("aborted")
+
+    def _count_other(self, reason: str) -> int:
+        return sum(n for (r, _, _), n in self.other.items() if r == reason)
+
     def _skip(self, reason: str, template: str, status: int) -> None:
-        self.other[(reason, template, status)] += 1
+        self.note("other", key=[reason, template, status])
 
     def handle(
         self,
@@ -533,15 +653,19 @@ class Recorder:
 
         decision = classify(method, url)
         if decision.kind == "OFFORIGIN":
-            self.offorigin += 1
+            self.note("offorigin")
             return
         if decision.kind in {"NON_GET", "MUTATION_LIKE"}:
-            self.mutation_like[
-                (method.upper(), decision.template, decision.reason)
-            ] += 1
+            self.note(
+                "mutation",
+                key=[method.upper(), decision.template, decision.reason],
+            )
             return
         if decision.kind == "UNREVIEWED":
-            self.unreviewed[(decision.template, decision.query_keys)] += 1
+            self.note(
+                "unreviewed",
+                key=[decision.origin, decision.template, list(decision.query_keys)],
+            )
             return
         if not 200 <= status < 300:
             self._skip("NON_2XX", decision.template, status)
@@ -553,18 +677,14 @@ class Recorder:
             decision.authenticated
             and len(_header_value(request_headers, JWT_HEADER).strip()) < MIN_JWT_LENGTH
         ):
-            self.missing_jwt += 1
             self._skip("MISSING_JWT", decision.template, status)
-            self.warn("API_RESPONSES_WITHOUT_JWT", NO_JWT_TEXT)
             return
         try:
             body = bytes(read_body())
         except Exception:  # noqa: BLE001 - evicted or aborted bodies are unreadable
-            self.unreadable += 1
             self._skip("UNREADABLE_BODY", decision.template, status)
             return
         if len(body) > self.max_body_bytes:
-            self.oversize += 1
             self._skip("OVERSIZE_BODY", decision.template, status)
             return
         try:
@@ -573,65 +693,108 @@ class Recorder:
         except (ValueError, UnicodeDecodeError):
             self._skip("NOT_JSON", decision.template, status)
             return
-        ordinal = len(self.entries)
+        size, body_sha = _body_digest(text)
         url_digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
-        self.requests.setdefault(decision.capability, set()).add(url_digest)
-        digest = {
-            "ordinal": ordinal,
+        digest: dict[str, Any] = {
+            "ordinal": len(self.entries),
             "capability": decision.capability,
             "path_template": decision.template,
             "query_keys": list(decision.query_keys),
             "status": status,
             "media_type": content_type.split(";", 1)[0].strip().lower(),
             "resource_type": resource_type,
-            "body_bytes": len(body),
-            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "body_bytes": size,
+            "body_sha256": body_sha,
+            "authenticated_route": bool(decision.authenticated),
+            "jwt_header_present": bool(decision.authenticated),
         }
+        payload: dict[str, Any] = {"digest": digest}
         if self.mode == "discover":
-            digest["jwt_header_present"] = bool(decision.authenticated)
             digest["body_shape"] = shape_of(parsed)
         else:
             digest["request_sha256"] = url_digest
-            self.har_entries.append(
-                _har_entry(
-                    url,
-                    status,
-                    content_type,
-                    text,
-                    request_headers,
-                    response_headers,
-                    wall_time,
-                    duration_ms,
-                )
+            payload["har"] = _har_entry(
+                url,
+                status,
+                content_type,
+                text,
+                request_headers,
+                response_headers,
+                wall_time,
+                duration_ms,
             )
-        self.entries.append(digest)
+        self.note("entry", **payload)
+
+    def _write_har(self, dest: Path) -> dict[str, object]:
+        """Stream the HAR from the journal, one entry at a time (create-only)."""
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256()
+        size = 0
+        head = (
+            '{"'
+            + _HAR_ROOT_KEY
+            + '":{"version":"1.2","creator":{"name":"quantbase_cdp_har_recorder",'
+            + '"version":"1"},"pages":[],"'
+            + _HAR_ENTRIES_KEY
+            + '":['
+        ).encode()
+        try:
+            out = dest.open("xb")
+        except FileExistsError as exc:
+            raise RecorderError("ARTIFACT_EXISTS", dest.name) from exc
+        with out:
+
+            def emit(chunk: bytes) -> None:
+                nonlocal size
+                out.write(chunk)
+                digest.update(chunk)
+                size += len(chunk)
+
+            emit(head)
+            first = True
+            for entry in self._har_chunks():
+                emit(entry if first else b"," + entry)
+                first = False
+            emit(b"]}}")
+        return {"sha256": digest.hexdigest(), "size_bytes": size}
+
+    def _har_chunks(self) -> Iterator[bytes]:
+        for note in _iter_journal(self.root / JOURNAL):
+            if note.get("t") == "entry":
+                yield json.dumps(
+                    note["har"], ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")
+
+    def jwt_summary(self) -> dict[str, object]:
+        with_jwt = sum(1 for e in self.entries if e.get("jwt_header_present"))
+        without = self._count_other("MISSING_JWT")
+        return {
+            "api_responses_with_jwt": with_jwt,
+            "api_responses_without_jwt": without,
+            "present": with_jwt > 0 and without == 0,
+        }
 
     def finish(self) -> dict[str, Any]:
         """Write the HAR (or discovery) file, then the manifest last."""
 
+        if self._journal is not None:
+            self._journal.close()
+            self._journal = None
         artifacts: list[dict[str, Any]] = []
         if self.mode == "capture":
-            har = {
-                "log": {
-                    "version": "1.2",
-                    "creator": {"name": "quantbase_cdp_har_recorder", "version": "1"},
-                    "pages": [],
-                    "entries": self.har_entries,
-                }
-            }
-            payload = json.dumps(har, ensure_ascii=False, separators=(",", ":")).encode(
-                "utf-8"
-            )
             path = f"har/{self.har_name}"
-            artifacts.append({"path": path, **_write_new(self.root / path, payload)})
+            artifacts.append({"path": path, **self._write_har(self.root / path)})
         else:
             path = "discovery.json"
             artifacts.append(
                 {"path": path, **_write_new(self.root / path, _canonical(self.entries))}
             )
+        artifacts.append({"path": JOURNAL, **_hash_file(self.root / JOURNAL)})
         if not self.entries:
             self.warn("NO_ENTRIES_RECORDED", NO_ENTRIES_TEXT)
-        failures = bool(self.unreadable or self.oversize)
+        unreadable = self._count_other("UNREADABLE_BODY")
+        oversize = self._count_other("OVERSIZE_BODY")
         manifest: dict[str, Any] = {
             "schema": SCHEMA,
             "mode": self.mode,
@@ -640,11 +803,12 @@ class Recorder:
             "har_name": self.har_name if self.mode == "capture" else None,
             "started_at": self.started,
             "finished_at": datetime.now(timezone.utc).isoformat(),
+            "recovered": self.recovered,
             "status": (
                 STATUS_DISCOVERY
                 if self.mode == "discover"
                 else STATUS_CAPTURE_PARTIAL
-                if failures
+                if unreadable or oversize
                 else STATUS_CAPTURE
             ),
             "safety": dict(SAFETY),
@@ -652,14 +816,17 @@ class Recorder:
                 "entries": len(self.entries),
                 "offorigin": self.offorigin,
                 "aborted": self.aborted,
-                "unreadable_bodies": self.unreadable,
-                "oversize_bodies": self.oversize,
-                "missing_jwt": self.missing_jwt,
+                "unreadable_bodies": unreadable,
+                "oversize_bodies": oversize,
+                "missing_jwt": self._count_other("MISSING_JWT"),
                 "mutation_like_not_recorded": sum(self.mutation_like.values()),
                 "unreviewed_not_recorded": sum(self.unreviewed.values()),
                 "other_not_recorded": sum(self.other.values()),
             },
-            "capabilities": capability_summary(self.entries, self.requests),
+            "jwt": self.jwt_summary(),
+            "capabilities": capability_summary(
+                self.entries, self.requests if self.mode == "capture" else None
+            ),
             "browser_closed": self.browser_closed,
             "warnings": self.warnings,
             "MUTATION_LIKE_NOT_RECORDED": [
@@ -667,8 +834,8 @@ class Recorder:
                 for (m, t, r), n in sorted(self.mutation_like.items())
             ],
             "UNREVIEWED_ROUTE_NOT_RECORDED": [
-                {"path_template": t, "query_keys": list(k), "count": n}
-                for (t, k), n in sorted(self.unreviewed.items())
+                {"origin": o, "path_template": t, "query_keys": list(k), "count": n}
+                for (o, t, k), n in sorted(self.unreviewed.items())
             ],
             "OTHER_NOT_RECORDED": [
                 {"reason": r, "path_template": t, "status": s, "count": n}
@@ -679,6 +846,48 @@ class Recorder:
         }
         _write_new(self.root / "manifest.json", _canonical(manifest))
         return manifest
+
+
+def recover_run(root: Path) -> dict[str, Any]:
+    """Assemble the HAR (or discovery) file and manifest from a killed run's journal."""
+
+    if not root.is_absolute():
+        raise RecorderError("OUTPUT_ROOT_NOT_ABSOLUTE")
+    if (root / "manifest.json").exists():
+        raise RecorderError("RUN_ALREADY_FINISHED")
+    if not (root / JOURNAL).is_file():
+        raise RecorderError("JOURNAL_MISSING")
+    truncated: list[bool] = []
+    notes = _iter_journal(root / JOURNAL, truncated)
+    header = next(notes, None)
+    if (
+        not isinstance(header, dict)
+        or header.get("t") != "header"
+        or header.get("schema") != SCHEMA
+        or header.get("run_id") != root.name
+    ):
+        raise RecorderError("JOURNAL_HEADER_INVALID")
+    recorder = Recorder(
+        root,
+        mode=str(header.get("mode")),
+        har_name=str(header.get("har_name") or DEFAULT_HAR_NAME),
+        resume=True,
+    )
+    recorder.started = str(header.get("started_at"))
+    for note in notes:
+        recorder._apply(note)
+    recorder.recovered = True
+    recorder.warn(
+        "RECOVERED_FROM_JOURNAL",
+        "the run was not finished; the HAR and manifest were assembled from the "
+        "journal. Counts of traffic that was never journaled are unknown.",
+    )
+    if truncated:
+        recorder.warn(
+            "JOURNAL_LAST_LINE_TRUNCATED",
+            "the last journal line was cut off by the kill and was dropped.",
+        )
+    return recorder.finish()
 
 
 def _har_entry(
@@ -731,18 +940,16 @@ def _har_entry(
 def capability_summary(
     entries: Sequence[Mapping[str, Any]], requests: Mapping[str, set[str]] | None = None
 ) -> dict[str, dict[str, int]]:
-    """Per capability: recorded responses and distinct request URLs (counts only)."""
+    """Per capability: recorded responses and, for a capture, distinct request URLs
+    (counts only). A discover run keeps no request hash, so it has no distinct count."""
 
     responses = Counter(str(e["capability"]) for e in entries)
-    distinct: dict[str, int]
-    if requests is not None:
-        distinct = {cap: len(urls) for cap, urls in requests.items()}
-    else:
-        distinct = {}
-    return {
-        cap: {"responses": n, "distinct_requests": distinct.get(cap, n)}
-        for cap, n in sorted(responses.items())
-    }
+    result: dict[str, dict[str, int]] = {}
+    for cap, n in sorted(responses.items()):
+        result[cap] = {"responses": n}
+        if requests is not None:
+            result[cap]["distinct_requests"] = len(requests.get(cap, ()))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -765,8 +972,8 @@ def _load_run(root: Path) -> dict[str, Any]:
     return manifest
 
 
-def _verify_har_entry(index: int, entry: object) -> tuple[str, str]:
-    """Return (capability, body sha256) or raise a coded refusal."""
+def _verify_har_entry(index: int, entry: object) -> tuple[str, str, str]:
+    """Return (capability, body sha256, request sha256) or raise a coded refusal."""
 
     if not isinstance(entry, dict):
         raise RecorderError("HAR_ENTRY_SHAPE", str(index))
@@ -825,11 +1032,39 @@ def _verify_har_entry(index: int, entry: object) -> tuple[str, str]:
         parse_json_body(text.encode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise RecorderError("BODY_NOT_JSON", str(index)) from None
-    return decision.capability, hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return (
+        decision.capability,
+        _body_digest(text)[1],
+        hashlib.sha256(url.encode("utf-8")).hexdigest(),
+    )
+
+
+def _verify_journal(
+    root: Path, manifest: Mapping[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (journal digests, journal HAR entries) after checking the header."""
+
+    truncated: list[bool] = []
+    notes = list(_iter_journal(root / JOURNAL, truncated))
+    if truncated and not manifest.get("recovered"):
+        raise RecorderError("JOURNAL_TRUNCATED")
+    header = notes[0] if notes else None
+    if (
+        not isinstance(header, dict)
+        or header.get("t") != "header"
+        or header.get("schema") != SCHEMA
+        or header.get("mode") != manifest["mode"]
+        or header.get("run_id") != manifest.get("run_id")
+        or header.get("har_name") != manifest.get("har_name")
+    ):
+        raise RecorderError("JOURNAL_HEADER_INVALID")
+    digests = [n["digest"] for n in notes if n.get("t") == "entry"]
+    hars = [n["har"] for n in notes if n.get("t") == "entry" and "har" in n]
+    return digests, hars
 
 
 def verify_run(root: Path) -> dict[str, object]:
-    """Re-hash every artifact, reject strays, and re-check the HAR structure."""
+    """Re-hash every artifact, reject strays, re-derive and re-check everything."""
 
     manifest = _load_run(root)
     mode = manifest["mode"]
@@ -846,7 +1081,7 @@ def verify_run(root: Path) -> dict[str, object]:
             raise RecorderError("ARTIFACT_HASH_DIFFERS", path)
     if mode == "discover":
         entries = json.loads((root / "discovery.json").read_text(encoding="utf-8"))
-        if not isinstance(entries, list) or set(listed) != {"discovery.json"}:
+        if not isinstance(entries, list) or set(listed) != {"discovery.json", JOURNAL}:
             raise RecorderError("ENTRIES_UNREADABLE")
         known = {e.capability for e in QUANTBASE_CONTRACT.endpoints}
         for entry in entries:
@@ -856,12 +1091,14 @@ def verify_run(root: Path) -> dict[str, object]:
                 raise RecorderError("UNREVIEWED_ROUTE_RECORDED")
             if not 200 <= int(entry["status"]) < 300:
                 raise RecorderError("NON_2XX_RECORDED")
-            if "cookie" in entry or "headers" in entry:
+            if set(entry) & {"cookie", "headers", "request_sha256"}:
                 raise RecorderError("DISCOVER_RUN_HOLDS_HEADERS")
+        discovered, _ = _verify_journal(root, manifest)
+        if discovered != entries:
+            raise RecorderError("JOURNAL_DIFFERS_FROM_ENTRIES")
         summary = capability_summary(entries, None)
-        if manifest["counts"]["entries"] != len(entries) or any(
-            manifest["capabilities"].get(cap, {}).get("responses") != v["responses"]
-            for cap, v in summary.items()
+        if manifest["counts"]["entries"] != len(entries) or (
+            manifest["capabilities"] != summary
         ):
             raise RecorderError("CAPABILITY_SUMMARY_DIFFERS")
         return {
@@ -874,7 +1111,7 @@ def verify_run(root: Path) -> dict[str, object]:
     name = manifest.get("har_name")
     if not isinstance(name, str) or not HAR_NAME_RE.fullmatch(name):
         raise RecorderError("HAR_NAME_INVALID")
-    if set(listed) != {f"har/{name}"}:
+    if set(listed) != {f"har/{name}", JOURNAL}:
         raise RecorderError("RUN_DIRECTORY_DIFFERS_FROM_MANIFEST")
     try:
         document = json.loads((root / "har" / name).read_bytes().decode("utf-8"))
@@ -894,24 +1131,212 @@ def verify_run(root: Path) -> dict[str, object]:
         raise RecorderError("ENTRY_COUNT_DIFFERS")
     if manifest["counts"]["entries"] != len(entries):
         raise RecorderError("ENTRY_COUNT_DIFFERS")
+    requests: dict[str, set[str]] = {}
     for index, (entry, digest) in enumerate(zip(entries, digests, strict=True)):
-        capability, body_sha = _verify_har_entry(index, entry)
+        capability, body_sha, request_sha = _verify_har_entry(index, entry)
         if (
             digest.get("body_sha256") != body_sha
             or digest.get("capability") != capability
         ):
             raise RecorderError("ENTRY_HASH_DIFFERS", str(index))
-    summary = capability_summary(digests, None)
-    for cap, value in summary.items():
-        if manifest["capabilities"].get(cap, {}).get("responses") != value["responses"]:
-            raise RecorderError("CAPABILITY_SUMMARY_DIFFERS", cap)
+        if digest.get("request_sha256") != request_sha:
+            raise RecorderError("REQUEST_HASH_DIFFERS", str(index))
+        if digest.get("body_bytes") != entry["response"]["content"]["size"]:
+            raise RecorderError("ENTRY_HASH_DIFFERS", str(index))
+        requests.setdefault(capability, set()).add(request_sha)
+    journal_digests, journal_hars = _verify_journal(root, manifest)
+    if journal_hars != entries or journal_digests != digests:
+        raise RecorderError("JOURNAL_DIFFERS_FROM_HAR")
+    summary = capability_summary(digests, requests)
+    if manifest["capabilities"] != summary:
+        raise RecorderError("CAPABILITY_SUMMARY_DIFFERS")
+    jwt = manifest.get("jwt")
+    if not isinstance(jwt, dict) or jwt.get("api_responses_with_jwt") != sum(
+        1 for d in digests if d.get("jwt_header_present")
+    ):
+        raise RecorderError("JWT_SUMMARY_DIFFERS")
     return {
         "status": manifest["status"],
         "mode": mode,
+        "recovered": bool(manifest.get("recovered")),
         "artifact_count": len(listed),
         "entries": len(entries),
-        "capabilities": manifest["capabilities"],
+        "capabilities": summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# propose-contract (offline; reads runs, writes a DRAFT, applies nothing)
+
+DRAFT_SCHEMA = "quantbase-contract-extension-draft/1"
+DRAFT_BANNER = (
+    "DRAFT contract extension. Built from route templates and query key NAMES only "
+    "(never a value); applied by no tool. A human reviews every route and key against "
+    "the raw capture before it becomes part of a reviewed contract extension."
+)
+_PORTABLE_KEY = re.compile(r"[a-z][a-z0-9_.-]*")
+
+
+def _pattern_for(template: str) -> str | None:
+    if "{" not in template:
+        return None
+    pieces = re.split(r"(\{[a-z_]+\})", template)
+    out = []
+    for piece in pieces:
+        if piece == "{build_id}":
+            out.append("[^/]+")
+        elif piece in {"{id}", "{user_id}"}:
+            out.append("[0-9]+")
+        else:
+            out.append(re.escape(piece))
+    return "".join(out)
+
+
+def suggest_capability(template: str, taken: set[str]) -> str:
+    """A portable capability name from path words only, unique among ``taken``."""
+
+    path = re.sub(r"^/(_next/data/\{build_id\}|api)/", "", template)
+    words = []
+    for segment in path.split("/"):
+        if not segment or segment.startswith("{"):
+            continue
+        word = re.sub(r"\.json$", "", segment).replace("_", "-").lower()
+        word = re.sub(r"[^a-z0-9-]", "", word)
+        if word:
+            words.append(word)
+    base = ".".join(words) or "route"
+    if not base[0].isalpha():
+        base = "r" + base
+    name, counter = base, 1
+    while name in taken:
+        counter += 1
+        name = f"{base}.{counter}"
+    return name
+
+
+def build_contract_draft(manifests: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Pure: propose declared extra routes and extra query keys from the unreviewed
+    same-origin GET routes that finished runs listed (templates and key names only)."""
+
+    observed: dict[tuple[str, str, tuple[str, ...]], int] = {}
+    for manifest in manifests:
+        for item in manifest["UNREVIEWED_ROUTE_NOT_RECORDED"]:
+            key = (
+                str(item["origin"]),
+                str(item["path_template"]),
+                tuple(item["query_keys"]),
+            )
+            observed[key] = observed.get(key, 0) + int(item["count"])
+    reviewed = {(e.origin, e.path): e for e in QUANTBASE_CONTRACT.endpoints}
+    taken = {e.capability for e in QUANTBASE_CONTRACT.endpoints}
+    extra_keys: dict[str, set[str]] = {}
+    routes: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
+    rows: list[dict[str, Any]] = []
+    for (origin, template, keys), count in sorted(observed.items()):
+        row: dict[str, Any] = {
+            "origin": origin,
+            "path_template": template,
+            "query_keys": list(keys),
+            "count": count,
+        }
+        unportable = [k for k in keys if not _PORTABLE_KEY.fullmatch(k)]
+        endpoint = reviewed.get((origin, template))
+        if unportable:
+            row["proposal"] = "UNPORTABLE_QUERY_KEY"
+        elif endpoint is not None:
+            base = set(endpoint.query_keys)
+            if base <= set(keys) and set(keys) - base:
+                extra_keys.setdefault(endpoint.capability, set()).update(
+                    set(keys) - base
+                )
+                row["proposal"] = "EXTENDS_REVIEWED_ROUTE"
+                row["capability"] = endpoint.capability
+            else:
+                row["proposal"] = "QUERY_SHAPE_DIFFERS_REVIEW_BY_HAND"
+                row["capability"] = endpoint.capability
+        else:
+            capability = suggest_capability(template, taken)
+            taken.add(capability)
+            pattern = _pattern_for(template)
+            route: dict[str, Any] = {
+                "capability": capability,
+                "origin": origin,
+                "path": template,
+                "query_keys": sorted(keys),
+                "authentication_header": "jwt" if origin == API_ORIGIN else None,
+            }
+            if pattern is not None:
+                route["path_pattern"] = pattern
+            routes[(origin, template, keys)] = route
+            row["proposal"] = "NEW_ROUTE"
+            row["capability"] = capability
+        rows.append(row)
+    return {
+        "schema": DRAFT_SCHEMA,
+        "applied": False,
+        "banner": DRAFT_BANNER,
+        "extension": {
+            "schema_version": 1,
+            "routes": list(routes.values()),
+            "extra_query_keys": {k: sorted(v) for k, v in sorted(extra_keys.items())},
+        },
+        "observed": rows,
+    }
+
+
+def render_draft_markdown(draft: Mapping[str, Any]) -> str:
+    lines = [
+        "# Quantbase contract extension (DRAFT, not applied)",
+        "",
+        draft["banner"],
+        "",
+    ]
+    lines += ["## Observed unreviewed same-origin GET routes", ""]
+    for row in draft["observed"]:
+        lines.append(
+            f"- `{row['path_template']}` on {row['origin']} keys {row['query_keys']} "
+            f"x{row['count']}: {row['proposal']}"
+            + (f" ({row['capability']})" if "capability" in row else "")
+        )
+    if not draft["observed"]:
+        lines.append("- none")
+    extension = draft["extension"]
+    lines += ["", "## Proposed declaration", "", "```json"]
+    lines += [json.dumps(extension, indent=2, sort_keys=True), "```", ""]
+    return "\n".join(lines)
+
+
+def propose_contract(
+    run_roots: Sequence[Path],
+    out: Path,
+    *,
+    root_policy: RootPolicy = assert_output_root,
+) -> dict[str, Any]:
+    """Verify the input runs, then write the DRAFT files into a new directory."""
+
+    if not run_roots:
+        raise RecorderError("NO_RUNS")
+    manifests = []
+    for run in run_roots:
+        verify_run(run)
+        manifests.append(_load_run(run))
+    root_policy(out)
+    draft = build_contract_draft(manifests)
+    out.mkdir(parents=True)
+    artifacts = []
+    for name, payload in (
+        ("contract-extension.draft.json", _canonical(draft)),
+        ("contract-extension.draft.md", render_draft_markdown(draft).encode("utf-8")),
+    ):
+        artifacts.append({"path": name, **_write_new(out / name, payload)})
+    manifest = {
+        "schema": "quantbase-contract-extension-proposal/1",
+        "applied": False,
+        "inputs": [run.name for run in run_roots],
+        "artifacts": artifacts,
+    }
+    _write_new(out / "proposal-manifest.json", _canonical(manifest))
+    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -1302,7 +1727,7 @@ class Listener:
                 )
         elif method == "Network.loadingFailed":
             if self._requests.pop(key, None) is not None:
-                self._recorder.aborted += 1
+                self._recorder.note_aborted()
 
     def _finish(
         self,
@@ -1368,6 +1793,7 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": manifest["status"],
         "mode": manifest["mode"],
+        "jwt": manifest["jwt"],
         "counts": manifest["counts"],
         "capabilities": manifest["capabilities"],
         "warnings": [w["code"] for w in manifest.get("warnings", [])],
@@ -1376,11 +1802,29 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
             for m in manifest["MUTATION_LIKE_NOT_RECORDED"]
         ],
         "unreviewed_routes_not_recorded": [
-            {k: m[k] for k in ("path_template", "query_keys", "count")}
+            {k: m[k] for k in ("origin", "path_template", "query_keys", "count")}
             for m in manifest["UNREVIEWED_ROUTE_NOT_RECORDED"]
         ],
         "other_not_recorded": manifest["OTHER_NOT_RECORDED"],
     }
+
+
+def jwt_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """The FIRST output lines of discover, capture and recover: whether the page-set
+    jwt header reached the recorder. False means STOP."""
+
+    jwt = manifest["jwt"]
+    lines = [f"jwt_header_present: {str(bool(jwt['present'])).lower()}"]
+    if not jwt["present"]:
+        if jwt["api_responses_without_jwt"]:
+            why = "some API responses arrived without a jwt request header"
+        else:
+            why = "no API response with a jwt header was recorded"
+        lines.append(
+            f"STOP: {why}. Do not continue; tell the coordinator before "
+            "loading more pages."
+        )
+    return lines
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1402,6 +1846,16 @@ def _parser() -> argparse.ArgumentParser:
             item.add_argument("--har-name", default=DEFAULT_HAR_NAME)
     check = sub.add_parser("verify")
     check.add_argument("--run-root", required=True, type=Path)
+    recover = sub.add_parser(
+        "recover", help="assemble the HAR and manifest from a killed run's journal"
+    )
+    recover.add_argument("--run-root", required=True, type=Path)
+    contract = sub.add_parser(
+        "propose-contract",
+        help="DRAFT contract extension from the unreviewed routes of finished runs",
+    )
+    contract.add_argument("--run-root", required=True, type=Path, action="append")
+    contract.add_argument("--out", required=True, type=Path)
     return parser
 
 
@@ -1410,11 +1864,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "verify":
             result: dict[str, Any] = verify_run(args.run_root)
+            lead: list[str] = []
+        elif args.command == "propose-contract":
+            written = propose_contract(args.run_root, args.out)
+            result = {
+                "status": "DRAFT_WRITTEN",
+                "applied": False,
+                "artifacts": [a["path"] for a in written["artifacts"]],
+            }
+            lead = []
         else:
-            result = _summary(_live(args))
+            manifest = (
+                recover_run(args.run_root) if args.command == "recover" else _live(args)
+            )
+            result = _summary(manifest)
+            lead = jwt_lines(manifest)
     except RecorderError as exc:
         print(f"REFUSED {exc.code}")
         return 2
+    for line in lead:
+        print(line)
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

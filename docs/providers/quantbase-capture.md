@@ -242,8 +242,9 @@ a HAR. So for RECORDED requests only the tool copies the request headers (the
 that HAR session-header redaction does not matter and that the raw HAR may live in
 the governed root. `Cookie`, `Set-Cookie`, `Authorization` and `Proxy-Authorization`
 are dropped anyway. No header value and no body is ever printed; the `jwt` value
-appears in the HAR file only (not in `manifest.json`, `discovery.json`, stdout or
-stderr). The HAR is restricted evidence.
+appears in exactly two files: the HAR and the per-run journal `journal.jsonl`
+(below), both only inside the governed root. It never appears in `manifest.json`,
+`discovery.json`, stdout or stderr. The HAR and the journal are restricted evidence.
 
 What is recorded: same-origin GET responses on `https://app.getquantbase.com` and
 `https://qbapi3.com` (an allow-list kept as data) that the reviewed contract
@@ -254,21 +255,28 @@ and is listed by path template and counts only:
 | List in `manifest.json` | Contents |
 | --- | --- |
 | `MUTATION_LIKE_NOT_RECORDED` | every non-GET (the `track-event` POST, `OPTIONS`) and any GET whose path contains `track-event`, `revert`, `delete`, `remove`, `save`, `submit`, `update`, `create`, `trade`, `order`, `subscri`, `cancel`, `logout`, `signout`, `sign-out`, `password`, `token`, `withdraw`, `transfer`, `deposit`, `link` (the body is never requested) |
-| `UNREVIEWED_ROUTE_NOT_RECORDED` | a GET on an allowed origin that the contract does not allow-list (for example `/_next/data/{build_id}/funds/{id}.json` or a paged activity URL), with its query KEY names. Recording one would make the driver's `parse` fail, so it is left out and named so the owner can ask for a contract review |
+| `UNREVIEWED_ROUTE_NOT_RECORDED` | a GET on an allowed origin that the contract does not allow-list (for example `/_next/data/{build_id}/funds/{id}.json` or a paged activity URL), with its origin and query KEY names. Recording one would make the driver's `parse` fail, so it is left out and named so the owner can ask for a contract review |
 | `OTHER_NOT_RECORDED` | `NON_2XX`, `NOT_JSON`, `MISSING_JWT`, `UNREADABLE_BODY`, `OVERSIZE_BODY` per template and status |
 
 Modes:
 
 - `discover`: value-free metadata only (capability, path template, query key names,
   status, media type, body shape = field names and types, `jwt_header_present`
-  boolean, body hash). No header and no body is kept.
-- `capture`: `<output-root>/har/<name>.har` (default `quantbase-session.har`) and
-  `<output-root>/manifest.json`, written last, with the HAR hash, per-entry body and
+  boolean, body hash). No header and no body is kept. Its journal holds the same
+  value-free digests, no headers.
+- `capture`: `<output-root>/har/<name>.har` (default `quantbase-session.har`),
+  `<output-root>/journal.jsonl` and `<output-root>/manifest.json`, written last, with the HAR hash, per-entry body and
   request hashes, per-capability response and distinct-request counts, and the
   lists above. `<output-root>/har` holds only the HAR, so it is exactly the driver's
   `--capture-dir`, and the file name goes into the intake manifest's `capture_files`.
+- `recover`: assembles the HAR and manifest from `journal.jsonl` after a killed
+  run (see below).
+- `propose-contract`: a DRAFT contract extension from the unreviewed routes of
+  finished runs (see below).
 - `verify`: re-hashes the run, rejects strays, and re-checks the HAR (version 1.2,
-  entry count equals the manifest, body hashes, only allow-listed origins, only GET,
+  entry count equals the manifest, body hashes, request hashes and per-capability
+  distinct-request counts recomputed from the HAR, the HAR equal to the journal,
+  only allow-listed origins, only GET,
   every URL routes through the contract, no mutation-like path, 2xx, JSON body, `jwt`
   present on API entries, no cookie-class header). Exit 0, or `REFUSED <CODE>`, exit 2.
 
@@ -281,6 +289,14 @@ START THE RECORDER FIRST, then load or reload the pages: it only sees new traffi
 once if nothing was recorded after N seconds; an empty run always records the
 warning in the manifest.
 
+FIRST OUTPUT LINE. `discover`, `capture` and `recover` print
+`jwt_header_present: true` or `jwt_header_present: false` as their first line. If it
+is `false` (an API response arrived without a `jwt` request header, or no API
+response was recorded), the next line says STOP: do not continue, tell the
+coordinator before loading more pages. A pre-sitting smoke on a public page can only
+exercise the false path (no API traffic, so no `jwt`); the true path needs a
+signed-in session.
+
 ```powershell
 python tools/quantbase_cdp_har_recorder.py discover --cdp-url http://127.0.0.1:9333 --output-root "<governed root>\discover-1"
 python tools/quantbase_cdp_har_recorder.py capture  --cdp-url http://127.0.0.1:9333 --output-root "<governed root>\capture-1"
@@ -290,9 +306,27 @@ python tools/capture_quantbase_har.py stage --manifest <intake-manifest.json> --
 
 The intake manifest's per-capability `expected_responses` must equal the recorder's
 `capabilities.<name>.responses` (repeated loads of one page count again; load each
-page once, or declare the repeats). Ctrl-C ends a run normally and writes the HAR
-(the HAR is held in memory until then, so end the run with Ctrl-C, not by killing
-the process).
+page once, or declare the repeats). Ctrl-C ends a run normally and assembles the
+HAR.
+
+Journal and recovery. Every recorder decision is appended to `journal.jsonl` in the
+output root (flushed and synced per line) BEFORE it changes state; a recorded entry
+line holds the full HAR entry, so it carries the `jwt` header exactly like the HAR.
+Nothing is held only in memory. If the process is killed, run
+`recover --run-root <output-root>`: it refuses a run that has a manifest, a run
+whose HAR already exists (create-only) and a corrupt journal, drops a half-written
+last line (warning `JOURNAL_LAST_LINE_TRUNCATED`), and writes the HAR and the manifest
+with `recovered: true` and the warning `RECOVERED_FROM_JOURNAL`. `verify` then
+checks the recovered run like any other. A finished run keeps its journal, hash-bound
+in the manifest, and `verify` requires the HAR to equal it.
+
+`propose-contract --run-root <run> [--run-root <run> ...] --out <new dir>` verifies the
+runs, then lists the observed unreviewed same-origin GET route templates and query key
+NAMES (never a value) and writes `contract-extension.draft.json`/`.md`: a proposed
+`extension` document (`extra_query_keys` for reviewed routes that were seen with more
+keys, and `routes` for new routes with a suggested capability name, path pattern and
+`jwt`/none authentication) plus the `observed` table. It is a DRAFT; nothing applies
+it.
 
 Proof is offline: `tests/quantbase/test_cdp_har_recorder.py` replays synthetic CDP
 events shaped like the reviewed routes through a fake transport, then runs the real
