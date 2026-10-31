@@ -178,6 +178,7 @@ def _tape(tmp_path: Path, last: str = "2026-09-01") -> tuple[Path, Path]:
                     "provider": "yahoo",
                     "transport": "yfinance",
                     "tickers": ["BIL", "SPY"],
+                    "start": "2026-08-28",
                 },
                 "schema_version": 1,
                 "source_run_id": "synthetic-run",
@@ -469,6 +470,39 @@ def test_tolerance_is_recorded_data(tmp_path: Path) -> None:
     validation = _manifest(tmp_path)[builder.PROVENANCE_KEY]["holdings_row_validation"]
     assert validation["allocation_sum_tolerance"] == 0.49
     assert validation["flags"] == []
+
+
+def test_price_window_start_is_recorded_apart_from_live_inception(
+    tmp_path: Path,
+) -> None:
+    assert _build(tmp_path) == 0
+    prov = _manifest(tmp_path)[builder.PROVENANCE_KEY]
+    assert prov["price_window_start"] == "2026-08-28"
+    assert prov["caller_supplied"]["live_inception"] == "2026-08-31"
+    assert prov["price_window_start"] != prov["caller_supplied"]["live_inception"]
+
+
+def test_in_force_row_before_inception_stays_in_scope() -> None:
+    comp = _comp(
+        [
+            ("2025-11-01", {"A": 0.5}),
+            ("2025-11-14", {"A": 0.5}),
+            ("2025-12-02", {"A": 1.0}),
+        ],
+        {"A": 1.0},
+    )
+    assert _classes(comp, inception="2025-11-25") == [
+        "OUT_OF_SCOPE_BEFORE_INCEPTION",
+        "ROUNDING_OR_CASH",
+    ]
+
+
+def test_component_without_a_row_before_inception_starts_at_its_first_row() -> None:
+    comp = _comp(
+        [("2025-12-02", {"A": 0.5}), ("2025-12-09", {"A": 1.0})],
+        {"A": 1.0},
+    )
+    assert _classes(comp, inception="2025-11-25") == ["ROUNDING_OR_CASH"]
 
 
 def test_caller_supplied_labels_record_the_owner_workbook(tmp_path: Path) -> None:

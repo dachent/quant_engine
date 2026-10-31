@@ -386,6 +386,15 @@ def _tape_ends(tape: Path, symbols: Sequence[str]) -> tuple[dict[str, date], lis
     return ends, sorted(wanted - set(ends))
 
 
+def _tape_request_start(manifest_bytes: bytes) -> str:
+    """The price window start the tape was requested from (not live_inception)."""
+    try:
+        request = json.loads(manifest_bytes)["request"]
+        return date.fromisoformat(str(request["start"])).isoformat()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise BuilderError("TT price source-run manifest lacks request.start") from exc
+
+
 def _preliminary(
     view: Path, slugs: Sequence[str], version: str, inception: str
 ) -> dict[str, Any]:
@@ -421,9 +430,11 @@ def _holdings_validation(
 
     Every class is derived from the data, never from a size cut-off.
 
-    * Rows dated before the component's inception anchor (its last snapshot on
-      or before ``inception``) are ``OUT_OF_SCOPE_BEFORE_INCEPTION``: they cannot
-      reach any input and are not defects.
+    * Rows dated before the component's inception anchor are
+      ``OUT_OF_SCOPE_BEFORE_INCEPTION`` (not defects: they cannot reach any
+      input).  The anchor is the row in force at inception: the last snapshot
+      dated on or before ``inception`` (it may predate it), or the first row
+      when there is none; the anchor row itself stays in scope.
     * A short row whose symbols are a strict subset of the nearest complete prior
       row and whose missing mass equals the dropped weight is a dropped
       position.  If the dropped symbols are back in the next complete row the
@@ -617,6 +628,7 @@ def _provenance(
     vane: Mapping[str, Any],
     gap: Mapping[str, Any] | None,
     holdings_rows: Mapping[str, Any],
+    price_window_start: str,
     workbook_sha: str,
     portfolio_version: str,
     live_inception: str,
@@ -662,6 +674,7 @@ def _provenance(
             for name, record in sorted(records.items())
         },
         "price_tape_gap": None if gap is None else dict(gap),
+        "price_window_start": price_window_start,
     }
 
 
@@ -842,6 +855,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                 inception,
                 citations,
             ),
+            price_window_start=_tape_request_start(tape_man_bytes),
             workbook_sha=workbook_sha,
             portfolio_version=version,
             live_inception=inception,
@@ -963,6 +977,10 @@ def verify_dir(out_dir: Path) -> dict[str, Any]:
         and target["observed_end"] < chart_last.isoformat()
     ):
         raise BuilderError("price tape gap record differs")
+    if provenance.get("price_window_start") != _tape_request_start(
+        _regular(out_dir / str(price["source_run_manifest"]["filename"]))
+    ):
+        raise BuilderError("recorded price window start differs from the tape manifest")
     # Replay the derivation from the re-hashed view and compare bytes.
     base = {k: v for k, v in manifest.items() if k != PROVENANCE_KEY}
     rebuilt = build_source_manifest(
