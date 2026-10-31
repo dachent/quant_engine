@@ -135,3 +135,16 @@ def test_an_unsupported_provider_still_reports_the_unsupported_convention(
     # The dispatcher parses native JSON evidence before it looks a provider up, so
     # an unknown provider with invalid evidence fails on the evidence, as before.
     assert "nonexistent" not in ledger._FINALITY_VALIDATORS  # noqa: SLF001
+
+
+def test_csv_fact_builders_cover_exactly_the_declared_csv_provider_facts() -> None:
+    csv_facts = {"capital_anchors", "flows", "nav_observations", "transactions"}
+    declared = {
+        (provider, fact)
+        for provider in ledger._CSV_FACT_ACCOUNT  # noqa: SLF001
+        for fact in ledger._ACCOUNT_FACTS[provider]  # noqa: SLF001
+        if fact in csv_facts
+    }
+    assert set(ledger._CSV_FACT_BUILDERS) == declared  # noqa: SLF001
+    described = {item.provider_id for item in ledger._PROVIDER_REGISTRY.descriptors()}  # noqa: SLF001
+    assert {provider for provider, _ in declared} <= described

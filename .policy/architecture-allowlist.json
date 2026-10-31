@@ -324,10 +324,10 @@
       "alpaca": 2,
       "fidelity": 6,
       "ibkr": 16,
-      "matrixport": 37,
+      "matrixport": 28,
       "matrixport ": 2,
       "portfolio123": 10,
-      "quantbase": 32,
+      "quantbase": 27,
       "schwab": 19
     },
     "tools/provider_security_quarantine.py": {
