@@ -1429,8 +1429,18 @@ def test_accepted_spans_compound_into_the_week_containing_their_end(
     assert meta["2026-07-20"][0] == 4 and meta["2026-07-27"][0] == 3
     spans = row["mode_coverage"]["LIVE_ONLY"]["accepted_multi_day_spans"]
     assert spans == [
-        {"end": "2026-07-23", "return": "-0.03", "start": "2026-07-21"},
-        {"end": "2026-07-27", "return": "0.015", "start": "2026-07-24"},
+        {
+            "end": "2026-07-23",
+            "return": "-0.03",
+            "start": "2026-07-21",
+            "strategy_id": "span-s",
+        },
+        {
+            "end": "2026-07-27",
+            "return": "0.015",
+            "start": "2026-07-24",
+            "strategy_id": "span-s",
+        },
     ]
     plain = _span_series(payload, PLAIN_SERIES)
     assert "accepted_multi_day_spans" not in plain["mode_coverage"]["LIVE_ONLY"]
@@ -1548,6 +1558,8 @@ def test_weekly_spans_must_equal_the_manifest_links_exactly(tmp_path: Path) -> N
             {
                 "rows": [
                     {
+                        "strategy_id": "span-s",
+                        "account_id": "acct-1",
                         "observation_trace": {
                             "links": [
                                 {
@@ -1559,7 +1571,7 @@ def test_weekly_spans_must_equal_the_manifest_links_exactly(tmp_path: Path) -> N
                                     SPAN_LINKS, factors, strict=True
                                 )
                             ]
-                        }
+                        },
                     }
                 ]
             },
@@ -1575,7 +1587,10 @@ def test_weekly_spans_must_equal_the_manifest_links_exactly(tmp_path: Path) -> N
                 weekly_root, manifest(drifted)
             )
     gone = tmp_path / "manifest-empty.json"
-    _write_json(gone, {"rows": [{"observation_trace": {"links": []}}]})
+    _write_json(
+        gone,
+        {"rows": [{"strategy_id": "span-s", "observation_trace": {"links": []}}]},
+    )
     with pytest.raises(builder.VerticalBuildError, match="manifest link"):
         builder._verify_weekly_spans_against_manifest(weekly_root, gone)
 
@@ -1616,6 +1631,8 @@ def test_span_tolerance_passes_arithmetic_noise_and_fails_real_drift(
             {
                 "rows": [
                     {
+                        "strategy_id": "span-s",
+                        "account_id": "acct-1",
                         "observation_trace": {
                             "links": [
                                 {
@@ -1629,7 +1646,7 @@ def test_span_tolerance_passes_arithmetic_noise_and_fails_real_drift(
                                     "factor": "1.015",
                                 },
                             ]
-                        }
+                        },
                     }
                 ]
             },
@@ -1684,3 +1701,150 @@ def test_accepted_spans_bind_to_the_dependence_source_and_the_common_cutoff(
     values = _span_series(ragged, SPAN_SERIES)["values_by_mode"]["LIVE_ONLY"]
     first = Decimal("1.01") * Decimal("1.02") * Decimal("0.97") * Decimal("1.005")
     assert abs(Decimal(values["2026-07-20"]) - (first - 1)) < SPAN_TOLERANCE
+
+
+def _handmade_weekly(
+    tmp_path: Path, spans: dict[str, tuple[str, str, str]], monkeypatch: Any
+) -> Path:
+    """A weekly payload whose strategy series each carry one accepted span."""
+
+    import portfolio_release_builder as builder
+
+    generation = tmp_path / "generation"
+    generation.mkdir(exist_ok=True)
+    series = [
+        {
+            "series_id": f"strategy:{name}",
+            "mode_coverage": {
+                "LIVE_ONLY": {
+                    "accepted_multi_day_spans": [
+                        {
+                            "strategy_id": strategy_id,
+                            "start": "2026-07-21",
+                            "end": "2026-07-23",
+                            "return": value,
+                        }
+                    ]
+                }
+            },
+        }
+        for name, (strategy_id, value, _unused) in spans.items()
+    ]
+    _write_json(generation / "weekly-returns.json", {"series": series})
+    monkeypatch.setattr(
+        builder, "_published_generation", lambda _root: ("g", generation)
+    )
+    return generation
+
+
+def _span_manifest(
+    path: Path, rows: dict[tuple[str, str], str], interval: tuple[str, str]
+) -> Path:
+    _write_json(
+        path,
+        {
+            "rows": [
+                {
+                    "strategy_id": strategy_id,
+                    "account_id": account_id,
+                    "observation_trace": {
+                        "links": [
+                            {
+                                "start_date": interval[0],
+                                "end_date": interval[1],
+                                "factor": factor,
+                            }
+                        ]
+                    },
+                }
+                for (strategy_id, account_id), factor in rows.items()
+            ]
+        },
+    )
+    return path
+
+
+def test_span_check_matches_each_strategy_to_its_own_manifest_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_release_builder as builder
+
+    # two strategies share one interval with different measured factors
+    _handmade_weekly(
+        tmp_path,
+        {"A": ("s-a", "-0.03", ""), "B": ("s-b", "0.02", "")},
+        monkeypatch,
+    )
+    interval = ("2026-07-21", "2026-07-23")
+    right = _span_manifest(
+        tmp_path / "right.json",
+        {("s-a", "acct-a"): "0.97", ("s-b", "acct-b"): "1.02"},
+        interval,
+    )
+    assert builder._verify_weekly_spans_against_manifest(tmp_path, right) == 2
+    swapped = _span_manifest(
+        tmp_path / "swapped.json",
+        {("s-a", "acct-a"): "1.02", ("s-b", "acct-b"): "0.97"},
+        interval,
+    )
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, swapped)
+    # another strategy's matching row does not stand in for the owner's
+    other_only = _span_manifest(
+        tmp_path / "other.json",
+        {("s-a", "acct-a"): "0.97", ("s-c", "acct-c"): "1.02"},
+        interval,
+    )
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, other_only)
+    # two account rows of one strategy must both agree with the span
+    disagree = _span_manifest(
+        tmp_path / "disagree.json",
+        {("s-a", "acct-a"): "0.97", ("s-a", "acct-a2"): "0.96", ("s-b", "b"): "1.02"},
+        interval,
+    )
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, disagree)
+
+
+def test_span_check_fails_on_a_manifest_link_the_weekly_line_omits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_release_builder as builder
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_json(
+        source / "history-coverage.json",
+        {"strategies": [{"strategy_id": "s-a", "series_id": "A"}]},
+    )
+    _write_csv(
+        source / "returns.csv",
+        ["series_id", "date", "return", "evidence_layer", "strategy_version"],
+        [
+            {
+                "series_id": "A",
+                "date": day,
+                "return": "0.01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "strategy_version": "v",
+            }
+            for day in ("2026-07-20", "2026-07-21", "2026-07-24")
+        ],
+    )
+    manifest = _span_manifest(
+        tmp_path / "m.json", {("s-a", "acct-a"): "0.97"}, ("2026-07-21", "2026-07-23")
+    )
+    # the weekly payload carries no span for the interval the manifest measured
+    _handmade_weekly(tmp_path, {}, monkeypatch)
+    with pytest.raises(builder.VerticalBuildError, match="no weekly accepted span"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, manifest, source)
+    # with its span the same inputs pass, and a weekly span without any manifest
+    # row fails the other way
+    _handmade_weekly(tmp_path, {"A": ("s-a", "-0.03", "")}, monkeypatch)
+    assert (
+        builder._verify_weekly_spans_against_manifest(tmp_path, manifest, source) == 1
+    )
+    empty = _span_manifest(tmp_path / "e.json", {}, ("2026-07-21", "2026-07-23"))
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, empty, source)

@@ -308,6 +308,7 @@ class AcceptedSpans:
     spans: dict[str, tuple[AcceptedSpan, ...]]
     daily_sha256: dict[str, str]
     observed_end: dict[str, date]
+    strategy_ids: dict[str, str]
 
 
 DEPENDENCE_RECEIPT_NAME: Final = "dependence-source.json"
@@ -323,7 +324,7 @@ def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
     """
 
     if path is None:
-        return AcceptedSpans({}, {}, {}), []
+        return AcceptedSpans({}, {}, {}, {}), []
     # The coverage is authority only as the dependence source packaged it: the
     # sibling receipt must name this exact file by hash and size.
     receipt_path = path.parent / DEPENDENCE_RECEIPT_NAME
@@ -350,6 +351,7 @@ def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
     spans: dict[str, tuple[AcceptedSpan, ...]] = {}
     daily_sha: dict[str, str] = {}
     observed_end: dict[str, date] = {}
+    owner: dict[str, str] = {}
     for item in _objects(coverage.get("epoch_hpr_receipts"), "epoch HPR receipts"):
         if item.get("evidence_layer") != "ACCOUNT_LIVE":
             continue
@@ -393,6 +395,7 @@ def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
         if abs(wealth - epoch) > SPAN_TELESCOPE_TOLERANCE:
             raise WeeklyReturnError(f"accepted spans do not telescope: {series_id}")
         spans[series_id] = tuple(accepted)
+        owner[series_id] = strategy_id
         daily_sha[series_id] = _text(
             receipt.get("daily_return_series_sha256"), "daily path sha"
         )
@@ -402,7 +405,10 @@ def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
             )
         except ValueError as exc:
             raise WeeklyReturnError("epoch HPR observed_end is invalid") from exc
-    return AcceptedSpans(spans, daily_sha, observed_end), [receipt_path, path]
+    return AcceptedSpans(spans, daily_sha, observed_end, owner), [
+        receipt_path,
+        path,
+    ]
 
 
 def _correlation_inputs(
@@ -743,7 +749,7 @@ def _strategy_rows(
             (observed_date, _decimal(row.get("return"), "strategy return"))
         )
 
-    accepted = accepted_spans or AcceptedSpans({}, {}, {})
+    accepted = accepted_spans or AcceptedSpans({}, {}, {}, {})
     unknown_spans = sorted(set(accepted.spans) - set(compositions["LIVE_ONLY"]))
     if unknown_spans:
         raise WeeklyReturnError(
@@ -837,6 +843,7 @@ def _strategy_rows(
                             {
                                 "end": span.end.isoformat(),
                                 "return": _decimal_text(span.value),
+                                "strategy_id": accepted.strategy_ids[series_id],
                                 "start": span.start.isoformat(),
                             }
                             for span in span_links

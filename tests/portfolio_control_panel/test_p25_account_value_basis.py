@@ -133,3 +133,19 @@ def test_reserve_nav_in_the_allocation_table_carries_the_label(tmp_path: Path) -
 
     assert "$98,000" in marked and LABEL in marked and "captured Sep 18, 2026" in marked
     assert "$98,000" in unmarked and LABEL not in unmarked
+
+    # the reserve is an aggregate: one derived member among several is not the aggregate's basis
+    derived = _summary(
+        "r0", role="RESERVE", value_basis=_value_basis(), capture_date="2026-09-18"
+    )
+    partial = reserve_row([derived, _summary("r1", role="RESERVE")])
+    assert "$98,000" in partial and LABEL not in partial
+    other_basis = {**_value_basis(), "basis": "SOME_OTHER_BASIS"}
+    mixed = reserve_row(
+        [derived, _summary("r1", role="RESERVE", value_basis=other_basis)]
+    )
+    assert "$98,000" in mixed and LABEL not in mixed
+    every = reserve_row(
+        [derived, _summary("r1", role="RESERVE", value_basis=_value_basis())]
+    )
+    assert "$98,000" in every and LABEL in every

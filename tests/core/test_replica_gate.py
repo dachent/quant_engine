@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -335,14 +336,26 @@ def test_real_anchor_paths_in_gate_path_fields_normalize_equal(
 
 
 def test_real_anchor_spelled_with_backslashes_and_other_case_normalizes_equal(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(gate, "_path_case_flags", lambda: re.IGNORECASE)
     spelled = str(
         tmp_path / "REAL" / "dataA" / "generations" / "g1" / "generation.json"
     )
     real, replica = _evidence_pair(tmp_path, replica_path=spelled.replace("/", "\\"))
     path = _receipt(tmp_path, real, replica, _steps())
     assert gate.verify_receipt(path, real)["kind"] == gate.RECEIPT_KIND
+
+
+def test_real_anchor_spelled_in_other_case_blocks_on_a_case_sensitive_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gate, "_path_case_flags", lambda: 0)
+    spelled = str(
+        tmp_path / "REAL" / "dataA" / "generations" / "g1" / "generation.json"
+    )
+    real, replica = _evidence_pair(tmp_path, replica_path=spelled.replace("/", "\\"))
+    _blocked(tmp_path, real, replica)
 
 
 def test_a_different_root_in_a_gate_path_field_still_blocks(tmp_path: Path) -> None:
