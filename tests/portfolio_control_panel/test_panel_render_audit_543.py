@@ -1019,7 +1019,7 @@ def test_F13_the_twr_status_follows_the_rows_own_flow_timing(tmp_path: Path) -> 
     assert "inferred flow timing" not in rows[0].lower()
     assert "Available" in rows[0]
     assert "Available · estimated timing" in rows[1]
-    assert "Date only end of day inferred timing" in rows[1]
+    assert "Date only; end-of-day timing inferred" in rows[1]
 
 
 def test_F14_the_provider_comparison_flags_a_window_that_ends_before_the_cutoff(
