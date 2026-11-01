@@ -795,13 +795,22 @@ def _perimeter_reconciliation(
     unattributed = _dec(reconciliation["unattributed"])
     if abs(remainder - unattributed) >= _CENT:
         raise DisclosureError("the shown perimeter figures do not close")
-    # the printed remainder is the difference of the printed rounded figures, so the
-    # sentence foots as printed; when that differs by a cent from the source's own amount
-    # rounded once, the source value is shown beside it
-    source_rounded = unattributed.quantize(_CENT)
+    # the printed residual is the source's own amount rounded once, never the difference of
+    # rounded figures; when the printed parts then differ from the printed total by a cent,
+    # the sentence says so and gives the identity at four decimals
+    printed = unattributed.quantize(_CENT)
+    printed_text = f"{printed:+,.2f}"
+    if Decimal(printed_text.replace(",", "")) != unattributed.quantize(_CENT):
+        raise DisclosureError(
+            "the printed residual is not the once-rounded source value"
+        )
     rounding = (
-        f" (rounded individually; unrounded {unattributed:+,.4f})"
-        if remainder != source_rounded
+        " (figures are rounded independently and may differ from their total by 0.01; "
+        f"unrounded: entry-day {_dec(reconciliation['entry_day_total']):+,.4f}, "
+        f"{unattributed:+,.4f} not attributed, "
+        f"{_dec(reconciliation['account_gain']) - _dec(reconciliation['sleeve_gain_total']):+,.4f} "
+        "in total)"
+        if entry_total + printed != difference
         else ""
     )
     later = _dec(reconciliation["paid_in_after_anchor"])
@@ -815,7 +824,7 @@ def _perimeter_reconciliation(
         f"{_usd(_dec(reconciliation['paid_in']))} of external capital (opening NAV "
         f"{_usd(_dec(reconciliation['opening_nav']))} plus {_usd(later)} paid in later{left}); "
         f"the sleeves sum to {sleeves:+,.2f}; the {difference:+,.2f} difference is the "
-        f"entry-day differences ({entry_total:+,.2f}) and {remainder:+,.2f} not attributed "
+        f"entry-day differences ({entry_total:+,.2f}) and {printed_text} not attributed "
         f"(days before the first sleeve day and the parent remainder){rounding}."
     )
 

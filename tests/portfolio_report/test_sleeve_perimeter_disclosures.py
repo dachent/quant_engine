@@ -582,7 +582,7 @@ def test_every_parent_account_of_a_product_strategy_is_reconciled_or_named(
     assert "exceeds all external capital" not in text
 
 
-def test_the_printed_parts_of_the_perimeter_sentence_foot() -> None:
+def test_the_printed_residual_is_the_source_rounded_once() -> None:
     reconciliation = {
         "sleeves": [
             {
@@ -605,26 +605,23 @@ def test_the_printed_parts_of_the_perimeter_sentence_foot() -> None:
     text = disclosures._perimeter_reconciliation(
         reconciliation, [{"account_id": "p", "gain": "2677.440211142"}]
     )
-    # The printed figures foot (-1,263.56 + 27.20 = -1,236.36); the source value 27.1924 is
-    # shown beside the remainder, rounded individually.
-    assert "and +27.20 not attributed" in text
-    assert "+27.19 not attributed" not in text
-    assert "(rounded individually; unrounded +27.1924)" in text
+    # The residual is the source amount rounded once (27.1924 -> 27.19), not the difference
+    # of the rounded figures (27.20); the cent that the printed parts then miss is stated.
+    assert "and +27.19 not attributed" in text
+    assert "+27.20" not in text
+    assert "rounded independently and may differ from their total by 0.01" in text
+    assert "+27.1924 not attributed" in text
+    assert "-1,236.3647 in total" in text
     import re
 
-    shown = re.search(
-        r"the (-?[\d,]+\.\d\d) difference is the entry-day differences \((-?[\d,]+\.\d\d)\) "
-        r"and (\+?-?[\d,]+\.\d\d) not attributed",
-        text,
-    )
+    shown = re.search(r"and (\+?-?[\d,]+\.\d\d) not attributed", text)
     assert shown is not None
-    difference, entries, remainder = (
-        Decimal(g.replace(",", "")) for g in shown.groups()
-    )
-    assert entries + remainder == difference
+    assert Decimal(shown.group(1).replace(",", "")) == Decimal(
+        reconciliation["unattributed"]
+    ).quantize(Decimal("0.01"))
 
 
-def test_no_rounding_note_is_printed_when_the_printed_parts_already_match_the_source() -> (
+def test_no_rounding_note_is_printed_when_the_printed_parts_foot() -> (
     None
 ):
     reconciliation = {
@@ -650,4 +647,4 @@ def test_no_rounding_note_is_printed_when_the_printed_parts_already_match_the_so
         reconciliation, [{"account_id": "p", "gain": "100"}]
     )
     assert "and +35.00 not attributed" in text
-    assert "rounded individually" not in text
+    assert "rounded independently" not in text
