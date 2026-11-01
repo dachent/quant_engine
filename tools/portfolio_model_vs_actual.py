@@ -600,9 +600,21 @@ def _tag_definitions(counts: Mapping[str, int]) -> dict[str, str]:
     return definitions
 
 
-def _unavailable_note(counts: Mapping[str, int]) -> str:
+def _unavailable_reasons(strategies: Sequence[Mapping[str, Any]]) -> str:
+    """The listed unavailable entries' reasons with their counts (text before any ':')."""
+
+    reasons: dict[str, int] = {}
+    for strategy in strategies:
+        for entry in strategy["unavailable"]:
+            reason = str(entry["reason"]).split(":", 1)[0]
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return ", ".join(f"{reason} ({count})" for reason, count in sorted(reasons.items()))
+
+
+def _unavailable_note(counts: Mapping[str, int], reasons: str) -> str:
     return (
-        "A strategy whose window has no admitted model leg is listed under unavailable; "
+        "A strategy window or term the audit analysis cannot supply is listed under "
+        f"unavailable with its reason ({reasons}); "
         f"{counts['unavailable_entries_named']} of the {counts['unavailable_entries']} "
         "unavailable entries name the pull that closes it."
     )
@@ -818,7 +830,7 @@ def build_model_vs_actual(
         "pulls": pulls,
         "notes": [
             _pull_note(counts),
-            _unavailable_note(counts),
+            _unavailable_note(counts, _unavailable_reasons(strategies)),
         ],
     }
 

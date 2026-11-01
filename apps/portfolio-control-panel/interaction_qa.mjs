@@ -404,10 +404,12 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
       const summary = (dashboardData.account_summary || []).find((item) => item.account_id === row.account_id && item.value_basis
         && String(item.as_of_date || "").slice(0, 10) === String(row.end || "").slice(0, 10));
       if (!summary) return "";
-      const dated = [["capture_date", "captured"], ["observed_at", "observed"], ["as_of_date", "as of"]]
-        .find(([field]) => typeof summary[field] === "string" && summary[field] !== "");
-      const day = dated ? new Date(`${summary[dated[0]].slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : null;
-      return `Derived from official closes${dated ? ` · ${dated[1]} ${day}` : ""}`;
+      // The one label the renderer prints (valueBasisLabel): basis, the as-of day, and the observed day only when different.
+      const longDay = (value) => new Date(`${String(value).slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+      const asOf = typeof summary.as_of_date === "string" && summary.as_of_date !== "" ? summary.as_of_date.slice(0, 10) : "";
+      const seen = typeof summary.capture_date === "string" && summary.capture_date !== "" ? summary.capture_date.slice(0, 10)
+        : typeof summary.observed_at === "string" ? summary.observed_at.slice(0, 10) : "";
+      return `Derived from official closes${asOf ? ` as of ${longDay(asOf)}` : ""}${seen && seen !== asOf ? ` (observed ${longDay(seen)})` : ""}`;
     })();
     const expectedNumbers = [
       exactMoney(row.invested) + (row.opening_basis === "PROVIDER_CAPITAL_ANCHOR" ? "sleeve allocation" : ""),

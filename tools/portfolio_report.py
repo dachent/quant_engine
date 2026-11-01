@@ -4313,6 +4313,62 @@ def _derived_value_basis(
     return None
 
 
+_PROVIDER_REPORTED_AUTHORITY: Final = "remain provider-reported USD authority"
+
+
+def _noun(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _restate_value_authority(
+    coverage: Sequence[Mapping[str, Any]],
+    account_summary: Sequence[Mapping[str, Any]],
+    positions: Sequence[Mapping[str, Any]],
+    cutoff: str,
+) -> list[dict[str, Any]]:
+    """Re-word the baseline's "provider-reported USD authority" clause from the value labels.
+
+    The baseline states that account NAV, positions, allocations and HWM values remain
+    provider-reported USD authority. For every value the report labels with a
+    ``value_basis`` (derived from official closes) that is not true, so the clause names
+    the labelled values by basis, counted from the account rows and the CURRENT position
+    rows (the latest accepted snapshot dated at the cutoff, as the panel classifies current
+    holdings; a historical snapshot the patch also covers is not a current position).
+    With no labelled value the text is unchanged. This is the one generator: the panel gates,
+    coverage and limitations copy these coverage rows.
+    """
+
+    counts: dict[str, list[int]] = {}
+    current_positions = [
+        row
+        for row in positions
+        if row.get("snapshot_status") == "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+        and row.get("as_of_date") == cutoff
+    ]
+    for index, rows in enumerate((account_summary, current_positions)):
+        for row in rows:
+            basis = row.get("value_basis")
+            if isinstance(basis, Mapping) and isinstance(basis.get("basis"), str):
+                counts.setdefault(str(basis["basis"]), [0, 0])[index] += 1
+    if not counts:
+        return [dict(row) for row in coverage]
+    labelled = "; ".join(
+        f"{sum(pair)} {'value' if sum(pair) == 1 else 'values'} labelled {label} "
+        f"({_noun(pair[0], 'account NAV', 'account NAVs')} and "
+        f"{_noun(pair[1], 'current position', 'current positions')})"
+        for label, pair in sorted(counts.items())
+    )
+    replacement = f"remain USD authority and are provider-reported except {labelled}"
+    restated: list[dict[str, Any]] = []
+    for row in coverage:
+        item = dict(row)
+        gap = item.get("known_gap")
+        if isinstance(gap, str) and _PROVIDER_REPORTED_AUTHORITY in gap:
+            item["known_gap"] = gap.replace(_PROVIDER_REPORTED_AUTHORITY, replacement)
+        restated.append(item)
+    return restated
+
+
 def _accounts(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
@@ -4378,6 +4434,9 @@ def _accounts(
         value_basis = _derived_value_basis(derived_values, account_id, as_of)
         if value_basis is not None:
             account_row["value_basis"] = value_basis
+            if status == "AVAILABLE_LATEST_OBSERVATION":
+                # a derived value is not a provider's latest observation
+                account_row["status"] = f"AVAILABLE_{value_basis['basis']}"
         if current_epoch_account_details is not None:
             detail = current_epoch_account_details.get(account_id)
             account_row["account_label"] = detail["account_label"] if detail else None
@@ -10132,6 +10191,7 @@ def build_report_data(
     derived_values = _derived_value_index(
         None if source_clock_authority is None else source_clock_authority[0]
     )
+    position_rows = _positions(catalog, current_account_ids, derived_values)
     account_summary = _accounts(
         catalog,
         strategy_product_controls,
@@ -10166,7 +10226,12 @@ def build_report_data(
         "as_of_date": catalog.get("as_of_date"),
         "baseline": baseline_ref,
         "corrections": _corrections(catalog),
-        "coverage_data_quality": coverage,
+        "coverage_data_quality": _restate_value_authority(
+            coverage,
+            account_summary,
+            position_rows,
+            str(calculation_cutoff_date or catalog.get("as_of_date")),
+        ),
         "dependence_analysis": dependence_analysis,
         "dependence_rows": dependence_rows,
         "fact_coverage_matrix": with_account_roles(
@@ -10235,11 +10300,7 @@ def build_report_data(
             ),
         ],
         "observation_windows": catalog.get("observation_windows", []),
-        "positions": _positions(
-            catalog,
-            current_account_ids,
-            derived_values,
-        ),
+        "positions": position_rows,
         "provider_admissions": provider_admissions,
         "provider_coverage": catalog.get("provider_coverage", []),
         "provider_strategy_returns": provider_strategy_returns,

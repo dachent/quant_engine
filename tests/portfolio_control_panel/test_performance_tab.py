@@ -1324,3 +1324,16 @@ def test_line_definitions_state_the_base_point_the_payload_declares() -> None:
                 in benchmark["definition"]
             )
     tab.verify_performance_tab(block, _panel())
+
+
+def test_the_equal_weight_definition_does_not_claim_the_panel_has_no_daily_returns() -> (
+    None
+):
+    """Daily benchmark returns are in the panel; the line is weekly because its inputs are."""
+
+    block = tab.build_performance_tab(_panel())
+    for mode in block["modes"].values():
+        for line in mode["lines"]:
+            assert "Daily returns are not in the panel" not in line["definition"]
+        ew = next(row for row in mode["lines"] if row["series_id"] == tab.EW_SERIES_ID)
+        assert "enter this line as weekly returns" in ew["definition"]

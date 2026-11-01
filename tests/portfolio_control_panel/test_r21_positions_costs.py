@@ -126,3 +126,43 @@ def test_rows_without_components_print_only_the_status_and_amount(
 
     assert "Known (gold API) · $3,590.00 per year" in table
     assert "Subscription" not in table and "Execution" not in table
+
+
+def test_a_derived_position_says_which_day_it_is_for_and_when_it_was_observed(
+    tmp_path: Path,
+) -> None:
+    """The derived label is generated from the row's own dates and never says a close was captured."""
+
+    payload = _positions_payload()
+    basis = {
+        "basis": "DERIVED_FROM_OFFICIAL_CLOSES",
+        "derivation_record_sha256": "d" * 64,
+        "finality_evidence_sha256": "e" * 64,
+        "official_closes_manifest_sha256": "c" * 64,
+        "provider_finality_guarantee": False,
+    }
+    payload["positions"] = [
+        _row(
+            as_of_date="2026-03-04",
+            as_of_basis="DERIVED_FROM_OFFICIAL_CLOSES",
+            capture_date="2026-03-05",
+            value_basis=basis,
+        ),
+        _row(
+            security_id="same-day",
+            as_of_date="2026-03-04",
+            as_of_basis="DERIVED_FROM_OFFICIAL_CLOSES",
+            value_basis=basis,
+        ),
+    ]
+    dom = _run(tmp_path, payload, "renderPositionTable")
+    joined = " ".join(_position_cells(dom))
+
+    assert (
+        "Derived from official closes as of Mar 4, 2026 (observed Mar 5, 2026)"
+        in joined
+    )
+    assert joined.count("Derived from official closes as of Mar 4, 2026") == 2
+    assert joined.count("(observed") == 1  # the same-day row has no observed day to add
+    assert "captured" not in joined
+    assert "official closes manifest cccccccc" in dom["#position-table"]["innerHTML"]
