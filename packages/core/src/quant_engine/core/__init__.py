@@ -125,6 +125,7 @@ from quant_engine.core.release import (
     rollback_release,
 )
 from quant_engine.core.directory_identity import inventory_identity
+from quant_engine.core.run_storage import process_alive, process_started
 from quant_engine.core.providers import (
     AdapterCapabilities,
     ProviderCapability,
@@ -146,6 +147,8 @@ __all__ = [
     "release_directory_identity",
     "CacheBaseError",
     "iter_cache_files",
+    "process_alive",
+    "process_started",
     "promote_cache_base",
     "read_cache_base_provenance",
     "verify_cache_base",

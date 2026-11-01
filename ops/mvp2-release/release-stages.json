@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Release tail stages of RELEASE-DRIVER-001: recipe through dry-run findings. Every id and path is derived from the run's own outputs by tools/release_driver.py.",
+  "description": "Release stages of RELEASE-DRIVER-001, selected inputs through the replica ceremony and the gated commit. Every id and path is derived from the run's own outputs by tools/release_driver.py.",
   "provider_roots": [
     "provider-alpaca",
     "provider-fidelity",
@@ -25,60 +25,408 @@
     "mvp2": "{repo_root}/ops/mvp2-release/scripts",
     "contract": "{repo_root}/contracts/portfolio-financial-mvp-source-v1.json",
     "source_matrix": "{repo_root}/generated/financial-mvp/source-matrix.json",
-    "ledger_receipt": "{run}/stages/ledger/generations/{ledger_id}/admit-or-declare-receipt.json"
+    "ledger_receipt": "{run}/stages/ledger/generations/{ledger_id}/admit-or-declare-receipt.json",
+    "pre": "{cycle}/pre",
+    "attribution": "{cycle}/attribution",
+    "laneout": "{cycle}/laneout",
+    "lane_real": "{cycle}/laneout/real",
+    "lane_replica": "{cycle}/laneout/replica",
+    "replica_cycle": "{cycle}/replica-production",
+    "replica_spec": "{cycle}/replica-production/production-spec.json",
+    "replica_provgens": "{cycle}/replica-provider-generations.json",
+    "replica_rehearsal": "{cycle}/replica-rehearsal",
+    "clean_room": "{cycle}/clean-room",
+    "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json"
   },
   "derive": {
-    "ledger_id": {"single_dir": "{run}/stages/ledger/generations"},
-    "epoch_id": {"single_dir": "{run}/stages/epoch/generations"},
-    "panel_gid": {"json_field": ["{run}/stages/panel/CURRENT.json", "generation_id"]},
-    "spec_panel_gid": {"spec_node_field": ["{prod_spec}", "portfolio-panel", "generation_id"]},
-    "panel_root": {"spec_root": ["{prod_spec}", "portfolio-panel"]},
-    "release_id": {"json_field": ["{production}/execute-stage.json", "release_id"]}
+    "ledger_id": {
+      "single_dir": "{run}/stages/ledger/generations"
+    },
+    "epoch_id": {
+      "single_dir": "{run}/stages/epoch/generations"
+    },
+    "panel_gid": {
+      "json_field": [
+        "{run}/stages/panel/CURRENT.json",
+        "generation_id"
+      ]
+    },
+    "spec_panel_gid": {
+      "spec_node_field": [
+        "{prod_spec}",
+        "portfolio-panel",
+        "generation_id"
+      ]
+    },
+    "panel_root": {
+      "spec_root": [
+        "{prod_spec}",
+        "portfolio-panel"
+      ]
+    },
+    "release_id": {
+      "json_field": [
+        "{lane_real}/dry-run.0.stdout.log",
+        "release_id"
+      ]
+    },
+    "baseline_id": {
+      "single_dir": "{cycle}/baseline/generations"
+    },
+    "cycle_ledger_id": {
+      "single_dir": "{cycle}/ledger/generations"
+    },
+    "attribution_id": {
+      "single_dir": "{cycle}/attribution/generations"
+    },
+    "history_id": {
+      "single_dir": "{cycle}/pre/history"
+    },
+    "candidate_id": {
+      "single_dir": "{run}/stages/panel/candidates"
+    },
+    "serial_release_id": {
+      "json_field": [
+        "{production}/execute-stage.json",
+        "release_id"
+      ]
+    }
   },
   "stages": [
     {
-      "id": "recipe-probe",
-      "inputs": ["{run}/preparation/release-recipe.json"],
-      "outputs": ["{recipe_probe}"],
+      "id": "selected-inputs",
+      "builtin": "inputs_only",
+      "inputs": [
+        "{selected_inputs}",
+        "{cycle}/attribution-spec.json"
+      ]
+    },
+    {
+      "id": "pre-chain",
+      "requires": [
+        "selected-inputs"
+      ],
+      "resume": {
+        "same_argv": true
+      },
+      "outputs": [
+        "{pre}",
+        "{attribution}"
+      ],
       "argv": [
-        "{python}", "{tools}/portfolio_pipeline_materialize.py", "recipe",
-        "--vertical-recipe", "{run}/preparation/release-recipe.json",
-        "--proof-root", "{run}", "--qa-dir", "{qa}", "--pipeline-id", "{pipeline_id}",
-        "--financial-mvp-contract", "contracts/portfolio-financial-mvp-source-v1.json",
-        "--financial-mvp-source-matrix", "generated/financial-mvp/source-matrix.json",
-        "--output", "{recipe_probe}"
+        "{python}",
+        "{mvp2}/pre_chain.py",
+        "{cycle}",
+        "{selected_inputs}",
+        "{baseline_id}",
+        "{evaluated_on}",
+        "{code_commit}"
+      ]
+    },
+    {
+      "id": "attended",
+      "requires": [
+        "pre-chain"
+      ],
+      "inputs": [
+        "{preparation_spec}"
+      ],
+      "bound_ids": [
+        [
+          "{preparation_spec}",
+          "{history_id}"
+        ],
+        [
+          "{preparation_spec}",
+          "{attribution_id}"
+        ],
+        [
+          "{preparation_spec}",
+          "{baseline_id}"
+        ],
+        [
+          "{preparation_spec}",
+          "{cycle_ledger_id}"
+        ]
+      ],
+      "must_not_exist": [
+        "{run}"
+      ],
+      "expect_rc": 1,
+      "resume": {
+        "argv": [
+          "{python}",
+          "{tools}/portfolio_pipeline_materialize.py",
+          "attended",
+          "--repo-root",
+          "{repo_root}",
+          "--python",
+          "{python}",
+          "--workspace-root",
+          "{workspace_root}",
+          "--output-root",
+          "{run}",
+          "--retained-cache-root",
+          "{retained_cache_root}",
+          "--requested-as-of",
+          "{requested_as_of}",
+          "--evaluated-on",
+          "{evaluated_on}",
+          "--preparation-spec",
+          "{preparation_spec}",
+          "--resume",
+          "--execute",
+          "--qa-hold"
+        ]
+      },
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "attended",
+        "--repo-root",
+        "{repo_root}",
+        "--python",
+        "{python}",
+        "--workspace-root",
+        "{workspace_root}",
+        "--output-root",
+        "{run}",
+        {
+          "if": "retained_cache_base",
+          "args": [
+            "--retained-cache-base",
+            "{retained_cache_base}"
+          ]
+        },
+        "--retained-cache-root",
+        "{retained_cache_root}",
+        "--requested-as-of",
+        "{requested_as_of}",
+        "--evaluated-on",
+        "{evaluated_on}",
+        "--preparation-spec",
+        "{preparation_spec}",
+        "--execute",
+        "--qa-hold"
+      ],
+      "checks": [
+        {
+          "exists": "{run}/stages/panel/candidates/{candidate_id}"
+        },
+        {
+          "json": "{run}/attended-run-state.json",
+          "path": "state",
+          "one_of": [
+            "FAILED",
+            "PASSED"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qa-browser",
+      "requires": [
+        "attended"
+      ],
+      "env": {
+        "PLAYWRIGHT_MODULE": "{playwright_module}",
+        "PLAYWRIGHT_EXECUTABLE_PATH": "{playwright_executable}",
+        "NODE_OPTIONS": "--max-old-space-size=8192"
+      },
+      "argv": [
+        "{node}",
+        "{repo_root}/apps/portfolio-control-panel/browser_qa.mjs",
+        "--html",
+        "{run}/stages/panel/candidates/{candidate_id}/index.html",
+        "--output",
+        "{qa}",
+        "--expected-calculation-cutoff",
+        "{requested_as_of}"
+      ],
+      "must_not_exist": [
+        "{qa}"
+      ]
+    },
+    {
+      "id": "qa-interaction",
+      "requires": [
+        "qa-browser"
+      ],
+      "outputs": [
+        "{qa}/interaction-results.json"
+      ],
+      "env": {
+        "PLAYWRIGHT_MODULE": "{playwright_module}",
+        "PLAYWRIGHT_EXECUTABLE_PATH": "{playwright_executable}",
+        "NODE_OPTIONS": "--max-old-space-size=8192"
+      },
+      "argv": [
+        "{node}",
+        "{repo_root}/apps/portfolio-control-panel/interaction_qa.mjs",
+        "--html",
+        "{run}/stages/panel/candidates/{candidate_id}/index.html",
+        "--output",
+        "{qa}/interaction-results.json",
+        "--expected-calculation-cutoff",
+        "{requested_as_of}"
+      ]
+    },
+    {
+      "id": "qa-native",
+      "requires": [
+        "qa-interaction"
+      ],
+      "stdout_to": "{cycle}/logs/qa-native.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_control_panel.py",
+        "qa",
+        "--candidate-dir",
+        "{run}/stages/panel/candidates/{candidate_id}",
+        "--qa-dir",
+        "{qa}"
+      ],
+      "outputs": []
+    },
+    {
+      "id": "resume",
+      "requires": [
+        "qa-native"
+      ],
+      "updates": [
+        "{run}"
+      ],
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "attended",
+        "--repo-root",
+        "{repo_root}",
+        "--python",
+        "{python}",
+        "--workspace-root",
+        "{workspace_root}",
+        "--output-root",
+        "{run}",
+        "--retained-cache-root",
+        "{retained_cache_root}",
+        "--requested-as-of",
+        "{requested_as_of}",
+        "--evaluated-on",
+        "{evaluated_on}",
+        "--preparation-spec",
+        "{preparation_spec}",
+        "--qa-dir",
+        "{qa}",
+        "--resume",
+        "--execute"
+      ],
+      "checks": [
+        {
+          "json": "{run}/attended-run-state.json",
+          "path": "state",
+          "equals": "PASSED"
+        }
+      ]
+    },
+    {
+      "id": "recipe-probe",
+      "inputs": [
+        "{run}/preparation/release-recipe.json"
+      ],
+      "outputs": [
+        "{recipe_probe}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "recipe",
+        "--vertical-recipe",
+        "{run}/preparation/release-recipe.json",
+        "--proof-root",
+        "{run}",
+        "--qa-dir",
+        "{qa}",
+        "--pipeline-id",
+        "{pipeline_id}",
+        "--financial-mvp-contract",
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "--financial-mvp-source-matrix",
+        "generated/financial-mvp/source-matrix.json",
+        "--output",
+        "{recipe_probe}"
+      ],
+      "requires": [
+        "resume"
       ]
     },
     {
       "id": "registries",
-      "requires": ["recipe-probe"],
-      "outputs": ["{ca}"],
+      "requires": [
+        "recipe-probe"
+      ],
+      "outputs": [
+        "{ca}"
+      ],
       "argv": [
-        "{python}", "{mvp2}/draft_correction_registries.py",
-        "--run", "{run}", "--pipeline-recipe", "{recipe_probe}",
-        "--history-store", "{history_store}", "--expect-superseded", "{expect_superseded}",
-        "--out", "{ca}"
+        "{python}",
+        "{mvp2}/draft_correction_registries.py",
+        "--run",
+        "{run}",
+        "--pipeline-recipe",
+        "{recipe_probe}",
+        "--history-store",
+        "{history_store}",
+        "--expect-superseded",
+        "{expect_superseded}",
+        "--out",
+        "{ca}"
       ]
     },
     {
       "id": "recipe",
-      "requires": ["registries"],
-      "outputs": ["{recipe}"],
+      "requires": [
+        "registries"
+      ],
+      "outputs": [
+        "{recipe}"
+      ],
       "argv": [
-        "{python}", "{tools}/portfolio_pipeline_materialize.py", "recipe",
-        "--vertical-recipe", "{run}/preparation/release-recipe.json",
-        "--proof-root", "{run}", "--qa-dir", "{qa}", "--pipeline-id", "{pipeline_id}",
-        "--financial-mvp-contract", "contracts/portfolio-financial-mvp-source-v1.json",
-        "--financial-mvp-source-matrix", "generated/financial-mvp/source-matrix.json",
-        "--correction-registry", "{ca}/portfolio-correction-registry.json",
-        "--rederive-receipt-registry", "{ca}/portfolio-rederive-receipt-registry.json",
-        "--output", "{recipe}"
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "recipe",
+        "--vertical-recipe",
+        "{run}/preparation/release-recipe.json",
+        "--proof-root",
+        "{run}",
+        "--qa-dir",
+        "{qa}",
+        "--pipeline-id",
+        "{pipeline_id}",
+        "--financial-mvp-contract",
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "--financial-mvp-source-matrix",
+        "generated/financial-mvp/source-matrix.json",
+        "--correction-registry",
+        "{ca}/portfolio-correction-registry.json",
+        "--rederive-receipt-registry",
+        "{ca}/portfolio-rederive-receipt-registry.json",
+        "--output",
+        "{recipe}"
       ]
     },
     {
       "id": "pipeline-spec",
-      "live_guard_keys": ["build_portfolio_root", "retained_cache_root"],
-      "requires": ["recipe"],
+      "live_guard_keys": [
+        "build_portfolio_root",
+        "retained_cache_root"
+      ],
+      "requires": [
+        "recipe"
+      ],
       "inputs": [
         "{run}/preparation/hwm-governed-result.json",
         "{run}/preparation/hwm-input-generation.json",
@@ -87,169 +435,495 @@
         "{run}/preparation/invested-capital-result.json",
         "{run}/preparation/capital-input-generation.json"
       ],
-      "outputs": ["{run}/pipeline-spec.json"],
+      "outputs": [
+        "{run}/pipeline-spec.json"
+      ],
       "argv": [
-        "{python}", "{tools}/portfolio_pipeline_materialize.py", "spec",
-        "--recipe", "{recipe}", "--output-root", "{run}", "--spec", "{run}/pipeline-spec.json",
-        "--hwm-governed-result", "{run}/preparation/hwm-governed-result.json",
-        "--hwm-governed-input-generation", "{run}/preparation/hwm-input-generation.json",
-        "--hwm-governed-calendar-authority", "{run}/preparation/hwm-calendar-authority.json",
-        "--hwm-governed-admission-receipt", "{ledger_receipt}",
-        "--invested-capital-result", "{run}/preparation/invested-capital-result.json",
-        "--invested-capital-input-generation", "{run}/preparation/capital-input-generation.json",
-        "--financial-input-contract", "contracts/portfolio-financial-mvp-source-v1.json",
-        "--portfolio-root", "{build_portfolio_root}",
-        "--retained-cache-root", "{retained_cache_root}"
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "spec",
+        "--recipe",
+        "{recipe}",
+        "--output-root",
+        "{run}",
+        "--spec",
+        "{run}/pipeline-spec.json",
+        "--hwm-governed-result",
+        "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation",
+        "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt",
+        "{ledger_receipt}",
+        "--invested-capital-result",
+        "{run}/preparation/invested-capital-result.json",
+        "--invested-capital-input-generation",
+        "{run}/preparation/capital-input-generation.json",
+        "--financial-input-contract",
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "--portfolio-root",
+        "{build_portfolio_root}",
+        "--retained-cache-root",
+        "{retained_cache_root}"
       ]
     },
     {
       "id": "semantic",
-      "requires": ["recipe"],
-      "outputs": ["{run}/evidence/post-build-semantic.json"],
+      "requires": [
+        "recipe"
+      ],
+      "outputs": [
+        "{run}/evidence/post-build-semantic.json"
+      ],
       "argv": [
-        "{python}", "{tools}/portfolio_pipeline_materialize.py", "semantic",
-        "--recipe", "{recipe}", "--output", "{run}/evidence/post-build-semantic.json"
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "semantic",
+        "--recipe",
+        "{recipe}",
+        "--output",
+        "{run}/evidence/post-build-semantic.json"
       ]
     },
     {
       "id": "financial-artifacts",
-      "requires": ["recipe"],
-      "outputs": ["{production}/financial-artifacts.json"],
+      "requires": [
+        "recipe"
+      ],
+      "outputs": [
+        "{production}/financial-artifacts.json"
+      ],
       "argv": [
-        "{python}", "{mvp2}/build_financial_artifacts.py",
-        "--run", "{run}", "--cycle", "{cycle}", "--out", "{production}/financial-artifacts.json"
+        "{python}",
+        "{mvp2}/build_financial_artifacts.py",
+        "--run",
+        "{run}",
+        "--cycle",
+        "{cycle}",
+        "--out",
+        "{production}/financial-artifacts.json"
       ]
     },
     {
       "id": "provider-generations",
-      "requires": ["recipe"],
+      "requires": [
+        "recipe"
+      ],
       "builtin": "provider_generations",
-      "outputs": ["{cycle}/provider-generations.json"]
+      "outputs": [
+        "{cycle}/provider-generations.json"
+      ]
     },
     {
       "id": "production-spec",
-      "live_guard_keys": ["portfolio_root", "retained_cache_root"],
-      "requires": ["pipeline-spec", "semantic", "financial-artifacts", "provider-generations"],
-      "outputs": ["{prod_spec}"],
+      "live_guard_keys": [
+        "portfolio_root",
+        "retained_cache_root"
+      ],
+      "requires": [
+        "pipeline-spec",
+        "semantic",
+        "financial-artifacts",
+        "provider-generations"
+      ],
+      "outputs": [
+        "{prod_spec}"
+      ],
       "argv": [
-        "{python}", "{tools}/portfolio_pipeline_materialize.py", "production-spec",
-        "--recipe", "{recipe}", "--prepared-root", "{run}",
-        "--semantic-gate", "{run}/evidence/post-build-semantic.json",
-        "--portfolio-root", "{portfolio_root}", "--state-root", "{retained_cache_root}",
-        "--spec", "{prod_spec}",
-        "--financial-artifacts", "{production}/financial-artifacts.json",
-        "--hwm-governed-result", "{run}/preparation/hwm-governed-result.json",
-        "--hwm-governed-input-generation", "{run}/preparation/hwm-input-generation.json",
-        "--hwm-governed-calendar-authority", "{run}/preparation/hwm-calendar-authority.json",
-        "--hwm-governed-admission-receipt", "{ledger_receipt}",
-        "--provider-generations", "{cycle}/provider-generations.json"
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "production-spec",
+        "--recipe",
+        "{recipe}",
+        "--prepared-root",
+        "{run}",
+        "--semantic-gate",
+        "{run}/evidence/post-build-semantic.json",
+        "--portfolio-root",
+        "{portfolio_root}",
+        "--state-root",
+        "{retained_cache_root}",
+        "--spec",
+        "{prod_spec}",
+        "--financial-artifacts",
+        "{production}/financial-artifacts.json",
+        "--hwm-governed-result",
+        "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation",
+        "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt",
+        "{ledger_receipt}",
+        "--provider-generations",
+        "{cycle}/provider-generations.json"
+      ],
+      "counter_keys": [
+        "model_fit_calls",
+        "receipt_reuse_count"
       ]
     },
     {
       "id": "preflight",
       "guard_spec": "{prod_spec}",
-      "requires": ["production-spec"],
+      "requires": [
+        "production-spec"
+      ],
       "outputs": [
         "{production}/evidence",
         "{production}/commit-authorization.json"
       ],
       "stdout_to": "{production}/preflight.log",
       "argv": [
-        "{python}", "{tools}/portfolio_qc.py", "--profile", "release-preflight",
-        "--spec", "{prod_spec}", "--evidence-dir", "{production}/evidence",
-        "--emit-commit-authorization", "{production}/commit-authorization.json"
-      ]
+        "{python}",
+        "{tools}/portfolio_qc.py",
+        "--profile",
+        "release-preflight",
+        "--spec",
+        "{prod_spec}",
+        "--evidence-dir",
+        "{production}/evidence",
+        "--emit-commit-authorization",
+        "{production}/commit-authorization.json"
+      ],
+      "explicit": true
     },
     {
       "id": "plan",
       "guard_spec": "{prod_spec}",
-      "requires": ["preflight"],
-      "outputs": ["{production}/plan.json"],
+      "requires": [
+        "preflight"
+      ],
+      "outputs": [
+        "{production}/plan.json"
+      ],
       "stdout_to": "{production}/plan.json",
-      "argv": ["{python}", "{tools}/data_pipeline.py", "plan", "--spec", "{prod_spec}"],
+      "argv": [
+        "{python}",
+        "{tools}/data_pipeline.py",
+        "plan",
+        "--spec",
+        "{prod_spec}"
+      ],
       "checks": [
-        {"json": "{production}/plan.json", "path": "financial_mvp.ready_for_execution", "equals": true},
-        {"json": "{production}/plan.json", "path": "financial_mvp.blocking_reasons", "equals": []}
-      ]
+        {
+          "json": "{production}/plan.json",
+          "path": "financial_mvp.ready_for_execution",
+          "equals": true
+        },
+        {
+          "json": "{production}/plan.json",
+          "path": "financial_mvp.blocking_reasons",
+          "equals": []
+        }
+      ],
+      "explicit": true
     },
     {
       "id": "dry-run",
       "guard_spec": "{prod_spec}",
-      "requires": ["plan"],
-      "outputs": ["{production}/execute-stage.json", "{production}/pointers-after-execute.json"],
+      "requires": [
+        "plan"
+      ],
+      "outputs": [
+        "{production}/execute-stage.json",
+        "{production}/pointers-after-execute.json"
+      ],
       "stdout_to": "{production}/execute-stage.json",
       "pointers_unchanged": "{prod_spec}",
       "snapshot_to": "{production}/pointers-after-execute.json",
-      "argv": ["{python}", "{tools}/data_pipeline.py", "execute", "--spec", "{prod_spec}"]
+      "argv": [
+        "{python}",
+        "{tools}/data_pipeline.py",
+        "execute",
+        "--spec",
+        "{prod_spec}"
+      ],
+      "explicit": true
     },
     {
       "id": "findings-panel",
       "guard_spec": "{prod_spec}",
-      "requires": ["dry-run"],
-      "assert_equal": [["{panel_gid}", "{spec_panel_gid}"]],
-      "outputs": ["{production}/validate-panel.log", "{production}/panel-findings-details.json"],
+      "requires": [
+        "dry-run"
+      ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "outputs": [
+        "{production}/validate-panel.log",
+        "{production}/panel-findings-details.json"
+      ],
       "stdout_to": "{production}/validate-panel.log",
       "argv": [
-        "{python}", "{tools}/validate_generation.py", "{panel_root}/generations/{panel_gid}",
-        "--expected", "acceptance/expected-baseline.json", "--cutoff", "{requested_as_of}",
-        "--crosswalk", "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
-        "--details-out", "{production}/panel-findings-details.json"
-      ]
+        "{python}",
+        "{tools}/validate_generation.py",
+        "{panel_root}/generations/{panel_gid}",
+        "--expected",
+        "acceptance/expected-baseline.json",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
+        "--details-out",
+        "{production}/panel-findings-details.json"
+      ],
+      "explicit": true
     },
     {
       "id": "findings-targets",
       "guard_spec": "{prod_spec}",
-      "requires": ["dry-run"],
-      "outputs": ["{production}/validate-targets.log"],
+      "requires": [
+        "dry-run"
+      ],
+      "outputs": [
+        "{production}/validate-targets.log"
+      ],
       "stdout_to": "{production}/validate-targets.log",
       "argv": [
-        "{python}", "{tools}/validate_release_targets.py",
-        "--spec", "{prod_spec}", "--release-id", "{release_id}"
+        "{python}",
+        "{tools}/validate_release_targets.py",
+        "--spec",
+        "{prod_spec}",
+        "--release-id",
+        "{serial_release_id}"
+      ],
+      "explicit": true
+    },
+    {
+      "id": "replica-copy",
+      "requires": [
+        "production-spec"
+      ],
+      "outputs": [
+        "{replica_workspace}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_replica.py",
+        "copy",
+        "--spec",
+        "{prod_spec}",
+        "--workspace-root",
+        "{source_workspace}",
+        "--replica-root",
+        "{replica_workspace}",
+        "--allow-state-root",
+        "{retained_cache_root}"
+      ]
+    },
+    {
+      "id": "replica-provider-generations",
+      "requires": [
+        "replica-copy"
+      ],
+      "builtin": "replica_provider_generations",
+      "outputs": [
+        "{replica_provgens}"
+      ]
+    },
+    {
+      "id": "replica-spec",
+      "requires": [
+        "replica-provider-generations"
+      ],
+      "outputs": [
+        "{replica_spec}"
+      ],
+      "counter_keys": [
+        "model_fit_calls",
+        "receipt_reuse_count"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "production-spec",
+        "--recipe",
+        "{recipe}",
+        "--prepared-root",
+        "{run}",
+        "--semantic-gate",
+        "{run}/evidence/post-build-semantic.json",
+        "--portfolio-root",
+        "{replica_workspace}/dataPortfolio",
+        "--state-root",
+        "{retained_cache_root}",
+        "--spec",
+        "{replica_spec}",
+        "--financial-artifacts",
+        "{production}/financial-artifacts.json",
+        "--hwm-governed-result",
+        "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation",
+        "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt",
+        "{ledger_receipt}",
+        "--provider-generations",
+        "{replica_provgens}"
+      ]
+    },
+    {
+      "id": "lanes",
+      "requires": [
+        "replica-spec"
+      ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "outputs": [
+        "{laneout}"
+      ],
+      "guard_spec": "{prod_spec}",
+      "argv": [
+        "{python}",
+        "{tools}/release_replica.py",
+        "lanes",
+        "--real-spec",
+        "{prod_spec}",
+        "--replica-spec",
+        "{replica_spec}",
+        "--out-dir",
+        "{laneout}",
+        "--real-panel-dir",
+        "{panel_root}/generations/{panel_gid}",
+        "--replica-panel-dir",
+        "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
+        "--expected",
+        "acceptance/expected-baseline.json",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{crosswalk}",
+        "--harness-code-commit",
+        "{code_commit}",
+        "--rehearsal-root",
+        "{replica_rehearsal}",
+        "--clean-room",
+        "{clean_room}"
       ]
     },
     {
       "id": "pack-probe",
       "explicit": true,
-      "requires": ["findings-panel", "findings-targets"],
+      "requires": [
+        "lanes"
+      ],
       "only_mode": "probe",
       "argv": [
-        "{python}", "{tools}/release_evidence_pack.py", "--cycle", "{cycle}", "--dest", "{evidence_dest}",
-        "--include", "production", "logs", "release-driver-state.json", "pipeline-recipe.json",
-        "provider-generations.json", "replica",
-        "--exclude", "production/state/*", "*.prev-*"
+        "{python}",
+        "{tools}/release_evidence_pack.py",
+        "--cycle",
+        "{cycle}",
+        "--dest",
+        "{evidence_dest}",
+        "--include",
+        "production",
+        "logs",
+        "release-driver-state.json",
+        "pipeline-recipe.json",
+        "provider-generations.json",
+        "laneout",
+        "replica-production",
+        "--exclude",
+        "production/state/*",
+        "*.prev-*"
       ]
     },
     {
       "id": "commit",
       "explicit": true,
-      "requires": ["findings-panel", "findings-targets"],
+      "requires": [
+        "lanes"
+      ],
       "commit_gate": {
         "spec": "{prod_spec}",
-        "replica_receipt": "{cycle}/replica/replica-receipt.json",
-        "pointer_snapshot": "{production}/pointers-after-execute.json"
+        "replica_spec": "{replica_spec}",
+        "replica_verify": [
+          "{python}",
+          "{tools}/release_replica.py",
+          "verify",
+          "--receipt",
+          "{lane_replica}/replica-receipt.json",
+          "--real-spec",
+          "{prod_spec}"
+        ],
+        "replica_receipt": "{lane_replica}/replica-receipt.json",
+        "pointer_snapshot": "{lane_real}/pointers-after-dry-run.json"
       },
-      "outputs": ["{production}/execute-commit.json"],
+      "outputs": [
+        "{production}/execute-commit.json"
+      ],
       "stdout_to": "{production}/execute-commit.json",
       "argv": [
-        "{python}", "{tools}/data_pipeline.py", "execute", "--spec", "{prod_spec}",
-        "--commit", "--commit-authorization", "{production}/commit-authorization.json",
-        "--replica-receipt", "{cycle}/replica/replica-receipt.json"
+        "{python}",
+        "{tools}/data_pipeline.py",
+        "execute",
+        "--spec",
+        "{prod_spec}",
+        "--commit",
+        "--commit-authorization",
+        "{lane_real}/commit-authorization.json",
+        "--replica-receipt",
+        "{lane_replica}/replica-receipt.json"
       ],
       "checks": [
-        {"json": "{production}/execute-commit.json", "path": "release_state", "equals": "COMMITTED"}
+        {
+          "json": "{production}/execute-commit.json",
+          "path": "release_state",
+          "equals": "COMMITTED"
+        }
       ]
     },
     {
       "id": "pack-evidence",
       "explicit": true,
-      "requires": ["commit"],
+      "requires": [
+        "commit"
+      ],
       "only_mode": "release",
       "argv": [
-        "{python}", "{tools}/release_evidence_pack.py", "--cycle", "{cycle}", "--dest", "{evidence_dest}",
-        "--include", "production", "logs", "release-driver-state.json", "pipeline-recipe.json",
-        "provider-generations.json", "replica",
-        "--exclude", "production/state/*", "*.prev-*"
+        "{python}",
+        "{tools}/release_evidence_pack.py",
+        "--cycle",
+        "{cycle}",
+        "--dest",
+        "{evidence_dest}",
+        "--include",
+        "production",
+        "logs",
+        "release-driver-state.json",
+        "pipeline-recipe.json",
+        "provider-generations.json",
+        "laneout",
+        "replica-production",
+        "--exclude",
+        "production/state/*",
+        "*.prev-*"
       ]
     }
-  ]
+  ],
+  "config_paths": {
+    "retained_cache_base": {
+      "exists": true,
+      "under": "{cycle}"
+    },
+    "retained_cache_root": {
+      "under": "{cycle}"
+    },
+    "run": {
+      "under": "{cycle}"
+    },
+    "qa": {
+      "under": "{cycle}"
+    }
+  }
 }

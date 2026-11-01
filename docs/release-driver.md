@@ -9,8 +9,12 @@ id the driver derives from the run's own outputs.
 
 ```
 python tools/release_driver.py plan   --config run.json
+python tools/release_driver.py plan   --config run.json --offline --ids ids.json --recorded cmds.json
 python tools/release_driver.py run    --config run.json [--only STAGE | --through STAGE] [--replace]
+python tools/release_driver.py check  --config run.json [--only STAGE | --through STAGE]
+python tools/release_driver.py gate-commit --config run.json --confirm-release-id ID
 python tools/release_driver.py status --config run.json
+python tools/release_driver.py stop   --config run.json
 ```
 
 Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
@@ -102,7 +106,65 @@ before the tool reports success.
 exit code, log path, output digests and, when the stage writes them, `work_counters`. Logs are
 `<cycle>/logs/<stage>.<attempt>.log`, one per attempt, so nothing greps a stale file name.
 
-## Scope of this stage graph
+## Stage graph and schema
 
-Recipe through dry-run findings. The attended run, replica ceremony, commit gate, archive
-restore and evidence packaging follow in later changes to the same graph.
+`ops/mvp2-release/release-stages.json` is validated on load against
+`ops/mvp2-release/release-stages.schema.json` (unknown keys, a missing `argv`, a repeated id or a
+`requires` that does not precede its stage are refused before any stage starts). Stage order:
+
+| group | stages |
+|---|---|
+| inputs | `selected-inputs` (the hand-built selected-inputs and attribution spec must exist and are hash-bound) |
+| pre-chain | `pre-chain` (`ops/mvp2-release/scripts/pre_chain.py`: layered history, dependence, attribution) |
+| attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
+| tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
+| replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
+| release | `pack-probe` or `commit` then `pack-evidence` (explicit) |
+
+`preflight`, `plan`, `dry-run`, `findings-panel` and `findings-targets` remain as explicit
+single-stage diagnostics of the serial path (pass 21); the release path is `lanes` (pass 26).
+The attended preparation spec (`mk_prep_spec.py`) is a per-cycle input builder, not a stage: the
+driver refuses it unless it names this run's history, attribution, baseline and ledger
+generations (`bound_ids`).
+
+## Refusals seeded from R2's incidents
+
+`tests/portfolio_operations/test_release_driver_stages.py` fires each refusal on a seeded input:
+
+- a script path that points at another repository (the probe clone): a stage script must be a
+  file inside `repo_root`;
+- a stale cache base after a root rewrite: `config_paths` requires `retained_cache_base` to exist
+  and every cycle path to lie inside the cycle;
+- a HEAD assertion that no longer holds: the repository must be at `code_commit`, clean, before
+  and after each stage; `check` reports it without running anything;
+- findings against the wrong generation: `assert_equal` of the run's panel generation and the
+  spec's; a preparation spec naming another pass's generations: `bound_ids`;
+- grepped log names: the driver reads exit codes and JSON fields, never a log.
+
+## Resume, PIDs, timing
+
+A stage whose process was killed is recorded `running` with the PID and start token the driver
+launched; the next `run` marks it `interrupted` when that process is gone (a live one blocks the
+run) and restarts only that stage: `resume.same_argv` reruns the same command over its partial
+output (the tool checkpoints itself, as `pre_chain.py` and the attended `--resume` do);
+`resume.argv` runs a different command; a stage without `resume` has its outputs moved aside and
+reruns alone. Completed stages are verified, not rerun. `stop` (and Ctrl-C) kills the process tree
+of recorded PIDs only, and only while the recorded start token still matches, so a reused PID is
+never touched. Every stage records `seconds`, `seconds_total` over its attempts, `attempt`, and
+`work_counters` (from the stage's `counters` JSON or the `counter_keys` found in its output).
+`<cycle>/release-driver-timing.log` has one line per start and finish.
+
+## Offline plan
+
+`plan --offline --ids ids.json --recorded cmds.json` prints every stage's command line from the
+configuration and graph alone (derived ids come from `ids.json`; nothing under the run is read)
+and compares each recorded command flag by flag. `tests/fixtures/release_driver/` holds the pass-26
+configuration, its ids and its recorded command lines; the plan reproduces all 16 recorded stages.
+
+## Commit gate and the replica receipt
+
+`commit_gate.replica_verify` runs `tools/release_replica.py verify` on the receipt. The receipt is
+written only by the `lanes` ceremony and names all seven steps (preflight, dry-run, findings,
+COMMIT, post-release verify, recovery rehearsal, clean-room restore, each rc 0) for the real
+spec's topology and code commit; the driver's gate adds the confirmed release id, the topology of
+the replica spec, a prepared release and unmoved pointers.

@@ -410,7 +410,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
             )
         config_keys |= placeholders(stage) - known
         if "builtin" not in stage:
-            assert stage["argv"][0] == "{python}"
+            assert stage["argv"][0] in ("{python}", "{node}")
     config_keys |= placeholders(graph["provider_run_sources"]) - known
     assert config_keys == {
         "python",
@@ -426,6 +426,17 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "retained_cache_root",
         "requested_as_of",
         "evidence_dest",
+        "node",
+        "workspace_root",
+        "evaluated_on",
+        "selected_inputs",
+        "preparation_spec",
+        "playwright_module",
+        "playwright_executable",
+        "source_workspace",
+        "replica_workspace",
+        "code_commit",
+        "retained_cache_base",
     }
     for tool in re.findall(r"\{(?:tools|mvp2)\}/([\w.]+)", json.dumps(graph)):
         base = (
@@ -791,7 +802,13 @@ def test_the_shipped_graph_ends_in_an_explicit_gated_commit_stage() -> None:
     )
     last = next(stage for stage in graph["stages"] if stage["id"] == "commit")
     assert last["explicit"] is True
-    assert set(last["commit_gate"]) == {"spec", "replica_receipt", "pointer_snapshot"}
+    assert set(last["commit_gate"]) == {
+        "spec",
+        "replica_spec",
+        "replica_verify",
+        "replica_receipt",
+        "pointer_snapshot",
+    }
     assert "--replica-receipt" in last["argv"] and "--commit" in last["argv"]
 
 
