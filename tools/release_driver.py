@@ -74,10 +74,17 @@ def _read_json(path: Path) -> Any:
 
 
 def _write_json(path: Path, value: Any) -> None:
+    """Write through a sibling temporary file and an atomic replace: a crash leaves the old checkpoint."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(
-        (json.dumps(value, indent=1, sort_keys=True) + "\n").encode("utf-8")
-    )
+    temporary = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    with temporary.open("wb") as handle:
+        handle.write(
+            (json.dumps(value, indent=1, sort_keys=True) + "\n").encode("utf-8")
+        )
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def _file_sha(path: Path) -> str:
@@ -522,6 +529,28 @@ def _claimed_outputs(run: Run, stage: Mapping[str, Any]) -> list[Path]:
     ]
 
 
+def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None:
+    """Every stage this one requires, and theirs in turn, completed and still has the bytes it recorded.
+
+    ``--only`` therefore cannot start from an input that changed after a prerequisite ran.
+    """
+
+    state = run.state["stages"]
+    for required in stage.get("requires", []):
+        if required in seen:
+            continue
+        seen.add(required)
+        record = state.get(required)
+        if not record or record.get("status") != "ok":
+            raise Refusal(f"{stage['id']} requires {required}, which has not completed")
+        if record["code_commit"] != run.values["code_commit"]:
+            raise Refusal(
+                f"{required} ran at {record['code_commit'][:12]}, not the run's code identity"
+            )
+        verify_kept(run, run.stage(required), record)
+        _verify_upstream(run, run.stage(required), seen)
+
+
 def check_ready(
     run: Run,
     stage: Mapping[str, Any],
@@ -541,19 +570,7 @@ def check_ready(
     if "only_mode" in stage and run.values["mode"] != stage["only_mode"]:
         raise Refusal(f"{stage['id']} runs only in {stage['only_mode']} mode")
     state = run.state["stages"]
-    for required in stage.get("requires", []):
-        record = state.get(required)
-        if not record or record.get("status") != "ok":
-            raise Refusal(f"{stage['id']} requires {required}, which has not completed")
-        if record["code_commit"] != run.values["code_commit"]:
-            raise Refusal(
-                f"{required} ran at {record['code_commit'][:12]}, not the run's code identity"
-            )
-        for path, recorded in record["outputs"].items():
-            if path_digest(Path(path)) != recorded:
-                raise Refusal(
-                    f"{required} output {path} changed since it was produced (stale or edited input)"
-                )
+    _verify_upstream(run, stage, set())
     own = state.get(stage["id"])
     for path in _claimed_outputs(run, stage):
         if path.exists() and not replace and not resuming:

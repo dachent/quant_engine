@@ -125,6 +125,10 @@
       "pinned_script": [
         "{pre_chain_script}",
         "{pre_chain_sha256}"
+      ],
+      "inputs": [
+        "{cycle}/baseline/generations/{baseline_id}",
+        "{cycle}/ledger/generations/{cycle_ledger_id}"
       ]
     },
     {
@@ -843,6 +847,9 @@
         "--exclude",
         "production/state/*",
         "*.prev-*"
+      ],
+      "outputs": [
+        "{evidence_dest}/manifest.json"
       ]
     },
     {
@@ -915,6 +922,9 @@
         "--exclude",
         "production/state/*",
         "*.prev-*"
+      ],
+      "outputs": [
+        "{evidence_dest}/manifest.json"
       ]
     }
   ],
