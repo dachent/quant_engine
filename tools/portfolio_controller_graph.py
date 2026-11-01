@@ -277,6 +277,7 @@ _PATH_STAGES = {
     # top-level `acceptance/validate/`; it reads published outputs and imports no
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
+    "tools/alpaca_generation.py": [],
     # Derived release-findings producer (ruling B / C1): binds every non-panel
     # release target to the panel's own findings. Its checks live in
     # `acceptance/validate/release_targets.py`; it reads a prepared release.json
