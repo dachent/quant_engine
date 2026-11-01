@@ -203,14 +203,16 @@ def _entry(
     }
 
 
-def _entries(bodies: dict[str, Any], omit: set[str]) -> list[dict[str, Any]]:
+def _entries(
+    bodies: dict[str, Any], omit: set[str], stats_end: str = "2026-10-07"
+) -> list[dict[str, Any]]:
     entries = [
         _entry(f"{API}/api/users/?platform=web&u=synthetic", bodies["users.profile"]),
         _entry(f"{API}/api/users/123/dashboard_data/", bodies["portfolio.dashboard"]),
         _entry(f"{API}/api/users/123/accounts/", bodies["accounts.linked"]),
         _entry(f"{API}/api/users/123/accounts/activity/", bodies["accounts.activity"]),
         _entry(
-            f"{API}/api/funds/stats/?end_day=2026-10-07&fund=Volatis%20Strategy"
+            f"{API}/api/funds/stats/?end_day={stats_end}&fund=Volatis%20Strategy"
             "&start_day=2026-09-27",
             bodies["funds.statistics"],
         ),
@@ -304,13 +306,14 @@ class Case:
         extra: list[dict[str, Any]] | None = None,
         repeats: dict[str, int] | None = None,
         omit: set[str] | None = None,
+        stats_end: str = "2026-10-07",
     ) -> None:
         root.mkdir(parents=True, exist_ok=True)
         bodies = _bodies()
         if mutate is not None:
             mutate(bodies)
         skipped = omit or set()
-        entries = _entries(bodies, skipped) + (extra or [])
+        entries = _entries(bodies, skipped, stats_end) + (extra or [])
         manifest = _manifest(bodies, repeats or {}, skipped)
         capture = root / "capture"
         capture.mkdir()
@@ -762,3 +765,117 @@ def test_a_body_that_echoes_the_session_value_is_refused(tmp_path: Path) -> None
     with pytest.raises(ERROR, match="session material"):
         case.convert()
     assert not (case.out / "quantbase-har-csv").exists()
+
+
+def _later_rows(bodies: dict[str, Any]) -> None:
+    """Observations dated after the 2026-10-07 cutoff in every time series."""
+
+    prices = bodies["funds.invest"]["pageProps"]["fundPriceData"]
+    prices.extend({**row, "time": "2026-10-12T00:00:00Z"} for row in list(prices)[::3])
+    for fund in bodies["portfolio.dashboard"]["data"]["funds_data"].values():
+        fund["pricehistory"].append({**fund["pricehistory"][0], "time": "10/12/2026"})
+    items = bodies["accounts.activity"]["data"]
+    items.append(
+        {
+            "item": {
+                **items[0]["item"],
+                "id": "late",
+                "filled_at": "2026-10-10T01:00:00Z",
+            },
+            "type": "order",
+        }
+    )
+    bodies["funds.rebalance-history"]["data"]["2026-10-12"] = {
+        "composition": [{"symbol": "ZZZ", "proportion": "1"}]
+    }
+
+
+def test_observations_after_the_cutoff_are_excluded_and_counted(
+    tmp_path: Path,
+) -> None:
+    case = Case(tmp_path, _later_rows)
+    case.convert()
+    target = case.output()
+    csv_dir = target / "source" / "csv"
+    for name in (
+        "ssg_Volatis_Strategy_pricehistory.csv",
+        "ssg_Other___Fund_and_Co_pricehistory.csv",
+    ):
+        assert len(_rows(csv_dir / name)) == 4  # header + the three <= cutoff
+    assert all(
+        row[3] <= "2026-10-07T23"
+        for row in _rows(csv_dir / "ssg_Volatis_Strategy_pricehistory.csv")[1:]
+    )
+    assert len(_rows(csv_dir / "dashboard_Total_pricehistory.csv")) == 2
+    activity = _rows(csv_dir / "account_activity.csv")
+    assert "late" not in {row[activity[0].index("id")] for row in activity[1:]}
+    assert len(activity) == 3
+    assert (
+        "2026-10-12"
+        not in (csv_dir / "volatis_strategy_rebalance_history.csv").read_text()
+    )
+    report = json.loads((target / "conversion-report.json").read_bytes())
+    excluded = report["derivation"]["excluded_after_cutoff"]
+    assert excluded == {
+        "account_activity": 1,
+        "dashboard_pricehistory": 9,  # the fixture shares one series across 3 funds
+        "rebalance_history": 1,
+        "ssg_pricehistory": 2,
+    }
+    assert report["cutoff"] == "2026-10-07"
+    assert report["capture_date"] == "2026-10-08"
+    assert "accounts.csv" in report["snapshot_files"]
+    assert "dashboard_Total_holdings.csv" in report["snapshot_files"]
+    # The later rows stay in the retained source evidence.
+    raw = (case.intake / "raw" / "owner_export.har").read_text(encoding="utf-8")
+    assert "2026-10-12T00:00:00Z" in raw and "late" in raw
+    assert converter.verify_conversion(case.intake, case.out, "public")["state"] == (
+        "VERIFIED"
+    )
+
+
+def test_statistics_window_after_the_cutoff_is_refused(tmp_path: Path) -> None:
+    case = Case(tmp_path, stats_end="2026-10-12")
+    with pytest.raises(ERROR, match="window ends after the cutoff"):
+        case.convert()
+
+
+def test_a_fund_with_a_null_wins_total_is_skipped(tmp_path: Path) -> None:
+    def apply(bodies: dict[str, Any]) -> None:
+        funds = bodies["portfolio.dashboard"]["data"]["funds_data"]
+        funds["Single-Index Leveraged In & Out"]["wins"] = {"total": None}
+
+    case = Case(tmp_path, apply)
+    case.convert()
+    report = json.loads((case.output() / "conversion-report.json").read_bytes())
+    assert report["derivation"]["total_wins_source_fund"] == VOLATIS
+
+
+def test_two_requests_for_one_fund_are_refused(tmp_path: Path) -> None:
+    extra = [
+        _entry(
+            f"{API}/api/funds/stats/?end_day=2026-10-07&fund=Volatis%20Strategy"
+            "&start_day=2026-09-01",
+            _bodies()["funds.statistics"],
+        )
+    ]
+    case = Case(tmp_path, extra=extra, repeats={"funds.statistics": 2})
+    with pytest.raises(ERROR, match="more than one request per fund"):
+        case.convert()
+
+
+def test_a_linked_output_directory_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = Case(tmp_path)
+    holder = case.out / "quantbase-har-csv"
+    holder.mkdir()
+    real = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: self.name == "quantbase-har-csv" or real(self),
+    )
+    with pytest.raises(ERROR, match="linked or not a directory"):
+        case.convert()
+    assert not any(holder.iterdir())
