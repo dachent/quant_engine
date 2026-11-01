@@ -4662,6 +4662,7 @@ class _SchwabPositionObservation(NamedTuple):
     financial_observation_date: date
     artifact: SourceArtifact
     record_ids: frozenset[str]
+    valuation_cutoff: date | None = None
 
 
 def _schwab_position_observation(
@@ -4695,6 +4696,16 @@ def _schwab_position_observation(
     financial_observation_date = observed_at.astimezone(
         ZoneInfo("America/New_York")
     ).date()
+    valuation_cutoff: date | None = None
+    if "valuation_cutoff" in metadata:
+        # Explicit financial day of a post-cutoff capture; absent, the New York
+        # day of the clock stays the financial day (legacy generations).
+        valuation_cutoff = _day(metadata["valuation_cutoff"], label)
+        if valuation_cutoff > financial_observation_date:
+            raise ProviderLedgerError(
+                f"{label} valuation cutoff is later than the observation"
+            )
+        financial_observation_date = valuation_cutoff
     if (
         manifest.verification is not VerificationStatus.VERIFIED
         or manifest.adapter.name != "quant-engine-schwab"
@@ -4806,7 +4817,11 @@ def _schwab_position_observation(
     if financial_observation_date > requested_as_of:
         return None
     return _SchwabPositionObservation(
-        observed_at, financial_observation_date, artifact, frozenset(record_ids)
+        observed_at,
+        financial_observation_date,
+        artifact,
+        frozenset(record_ids),
+        valuation_cutoff,
     )
 
 
@@ -5245,6 +5260,10 @@ def _project_account_facts(
                     average_price=row["average_price"],
                     source_artifact_id=position_observation.artifact.artifact_id,
                 )
+                if position_observation.valuation_cutoff is not None:
+                    record["valuation_cutoff"] = (
+                        position_observation.valuation_cutoff.isoformat()
+                    )
             if (
                 source_fact == "flows"
                 and record.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL"

@@ -181,15 +181,17 @@ consumes, under a new create-only output root:
   frozen `read_holdings_v2_current_snapshot` over the raw response. Positions are
   valued at quantity times the **official close** of the cutoff date from
   `<SYMBOL>_yahoo_daily.csv` files; the provider-quoted value is never used. The
-  snapshot `observed_at` satisfies two readers: the frozen generation needs its
-  UTC date to equal the spec as-of, and the baseline
-  (`tools/portfolio_baseline.py`) takes the position's financial day from the
-  observation's NEW YORK date and relabels a row whose UTC date is later (the
-  R2.1 pattern). In the first-next-date mode it is therefore the close of the
-  cutoff day's extended session, 20:00 New York (New York date = cutoff, UTC date
-  = cutoff + 1 = the as-of); the real capture instant, both capture dates, the
-  offset and `valuation_cutoff` are in the binding. The labelled same-day
-  fallback keeps the real capture instant. Readers are traced in the READY note.
+  snapshot `observed_at` is provenance and always the REAL capture instant; the
+  as-of is its UTC date (cutoff + 1 in the first-next-date mode, which the frozen
+  generation requires). The financial day of every position is the explicit
+  `valuation_cutoff` the adapter writes into the snapshot document (an optional
+  key the generation accepts; it may not be later than the observation's New York
+  date). The generation carries it into the catalog's `position_snapshot_as_of`,
+  the provider ledger into its position rows, and the baseline, the ledger
+  selection and the pipeline materializer take the financial day from it, falling
+  back to the New York date of `observed_at` when it is absent, so every legacy
+  generation reads exactly as before. The binding records the cutoff, both
+  capture dates, the offset and the mode. Readers are traced in the READY note.
   Zero-quantity rows are removed from the raw response before the frozen reader
   sees it (the driver omits them before reading their price fields). The emitted
   `sweep_vehicle_count` counts quantity rows only: the frozen reader also counts

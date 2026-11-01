@@ -16,21 +16,22 @@ capture date) holds an observed row at the cutoff for every account. A same-day
 post-close capture is bound only as a labelled fallback, whose NAV ends the day
 before the cutoff and needs the official-close derivation that R2 used.
 
-Dating. Two readers constrain the snapshot observation. The frozen generation
-requires its UTC date to equal the spec ``as_of_date`` (and the terminal
-manifest to finish no later than that date, with the requested history end, the
-provider's New York date, equal to the manifest finish date). The baseline
-(``tools/portfolio_baseline.py``) reads the NEW YORK date of the observation as
-the position's financial day and relabels a row whose UTC date is later, which is
-how R2.1 consumed generation as-of 2026-09-18 for cutoff 2026-09-17. For the
-first-next-date mode the adapter therefore writes the observation as the close of
-the cutoff day's extended session (20:00 New York: New York date = cutoff, UTC
-date = cutoff + 1 = the as-of) and records the real capture instant, both capture
-dates, the offset, the valuation cutoff and the mode in the binding. The
-same-day fallback keeps the real capture instant. Any other labelled mode is
-refused by the adapter. The terminal transaction manifest is re-emitted with ``started_at``
-and ``finished_at`` expressed at the America/New_York offset, the same instants,
-so its finish date is the New York date the provider used.
+Dating. ``observed_at`` is provenance and always carries the REAL capture
+instant. The frozen generation requires its UTC date to equal the spec
+``as_of_date`` (and the terminal manifest to finish no later than that date,
+with the requested history end, the provider's New York date, equal to the
+manifest finish date), so ``as_of_date`` is the capture's UTC date (cutoff + 1 in
+the first-next-date mode). The financial day of every position is the explicit
+``valuation_cutoff`` the adapter writes into the snapshot document; the
+generation carries it into the catalog's ``position_snapshot_as_of`` and the
+provider ledger into its position rows, and the baseline, the ledger selection
+and the pipeline materializer take the financial day from it, falling back to the
+New York date of ``observed_at`` when it is absent (every legacy generation). The
+binding records the cutoff, both capture dates, the offset and the mode. Any
+labelled mode other than the same-day fallback is refused by the adapter. The
+terminal transaction manifest is re-emitted with ``started_at`` and
+``finished_at`` expressed at the America/New_York offset, the same instants, so
+its finish date is the New York date the provider used.
 
 Valuation. The Holdings-V2 ``marketValue`` is quantity times the provider's last
 trade (preserved 2026-09-17 bytes: ``price.price`` is not the official close for
@@ -66,7 +67,7 @@ import csv
 from collections.abc import Mapping, Sequence
 import copy
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import hashlib
 import io
@@ -76,13 +77,14 @@ import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from quant_engine.core import strict_json_loads
+from quant_engine.core import canonical_json_bytes, strict_json_loads
 from quant_engine.schwab import (
+    CurrentSnapshot,
     SchwabGenerationError,
     SchwabReadError,
     build_generation,
     read_holdings_v2_current_snapshot,
-    write_current_snapshot,
+    current_snapshot_bytes,
 )
 
 import schwab_capture_driver as driver
@@ -97,9 +99,7 @@ ROOT_CURRENT = "ingest-current"
 ROOT_NAV = "ingest-nav"
 ROOT_TERMINAL = "ingest-terminal"
 VALUATION_BASIS = "OFFICIAL_CLOSE_QUANTITY_TIMES_CLOSE"
-OBSERVED_AT_BASIS = "CUTOFF_DAY_EXTENDED_SESSION_CLOSE_20_00_NEW_YORK"
-OBSERVED_AT_BASIS_CAPTURE = "CAPTURE_INSTANT_SAME_DAY_FALLBACK"
-SESSION_END_LOCAL_TIME = time(20, 0)
+OBSERVED_AT_BASIS = "REAL_CAPTURE_INSTANT_FINANCIAL_DAY_IS_VALUATION_CUTOFF"
 TRANSACTION_MANIFEST_RULE = "TIMESTAMPS_RE_EXPRESSED_AT_AMERICA_NEW_YORK_SAME_INSTANTS"
 _NEW_YORK = ZoneInfo(driver.CLOSE_TIME_ZONE)
 _REPLACED_ROLES = frozenset({"WCH_NAV_CSV", "WCH_TRANSACTION_JSON"})
@@ -659,27 +659,13 @@ def ingest(
     if set(manifest["accounts"]) != accounts or len(accounts) != len(crosswalk):
         raise IngestError("crosswalk scope differs from the driver run")
     capture = _capture_binding(positions, balances, cutoff, label)
-    # The snapshot observation must satisfy two readers at once. The frozen
-    # generation needs its UTC date to equal the spec as-of date; the baseline
-    # (tools/portfolio_baseline.py) takes the position's financial day from the
-    # observation's NEW YORK date and relabels a row whose UTC date is later (the
-    # R2.1 pattern). For the first-next-date mode the observation is therefore the
-    # close of the cutoff day's extended session, 20:00 New York, whose New York
-    # date is the cutoff and whose UTC date is cutoff + 1, the as-of. The same-day
-    # fallback keeps the real capture instant (New York date = cutoff).
-    if capture["capture_mode"] == driver.MODE_NEXT_SESSION:
-        snapshot_at = datetime.combine(
-            cutoff.as_of_date, SESSION_END_LOCAL_TIME, tzinfo=_NEW_YORK
-        ).astimezone(timezone.utc)
-        observed_basis = OBSERVED_AT_BASIS
-    elif capture["capture_mode"] == driver.MODE_SAME_DAY:
-        snapshot_at = driver.aware_utc(capture["captured_at_utc"], "captured_at_utc")
-        observed_basis = OBSERVED_AT_BASIS_CAPTURE
-    else:
+    if capture["capture_mode"] not in (driver.MODE_NEXT_SESSION, driver.MODE_SAME_DAY):
         raise IngestError(
             "a capture outside the first-next-date and same-day modes cannot be "
-            "bound: the baseline would not read its financial day as the cutoff"
+            "bound: it exceeds the proven +1 pattern"
         )
+    snapshot_at = driver.aware_utc(capture["captured_at_utc"], "captured_at_utc")
+    observed_basis = OBSERVED_AT_BASIS
     as_of = snapshot_at.date()
 
     held = driver.json_objects(positions.get("positions"), "positions")
@@ -796,9 +782,9 @@ def ingest(
 
     current_dir = output_root / "current"
     current_dir.mkdir()
-    digest, size = write_current_snapshot(
-        snapshot, current_dir / "current-snapshot.json"
-    )
+    snapshot_bytes = snapshot_document_bytes(snapshot, cutoff.as_of_date)
+    snapshot_meta = _write_new(current_dir / "current-snapshot.json", snapshot_bytes)
+    digest, size = str(snapshot_meta["sha256"]), int(str(snapshot_meta["size_bytes"]))
     record(
         "current/current-snapshot.json",
         "CURRENT_SNAPSHOT",
@@ -910,7 +896,7 @@ def ingest(
         "schema_name": "schwab-capture-ingest-binding",
         "schema_version": SCHEMA_VERSION,
         "exception_label": label,
-        "financial_day_new_york": snapshot_at.astimezone(_NEW_YORK).date().isoformat(),
+        "financial_day": cutoff.as_of_date.isoformat(),
         "snapshot_observed_at": snapshot_at.isoformat(),
         "snapshot_observed_at_basis": observed_basis,
         "transaction_manifest": tx_rule,
@@ -946,6 +932,17 @@ def _without_zero_quantity_rows(raw: object) -> tuple[dict[str, Any], int]:
             dropped += len(rows) - len(kept)
             group["holdingsRows"] = kept
     return document, dropped
+
+
+def snapshot_document_bytes(snapshot: CurrentSnapshot, cutoff_day: date) -> bytes:
+    """The schema-2 snapshot document with the explicit ``valuation_cutoff``."""
+
+    return canonical_json_bytes(
+        {
+            **json.loads(current_snapshot_bytes(snapshot)),
+            "valuation_cutoff": cutoff_day.isoformat(),
+        }
+    )
 
 
 def _market_value(row: Mapping[str, object]) -> object:
@@ -1115,14 +1112,17 @@ def _write_terminal(
 
 def _check_snapshot_dating(path: Path, as_of: date, cutoff_day: date) -> None:
     """The frozen consumer compares the UTC date of every as-of and observation;
-    the baseline reads the New York date of the observation as the financial day."""
+    the readers take the financial day from the explicit ``valuation_cutoff``,
+    which may not be later than the observation's New York date."""
 
     document = driver.load_json_file(path, "current snapshot")
     observed = driver.aware_utc(document.get("observed_at"), "observed_at")
-    if observed.astimezone(_NEW_YORK).date() != cutoff_day:
-        raise IngestError("snapshot financial day (New York) differs from the cutoff")
     if observed.date() != as_of:
         raise IngestError("snapshot observation UTC date differs from the as-of date")
+    if document.get("valuation_cutoff") != cutoff_day.isoformat():
+        raise IngestError("snapshot valuation cutoff differs from the cutoff")
+    if cutoff_day > observed.astimezone(_NEW_YORK).date():
+        raise IngestError("snapshot valuation cutoff is later than the observation")
     for row in driver.json_objects(document.get("positions"), "snapshot positions"):
         if row.get("as_of_date") != as_of.isoformat():
             raise IngestError("snapshot position as-of differs from the as-of date")
