@@ -177,6 +177,9 @@ _PATH_STAGES = {
     # Stages an unpublished derived-return candidate from retained bytes; the weekly
     # builder reads only the pinned generation it is handed, never this tool.
     "tools/portfolio_grizzly_signal_replay.py": [],
+    # Passive CDP listener for one attended Portfolio123 sitting; writes a
+    # create-only run directory and a draft catalog diff, no stage reads it.
+    "tools/p123_cdp_recorder.py": [],
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],
