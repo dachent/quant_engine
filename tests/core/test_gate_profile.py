@@ -271,12 +271,16 @@ def _approval(tmp_path: Path, **override: Any) -> Path:
 
 
 def _post_verify(
-    tmp_path: Path, spec_sha: str = _hex("b"), status: str = "PASS"
+    tmp_path: Path,
+    spec_sha: str = _hex("b"),
+    status: str = "PASS",
+    release_id: str = _hex("c"),
 ) -> Path:
     path = tmp_path / "post-verify.json"
     path.write_bytes(
         json.dumps(
             {
+                "committed_release": {"release_id": release_id},
                 "kind": "portfolio-post-release-verify-v1",
                 "spec_sha256": spec_sha,
                 "status": status,
@@ -540,10 +544,20 @@ def test_issue_refuses_failed_restore_dirty_tree_and_bad_post_verify(
         {"identity": dict(IDENTITY, worktree_clean=False)},
         {"post_verify_receipt": _post_verify(tmp_path, status="FAIL")},
         {"post_verify_receipt": _post_verify(tmp_path, spec_sha=_hex("0"))},
+        {"post_verify_receipt": _post_verify(tmp_path, release_id=_hex("0"))},
         {"previous_receipt": anchor},  # both anchor and previous
     ):
         with pytest.raises(gp.GateProfileError):
             gp.issue_reuse_receipt(**{**good, **override})
+
+
+def _successor(world: World, predecessor: str) -> Any:
+    return SimpleNamespace(
+        release_id=_hex("d"),
+        code_commit=COMMIT,
+        previous_authority=SimpleNamespace(release_id=predecessor),
+        targets=world.manifest.targets,
+    )
 
 
 def test_chained_receipt_increments_depth_and_inherits_the_anchor(
@@ -557,15 +571,17 @@ def test_chained_receipt_increments_depth_and_inherits_the_anchor(
         spec_sha256=_hex("b"),
     )
     first = json.loads(receipt.read_bytes())
+    common: dict[str, Any] = {
+        "spec": prev_spec,
+        "identity": IDENTITY,
+        "anchor": None,
+        "previous_receipt": receipt,
+        "post_verify_receipt": _post_verify(tmp_path, release_id=_hex("d")),
+        "clean_room_rc": 0,
+        "clean_room_log_sha256": _hex("e"),
+    }
     chained = gp.issue_reuse_receipt(
-        spec=prev_spec,  # type: ignore[arg-type]
-        manifest=world.manifest,  # type: ignore[arg-type]
-        identity=IDENTITY,
-        anchor=None,
-        previous_receipt=receipt,
-        post_verify_receipt=_post_verify(tmp_path),
-        clean_room_rc=0,
-        clean_room_log_sha256=_hex("e"),
+        manifest=_successor(world, first["release_id"]), **common
     )
     assert chained["chain_depth"] == first["chain_depth"] + 1
     assert chained["anchor_sha256"] == first["anchor_sha256"]
@@ -575,12 +591,29 @@ def test_chained_receipt_increments_depth_and_inherits_the_anchor(
     )
     with pytest.raises(gp.GateProfileError, match="different tool identity"):
         gp.issue_reuse_receipt(
+            manifest=_successor(world, first["release_id"]),
+            **{**common, "identity": dict(IDENTITY, head_tree="other")},
+        )
+
+
+def test_chain_refuses_an_older_receipt_than_the_predecessor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world, receipt = _issued_world(tmp_path, monkeypatch)
+    prev_spec = SimpleNamespace(
+        code_commit=COMMIT,
+        release_generations=dict(world.prev_ids),
+        nodes=(),
+        spec_sha256=_hex("b"),
+    )
+    with pytest.raises(gp.GateProfileError, match="does not vouch for the release"):
+        gp.issue_reuse_receipt(
             spec=prev_spec,  # type: ignore[arg-type]
-            manifest=world.manifest,  # type: ignore[arg-type]
-            identity=dict(IDENTITY, head_tree="other"),
+            manifest=_successor(world, _hex("9")),  # a newer release sits between
+            identity=IDENTITY,
             anchor=None,
             previous_receipt=receipt,
-            post_verify_receipt=_post_verify(tmp_path),
+            post_verify_receipt=_post_verify(tmp_path, release_id=_hex("d")),
             clean_room_rc=0,
             clean_room_log_sha256=_hex("e"),
         )
@@ -743,3 +776,29 @@ def test_fallback_names_the_changed_tracked_data_and_code_paths(tmp_path: Path) 
         "FULL: tool code or contract changed: tools/a.py",
     ]
     assert gp._path_reasons(repo, None) == []
+
+
+def test_issue_refuses_post_verify_evidence_for_another_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _world(tmp_path)
+    monkeypatch.setattr(gp, "verify_replica_receipt", lambda path, spec: {})
+    anchor = tmp_path / "c.json"
+    anchor.write_bytes(b"{}")
+    prev_spec = SimpleNamespace(
+        code_commit=COMMIT,
+        release_generations=dict(world.prev_ids),
+        nodes=(),
+        spec_sha256=_hex("b"),
+    )
+    with pytest.raises(gp.GateProfileError, match="another release"):
+        gp.issue_reuse_receipt(
+            spec=prev_spec,  # type: ignore[arg-type]
+            manifest=world.manifest,  # type: ignore[arg-type]
+            identity=IDENTITY,
+            anchor=anchor,
+            previous_receipt=None,
+            post_verify_receipt=_post_verify(tmp_path, release_id=_hex("0")),
+            clean_room_rc=0,
+            clean_room_log_sha256=_hex("e"),
+        )

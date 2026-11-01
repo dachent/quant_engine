@@ -209,6 +209,15 @@ def issue_reuse_receipt(
         raise GateProfileError(
             "post-release-verify receipt is not a PASS for this spec"
         )
+    committed = verify.get("committed_release")
+    if (
+        not isinstance(committed, dict)
+        or committed.get("release_id") != manifest.release_id
+    ):
+        raise GateProfileError(
+            "post-release-verify receipt verified another release than the one "
+            "committed now"
+        )
     depth = 0
     previous_sha: str | None = None
     if anchor is not None:
@@ -225,6 +234,12 @@ def issue_reuse_receipt(
             )
         except ValueError as exc:
             raise GateProfileError(str(exc)) from exc
+        predecessor = getattr(manifest, "previous_authority", None)
+        if predecessor is None or prior.get("release_id") != predecessor.release_id:
+            raise GateProfileError(
+                "previous reuse receipt does not vouch for the release this one "
+                "succeeded"
+            )
         if prior.get("tool_identity_sha256") != identity_digest(identity):
             raise GateProfileError(
                 "previous reuse receipt was issued for a different tool identity"
