@@ -126,7 +126,7 @@ _LENS = """
 import { lensAndDownload, PAGE, STEP_ATTEMPTS } from %(harness)s;
 import crypto from "node:crypto";
 const BODY = Buffer.from("report-bytes");
-function build({ linkInHiddenView = true, brokenNav = null, lensNeverReady = false, noDownload = false }) {
+function build({ linkInHiddenView = true, brokenNav = null, lensNeverReady = false, noDownload = false, lensDisabled = false }) {
   const log = [];
   const state = { view: "command", lazy: "idle", files: new Map(), navFailures: 0 };
   const exists = (sel) => {
@@ -150,7 +150,9 @@ function build({ linkInHiddenView = true, brokenNav = null, lensNeverReady = fal
         if (nav) state.view = nav[1];
         else if (arg.includes("evidence-mode")) {
           if (state.view !== "attribution") return false;
+          if (lensDisabled) return false; // el.disabled: the real click() is a no-op
           state.lazy = lensNeverReady ? "loading" : "ready";
+          state.pressed = true;
         } else if (arg.startsWith("a[data-download")) {
           if (state.view !== "data") return false;
           if (!noDownload) state.files.set("portfolio-report-data.json", BODY);
@@ -160,6 +162,10 @@ function build({ linkInHiddenView = true, brokenNav = null, lensNeverReady = fal
       throw new Error("unexpected evaluate");
     },
     async waitForFunction(fn, arg) {
+      if (fn === PAGE.pressed) {
+        if (!state.pressed) throw new Error("lens button never became pressed");
+        return;
+      }
       if (fn === PAGE.viewShown) {
         if (state.view !== arg) throw new Error("view " + arg + " not shown");
         return;
@@ -199,6 +205,11 @@ const out = {};
 {
   const r = build({ noDownload: true });
   out.nodl = await lensAndDownload(r.page, r.io);
+}
+{
+  const r = build({ lensDisabled: true });
+  out.disabled = await lensAndDownload(r.page, r.io);
+  out.disabled_downloaded = r.state.files.size;
 }
 out.attempts = STEP_ATTEMPTS;
 process.stdout.write(JSON.stringify(out));
@@ -252,3 +263,7 @@ def test_lens_and_download_fails_closed_with_a_named_step() -> None:
     assert "download_sha256" not in out["retry"]
     assert out["lens"]["failure"]["step"] == "wait for lens data"
     assert out["nodl"]["failure"]["step"] == "wait for download"
+    # a disabled (unavailable) lens button is a failed click, and nothing is downloaded
+    assert out["disabled"]["failure"]["step"] == "select LIVE_PLUS_BACKTEST lens"
+    assert "disabled" in out["disabled"]["failure"]["message"]
+    assert out["disabled_downloaded"] == 0

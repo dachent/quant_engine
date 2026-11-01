@@ -176,9 +176,15 @@ export class StepError extends Error {
 export const PAGE = {
   click: (selector) => {
     const el = document.querySelector(selector);
-    if (!el) return false;
+    // `HTMLElement.click()` on a disabled button dispatches nothing (an unavailable lens),
+    // so a missing or disabled element is a failed click, never a silent success.
+    if (!el || el.disabled) return false;
     el.click();
     return true;
+  },
+  pressed: (selector) => {
+    const el = document.querySelector(selector);
+    return Boolean(el) && el.getAttribute("aria-pressed") === "true";
   },
   viewShown: (name) => {
     const view = document.querySelector(`[data-view="${name}"]`);
@@ -202,7 +208,7 @@ async function attempts(step, count, action, sleepFn) {
 export async function domClick(page, selector, step, io) {
   return attempts(step, STEP_ATTEMPTS, async () => {
     await page.waitForSelector(selector, { state: "attached", timeout: STEP_WAIT_MS });
-    if (!(await page.evaluate(PAGE.click, selector))) throw new Error(`${selector} vanished before the click`);
+    if (!(await page.evaluate(PAGE.click, selector))) throw new Error(`${selector} is missing or disabled`);
   }, io.sleep);
 }
 
@@ -256,6 +262,13 @@ export async function lensAndDownload(page, io = realIo) {
       });
     } catch (error) {
       throw new StepError("wait for lens data", String((error && error.message) || error).slice(0, 300));
+    }
+    // The lens is open only once the mode button reports it is the active one: a failed
+    // lazy decode, or a click that changed nothing, leaves it unpressed and fails here.
+    try {
+      await page.waitForFunction(PAGE.pressed, LENS_MODE, { timeout: STEP_WAIT_MS });
+    } catch (error) {
+      throw new StepError("confirm lens is active", String((error && error.message) || error).slice(0, 300));
     }
     out.lens_open_ms = io.now() - t1;
     await openView(page, NAV_DATA, "data", "open data view", io);
