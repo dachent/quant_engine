@@ -210,7 +210,10 @@ def _run_lens(nav_failures: int) -> dict[str, object]:
     node = runtime.node if runtime else shutil.which("node")
     if node is None:
         pytest.skip("node is unavailable")
-    source = _LENS % {"harness": json.dumps(HARNESS.as_uri()), "nav_failures": nav_failures}
+    source = _LENS % {
+        "harness": json.dumps(HARNESS.as_uri()),
+        "nav_failures": nav_failures,
+    }
     done = subprocess.run(
         [node, "--input-type=module", "-e", source],
         check=True,
