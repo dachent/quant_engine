@@ -98,6 +98,20 @@ alternating signals from the reviewed vocabulary (`Buy`, `Sell`, `Rebuy`,
 `Hypothetical Sell`), and the last signal date reaches the page's stated end date.
 `INCOMPLETE_MISSING_CAPABILITY` and `FAILED_REQUIRED_CAPABILITY` exit non-zero.
 
+### Observed 2026-10-31 and later
+
+- The history endpoints failed vendor-side on 2026-10-31 (HTTP 500 for every
+  slug and mode; `modelsHistorical` 500 even unauthenticated) and worked on a
+  later day. After the fix, `modelTradeHistory` returned CSVs byte-identical to
+  the owner's retained exports, and `modelsHistorical` returned exactly the 20
+  rows the page withholds.
+- The CSV arrives as a browser download (`content-disposition`), so the response
+  body is empty. The driver binds the browser's download event to its response;
+  a response whose download never arrives fails the run.
+- `modelsHistorical` also carries a `user` profile object (PII). The raw body
+  stays only in the governed root; the derived layer removes `user`, and the
+  sanitization audit fails the run if any other data field would change.
+
 ### Observed 2026-10-30
 
 - Gated calls carry only `authorization` and `emailverified` headers; no global key.
