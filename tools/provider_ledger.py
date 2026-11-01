@@ -8104,6 +8104,87 @@ def _quantbase_csv_cell(value: object) -> str:
     return str(value)
 
 
+def _quantbase_har_activity_entries(har: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Every successful bare GET of the account-activity route in one HAR."""
+
+    log = har.get("log")
+    if not isinstance(log, Mapping):
+        raise ProviderLedgerError("Quantbase account activity HAR shape differs")
+    entries = log.get("entries")
+    if not isinstance(entries, list):
+        raise ProviderLedgerError("Quantbase account activity HAR shape differs")
+    matches: list[Mapping[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        request = entry.get("request")
+        response = entry.get("response")
+        if not isinstance(request, Mapping) or not isinstance(response, Mapping):
+            continue
+        raw_url = request.get("url")
+        if not isinstance(raw_url, str):
+            continue
+        parsed_url = urlsplit(raw_url)
+        if (
+            request.get("method") == "GET"
+            and parsed_url.scheme == "https"
+            and parsed_url.hostname == "qbapi3.com"
+            and re.fullmatch(r"/api/users/[^/]+/accounts/activity/", parsed_url.path)
+            and parsed_url.query == ""
+            and request.get("queryString") == []
+            and response.get("status") == 200
+        ):
+            matches.append(entry)
+    return matches
+
+
+def _quantbase_capture_time(match: Mapping[str, Any]) -> datetime:
+    """The HAR entry's ``startedDateTime`` as a parsed timestamp."""
+
+    try:
+        capture_observed_at = datetime.fromisoformat(
+            _text(
+                match.get("startedDateTime"),
+                "Quantbase account activity startedDateTime",
+            ).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ProviderLedgerError(
+            "Quantbase account activity capture time is invalid"
+        ) from exc
+    return capture_observed_at
+
+
+def _quantbase_har_response(match: Mapping[str, Any]) -> Any:
+    """The decoded JSON body of a matched HAR entry."""
+
+    response = match["response"]
+    content = response.get("content")
+    if not isinstance(content, Mapping) or not isinstance(content.get("text"), str):
+        raise ProviderLedgerError("Quantbase account activity HAR response is missing")
+    response_text = content["text"]
+    if content.get("encoding") == "base64":
+        try:
+            response_text = base64.b64decode(response_text, validate=True).decode(
+                "utf-8"
+            )
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ProviderLedgerError(
+                "Quantbase account activity HAR response encoding differs"
+            ) from exc
+    elif content.get("encoding") not in {None, ""}:
+        raise ProviderLedgerError(
+            "Quantbase account activity HAR response encoding differs"
+        )
+    try:
+        har_response = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise ProviderLedgerError(
+            "Quantbase account activity HAR response is not JSON"
+        ) from exc
+    return har_response
+
+
 def _quantbase_flow_coverage(
     manifest: GenerationManifest,
     catalog: Mapping[str, Any],
@@ -8124,17 +8205,31 @@ def _quantbase_flow_coverage(
     declared_artifact_ids = {artifact.artifact_id for artifact in manifest.artifacts}
     declared_legacy_ids = declared_artifact_ids & set(legacy_capture_ids)
     declared_current_ids = declared_artifact_ids & set(current_capture_ids)
-    if not declared_legacy_ids and not declared_current_ids:
+    # A native HAR declared by role (schema version 1, not the legacy-unknown pair).
+    role_har_ids = tuple(
+        sorted(
+            artifact.artifact_id
+            for artifact in manifest.artifacts
+            if artifact.schema_name == "quantbase-native-har"
+            and artifact.schema_version == "1"
+        )
+    )
+    if not declared_legacy_ids and not declared_current_ids and not role_har_ids:
         return {}
     if (
         declared_legacy_ids not in (set(), set(legacy_capture_ids))
         or declared_current_ids not in (set(), set(current_capture_ids))
         or (declared_legacy_ids and declared_current_ids)
+        or (role_har_ids and (declared_legacy_ids or declared_current_ids))
+        or any(not item.startswith("source/har/") for item in role_har_ids)
     ):
         raise ProviderLedgerError(
             "Quantbase account activity capture artifact set is incomplete"
         )
-    capture_ids = legacy_capture_ids if declared_legacy_ids else current_capture_ids
+    if role_har_ids:
+        capture_ids = role_har_ids
+    else:
+        capture_ids = legacy_capture_ids if declared_legacy_ids else current_capture_ids
     artifact_ids = (csv_artifact_id, *capture_ids)
 
     account_id = _CSV_FACT_ACCOUNT[_QUANTBASE]
@@ -8183,53 +8278,13 @@ def _quantbase_flow_coverage(
 
     if capture_ids == legacy_capture_ids:
         har_id, response_id = legacy_capture_ids
-        har = verified[har_id]
-        log = har.get("log")
-        if not isinstance(log, Mapping):
-            raise ProviderLedgerError("Quantbase account activity HAR shape differs")
-        entries = log.get("entries")
-        if not isinstance(entries, list):
-            raise ProviderLedgerError("Quantbase account activity HAR shape differs")
-        matches: list[Mapping[str, Any]] = []
-        for entry in entries:
-            if not isinstance(entry, Mapping):
-                continue
-            request = entry.get("request")
-            response = entry.get("response")
-            if not isinstance(request, Mapping) or not isinstance(response, Mapping):
-                continue
-            raw_url = request.get("url")
-            if not isinstance(raw_url, str):
-                continue
-            parsed_url = urlsplit(raw_url)
-            if (
-                request.get("method") == "GET"
-                and parsed_url.scheme == "https"
-                and parsed_url.hostname == "qbapi3.com"
-                and re.fullmatch(
-                    r"/api/users/[^/]+/accounts/activity/", parsed_url.path
-                )
-                and parsed_url.query == ""
-                and request.get("queryString") == []
-                and response.get("status") == 200
-            ):
-                matches.append(entry)
+        matches = _quantbase_har_activity_entries(verified[har_id])
         if len(matches) != 1:
             raise ProviderLedgerError(
                 "Quantbase account activity HAR request is missing or ambiguous"
             )
         match = matches[0]
-        try:
-            capture_observed_at = datetime.fromisoformat(
-                _text(
-                    match.get("startedDateTime"),
-                    "Quantbase account activity startedDateTime",
-                ).replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise ProviderLedgerError(
-                "Quantbase account activity capture time is invalid"
-            ) from exc
+        capture_observed_at = _quantbase_capture_time(match)
         if (
             capture_observed_at.tzinfo is None
             or capture_observed_at.utcoffset() is None
@@ -8237,36 +8292,37 @@ def _quantbase_flow_coverage(
         ):
             raise ProviderLedgerError("Quantbase account activity capture date differs")
 
-        response = match["response"]
-        content = response.get("content")
-        if not isinstance(content, Mapping) or not isinstance(content.get("text"), str):
-            raise ProviderLedgerError(
-                "Quantbase account activity HAR response is missing"
-            )
-        response_text = content["text"]
-        if content.get("encoding") == "base64":
-            try:
-                response_text = base64.b64decode(response_text, validate=True).decode(
-                    "utf-8"
-                )
-            except (ValueError, UnicodeDecodeError) as exc:
-                raise ProviderLedgerError(
-                    "Quantbase account activity HAR response encoding differs"
-                ) from exc
-        elif content.get("encoding") not in {None, ""}:
-            raise ProviderLedgerError(
-                "Quantbase account activity HAR response encoding differs"
-            )
-        try:
-            har_response = json.loads(response_text)
-        except json.JSONDecodeError as exc:
-            raise ProviderLedgerError(
-                "Quantbase account activity HAR response is not JSON"
-            ) from exc
+        har_response = _quantbase_har_response(match)
         captured_response = verified[response_id]
         if har_response != captured_response:
             raise ProviderLedgerError(
                 "Quantbase account activity response differs from HAR"
+            )
+    elif role_har_ids:
+        # Role-driven proof: the declared native HAR(s) are the only source, so a
+        # capture of any file name or date is proved the same way. The response is
+        # read from the HAR itself; the capture may be later than the cutoff but
+        # never earlier.
+        matches = [
+            entry
+            for har_id in role_har_ids
+            for entry in _quantbase_har_activity_entries(verified[har_id])
+        ]
+        if len(matches) != 1:
+            raise ProviderLedgerError(
+                "Quantbase account activity HAR request is missing or ambiguous"
+            )
+        capture_observed_at = _quantbase_capture_time(matches[0])
+        if (
+            capture_observed_at.tzinfo is None
+            or capture_observed_at.utcoffset() is None
+            or capture_observed_at.date() < manifest.as_of_date
+        ):
+            raise ProviderLedgerError("Quantbase account activity capture date differs")
+        captured_response = _quantbase_har_response(matches[0])
+        if not isinstance(captured_response, Mapping):
+            raise ProviderLedgerError(
+                "Quantbase account activity response shape differs"
             )
     else:
         proof_id, response_id = current_capture_ids
@@ -8376,7 +8432,7 @@ def _quantbase_flow_coverage(
             raise ProviderLedgerError(
                 f"Quantbase account activity row {index} item differs"
             )
-        fields.update(item)
+        row_times: list[datetime] = []
         for field in timestamp_fields:
             raw_timestamp = item.get(field)
             if raw_timestamp is None or raw_timestamp == "":
@@ -8401,7 +8457,13 @@ def _quantbase_flow_coverage(
                 raise ProviderLedgerError(
                     "Quantbase account activity timestamp is invalid"
                 )
-            observed_times.append(parsed_timestamp)
+            row_times.append(parsed_timestamp)
+        if role_har_ids and row_times and max(row_times).date() > manifest.as_of_date:
+            # Later source evidence is preserved in the HAR, but a post-cutoff
+            # observation is not part of the generation (repository policy).
+            continue
+        fields.update(item)
+        observed_times.extend(row_times)
         normalized.append((response_row["type"], item))
     if not observed_times:
         raise ProviderLedgerError("Quantbase account activity date coverage is empty")
@@ -8419,7 +8481,11 @@ def _quantbase_flow_coverage(
     if (
         not csv_rows
         or len(csv_rows[0]) != len(set(csv_rows[0]))
-        or set(csv_rows[0]) != fields
+        or (
+            not fields <= set(csv_rows[0])
+            if role_har_ids
+            else set(csv_rows[0]) != fields
+        )
     ):
         raise ProviderLedgerError(
             "Quantbase account activity CSV differs from captured response"
@@ -8442,9 +8508,11 @@ def _quantbase_flow_coverage(
     return {
         account_id: {
             "capture_observed_at": capture_observed_at.isoformat(),
-            "effective_end": capture_observed_at.date().isoformat(),
+            "effective_end": (
+                manifest.as_of_date if role_har_ids else capture_observed_at.date()
+            ).isoformat(),
             "effective_start": min(observed_times).date().isoformat(),
-            "record_count": len(response_rows),
+            "record_count": len(normalized) if role_har_ids else len(response_rows),
             "source_artifact_ids": sorted(artifact_ids),
         }
     }
