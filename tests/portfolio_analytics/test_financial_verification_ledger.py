@@ -576,3 +576,73 @@ def test_semantic_identity_still_ignores_counters() -> None:
     assert outcomes.financial_outcomes_semantic_identity(
         proof
     ) == outcomes.financial_outcomes_semantic_identity(other)
+
+
+def _replay(
+    case: tuple[tuple[Any, ...], Path, str],
+    state_root: Path,
+    *,
+    parallel: bool,
+) -> tuple[dict[str, int], list[dict[str, Any]], dict[str, Any]]:
+    """Replay one case with or without a pre-built plan and worker-derived bytes."""
+    nodes, source_root, kind = case
+    invocation = SimpleNamespace(
+        nodes=nodes, roots={"analytics": nodes[0].source_dir}, state_root=state_root
+    )
+    plan = outcomes._replay_plan(invocation, nodes[1], kind, source_root=source_root)
+    derived = None
+    if parallel:
+        # A pool only forms when there are two fits to overlap; a twin under
+        # another identity gives it that, and must come back byte-equal.
+        twin = plan._replace(calculation_identity="f" * 64)
+        results = outcomes._derive_in_parallel([plan, twin])
+        assert results[plan.calculation_identity] == results["f" * 64]
+        derived = results[plan.calculation_identity]
+    counters = {key: 0 for key in outcomes._WORK_COUNTER_KEYS}
+    calls: list[dict[str, Any]] = []
+    value = outcomes._replay_model(
+        invocation,
+        nodes[1],
+        kind,
+        source_root=source_root,
+        work_counters=counters,
+        calls=calls,
+        plan=plan,
+        derived=derived,
+    )
+    return counters, calls, value
+
+
+@pytest.mark.parametrize("builder", [_decomposition_case, _dependence_case])
+def test_worker_derived_replay_equals_the_serial_replay(
+    tmp_path: Path, builder: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fits run in another process book the same counters, calls, receipt and value."""
+    monkeypatch.setenv(outcomes._REPLAY_WORKERS_ENV, "2")
+    case = builder(tmp_path)
+    serial = _replay(case, tmp_path / "state-serial", parallel=False)
+    parallel = _replay(case, tmp_path / "state-parallel", parallel=True)
+    assert parallel[0] == serial[0]
+    assert parallel[1] == serial[1]
+    assert parallel[2] == serial[2]
+    assert _receipt_names(tmp_path / "state-parallel") == _receipt_names(
+        tmp_path / "state-serial"
+    )
+    (name,) = _receipt_names(tmp_path / "state-serial")
+    assert (tmp_path / "state-parallel" / RECEIPTS / name).read_bytes() == (
+        tmp_path / "state-serial" / RECEIPTS / name
+    ).read_bytes()
+
+
+def test_replay_worker_count_is_bounded_and_validated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(outcomes._REPLAY_WORKERS_ENV, "1")
+    assert outcomes._replay_worker_count(26) == 1
+    monkeypatch.setenv(outcomes._REPLAY_WORKERS_ENV, "64")
+    assert outcomes._replay_worker_count(26) == 16
+    assert outcomes._replay_worker_count(3) == 3
+    for bad in ("0", "-2", "many"):
+        monkeypatch.setenv(outcomes._REPLAY_WORKERS_ENV, bad)
+        with pytest.raises(outcomes.FinancialOutcomeError, match="positive integer"):
+            outcomes._replay_worker_count(5)

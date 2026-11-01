@@ -11,12 +11,14 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 import contextlib
 from datetime import UTC, date, datetime
 import hashlib
+from concurrent.futures import ProcessPoolExecutor
 from itertools import product
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import re
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import derived_epoch_perimeter
 from quant_engine.core.pipeline import ArtifactNode, GenerationNode
@@ -854,16 +856,158 @@ def _correlation_consumed_producer_identity(
     }
 
 
-def _replay_model(
+class _DerivedReplay(NamedTuple):
+    """One replay's rebuilt bytes and fit counts, produced in a worker process."""
+
+    manifest_bytes: bytes
+    result_bytes: bytes
+    fits_dynamic: int
+    fits_static: int
+
+
+def _rebuild(
+    kind: str,
+    spec_path: Path,
+    build_root: Path,
+    on_dynamic_fit: Callable[[], None],
+    on_static_fit: Callable[[], None],
+) -> tuple[bytes, bytes]:
+    """Run the domain producer once, reporting every model fit it makes."""
+    import portfolio_decomposition
+    import portfolio_correlation
+
+    if kind != "DECOMPOSITION":
+        _result, rebuilt_manifest, result_bytes = (
+            portfolio_correlation.build_correlation(spec_path, build_root)
+        )
+        return rebuilt_manifest.to_json_bytes(), result_bytes
+    original_dynamic_fit: Any = portfolio_decomposition._dynamic_fit
+    original_fit: Any = portfolio_decomposition._fit
+
+    def counted_dynamic_fit(*args: object, **kwargs: object) -> Any:
+        on_dynamic_fit()
+        return original_dynamic_fit(*args, **kwargs)
+
+    def counted_fit(*args: object, **kwargs: object) -> Any:
+        on_static_fit()
+        return original_fit(*args, **kwargs)
+
+    portfolio_decomposition._dynamic_fit = cast(Any, counted_dynamic_fit)
+    portfolio_decomposition._fit = cast(Any, counted_fit)
+    try:
+        _result, rebuilt_manifest, result_bytes = cast(
+            Any, portfolio_decomposition.build_decomposition
+        )(spec_path, build_root)
+    finally:
+        portfolio_decomposition._dynamic_fit = original_dynamic_fit
+        portfolio_decomposition._fit = original_fit
+    return rebuilt_manifest.to_json_bytes(), result_bytes
+
+
+def _derive_in_worker(kind: str, spec_path: Path, build_root: Path) -> _DerivedReplay:
+    fits = [0, 0]
+
+    def count_dynamic() -> None:
+        fits[0] += 1
+
+    def count_static() -> None:
+        fits[1] += 1
+
+    manifest_bytes, result_bytes = _rebuild(
+        kind, spec_path, build_root, count_dynamic, count_static
+    )
+    return _DerivedReplay(manifest_bytes, result_bytes, fits[0], fits[1])
+
+
+_REPLAY_WORKERS_ENV = "QE_REPLAY_WORKERS"
+_BLAS_THREADS_ENV = "QE_REPLAY_BLAS_THREADS"
+_BLAS_THREAD_VARIABLES = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+)
+
+
+def _replay_worker_count(jobs: int) -> int:
+    """Processes for ``jobs`` fits; ``QE_REPLAY_WORKERS=1`` keeps the serial path."""
+    configured = os.environ.get(_REPLAY_WORKERS_ENV)
+    if configured is not None:
+        try:
+            requested = int(configured)
+        except ValueError:
+            raise FinancialOutcomeError(
+                f"{_REPLAY_WORKERS_ENV} must be a positive integer"
+            ) from None
+        if requested < 1:
+            raise FinancialOutcomeError(
+                f"{_REPLAY_WORKERS_ENV} must be a positive integer"
+            )
+    else:
+        requested = max(1, (os.cpu_count() or 1) // 2)
+    return max(1, min(jobs, requested, 16))
+
+
+def _derive_in_parallel(
+    plans: Sequence[_ReplayPlan],
+) -> dict[str, _DerivedReplay]:
+    """Rebuild each plan in its own process; results are keyed by identity.
+
+    Every replay is independent and is compared byte for byte afterwards, so
+    completion order cannot change what is accepted or recorded.
+    """
+    workers = _replay_worker_count(len(plans))
+    if workers < 2:
+        return {}
+    # Workers inherit the caller's numerical environment unchanged, so their
+    # arithmetic is the serial path's. A BLAS thread cap is applied only when
+    # the operator asks for one, because spawned workers read it at import.
+    cap = os.environ.get(_BLAS_THREADS_ENV)
+    previous = {name: os.environ.get(name) for name in _BLAS_THREAD_VARIABLES}
+    if cap is not None:
+        for name in _BLAS_THREAD_VARIABLES:
+            os.environ[name] = cap
+    try:
+        with ProcessPoolExecutor(
+            max_workers=workers, mp_context=multiprocessing.get_context("spawn")
+        ) as pool:
+            futures = {
+                plan.calculation_identity: pool.submit(
+                    _derive_in_worker, plan.kind, plan.spec_path, plan.build_root
+                )
+                for plan in plans
+            }
+            return {key: future.result() for key, future in futures.items()}
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+class _ReplayPlan(NamedTuple):
+    """Everything a replay needs once its inputs are verified, before any fit."""
+
+    kind: str
+    node_id: str
+    artifact_bytes: bytes
+    manifest: GenerationManifest
+    spec_path: Path
+    build_root: Path
+    model_count: int
+    receipt: dict[str, Any]
+    receipt_path: Path | None
+    calculation_identity: str
+
+
+def _replay_plan(
     spec: Any,
     artifact: ArtifactNode,
     kind: str,
     *,
     source_root: Path | None = None,
-    work_counters: dict[str, int] | None = None,
-    calls: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Delegate numerical replay to the existing domain producer, once per file."""
+) -> _ReplayPlan:
+    """Verify one replay's inputs and name its calculation, without fitting."""
     artifact_bytes = _verified_file(artifact.path, artifact.sha256, artifact.size_bytes)
     generation = _generation(spec, artifact)
     assert generation.source_dir is not None
@@ -906,12 +1050,10 @@ def _replay_model(
             parsed.factor_source,
             *parsed.provenance_sources,
         ]
-        build = cast(Any, portfolio_decomposition.build_decomposition)
         producer_dependencies = portfolio_decomposition._consumed_producer_identity()
     else:
         correlation_spec = portfolio_correlation._load_spec(specification.path)
         source_definitions = [correlation_spec.source]
-        build = cast(Any, portfolio_correlation.build_correlation)
         producer_dependencies = _correlation_consumed_producer_identity(
             portfolio_correlation
         )
@@ -972,7 +1114,44 @@ def _replay_model(
         "schema_version": 1,
         **receipt_base,
     }
-    receipt_path = _replay_receipt_path(spec, calculation_identity)
+    return _ReplayPlan(
+        kind=kind,
+        node_id=artifact.node_id,
+        artifact_bytes=artifact_bytes,
+        manifest=manifest,
+        spec_path=specification.path,
+        build_root=next(iter(roots)),
+        model_count=len(parsed.models) if kind == "DECOMPOSITION" else 0,
+        receipt=receipt,
+        receipt_path=_replay_receipt_path(spec, calculation_identity),
+        calculation_identity=calculation_identity,
+    )
+
+
+def _replay_model(
+    spec: Any,
+    artifact: ArtifactNode,
+    kind: str,
+    *,
+    source_root: Path | None = None,
+    work_counters: dict[str, int] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+    plan: _ReplayPlan | None = None,
+    derived: _DerivedReplay | None = None,
+) -> dict[str, Any]:
+    """Delegate numerical replay to the existing domain producer, once per file.
+
+    ``plan`` and ``derived`` let the caller verify every input first and run the
+    fits in other processes; the outcome, counters and call records are exactly
+    what the serial path produces for the same inputs.
+    """
+    if plan is None:
+        plan = _replay_plan(spec, artifact, kind, source_root=source_root)
+    artifact_bytes = plan.artifact_bytes
+    manifest = plan.manifest
+    calculation_identity = plan.calculation_identity
+    receipt = plan.receipt
+    receipt_path = plan.receipt_path
     if _read_replay_receipt(receipt_path, receipt):
         if work_counters is not None:
             work_counters["receipt_reuse_count"] += 1
@@ -983,48 +1162,46 @@ def _replay_model(
                 )
             )
         return cast(dict[str, Any], json.loads(artifact_bytes.decode("utf-8")))
-    record = _call_record(kind, [artifact.node_id], calculation_identity, "REDERIVED")
+    record = _call_record(kind, [plan.node_id], calculation_identity, "REDERIVED")
     if calls is not None:
         calls.append(record)
     if work_counters is not None:
         work_counters["full_rederivation_count"] += 1
     if kind == "DECOMPOSITION":
-        original_dynamic_fit: Any = portfolio_decomposition._dynamic_fit
-        original_fit: Any = portfolio_decomposition._fit
-
-        def counted_dynamic_fit(*args: object, **kwargs: object) -> Any:
-            record["model_fit_calls_dynamic"] += 1
-            if work_counters is not None:
-                work_counters["model_fit_calls"] += 1
-            return original_dynamic_fit(*args, **kwargs)
-
-        def counted_fit(*args: object, **kwargs: object) -> Any:
-            record["model_fit_calls_static"] += 1
-            if work_counters is not None:
-                work_counters["model_fit_calls"] += 1
-            return original_fit(*args, **kwargs)
-
-        record["grid_search_calls"] += len(parsed.models)
+        record["grid_search_calls"] += plan.model_count
         if work_counters is not None:
-            work_counters["grid_search_calls"] += len(parsed.models)
-        portfolio_decomposition._dynamic_fit = cast(Any, counted_dynamic_fit)
-        portfolio_decomposition._fit = cast(Any, counted_fit)
-        try:
-            result, rebuilt_manifest, result_bytes = build(
-                specification.path, next(iter(roots))
-            )
-        finally:
-            portfolio_decomposition._dynamic_fit = original_dynamic_fit
-            portfolio_decomposition._fit = original_fit
+            work_counters["grid_search_calls"] += plan.model_count
     else:
         record["correlation_build_calls"] += 1
         if work_counters is not None:
             work_counters["correlation_build_calls"] += 1
-        result, rebuilt_manifest, result_bytes = build(
-            specification.path, next(iter(roots))
+
+    def count_dynamic() -> None:
+        record["model_fit_calls_dynamic"] += 1
+        if work_counters is not None:
+            work_counters["model_fit_calls"] += 1
+
+    def count_static() -> None:
+        record["model_fit_calls_static"] += 1
+        if work_counters is not None:
+            work_counters["model_fit_calls"] += 1
+
+    if derived is None:
+        rebuilt_manifest_bytes, result_bytes = _rebuild(
+            kind, plan.spec_path, plan.build_root, count_dynamic, count_static
+        )
+    else:
+        # The fits already ran in another process; book them as the serial path would.
+        for _ in range(derived.fits_dynamic):
+            count_dynamic()
+        for _ in range(derived.fits_static):
+            count_static()
+        rebuilt_manifest_bytes, result_bytes = (
+            derived.manifest_bytes,
+            derived.result_bytes,
         )
     if (
-        rebuilt_manifest.to_json_bytes() != manifest.to_json_bytes()
+        rebuilt_manifest_bytes != manifest.to_json_bytes()
         or result_bytes != artifact_bytes
     ):
         raise FinancialOutcomeError(
@@ -2135,6 +2312,31 @@ def _validate_financial_outcomes(
     plan_bindings = {}
     plan_artifacts: dict[tuple[str, str, str], tuple[Path, str, int]] = {}
     selected_cells = {}
+    # Verify every replay's inputs first, then run the fits that the serial walk
+    # below would run -- in the same first-use order, one per calculation identity
+    # that has no receipt yet -- across worker processes.
+    replay_plans: dict[tuple[str, Path], _ReplayPlan] = {}
+    for node_id, key in roles.items():
+        if key[0] not in {"DECOMPOSITION", "DEPENDENCE"}:
+            continue
+        node = nodes[node_id]
+        cache_key = (key[0], node.path.resolve())
+        if cache_key not in replay_plans:
+            replay_plans[cache_key] = _replay_plan(
+                spec,
+                node,
+                key[0],
+                source_root=plans[key[-1]] if key[0] == "DECOMPOSITION" else None,
+            )
+    pending: dict[str, _ReplayPlan] = {}
+    for replay_plan in replay_plans.values():
+        if replay_plan.calculation_identity not in pending and not _read_replay_receipt(
+            replay_plan.receipt_path, replay_plan.receipt
+        ):
+            pending[replay_plan.calculation_identity] = replay_plan
+    derived_replays = (
+        _derive_in_parallel(list(pending.values())) if len(pending) > 1 else {}
+    )
     for node_id, key in roles.items():
         if key[0] not in {"DECOMPOSITION", "DEPENDENCE"}:
             continue
@@ -2148,6 +2350,10 @@ def _validate_financial_outcomes(
                 source_root=plans[key[-1]] if key[0] == "DECOMPOSITION" else None,
                 work_counters=work_counters,
                 calls=calls,
+                plan=replay_plans[cache_key],
+                derived=derived_replays.get(
+                    replay_plans[cache_key].calculation_identity
+                ),
             )
             replay_records[cache_key] = calls[-1]
         elif node_id not in replay_records[cache_key]["node_ids"]:
