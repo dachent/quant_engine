@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import tempfile
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
@@ -52,8 +53,10 @@ _MENU_ITEMS = (
     ("blended", "Blended history (backtest + live)"),
     ("live", "Live history only"),
 )
-_QUERY_VALUE_CAPABILITIES = frozenset({"models.history", "models.historical"})
-_AUTHENTICATED = _QUERY_VALUE_CAPABILITIES
+_QUERY_VALUE_CAPABILITIES = frozenset(
+    {"models.history", "models.historical", "models.page"}
+)
+_AUTHENTICATED = frozenset({"models.history", "models.historical"})
 #: modelsHistorical returned HTTP 500 for the signed-in owner on 2026-10-30; it is
 #: contracted and recorded, but a failure there does not fail the run.
 _OPTIONAL_CAPABILITIES = frozenset({"models.historical"})
@@ -107,7 +110,9 @@ def assert_output_root(root: Path) -> None:
 class Recorder:
     """Decide per response what, if anything, is persisted. Pure: no browser."""
 
-    def __init__(self, root: Path, *, mode: str) -> None:
+    def __init__(
+        self, root: Path, *, mode: str, slugs: Sequence[str] | None = None
+    ) -> None:
         if mode not in {"discover", "capture", "record"}:
             raise GrizzlyCaptureError("mode must be discover, capture or record")
         assert_output_root(root)
@@ -120,6 +125,7 @@ class Recorder:
         self.artifacts: list[dict[str, object]] = []
         self.skipped_offorigin = 0
         self.failures: list[str] = []
+        self.slugs = frozenset(slugs) if slugs else None
 
     def handle(
         self,
@@ -159,6 +165,15 @@ class Recorder:
             entry["query"] = dict(parse_qsl(parsed.query))
         self.entries.append(entry)
         if verdict == "denied":
+            return
+        query = entry.get("query")
+        if (
+            self.mode == "capture"
+            and self.slugs is not None
+            and isinstance(query, dict)
+            and query.get("slug") not in self.slugs
+        ):
+            entry["skipped"] = "slug not requested"
             return
         if self.mode == "discover":
             self._discover(entry, read_body)
@@ -234,6 +249,10 @@ class Recorder:
             self._fail(entry, "authenticated request evidence is missing")
             return
         body = bytes(read_body())
+        if not body and "content-disposition" in entry["response_header_names"]:  # type: ignore[operator]
+            # An attachment reaches the browser as a download, not a body.
+            entry["awaiting_download"] = True
+            return
         if not body:
             self._fail(entry, "empty body")
             return
@@ -249,9 +268,32 @@ class Recorder:
         entry["raw_path"] = f"raw/{name}"
         self.artifacts.append({"path": f"raw/{name}", **record})
 
+    def attach_download(self, data: bytes) -> None:
+        """Bind a completed browser download to the oldest awaiting response."""
+
+        waiting = [e for e in self.entries if e.get("awaiting_download")]
+        if not waiting or not data:
+            self.failures.append("download: no awaiting response or empty file")
+            return
+        entry = waiting[0]
+        entry.pop("awaiting_download")
+        query = entry.get("query")
+        suffix = (
+            "-".join(str(v) for v in query.values()) if isinstance(query, dict) else ""
+        )
+        name = f"{entry['ordinal']:04d}-{entry['capability']}-{suffix}.body"
+        record = _write_new(self.root / "raw" / name, data)
+        entry.update(record)
+        entry["raw_path"] = f"raw/{name}"
+        entry["delivery"] = "download"
+        self.artifacts.append({"path": f"raw/{name}", **record})
+
     def finish(self, *, expected_slugs: Sequence[str] = ()) -> dict[str, object]:
         """Derive from raw bytes, then write the manifest last."""
 
+        for entry in self.entries:
+            if entry.get("awaiting_download"):
+                self._fail(entry, "download was never delivered")
         derived: list[dict[str, object]] = []
         captured: set[str] = set()
         for entry in self.entries:
@@ -346,6 +388,8 @@ def verify_run(root: Path) -> dict[str, object]:
     if manifest["mode"] in {"capture", "record"}:
         derived = json.loads((root / "derived" / "summary.json").read_text("utf-8"))
         for record in derived:
+            if "summary" not in record:
+                continue
             fresh = summarize_capability(
                 record["capability"], (root / record["raw_path"]).read_bytes()
             )
@@ -360,7 +404,9 @@ def _cdp_run(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
     except ImportError as exc:
         raise GrizzlyCaptureError("Playwright is required for live capture") from exc
 
-    recorder = Recorder(args.output_root, mode=args.command)
+    recorder = Recorder(
+        args.output_root, mode=args.command, slugs=args.slug or [_DEFAULT_SLUG]
+    )
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(args.cdp_url)
         if not browser.contexts:
@@ -382,6 +428,14 @@ def _cdp_run(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
 
         context.on("response", on_response)
         page = context.new_page()
+
+        def on_download(download: Any) -> None:
+            with tempfile.TemporaryDirectory() as scratch:
+                target = Path(scratch) / "download.bin"
+                download.save_as(str(target))
+                recorder.attach_download(target.read_bytes())
+
+        page.on("download", on_download)
         for slug in args.slug or [_DEFAULT_SLUG]:
             if re.fullmatch(SLUG_PATTERN, slug) is None:
                 raise GrizzlyCaptureError("slug is invalid")
@@ -400,6 +454,7 @@ def _cdp_run(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
                     timeout=30000,
                 ):
                     page.get_by_role("menuitem", name=label).click()
+                page.wait_for_timeout(3000)
         if args.manual_seconds:
             # Fallback: the owner clicks the menu items in the attached tab.
             page.wait_for_timeout(args.manual_seconds * 1000)

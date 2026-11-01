@@ -246,10 +246,18 @@ def test_gated_history_routes_are_exact_and_vocabulary_bound() -> None:
             endpoint.validate_query(query)
 
 
-def test_historical_json_parses_like_the_page_table() -> None:
-    body = {"sheetData": page(sheet_rows())["pageProps"]["sheetData"]}  # type: ignore[index]
+def test_historical_json_is_the_withheld_tail_without_a_header() -> None:
+    body = {
+        "sheetData": sheet_rows()[:2],
+        "summaryData": [["Summary", "Value", "Notes"], ["Row:", "1"]],
+        "user": {"email": "someone@example.invalid", "uid": "synthetic"},
+    }
     summary = summarize_capability("models.historical", json.dumps(body).encode())
-    assert summary["row_count"] == 3
+    assert summary["row_count"] == 2
+    assert summary["kind"] == "historical"
+    audit = sanitization_audit(body)
+    assert audit["explicitly_removed"] == ["/user", "/user/email"]
+    assert audit["data_fields_masked"] == []
     with pytest.raises(WebContractError):
         parse_historical({"message": "Internal Server Error"})
     with pytest.raises(WebContractError):

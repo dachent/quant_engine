@@ -38,7 +38,10 @@ DENIED_PATHS: Final = frozenset(
 SLUG_PATTERN: Final = r"[a-z0-9][a-z0-9-]{0,63}"
 #: Account identity fields removed from the derived layer. Deliberately explicit:
 #: no regex and no substring rule, so a data field is never removed by accident.
-SENSITIVE_FIELDS: Final = frozenset({"email", "customer_id", "stripe_customer_id"})
+#: ``user`` is the signed-in profile object that modelsHistorical appends.
+SENSITIVE_FIELDS: Final = frozenset(
+    {"email", "customer_id", "stripe_customer_id", "user"}
+)
 
 #: Gated routes found in the model page's public JS chunk (2026-10-30). The page
 #: sends a Firebase ID token in an Authorization header; the contract never sees it.
@@ -284,9 +287,10 @@ def parse_models_index(body: object) -> tuple[str, ...]:
     """``/models`` SSG page: plans plus one summary table per model slug."""
 
     props = _object(_object(body, "page").get("pageProps"), "pageProps")
-    plans = props.get("plans")
-    if not isinstance(plans, list) or not plans:
-        raise WebContractError("plans must be a nonempty array")
+    # Signed-in pages omit ``plans``; when present they must be well formed.
+    plans = props.get("plans", [])
+    if not isinstance(plans, list):
+        raise WebContractError("plans must be an array")
     for plan in plans:
         record = _object(plan, "plan")
         if not isinstance(record.get("key"), str) or not isinstance(
@@ -317,7 +321,14 @@ def parse_model_page(body: object) -> SignalSeries:
 def parse_historical(body: object) -> SignalSeries:
     """``/api/modelsHistorical``: JSON object carrying ``sheetData``."""
 
-    return _sheet_series(_object(body, "historical").get("sheetData"), "historical")
+    record = _object(body, "historical")
+    sheet = record.get("sheetData")
+    if not isinstance(sheet, list) or not sheet:
+        raise WebContractError("sheetData must be a nonempty array")
+    if "summaryData" in record:
+        _summary(record["summaryData"])
+    # The withheld tail ships without a header row.
+    return _rows_series(sheet, "historical")
 
 
 def _sheet_series(sheet: object, kind: str) -> SignalSeries:
@@ -326,8 +337,12 @@ def _sheet_series(sheet: object, kind: str) -> SignalSeries:
     header = sheet[0]
     if not isinstance(header, list) or header[1:] != list(_HISTORY_HEADER[1:]):
         raise WebContractError("sheetData header differs from the reviewed shape")
+    return _rows_series(sheet[1:], kind)
+
+
+def _rows_series(body: list[object], kind: str) -> SignalSeries:
     rows: list[tuple[str, str, str]] = []
-    for row in sheet[1:]:
+    for row in body:
         # The public page ships text cells; the signed-in page ships numbers.
         if (
             not isinstance(row, list)
