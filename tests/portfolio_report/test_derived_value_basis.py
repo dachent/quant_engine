@@ -233,7 +233,7 @@ def test_account_nav_rows_name_the_basis_only_where_declared(
         r["account_id"]: r for r in reporter._accounts(catalog, derived_values=index)
     }
     assert rows["acct-derived"]["value_basis"]["basis"] == DERIVED
-    assert rows["acct-derived"]["status"] == "AVAILABLE_LATEST_OBSERVATION"
+    assert rows["acct-derived"]["status"] == "AVAILABLE_DERIVED_FROM_OFFICIAL_CLOSES"
     assert "value_basis" not in rows["acct-native"]
 
 

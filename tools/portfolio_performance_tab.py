@@ -66,8 +66,8 @@ EW_DEFINITION: Final = (
     "return is the arithmetic mean of the strategy weekly total returns "
     "(1/N each, rebalanced to equal weights at the start of every week), "
     + _COMPOUNDED
-    + ".  Daily returns are not in "
-    "the panel, so the rebalance is weekly.  A week missing for any strategy makes "
+    + ".  The strategy returns enter this line as weekly returns, "
+    "so the rebalance is weekly.  A week missing for any strategy makes "
     "the mode UNAVAILABLE; it is never filled with zero.  In LIVE_PLUS_BACKTEST a "
     "strategy with no admitted backtest history contributes its live weeks and the "
     "line is labelled by origin (MIXED where components differ)."
