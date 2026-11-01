@@ -162,6 +162,8 @@ _PATH_STAGES = {
     # #540 payload budget: reads a published generation and the budget file, imports no
     # producer and writes no delivery artifact.
     "tools/panel_payload_size.py": [],
+    "tools/tt_source_manifest_builder.py": [],
+    "tools/tt_order_planner.py": [],
     "tools/check_architecture.py": [],
     "tools/check_data_roots.py": [],
     "tools/check_fact_admission.py": [],
