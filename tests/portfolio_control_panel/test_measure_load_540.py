@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 
 from browser_runtime import resolve_browser_runtime
@@ -116,3 +117,135 @@ def test_cleanup_tolerates_a_held_profile_but_not_other_errors() -> None:
     out = json.loads(done.stdout)
     assert out["tolerated"] is False and out["refused"] is True and out["ok"] is True
     assert out["opts"]["maxRetries"] >= 10 and out["opts"]["retryDelay"] >= 200
+
+
+# #690: the lens/download step against a panel model whose report link sits in a hidden
+# view. The fake page refuses a visibility-gated click (like Playwright's `page.click` on
+# a nav item outside the viewport) and only honours attached-element DOM clicks.
+_LENS = """
+import { lensAndDownload, PAGE, STEP_ATTEMPTS } from %(harness)s;
+import crypto from "node:crypto";
+const BODY = Buffer.from("report-bytes");
+function build({ linkInHiddenView = true, brokenNav = null, lensNeverReady = false, noDownload = false }) {
+  const log = [];
+  const state = { view: "command", lazy: "idle", files: new Map(), navFailures: 0 };
+  const exists = (sel) => {
+    if (sel.startsWith("[data-nav=")) return true;
+    if (sel.includes("evidence-mode")) return state.view === "attribution" || !linkInHiddenView;
+    if (sel.startsWith("a[data-download-filename")) return true; // attached, hidden unless view=data
+    return false;
+  };
+  const page = {
+    async click() { throw new Error("page.click must not be used: element outside of the viewport"); },
+    async waitForSelector(sel, opts) {
+      log.push(["wait", sel, opts.state]);
+      if (opts.state !== "attached") throw new Error("visibility wait on a hidden element");
+      if (!exists(sel)) throw new Error("timeout " + sel);
+    },
+    async evaluate(fn, arg) {
+      if (fn === PAGE.click) {
+        log.push(["click", arg]);
+        if (arg === brokenNav && state.navFailures++ < %(nav_failures)d) return false;
+        const nav = /data-nav="([a-z]+)"/.exec(arg);
+        if (nav) state.view = nav[1];
+        else if (arg.includes("evidence-mode")) {
+          if (state.view !== "attribution") return false;
+          state.lazy = lensNeverReady ? "loading" : "ready";
+        } else if (arg.startsWith("a[data-download")) {
+          if (state.view !== "data") return false;
+          if (!noDownload) state.files.set("portfolio-report-data.json", BODY);
+        }
+        return true;
+      }
+      throw new Error("unexpected evaluate");
+    },
+    async waitForFunction(fn, arg) {
+      if (fn === PAGE.viewShown) {
+        if (state.view !== arg) throw new Error("view " + arg + " not shown");
+        return;
+      }
+      if (lensNeverReady) throw new Error("timeout waiting for lazyData");
+    },
+  };
+  let clock = 0;
+  const io = {
+    sleep: async (ms) => { clock += ms; },
+    now: () => clock,
+    makeDownloadDir: () => "dl",
+    allowDownloads: async () => {},
+    listDir: () => [...state.files.keys()],
+    sizeOf: () => BODY.length,
+    readFile: () => BODY,
+    removeTree: () => { log.push(["cleanup"]); },
+  };
+  return { page, io, state, log };
+}
+const out = {};
+{
+  const r = build({});
+  const res = await lensAndDownload(r.page, r.io);
+  out.ok = { res, view: r.state.view, cleaned: r.log.some((l) => l[0] === "cleanup"),
+    sha: crypto.createHash("sha256").update(BODY).digest("hex") };
+  out.nav_order = r.log.filter((l) => l[0] === "click").map((l) => l[1]);
+}
+{
+  const r = build({ brokenNav: '[data-nav="data"]' });
+  out.retry = await lensAndDownload(r.page, r.io);
+}
+{
+  const r = build({ lensNeverReady: true });
+  out.lens = await lensAndDownload(r.page, r.io);
+}
+{
+  const r = build({ noDownload: true });
+  out.nodl = await lensAndDownload(r.page, r.io);
+}
+out.attempts = STEP_ATTEMPTS;
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _run_lens(nav_failures: int) -> dict[str, object]:
+    runtime = resolve_browser_runtime(REPOSITORY_ROOT)
+    node = runtime.node if runtime else shutil.which("node")
+    if node is None:
+        pytest.skip("node is unavailable")
+    source = _LENS % {"harness": json.dumps(HARNESS.as_uri()), "nav_failures": nav_failures}
+    done = subprocess.run(
+        [node, "--input-type=module", "-e", source],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return json.loads(done.stdout)  # type: ignore[no-any-return]
+
+
+def test_lens_and_download_reaches_the_report_link_in_the_hidden_data_view() -> None:
+    out = _run_lens(nav_failures=1)
+    ok = out["ok"]
+    assert "failure" not in ok["res"]
+    assert ok["view"] == "data" and ok["cleaned"] is True
+    assert ok["res"]["download_bytes"] == len(b"report-bytes")
+    assert ok["res"]["download_sha256"] == ok["sha"]
+    assert ok["res"]["lens_open_ms"] >= 0 and ok["res"]["download_ms"] >= 0
+    # The data view is reached by its documented nav selector before the download click.
+    clicks = out["nav_order"]
+    assert clicks.index('[data-nav="data"]') < clicks.index(
+        'a[data-download-filename="portfolio-report-data.json"]'
+    )
+
+
+def test_lens_and_download_retries_a_flaky_nav_click_then_succeeds() -> None:
+    out = _run_lens(nav_failures=1)
+    assert "failure" not in out["retry"]
+    assert out["retry"]["download_bytes"] == len(b"report-bytes")
+
+
+def test_lens_and_download_fails_closed_with_a_named_step() -> None:
+    out = _run_lens(nav_failures=99)
+    assert out["retry"]["failure"]["step"] == "open data view"
+    assert "failed" in out["retry"]["failure"]["message"]
+    assert "download_sha256" not in out["retry"]
+    assert out["lens"]["failure"]["step"] == "wait for lens data"
+    assert out["nodl"]["failure"]["step"] == "wait for download"

@@ -5,6 +5,9 @@
 //          [--memory] [--lens-and-download] [--out result.json]
 // env:   PLAYWRIGHT_MODULE (index.mjs), PLAYWRIGHT_EXECUTABLE_PATH (chrome binary)
 //
+// Exit codes: 0 ok, 1 verdict over ratio, 2 harness error, 3 watchdog, 4 lens/download step failed
+// (the result file is written first, with `memory.failure`).
+//
 // Usable load = page.goto(file://...index.html#command, waitUntil "commit") until
 // #app[data-app-state="ready"] exists. No DOMContentLoaded, no paint. Clicks (lens mode,
 // download) are never part of it.
@@ -145,32 +148,135 @@ async function loadOnce(browser, html, extra) {
   return run;
 }
 
-async function lensAndDownload(page) {
-  const out = {};
-  await page.click('[data-nav="attribution"]');
-  const t1 = Date.now();
-  await page.click('[data-factor-evidence-mode="LIVE_PLUS_BACKTEST"]');
-  await page.waitForFunction(() => document.documentElement.dataset.lazyData !== "loading", null, {
-    timeout: 600000,
-  });
-  out.lens_open_ms = Date.now() - t1;
-  const client = await page.context().newCDPSession(page);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "panel-dl-"));
-  await client.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: dir });
-  const t2 = Date.now();
-  await page.click('a[data-download-filename="portfolio-report-data.json"]');
-  let file;
-  while (!file && Date.now() - t2 < 600000) {
-    await sleep(250);
-    file = fs.readdirSync(dir).find((n) => !n.endsWith(".crdownload"));
+// ---- lens + download step (#690) -------------------------------------------------------
+// The report link lives in the hidden `[data-view="data"]` section (view id `view-data`),
+// reached through `[data-nav="data"]`. Playwright `page.click` needs a visible, in-viewport
+// element and times out on nav items in the CDP-attached headless window, so every click
+// here is a DOM `.click()` on an element that is merely ATTACHED (no visibility needed).
+// Each step waits explicitly, retries a bounded number of times, and on exhaustion throws
+// a StepError naming the step; lensAndDownload turns that into `failure` in the result so
+// the harness still writes its result file and exits non-zero (fail closed).
+export const STEP_ATTEMPTS = 3;
+export const STEP_WAIT_MS = 30000;
+export const LENS_WAIT_MS = 600000;
+export const DOWNLOAD_WAIT_MS = 600000;
+const NAV_ATTRIBUTION = '[data-nav="attribution"]';
+const NAV_DATA = '[data-nav="data"]';
+const LENS_MODE = '[data-factor-evidence-mode="LIVE_PLUS_BACKTEST"]';
+const DOWNLOAD_LINK = 'a[data-download-filename="portfolio-report-data.json"]';
+
+export class StepError extends Error {
+  constructor(step, message) {
+    super(`lens/download step "${step}" failed: ${message}`);
+    this.step = step;
   }
-  if (file) {
-    const bytes = fs.readFileSync(path.join(dir, file));
-    out.download_ms = Date.now() - t2;
+}
+
+// Evaluated inside the page; exported so a test double can recognise them.
+export const PAGE = {
+  click: (selector) => {
+    const el = document.querySelector(selector);
+    if (!el) return false;
+    el.click();
+    return true;
+  },
+  viewShown: (name) => {
+    const view = document.querySelector(`[data-view="${name}"]`);
+    return Boolean(view) && !view.hidden && view.classList.contains("is-active");
+  },
+};
+
+async function attempts(step, count, action, sleepFn) {
+  let last = "no attempt ran";
+  for (let i = 1; i <= count; i += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      last = `attempt ${i}/${count}: ${String((error && error.message) || error).slice(0, 300)}`;
+      if (i < count) await sleepFn(500 * i);
+    }
+  }
+  throw new StepError(step, last);
+}
+
+export async function domClick(page, selector, step, io) {
+  return attempts(step, STEP_ATTEMPTS, async () => {
+    await page.waitForSelector(selector, { state: "attached", timeout: STEP_WAIT_MS });
+    if (!(await page.evaluate(PAGE.click, selector))) throw new Error(`${selector} vanished before the click`);
+  }, io.sleep);
+}
+
+export async function openView(page, nav, view, step, io) {
+  return attempts(step, STEP_ATTEMPTS, async () => {
+    await domClick(page, nav, `${step} click`, io);
+    await page.waitForFunction(PAGE.viewShown, view, { timeout: STEP_WAIT_MS });
+  }, io.sleep);
+}
+
+export const realIo = {
+  sleep,
+  now: () => Date.now(),
+  makeDownloadDir: () => fs.mkdtempSync(path.join(os.tmpdir(), "panel-dl-")),
+  async allowDownloads(page, dir) {
+    const client = await page.context().newCDPSession(page);
+    await client.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: dir });
+  },
+  listDir: (dir) => fs.readdirSync(dir),
+  sizeOf: (file) => fs.statSync(file).size,
+  readFile: (file) => fs.readFileSync(file),
+  removeTree,
+};
+
+// A finished download is a file without the in-progress suffix whose size stopped moving.
+export async function awaitDownload(dir, io, timeoutMs = DOWNLOAD_WAIT_MS) {
+  const started = io.now();
+  let previous = null;
+  while (io.now() - started < timeoutMs) {
+    await io.sleep(250);
+    const name = io.listDir(dir).find((n) => !n.endsWith(".crdownload"));
+    if (name) {
+      const size = io.sizeOf(path.join(dir, name));
+      if (previous && previous.name === name && previous.size === size) return name;
+      previous = { name, size };
+    }
+  }
+  return null;
+}
+
+export async function lensAndDownload(page, io = realIo) {
+  const out = {};
+  let dir = null;
+  try {
+    await openView(page, NAV_ATTRIBUTION, "attribution", "open attribution view", io);
+    const t1 = io.now();
+    await domClick(page, LENS_MODE, "select LIVE_PLUS_BACKTEST lens", io);
+    try {
+      await page.waitForFunction(() => document.documentElement.dataset.lazyData !== "loading", null, {
+        timeout: LENS_WAIT_MS,
+      });
+    } catch (error) {
+      throw new StepError("wait for lens data", String((error && error.message) || error).slice(0, 300));
+    }
+    out.lens_open_ms = io.now() - t1;
+    await openView(page, NAV_DATA, "data", "open data view", io);
+    dir = io.makeDownloadDir();
+    await io.allowDownloads(page, dir);
+    const t2 = io.now();
+    await domClick(page, DOWNLOAD_LINK, "click report download link", io);
+    const file = await awaitDownload(dir, io);
+    if (!file) throw new StepError("wait for download", `no completed file within ${DOWNLOAD_WAIT_MS} ms`);
+    const bytes = io.readFile(path.join(dir, file));
+    out.download_ms = io.now() - t2;
     out.download_bytes = bytes.length;
     out.download_sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  } catch (error) {
+    out.failure = {
+      step: (error && error.step) || "unexpected",
+      message: String((error && error.message) || error).slice(0, 500),
+    };
+  } finally {
+    if (dir) io.removeTree(dir);
   }
-  removeTree(dir);
   return out;
 }
 
@@ -222,7 +328,9 @@ async function measureMemory(pw, executable, html, options) {
     await session.close();
     sampler.stop();
   }
-  return { ...run, peak_rss_mb: sampler.samples.length ? Math.max(...sampler.samples) : null };
+  const peak = { peak_rss_mb: sampler.samples.length ? Math.max(...sampler.samples) : null };
+  // A failed lens/download step is recorded, never thrown: the result file is still written.
+  return { ...run, ...peak, ...(run.failure ? { failure: run.failure } : {}) };
 }
 
 function parseArgs(argv) {
@@ -273,7 +381,9 @@ async function main() {
   const text = `${JSON.stringify(report, null, 2)}\n`;
   if (options.out) fs.writeFileSync(options.out, text);
   else process.stdout.write(text);
-  process.exit(report.verdict.pass === false ? 1 : 0);
+  const lensFailed = Boolean(report.memory && report.memory.failure);
+  if (lensFailed) console.error(`measure_load: ${report.memory.failure.message}`);
+  process.exit(lensFailed ? 4 : report.verdict.pass === false ? 1 : 0);
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
