@@ -549,6 +549,11 @@
       1
     ],
     [
+      "quantbase_har_to_csv",
+      "capture_quantbase_har",
+      1
+    ],
+    [
       "sleeve_inputs",
       "nested_strategy_tag_map",
       1
