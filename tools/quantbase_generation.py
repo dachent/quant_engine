@@ -38,6 +38,8 @@ DEFAULT_FILE_COUNT: Final = 55
 DEFAULT_RECORD_COUNT: Final = 14901
 PLANNING_RECORD_COUNT: Final = 14981
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SNAPSHOT_LABEL_KEYS: Final = frozenset({"file", "captured_at", "gap_hours"})
+_SNAPSHOT_EXCEPTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,119}$")
 _DECLARED_SCHEMA_NAME = re.compile(r"^quantbase-[a-z0-9-]{1,80}$")
 _DECLARED_SCHEMA_VERSION = re.compile(r"^[0-9a-z][0-9a-z.-]{0,31}$")
 _NATIVE_ARTIFACT_CONTRACTS: Final[tuple[dict[str, tuple[str, str]], ...]] = (
@@ -366,6 +368,57 @@ def _source_layout(source_root: Path) -> tuple[list[Path], Path]:
     return files, runbook
 
 
+def _snapshot_plan_block(
+    datasets: Sequence[Mapping[str, object]],
+    labels: Sequence[Mapping[str, object]] | None,
+    exception: str | None,
+) -> dict[str, object]:
+    """Capture-time labels for undated snapshot datasets (absent for legacy plans)."""
+
+    if labels is None:
+        if exception is not None:
+            raise QuantbaseGenerationError("a snapshot exception needs snapshot labels")
+        return {}
+    paths = {str(item["relative_path"]) for item in datasets}
+    checked: list[dict[str, object]] = []
+    for label in labels:
+        if set(label) - _SNAPSHOT_LABEL_KEYS or not {"file", "captured_at"} <= set(
+            label
+        ):
+            raise QuantbaseGenerationError("snapshot label keys differ")
+        entry = {key: label[key] for key in sorted(label)}
+        if f"csv/{entry['file']}" not in paths:
+            raise QuantbaseGenerationError("snapshot label names an unplanned file")
+        captured = entry["captured_at"]
+        if not isinstance(captured, str) or not captured.endswith("Z"):
+            raise QuantbaseGenerationError("snapshot captured_at must be UTC text")
+        try:
+            datetime.fromisoformat(captured.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise QuantbaseGenerationError("snapshot captured_at is invalid") from exc
+        gap = entry.get("gap_hours")
+        if "gap_hours" in entry and (
+            isinstance(gap, bool) or not isinstance(gap, (int, float)) or gap <= 0
+        ):
+            raise QuantbaseGenerationError("snapshot gap_hours must be positive")
+        checked.append(entry)
+    if len({str(item["file"]) for item in checked}) != len(checked):
+        raise QuantbaseGenerationError("snapshot labels repeat a file")
+    late = any("gap_hours" in item for item in checked)
+    if late and exception is None:
+        raise QuantbaseGenerationError(
+            "a snapshot taken after the cutoff day end needs a labelled exception"
+        )
+    if exception is not None and (
+        _SNAPSHOT_EXCEPTION.fullmatch(exception) is None or not late
+    ):
+        raise QuantbaseGenerationError("snapshot exception label is invalid or unused")
+    return {
+        "snapshot_labels": sorted(checked, key=lambda item: str(item["file"])),
+        **({"snapshot_exception": exception} if exception is not None else {}),
+    }
+
+
 def create_plan(
     source_root: Path,
     data_root: Path,
@@ -377,6 +430,8 @@ def create_plan(
     planning_record_count: int = PLANNING_RECORD_COUNT,
     native_artifacts: Sequence[tuple[str, Path]] | None = None,
     native_contract: Mapping[str, tuple[str, str]] | None = None,
+    snapshot_labels: Sequence[Mapping[str, object]] | None = None,
+    snapshot_exception: str | None = None,
 ) -> dict[str, object]:
     """Create one content-addressed, private cutover plan."""
 
@@ -477,6 +532,7 @@ def create_plan(
         "observed_end": max(observed).isoformat(),
         "observed_start": min(observed).isoformat(),
         "provider_id": "quantbase",
+        **_snapshot_plan_block(datasets, snapshot_labels, snapshot_exception),
         "quarantine_plan_id": quarantine_plan_id,
         "runbook": {
             "bytes": runbook_size,
@@ -738,6 +794,23 @@ def _copy_to_staging(plan: Mapping[str, Any]) -> Path:
     return staging
 
 
+def _snapshot_catalog_fields(
+    label: Mapping[str, object] | None, exception: object
+) -> dict[str, object]:
+    """Per-dataset capture-time fields; nothing for dated series or legacy plans."""
+
+    if label is None:
+        return {}
+    fields: dict[str, object] = {
+        "captured_at": label["captured_at"],
+        "snapshot_kind": "CAPTURE_TIME_SNAPSHOT",
+    }
+    if "gap_hours" in label:
+        fields["gap_hours_after_cutoff_end"] = label["gap_hours"]
+        fields["snapshot_exception"] = exception
+    return fields
+
+
 def build_generation(
     plan_path: Path, *, input_root: Path | None = None
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
@@ -761,6 +834,10 @@ def build_generation(
         )
     baseline = _object(plan["baseline"], "baseline")
     native_entries = _native_entries(plan)
+    snapshot_labels = {
+        str(item["file"]): item for item in plan.get("snapshot_labels", [])
+    }
+    snapshot_exception = plan.get("snapshot_exception")
     catalog: dict[str, object] = {
         "api_fallback": False,
         "as_of_date": as_of.isoformat(),
@@ -791,6 +868,12 @@ def build_generation(
                 "relative_path": item["relative_path"],
                 "row_count": item["row_count"],
                 "sha256": item["sha256"],
+                **_snapshot_catalog_fields(
+                    snapshot_labels.get(
+                        str(item["relative_path"]).removeprefix("csv/")
+                    ),
+                    snapshot_exception,
+                ),
             }
             for item in datasets
         ],
@@ -1143,6 +1226,7 @@ NATIVE_ROLES: Final[dict[str, tuple[str, str, str, str | None]]] = {
     ),
 }
 _NATIVE_MANIFEST_KEYS: Final = frozenset({"schema_version", "cutoff", "files"})
+_NATIVE_MANIFEST_OPTIONAL: Final = frozenset({"snapshots", "snapshot_exception"})
 _NATIVE_FILE_KEYS: Final = frozenset({"role", "path", "sha256", "bytes"})
 _NATIVE_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
@@ -1173,7 +1257,7 @@ def load_native_manifest(
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise QuantbaseGenerationError("native manifest is not valid JSON") from exc
-    if set(document) - _NATIVE_MANIFEST_KEYS or not {
+    if set(document) - (_NATIVE_MANIFEST_KEYS | _NATIVE_MANIFEST_OPTIONAL) or not {
         "schema_version",
         "cutoff",
         "files",
@@ -1233,6 +1317,31 @@ def load_native_manifest(
     return artifacts, contract, cutoff
 
 
+def load_native_snapshots(
+    path: Path,
+) -> tuple[list[dict[str, object]] | None, str | None]:
+    """The optional capture-time snapshot labels of a native manifest.
+
+    ``(None, None)`` when the manifest declares none; ``plan`` validates them.
+    """
+
+    try:
+        document = _object(
+            json.loads(Path(path).read_text(encoding="utf-8")), "native manifest"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QuantbaseGenerationError("native manifest is not valid JSON") from exc
+    labels = document.get("snapshots")
+    exception = document.get("snapshot_exception")
+    if labels is None:
+        if exception is not None:
+            raise QuantbaseGenerationError("a snapshot exception needs snapshot labels")
+        return None, None
+    if exception is not None and not isinstance(exception, str):
+        raise QuantbaseGenerationError("snapshot exception must be text")
+    return [dict(item) for item in _objects(labels, "native snapshots")], exception
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1269,6 +1378,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else _load_native_intake(args.native_intake)
             )
             native_artifacts, native_contract, intake_cutoff = declared
+            snapshot_labels, snapshot_exception = (
+                load_native_snapshots(args.native_manifest)
+                if args.native_manifest is not None
+                else (None, None)
+            )
             if intake_cutoff is not None and args.as_of_date != intake_cutoff:
                 raise QuantbaseGenerationError(
                     "as-of date must equal the intake manifest cutoff"
@@ -1283,6 +1397,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 planning_record_count=args.planning_record_count,
                 native_artifacts=native_artifacts,
                 native_contract=native_contract,
+                snapshot_labels=snapshot_labels,
+                snapshot_exception=snapshot_exception,
             )
         elif args.command == "build":
             catalog, manifest, catalog_bytes = build_generation(args.plan)

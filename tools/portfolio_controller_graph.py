@@ -241,6 +241,7 @@ _PATH_STAGES = {
     # source bytes only, and the release step runs it beside the IBKR builder.
     "tools/build_quantbase_fund_facts.py": ["report", "panel"],
     "tools/capture_quantbase_har.py": [],
+    "tools/quantbase_har_to_csv.py": [],
     "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
