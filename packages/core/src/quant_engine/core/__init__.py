@@ -23,6 +23,10 @@ from quant_engine.core.authority import (
     local_freshness_alerts,
 )
 
+from quant_engine.core.code_identity import (
+    COMMIT_SCHEME as CODE_IDENTITY_COMMIT_SCHEME,
+    TREE_SCHEME as CODE_IDENTITY_TREE_SCHEME,
+)
 from quant_engine.core.retained_cache_base import (
     CacheBaseError,
     iter_cache_files,
@@ -143,6 +147,8 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "CODE_IDENTITY_COMMIT_SCHEME",
+    "CODE_IDENTITY_TREE_SCHEME",
     "release_directory_identity",
     "CacheBaseError",
     "iter_cache_files",
