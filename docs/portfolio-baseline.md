@@ -85,7 +85,10 @@ applies (or `TIER_UNSETTLED`, which claims no rate); `placement` is
 required exactly when it is stated), with optional `redemption` and `lock`.  The row is
 carried as `fee_rates`.  The fixed-amount `declared.basis` additionally admits
 `OWNER_DECLARED` (an amount the owner stated in his own words; its source cites that
-message).
+message).  An owner-declared row is a static input used exactly as supplied: its
+`corroboration` list is empty (nothing corroborates or overrides it), the annual amount
+is the declared amount times the periods per year, and its status must start with
+`known`.  A listed corroboration source with no observed charge is still refused.
 
 A position row whose provider captured it after the New York close of its as-of
 date but stores it under the later native UTC date (Schwab's holdings capture)
