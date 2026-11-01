@@ -2610,9 +2610,13 @@ def _attach_cost_evidence(
         if declared["period"] not in _PERIODS_PER_YEAR:
             raise BaselineValidationError(f"{name} declared period is not recognised")
         corroboration: list[dict[str, Any]] = []
-        for position, item in enumerate(
-            _objects(raw["corroboration"], f"{name}.corroboration")
-        ):
+        listed = _objects(raw["corroboration"], f"{name}.corroboration")
+        if declared["basis"] == "OWNER_DECLARED" and listed:
+            # A static input used as the owner supplied it: nothing corroborates it.
+            raise BaselineValidationError(
+                f"{name} an owner-declared cost carries no corroboration"
+            )
+        for position, item in enumerate(listed):
             label = f"{name}.corroboration[{position}]"
             _strict_keys(
                 item,

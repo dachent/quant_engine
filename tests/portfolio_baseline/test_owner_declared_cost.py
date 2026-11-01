@@ -138,21 +138,42 @@ def test_a_declared_amount_must_be_positive_and_usd(tmp_path: Path) -> None:
         _attach(tmp_path, euro, _cost())
 
 
-def test_a_corroboration_entry_still_needs_an_observed_charge(tmp_path: Path) -> None:
-    """Only an absent list is admitted; a listed source with no charge stays refused."""
+def _source(charges: list[dict[str, str]]) -> dict[str, Any]:
+    return {
+        "artifact": "synthetic.xlsx",
+        "descriptor": "SYNTHETIC",
+        "feed_last_date": "2026-06-08",
+        "kind": "CARD_FEED_OBSERVED_CHARGES",
+        "observations": charges,
+        "role": "CORROBORATING_OBSERVED_EVIDENCE",
+        "sha256": DIGEST,
+    }
+
+
+CHARGE = {"amount": "-500", "currency": "USD", "date": "2026-05-28"}
+
+
+@pytest.mark.parametrize("charges", [[], [CHARGE]])
+def test_an_owner_declared_row_refuses_any_corroboration(
+    tmp_path: Path, charges: list[dict[str, str]]
+) -> None:
+    """The owner's number is used as supplied: nothing corroborates it, even a match."""
 
     row = _row()
-    row["corroboration"] = [
-        {
-            "artifact": "synthetic.xlsx",
-            "descriptor": "SYNTHETIC",
-            "feed_last_date": "2026-06-08",
-            "kind": "CARD_FEED_OBSERVED_CHARGES",
-            "observations": [],
-            "role": "CORROBORATING_OBSERVED_EVIDENCE",
-            "sha256": DIGEST,
-        }
-    ]
+    row["corroboration"] = [_source(charges)]
+    with pytest.raises(
+        baseline.BaselineValidationError, match="carries no corroboration"
+    ):
+        _attach(tmp_path, row, _cost())
+
+
+def test_other_bases_keep_their_corroboration_rules(tmp_path: Path) -> None:
+    row = _row()
+    row["declared"]["basis"] = "PROVIDER_DECLARED"
+    row["corroboration"] = [_source([CHARGE])]
+    (cost,) = _attach(tmp_path, row, _cost())
+    assert cost["corroboration"][0]["observations"][0]["amount"] == "-500"
+    row["corroboration"] = [_source([])]
     with pytest.raises(
         baseline.BaselineValidationError, match="has no observed charge"
     ):

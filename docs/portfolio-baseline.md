@@ -88,7 +88,8 @@ carried as `fee_rates`.  The fixed-amount `declared.basis` additionally admits
 message).  An owner-declared row is a static input used exactly as supplied: its
 `corroboration` list is empty (nothing corroborates or overrides it), the annual amount
 is the declared amount times the periods per year, and its status must start with
-`known`.  A listed corroboration source with no observed charge is still refused.
+`known`.  A row that lists any corroboration is refused for this basis; every other
+basis keeps its corroboration rules unchanged.
 
 A position row whose provider captured it after the New York close of its as-of
 date but stores it under the later native UTC date (Schwab's holdings capture)
