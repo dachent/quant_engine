@@ -193,11 +193,22 @@ def _bodies() -> dict[str, Any]:
     }
 
 
+# Capture on the cutoff day (2026-10-07) after the close, as R3 schedules it.
+CAPTURED = "2026-10-07T21:00:00.500000+00:00"
+
+
 def _entry(
-    url: str, body: object, *, method: str = "GET", status: int = 200, api: bool = True
+    url: str,
+    body: object,
+    *,
+    method: str = "GET",
+    status: int = 200,
+    api: bool = True,
+    started: str | None = CAPTURED,
 ) -> dict[str, Any]:
     headers = [{"name": "j" + "wt", "value": SESSION_VALUE}] if api else []
     return {
+        **({"startedDateTime": started} if started is not None else {}),
         "request": {"headers": headers, "method": method, "url": url},
         "response": {"content": {"text": json.dumps(body)}, "status": status},
     }
@@ -444,7 +455,7 @@ def test_native_manifest_drives_plan_and_build_with_no_hand_step(
     case, target = _ready(tmp_path)
     report = json.loads((target / "conversion-report.json").read_bytes())
     manifest = json.loads((target / "native-manifest.json").read_bytes())
-    assert set(manifest) == {"schema_version", "cutoff", "files"}
+    assert set(manifest) == {"schema_version", "cutoff", "files", "snapshots"}
     assert manifest["cutoff"] == "2026-10-07"
     assert [item["role"] for item in manifest["files"]] == [
         "native-har",
@@ -824,8 +835,8 @@ def test_observations_after_the_cutoff_are_excluded_and_counted(
     }
     assert report["cutoff"] == "2026-10-07"
     assert report["capture_date"] == "2026-10-08"
-    assert "accounts.csv" in report["snapshot_files"]
-    assert "dashboard_Total_holdings.csv" in report["snapshot_files"]
+    names = {item["file"] for item in report["snapshots"]}
+    assert {"accounts.csv", "dashboard_Total_holdings.csv"} <= names
     # The later rows stay in the retained source evidence.
     raw = (case.intake / "raw" / "owner_export.har").read_text(encoding="utf-8")
     assert "2026-10-12T00:00:00Z" in raw and "late" in raw
@@ -879,3 +890,223 @@ def test_a_linked_output_directory_is_refused(
     with pytest.raises(ERROR, match="linked or not a directory"):
         case.convert()
     assert not any(holder.iterdir())
+
+
+SNAPSHOT_FILES = (
+    "accounts.csv",
+    "dashboard_Total_holdings.csv",
+    "dashboard_Volatis_Strategy_holdings.csv",
+    "dashboard_total_wins.csv",
+    "partner_status.csv",
+    "projections_all_live_funds.csv",
+    "ssg_all_funds_stats.csv",
+    "user_profile.csv",
+)
+
+
+def _late_case(tmp_path: Path, started: str | None) -> Case:
+    """Every API response taken at ``started`` (None: the entry has no time)."""
+
+    case = Case(tmp_path)
+    document = json.loads((case.intake / "raw" / "owner_export.har").read_bytes())
+    for entry in document["log"]["entries"]:
+        if started is None:
+            entry.pop("startedDateTime", None)
+        else:
+            entry["startedDateTime"] = started
+    other = tmp_path / "late"
+    capture = other / "capture"
+    capture.mkdir(parents=True)
+    (capture / "owner_export.har").write_bytes(json.dumps(document).encode("utf-8"))
+    manifest = json.loads((case.intake / "manifest.json").read_bytes())
+    (other / "manifest.json").write_bytes(json.dumps(manifest).encode("utf-8"))
+    (other / "staging").mkdir()
+    (other / "out").mkdir()
+    staged = intake.stage_intake(other / "manifest.json", capture, other / "staging")
+    late = Path(str(staged["intake_dir"]))
+    intake.parse_intake(late)
+    case.intake, case.out = late, other / "out"
+    return case
+
+
+def test_every_snapshot_is_labelled_with_its_capture_time(tmp_path: Path) -> None:
+    case = Case(tmp_path)
+    case.convert()
+    report = json.loads((case.output() / "conversion-report.json").read_bytes())
+    labels = {item["file"]: item for item in report["snapshots"]}
+    assert set(labels) == set(SNAPSHOT_FILES)
+    for item in labels.values():
+        assert item["captured_at"] == "2026-10-07T21:00:00.500000Z"
+        assert item["source"] == "har_entry"
+        assert "gap_hours" not in item  # inside the cutoff day: gap zero
+    assert labels["accounts.csv"]["capability"] == "accounts.linked"
+    assert report["snapshot_exception"] is None
+    manifest = json.loads((case.output() / "native-manifest.json").read_bytes())
+    assert {item["file"] for item in manifest["snapshots"]} == set(SNAPSHOT_FILES)
+    assert all(set(item) == {"captured_at", "file"} for item in manifest["snapshots"])
+    assert "snapshot_exception" not in manifest
+
+
+def test_a_snapshot_after_the_cutoff_day_end_is_refused(tmp_path: Path) -> None:
+    case = _late_case(tmp_path, "2026-10-08T06:30:00+00:00")
+    with pytest.raises(ERROR, match="--snapshot-exception"):
+        case.convert()
+    assert not (case.out / "quantbase-har-csv").exists()
+
+
+def test_a_labelled_exception_records_the_gap_in_hours(tmp_path: Path) -> None:
+    case = _late_case(tmp_path, "2026-10-08T06:30:00+00:00")
+    label = "owner ruling 2026-11-01 late capture"
+    converter.convert(case.intake, case.out, "public", label)
+    report = json.loads((case.output() / "conversion-report.json").read_bytes())
+    assert report["snapshot_exception"] == label
+    assert {item["gap_hours"] for item in report["snapshots"]} == {6.5}
+    manifest = json.loads((case.output() / "native-manifest.json").read_bytes())
+    assert manifest["snapshot_exception"] == label
+    assert {item["gap_hours"] for item in manifest["snapshots"]} == {6.5}
+    assert converter.verify_conversion(case.intake, case.out, "public", label)[
+        "state"
+    ] == ("VERIFIED")
+    with pytest.raises(ERROR, match="--snapshot-exception"):
+        converter.verify_conversion(case.intake, case.out, "public")
+
+
+def test_the_exception_label_is_validated_and_must_be_used(tmp_path: Path) -> None:
+    late = _late_case(tmp_path / "a", "2026-10-08T06:30:00+00:00")
+    with pytest.raises(ERROR, match="label is invalid"):
+        converter.convert(late.intake, late.out, "public", "bad\nlabel")
+    ontime = Case(tmp_path / "b")
+    with pytest.raises(ERROR, match="within the cutoff day"):
+        converter.convert(ontime.intake, ontime.out, "public", "unneeded")
+
+
+def test_an_entry_without_a_time_uses_the_run_capture_time(tmp_path: Path) -> None:
+    # The fixture session was captured 2026-10-08T12:00Z, after the cutoff day end.
+    case = _late_case(tmp_path, None)
+    with pytest.raises(ERROR, match="--snapshot-exception"):
+        case.convert()
+    converter.convert(case.intake, case.out, "public", "session time only")
+    report = json.loads((case.output() / "conversion-report.json").read_bytes())
+    assert {item["source"] for item in report["snapshots"]} == {"session"}
+    assert {item["gap_hours"] for item in report["snapshots"]} == {12.0}
+
+
+def test_the_snapshot_labels_reach_the_plan_and_the_catalog(tmp_path: Path) -> None:
+    case = _late_case(tmp_path, "2026-10-08T06:30:00+00:00")
+    label = "owner ruling late capture"
+    converter.convert(case.intake, case.out, "public", label)
+    target = case.output()
+    report = json.loads((target / "conversion-report.json").read_bytes())
+    data = tmp_path / "dataQuantbase"
+    data.mkdir()
+    args = [
+        "plan",
+        str(target / "source"),
+        str(data),
+        "--as-of-date",
+        "2026-10-07",
+        "--quarantine-plan-id",
+        "a" * 64,
+        "--expected-file-count",
+        str(report["csv_file_count"]),
+        "--expected-record-count",
+        str(report["csv_record_count"]),
+        "--native-manifest",
+        str(target / "native-manifest.json"),
+    ]
+    assert generation.main(args) == 0
+    plan_path = next((data / "cutovers" / "plans").glob("*/plan.json"))
+    plan = json.loads(plan_path.read_bytes())
+    assert plan["snapshot_exception"] == label
+    assert {item["file"] for item in plan["snapshot_labels"]} == set(SNAPSHOT_FILES)
+    catalog, _, _ = generation.build_generation(plan_path)
+    by_path = {item["relative_path"]: item for item in catalog["datasets"]}
+    snap = by_path["csv/accounts.csv"]
+    assert snap["captured_at"] == "2026-10-08T06:30:00.000000Z"
+    assert snap["snapshot_kind"] == "CAPTURE_TIME_SNAPSHOT"
+    assert snap["gap_hours_after_cutoff_end"] == 6.5
+    assert snap["snapshot_exception"] == label
+    for dated in ("csv/account_activity.csv", "csv/dashboard_Total_pricehistory.csv"):
+        assert "captured_at" not in by_path[dated]
+    assert set(catalog) == {
+        "api_fallback",
+        "as_of_date",
+        "catalog_schema_version",
+        "coverage",
+        "datasets",
+        "family_dataset_counts",
+        "family_record_counts",
+        "legacy_lineage",
+        "planning_reconciliation",
+        "provider_id",
+        "reconciliation",
+    }
+
+
+def test_on_time_labels_carry_no_gap_or_exception(tmp_path: Path) -> None:
+    case, target = _ready(tmp_path)
+    report = json.loads((target / "conversion-report.json").read_bytes())
+    data = tmp_path / "dataQuantbase"
+    data.mkdir()
+    assert (
+        generation.main(
+            [
+                "plan",
+                str(target / "source"),
+                str(data),
+                "--as-of-date",
+                "2026-10-07",
+                "--quarantine-plan-id",
+                "a" * 64,
+                "--expected-file-count",
+                str(report["csv_file_count"]),
+                "--expected-record-count",
+                str(report["csv_record_count"]),
+                "--native-manifest",
+                str(target / "native-manifest.json"),
+            ]
+        )
+        == 0
+    )
+    plan_path = next((data / "cutovers" / "plans").glob("*/plan.json"))
+    catalog, _, _ = generation.build_generation(plan_path)
+    snap = {i["relative_path"]: i for i in catalog["datasets"]}["csv/accounts.csv"]
+    assert snap["captured_at"] == "2026-10-07T21:00:00.500000Z"
+    assert "gap_hours_after_cutoff_end" not in snap
+    assert "snapshot_exception" not in snap
+
+
+GEN_ERROR = generation.QuantbaseGenerationError
+_DATASETS = [{"relative_path": "csv/accounts.csv"}]
+_ONTIME = {"file": "accounts.csv", "captured_at": "2026-10-07T21:00:00.000000Z"}
+_LATE = {**_ONTIME, "gap_hours": 6.5}
+
+
+@pytest.mark.parametrize(
+    ("labels", "exception", "match"),
+    [
+        ([{**_ONTIME, "extra": 1}], None, "keys differ"),
+        ([{"file": "accounts.csv"}], None, "keys differ"),
+        ([{**_ONTIME, "file": "other.csv"}], None, "unplanned file"),
+        ([{**_ONTIME, "captured_at": "2026-10-07T21:00:00+01:00"}], None, "UTC text"),
+        ([{**_ONTIME, "captured_at": "nonsense Z"}], None, "invalid"),
+        ([{**_LATE, "gap_hours": -1}], "label", "positive"),
+        ([{**_LATE, "gap_hours": True}], "label", "positive"),
+        ([_ONTIME, _ONTIME], None, "repeat"),
+        ([_LATE], None, "labelled exception"),
+        ([_ONTIME], "unused", "invalid or unused"),
+        ([_LATE], "bad\nlabel", "invalid or unused"),
+    ],
+)
+def test_the_generation_refuses_malformed_snapshot_labels(
+    labels: list[dict[str, Any]], exception: str | None, match: str
+) -> None:
+    with pytest.raises(GEN_ERROR, match=match):
+        generation._snapshot_plan_block(_DATASETS, labels, exception)
+
+
+def test_labels_are_absent_for_legacy_plans_and_exceptions_need_labels() -> None:
+    assert generation._snapshot_plan_block(_DATASETS, None, None) == {}
+    with pytest.raises(GEN_ERROR, match="needs snapshot labels"):
+        generation._snapshot_plan_block(_DATASETS, None, "label")
+    assert generation._snapshot_catalog_fields(None, None) == {}
