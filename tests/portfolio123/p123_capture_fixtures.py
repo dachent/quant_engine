@@ -158,27 +158,6 @@ CREDITS: dict[str, Any] = {
 }
 
 
-def transactions_page(
-    page: int, page_count: int, total: int, rows: int
-) -> dict[str, Any]:
-    return {
-        "page": page,
-        "page_count": page_count,
-        "total": total,
-        "transactions": [
-            {
-                "trade_date": "2029-06-01",
-                "ticker": "AAAA",
-                "action": "BUY",
-                "quantity": 10,
-                "price": 12.5,
-                "commission": 1.0,
-            }
-            for _ in range(rows)
-        ],
-    }
-
-
 def entry(
     url: str,
     body: object,

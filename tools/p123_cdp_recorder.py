@@ -1416,7 +1416,8 @@ def _candidate(
             "no values. Reviewer to confirm against the raw capture."
         ),
     }
-    if media == "html":
+    current = _current_row(capability)
+    if media == "html" and not (current and current.get("html")):
         row["requires_code_change"].append(
             "HTML response admission: the capture extractor and CaptureRoute admit "
             "JSON shapes and CSV columns only"
@@ -1459,7 +1460,9 @@ def _compare_existing(
         )
     else:
         info["change"] = (
-            "REPLACE_PLACEHOLDER"
+            "SAME_ROUTE_UNVERIFIED"
+            if same_route and current["verdict"] != "CONFIRMED"
+            else "REPLACE_PLACEHOLDER"
             if current["verdict"] != "CONFIRMED"
             else "CHANGED_ROW"
         )
