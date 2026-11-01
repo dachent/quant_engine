@@ -455,7 +455,9 @@ def test_cagr_and_mwr_carry_their_basis_and_window_at_version_four(
         else:
             labelled += 1
             assert cagr["basis"] == "CALENDAR_DAYS_COMPOUNDED_OVER_365"
-            assert cagr["window_start"] == row["account_live_observed_start"]
+            # the window opens at the opening NAV date, the close before the first return
+            assert cagr["window_start"] == row["return_window_start"]
+            assert cagr["window_start"] < row["account_live_observed_start"]
             assert cagr["window_end"] == row["account_live_observed_end"]
             assert (
                 cagr["window_days"]
