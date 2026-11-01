@@ -7,13 +7,24 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .credentials import CredentialError, load_credentials
+from .evidence import (
+    DEFAULT_MAX_WINDOW_HOURS,
+    EvidenceGenerationError,
+    EvidenceRequest,
+    verify_evidence,
+    write_evidence,
+)
 from .pipeline import (
+    DATABASE_NAME,
     MatrixportExtractor,
     export_catalog,
     export_run,
     live_auth_test,
+    _credential_identity,
+    recorded_credential_identity,
     validate_run_id,
 )
+from .storage import RunStorage
 from .util import atomic_write, canonical_json
 from .verification import verify_run
 
@@ -22,6 +33,16 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="quant-engine-matrixport",
         description="Read-only Matrixport/BIT data extraction and export",
+    )
+    parser.add_argument(
+        "--credentials-config",
+        type=Path,
+        help=(
+            "TOML file with a [credentials.matrixport] plan naming where the "
+            "keys are read from (Azure Key Vault, Bitwarden, Windows Credential "
+            "Manager); the file holds references, never values. Without it the "
+            "Windows generic credential BIT.com-API is used."
+        ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -52,6 +73,37 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify.add_argument("--run-id", required=True)
 
+    gen = subcommands.add_parser(
+        "governance-evidence",
+        help="Assemble (never approve) a single-use live-read evidence file",
+    )
+    gen.add_argument(
+        "--operation", required=True, choices=("auth-test", "extract", "run")
+    )
+    gen.add_argument("--mode", choices=("full", "incremental"))
+    gen.add_argument("--cutoff", required=True, help="YYYY-MM-DD")
+    gen.add_argument("--review-url", required=True)
+    gen.add_argument("--review-identity", required=True)
+    gen.add_argument("--issued-at", required=True)
+    gen.add_argument("--expires-at", required=True)
+    gen.add_argument("--max-requests", required=True, type=int)
+    gen.add_argument("--max-window-hours", type=float, default=DEFAULT_MAX_WINDOW_HOURS)
+    gen.add_argument(
+        "--scope-path",
+        action="append",
+        help="assert the scope: repeat for every GET path; must equal the catalog reads",
+    )
+    gen.add_argument("--out", required=True, type=Path)
+
+    check = subcommands.add_parser(
+        "verify-evidence",
+        help="Validate an evidence file with the live gate's validator, unconsumed",
+    )
+    check.add_argument("evidence", type=Path)
+    check.add_argument(
+        "--max-window-hours", type=float, default=DEFAULT_MAX_WINDOW_HOURS
+    )
+
     run = subcommands.add_parser("run", help="Extract, export, and verify")
     run.add_argument("--full", action="store_true", required=True)
     run.add_argument("--governance-evidence", required=True)
@@ -66,8 +118,26 @@ def _report(message: str) -> None:
     print(f"[matrixport] {message}", file=sys.stderr, flush=True)
 
 
-def _secret_needles() -> list[bytes]:
-    credentials = load_credentials()
+def _require_recorded_credentials(
+    run_dir: Path, run_id: str, config_path: Path | None
+) -> None:
+    """Scan for the credentials that produced the run, not whichever are current."""
+
+    storage = RunStorage(run_dir / "state" / DATABASE_NAME)
+    try:
+        run = storage.get_run(run_id)
+    finally:
+        storage.close()
+    if run is not None and recorded_credential_identity(run) != _credential_identity(
+        None, config_path
+    ):
+        raise CredentialError(
+            "The credential source does not match the one recorded for this run"
+        )
+
+
+def _secret_needles(config_path: Path | None = None) -> list[bytes]:
+    credentials = load_credentials(config_path)
     values = (credentials.key_identifier, credentials.signing_material)
     needles: list[bytes] = []
     for value in values:
@@ -82,6 +152,7 @@ def _extract(args: argparse.Namespace) -> int:
         mode=mode,
         run_id=args.resume,
         resume=bool(args.resume),
+        credentials_config=args.credentials_config,
         governance_evidence=args.governance_evidence,
         reporter=_report,
     )
@@ -103,10 +174,11 @@ def _extract(args: argparse.Namespace) -> int:
     return 0
 
 
-def _verify(run_id: str) -> tuple[int, dict[str, Any]]:
+def _verify(run_id: str, config_path: Path | None = None) -> tuple[int, dict[str, Any]]:
     validate_run_id(run_id)
     run_dir = _workspace() / "output" / run_id
-    result = verify_run(run_dir, _secret_needles())
+    _require_recorded_credentials(run_dir, run_id, config_path)
+    result = verify_run(run_dir, _secret_needles(config_path))
     release_path = run_dir / "reports" / "release_status.json"
     try:
         release = json.loads(release_path.read_text(encoding="utf-8"))
@@ -131,7 +203,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "auth-test":
             print(
-                canonical_json(live_auth_test(_workspace(), args.governance_evidence))
+                canonical_json(
+                    live_auth_test(
+                        _workspace(),
+                        args.governance_evidence,
+                        credentials_config=args.credentials_config,
+                    )
+                )
+            )
+            return 0
+        if args.command == "governance-evidence":
+            print(
+                canonical_json(
+                    write_evidence(
+                        EvidenceRequest(
+                            operation=args.operation,
+                            mode=args.mode,
+                            cutoff=args.cutoff,
+                            review_url=args.review_url,
+                            review_identity=args.review_identity,
+                            issued_at=args.issued_at,
+                            expires_at=args.expires_at,
+                            max_requests=args.max_requests,
+                            max_window_hours=args.max_window_hours,
+                            scope_paths=(
+                                tuple(args.scope_path) if args.scope_path else None
+                            ),
+                            credentials_config=args.credentials_config,
+                        ),
+                        args.out,
+                    )
+                )
+            )
+            return 0
+        if args.command == "verify-evidence":
+            print(
+                canonical_json(
+                    verify_evidence(
+                        args.evidence, max_window_hours=args.max_window_hours
+                    )
+                )
             )
             return 0
         if args.command == "catalog":
@@ -160,13 +271,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
         if args.command == "verify":
-            return _verify(args.run_id)[0]
+            return _verify(args.run_id, args.credentials_config)[0]
         if args.command == "run":
-            credentials = load_credentials()
+            credentials = load_credentials(args.credentials_config)
             extractor = MatrixportExtractor(
                 _workspace(),
                 mode="full",
                 credentials=credentials,
+                credentials_config=args.credentials_config,
                 governance_evidence=args.governance_evidence,
                 live_operation="run",
                 reporter=_report,
@@ -211,6 +323,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0 if result["ok"] else 2
+    except EvidenceGenerationError as error:
+        print(
+            canonical_json(
+                {"ok": False, "error": "EvidenceRefused", "message": str(error)}
+            ),
+            file=sys.stderr,
+        )
+        return 4
     except CredentialError as error:
         print(
             canonical_json(
