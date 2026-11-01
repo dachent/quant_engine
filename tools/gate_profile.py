@@ -12,11 +12,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Sequence
 
+import verify_release_restore
 from quant_engine.core import (
     GATE_PROFILE_APPROVAL_KIND,
     GATE_PROFILE_ID,
@@ -43,19 +44,13 @@ def _issue(args: argparse.Namespace) -> int:
     )
     log = args.clean_room.parent / f"{args.clean_room.name}.restore.log"
     args.clean_room.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("wb") as handle:
-        done = subprocess.run(
-            [
-                sys.executable,
-                str(REPO_ROOT / "tools" / "verify_release_restore.py"),
-                "--spec",
-                str(args.spec),
-                "--clean-room",
-                str(args.clean_room),
-            ],
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            check=False,
+    with (
+        log.open("w", encoding="utf-8") as handle,
+        redirect_stdout(handle),
+        redirect_stderr(handle),
+    ):
+        restore_rc = verify_release_restore.main(
+            ["--spec", str(args.spec), "--clean-room", str(args.clean_room)]
         )
     receipt = issue_gate_profile_reuse_receipt(
         spec=spec,
@@ -64,7 +59,7 @@ def _issue(args: argparse.Namespace) -> int:
         anchor=args.ceremony_receipt,
         previous_receipt=args.previous_reuse_receipt,
         post_verify_receipt=args.post_release_verify_receipt,
-        clean_room_rc=done.returncode,
+        clean_room_rc=restore_rc,
         clean_room_log_sha256=hashlib.sha256(log.read_bytes()).hexdigest(),
     )
     args.out.write_bytes(canonical_json_bytes(receipt))
