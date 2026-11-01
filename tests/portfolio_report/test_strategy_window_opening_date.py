@@ -247,7 +247,7 @@ cr2_custody_structural_complete_world = _consumers.cr2_custody_structural_comple
 def _epoch_starts(report: dict[str, Any], strategy: str) -> list[str]:
     return [
         row["return_window_start"]
-        for row in report["performance"]
+        for row in report["twr_mwr"]
         if row["strategy_id"] == strategy and row.get("return_window_start")
     ]
 
