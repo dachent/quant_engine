@@ -128,3 +128,43 @@ root to exactly the generation, manifest hash and inventory hash the release bou
 preserved bound-generation zips) to be found by hash among the restored files. A release
 also binds each root's directory identity, so `read_current_release` cannot pass in a
 different location by design: adopting restored roots needs a new release over them.
+
+## Data-only gate profile (default off, owner approval required)
+
+`DATA_ONLY_V1` lets a real-roots `data_pipeline.py execute --commit --gate-profile data-only`
+present a *reuse receipt* instead of a fresh replica ceremony receipt. It replaces exactly one
+check, `verify_replica_receipt`; validator findings, A/B derivers, telescoping checks, browser and
+interaction QA, payload proofs, pointer snapshots and post-release verification are unchanged and
+still run every release. Without the flag the commit path is byte-identical to before.
+
+Enabling needs `--gate-profile-approval <file>`: an owner approval record written with
+`tools/gate_profile.py seal-approval` only after the owner's direct ruling (`profile`,
+`approved_by=owner`, `approved_on`, `statement`, `max_consecutive_reuse`). A missing or invalid
+record is a hard refusal. Every other failed condition falls back, automatically, to the full
+replica receipt check and writes `gate-profile-decision.json` beside the spec (`llm_review:
+REQUIRED` on fallback, `NOT_REQUIRED` when the profile engaged).
+
+The profile engages only when ALL hold: the tool identity (HEAD commit and tree, `uv.lock`, Python
+runtime, clean worktree; `core.gate_profile.tool_identity`) is byte-identical to the one the reuse
+receipt recorded; the previous release was committed at this code commit (so the first release
+after a code merge always falls back); the receipt vouches for the release that is COMMITTED right
+now; the root-id set, node count and target count are unchanged; the number of consecutive reuses
+is below the owner's limit; and the leaf diff against the previous release
+(`core.release_diff.explain_release`) has no unexplained change. A changed number is explained
+only by a changed input generation in its target's `depends_on` ancestry; a derived target that
+changed with no changed ancestor, an added or removed key or file, a type or boolean change, or
+changed wording (text differing beyond digits) is unexplained.
+
+Procedure per release: (1) full ceremony once, `tools/release_replica.py ceremony`; (2) after the
+real commit and `post-release-verify`, `tools/gate_profile.py issue --ceremony-receipt <replica
+receipt> --post-release-verify-receipt <receipt> --clean-room <dir> --out <reuse receipt>` (runs the
+clean-room restore; refuses if it fails); (3) next data-only release commits with `--gate-profile
+data-only --gate-profile-approval <file> --reuse-receipt <reuse receipt>`; (4) after it, `issue
+--previous-reuse-receipt <that receipt>` extends the chain. `tools/gate_profile.py select` previews
+the decision without committing. Run the four-family review when the decision record says
+REQUIRED. Receipts and approvals are tamper-evident, not forgery-proof.
+
+What it gives up, in plain terms: no rehearsal of this week's commit on a copy (a commit-path
+refusal is found on the real commit and rolls back), no fresh injected-failure recovery rehearsal,
+no fresh semantic review while every change is input-explained, and lineage is coarse (one changed
+upstream input explains all downstream changes).
