@@ -282,6 +282,11 @@ def check_config_paths(run: Run) -> None:
     refused here, before any stage reads it.
     """
 
+    for file, sha in sorted(dict(run.config.get("pinned_files", {})).items()):
+        if not Path(file).is_file() or _file_sha(Path(file)) != sha:
+            raise Refusal(
+                f"pinned input {file} is missing or does not match its pinned sha256 (stale evidence?)"
+            )
     for key, rule in sorted(run.graph.get("config_paths", {}).items()):
         if key not in run.values:
             continue

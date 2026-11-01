@@ -39,7 +39,6 @@ def write(OUT: Path) -> None:
         "requested_as_of": "2026-09-17",
         "evaluated_on": "2026-10-27",
         "workspace_root": R + "/ws",
-        "retained_cache_base": C + "/cachebase",
         "retained_cache_root": C + "/cache2",
         "preparation_spec": C + "/in/spec.json",
         "selected_inputs": C + "/in/selected-inputs.json",
@@ -138,11 +137,9 @@ def write(OUT: Path) -> None:
             ],
         ),
         "attended": (
-            "run_attended.sh (cold, --qa-hold)",
+            "run_attended_p23.sh (cold, no cache base, --qa-hold)",
             ATT_HEAD
             + [
-                "--retained-cache-base",
-                C + "/cachebase",
                 "--retained-cache-root",
                 C + "/cache2",
             ]

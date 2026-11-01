@@ -652,13 +652,11 @@ def test_the_offline_plan_names_a_flag_that_differs_from_the_recorded_run(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def drop(row: dict[str, Any]) -> None:
-        i = row["argv"].index("--retained-cache-base")
+        i = row["argv"].index("--evaluated-on")
         del row["argv"][i : i + 2]
 
     assert _offline(recorded=_mutated(tmp_path, "attended", drop)) == 2
-    assert (
-        "attended: --retained-cache-base: only in the plan" in capsys.readouterr().err
-    )
+    assert "attended: --evaluated-on: only in the plan" in capsys.readouterr().err
 
     def stale(row: dict[str, Any]) -> None:
         row["argv"][row["argv"].index("--cutoff") + 1] = "2026-09-10"
@@ -667,9 +665,7 @@ def test_the_offline_plan_names_a_flag_that_differs_from_the_recorded_run(
 
     def explained(row: dict[str, Any]) -> None:
         drop(row)
-        row["known"] = [
-            {"flag": "--retained-cache-base", "reason": "documented difference"}
-        ]
+        row["known"] = [{"flag": "--evaluated-on", "reason": "documented difference"}]
 
     assert _offline(recorded=_mutated(tmp_path, "attended", explained)) == 0
 
@@ -678,7 +674,7 @@ def test_the_offline_plan_omits_the_cache_base_when_the_run_has_none(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = json.loads((FIXTURES / "pass26-run.json").read_text(encoding="utf-8"))
-    del config["retained_cache_base"]
+    config["retained_cache_base"] = "C:/Dev/scratch/qe-p26b/c/cachebase"
     path = tmp_path / "run.json"
     path.write_text(json.dumps(config), encoding="utf-8")
     code = driver.main(
@@ -693,7 +689,11 @@ def test_the_offline_plan_omits_the_cache_base_when_the_run_has_none(
             "attended",
         ]
     )
-    assert code == 0 and "--retained-cache-base" not in capsys.readouterr().out
+    assert (
+        code == 0
+        and "--retained-cache-base C:/Dev/scratch/qe-p26b/c/cachebase"
+        in capsys.readouterr().out
+    )
 
 
 def test_every_stage_of_the_shipped_graph_is_planned_offline(
@@ -775,4 +775,25 @@ def test_an_operator_script_outside_the_repo_runs_only_at_its_pinned_sha256(
     _config(world, pre_sha=hashlib.sha256(script.read_bytes()).hexdigest())
     assert _drive(world, graph) == 0
     script.write_text("# edited after pinning\n", encoding="utf-8")
+    assert _drive(world, graph, "--only", "one", "--replace") == 2
+
+
+def test_incident_a_pinned_evidence_file_that_no_longer_matches_is_refused(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    import hashlib
+
+    evidence = world["tmp"] / "selected-strategy-evidence.json"
+    evidence.write_text("267 observations", encoding="utf-8")
+    graph = _graph(world, CHAIN)
+    old = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    _config(world, pinned_files={str(evidence): old})
+    assert _drive(world, graph) == 0
+    evidence.write_text(
+        "281 observations", encoding="utf-8"
+    )  # the corrected file, old pin
+    assert (
+        driver.main(["check", "--config", str(world["config"]), "--graph", str(graph)])
+        == 2
+    )
     assert _drive(world, graph, "--only", "one", "--replace") == 2
