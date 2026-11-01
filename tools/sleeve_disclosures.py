@@ -1377,10 +1377,12 @@ def compose(
                 last_without = date.fromisoformat(epochs[0][0]) - timedelta(days=1)
                 if first_observed <= last_without:
                     no_member = (
-                        f" {strategy} has no HWM member {first_observed.isoformat()}.."
-                        f"{last_without.isoformat()}: its parent account is observed from "
-                        f"{parent_reconciliation['anchor_day']}, and the governed member "
-                        f"series begins {epochs[0][0]}."
+                        f" The derived sleeve series for {strategy} carries no value "
+                        f"{first_observed.isoformat()}..{last_without.isoformat()}: its "
+                        f"parent account is observed from {parent_reconciliation['anchor_day']}"
+                        f" and the sleeve series begins {epochs[0][0]}. This describes the "
+                        "series only; the HWM membership of those days is the governed "
+                        "membership's, which this sentence does not state."
                     )
             items.append(
                 {

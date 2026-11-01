@@ -695,7 +695,9 @@ def test_the_timing_text_states_the_classification_the_external_only_bound_depen
     assert "external flows only" not in text
 
 
-def test_the_hwm_member_text_names_the_days_without_a_member(tmp_path: Path) -> None:
+def test_the_hwm_member_text_names_the_days_the_sleeve_series_does_not_cover(
+    tmp_path: Path,
+) -> None:
     sources = _sources(tmp_path, _facts(), _closing_ledger())
     rows = _rows()
     rows[0]["effective_start"] = "2026-01-30"
@@ -706,9 +708,12 @@ def test_the_hwm_member_text_names_the_days_without_a_member(tmp_path: Path) -> 
     )
     # the parent is observed from the day after its anchor (2026-01-21)
     assert (
-        "product has no HWM member 2026-01-22..2026-01-29: its parent account is "
-        "observed from 2026-01-21, and the governed member series begins 2026-01-30."
+        "The derived sleeve series for product carries no value 2026-01-22..2026-01-29: "
+        "its parent account is observed from 2026-01-21 and the sleeve series begins "
+        "2026-01-30. This describes the series only; the HWM membership of those days is "
+        "the governed membership's, which this sentence does not state."
     ) in text
+    assert "has no HWM member" not in text
     # no gap, no clause
     rows[0]["effective_start"] = "2026-01-22"
     text = next(
@@ -716,7 +721,7 @@ def test_the_hwm_member_text_names_the_days_without_a_member(tmp_path: Path) -> 
         for i in _compose(sources, rows)["items"]
         if i["item"] == "HWM member series"
     )
-    assert "has no HWM member" not in text
+    assert "carries no value" not in text
 
 
 def test_the_pool_inflow_of_the_day_before_a_margin_allocation_is_named() -> None:
