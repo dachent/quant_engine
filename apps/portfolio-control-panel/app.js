@@ -445,11 +445,11 @@
     }
     const background = sized ? `conic-gradient(${stops.join(", ")})` : CAPITAL_HATCH;
     const legend = parts.map((part) => {
-      const label = !part.ready ? `${part.label} · Not ready at the cutoff` : sized ? `${part.label} · ${part.share.toFixed(1)}%` : part.label;
+      const label = !part.ready ? `${part.label} · Not ready at the cutoff` : sized ? `${part.label} · ${part.share.toFixed(1)}%${part.key === "systematic" ? capitalAggregateSuffix("systematic") : ""}` : `${part.label}${part.key === "systematic" ? capitalAggregateSuffix("systematic") : ""}`;
       const dot = part.ready ? `<span class="legend-dot" style="background:${part.color}"></span>` : `<span class="legend-dot is-hatched" style="background:${CAPITAL_HATCH}"></span>`;
       return `<div class="legend-item" data-capital-component="${part.key}" data-capital-status="${safe(part.status)}">${dot}<span>${safe(label)}</span><strong>${part.ready ? currency(part.value) : "—"}</strong></div>`;
     }).join("");
-    return `<div class="capital-donut" data-capital-state="${sized ? "CURRENT" : "NOT_READY"}" style="background:${background}"><div class="donut-center"><strong>${sized ? currency(total.value) : "Not ready"}</strong><span>${sized ? "liquid" : "liquid at cutoff"}</span></div></div><div class="legend-list">${legend}</div>`;
+    return `<div class="capital-donut" data-capital-state="${sized ? "CURRENT" : "NOT_READY"}" style="background:${background}"><div class="donut-center"><strong>${sized ? currency(total.value) : "Not ready"}</strong><span>${sized ? "liquid" : "liquid at cutoff"}</span>${sized && capitalAggregateText("total_liquid") ? `<span class="cell-secondary">${safe(capitalAggregateText("total_liquid"))}</span>` : ""}</div></div><div class="legend-list">${legend}</div>`;
   };
   const weightBasisText = (basis) => {
     const text = String(basis || "");
@@ -666,7 +666,7 @@
     $("#command-reason").textContent = performanceLineageMismatch
       ? `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`
       : data.advisory.reason;
-    const liquidNote = capitalState("total_liquid").ready ? `Systematic plus reserve plus retained excluded${capitalAsOf("total_liquid")}` : capitalNotReadyNote();
+    const liquidNote = capitalState("total_liquid").ready ? `Systematic plus reserve plus retained excluded${capitalAsOf("total_liquid")}${capitalAggregateSuffix("total_liquid")}` : capitalNotReadyNote();
     const reserveNote = capitalState("reserve").ready ? `Zero strategy risk budget${capitalAsOf("reserve")}` : "Not ready at the cutoff · zero strategy risk budget";
     renderKpis("#command-kpis", performanceLineageMismatch ? [
       ["Total liquid", capitalAmount("total_liquid"), liquidNote],
@@ -675,7 +675,7 @@
       ["Report coverage", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
     ] : [
       ["Total liquid", capitalAmount("total_liquid"), liquidNote],
-      ["Systematic capital", capitalAmount("systematic"), `Subject to the accepted HWM policy${capitalAsOf("systematic")}`],
+      ["Systematic capital", capitalAmount("systematic"), `Subject to the accepted HWM policy${capitalAsOf("systematic")}${capitalAggregateSuffix("systematic")}`],
       ["Reserve", capitalAmount("reserve"), reserveNote, "reserve"],
       ["Governed NAV coverage", pct(data.advisory.nav_coverage), `${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}; ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered. ${hwmExclusionNote()}`, "warning"],
     ]);
@@ -817,7 +817,7 @@
     const rows = accepted.map((row, index) => {
       const target = targetState(row);
       const current = currents[index];
-      const currentValue = current.value != null ? `${currency(current.value)}${row.scope === "RESERVE" ? reserveBasisNote() : ""}` : current.status ? statusText(current.status) : "—";
+      const currentValue = current.value != null ? `${currency(current.value)}${row.scope === "RESERVE" ? reserveBasisNote() : aggregateBasisNote([row.strategy_id])}` : current.status ? statusText(current.status) : "—";
       const identity = "Reserve classification";
       return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
     });
@@ -829,7 +829,7 @@
     const currentWeights = currents.map((item) => item.weight).filter((value) => value != null);
     const notReady = accepted.length - currentValues.length;
     const footer = accepted.length
-      ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${snapshotValues.length ? currency(sumOf(snapshotValues)) : "—"}</td><td class="numeric">${snapshotWeights.length ? pct(sumOf(snapshotWeights)) : "—"}</td><td class="numeric">${currentValues.length ? currency(sumOf(currentValues)) : "—"}${notReady ? `<span class="cell-secondary">excludes ${integer.format(notReady)} not ready</span>` : ""}</td><td class="numeric">${currentWeights.length ? pct(sumOf(currentWeights)) : "—"}</td><td colspan="4"></td></tr>`
+      ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${snapshotValues.length ? currency(sumOf(snapshotValues)) : "—"}</td><td class="numeric">${snapshotWeights.length ? pct(sumOf(snapshotWeights)) : "—"}</td><td class="numeric">${currentValues.length ? currency(sumOf(currentValues)) : "—"}${currentValues.length ? aggregateBasisNote(accepted.filter((row) => row.scope !== "RESERVE").map((row) => row.strategy_id)) : ""}${notReady ? `<span class="cell-secondary">excludes ${integer.format(notReady)} not ready</span>` : ""}</td><td class="numeric">${currentWeights.length ? pct(sumOf(currentWeights)) : "—"}</td><td colspan="4"></td></tr>`
       : "";
     const table = $("#allocation-table");
     table.dataset.visibleRows = String(accepted.length);
@@ -899,6 +899,40 @@
     const first = members[0]?.value_basis?.basis;
     return first && members.every((summary) => summary.value_basis?.basis === first) ? accountBasisNote(members[0]) : "";
   };
+
+  // An aggregate (a strategy's current value, a capital total) is a sum over member accounts' values.  It is derived when any
+  // member's own-date value is declared derived in account_summary; the counts and the day come from those rows, and the
+  // wording is the account-row label (valueBasisLabel) with the member counts.
+  const derivedAccountRows = () => new Map(accountDimension.filter((summary) => summary.value_basis)
+    .map((summary) => [`${summary.account_id}|${String(summary.as_of_date || "").slice(0, 10)}`, summary]));
+  const aggregateBasisStats = (members) => {
+    const derived = derivedAccountRows();
+    const list = Array.isArray(members) ? members : [];
+    const hits = list.map((member) => derived.get(`${member.account_id}|${String(member.as_of_date || "").slice(0, 10)}`)).filter(Boolean);
+    return { k: hits.length, n: list.length, hits };
+  };
+  const aggregateBasisText = (stats) => {
+    if (!stats.k) return "";
+    const days = [...new Set(stats.hits.map((summary) => String(summary.as_of_date).slice(0, 10)))];
+    const label = valueBasisLabel({ value_basis: stats.hits[0].value_basis, as_of_date: days.length === 1 ? days[0] : "" });
+    return `${stats.k === stats.n ? label : `Partly ${label.charAt(0).toLowerCase()}${label.slice(1)}`} (${integer.format(stats.k)} of ${integer.format(stats.n)} account${stats.n === 1 ? "" : "s"})`;
+  };
+  const strategyMembers = (ids) => (data.custody_current_capital?.strategies || []).filter((row) => ids.includes(row.strategy_id)).flatMap((row) => row.members || []);
+  const aggregateBasisNote = (ids) => {
+    const text = aggregateBasisText(aggregateBasisStats(strategyMembers(ids)));
+    return text ? `<span class="cell-secondary">${safe(text)}</span>` : "";
+  };
+  // The capital totals: systematic is the sum of its component strategies; total liquid adds the reserve and the retained
+  // excluded strategies.  Text only, "" when no member is derived.
+  const capitalAggregateText = (key) => {
+    const custody = data.custody_current_capital || {};
+    const systematic = strategyMembers(custody.systematic?.components || []);
+    const members = key === "systematic" ? systematic
+      : key === "total_liquid" ? [...(custody.reserve?.members || []), ...strategyMembers(custody.retained_excluded?.components || []), ...systematic]
+        : [];
+    return aggregateBasisText(aggregateBasisStats(members));
+  };
+  const capitalAggregateSuffix = (key) => (capitalState(key).ready && capitalAggregateText(key) ? ` · ${capitalAggregateText(key)}` : "");
 
   function renderPositionTable() {
     const query = positionSearch.toLowerCase();

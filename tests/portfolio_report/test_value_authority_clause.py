@@ -173,3 +173,90 @@ def test_a_derived_nav_row_does_not_claim_to_be_a_latest_observation() -> None:
         monkey.undo()
     assert rows["acct-derived"]["status"] == f"AVAILABLE_{DERIVED}"
     assert rows["acct-native"]["status"] == "AVAILABLE_LATEST_OBSERVATION"
+
+
+def _capital() -> dict[str, Any]:
+    def member(account: str, day: str = CUTOFF) -> dict[str, Any]:
+        return {"account_id": account, "as_of_date": day, "status": "AVAILABLE"}
+
+    return {
+        "strategies": [
+            {
+                "strategy_id": "strat-a",
+                "status": "AVAILABLE",
+                "members": [member("a0")],
+            },
+            {
+                "strategy_id": "strat-b",
+                "status": "AVAILABLE",
+                "members": [member("a1"), member("native")],
+            },
+            {
+                "strategy_id": "strat-c",
+                "status": "AVAILABLE",
+                "members": [member("native")],
+            },
+            # a derived account on another day than the member's own date does not count
+            {
+                "strategy_id": "strat-d",
+                "status": "AVAILABLE",
+                "members": [member("a0", "2026-09-10")],
+            },
+        ],
+        "reserve": {"status": "NOT_READY_AT_CUTOFF", "members": [member("native")]},
+        "retained_excluded": {"status": "AVAILABLE", "components": ["strat-c"]},
+        "systematic": {
+            "status": "AVAILABLE",
+            "components": ["strat-a", "strat-b", "strat-c", "strat-d"],
+        },
+        "total_liquid": {
+            "status": "AVAILABLE",
+            "components": ["reserve", "retained_excluded", "systematic"],
+        },
+    }
+
+
+def _dated_accounts(count: int) -> tuple[list[Any], list[Any]]:
+    accounts, positions = _rows(count, 1)
+    for row in accounts:
+        row["as_of_date"] = CUTOFF
+    return accounts, positions
+
+
+def test_the_clause_also_names_the_aggregates_computed_from_labelled_values() -> None:
+    accounts, positions = _dated_accounts(2)
+    text = reporter._restate_value_authority(
+        _coverage(), accounts, positions, CUTOFF, _capital()
+    )[1]["known_gap"]
+    assert (
+        "aggregates computed from those values are derived too: 2 strategy current "
+        "values (strat-a and strat-b) and the totals systematic capital and total liquid"
+    ) in text
+    # the strategy whose member is derived on another day, and the native strategy, are not named
+    assert "strat-c" not in text and "strat-d" not in text
+
+
+def test_an_aggregate_total_that_is_not_ready_is_not_called_derived() -> None:
+    accounts, positions = _dated_accounts(2)
+    capital = _capital()
+    capital["total_liquid"] = {"status": "NOT_READY_AT_CUTOFF", "components": []}
+    text = reporter._restate_value_authority(
+        _coverage(), accounts, positions, CUTOFF, capital
+    )[1]["known_gap"]
+    assert "and the totals systematic capital" in text
+    assert "total liquid" not in text
+
+
+def test_without_a_capital_block_or_derived_member_no_aggregate_sentence_is_added() -> (
+    None
+):
+    accounts, positions = _dated_accounts(2)
+    plain = reporter._restate_value_authority(_coverage(), accounts, positions, CUTOFF)
+    assert "aggregates computed" not in plain[1]["known_gap"]
+    capital = _capital()
+    for strategy in capital["strategies"]:
+        strategy["members"] = [{"account_id": "native", "as_of_date": CUTOFF}]
+    none = reporter._restate_value_authority(
+        _coverage(), accounts, positions, CUTOFF, capital
+    )
+    assert "aggregates computed" not in none[1]["known_gap"]
