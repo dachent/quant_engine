@@ -272,5 +272,31 @@ field addition stops the conversion until the shape is reviewed. The account
 `funds` list was empty in that capture, so its entries are written as JSON without
 shape checks. The 2026-09-02 reproduction (46 CSVs) is recorded in the READY note;
 shapes after 2026-09-02 and a capture that includes `funds.projections` remain
-UNVERIFIED. No flow-coverage artifact is produced: a native HAR declared under a new
-name is not one of the files the ledger's account-activity check recognises.
+UNVERIFIED. The ledger's account-activity flow-coverage proof reads the native HAR
+by role, see "Role-driven account-activity proof" below.
+
+## Role-driven account-activity proof
+
+`provider_ledger._quantbase_flow_coverage` proves that `csv/account_activity.csv` is the
+complete captured activity response. Besides the legacy-named pair and the executed
+request proof it now accepts native HARs by role: every manifest artifact with schema
+`quantbase-native-har` version `1` under `source/har/` (what `--native-intake` and
+`--native-manifest` declare; the legacy pair is version `legacy-unknown`, so it never
+selects this path). The HAR itself is the source: exactly one successful bare `GET`
+of `/api/users/<id>/accounts/activity/` across the declared HARs, its decoded body
+must be the `{"data": [...]}` shape, every row timestamp must be at or before the
+HAR entry's `startedDateTime`, and the CSV must equal that response row for row
+(same projection as the legacy proof; columns the capture never carried may be
+blank), except that rows whose latest timestamp is after the cutoff
+(`as_of_date`) are excluded, exactly as the converter excludes them: the HAR keeps
+later evidence, the generation does not carry post-cutoff observations. The capture
+may be later than the cutoff but never earlier (`capture date >= as_of_date`; the
+legacy proof keeps `==`), and the proof's `effective_end` is the cutoff, not the
+capture date; `record_count` counts the kept rows.
+
+Refused: a role HAR with no or more than one activity request, with no
+`account_activity.csv` artifact, with a CSV that is not the HAR response, with a
+changed file, outside `source/har/`, or declared together with the legacy pair or
+the current request proof. A generation with no native capture still returns no
+coverage, and the legacy and current-proof results are unchanged byte for byte
+(pinned in `tests/provider_ledger/test_quantbase_har_role_coverage.py`).
