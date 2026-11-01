@@ -124,3 +124,9 @@ ops/preserved-captures/**/p123_cookies_*.json
 
 # Project-local browser test runtime and installed Chromium.
 node_modules/
+
+# Governed secrets of the synthetic-fixture generator (issue 696): data root only
+salt.txt
+spec.json
+fixture-salt.txt
+fixture-spec.json
