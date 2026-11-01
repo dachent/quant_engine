@@ -17,6 +17,7 @@ from quant_engine.web_contracts.provenance import SOURCE_ANCHORS
 from quant_engine.web_contracts.portfolio123 import PORTFOLIO123_CONTRACT
 from quant_engine.web_contracts.quantbase import (
     QUANTBASE_CONTRACT,
+    build_quantbase_contract,
     extract_quantbase_har,
 )
 from quant_engine.web_contracts.schwab import SCHWAB_CONTRACT
@@ -35,6 +36,7 @@ __all__ = [
     "SemanticEffect",
     "SessionEnvelope",
     "WebContractError",
+    "build_quantbase_contract",
     "canonical_extraction",
     "extract_har",
     "extract_quantbase_har",

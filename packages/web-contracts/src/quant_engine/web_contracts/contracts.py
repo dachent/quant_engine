@@ -37,6 +37,9 @@ class EndpointContract:
     query_keys: frozenset[str] = frozenset()
     validate_query: RequestValidator | None = None
     authentication_header: str | None = "authorization"
+    #: Query keys that MAY appear in addition to ``query_keys`` (all of which must).
+    #: Empty by default, which keeps the exact-key-set match.
+    optional_query_keys: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         method = self.method.upper()
@@ -55,6 +58,13 @@ class EndpointContract:
         query_keys = frozenset(item.casefold() for item in self.query_keys)
         if any(re.fullmatch(r"[a-z][a-z0-9_.-]*", item) is None for item in query_keys):
             raise WebContractError("endpoint query key is not portable")
+        optional_keys = frozenset(item.casefold() for item in self.optional_query_keys)
+        if any(
+            re.fullmatch(r"[a-z][a-z0-9_.-]*", item) is None for item in optional_keys
+        ):
+            raise WebContractError("endpoint optional query key is not portable")
+        if optional_keys & query_keys:
+            raise WebContractError("optional query keys repeat required keys")
         authentication_header = self.authentication_header
         if authentication_header is not None:
             authentication_header = authentication_header.casefold()
@@ -67,6 +77,7 @@ class EndpointContract:
         object.__setattr__(self, "method", method)
         object.__setattr__(self, "origin", self.origin.rstrip("/"))
         object.__setattr__(self, "query_keys", query_keys)
+        object.__setattr__(self, "optional_query_keys", optional_keys)
         object.__setattr__(self, "authentication_header", authentication_header)
 
     def matches(self, method: str, url: str) -> bool:
@@ -84,7 +95,9 @@ class EndpointContract:
             and actual_origin == self.origin
             and path_matches
             and len(actual_query_keys) == len(set(actual_query_keys))
-            and frozenset(actual_query_keys) == self.query_keys
+            and self.query_keys
+            <= frozenset(actual_query_keys)
+            <= self.query_keys | self.optional_query_keys
             and not parsed.fragment
         )
 
@@ -93,7 +106,12 @@ class EndpointContract:
 
         pairs = parse_qsl(urlsplit(url).query, keep_blank_values=True)
         result = {key.casefold(): value for key, value in pairs}
-        if len(result) != len(pairs) or frozenset(result) != self.query_keys:
+        if (
+            len(result) != len(pairs)
+            or not self.query_keys
+            <= frozenset(result)
+            <= self.query_keys | self.optional_query_keys
+        ):
             raise WebContractError("request query differs from the reviewed shape")
         return result
 
