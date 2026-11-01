@@ -198,3 +198,37 @@ The current A1.3 seam is owned across these in-repository surfaces:
 - `tools/portfolio_control_panel.py` binds a hash-addressed report candidate for
   the pre-publication panel path; this binding was added at `32bb7f8` and does
   not promote the candidate or workbook to report authority.
+
+## Opt-in strategy-basis restatement (#624, option B)
+
+By default a strategy whose product epoch is a derived sleeve (#567) publishes its
+return, drawdown, current value, weight and weekly series from the whole parent
+account (disclosure A) and its MWR and governed capital from the sleeve; its
+`return_scope` says so. `build --strategy-basis <file>` (or `strategy_basis_path`
+on `build_report_data`) reads a `strategy-basis-declaration/1` document naming the
+strategies to restate onto the sleeve instead:
+
+```json
+{"schema": "strategy-basis-declaration/1",
+ "strategies": [{"strategy_id": "p123-ai-factor", "basis": "SLEEVE_EPOCH"}]}
+```
+
+With no declaration the report bytes are unchanged (a test compares them with the
+bytes main produces). With one, the strategy's return rows are the sleeve epoch's
+verified observation trace (an opening row on the epoch's opening date, then one row
+per link), its current capital is the sleeve's closing NAV, the systematic total and
+every weight are recomputed from the rows, `return_scope.basis` is `SLEEVE_EPOCH`
+and the label is generated from the sleeve and window. The portfolio perimeter then
+equals the open epochs' value, so the portfolio MWR is computable. The row names
+what stays on the parent basis (`return_scope.not_restated`): benchmark and provider
+comparisons, the implementation bridge, dependence and the decomposition lenses,
+the legacy HWM envelope and the dated allocation snapshot. The weekly-returns and
+dependence inputs are separate artifacts built from the baseline return rows; a
+panel built from a restated report fails its report/dependence series parity gate
+until those inputs are restated the same way.
+
+Convention (ADR 0002, unchanged by this option): the sleeve epoch opens at its first
+closing NAV, so the entry day's own result is outside the sleeve TWR, and date-only
+transfers are placed at end of day. An audit that counts the entry day and places
+transfers at the start of day gets a different figure for the same NAV series
+(AI Factor s2: panel 15.43%, audit 14.35%, of which the entry day is 1.66 points).

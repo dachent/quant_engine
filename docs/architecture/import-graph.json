@@ -540,6 +540,11 @@
     ],
     [
       "portfolio_report",
+      "strategy_basis",
+      1
+    ],
+    [
+      "portfolio_report",
       "verify_holdings_identity",
       1
     ],
