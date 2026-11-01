@@ -704,3 +704,41 @@ def test_every_stage_of_the_shipped_graph_is_planned_offline(
     printed = capsys.readouterr().out
     # a derived id the fixture does not give would print as <name>
     assert set(re.findall(r"<(\w+)>", printed)) <= {"release_id", "serial_release_id"}
+
+
+def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
+    # chain_p26.sh: resume, tail1 (2a probe recipe, 2b registries, 2c recipe, 3 spec, 4 semantic,
+    # 5a financial artifacts), provider generations, production spec, replica copy, replica spec,
+    # lanes; before it run_attended.sh, qa_only.sh and the pre-chain
+    pass26 = [
+        "pre-chain",
+        "attended",
+        "qa-browser",
+        "qa-interaction",
+        "qa-native",
+        "resume",
+        "recipe-probe",
+        "registries",
+        "recipe",
+        "pipeline-spec",
+        "semantic",
+        "financial-artifacts",
+        "provider-generations",
+        "production-spec",
+        "replica-copy",
+        "replica-provider-generations",
+        "replica-spec",
+        "lanes",
+    ]
+    ids = [stage["id"] for stage in _shipped()["stages"]]
+    assert [i for i in ids if i in pass26] == pass26
+    # a default run covers exactly that path, then stops before the explicit commit
+    assert [i for i in ids if not _stage(i).get("explicit")] == [
+        "selected-inputs",
+        *pass26,
+    ]
+    assert ids[-2:] == ["commit", "pack-evidence"]
+
+
+def _stage(stage_id: str) -> dict[str, Any]:
+    return next(s for s in _shipped()["stages"] if s["id"] == stage_id)
