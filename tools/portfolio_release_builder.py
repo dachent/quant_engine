@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import csv
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, localcontext
@@ -17,7 +18,16 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterable, Iterator, Mapping, Sequence, TypedDict
+import time
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+    TypedDict,
+)
 
 from quant_engine.core import (
     GenerationManifest,
@@ -1186,6 +1196,67 @@ def create_recipe(
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
+
+
+_LENS_WORKERS_ENV = "QE_LENS_WORKERS"
+_LensBuild = tuple[str, list[dict[str, Any]]]
+
+
+def _lens_worker_count(jobs: int) -> int:
+    """Concurrent lens builds; ``QE_LENS_WORKERS=1`` keeps the serial walk."""
+    configured = os.environ.get(_LENS_WORKERS_ENV)
+    if configured is None:
+        requested = max(1, (os.cpu_count() or 1) // 4)
+    else:
+        try:
+            requested = int(configured)
+        except ValueError:
+            requested = 0
+        if requested < 1:
+            raise VerticalBuildError(f"{_LENS_WORKERS_ENV} must be a positive integer")
+    return max(1, min(jobs, requested, 8))
+
+
+def _build_lenses(
+    items: Sequence[tuple[Path, Mapping[str, Any]]],
+    build: Callable[[Path, Mapping[str, Any]], _LensBuild],
+    *,
+    workers: int,
+) -> Iterator[_LensBuild]:
+    """Yield each lens build in declared order, running independent ones together.
+
+    Each lens is its own pair of producer subprocesses over its own spec and
+    output root. Runs whose specs have the same bytes share one reuse key, so
+    they stay in a single task, in order; everything else overlaps. Results are
+    consumed in declared order, so recorded operations and bindings do not
+    depend on which build finished first.
+    """
+    if workers < 2 or len(items) < 2:
+        for bundle, row in items:
+            yield build(bundle, row)
+        return
+    groups: dict[object, list[int]] = {}
+    for index, (_bundle, row) in enumerate(items):
+        digest = row.get("sha256")
+        groups.setdefault(digest if isinstance(digest, str) else index, []).append(
+            index
+        )
+
+    def run(indexes: list[int]) -> list[tuple[int, _LensBuild]]:
+        return [(index, build(*items[index])) for index in indexes]
+
+    results: dict[int, _LensBuild] = {}
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = [pool.submit(run, indexes) for indexes in groups.values()]
+        for future in futures:
+            results.update(future.result())
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    for index in range(len(items)):
+        yield results[index]
 
 
 def _note_progress(what: str) -> None:
@@ -4586,17 +4657,22 @@ def build_analytics(
         hybrid_bundles["dynamic-style"] = _text(
             hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
         )
-    for lens_bundle, row in spec_sources:
+
+    def lens_layout(row: Mapping[str, Any]) -> tuple[Path, str]:
         source_key = _text(row.get("source_key"), "lens source_key")
         if current_plan:
             surface = _text(row.get("surface"), "lens surface")
             evidence_mode = _text(row.get("evidence_mode"), "lens evidence_mode")
-            spec_id = _text(row.get("spec_id"), "lens spec_id")
-            lens_root = lenses_root / evidence_mode / surface / source_key
-        else:
-            lens_root = lenses_root / source_key
+            return lenses_root / evidence_mode / surface / source_key, source_key
+        return lenses_root / source_key, source_key
+
+    def build_lens(lens_bundle: Path, row: Mapping[str, Any]) -> _LensBuild:
+        """Stage and publish one lens; return its generation and its operations."""
+        lens_root, _source_key = lens_layout(row)
         lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
+        operations: list[dict[str, Any]] = []
         _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
+        started = time.monotonic()
         staged = _tool(
             "portfolio_decomposition.py",
             "stage",
@@ -4613,8 +4689,9 @@ def build_analytics(
             ),
             timeout=7200,
         )
+        staged_seconds = time.monotonic() - started
         _record_numerical_producer_operation(
-            producer_operations,
+            operations,
             tool="portfolio_decomposition.py",
             operation="stage",
             spec_path=lens_spec,
@@ -4639,7 +4716,7 @@ def build_analytics(
             timeout=7200,
         )
         _record_numerical_producer_operation(
-            producer_operations,
+            operations,
             tool="portfolio_decomposition.py",
             operation="publish",
             spec_path=lens_spec,
@@ -4647,10 +4724,32 @@ def build_analytics(
             output_root=lens_root,
             producer_result=result,
         )
-        generation_id = _generation_id(
-            result.get("generation_id"), "lens generation_id"
+        _note_progress(
+            f"decomposition lens {lens_root.name}/{lens_spec.stem} done "
+            f"stage={staged_seconds:.1f}s total={time.monotonic() - started:.1f}s"
         )
+        return (
+            _generation_id(result.get("generation_id"), "lens generation_id"),
+            operations,
+        )
+
+    built_lenses = _build_lenses(
+        [(lens_bundle, row) for lens_bundle, row in spec_sources],
+        build_lens,
+        # Hybrid lenses derive a second decomposition from each one inside this
+        # same loop, so only the current plan's independent lens runs overlap.
+        workers=_lens_worker_count(len(spec_sources)) if current_plan else 1,
+    )
+    for (lens_bundle, row), (generation_id, operations) in zip(
+        spec_sources, built_lenses, strict=True
+    ):
+        lens_root, source_key = lens_layout(row)
+        lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
+        producer_operations.extend(operations)
         if current_plan:
+            surface = _text(row.get("surface"), "lens surface")
+            evidence_mode = _text(row.get("evidence_mode"), "lens evidence_mode")
+            spec_id = _text(row.get("spec_id"), "lens spec_id")
             lens_key = f"{evidence_mode}:{spec_id}" if len(mode_plans) > 1 else spec_id
             lenses[lens_key] = generation_id
             lens_bindings.append(
