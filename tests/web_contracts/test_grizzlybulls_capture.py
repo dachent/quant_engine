@@ -339,3 +339,35 @@ def test_explicit_slug_replaces_the_default() -> None:
         ["capture", "--cdp-url", "http://x", "--output-root", "o", "--slug", "a-model"]
     )
     assert args.slug == ["a-model"]
+
+
+def test_attachment_bodies_arrive_through_the_download_event(tmp_path: Path) -> None:
+    rec = _recorder(tmp_path)
+    csv = history_csv(ROWS)
+    for mode in ("blended", "live"):
+        rec.handle(
+            method="GET",
+            url=f"{BASE}/api/modelTradeHistory?slug={SLUG}&mode={mode}",
+            status=200,
+            content_type="text/csv",
+            request_header_names=AUTH,
+            read_body=lambda: b"",
+            response_header_names=["content-disposition", "content-type"],
+        )
+        rec.attach_download(csv)
+    manifest = rec.finish(expected_slugs=[SLUG])
+    assert manifest["failures"] == []
+    raws = sorted((tmp_path / "run" / "raw").glob("*history*"))
+    assert [p.read_bytes() for p in raws] == [csv, csv]
+    # a response whose download never arrives is a failure, not a silent gap
+    late = Recorder(tmp_path / "late", mode="capture")
+    late.handle(
+        method="GET",
+        url=f"{BASE}/api/modelTradeHistory?slug={SLUG}&mode=live",
+        status=200,
+        content_type="text/csv",
+        request_header_names=AUTH,
+        read_body=lambda: b"",
+        response_header_names=["content-disposition"],
+    )
+    assert late.finish(expected_slugs=[SLUG])["status"] == "FAILED_REQUIRED_CAPABILITY"
