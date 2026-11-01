@@ -7,7 +7,7 @@ financial outputs; existing GenerationNodes carry their immutable containers.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 import contextlib
 from datetime import UTC, date, datetime
 import hashlib
@@ -945,6 +945,24 @@ def _replay_worker_count(jobs: int) -> int:
     else:
         requested = max(1, (os.cpu_count() or 1) // 2)
     return max(1, min(jobs, requested, 16))
+
+
+def _derive_pending(
+    replay_plans: Iterable[_ReplayPlan],
+) -> dict[str, _DerivedReplay]:
+    """Run, in worker processes, the fits the serial walk would run.
+
+    That is the first plan of each calculation identity that has no receipt yet;
+    later plans of one identity and plans with a receipt reuse it, as they do
+    serially.
+    """
+    pending: dict[str, _ReplayPlan] = {}
+    for replay_plan in replay_plans:
+        if replay_plan.calculation_identity not in pending and not _read_replay_receipt(
+            replay_plan.receipt_path, replay_plan.receipt
+        ):
+            pending[replay_plan.calculation_identity] = replay_plan
+    return _derive_in_parallel(list(pending.values())) if len(pending) > 1 else {}
 
 
 def _derive_in_parallel(
@@ -2328,15 +2346,7 @@ def _validate_financial_outcomes(
                 key[0],
                 source_root=plans[key[-1]] if key[0] == "DECOMPOSITION" else None,
             )
-    pending: dict[str, _ReplayPlan] = {}
-    for replay_plan in replay_plans.values():
-        if replay_plan.calculation_identity not in pending and not _read_replay_receipt(
-            replay_plan.receipt_path, replay_plan.receipt
-        ):
-            pending[replay_plan.calculation_identity] = replay_plan
-    derived_replays = (
-        _derive_in_parallel(list(pending.values())) if len(pending) > 1 else {}
-    )
+    derived_replays = _derive_pending(replay_plans.values())
     for node_id, key in roles.items():
         if key[0] not in {"DECOMPOSITION", "DEPENDENCE"}:
             continue

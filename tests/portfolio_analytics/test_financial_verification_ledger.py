@@ -399,14 +399,19 @@ def _generation_nodes(
     return (generation, artifact, *(_file_node(n, p) for n, p in extra))
 
 
-def _decomposition_case(tmp_path: Path) -> tuple[tuple[Any, ...], Path, str]:
+def _decomposition_case(
+    tmp_path: Path, tag: str = ""
+) -> tuple[tuple[Any, ...], Path, str]:
     source_root = tmp_path / "dec-source"
     target_path, days, _truth = _write_dec_sources(source_root)
     spec_path = _dec_spec(
         source_root,
         target_path,
         days,
-        models=[_dec_model(days), _dec_dynamic_model(days)],
+        models=[
+            _dec_model(days, model_id=f"model-two-factor{tag}"),
+            _dec_dynamic_model(days),
+        ],
     )
     staged = decomposition.stage_candidate(spec_path, source_root, tmp_path / "dec-out")
     nodes = _generation_nodes(
@@ -646,3 +651,81 @@ def test_replay_worker_count_is_bounded_and_validated(
         monkeypatch.setenv(outcomes._REPLAY_WORKERS_ENV, bad)
         with pytest.raises(outcomes.FinancialOutcomeError, match="positive integer"):
             outcomes._replay_worker_count(5)
+
+
+def test_pending_fits_run_in_workers_and_book_like_the_serial_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One walk over several replays: duplicates and warm receipts reuse, the rest derive."""
+    monkeypatch.setenv(outcomes._REPLAY_WORKERS_ENV, "3")
+    cases = [
+        _decomposition_case(tmp_path / "d0"),
+        _decomposition_case(tmp_path / "d1", "-b"),
+        _decomposition_case(tmp_path / "d2", "-c"),
+        _dependence_case(tmp_path / "c0"),
+    ]
+    # Repeated calculations: the walk meets the first and the last twice.
+    walk = [*cases, cases[0], cases[3]]
+    warm_case = cases[1]
+
+    def plans_for(state_root: Path) -> list[Any]:
+        rows = []
+        for nodes, source_root, kind in walk:
+            invocation = SimpleNamespace(
+                nodes=nodes,
+                roots={"analytics": nodes[0].source_dir},
+                state_root=state_root,
+            )
+            rows.append(
+                (
+                    invocation,
+                    nodes[1],
+                    kind,
+                    source_root,
+                    outcomes._replay_plan(
+                        invocation, nodes[1], kind, source_root=source_root
+                    ),
+                )
+            )
+        return rows
+
+    def run(state_root: Path, *, parallel: bool) -> tuple[Any, Any, list[Any]]:
+        _replay(warm_case, state_root, parallel=False)
+        rows = plans_for(state_root)
+        derived = outcomes._derive_pending(row[4] for row in rows) if parallel else {}
+        counters = {key: 0 for key in outcomes._WORK_COUNTER_KEYS}
+        calls: list[dict[str, Any]] = []
+        values = [
+            outcomes._replay_model(
+                invocation,
+                node,
+                kind,
+                source_root=source_root,
+                work_counters=counters,
+                calls=calls,
+                plan=plan,
+                derived=derived.get(plan.calculation_identity),
+            )
+            for invocation, node, kind, source_root, plan in rows
+        ]
+        assert bool(derived) is parallel
+        return counters, calls, values
+
+    serial = run(tmp_path / "state-serial", parallel=False)
+    parallel = run(tmp_path / "state-parallel", parallel=True)
+    assert parallel == serial
+    counters, calls, _values = serial
+    assert counters["full_rederivation_count"] == 3
+    assert counters["receipt_reuse_count"] == 3
+    assert [row["outcome"] for row in calls] == [
+        "REDERIVED",
+        "RECEIPT_REUSED",
+        "REDERIVED",
+        "REDERIVED",
+        "RECEIPT_REUSED",
+        "RECEIPT_REUSED",
+    ]
+    for name in _receipt_names(tmp_path / "state-serial"):
+        assert (tmp_path / "state-parallel" / RECEIPTS / name).read_bytes() == (
+            tmp_path / "state-serial" / RECEIPTS / name
+        ).read_bytes()
