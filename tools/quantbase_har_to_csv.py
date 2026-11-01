@@ -30,7 +30,7 @@ import argparse
 import csv
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import io
 import json
@@ -257,16 +257,29 @@ _TIMESTAMP_FIELDS: Final = (
     "updated_at",
     "canceled_at",
 )
-_SNAPSHOT_FILES: Final = frozenset(
-    {
-        "accounts.csv",
-        "dashboard_total_wins.csv",
-        "partner_status.csv",
-        "projections_all_live_funds.csv",
-        "ssg_all_funds_stats.csv",
-        "user_profile.csv",
-    }
-)
+_SNAPSHOT_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,119}$")
+
+
+def _snapshot_capability(name: str) -> str | None:
+    """The capability whose capture-time response a CSV file is a snapshot of."""
+
+    if name == "user_profile.csv":
+        return "users.profile"
+    if name == "accounts.csv":
+        return "accounts.linked"
+    if name == "partner_status.csv":
+        return "partners.status"
+    if name == "dashboard_total_wins.csv" or (
+        name.startswith("dashboard_") and name.endswith("_holdings.csv")
+    ):
+        return "portfolio.dashboard"
+    if name in {"ssg_all_funds_stats.csv", "projections_all_live_funds.csv"}:
+        return "funds.invest"
+    return None
+
+
+def _utc_text(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 class QuantbaseCsvError(ValueError):
@@ -375,7 +388,14 @@ def _safe_name(title: str) -> str:
 class _Response:
     """One raw response body bound to its reviewed capability and request."""
 
-    __slots__ = ("body", "capability", "query", "request_sha256")
+    __slots__ = (
+        "body",
+        "capability",
+        "captured_at",
+        "captured_source",
+        "query",
+        "request_sha256",
+    )
 
     def __init__(
         self,
@@ -383,7 +403,11 @@ class _Response:
         request_sha256: str,
         query: Mapping[str, Any],
         body: object,
+        captured_at: datetime,
+        captured_source: str,
     ) -> None:
+        self.captured_at = captured_at
+        self.captured_source = captured_source
         self.capability = capability
         self.request_sha256 = request_sha256
         self.query = query
@@ -403,6 +427,20 @@ def _har_entries(raw: Path, names: Sequence[str]) -> list[Any]:
             raise QuantbaseCsvError(f"raw HAR is not valid JSON: {name}") from exc
         entries.extend(_array(log.get("entries"), "log.entries"))
     return entries
+
+
+def _entry_time(entry: Mapping[str, Any], fallback: datetime) -> tuple[datetime, str]:
+    """UTC time of a HAR entry; the run's capture time when it has none."""
+
+    started = entry.get("startedDateTime")
+    if isinstance(started, str):
+        try:
+            parsed = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc), "har_entry"
+    return fallback.astimezone(timezone.utc), "session"
 
 
 def _bound_responses(
@@ -432,6 +470,7 @@ def _bound_responses(
         query = QUANTBASE_CONTRACT.route(request["method"], request["url"]).query(
             request["url"]
         )
+        started, source = _entry_time(entry, manifest.session.captured_at)
         responses.append(
             _Response(
                 item.capability,
@@ -442,6 +481,8 @@ def _bound_responses(
                     if key in query
                 },
                 json.loads(entry["response"]["content"]["text"]),
+                started,
+                source,
             )
         )
         sanitized.append(item)
@@ -768,7 +809,10 @@ _SUPPORTED: Final = frozenset(
 
 
 def derive_csv_files(
-    responses: Sequence[_Response], volatis_pricehistory: str, cutoff_day: date
+    responses: Sequence[_Response],
+    volatis_pricehistory: str,
+    cutoff_day: date,
+    snapshot_exception: str | None = None,
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Return ``{file name: bytes}`` and value-free derivation facts.
 
@@ -841,7 +885,45 @@ def derive_csv_files(
         raise QuantbaseCsvError(
             f"required datasets missing: {sorted(REQUIRED_FILES - set(files))}"
         )
+    if snapshot_exception is not None and not _SNAPSHOT_LABEL.fullmatch(
+        snapshot_exception
+    ):
+        raise QuantbaseCsvError("snapshot exception label is invalid")
+    cutoff_end = datetime.combine(
+        cutoff_day + timedelta(days=1), time(0), tzinfo=timezone.utc
+    )
+    snapshots: list[dict[str, object]] = []
+    for name in sorted(files):
+        capability = _snapshot_capability(name)
+        if capability is None:
+            continue
+        latest = max(
+            (item for item in responses if item.capability == capability),
+            key=lambda item: item.captured_at,
+        )
+        label: dict[str, object] = {
+            "captured_at": _utc_text(latest.captured_at),
+            "capability": capability,
+            "file": name,
+            "source": latest.captured_source,
+        }
+        gap = (latest.captured_at - cutoff_end).total_seconds() / 3600
+        if gap > 0:
+            label["gap_hours"] = round(gap, 4)
+        snapshots.append(label)
+    late = [str(item["file"]) for item in snapshots if "gap_hours" in item]
+    if late and snapshot_exception is None:
+        raise QuantbaseCsvError(
+            "snapshot captured after the cutoff day end (a cutoff-dated reader "
+            f"would mistake it for a cutoff value): {late}; label an exception "
+            "with --snapshot-exception"
+        )
+    if snapshot_exception is not None and not late:
+        raise QuantbaseCsvError(
+            "snapshot exception given but every snapshot is within the cutoff day"
+        )
     facts: dict[str, object] = {
+        "snapshots": snapshots,
         "excluded_after_cutoff": dict(sorted(cutoff.excluded.items())),
         "total_wins_source_fund": wins_source,
         "volatis_pricehistory": volatis_pricehistory,
@@ -930,15 +1012,18 @@ def _hash_file(path: Path) -> tuple[str, int]:
 
 
 def _derive(
-    intake_dir: Path, volatis_pricehistory: str
+    intake_dir: Path,
+    volatis_pricehistory: str,
+    snapshot_exception: str | None = None,
 ) -> tuple[Path, dict[str, bytes], dict[str, Any]]:
     """Every output file name (relative to the output directory) to its bytes."""
 
     root, manifest, record, report = _load_intake(intake_dir)
     responses = _bound_responses(root, manifest, record)
     csv_files, facts = derive_csv_files(
-        responses, volatis_pricehistory, manifest.cutoff
+        responses, volatis_pricehistory, manifest.cutoff, snapshot_exception
     )
+    snapshots = facts.pop("snapshots")
     intake_id = str(record["intake_id"])
     outputs: dict[str, bytes] = {
         f"source/csv/{name}": content for name, content in csv_files.items()
@@ -965,12 +1050,8 @@ def _derive(
         "intake_id": intake_id,
         "manifest_sha256": record["manifest_sha256"],
         "records_sha256": report["records_sha256"],
-        "snapshot_files": sorted(
-            name
-            for name in csv_files
-            if name in _SNAPSHOT_FILES
-            or (name.startswith("dashboard_") and name.endswith("_holdings.csv"))
-        ),
+        "snapshot_exception": snapshot_exception,
+        "snapshots": snapshots,
         "runbook_sha256": _sha256(outputs["source/RUNBOOK_QUANTBASE.md"]),
         "schema_version": SCHEMA_VERSION,
     }
@@ -994,9 +1075,22 @@ def _derive(
             "sha256": digest,
         }
     )
-    outputs["native-manifest.json"] = _canonical(
-        {"cutoff": manifest.cutoff.isoformat(), "files": files, "schema_version": 1}
-    )
+    declared: dict[str, object] = {
+        "cutoff": manifest.cutoff.isoformat(),
+        "files": files,
+        "schema_version": 1,
+        "snapshots": [
+            {
+                key: item[key]
+                for key in ("captured_at", "file", "gap_hours")
+                if key in item
+            }
+            for item in snapshots  # type: ignore[attr-defined]
+        ],
+    }
+    if snapshot_exception is not None:
+        declared["snapshot_exception"] = snapshot_exception
+    outputs["native-manifest.json"] = _canonical(declared)
     names = [str(item["name"]) for item in record["files"]]
     blob = b"".join(outputs.values())
     for value in _session_values(_har_entries(root / "raw", names)):
@@ -1022,11 +1116,16 @@ def _output_dir(root: Path, out_root: Path, intake_id: str) -> Path:
 
 
 def convert(
-    intake_dir: Path, out_root: Path, volatis_pricehistory: str
+    intake_dir: Path,
+    out_root: Path,
+    volatis_pricehistory: str,
+    snapshot_exception: str | None = None,
 ) -> dict[str, object]:
     """Derive the CSV source root and the native manifest; create-only."""
 
-    root, outputs, conversion = _derive(intake_dir, volatis_pricehistory)
+    root, outputs, conversion = _derive(
+        intake_dir, volatis_pricehistory, snapshot_exception
+    )
     target = _output_dir(root, out_root, str(conversion["intake_id"]))
     if target.exists():
         raise QuantbaseCsvError("output already exists; conversion is create-only")
@@ -1063,11 +1162,16 @@ def _summary(target: Path, conversion: Mapping[str, Any]) -> dict[str, object]:
 
 
 def verify_conversion(
-    intake_dir: Path, out_root: Path, volatis_pricehistory: str
+    intake_dir: Path,
+    out_root: Path,
+    volatis_pricehistory: str,
+    snapshot_exception: str | None = None,
 ) -> dict[str, object]:
     """Re-derive every output from the verified intake and compare byte for byte."""
 
-    root, outputs, conversion = _derive(intake_dir, volatis_pricehistory)
+    root, outputs, conversion = _derive(
+        intake_dir, volatis_pricehistory, snapshot_exception
+    )
     target = _output_dir(root, out_root, str(conversion["intake_id"]))
     if target.is_symlink() or not target.is_dir():
         raise QuantbaseCsvError("conversion output is missing or linked")
@@ -1102,6 +1206,13 @@ def _parser() -> argparse.ArgumentParser:
         child.add_argument(
             "--volatis-pricehistory", choices=VOLATIS_MODES, required=True
         )
+        child.add_argument(
+            "--snapshot-exception",
+            default=None,
+            metavar="LABEL",
+            help="label that accepts capture-time snapshots taken after the "
+            "cutoff day end (recorded in the report and the native manifest)",
+        )
     return parser
 
 
@@ -1109,7 +1220,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         run = convert if args.command == "convert" else verify_conversion
-        result = run(args.intake, args.out_root, args.volatis_pricehistory)
+        result = run(
+            args.intake,
+            args.out_root,
+            args.volatis_pricehistory,
+            args.snapshot_exception,
+        )
     except (OSError, QuantbaseCsvError, ValueError) as exc:
         print(f"quantbase-har-to-csv: FAIL: {exc}")
         return 1
