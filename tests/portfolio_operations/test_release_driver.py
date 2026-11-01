@@ -437,6 +437,8 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "replica_workspace",
         "code_commit",
         "retained_cache_base",
+        "pre_chain_script",
+        "pre_chain_sha256",
     }
     for tool in re.findall(r"\{(?:tools|mvp2)\}/([\w.]+)", json.dumps(graph)):
         base = (

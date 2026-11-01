@@ -310,6 +310,15 @@ def check_script_in_repo(
         return
     if not script.is_file():
         raise Refusal(f"{stage['id']}: script {script} does not exist")
+    if "pinned_script" in stage:
+        # an operator-supplied script outside the repository, named by its sha256
+        path_template, sha_template = stage["pinned_script"]
+        if Path(run.expand(path_template)) == script:
+            if _file_sha(script) != run.expand(sha_template):
+                raise Refusal(
+                    f"{stage['id']}: script {script} does not match its pinned sha256"
+                )
+            return
     if not _inside(script, run.repo):
         raise Refusal(
             f"{stage['id']}: script {script} is outside the run's repository {run.repo}"

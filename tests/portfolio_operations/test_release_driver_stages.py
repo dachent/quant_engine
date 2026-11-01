@@ -32,7 +32,18 @@ from test_release_driver import (  # noqa: E402
 )
 
 SHIPPED = REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json"
-FIXTURES = REPO_ROOT / "tests" / "fixtures" / "release_driver"
+
+import pass26_commands  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _pass26_files(tmp_path_factory: pytest.TempPathFactory) -> None:
+    global FIXTURES
+    FIXTURES = tmp_path_factory.mktemp("pass26")
+    pass26_commands.write(FIXTURES)
+
+
+FIXTURES = Path()
 
 
 def _shipped() -> dict[str, Any]:
@@ -742,3 +753,26 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
 
 def _stage(stage_id: str) -> dict[str, Any]:
     return next(s for s in _shipped()["stages"] if s["id"] == stage_id)
+
+
+def test_an_operator_script_outside_the_repo_runs_only_at_its_pinned_sha256(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    import hashlib
+
+    script = world["tmp"] / "ops" / "pre.py"
+    script.parent.mkdir()
+    script.write_text("open(__import__('sys').argv[1], 'w')\n", encoding="utf-8")
+    stage = {
+        "id": "one",
+        "outputs": ["{cycle}/one.txt"],
+        "pinned_script": ["{pre_script}", "{pre_sha}"],
+        "argv": ["{python}", "{pre_script}", "{cycle}/one.txt"],
+    }
+    graph = _graph(world, [stage])
+    _config(world, pre_script=str(script), pre_sha="0" * 64)
+    assert _drive(world, graph) == 2
+    _config(world, pre_sha=hashlib.sha256(script.read_bytes()).hexdigest())
+    assert _drive(world, graph) == 0
+    script.write_text("# edited after pinning\n", encoding="utf-8")
+    assert _drive(world, graph, "--only", "one", "--replace") == 2

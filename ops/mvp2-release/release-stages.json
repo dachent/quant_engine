@@ -115,12 +115,16 @@
       ],
       "argv": [
         "{python}",
-        "{mvp2}/pre_chain.py",
+        "{pre_chain_script}",
         "{cycle}",
         "{selected_inputs}",
         "{baseline_id}",
         "{evaluated_on}",
         "{code_commit}"
+      ],
+      "pinned_script": [
+        "{pre_chain_script}",
+        "{pre_chain_sha256}"
       ]
     },
     {
@@ -780,7 +784,10 @@
         ]
       ],
       "outputs": [
-        "{laneout}"
+        "{laneout}",
+        "{lane_replica}/replica-receipt.json",
+        "{lane_real}/pointers-after-dry-run.json",
+        "{lane_real}/commit-authorization.json"
       ],
       "guard_spec": "{prod_spec}",
       "argv": [

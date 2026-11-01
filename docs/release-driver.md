@@ -158,7 +158,7 @@ never touched. Every stage records `seconds`, `seconds_total` over its attempts,
 
 `plan --offline --ids ids.json --recorded cmds.json` prints every stage's command line from the
 configuration and graph alone (derived ids come from `ids.json`; nothing under the run is read)
-and compares each recorded command flag by flag. `tests/fixtures/release_driver/` holds the pass-26
+and compares each recorded command flag by flag. `tests/portfolio_operations/pass26_commands.py` builds the pass-26
 configuration, its ids and its recorded command lines; the plan reproduces all 16 recorded stages.
 
 ## Commit gate and the replica receipt
