@@ -17,6 +17,7 @@ Two steps, so a report is a pure function of its pinned inputs:
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -710,6 +711,86 @@ def _margin_allocation(
     return f"{head}{where} (declared: {event['note']})"
 
 
+def _pool_inflow_before(
+    event: Mapping[str, str], by_source: Mapping[str, Mapping[str, Mapping[str, str]]]
+) -> str:
+    """What the unallocated pool received the day before a margin allocation drew on it.
+
+    The activity carries no link from cash to a fund purchase, so the margin share of an
+    allocation out of the pool is not sized; the bound inflow of the day before is named
+    so the reader can see the amount that did not come from margin-funded activity alone.
+    """
+
+    account = next(
+        (a for a in by_source if a.rsplit("-", 1)[-1] == event["sleeve_id"]),
+        None,
+    )
+    if account is None:
+        return ""
+    day = date.fromisoformat(event["day"])
+    before = (day - timedelta(days=1)).isoformat()
+    sentences: list[str] = []
+    for pool in sorted(by_source.get(account, {}).get(event["day"], {})):
+        if not pool.endswith("-unallocated"):
+            continue
+        received = by_source.get(pool, {}).get(before, {})
+        if not received:
+            continue
+        named = " and ".join(
+            f"{_usd(_dec(v))} from {_sleeve_label(cp)}"
+            for cp, v in sorted(received.items())
+        )
+        sentences.append(
+            f" The {event['day']} margin share of the allocation drawn from the "
+            f"unallocated pool is not sized (the activity does not link cash to fund "
+            f"purchases); the pool had received {named} on {before}."
+        )
+    return "".join(sentences)
+
+
+def _other_margin_events(
+    sources: Mapping[str, Any],
+    *,
+    product_sleeves: Mapping[str, str],
+    sleeve_accounts: Mapping[str, str],
+    parents: Collection[str],
+    by_source: Mapping[str, Mapping[str, Mapping[str, str]]],
+    named: str,
+) -> str:
+    """Declared margin allocations into retained sleeves of the product's parent account."""
+
+    listed: list[str] = []
+    for event in sources.get("margin_funding_events", []):
+        if event["kind"] != "IN" or event["sleeve_id"] in product_sleeves:
+            continue
+        account = next(
+            (
+                a
+                for a, parent in sleeve_accounts.items()
+                if parent in parents and a.rsplit("-", 1)[-1] == event["sleeve_id"]
+            ),
+            None,
+        )
+        parts = (
+            None if account is None else by_source.get(account, {}).get(event["day"])
+        )
+        if not parts:
+            continue
+        total = sum((_dec(v) for v in parts.values()), Decimal(0))
+        if f"{event['sleeve_id']} {_usd(total)} on {event['day']}" in named:
+            continue
+        listed.append(
+            f"{event['sleeve_id']} {_usd(total)} on {event['day']} "
+            f"(declared: {event['note']})"
+        )
+    if not listed:
+        return ""
+    return (
+        " Declared margin-funded allocations into retained sleeves of the same account, "
+        f"outside the product's own capital ({len(listed)}): {'; '.join(listed)}."
+    )
+
+
 def _exit_proceeds(
     sources: Mapping[str, Any],
     *,
@@ -819,10 +900,14 @@ def _perimeter_reconciliation(
     return (
         " Sleeve gains are measured from each sleeve's first-day end-of-day NAV, not from "
         f"the amount allocated to it; the entry-day differences ({entries}; total "
-        f"{entry_total:+,.2f}) belong to no sleeve. Parent account gain over "
+        f"{entry_total:+,.2f}) belong to no sleeve and lie outside every sleeve's TWR and "
+        f"MWR. Parent account gain over "
         f"{reconciliation['anchor_day']}..{reconciliation['last_day']} is {gain:+,.2f} on "
-        f"{_usd(_dec(reconciliation['paid_in']))} of external capital (opening NAV "
-        f"{_usd(_dec(reconciliation['opening_nav']))} plus {_usd(later)} paid in later{left}); "
+        f"{_usd(_dec(reconciliation['paid_in']))} of paid-in capital including the opening "
+        f"value (the opening NAV on {reconciliation['anchor_day']}, "
+        f"{_usd(_dec(reconciliation['opening_nav']))}, plus {_usd(later)} of inflows the "
+        "parent account's ledger recognises after that day, counted whatever their "
+        f"provider classification{left}); "
         f"the sleeves sum to {sleeves:+,.2f}; the {difference:+,.2f} difference is the "
         f"entry-day differences ({entry_total:+,.2f}) and {printed_text} not attributed "
         f"(days before the first sleeve day and the parent remainder){rounding}."
@@ -1031,8 +1116,8 @@ def compose(
                 f"{label} (cumulative TWR {_pct(twr)}%{basis_note}): placing each flow "
                 "at the beginning or the end of its day, independently, moves it by "
                 f"between {_signed_pt(entry['b_all_lower_pt'])} and "
-                f"{_signed_pt(entry['b_all_upper_pt'])} points (external flows only: "
-                f"{_signed_pt(entry['b_ext_lower_pt'])} / "
+                f"{_signed_pt(entry['b_all_upper_pt'])} points (flows classified external "
+                f"only: {_signed_pt(entry['b_ext_lower_pt'])} / "
                 f"{_signed_pt(entry['b_ext_upper_pt'])}){every_bod}"
             )
         if parts:
@@ -1045,6 +1130,14 @@ def compose(
                         "the return depends on flow timing as follows: "
                         + "; ".join(parts)
                         + f". Source: {evidence['path']} (sha256 {evidence['sha256'][:12]}). "
+                        "The external-only bound covers only the flows the measured epoch's "
+                        "own flow reconciliation classifies as external, so it depends on "
+                        "that classification (the perimeter is the epoch's flow "
+                        "reconciliation, not the parent account's ledger, whose inflows are "
+                        "counted as paid-in whatever their classification): an inflow "
+                        "classified as an internal transfer is outside it, and a reader who "
+                        "treats such an inflow as external capital should read the all-flows "
+                        "bound instead. "
                         "Epochs derived from sleeves are not covered by these bounds; "
                         "exact-timestamp TWR is acceptance item #535."
                     ),
@@ -1148,11 +1241,21 @@ def compose(
                     " Allocations whose declared funding events name account margin "
                     f"({len(margin)}): {listed}."
                 )
+            for event in margin:
+                text += _pool_inflow_before(event, by_source)
             text += _exit_proceeds(
                 sources,
                 product_sleeves=product_sleeves,
                 by_source=by_source,
                 margin_days=margin_days,
+            )
+            text += _other_margin_events(
+                sources,
+                product_sleeves=product_sleeves,
+                sleeve_accounts=sleeve_accounts,
+                parents={sleeve_accounts[a] for a in product_accounts},
+                by_source=by_source,
+                named=text,
             )
             parents = sorted({sleeve_accounts[a] for a in product_accounts})
             known = {
@@ -1173,8 +1276,8 @@ def compose(
                 )
                 if capital[strategy] > paid_in:
                     text += (
-                        f" Gross capital {_usd(capital[strategy])} exceeds all external "
-                        f"capital paid into the account ({_usd(paid_in)}) by "
+                        f" Gross capital {_usd(capital[strategy])} exceeds all capital "
+                        f"paid into the account, opening value included ({_usd(paid_in)}), by "
                         f"{_usd(capital[strategy] - paid_in)}."
                     )
             predecessor = sources.get("predecessor")
@@ -1258,13 +1361,36 @@ def compose(
             and str(r.get("account_id")) in sleeve_accounts
         )
         if epochs:
+            parent_reconciliation = next(
+                (
+                    item
+                    for item in sources.get("account_reconciliation", [])
+                    if item["parent_account_id"] == sleeve_accounts.get(epochs[0][1])
+                ),
+                None,
+            )
+            no_member = ""
+            if parent_reconciliation is not None:
+                first_observed = date.fromisoformat(
+                    str(parent_reconciliation["anchor_day"])
+                ) + timedelta(days=1)
+                last_without = date.fromisoformat(epochs[0][0]) - timedelta(days=1)
+                if first_observed <= last_without:
+                    no_member = (
+                        f" {strategy} has no HWM member {first_observed.isoformat()}.."
+                        f"{last_without.isoformat()}: its parent account is observed from "
+                        f"{parent_reconciliation['anchor_day']}, and the governed member "
+                        f"series begins {epochs[0][0]}."
+                    )
             items.append(
                 {
                     "item": "HWM member series",
                     "value": (
                         f"The governed HWM member for {strategy} is the sleeve series "
                         f"{epochs[0][1]} from {epochs[0][0]}; the index carries this member from "
-                        "that date. "
+                        "that date."
+                        + no_member
+                        + " "
                         + _index_move(
                             sources.get("predecessor"),
                             hwm_current_index,
