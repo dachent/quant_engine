@@ -239,6 +239,7 @@ _PATH_STAGES = {
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
     # source bytes only, and the release step runs it beside the IBKR builder.
     "tools/build_quantbase_fund_facts.py": ["report", "panel"],
+    "tools/capture_quantbase_har.py": [],
     "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
