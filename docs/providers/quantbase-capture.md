@@ -218,9 +218,44 @@ date key, and account activity by the latest of a row's timestamps
 `conversion-report.json` (`derivation.excluded_after_cutoff`). `funds.statistics`
 whose `end_day` is after the cutoff is refused, not filtered. Capture-time snapshots
 (`user_profile`, `accounts`, `partner_status`, dashboard holdings and wins, the two
-fund-metadata tables) have no observation date and are written as captured; the
-report names them (`snapshot_files`) and the capture date so the owner can rule on
-them. An output directory that is a link, or whose `quantbase-har-csv` ancestor is a
+fund-metadata tables) have no observation date; they are what the provider showed
+when the response was captured, not a cutoff-dated value. Each is labelled with
+`captured_at` (UTC, the `startedDateTime` of the HAR entry that carried the
+response, or the intake manifest's session capture time when the entry has none;
+`source` says which) in `conversion-report.json` (`snapshots[]`) and, as
+`snapshots[]` with `file`, `captured_at` and optional `gap_hours`, in
+`native-manifest.json`. When a snapshot was captured after the cutoff day end
+(cutoff day + 1, 00:00 UTC) the label also carries `gap_hours`, the positive gap in
+hours; inside the cutoff day there is no gap key. `plan --native-manifest` carries
+the labels into the plan (`snapshot_labels`) and into the catalog's dataset rows
+(`captured_at`, `snapshot_kind: CAPTURE_TIME_SNAPSHOT`, and for a late snapshot
+`gap_hours_after_cutoff_end` and `snapshot_exception`); dated series and legacy
+plans carry none of it, so legacy plans, plan ids and catalogs are unchanged.
+
+Downstream consumers of the snapshot files (traced by code) and the refusal. The
+`accounts.csv` `settled_balance` of the `alpaca` row feeds a cutoff-bounded cash
+closure: `tools/build_quantbase_fund_facts.py:699-707` (`_provider_cash`), used at
+`:1394`, compared with activity-derived cash at `:1262-1270` (refusal when the
+residual differs from the declaration) and published as `provider_settled_cash` at
+`:1320` (shown in `tools/sleeve_disclosures.py:820`); the same closure is in
+`acceptance/derive_a/sleeves.py:1010-1019` and `acceptance/derive_b/derive.py:6088-6096`.
+The `accounts.csv` fund `value` becomes `QuantbaseSleeve.snapshot_value`
+(`acceptance/derive_a/sources.py:562-577`) and is only a note in
+`acceptance/derive_a/derive.py:1311-1321`. No consumer of `user_profile`,
+`partner_status`, dashboard holdings or wins, `ssg_all_funds_stats` or
+`projections_all_live_funds` exists in `tools`, `packages`, `acceptance`, `apps` or
+`ops/mvp2-release`. NAV comes only from the dated series
+(`dashboard_Volatis_Strategy_pricehistory.csv`) and activity. Because a balance
+snapshot taken after the cutoff day end would be compared with cutoff-bounded cash,
+`convert` and `verify` REFUSE any snapshot whose `captured_at` is after the cutoff
+day end unless `--snapshot-exception LABEL` is passed (label: 1-120 characters,
+`[A-Za-z0-9 ._:/#-]`, starting alphanumeric). The label is recorded in the report,
+the native manifest, the plan and the catalog's late snapshot rows, and an
+exception given when no snapshot is late is refused. R3 schedules the Quantbase
+capture on the cutoff day after the close, so the gap is zero and no exception is
+needed.
+
+An output directory that is a link, or whose `quantbase-har-csv` ancestor is a
 link, is refused.
 
 Refusals (fail closed): an intake that does not verify; records that differ from
