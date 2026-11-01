@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 import json
 import math
 from typing import Any, Union
@@ -48,9 +48,12 @@ class Choice:
     values: tuple[str, ...]
 
 
-# Scalars are named: "int", "num", "str", "date", "bool"; a trailing "?" admits null.
+# Scalars are named: "int", "num", "str", "date" (ISO), "us_date" (MM/DD/YYYY, the
+# format the designer-model route returns), "bool", and "null" (observed null only,
+# anything else is refused); a trailing "?" admits null for the other scalars.
 Spec = Union[str, Obj, Seq, Choice]
-_SCALARS = frozenset({"int", "num", "str", "date", "bool"})
+_SCALARS = frozenset({"int", "num", "str", "date", "us_date", "bool", "null"})
+REDACTION = "[REDACTED]"
 
 
 def _scalar(value: object, name: str, path: str) -> None:
@@ -62,6 +65,13 @@ def _scalar(value: object, name: str, path: str) -> None:
             and not isinstance(value, bool)
             and math.isfinite(value)
         )
+    elif name == "us_date":
+        ok = isinstance(value, str) and len(value) == 10
+        if ok:
+            try:
+                datetime.strptime(str(value), "%m/%d/%Y")
+            except ValueError:
+                ok = False
     elif name == "bool":
         ok = isinstance(value, bool)
     elif name == "str":
@@ -87,8 +97,12 @@ def validate_shape(value: object, spec: Spec, path: str = "$", depth: int = 0) -
     if isinstance(spec, str):
         nullable = spec.endswith("?")
         name = spec[:-1] if nullable else spec
-        if name not in _SCALARS:
+        if name not in _SCALARS or (name == "null" and nullable):
             raise ShapeError(f"{path}: shape declaration is invalid")
+        if name == "null":
+            if value is not None:
+                raise ShapeError(f"{path}: value has the wrong type")
+            return
         if value is None:
             if nullable:
                 return
@@ -149,3 +163,22 @@ def canonical_bytes(value: Mapping[str, Any] | list[Any]) -> bytes:
 
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return (text + chr(10)).encode("utf-8")
+
+
+def redact_keys(value: object, keys: frozenset[str]) -> object:
+    """Replace the value of every object key in ``keys`` (case-insensitive) by the marker.
+
+    The same rule the web-contract extractor applies to HAR bodies, so a file export
+    and a HAR export of one capability normalize to the same redacted record.
+    """
+
+    if isinstance(value, dict):
+        return {
+            key: REDACTION
+            if isinstance(key, str) and key.casefold() in keys
+            else redact_keys(child, keys)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_keys(item, keys) for item in value]
+    return value

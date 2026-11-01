@@ -8,11 +8,31 @@ account transactions, designer-model JSON, and billing evidence. It complements
 the network, or calls the API. The owner exports; the code stages, normalizes, and
 verifies offline.
 
-## Status: every route and shape is UNVERIFIED
+## Status: two capabilities CONFIRMED from preserved evidence, the rest UNVERIFIED
 
-No real Portfolio123 response was observed when this code was written. The route
-paths and response shapes in `quant_engine.portfolio123.capture_catalog` are
-placeholders exercised only against invented fixtures. The first real export
+The catalog was reviewed offline against preserved real bytes (2026-09 captures
+under the private portfolio data root: 92 HARs, the raw JSON and HTML pages, the
+CDP request records, the designer-model capture, the downloaded CSVs, and the
+2026-10-16 design intake). Only route templates, methods, status codes, query keys,
+and response field names and types were taken; no value or identifier was copied.
+
+| Capability | Placeholder vs evidence | Catalog now | What the evidence showed |
+|---|---|---|---|
+| `designer-model.json` | DIFFERS | CONFIRMED | Real route is `GET /spr/strategy/model/{id}?dm=true` (not `/app/investment/model`); real response has 37 top-level fields, MM/DD/YYYY dates, and personal data (designer profile, comment threads) that is now redacted. Verified byte-for-byte against the preserved capture in HAR and file form. |
+| `transactions.download` | DIFFERS | CONFIRMED | Real header is `Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes`, identical in ten captures (route is the reviewed `strategy.transactions`). |
+| `transactions.account` | DIFFERS | UNVERIFIED | No JSON account-transactions route in 92 HARs. The real list is `GET /transact_list.jsp?portid=&offset=`, an HTML table, 50 rows per page, `offset` (not `page`), strategy-scoped. The JSON-only extractor cannot admit it; use the reviewed CSV download. |
+| `aifactor.predictor` | UNVERIFIED | UNVERIFIED | No capture contains an AI Factor page or response. Only the menu link `/sv/opener/AIFACTOR/{cat}` and the user flags `aiFactorEnabled` / `hasAiFactor` were seen. |
+| `aifactor.model` | UNVERIFIED | UNVERIFIED | Same; the design intake records the predictor definition as in no capture. |
+| `screen.definition` | UNVERIFIED | UNVERIFIED | Only the list `/app/opener/SCR` and a `.../screen/summary/{n}/revert` copy-to-screen action link (a mutation: never capture or follow it). |
+| `simulation.result` | UNVERIFIED | UNVERIFIED | Only `POST /port_simul6.jsp` (HTML) and the list `/app/opener/SIM`; no JSON simulation response. |
+| `billing.credit-table` | UNVERIFIED | UNVERIFIED | Only the menu links `/sv/account-settings/billing` and `/sv/account-settings/dataminer-api`; `GET /spr/user` carries an integer `apiQuota` of unknown meaning. |
+| `billing.invoice` | UNVERIFIED | UNVERIFIED | No preserved statement or invoice. |
+
+The same table is pinned in `tests/portfolio123/test_capture_catalog.py`. A run is
+marked `REVIEWED_SHAPES` in its manifest only when every capability in its scope is
+CONFIRMED; otherwise it is `UNVERIFIED_SYNTHETIC_SHAPES`, and the provenance
+admission below refuses it. Every UNVERIFIED row is still an invented placeholder
+that matches no real traffic. The first real export of an UNVERIFIED capability
 therefore does three jobs, in this order:
 
 1. It is inventoried: route templates, methods, status codes, and counts, with no
@@ -62,7 +82,7 @@ is the `--capability` value.
 | `simulation.result` | HAR | Open the simulation results page, wait for the curve, export the HAR. |
 | `transactions.account` | HAR | Open the transactions tab, page to the last page without skipping, export the HAR. |
 | `transactions.download` | file (CSV) | Use the transactions download control and save the file unmodified. Do not open and re-save it. |
-| `designer-model.json` | file (JSON) or HAR | Export the designer model JSON unmodified, or open the model page and export the HAR. |
+| `designer-model.json` | file (JSON) or HAR | Export the designer model JSON unmodified, or open the designer model summary page and export the HAR (the page issues `GET /spr/strategy/model/{id}?dm=true`; the sibling `.../perf` route is not catalogued and stays inventoried only). The designer profile and the comment threads are redacted in the normalized record; the restricted raw copy keeps them. |
 | `billing.credit-table` | HAR | Open the signed-in billing credits page, export the HAR. |
 | `billing.invoice` | file (CSV or PDF) | Download each statement or invoice from the billing page unmodified, one run per file. EU123 cost evidence goes here. |
 
@@ -110,7 +130,7 @@ nothing is overwritten. A failed run leaves no partial directory. `verify`
 re-reads the bytes, checks every hash and the exact file set, re-validates every
 record against the catalog, and re-derives the normalized output from the raw
 export; it trusts nothing the stager reported. The manifest is marked restricted
-and `UNVERIFIED_SYNTHETIC_SHAPES`.
+and records `REVIEWED_SHAPES` or `UNVERIFIED_SYNTHETIC_SHAPES` (recomputed by `verify`).
 
 ## Refusal codes
 
@@ -152,11 +172,90 @@ key_id = [{ source = "azure-keyvault", name = "<owner-supplied name>" }]
 key = [{ source = "azure-keyvault", name = "<owner-supplied name>" }]
 ```
 
-Exactly the fields `key_id` and `key` are accepted. Secret names are
-owner-supplied and appear nowhere in the code.
+Exactly the fields `key_id` and `key` are accepted, and they must name two
+different secrets (a plan that points both at one secret is refused with
+`CREDENTIAL_PLAN_SHARED_SECRET`). The Key Vault source returns one whole secret
+and has no sub-field support, so the existing single secret `portfolio123-api`
+(internal shape unknown, never read here) cannot serve both fields through the
+resolver. The minimal mapping that works with the resolver as it is uses two
+secrets, `portfolio123-api-key-id` and `portfolio123-api-key`:
+
+```toml
+[credentials.sources.azure-keyvault]
+command = ["pwsh", "-NoProfile", "-NonInteractive", "-File", "C:/Dev/bin/kvget.ps1"]
+
+[credentials.p123]
+key_id = [{ source = "azure-keyvault", name = "portfolio123-api-key-id" }]
+key = [{ source = "azure-keyvault", name = "portfolio123-api-key" }]
+```
+
+Both names are valid Key Vault secret names for the resolver and are proven offline
+with a fake runner in `tests/portfolio123/test_capture_credential_plan.py`. The
+owner creates the two secrets (or splits `portfolio123-api` into them); no value is
+read or written by the code. Secret names appear in this runbook and in tests only,
+never in the package code.
 
 The allow-list is the reviewed metered read operations only. Rebalance commit and
 transaction import or delete are not representable. `ai_factor_predict` is a
 candidate for a declared HAR gap and is deliberately absent from the allow-list
 until the owner declares the gap and the routing registry is extended in a
 reviewed change.
+
+## AI Factor design admission (issue 628, SRC-AIFACTOR-DESIGN-001)
+
+The `p123-ai-factor` design slot moves from `REFERENCE_ONLY` to `EVIDENCED` only
+through a staged, reviewed capture. `tools/portfolio_provenance.py` accepts a design
+reference of the form `p123-capture-design:<sha256>` and recomputes it from the
+admitted bytes; a label or a model container cannot produce one.
+
+What admission needs from the capture (all of it is produced by `stage-har`):
+
+| Needed | Source in the run | Check |
+|---|---|---|
+| A staged HAR run | `manifest.json`: `kind`, `form` = `har`, `restricted` | exact manifest key set, canonical bytes |
+| Reviewed shapes | `evidence_status` = `REVIEWED_SHAPES` | every capability in scope CONFIRMED in the catalog |
+| Both AI Factor captures | `scope` holds `aifactor.predictor` and `aifactor.model` | each has at least one record, coverage `COMPLETE` |
+| Complete, not partial | `complete` true, `allow_partial` false | |
+| Capture before the as-of date | `captured_at` | timezone-aware, not after `as_of_date` |
+| Bound records | `files` entry for `normalized/records.json` | hash and size equal the admitted bytes |
+| Successful, non-empty responses | each AI Factor record: `status` 2xx, `response` a non-empty object | |
+| Predictor identity | each record's `request_sha256` (hash of method, origin, id-bearing path, query) | part of the design reference |
+| Shapes reviewed in this repository | each AI Factor response re-validated against the catalog row, which must be CONFIRMED now | a self-consistent forged run with invented content is refused |
+| Owner attestation | `expected_hashes` in the source group pins both `manifest.json` and `normalized/records.json` | the run's own claims are not trusted; the owner confirms the hashes |
+
+The design reference is `p123-capture-design:` plus the SHA-256 of the canonical
+JSON of the AI Factor records only (capability, `request_sha256`, sanitized
+response), sorted. It ignores the capture time, the run id, and every other
+capability in the run, so the same design captured twice has one reference and a
+changed design has another.
+
+What R3 supplies as data in the private provenance specification:
+
+1. A source group for the run: a private root plus the explicit relative paths of
+   `<run>/manifest.json` and `<run>/normalized/records.json` (the raw HAR, which
+   holds session material, is not admitted and may be quarantined first), with an
+   `expected_hashes` entry for each of those two files, confirmed by the owner.
+2. In the `p123-ai-factor` version row, the `design` slot: `status` `EVIDENCED`,
+   `artifact_sha256` = SHA-256 of `normalized/records.json`, `source_ids` = that
+   group, `version_ref` = the reference printed by:
+
+```powershell
+uv run --frozen --no-sync python tools/portfolio_provenance.py capture-design-ref `
+  --run-dir <staging-root>\p123-capture\<run-id>
+```
+
+It refuses a run that is unreviewed, partial, out of scope, or inconsistent. Admission
+repeats every check from the admitted bytes at `stage` and `publish`.
+
+What the attended HAR must contain: the AI Factor predictor page and the AI Factor
+model page, each loaded to completion in one signed-in session, exported with
+sensitive data included, with the JSON responses that carry the predictor and model
+definitions (type, target, horizon, features, universe) returned with status 2xx.
+
+Limit, stated plainly: the AI Factor routes and shapes are not in any preserved
+capture, so they cannot be reviewed offline. After the first attended export,
+`inventory-har` lists the routes; a reviewed change adds the two real routes and
+shapes to `capture_catalog` and marks them CONFIRMED; only then does `stage-har`
+produce a `REVIEWED_SHAPES` run that admission accepts. That review is a small,
+mechanical code change (two catalog rows and their tests), not data, and it must
+land before the run that admission binds is staged.
