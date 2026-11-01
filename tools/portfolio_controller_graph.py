@@ -104,6 +104,10 @@ _PATH_STAGES = {
     # Verifies a promoted retained-cache base before the runner links an overlay to it; it
     # can refuse any stage's run, like run_storage.
     "packages/core/src/quant_engine/core/retained_cache_base.py": list(_STAGE_ORDER),
+    # The release code-identity scheme (commit vs tree) and the mandatory merge attestation
+    # the runtime gate checks before execute/commit: it can refuse any stage's release and
+    # decides what every generation id binds, like release.py.
+    "packages/core/src/quant_engine/core/code_identity.py": list(_STAGE_ORDER),
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
@@ -183,6 +187,9 @@ _PATH_STAGES = {
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],
+    # Stages an unpublished public Yahoo price/FX fetch from a config; consumers read
+    # only the artifacts and manifests they are handed, never this tool.
+    "tools/yahoo_fetch_driver.py": [],
     # Assembles the pinned attribution return-source CSV; the attribution stage reads
     # only the file and manifest the spec pins, never this tool.
     "tools/portfolio_attribution_returns.py": [],

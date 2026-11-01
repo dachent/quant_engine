@@ -1752,3 +1752,20 @@ def test_governed_hwm_input_policy_loads_a_module_that_declares_dataclasses() ->
     )
     assert result == policy
     assert name not in sys.modules
+
+
+def test_spec_code_identity_scheme_is_versioned_and_legacy_bytes_unchanged(
+    tmp_path: Path,
+) -> None:
+    value, _previous, _proposed, _target = _spec_dict(tmp_path)
+    legacy = _parse(value)
+    assert legacy.code_identity_scheme == "git-commit-v1"
+    assert "code_identity_scheme" not in legacy.to_dict()
+    assert legacy.to_dict() == value
+    tree = _parse({**value, "code_identity_scheme": "git-tree-v2"})
+    assert tree.to_dict()["code_identity_scheme"] == "git-tree-v2"
+    assert tree.spec_sha256 != legacy.spec_sha256
+    with pytest.raises(PipelineValidationError):
+        _parse({**value, "code_identity_scheme": "git-commit-v1"})
+    with pytest.raises(PipelineValidationError):
+        _parse({**value, "code_identity_scheme": "git-tree-v3"})
