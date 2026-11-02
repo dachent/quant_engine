@@ -555,6 +555,11 @@
     ],
     [
       "portfolio_report",
+      "strategy_basis_disclosure",
+      1
+    ],
+    [
+      "portfolio_report",
       "verify_holdings_identity",
       1
     ],
@@ -591,6 +596,11 @@
     [
       "strategy_basis",
       "nested_strategy_tag_map",
+      1
+    ],
+    [
+      "strategy_basis_disclosure",
+      "strategy_basis",
       1
     ],
     [

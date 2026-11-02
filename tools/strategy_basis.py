@@ -413,6 +413,12 @@ def return_scope(
     }
 
 
+def scope_names(keys: Sequence[str]) -> str:
+    """The readable names of scope entries (``NOT_RESTATED`` / ``POLICY_CONSTANTS``)."""
+
+    return ", ".join(_NAMES[key] for key in keys)
+
+
 def return_scope_label(restatement: SleeveRestatement) -> str:
     """The label a restated row carries, generated from the sleeve and window it stands on."""
 
@@ -425,9 +431,9 @@ def return_scope_label(restatement: SleeveRestatement) -> str:
         f"(sleeve NAV with the sleeve's transfers external; the parent's unallocated "
         f"cash and margin and its other sleeves are excluded). MWR and governed "
         f"capital: the same sleeve. Measurements still on the parent account "
-        f"basis: {', '.join(_NAMES[name] for name in NOT_RESTATED)}. Owner-approved "
+        f"basis: {scope_names(NOT_RESTATED)}. Owner-approved "
         f"policy constants, not restated: "
-        f"{', '.join(_NAMES[name] for name in POLICY_CONSTANTS)}."
+        f"{scope_names(POLICY_CONSTANTS)}."
     )
 
 

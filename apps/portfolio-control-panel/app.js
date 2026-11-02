@@ -229,7 +229,9 @@
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
   // F20/F12: `footer` is the markup of a <tfoot> body (total rows computed from the rows shown).
-  const tableMarkup = (headers, rows, caption = null, footer = "") => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>${footer ? `<tfoot>${footer}</tfoot>` : ""}`;
+  // `groups` is an optional spanning header row: [[label, span, title], ...] (a null label is an empty cell).
+  const groupRowMarkup = (groups) => (groups ? `<tr class="group-row">${groups.map(([label, span, title = ""]) => `<th scope="colgroup" colspan="${span}" class="${label ? "group-head" : ""}"${title ? ` title="${safe(title)}"` : ""}>${safe(label || "")}</th>`).join("")}</tr>` : "");
+  const tableMarkup = (headers, rows, caption = null, footer = "", groups = null) => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead>${groupRowMarkup(groups)}<tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>${footer ? `<tfoot>${footer}</tfoot>` : ""}`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
   // Q5: a retained-history record is lifecycle evidence of a closed or immaterial strategy, not a current strategy.
   // ONE marker and ONE helper decide which strategy rows the register, comparison, provider and count surfaces show;
@@ -984,8 +986,141 @@
     });
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Provider/model comparison"]], rows, evidenceCaption("Current strategy evidence"));
     renderLifecycleTable();
+    renderStrategyBasisDisclosure();
+    renderPolicyConstantSensitivity();
     renderPositionTable();
     renderLeverageDisclosures();
+  }
+
+  // #624: when a strategy row stands on its sleeve, the report says what the sleeve is worth gross, the account's
+  // unallocated cash and margin bucket that makes the net equivalent, the figures the row used to carry for the whole
+  // parent account (`account_summary[].account_basis`) and the two bridges.  All of it is printed as the report states
+  // it, nothing is recomputed here; a payload without the block shows nothing.
+  function renderStrategyBasisDisclosure() {
+    const host = $("#strategy-basis-disclosure");
+    const block = data.strategy_basis_disclosure;
+    if (!host) return;
+    if (!block || typeof block !== "object" || !Array.isArray(block.strategies) || !block.strategies.length) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const accounts = Array.isArray(data.account_summary) ? data.account_summary : [];
+    const pp = (value) => (number(value) == null ? "—" : `${(Number(value) * 100).toFixed(4)} pp`);
+    const lines = [];
+    const accountRows = [];
+    const accountBridge = [];
+    const auditBridge = [];
+    const weightRows = [];
+    const weightNotes = [];
+    const statements = [];
+    for (const entry of block.strategies) {
+      const margin = entry.margin_liability || {};
+      const identity = margin.identity || {};
+      const liability = margin.liability_line || {};
+      const pointer = margin.leverage_disclosure || {};
+      const classes = Object.entries(pointer.row_counts_by_data_class || {}).map(([name, count]) => `${humanStatus(name)} ${integer.format(count)}`).join(" · ");
+      const who = safe(entry.strategy_name || entry.strategy_id);
+      statements.push(`<p><strong>${who}</strong> · sleeve ${safe(entry.sleeve_id)} of account ${safe(entry.parent_account_id)}, ${safe(formatDate(entry.opening_date))} to ${safe(formatDate(entry.cutoff_date))}. ${safe(margin.statement)}</p>`);
+      lines.push(
+        `<tr><td>${who}</td><td>Gross sleeve NAV (the row's value)</td><td class="numeric">${currencyExact(margin.gross_sleeve_nav_usd)}</td></tr>`,
+        `<tr><td>${who}</td><td>${safe(liability.label)}${liability.kind ? ` · ${safe(humanStatus(liability.kind))}` : ""}</td><td class="numeric">${currencyExact(liability.value_usd)}</td></tr>`,
+        `<tr><td>${who}</td><td>Net equivalent (gross plus the liability line)</td><td class="numeric">${currencyExact(margin.net_equivalent_usd)}</td></tr>`,
+        `<tr><td>${who}</td><td>Identity: sleeve NAVs ${currencyExact(identity.sleeve_navs_usd)} plus bucket ${currencyExact(identity.unallocated_bucket_usd)} against account NAV ${currencyExact(identity.account_nav_usd)} (difference ${currencyExact(identity.difference_usd)})</td><td>${statusText(identity.status)}</td></tr>`,
+        `<tr><td>${who}</td><td>Leverage disclosures: ${safe(pointer.table || "")} rows of this account and strategy</td><td class="cell-secondary">${safe(classes || "none")}</td></tr>`,
+      );
+      const account = accounts.find((row) => row && row.account_id === entry.parent_account_id && row.account_basis);
+      const basis = account ? account.account_basis : null;
+      if (basis) {
+        const figures = basis.figures || {};
+        const window = basis.window || {};
+        const annualised = figures.account_live_cagr_annualization && figures.account_live_cagr_annualization.label ? figures.account_live_cagr_annualization.label : "";
+        accountRows.push(
+          `<tr><td colspan="2"><span class="cell-primary">${who} on ${safe(basis.label)}</span><span class="cell-secondary">${safe(formatDate(window.start))} to ${safe(formatDate(window.end))} · ${integer.format(basis.observations || 0)} observations · series ${safe(String((basis.series || {}).sha256 || "").slice(0, 8))}</span></td></tr>`,
+          `<tr><td>Cumulative return</td><td class="numeric">${pct(figures.account_live_cumulative_return, 4)}</td></tr>`,
+          `<tr><td>Annualised${annualised ? ` <span class="cell-secondary">${safe(annualised)}</span>` : ""}</td><td class="numeric">${pct(figures.account_live_cagr, 4)}</td></tr>`,
+          `<tr><td>Maximum drawdown</td><td class="numeric">${pct(figures.account_live_max_drawdown, 4)}</td></tr>`,
+          `<tr><td>Current drawdown (from the high-water mark)</td><td class="numeric">${pct(figures.hwm_current_drawdown, 4)}</td></tr>`,
+          `<tr><td>Current value (whole account)</td><td class="numeric">${currencyExact(figures.current_value_usd)}</td></tr>`,
+          `<tr><td>Weight on the account perimeter</td><td class="numeric">${pct(figures.systematic_weight, 4)}</td></tr>`,
+        );
+      }
+      const toSleeve = (entry.bridges || {}).account_to_sleeve;
+      if (toSleeve) {
+        const value = toSleeve.value || {};
+        const ret = toSleeve.return || {};
+        const aw = ret.account_window || {};
+        const sw = ret.sleeve_window || {};
+        accountBridge.push(
+          `<tr><td>Account value</td><td class="numeric">${currencyExact(value.account_value_usd)}</td></tr>`,
+          `<tr><td>Less the unallocated bucket (a debit adds)</td><td class="numeric">${currencyExact(value.unallocated_bucket_usd)}</td></tr>`,
+          `<tr><td>Less the other live sleeves</td><td class="numeric">${currencyExact(value.other_live_sleeves_usd)}</td></tr>`,
+          `<tr><td><strong>Sleeve value</strong></td><td class="numeric"><strong>${currencyExact(value.sleeve_value_usd)}</strong></td></tr>`,
+          `<tr><td>Account return ${safe(formatDate(aw.start))} to ${safe(formatDate(aw.end))}</td><td class="numeric">${pct(ret.account_cumulative_return, 4)}</td></tr>`,
+          `<tr><td>Sleeve return ${safe(formatDate(sw.start))} to ${safe(formatDate(sw.end))} (window opens ${integer.format(ret.window_start_difference_days || 0)} days later)</td><td class="numeric">${pct(ret.sleeve_cumulative_return, 4)}</td></tr>`,
+          `<tr><td>Difference</td><td class="numeric">${pp(ret.difference)}</td></tr>`,
+          ...(toSleeve.account_series_also_holds || []).map((other) => `<tr><td colspan="2" class="cell-secondary">The account series also holds sleeve ${safe(other.sleeve_id)} (${safe(other.strategy_id)}), ${safe(formatDate(other.first_day))} to ${safe(formatDate(other.last_day))}, at the cutoff it ${other.live_at_cutoff ? "holds a NAV" : "holds no NAV"}</td></tr>`),
+        );
+      }
+      const weights = entry.weight_restatement;
+      if (weights) {
+        weightNotes.push(`<p>${safe(weights.statement)}</p>`);
+        for (const row of weights.rows || []) {
+          weightRows.push(`<tr><td>${safe(strategyNameById(row.strategy_id))}${row.restated ? ' <span class="cell-secondary">restated sleeve</span>' : ""}</td><td class="numeric">${pct(row.weight_before, 4)}</td><td class="numeric">${pct(row.weight_after, 4)}</td><td class="numeric">${currencyExact(row.value_before_usd)}</td><td class="numeric">${currencyExact(row.value_after_usd)}</td></tr>`);
+        }
+        weightRows.push(`<tr><td colspan="3">Perimeter before and after (common factor ${safe(decimal(weights.common_factor, 6))})</td><td class="numeric">${currencyExact(weights.perimeter_before_usd)}</td><td class="numeric">${currencyExact(weights.perimeter_after_usd)}</td></tr>`);
+      }
+      const toAudit = (entry.bridges || {}).sleeve_to_audit;
+      if (toAudit) {
+        const sw = toAudit.window || {};
+        auditBridge.push(
+          `<tr><td>Audit convention ${safe(formatDate(sw.start))} to ${safe(formatDate(sw.end))}</td><td class="numeric">${pct(toAudit.audit_convention_return, 4)}</td></tr>`,
+          ...(toAudit.steps || []).map((step) => `<tr><td>${safe(step.description)}</td><td class="numeric">${pp(step.effect)}</td></tr>`),
+          `<tr><td><strong>Panel sleeve return</strong></td><td class="numeric"><strong>${pct(toAudit.panel_return, 4)}</strong></td></tr>`,
+          `<tr><td>Residual after the three steps (recomputed from the facts) · ${statusText(toAudit.closure_status)}</td><td class="numeric">${pp(toAudit.residual)}</td></tr>`,
+        );
+      }
+    }
+    $("#strategy-basis-statement").innerHTML = statements.join("");
+    $("#strategy-basis-lines-table").innerHTML = tableMarkup([["Strategy"], ["Value line"], ["Amount", "numeric"]], lines, "Sleeve value, margin liability line and net equivalent");
+    $("#account-basis-table").innerHTML = tableMarkup([["Parent-account figure"], ["Value", "numeric"]], accountRows.length ? accountRows : [emptyRow(2, "No account-basis block")], "What the row carried before it stood on its sleeve");
+    $("#strategy-basis-account-bridge-table").innerHTML = tableMarkup([["Account basis to sleeve basis"], ["Figure", "numeric"]], accountBridge, "Bridge from the account basis to the sleeve basis");
+    $("#strategy-basis-weights-note").innerHTML = weightNotes.join("");
+    $("#strategy-basis-weights-table").innerHTML = tableMarkup([["Strategy"], ["Weight before (account perimeter)", "numeric"], ["Weight after (restated perimeter)", "numeric"], ["Value before", "numeric"], ["Value after", "numeric"]], weightRows.length ? weightRows : [emptyRow(5, "No weight restatement")], "Systematic weights before and after the restatement");
+    $("#strategy-basis-audit-bridge-table").innerHTML = tableMarkup([["Audit convention to panel convention"], ["Figure", "numeric"]], auditBridge, "Bridge from the audit's convention to the panel's sleeve return");
+  }
+
+  // #624: the dependence allocation weights and conservative loss fractions are owner-approved policy constants and are
+  // never restated.  When a strategy stands on its sleeve each dependence mode carries `policy_constant_sensitivity`: the
+  // central-case and conservative-bound losses under the policy weights and, beside them, under the restated weights.
+  // Printed as the payload states it, once per mode; a payload without the block shows nothing.
+  function renderPolicyConstantSensitivity() {
+    const host = $("#policy-constant-sensitivity");
+    if (!host) return;
+    const modes = data.dependence_modes && typeof data.dependence_modes === "object" ? Object.entries(data.dependence_modes) : [];
+    const shown = modes.filter(([, mode]) => mode && typeof mode === "object" && mode.policy_constant_sensitivity && typeof mode.policy_constant_sensitivity === "object");
+    if (!shown.length) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const notes = [];
+    const rows = [];
+    for (const [modeName, mode] of shown) {
+      const block = mode.policy_constant_sensitivity;
+      const policy = block.policy || {};
+      const restated = block.sensitivity || {};
+      notes.push(`<p><strong>${safe(humanStatus(modeName))}</strong> · ${statusText(block.classification)} · ${safe(block.policy_id)} · restated: ${safe((block.restated_strategies || []).join(", "))}. ${safe(block.statement)}</p>`);
+      for (const name of Object.keys(policy.allocation_weight || {})) {
+        rows.push(`<tr><td>${safe(humanStatus(modeName))}</td><td>${safe(name)} weight</td><td class="numeric">${pct(policy.allocation_weight[name], 4)}</td><td class="numeric">${pct((restated.allocation_weight || {})[name], 4)}</td><td class="numeric">—</td></tr>`);
+      }
+      rows.push(
+        `<tr><td>${safe(humanStatus(modeName))}</td><td>Central-case loss</td><td class="numeric">${pct(policy.central_case_loss, 4)}</td><td class="numeric">${pct(restated.central_case_loss, 4)}</td><td class="numeric">${pct(restated.central_case_loss_difference, 4)}</td></tr>`,
+        `<tr><td>${safe(humanStatus(modeName))}</td><td>Conservative-bound (correlation one) loss</td><td class="numeric">${pct(policy.correlation_one_loss, 4)}</td><td class="numeric">${pct(restated.correlation_one_loss, 4)}</td><td class="numeric">${pct(restated.correlation_one_loss_difference, 4)}</td></tr>`,
+      );
+    }
+    $("#policy-constant-note").innerHTML = notes.join("");
+    $("#policy-constant-table").innerHTML = tableMarkup([["Dependence mode"], ["Figure"], ["Policy constant", "numeric"], ["Restated weights", "numeric"], ["Difference", "numeric"]], rows, "Policy-constant sensitivity: losses with the owner-approved weights and with the restated weights");
   }
 
   // One line per strategy over the verified daily history, labelled at the line end (no legend to decode).
@@ -1574,6 +1709,37 @@
     // account-cumulative cell rather than being silently dropped.
     // F19: each strategy's account-live window starts on its own date; the header cannot, so the cell does.
     const accountWindowStart = (row) => row.provider_evidence?.account?.observed_start || null;
+    // Levered / unlevered return columns: every figure, label and reason is the strategy row's own
+    // return_<kind>_* field; a strategy without a derived leverage record carries null values and a
+    // reason from the producer, which is what the cell prints.  Nothing is derived or defaulted here.
+    const returnBasisCell = (row, kind, render) => {
+      if (performanceLineageMismatch) return `<td class="numeric basis-cell">${withheldCell()}</td>`;
+      const value = number(row[`return_${kind}_cumulative`]);
+      if (value == null) {
+        const published = `return_${kind}_na_reason` in row;
+        const reason = row[`return_${kind}_na_reason`];
+        return `<td class="numeric basis-cell is-na">—<span class="cell-secondary">${safe(reason ? humanStatus(reason) : published ? "No reason published" : "Not published in this payload")}</span></td>`;
+      }
+      return `<td class="numeric basis-cell">${render(row)}</td>`;
+    };
+    const withheldCell = () => `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
+    const windowNote = (row, kind) => (number(row[`return_${kind}_window_days`]) == null ? "" : `<span class="cell-secondary">${integer.format(row[`return_${kind}_window_days`])} day window</span>`);
+    const basisCells = (row, kind) => {
+      const field = (name) => row[`return_${kind}_${name}`];
+      const cumulative = returnBasisCell(row, kind, () => `${pct(field("cumulative"), 2)}${windowNote(row, kind)}`);
+      const annualised = returnBasisCell(row, kind, () => pct(field("annualised"), 2));
+      const drawdown = returnBasisCell(row, kind, () => `${pct(field("max_drawdown"), 2)}${number(field("current_drawdown")) == null ? "" : `<span class="cell-secondary">current ${pct(field("current_drawdown"), 2)}</span>`}`);
+      return cumulative + annualised + drawdown;
+    };
+    const grossToEquityCell = (row) => returnBasisCell(row, "levered", () => `${number(row.return_levered_peak_gross_to_equity) == null ? "—" : `${decimal(row.return_levered_peak_gross_to_equity, 2)}x`}<span class="cell-secondary">peak${number(row.return_levered_current_gross_to_equity) == null ? "" : ` · now ${decimal(row.return_levered_current_gross_to_equity, 2)}x`}</span>`);
+    // One legend for the basis of each group: the distinct labels the rows publish.
+    const basisLegendText = (kind) => [...new Set(currentStrategies().map((row) => row[`return_${kind}_basis_label`]).filter((label) => typeof label === "string" && label))].join(" · ");
+    const basisLegend = $("#return-basis-legend");
+    if (basisLegend) {
+      const parts = [["Unlevered", basisLegendText("unlevered")], ["Levered", basisLegendText("levered")]].filter(([, text]) => text);
+      basisLegend.hidden = !parts.length;
+      basisLegend.innerHTML = parts.map(([name, text]) => `<span><strong>${name}</strong> ${safe(text)}</span>`).join("");
+    }
     const implementationRows = currentStrategies().map((row) => {
       const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
       const cagrLabel = row.account_live_cagr_annualization?.label;
@@ -1582,9 +1748,9 @@
         ? withheld
         : `${pct(row.account_live_cumulative_return)}${accountWindowStart(row) ? `<span class="cell-secondary">since ${formatDateHtml(accountWindowStart(row))}</span>` : ""}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${annualizationSuffix(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${annualizationSuffix(mwrLabel)}</span>` : ""}`;
       const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
-      return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td>${basisCells(row, "unlevered")}${basisCells(row, "levered")}${grossToEquityCell(row)}<td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
-    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"));
+    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualised (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualised (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Gross ÷ equity (x)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"), "", [["", 4], ["Unlevered", 3, "Return on gross sleeve assets, before the margin loan"], ["Levered", 4, "Return on equity after margin financing"], ["", 3]]);
     // F36: a blocking item's value is shown beside its gap text, and a check's tolerance and maximum
     // difference are shown when the report publishes them (or said not to be published).
     const reconciliationEvidence = (row) => {
@@ -3308,7 +3474,7 @@
   // After a render, every cell of those columns keeps its first two parts visible and moves the rest into a
   // closed disclosure.  Nothing is removed or reworded: the text stays in the cell (and in textContent).
   const DENSE_CELL_COLUMNS = {
-    "implementation-table": [1, 4, 5, 6],
+    "implementation-table": [1, 11, 12, 13],
     "underwriting-table": [1, 2, 3, 4, 5, 6],
     "factor-model-table": [1, 6, 7, 11],
     "observation-windows-table": [4, 5],

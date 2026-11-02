@@ -12,6 +12,10 @@ from typing import Any
 
 import pytest
 
+from decimal import Decimal
+
+from nested_strategy_tag_map import validate_tag_map
+from sleeve_facts_fixture import build_facts
 from test_derived_sleeve_report import LAST_BYTES, _build, _tag_map
 from test_returns_engine_consumption import _full_report_fixture
 
@@ -28,6 +32,13 @@ DECLARATION = {
 # sha256 of the canonical report bytes the unmodified main (1fa910ef) builds from this
 # fixture with no declaration; the switch off must reproduce them exactly
 MAIN_OFF_DIGEST = "98329bf998933295d44838fcce64b65f41ed9c0742056269acde5daa7541cdb0"
+
+
+def _facts() -> dict[str, Any]:
+    # the parent account's NAV in the fixture is 10; the sleeve closes at 104
+    return build_facts(
+        account_value=Decimal(10), tag_map_sha256=validate_tag_map(_tag_map()).sha256
+    )
 
 
 def _row(report: dict[str, Any]) -> dict[str, Any]:
@@ -53,7 +64,12 @@ def test_with_the_switch_on_the_row_stands_on_the_sleeve(
 ) -> None:
     off = _row(_build(full, tmp_path, monkeypatch, tag_map=_tag_map()))
     on_report = _build(
-        full, tmp_path, monkeypatch, tag_map=_tag_map(), strategy_basis=DECLARATION
+        full,
+        tmp_path,
+        monkeypatch,
+        tag_map=_tag_map(),
+        strategy_basis=DECLARATION,
+        sleeve_facts=_facts(),
     )
     on = _row(on_report)
     assert hashlib.sha256(LAST_BYTES["content"]).hexdigest() != MAIN_OFF_DIGEST

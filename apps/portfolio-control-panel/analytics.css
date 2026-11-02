@@ -1330,3 +1330,61 @@ tfoot td {
 .risk-loadings span { font-variant-numeric: tabular-nums; }
 details.orthogonal-data { margin-top: 12px; }
 /* ===== END orthogonal risk shares and contribution chart ===== */
+
+/* Levered / unlevered return columns on the implementation table: 14 columns, so the table
+   scrolls inside its .table-wrap region; the basis groups are separated and aligned. */
+#implementation-table {
+  min-width: 1900px;
+}
+
+#implementation-table .group-row th {
+  padding-block: 4px;
+  border-bottom: 0;
+}
+
+#implementation-table .group-row .group-head {
+  text-align: center;
+  border-inline: 1px solid var(--border);
+  border-bottom: 2px solid var(--border-strong);
+}
+
+#implementation-table .basis-cell {
+  min-width: 112px;
+  white-space: nowrap;
+}
+
+#implementation-table .basis-cell.is-na {
+  color: var(--text-soft);
+  white-space: normal;
+  min-width: 112px;
+}
+
+.basis-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 0 0 8px;
+}
+
+.basis-legend[hidden] {
+  display: none;
+}
+
+.basis-definitions {
+  margin: 0 0 10px;
+}
+
+.basis-definitions summary {
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+/* The strategy name stays in view while the wide table scrolls under it. */
+#implementation-table tbody td:first-child,
+#implementation-table thead tr:last-child th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: rgb(16 26 36);
+}
