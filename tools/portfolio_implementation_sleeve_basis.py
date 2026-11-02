@@ -497,7 +497,7 @@ def cost_scale_block(
     first: str,
     last: str,
     flex_paths: Sequence[Path],
-    broker_account_id: str | None,
+    flex_account_key: str | None,
     model_transactions: bytes | None,
 ) -> dict[str, Any]:
     """Sleeve commissions and fills against the model book, from the Flex rows.
@@ -505,7 +505,7 @@ def cost_scale_block(
     ``NOT_COMPUTED`` when the rows are not a build input; numbers are never typed.
     """
 
-    if not flex_paths or model_transactions is None or not broker_account_id:
+    if not flex_paths or model_transactions is None or not flex_account_key:
         block: dict[str, Any] = {"status": COST_SCALE_NOT_COMPUTED}
         block["line"] = cost_scale_line(block)
         return block
@@ -523,7 +523,7 @@ def cost_scale_block(
         ),
         Decimal(0),
     )
-    rows = _flex_trades(flex_paths, broker_account_id)
+    rows = _flex_trades(flex_paths, flex_account_key)
     entry_day = str(entry["day"])
     tags: dict[str, list[Decimal]] = {}
     for row in rows:
@@ -987,7 +987,7 @@ def build_contract(
     filenames: Mapping[str, str],
     ordering: str = PLAN_ORDER,
     flex_activity_paths: Sequence[Path] = (),
-    broker_account_id: str | None = None,
+    flex_account_key: str | None = None,
     model_transactions: bytes | None = None,
 ) -> bytes:
     """The canonical ``implementation-sleeve-basis/1`` bytes."""
@@ -1013,7 +1013,7 @@ def build_contract(
         first=block["observed_start"],
         last=block["observed_end"],
         flex_paths=flex_activity_paths,
-        broker_account_id=broker_account_id,
+        flex_account_key=flex_account_key,
         model_transactions=model_transactions,
     )
     block["model_leg"]["admission_disclosure"] = exclusion_disclosure(
@@ -1338,7 +1338,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-provider-id", required=True)
     parser.add_argument("--ordering", default=PLAN_ORDER)
     parser.add_argument("--flex-activity", type=Path, action="append", default=[])
-    parser.add_argument("--broker-account-id")
+    parser.add_argument("--flex-account-key")
     parser.add_argument("--model-transactions", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     return parser
@@ -1367,7 +1367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         filenames={key: path.name for key, path in paths.items()},
         ordering=args.ordering,
         flex_activity_paths=args.flex_activity,
-        broker_account_id=args.broker_account_id,
+        flex_account_key=args.flex_account_key,
         model_transactions=(
             None
             if args.model_transactions is None

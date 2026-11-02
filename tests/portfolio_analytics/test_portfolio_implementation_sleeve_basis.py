@@ -903,7 +903,7 @@ def test_the_cost_scale_line_is_computed_from_flex_rows_and_model_transactions(
         **sources,
         filenames={**names, "model_transactions": "m.csv"},
         flex_activity_paths=[flex],
-        broker_account_id="UX",
+        flex_account_key="UX",
         model_transactions=model_csv,
     )
     scale = _block(content)["cost_scale"]
@@ -944,7 +944,7 @@ def test_the_cost_scale_line_is_computed_from_flex_rows_and_model_transactions(
             **sources,
             filenames={**names, "model_transactions": "m.csv"},
             flex_activity_paths=[bad],
-            broker_account_id="UX",
+            flex_account_key="UX",
             model_transactions=model_csv,
         )
 
@@ -1033,7 +1033,7 @@ def test_real_flex_trade_rows_give_the_cost_scale_and_reproduce_the_commissions(
             "model_transactions": "t",
         },
         flex_activity_paths=flex,
-        broker_account_id=os.environ.get("QE_AI624_R2_BROKER_ACCOUNT", "U22596907"),
+        flex_account_key=os.environ.get("QE_AI624_R2_BROKER_ACCOUNT", "U22596907"),
         model_transactions=transactions.read_bytes(),
     )
     block = _block(content)
