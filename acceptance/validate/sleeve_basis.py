@@ -212,7 +212,7 @@ def select_sleeve(facts: Mapping[str, Any], strategy_id: str) -> Mapping[str, An
 
     window = _mapping(facts.get("window"), "window")
     last = _day(window.get("last_day"), "window.last_day")
-    matching = [
+    matching: list[Mapping[str, Any]] = [
         sleeve
         for sleeve in _sequence(facts.get("sleeves"), "sleeves")
         if _mapping(sleeve, "sleeve").get("strategy_id") == strategy_id
@@ -223,7 +223,7 @@ def select_sleeve(facts: Mapping[str, Any], strategy_id: str) -> Mapping[str, An
             f"the declaration names {strategy_id!r} but the sleeve facts hold no "
             "sleeve of that strategy",
         )
-    live = [
+    live: list[Mapping[str, Any]] = [
         sleeve
         for sleeve in matching
         if _day(sleeve.get("last_day"), "sleeve.last_day") == last
@@ -239,7 +239,8 @@ def select_sleeve(facts: Mapping[str, Any], strategy_id: str) -> Mapping[str, An
             STRATEGY_SLEEVE_AMBIGUOUS,
             f"{len(live)} sleeves of {strategy_id!r} are live at {last}",
         )
-    return live[0]
+    chosen: Mapping[str, Any] = live[0]
+    return chosen
 
 
 def _check_nav_rows(account: str, days: Sequence[Mapping[str, Any]]) -> None:
@@ -449,7 +450,7 @@ def _derive_sleeve(
     if span > 0 and index > 0:
         annualised = index ** (Decimal(365) / Decimal(span)) - 1
     bucket = _bucket_line(facts, end)
-    live = [
+    live_nav: list[tuple[str, Decimal]] = [
         (
             str(other.get("account_id")),
             _dec(other["days"][-1]["nav_end_after_alloc"], "nav"),
@@ -457,7 +458,7 @@ def _derive_sleeve(
         for other in _sequence(facts.get("sleeves"), "sleeves")
         if _day(_mapping(other, "sleeve").get("last_day"), "last_day") == end
     ]
-    equity = sum((value for _, value in live), Decimal(0)) + bucket
+    equity = sum((value for _, value in live_nav), Decimal(0)) + bucket
     if parent_equity is not None and abs(equity - parent_equity) > USD_TOLERANCE:
         raise Refusal(
             PARENT_EQUITY_CLOSURE,
@@ -485,7 +486,7 @@ def _derive_sleeve(
         liability_line=bucket,
         parent_equity=equity,
         other_live_sleeves=tuple(
-            (name, value) for name, value in live if name != account
+            (name, value) for name, value in live_nav if name != account
         ),
     )
 
