@@ -282,7 +282,8 @@ def test_f1_stale_rows_become_closed_not_ready_objects_and_the_rest_is_unchanged
         f"{LEDGER_GOVERNED[:12]}. Its account return over {DATES[0]}..{DATES[-1]} "
         f"differs from the governed account-live series by {difference:+.4f} pp. "
         "No model return, gap, risk statistic or causal waterfall is published "
-        "from it."
+        "from it; any figure the Model vs actual view shows for this strategy is "
+        "audit-derived, not governed."
     )
     assert attr_rows[GRIZZLY]["contract_kind"] == "RETURN_ATTRIBUTION"
     assert attr_rows[GRIZZLY]["reason"].startswith(
