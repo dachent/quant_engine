@@ -466,3 +466,207 @@ def test_r2_interest_consistency_candidate_a_does_not_reproduce_the_charge() -> 
     assert not report["candidates"]["G_BUCKET_DEBIT_PLUS_SLEEVE_OWN_DEBITS|lag1"][
         "reproduces_charge"
     ]
+
+
+# ---------------------------------------------------------------------------------------
+# settlement basis: synthetic (CI) and the saved IBKR Flex statements (environment gated)
+# ---------------------------------------------------------------------------------------
+
+
+def _settlement_world() -> tuple[
+    dict[str, Any], list[tuple[str, str, str]], dict[str, Any]
+]:
+    """Facts with a T+1 buy on day 2: trade-date cash debit differs from settled cash."""
+
+    facts = _facts()
+    buy = ("2026-03-04", "2026-03-05", str(D(-300) * SCALE))  # proceeds of a 300 buy
+    trades = [buy]
+    table = sl._trade_table(trades)
+    book = sl._read(facts)
+
+    def cash(day: str) -> Decimal:
+        return book.bucket_nav[day]  # sleeves hold no cash in the synthetic facts
+
+    broker = {
+        day: (cash(day), cash(day) - sl.unsettled_proceeds(table, day)) for day in DAYS
+    }
+    rows = []
+    for day in DAYS[1:]:
+        principal = max(D(0), -broker[day][1])
+        interest = (principal * D("0.05") / D(360)).quantize(D("0.01"))
+        rows.append(
+            {
+                "account_id": PARENT,
+                "classification": "BROKER_DEBIT_INTEREST",
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": str(interest),
+                },
+                "code": "Po",
+                "value_date": day,
+                "accounting_date": day,
+                "rate": "5",
+                "total_principal": str(-principal),
+                "total_interest": str(-interest),
+            }
+        )
+    return facts, trades, {"rows": rows, "broker": broker}
+
+
+def test_unsettled_proceeds_counts_trades_between_trade_and_settle_date() -> None:
+    table = sl._trade_table(
+        [("2026-03-04", "2026-03-05", "-300"), ("2026-03-04", "2026-03-04", "9")]
+    )
+    assert sl.unsettled_proceeds(table, "2026-03-03") == 0
+    assert (
+        sl.unsettled_proceeds(table, "2026-03-04") == -300
+    )  # same-day settle is settled
+    assert sl.unsettled_proceeds(table, "2026-03-05") == 0
+    with pytest.raises(sl.SleeveLeverageError) as caught:
+        sl._trade_table([("2026-03-05", "2026-03-04", "1")])
+    assert caught.value.reason == "TRADE_SETTLE_BEFORE_TRADE"
+
+
+def test_settlement_basis_reproduces_what_the_trade_date_basis_does_not() -> None:
+    facts, trades, world = _settlement_world()
+    report = sl.settlement_interest_consistency(
+        facts, world["rows"], trades, broker_cash=world["broker"]
+    )
+    bases = report["bases"]
+    assert bases["TRADE_DATE_NET_CASH_DEBIT_PRIOR_CLOSE"]["value_dates_reproduced"] < 5
+    for name in ("FACTS_CASH_LESS_UNSETTLED_TRADES", "BROKER_ENDING_SETTLED_CASH"):
+        assert bases[name]["value_dates_reproduced"] == 5
+        assert bases[name]["value_dates_cent_exact"] == 5
+        assert bases[name]["value_dates_outside_statement_coverage"] == 0
+    closure = report["settled_cash_closure"]
+    assert (
+        closure["closed_days"] == closure["statement_days"] == 6
+        and not closure["open_days"]
+    )
+    assert closure["facts_cash_vs_broker_settled_max_gap"] == "0"
+    assert report["trade_date_unreproduced_dates"], (
+        "the T+1 date is listed with residuals"
+    )
+    first = report["trade_date_unreproduced_dates"][0]
+    assert first["BROKER_ENDING_SETTLED_CASH"]["principal_residual"] == "0"
+    assert first["BROKER_ENDING_SETTLED_CASH"]["interest_residual_cents"] == "0"
+
+
+def test_settlement_closure_reports_a_broker_cash_the_trades_do_not_explain() -> None:
+    facts, trades, world = _settlement_world()
+    broker = dict(world["broker"])
+    ending, settled = broker[DAYS[3]]
+    broker[DAYS[3]] = (ending, settled + D(1000))
+    report = sl.settlement_interest_consistency(
+        facts, world["rows"], trades, broker_cash=broker
+    )
+    open_days = report["settled_cash_closure"]["open_days"]
+    assert [d["day"] for d in open_days] == [DAYS[3]] and open_days[0]["gap"] == "1000"
+    with pytest.raises(sl.SleeveLeverageError) as caught:
+        sl.settlement_interest_consistency(facts, world["rows"], trades, broker_cash={})
+    assert caught.value.reason == "BROKER_CASH_EMPTY"
+
+
+def _flex_settlement(
+    root: Path, staging_zip: Path | None, account: str
+) -> tuple[dict[str, tuple[str, str]], list[tuple[str, str, str]]]:
+    """Broker cash by day and the trade table from the saved Flex statements."""
+
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    def iso(day: str) -> str:
+        return f"{day[:4]}-{day[4:6]}-{day[6:]}"
+
+    cash: dict[str, tuple[str, str]] = {}
+    trades: dict[str, tuple[str, str, str]] = {}
+
+    def scan(handle: Any) -> None:
+        for _event, element in ET.iterparse(handle, events=("end",)):
+            attrs = element.attrib
+            if attrs.get("accountId") == account:
+                if element.tag == "CashReportCurrency":
+                    cash[iso(attrs["toDate"])] = (
+                        attrs["endingCash"],
+                        attrs["endingSettledCash"],
+                    )
+                elif element.tag == "Trade":
+                    trades[attrs["transactionID"]] = (
+                        iso(attrs["tradeDate"]),
+                        iso(attrs["settleDateTarget"]),
+                        attrs["proceeds"],
+                    )
+            element.clear()
+
+    sources = sorted(
+        root.glob(
+            "cutover-recovery/legacy-original-*/AllAccounts_Accounting_XML_2026*.xml"
+        )
+    )
+    sources += sorted(root.glob("source-runs/flex-*/statement.xml"))
+    for path in sources:
+        scan(path)
+    if staging_zip is not None:
+        with zipfile.ZipFile(staging_zip) as archive:
+            names = sorted(
+                (
+                    n
+                    for n in archive.namelist()
+                    if n.endswith("-ibkr/activity-flex.xml")
+                    and n.startswith("onedrive/")
+                ),
+                key=lambda n: n.split("/")[-2],
+            )
+            for name in names:
+                with archive.open(name) as handle:
+                    scan(handle)
+    return cash, list(trades.values())
+
+
+def test_r2_settlement_basis_reproduces_every_value_date_from_the_saved_flex() -> None:
+    facts = _load("QE_AI624_R2_FACTS")
+    panel = _load("QE_AI624_R2_PANEL")
+    root = os.environ.get("QE_AI624_R2_IBKR_ROOT")
+    if not root or not Path(root).is_dir():
+        pytest.skip("QE_AI624_R2_IBKR_ROOT is not set to the dataIBKR root")
+    staging = os.environ.get("QE_AI624_R2_IBKR_STAGING_ZIP")
+    cash, trades = _flex_settlement(
+        Path(root),
+        Path(staging) if staging and Path(staging).is_file() else None,
+        os.environ.get("QE_AI624_R2_IBKR_ACCOUNT", "U22596907"),
+    )
+    report = sl.settlement_interest_consistency(
+        facts, panel["leverage_disclosures"], trades, broker_cash=cash
+    )
+    bases = report["bases"]
+    assert report["value_dates"] == 169
+    trade_date = bases["TRADE_DATE_NET_CASH_DEBIT_PRIOR_CLOSE"]
+    assert trade_date["value_dates_reproduced"] == 160
+    assert trade_date["unreproduced_dates"] == [
+        "2026-01-30",
+        "2026-01-31",
+        "2026-02-01",
+        "2026-02-03",
+        "2026-05-11",
+        "2026-06-22",
+        "2026-07-25",
+        "2026-07-26",
+        "2026-08-03",
+    ]
+    facts_basis = bases["FACTS_CASH_LESS_UNSETTLED_TRADES"]
+    assert facts_basis["value_dates_reproduced"] == 169
+    assert facts_basis["unreproduced_dates"] == []
+    broker_basis = bases["BROKER_ENDING_SETTLED_CASH"]
+    assert broker_basis["value_dates_reproduced"] == 169
+    assert broker_basis["value_dates_cent_exact"] == 169
+    assert broker_basis["value_dates_outside_statement_coverage"] == 0
+    assert D(broker_basis["ratio_to_charged"]).quantize(D("0.01")) == D("1.00")
+    for entry in report["trade_date_unreproduced_dates"]:
+        residual = entry["BROKER_ENDING_SETTLED_CASH"]
+        assert residual["interest_residual_cents"] == "0", entry["value_date"]
+    closure = report["settled_cash_closure"]
+    assert closure["last_day"] >= "2026-09-17"
+    # broker settled cash = broker ending cash less unsettled trade proceeds on every
+    # statement day but one that precedes the sleeve window (2026-01-23)
+    assert [d["day"] for d in closure["open_days"]] == ["2026-01-23"]

@@ -783,3 +783,209 @@ def _allocation_report(
             for s in sleeves
         }
     return out
+
+
+# ----------------------------------------------------------------------------------------
+# settlement basis: the broker charges debit interest on settled cash, not trade-date cash
+# ----------------------------------------------------------------------------------------
+
+SETTLED_CASH_CLOSURE_TOLERANCE: Final = Decimal("0.01")
+INTEREST_CENT_TOLERANCE: Final = Decimal("0.01")
+_TRADE_DATE_BASIS: Final = "TRADE_DATE_NET_CASH_DEBIT_PRIOR_CLOSE"
+_FACTS_SETTLED_BASIS: Final = "FACTS_CASH_LESS_UNSETTLED_TRADES"
+_BROKER_SETTLED_BASIS: Final = "BROKER_ENDING_SETTLED_CASH"
+
+
+def _trade_table(
+    trades: Sequence[tuple[str, str, Decimal | str]],
+) -> tuple[tuple[str, str, Decimal], ...]:
+    table = []
+    for trade_date, settle_date, proceeds in trades:
+        if settle_date < trade_date:
+            raise SleeveLeverageError(
+                "TRADE_SETTLE_BEFORE_TRADE", f"{trade_date} {settle_date}"
+            )
+        table.append(
+            (str(trade_date), str(settle_date), _decimal(proceeds, "trade proceeds"))
+        )
+    return tuple(table)
+
+
+def unsettled_proceeds(trades: Sequence[tuple[str, str, Decimal]], day: str) -> Decimal:
+    """Trade proceeds executed on or before ``day`` whose cash settles after it.
+
+    Commissions are cash on the trade date and are not part of this amount.
+    """
+
+    return sum((p for td, sd, p in trades if td <= day < sd), _ZERO)
+
+
+def settlement_interest_consistency(
+    facts: Mapping[str, Any],
+    leverage_rows: Sequence[Mapping[str, Any]],
+    trades: Sequence[tuple[str, str, Decimal | str]],
+    *,
+    broker_cash: Mapping[str, tuple[Decimal | str, Decimal | str]] | None = None,
+    account_id: str | None = None,
+) -> dict[str, Any]:
+    """Interest reproduced on a settlement-date cash basis, for every value date.
+
+    ``trades`` is ``(trade_date, settle_date, proceeds)`` per execution (the Flex
+    ``tradeDate``, ``settleDateTarget`` and ``proceeds``).  ``broker_cash`` is the broker's
+    own ``{day: (endingCash, endingSettledCash)}`` (Flex ``CashReportCurrency``); when given
+    it is tested too, and closed against the trades and against the facts' derived cash.
+
+    Tested on the value date's own close (carried over days without a statement): the
+    facts' account cash less unsettled trades, and the broker's settled cash; against them
+    the trade-date prior-close net cash debit of ``interest_consistency``.  Interest is
+    ``principal x rate / 360``; a date is reproduced when its principal is within the
+    stated tolerance, and cent-exact when the rounded interest equals the charged interest.
+    The residuals of the dates the trade-date basis does not reproduce are listed.
+    """
+
+    book = _read(facts)
+    account = account_id or book.parent_account_id
+    currency = str(facts.get("base_currency", "USD"))
+    charged, scope = _charged(leverage_rows, account, currency)
+    table = _trade_table(trades)
+    sleeves = tuple(book.nav)
+    cent = Decimal("0.01")
+
+    def facts_cash(day: str) -> Decimal:
+        return book.bucket_nav[day] + sum(
+            (_sleeve_cash(book, s, day) for s in sleeves), _ZERO
+        )
+
+    def facts_settled_debit(day: str) -> Decimal:
+        return max(_ZERO, -(facts_cash(day) - unsettled_proceeds(table, day)))
+
+    broker: dict[str, tuple[Decimal, Decimal]] = {}
+    for day, (ending, settled) in (broker_cash or {}).items():
+        broker[str(day)] = (
+            _decimal(ending, "ending cash"),
+            _decimal(settled, "settled cash"),
+        )
+    if broker_cash is not None and not broker:
+        raise SleeveLeverageError("BROKER_CASH_EMPTY", account)
+    broker_days = sorted(broker)
+
+    def broker_debit(day: str) -> Decimal:
+        return max(_ZERO, -broker[day][1])
+
+    bases: dict[str, tuple[Sequence[str], Callable[[str], Decimal], int]] = {
+        _TRADE_DATE_BASIS: (
+            book.days,
+            _candidate_totals(book)["C_ACCOUNT_NET_CASH_DEBIT"],
+            1,
+        ),
+        _FACTS_SETTLED_BASIS: (book.days, facts_settled_debit, 0),
+    }
+    if broker:
+        bases[_BROKER_SETTLED_BASIS] = (broker_days, broker_debit, 0)
+    dates = sorted(charged)
+    total_charged = sum((v[1] for v in charged.values()), _ZERO)
+    report: dict[str, Any] = {
+        "account_id": account,
+        "scope": scope,
+        "value_dates": len(dates),
+        "charged_interest_total": decimal_text(total_charged),
+        "trades": len(table),
+        "bases": {},
+    }
+    per_date: dict[str, dict[str, tuple[Decimal, Decimal]]] = {}
+    with localcontext() as context:
+        context.prec = _PRECISION
+        for name, (days, debit, lag) in bases.items():
+            reproduced = exact = outside = 0
+            implied_total = _ZERO
+            unreproduced: list[str] = []
+            rows: dict[str, tuple[Decimal, Decimal]] = {}
+            for value_date in dates:
+                principal, charge, rate = charged[value_date]
+                if name != _TRADE_DATE_BASIS and (
+                    value_date < days[0] or value_date > days[-1]
+                ):
+                    outside += 1
+                candidate = _loan_at(days, debit, value_date, lag)
+                implied = candidate * rate / Decimal(100) / INTEREST_DAY_COUNT_BASIS
+                implied_total += implied
+                rows[value_date] = (candidate, implied)
+                if abs(candidate - principal) <= max(
+                    INTEREST_DAY_RELATIVE_TOLERANCE * principal,
+                    INTEREST_DAY_ABSOLUTE_TOLERANCE,
+                ):
+                    reproduced += 1
+                else:
+                    unreproduced.append(value_date)
+                if abs(implied.quantize(cent) - charge) <= INTEREST_CENT_TOLERANCE:
+                    exact += 1
+            per_date[name] = rows
+            report["bases"][name] = {
+                "lag": lag,
+                "value_dates_reproduced": reproduced,
+                "value_dates_cent_exact": exact,
+                "implied_interest_total": decimal_text(implied_total.quantize(cent)),
+                "ratio_to_charged": decimal_text(
+                    (implied_total / total_charged).quantize(Decimal("0.000001"))
+                ),
+                "unreproduced_dates": unreproduced,
+                "value_dates_outside_statement_coverage": outside,
+            }
+        residuals = []
+        for value_date in report["bases"][_TRADE_DATE_BASIS]["unreproduced_dates"]:
+            principal, charge, _rate = charged[value_date]
+            entry: dict[str, Any] = {
+                "value_date": value_date,
+                "broker_principal": decimal_text(principal),
+                "charged_interest": decimal_text(charge),
+            }
+            for name, rows in per_date.items():
+                candidate, implied = rows[value_date]
+                entry[name] = {
+                    "principal": decimal_text(candidate.quantize(cent)),
+                    "principal_residual": decimal_text(
+                        (candidate - principal).quantize(cent)
+                    ),
+                    "implied_interest": decimal_text(
+                        implied.quantize(Decimal("0.0001"))
+                    ),
+                    "interest_residual_cents": decimal_text(
+                        (implied.quantize(cent) - charge).quantize(cent)
+                    ),
+                }
+            residuals.append(entry)
+        report["trade_date_unreproduced_dates"] = residuals
+        if broker:
+            gaps = sorted(
+                (
+                    (abs(broker[d][0] - unsettled_proceeds(table, d) - broker[d][1]), d)
+                    for d in broker_days
+                ),
+                reverse=True,
+            )
+            open_days = [(g, d) for g, d in gaps if g > SETTLED_CASH_CLOSURE_TOLERANCE]
+            facts_gaps = sorted(
+                abs(facts_cash(d) - unsettled_proceeds(table, d) - broker[d][1])
+                for d in broker_days
+                if d in book.bucket_nav
+            )
+            report["settled_cash_closure"] = {
+                "statement_days": len(broker_days),
+                "first_day": broker_days[0],
+                "last_day": broker_days[-1],
+                "tolerance": decimal_text(SETTLED_CASH_CLOSURE_TOLERANCE),
+                "closed_days": len(broker_days) - len(open_days),
+                "open_days": [
+                    {"day": d, "gap": decimal_text(g.quantize(cent))}
+                    for g, d in open_days
+                ],
+                "facts_cash_vs_broker_settled_median_gap": (
+                    decimal_text(facts_gaps[len(facts_gaps) // 2].quantize(cent))
+                    if facts_gaps
+                    else None
+                ),
+                "facts_cash_vs_broker_settled_max_gap": (
+                    decimal_text(facts_gaps[-1].quantize(cent)) if facts_gaps else None
+                ),
+            }
+    return report
