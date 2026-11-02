@@ -201,3 +201,26 @@ def test_the_cli_builds_from_the_cycle_manifest_and_roots(
     assert tool.main(argv) == 0  # an identical finished pair is re-validated
     Path(printed["run_observation"]).write_bytes(b"{}")
     assert tool.main(argv) == 1  # other bytes are never overwritten
+
+
+@pytest.mark.parametrize(
+    ("given", "written"),
+    [
+        ("2026-09-19T09:19:17.369302+00:00", "2026-09-19T09:19:17.369302+00:00"),
+        ("2026-09-19T04:19:17.369302-05:00", "2026-09-19T09:19:17.369302+00:00"),
+        ("2026-09-19T09:19:17.369302Z", "2026-09-19T09:19:17.369302Z"),
+    ],
+)
+def test_capture_microseconds_reach_the_run_observation_and_the_validator(
+    tmp_path: Path, given: str, written: str
+) -> None:
+    world = real_cycle(tmp_path)
+    world["manifest"]["captured_at_utc"] = given
+    resolved = cycle_tool.resolve(cycle_tool.dumps(world["manifest"]), world["roots"])
+    assert resolved["captured_at_utc"] == written
+    built = tool.build(
+        resolved, world["predecessor"], world["out"], world["provenance"]
+    )
+    result = tool.write_and_check(built)  # the real provider-ledger validator
+    observation = json.loads(Path(result["run_observation"]).read_bytes())
+    assert observation["captured_at_utc"] == written

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -101,13 +101,49 @@ def _day(value: str, what: str) -> date:
         ) from exc
 
 
-def _utc(value: str, what: str) -> datetime:
+_CAPTURE_TIMESTAMP = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def normalize_capture_timestamp(value: str, what: str) -> str:
+    """The capture instant in UTC, keeping every microsecond the capture recorded.
+
+    Accepted: ``YYYY-MM-DDTHH:MM:SS`` plus optional fractional seconds plus ``Z`` or a numeric
+    offset. A numeric offset is converted to UTC and written ``+00:00``; ``Z`` stays ``Z``. The
+    fraction is written as six digits when it is not zero. A naive timestamp or an impossible value
+    is ``DATE_INVALID``. A fraction finer than a microsecond that is not all zero is
+    ``DATE_PRECISION_LOST``: the provider ledger holds microseconds, so the digits cannot be kept
+    and are never truncated.
+    """
+
+    match = _CAPTURE_TIMESTAMP.match(value)
+    if match is None:
+        raise CycleManifestError(
+            "DATE_INVALID",
+            f"{what}: {value!r} is not an ISO-8601 timestamp with a UTC offset",
+        )
+    seconds, fraction, zone = match.groups()
+    fraction = fraction or ""
+    if fraction[6:].strip("0"):
+        raise CycleManifestError(
+            "DATE_PRECISION_LOST",
+            f"{what}: {value!r} is finer than a microsecond; the ledger cannot hold it",
+        )
+    micro = fraction[:6].ljust(6, "0")
     try:
-        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        parsed = datetime.fromisoformat(
+            f"{seconds}.{micro}{'+00:00' if zone == 'Z' else zone}"
+        )
     except ValueError as exc:
         raise CycleManifestError(
-            "DATE_INVALID", f"{what}: {value!r} is not a UTC timestamp"
+            "DATE_INVALID", f"{what}: {value!r} is not a real timestamp"
         ) from exc
+    utc = parsed.astimezone(timezone.utc)
+    text = utc.replace(tzinfo=None).isoformat(
+        timespec="microseconds" if utc.microsecond else "seconds"
+    )
+    return text + ("Z" if zone == "Z" else "+00:00")
 
 
 def validate_static(manifest: Mapping[str, Any]) -> None:
@@ -120,7 +156,7 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
         "cutoff": _day(manifest["cutoff"], "cutoff"),
         "evaluated_on": _day(manifest["evaluated_on"], "evaluated_on"),
     }
-    _utc(manifest["captured_at_utc"], "captured_at_utc")
+    normalize_capture_timestamp(manifest["captured_at_utc"], "captured_at_utc")
     for provider_id, provider in manifest["providers"].items():
         if "finalized_through" in provider:
             _day(provider["finalized_through"], f"{provider_id}.finalized_through")
@@ -348,7 +384,9 @@ def resolve(
         "cycle_id": manifest["cycle_id"],
         "cutoff": manifest["cutoff"],
         "evaluated_on": manifest["evaluated_on"],
-        "captured_at_utc": manifest["captured_at_utc"],
+        "captured_at_utc": normalize_capture_timestamp(
+            manifest["captured_at_utc"], "captured_at_utc"
+        ),
         "cycle_manifest_sha256": digest,
         "predecessor": manifest["predecessor"],
         "roots": {key: path.as_posix() for key, path in sorted(roots.items())},
