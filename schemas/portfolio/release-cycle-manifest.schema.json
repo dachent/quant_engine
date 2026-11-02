@@ -37,13 +37,13 @@
       "additionalProperties": false,
       "required": ["alpaca", "fidelity", "ibkr", "matrixport", "portfolio123", "quantbase", "schwab"],
       "properties": {
-        "alpaca": { "$ref": "#/$defs/provider" },
-        "fidelity": { "$ref": "#/$defs/provider" },
-        "ibkr": { "$ref": "#/$defs/provider" },
-        "matrixport": { "$ref": "#/$defs/provider" },
-        "portfolio123": { "$ref": "#/$defs/provider" },
-        "quantbase": { "$ref": "#/$defs/provider" },
-        "schwab": { "$ref": "#/$defs/provider" }
+        "alpaca": { "$ref": "#/$defs/provider", "properties": { "finality_source": { "const": "GENERATION_MANIFEST" } } },
+        "fidelity": { "$ref": "#/$defs/provider", "properties": { "finality_source": { "const": "GENERATION_MANIFEST" } } },
+        "ibkr": { "$ref": "#/$defs/provider", "properties": { "finality_source": { "const": "SELECTED_SOURCE_ARTIFACT" } } },
+        "matrixport": { "$ref": "#/$defs/provider", "properties": { "finality_source": { "const": "CYCLE_MANIFEST_NATIVE" } } },
+        "portfolio123": { "$ref": "#/$defs/provider", "properties": { "finality_source": { "const": "GENERATION_MANIFEST" } } },
+        "quantbase": { "$ref": "#/$defs/provider", "properties": { "finality_source": { "const": "CYCLE_MANIFEST_NATIVE" } } },
+        "schwab": { "$ref": "#/$defs/provider", "properties": { "finality_source": { "const": "CYCLE_MANIFEST_NATIVE" } } }
       }
     },
     "strategy_evidence": { "$ref": "#/$defs/pin" },
@@ -105,8 +105,11 @@
     "provider": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "generation", "manifest_sha256"],
+      "required": ["root", "generation", "manifest_sha256", "finality_source"],
       "properties": {
+        "finality_source": {
+          "enum": ["GENERATION_MANIFEST", "SELECTED_SOURCE_ARTIFACT", "CYCLE_MANIFEST_NATIVE"]
+        },
         "root": { "$ref": "#/$defs/ref" },
         "generation": { "$ref": "#/$defs/generation" },
         "manifest_sha256": { "$ref": "#/$defs/sha256" },

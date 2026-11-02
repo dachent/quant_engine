@@ -187,6 +187,8 @@ _PATH_STAGES = {
     "tools/verify_release_restore.py": [],
     "tools/release_driver.py": [],
     "tools/release_cycle_manifest.py": [],
+    "schemas/portfolio/release-cycle-manifest.schema.json": [],
+    "schemas/portfolio/release-resolved-cycle.schema.json": [],
     "tools/release_restore_world.py": [],
     "tools/release_evidence_pack.py": [],
     "tools/check_gitleaks_suppressions.py": [],

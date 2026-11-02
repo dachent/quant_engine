@@ -26,6 +26,14 @@ PROVIDERS = (
     "schwab",
 )
 NATIVE = {"matrixport", "quantbase", "schwab"}
+SOURCE = {
+    p: "CYCLE_MANIFEST_NATIVE"
+    if p in NATIVE
+    else "SELECTED_SOURCE_ARTIFACT"
+    if p == "ibkr"
+    else "GENERATION_MANIFEST"
+    for p in PROVIDERS
+}
 
 
 def _sha(data: bytes) -> str:
@@ -65,6 +73,7 @@ def cycle(tmp_path: Path) -> dict[str, Any]:
             "root": {"root_key": "data", "relative": f"data-{provider_id}"},
             "generation": {"mode": "single"},
             "manifest_sha256": info["sha256"],
+            "finality_source": SOURCE[provider_id],
         }
         if provider_id in NATIVE:
             native = _put(
@@ -203,6 +212,13 @@ def test_finite_provider_may_not_name_evidence_of_its_own(
         "strategy_evidence"
     ]
     _refused(cycle, "FINALITY_EVIDENCE_NOT_ALLOWED")
+
+
+def test_a_finality_source_other_than_the_providers_own_is_a_schema_refusal(
+    cycle: dict[str, Any],
+) -> None:
+    cycle["manifest"]["providers"]["schwab"]["finality_source"] = "GENERATION_MANIFEST"
+    _refused(cycle, "SCHEMA")
 
 
 def test_two_generations_under_one_root_are_ambiguous_unless_one_is_named(

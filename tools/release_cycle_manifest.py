@@ -41,18 +41,10 @@ RESOLVED_VERSION = "qe-release-resolved-cycle/1"
 GENERATION_MANIFEST = "GENERATION_MANIFEST"
 SELECTED_SOURCE_ARTIFACT = "SELECTED_SOURCE_ARTIFACT"
 CYCLE_MANIFEST_NATIVE = "CYCLE_MANIFEST_NATIVE"
-# Where each provider's finality evidence comes from (the provider ledger's own rules): a finite
-# provider's evidence is its generation manifest; IBKR's is a source artifact the selected manifest
-# names (B1 reads it); the three native-evidence providers need the file this manifest pins.
-FINALITY_SOURCE: dict[str, str] = {
-    "alpaca": GENERATION_MANIFEST,
-    "fidelity": GENERATION_MANIFEST,
-    "ibkr": SELECTED_SOURCE_ARTIFACT,
-    "matrixport": CYCLE_MANIFEST_NATIVE,
-    "portfolio123": GENERATION_MANIFEST,
-    "quantbase": CYCLE_MANIFEST_NATIVE,
-    "schwab": CYCLE_MANIFEST_NATIVE,
-}
+# Where a provider's finality evidence comes from is declared per provider in the manifest
+# (``finality_source``) and pinned to the right value per provider id by the schema: a finite
+# provider's evidence is its generation manifest; one provider's is a source artifact the selected
+# manifest names (B1 reads it); the native-evidence providers need the file the manifest pins.
 
 _ROOT_KEY = re.compile(r"^[a-z][a-z0-9_-]{0,47}$")
 _DRIVE = re.compile(r"^[A-Za-z]:")
@@ -111,7 +103,7 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
             f"cutoff {manifest['cutoff']} is after evaluated_on {manifest['evaluated_on']}",
         )
     for provider_id, provider in manifest["providers"].items():
-        needs = FINALITY_SOURCE[provider_id] == CYCLE_MANIFEST_NATIVE
+        needs = provider["finality_source"] == CYCLE_MANIFEST_NATIVE
         has = "finality_evidence" in provider
         if needs and not has:
             raise CycleManifestError(
@@ -122,7 +114,7 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
             raise CycleManifestError(
                 "FINALITY_EVIDENCE_NOT_ALLOWED",
                 f"{provider_id} finality evidence is "
-                f"{FINALITY_SOURCE[provider_id].lower()}, not a cycle-manifest file",
+                f"{provider['finality_source'].lower()}, not a cycle-manifest file",
             )
     for what, ref in _refs(manifest):
         _relative_parts(ref["relative"], what)
@@ -272,7 +264,7 @@ def _generation(
             "ID_MISMATCH",
             f"{what}: generation.json names another generation than its directory",
         )
-    source = FINALITY_SOURCE[provider_id]
+    source = provider["finality_source"]
     if source == GENERATION_MANIFEST:
         evidence: dict[str, Any] | None = dict(manifest)
     elif source == CYCLE_MANIFEST_NATIVE:

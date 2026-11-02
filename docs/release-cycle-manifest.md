@@ -56,6 +56,11 @@ portfolio123, quantbase, schwab):
 | `finality_source` | `GENERATION_MANIFEST` (alpaca, fidelity, portfolio123), `SELECTED_SOURCE_ARTIFACT` (ibkr), `CYCLE_MANIFEST_NATIVE` (matrixport, quantbase, schwab) |
 | `finality_evidence` | a file object: the generation manifest itself, or the native file; `null` for ibkr (B1 reads the Flex artifact the selected manifest names) |
 
+`finality_source` is declared per provider in the manifest and the schema pins the only allowed
+value for each provider id (the tool holds no provider names); B1 re-checks it against the
+provider ledger's own validator, which stays the authority. The set of providers is checked by the
+schema (all seven required); B1 checks it equals the ledger's provider catalog set.
+
 The catalog file, `catalog_sha256`, qualification and `generation_as_of_date` are NOT resolved
 here: B1 reads them through the provider ledger's registry.
 
@@ -74,12 +79,14 @@ here: B1 reads them through the provider ledger's registry.
     "alpaca": {
       "root": {"root_key": "data", "relative": "dataAlpaca"},
       "generation": {"mode": "single"},
-      "manifest_sha256": "<64 hex>"
+      "manifest_sha256": "<64 hex>",
+      "finality_source": "GENERATION_MANIFEST"
     },
     "schwab": {
       "root": {"root_key": "data", "relative": "dataSchwab"},
       "generation": {"mode": "explicit", "generation_id": "gen-schwab-example"},
       "manifest_sha256": "<64 hex>",
+      "finality_source": "CYCLE_MANIFEST_NATIVE",
       "finality_evidence": {
         "path": {"root_key": "data", "relative": "dataSchwab/native/evidence.json"},
         "sha256": "<64 hex>"
