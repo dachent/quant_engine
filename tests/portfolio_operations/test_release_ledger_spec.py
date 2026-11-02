@@ -427,3 +427,25 @@ def test_a_provenance_generation_without_its_catalog_is_refused(
 
 def test_a_file_that_is_not_a_resolved_cycle_is_refused(world: dict[str, Any]) -> None:
     _refused(world, "RESOLVED_VERSION", resolved={"schema_version": "x"})
+
+
+def test_a_catalog_outside_its_generation_directory_or_behind_a_link_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation = tmp_path / "generations" / "g1"
+    generation.mkdir(parents=True)
+    inside = generation / "catalog.json"
+    inside.write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    assert tool._file_facts(inside, "catalog", generation)[2] == 2
+    with pytest.raises(tool.LedgerSpecError) as escaped:
+        tool._file_facts(outside, "catalog", generation)
+    assert escaped.value.code == "PATH_ESCAPES_ROOT"
+    # a link on the way is refused even where this host cannot create a symlink
+    monkeypatch.setattr(
+        cycle_tool, "link_like", lambda path: path.name == "catalog.json"
+    )
+    with pytest.raises(tool.LedgerSpecError) as linked:
+        tool._file_facts(inside, "catalog", generation)
+    assert linked.value.code == "MISSING"

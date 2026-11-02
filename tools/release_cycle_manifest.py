@@ -25,6 +25,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -213,6 +214,37 @@ def parse_roots(items: Sequence[str], roots_file: Path | None) -> dict[str, Path
     return roots
 
 
+# reparse tags of a symlink and of a junction (mount point); other reparse points (OneDrive cloud
+# placeholders, for one) are ordinary files for this purpose
+_LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
+
+
+def _is_link_tag(path: Path) -> bool:
+    try:
+        return getattr(path.lstat(), "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
+    except OSError:
+        return False
+
+
+def link_like(path: Path) -> bool:
+    """A symlink, or on Windows a junction: a path whose spelling does not say where its bytes are."""
+
+    return path.is_symlink() or (os.name == "nt" and _is_link_tag(path))
+
+
+def refuse_links(base: Path, parts: Sequence[str], what: str) -> None:
+    """No component below ``base`` is a symlink or junction."""
+
+    current = base
+    for part in parts:
+        current = current / part
+        if link_like(current):
+            raise CycleManifestError(
+                "PATH_ESCAPES_ROOT",
+                f"{what}: {part!r} is a symlink or junction, not a plain path under its root",
+            )
+
+
 def _resolve_ref(ref: Mapping[str, str], roots: Mapping[str, Path], what: str) -> Path:
     key = ref["root_key"]
     if key not in roots:
@@ -220,7 +252,9 @@ def _resolve_ref(ref: Mapping[str, str], roots: Mapping[str, Path], what: str) -
             "UNKNOWN_ROOT", f"{what}: root key {key!r} is not bound by the run"
         )
     base = roots[key]
-    target = (base.joinpath(*_relative_parts(ref["relative"], what))).resolve()
+    parts = _relative_parts(ref["relative"], what)
+    refuse_links(base, parts, what)
+    target = (base.joinpath(*parts)).resolve()
     if target != base and base not in target.parents:
         raise CycleManifestError(
             "PATH_ESCAPES_ROOT", f"{what}: {ref['relative']!r} leaves root {key!r}"
@@ -288,6 +322,7 @@ def _generation(
         directory = generations / generation_id
     # a generation directory or manifest that is a symlink or junction leaving the provider root
     # is not under it, whatever its spelling says
+    refuse_links(root, ["generations", generation_id, "generation.json"], what)
     if (
         directory.resolve() != root / "generations" / generation_id
         or (directory / "generation.json").resolve().parent != directory.resolve()

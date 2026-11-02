@@ -1610,3 +1610,13 @@ def test_replica_only_still_refuses_to_execute_a_spec_bound_to_a_real_root(
         "findings-targets",
     ):
         assert _stage(stage_id)["only_ceremony"] == "full"
+
+
+def test_a_link_like_provider_source_directory_is_recognised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "gen"
+    plain.mkdir()
+    assert driver._link_like(plain) is False
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "gen")
+    assert driver._link_like(plain) is True

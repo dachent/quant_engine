@@ -955,6 +955,22 @@ FROM_LEDGER = "from_ledger"
 PROVIDER_ROOT_PREFIX = "provider-"
 
 
+_LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
+
+
+def _link_like(path: Path) -> bool:
+    """A symlink, or on Windows a junction (not an OneDrive placeholder)."""
+
+    if path.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        return getattr(path.lstat(), "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
+    except OSError:
+        return False
+
+
 def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
     """Derive the provider source directories from the cycle's ledger spec, not a typed map.
 
@@ -1000,6 +1016,14 @@ def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
             if root_id in overrides
             else str(Path(ref["root"]) / "generations" / generation_id)
         )
+        if (
+            _link_like(Path(directory))
+            or Path(directory).resolve().name != generation_id
+        ):
+            raise Refusal(
+                f"provider-generations: {root_id} source {directory} is a symlink or junction, or resolves "
+                f"to another directory than generation {generation_id[:12]}"
+            )
         if Path(directory).name != generation_id:
             raise Refusal(
                 f"provider-generations: {root_id} source {directory} is not generation "
