@@ -22,14 +22,23 @@ import pytest
 
 import strategy_basis
 from test_portfolio_layered_history import (
+    _artifact,
+    _core_generation_manifest,
     _matrixport_fx_boundary_fixture,
+    _refresh_materialized_segment_identities,
+    _restore_retained_echo_correction,
     _synthetic_current_admission,
+    _update_correction_generations,
+    _update_source_generation,
+    _write_json,
     synthetic_history_authority,  # noqa: F401
     target_series,
 )
 
 AI = "p123-ai-factor"
 PARENT = "synthetic-account-01"
+PROVIDER = "synthetic"
+BOUND_GENERATION = "7" * 64
 ACCOUNT = f"{PARENT}-s2"
 DECLARATION = {
     "schema": "strategy-basis-declaration/1",
@@ -65,7 +74,11 @@ def _facts(*, open_sleeve: bool = True) -> dict[str, Any]:
         "schema_version": 1,
         "artifact_id": "sleeve-account-facts",
         "parent_account_id": PARENT,
-        "provider_id": "synthetic",
+        "provider_id": PROVIDER,
+        "bindings": {
+            "parent_ledger_generation_id": BOUND_GENERATION,
+            "tag_map_sha256": hashlib.sha256(_tag_map()).hexdigest(),
+        },
         "sleeves": [
             {
                 "sleeve_id": "s2",
@@ -94,16 +107,98 @@ def _bytes(document: dict[str, Any]) -> bytes:
     return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def _tag_map(parent: str = PARENT) -> bytes:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "artifact_id": "nested-strategy-tag-map",
+            "as_of_date": "2026-01-10",
+            "parents": [
+                {
+                    "parent_account_id": parent,
+                    "provider_id": PROVIDER,
+                    "tag_field": "orderReference",
+                    "tag_normalization": "NONE",
+                    "sleeves": [
+                        {
+                            "sleeve_id": "s2",
+                            "strategy_id": AI,
+                            "label": "Sleeve two",
+                            "effective_start": "2026-01-05",
+                            "effective_end": None,
+                            "tags": [{"match": "exact", "pattern": "T2"}],
+                        }
+                    ],
+                    "unmatched": {"mode": "BLOCK"},
+                }
+            ],
+        }
+    ).encode()
+
+
+def _bind_ledger(world: dict[str, Any], rows: object) -> None:
+    """Record ``provider_generations`` in the selected ledger catalog and re-bind it."""
+
+    fixture = world["fixture"]
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    if rows is None:
+        catalog.pop("provider_generations", None)
+    else:
+        catalog["provider_generations"] = rows
+    _write_json(catalog_path, catalog)
+    manifest_path = fixture["provider_ledger_manifest_path"]
+    previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts: list[dict[str, object]] = []
+    for item in previous["artifacts"]:
+        if item["artifact_id"] == "normalized/provider-ledger.json":
+            artifacts.append(_artifact(catalog_path, item["artifact_id"]))
+        else:
+            artifacts.append(
+                {
+                    **item,
+                    "schema": {
+                        "name": item["schema_name"],
+                        "version": item["schema_version"],
+                    },
+                }
+            )
+    _core_generation_manifest(
+        manifest_path,
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        artifacts,
+    )
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_bytes())
+    _update_source_generation(
+        contract, "owner-account-live-history", manifest_path, fixture["as_of_date"]
+    )
+    _update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        manifest_path,
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    _restore_retained_echo_correction(contract)
+    _write_json(contract_path, contract)
+    _refresh_materialized_segment_identities(fixture)
+    world["admission"] = _synthetic_current_admission(fixture)
+
+
 @pytest.fixture
-def world(
+def plain_world(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     synthetic_history_authority: None,
 ) -> dict[str, Any]:
     fixture = _matrixport_fx_boundary_fixture(tmp_path)
-    admission = _synthetic_current_admission(fixture)
+    holder: dict[str, Any] = {"admission": _synthetic_current_admission(fixture)}
     monkeypatch.setattr(
-        target_series, "_current_source_admission_authority", lambda **_: admission
+        target_series,
+        "_current_source_admission_authority",
+        lambda **_: holder["admission"],
     )
     receipt = tmp_path / "admit-or-declare-receipt.json"
     receipt.write_bytes(b"{}")
@@ -119,14 +214,27 @@ def world(
         "portfolio123_pointer_path",
     ):
         inputs.pop(key)
-    return {
+    tag_map = tmp_path / "nested-strategy-tag-map.json"
+    tag_map.write_bytes(_tag_map())
+    return holder | {
         "fixture": fixture,
         "inputs": inputs,
         "receipt": receipt,
         "declaration": declaration,
         "facts": facts,
+        "tag_map": tag_map,
         "tmp": tmp_path,
     }
+
+
+@pytest.fixture
+def world(plain_world: dict[str, Any]) -> dict[str, Any]:
+    """The same world with the selected ledger recording its provider generation."""
+
+    _bind_ledger(
+        plain_world, [{"provider_id": PROVIDER.upper(), "generation_id": BOUND_GENERATION}]
+    )
+    return plain_world
 
 
 def _build(world: dict[str, Any], **extra: Any) -> tuple[dict[str, bytes], bytes]:
@@ -173,12 +281,14 @@ def _restated(world: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
         world,
         strategy_basis_declaration_path=world["declaration"],
         sleeve_facts_path=world["facts"],
+        nested_tag_map_path=world["tag_map"],
     )
 
 
 def test_without_a_declaration_every_output_is_the_main_output(
-    world: dict[str, Any],
+    plain_world: dict[str, Any],
 ) -> None:
+    world = plain_world
     artifacts, manifest = _build(world)
     assert "strategy_basis_restatement" not in json.loads(manifest)
     digests = {
@@ -348,3 +458,95 @@ def test_the_verifier_refuses_a_restated_manifest_without_the_admission(
             manifest_content=manifest,
             contract_path=world["fixture"]["contract_path"],
         )
+
+
+def _write_facts(world: dict[str, Any], **bindings: object) -> None:
+    facts = _facts()
+    facts["bindings"] = {**facts["bindings"], **bindings}
+    world["facts"].write_bytes(_bytes(facts))
+
+
+def test_facts_bound_to_another_provider_generation_are_refused(
+    world: dict[str, Any],
+) -> None:
+    _write_facts(world, parent_ledger_generation_id="f65c8ddb" + "0" * 56)
+    with pytest.raises(
+        target_series.TargetSeriesError, match="parent_ledger_generation_id differs"
+    ):
+        _restated(world)
+
+
+def test_a_ledger_that_records_no_provider_generations_is_a_refusal(
+    plain_world: dict[str, Any],
+) -> None:
+    with pytest.raises(
+        target_series.TargetSeriesError, match="records\s+its provider generations"
+    ):
+        _restated(plain_world)
+
+
+def test_two_generations_for_the_provider_are_a_refusal(
+    world: dict[str, Any],
+) -> None:
+    _bind_ledger(
+        world,
+        [
+            {"provider_id": PROVIDER, "generation_id": BOUND_GENERATION},
+            {"provider_id": PROVIDER.upper(), "generation_id": "8" * 64},
+        ],
+    )
+    with pytest.raises(
+        target_series.TargetSeriesError, match="parent_ledger_generation_id differs"
+    ):
+        _restated(world)
+
+
+def test_a_tag_map_other_than_the_one_the_facts_bind_is_refused(
+    world: dict[str, Any],
+) -> None:
+    world["tag_map"].write_bytes(world["tag_map"].read_bytes() + b"\n")
+    with pytest.raises(target_series.TargetSeriesError, match="tag_map_sha256 differs"):
+        _restated(world)
+
+
+def test_a_tag_map_that_does_not_name_the_facts_parent_is_refused(
+    world: dict[str, Any],
+) -> None:
+    other = _tag_map("another-account")
+    world["tag_map"].write_bytes(other)
+    _write_facts(world, tag_map_sha256=hashlib.sha256(other).hexdigest())
+    with pytest.raises(target_series.TargetSeriesError, match="tag map is refused"):
+        _restated(world)
+
+
+def test_an_absent_tag_map_is_a_refusal(world: dict[str, Any]) -> None:
+    with pytest.raises(target_series.TargetSeriesError, match="needs the tag map"):
+        _build(
+            world,
+            strategy_basis_declaration_path=world["declaration"],
+            sleeve_facts_path=world["facts"],
+        )
+
+
+def test_facts_without_bindings_are_refused(world: dict[str, Any]) -> None:
+    facts = _facts()
+    del facts["bindings"]
+    world["facts"].write_bytes(_bytes(facts))
+    with pytest.raises(target_series.TargetSeriesError, match="no bindings"):
+        _restated(world)
+
+
+def test_the_manifest_records_the_bound_identities_and_the_verifier_checks_them(
+    world: dict[str, Any],
+) -> None:
+    artifacts, manifest = _restated(world)
+    block = json.loads(manifest)["strategy_basis_restatement"]
+    assert block["parent_ledger_generation_id"] == BOUND_GENERATION
+    assert block["parent_account_id"] == PARENT
+    assert block["tag_map_sha256"] == hashlib.sha256(_tag_map()).hexdigest()
+
+    def other_generation(document: dict[str, Any]) -> None:
+        document["strategy_basis_restatement"]["parent_ledger_generation_id"] = "9" * 64
+
+    with pytest.raises(target_series.TargetSeriesError):
+        _validate(world, artifacts, _retie(manifest, other_generation))

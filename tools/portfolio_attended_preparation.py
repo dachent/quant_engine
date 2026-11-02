@@ -848,6 +848,7 @@ def _rebuild_layered_history(
     *,
     declaration_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    tag_map_path: Path | None = None,
 ) -> Path:
     """Regenerate only stale code-bound history from the frozen selected bytes."""
 
@@ -873,6 +874,7 @@ def _rebuild_layered_history(
         # account's in the rebuilt history (#624); without it the kwargs are unchanged
         kwargs["strategy_basis_declaration_path"] = declaration_path
         kwargs["sleeve_facts_path"] = sleeve_facts_path
+        kwargs["nested_tag_map_path"] = tag_map_path
 
     build_history = cast(
         Callable[..., tuple[dict[str, bytes], bytes]],
@@ -2172,6 +2174,9 @@ def _prepare_attended_inputs(
                     else {
                         "declaration_path": basis_declaration_path,
                         "sleeve_facts_path": basis_facts_path,
+                        "tag_map_path": _sleeve_tag_map_path(
+                            config.get("sleeve_facts")
+                        ),
                     }
                 ),
             )

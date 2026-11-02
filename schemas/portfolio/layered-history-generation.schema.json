@@ -72,9 +72,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "declaration", "declaration_sha256", "sleeve_facts", "sleeve_facts_sha256", "strategies"
+        "declaration", "declaration_sha256", "sleeve_facts", "sleeve_facts_sha256", "strategies",
+        "tag_map", "parent_account_id", "parent_ledger_generation_id", "tag_map_sha256"
       ],
       "properties": {
+        "tag_map": {"type": "string", "minLength": 1},
+        "parent_account_id": {"type": "string", "minLength": 1},
+        "parent_ledger_generation_id": {"type": "string", "minLength": 1},
+        "tag_map_sha256": {"$ref": "#/$defs/sha256"},
         "declaration": {"type": "string", "minLength": 1},
         "declaration_sha256": {"$ref": "#/$defs/sha256"},
         "sleeve_facts": {"type": "string", "minLength": 1},

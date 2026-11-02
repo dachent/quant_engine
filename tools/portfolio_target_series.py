@@ -382,6 +382,8 @@ def _restated_live_rows(
     series_by_strategy: Mapping[str, str],
     original_rows: Mapping[str, Sequence[Mapping[str, str]]],
     accepted_as_of: date,
+    provider_generations: object,
+    tag_map: bytes | None,
 ) -> tuple[dict[str, list[dict[str, str]]], dict[str, object]]:
     """The sleeve live segment of every declared strategy, and the block that binds it.
 
@@ -397,6 +399,13 @@ def _restated_live_rows(
         declared = basis.load_declaration(declaration)
     except basis.StrategyBasisError as exc:
         raise TargetSeriesError(f"strategy basis declaration refused: {exc}") from exc
+    try:
+        bindings = basis.require_facts_bindings(
+            facts, provider_generations=provider_generations, tag_map=tag_map
+        )
+    except basis.StrategyBasisError as exc:
+        raise TargetSeriesError(f"strategy basis facts refused: {exc}") from exc
+    assert tag_map is not None
     restated: dict[str, list[dict[str, str]]] = {}
     identities: list[dict[str, object]] = []
     for strategy_id in sorted(declared):
@@ -447,6 +456,8 @@ def _restated_live_rows(
         "sleeve_facts": facts.decode("utf-8"),
         "sleeve_facts_sha256": hashlib.sha256(facts).hexdigest(),
         "strategies": identities,
+        "tag_map": tag_map.decode("utf-8"),
+        **bindings,
     }
     return restated, block
 
@@ -458,6 +469,7 @@ def _restated_live_rows_from_block(
     series_by_strategy: Mapping[str, str],
     original_rows: Mapping[str, Sequence[Mapping[str, str]]],
     accepted_as_of: date,
+    provider_generations: object,
 ) -> dict[str, list[dict[str, str]]]:
     """Re-derive the restated live rows from a manifest's embedded declaration and facts."""
 
@@ -470,9 +482,14 @@ def _restated_live_rows_from_block(
             "sleeve_facts",
             "sleeve_facts_sha256",
             "strategies",
+            "tag_map",
+            "parent_account_id",
+            "parent_ledger_generation_id",
+            "tag_map_sha256",
         }
         or not isinstance(block["declaration"], str)
         or not isinstance(block["sleeve_facts"], str)
+        or not isinstance(block["tag_map"], str)
     ):
         raise TargetSeriesError("strategy basis restatement block differs")
     declaration = block["declaration"].encode("utf-8")
@@ -489,6 +506,8 @@ def _restated_live_rows_from_block(
         series_by_strategy=series_by_strategy,
         original_rows=original_rows,
         accepted_as_of=accepted_as_of,
+        provider_generations=provider_generations,
+        tag_map=block["tag_map"].encode("utf-8"),
     )
     if block != expected:
         raise TargetSeriesError("strategy basis restatement identity differs")
@@ -4517,6 +4536,7 @@ def build_layered_history_generation(
     source_selection_mode: str = "CURRENT_POINTERS",
     strategy_basis_declaration_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    nested_tag_map_path: Path | None = None,
 ) -> tuple[dict[str, bytes], bytes]:
     """Build one deterministic, content-addressed current history generation.
 
@@ -4799,6 +4819,12 @@ def build_layered_history_generation(
             series_by_strategy=series_by_strategy,
             original_rows=live_by_strategy,
             accepted_as_of=accepted_as_of,
+            provider_generations=ledger_catalog.get("provider_generations"),
+            tag_map=(
+                None
+                if nested_tag_map_path is None
+                else nested_tag_map_path.read_bytes()
+            ),
         )
         live_by_strategy.update(restated_rows)
     echo_correction = corrections.get("echotrade-event-only-account-live-rejected")
@@ -7435,6 +7461,10 @@ def validate_layered_history_generation(
                 },
                 original_rows=original_by_strategy,
                 accepted_as_of=accepted_as_of,
+                provider_generations=_load_json(
+                    cast(Path, provider_ledger_catalog_path),
+                    "provider-ledger catalog",
+                ).get("provider_generations"),
             )
             replaced = {rows[0]["series_id"] for rows in restated_live.values()}
             ledger_live_rows = [

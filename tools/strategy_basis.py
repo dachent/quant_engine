@@ -624,3 +624,65 @@ def rows_from_sleeve_facts(
             facts, strategy_id, sleeve_id=sleeve_id, provider_id=provider_id
         ).rows
     ]
+
+
+def require_facts_bindings(
+    facts: bytes | Mapping[str, Any],
+    *,
+    provider_generations: object,
+    tag_map: bytes | None,
+) -> dict[str, str]:
+    """Refuse sleeve facts that are not the ones this run's own ledger and tag map bind.
+
+    ``bindings.parent_ledger_generation_id`` is the provider generation the selected
+    provider ledger records for the facts' provider (exactly one row); the tag map the
+    consumer holds must be the one the facts were built from (digest) and must name the
+    facts' parent account.  A comparison side that is absent is a refusal, never "not
+    comparable".  Returns the bound identities.
+    """
+
+    document, _digest = _facts_document(facts)
+    bindings = document.get("bindings")
+    if not isinstance(bindings, Mapping):
+        raise StrategyBasisError("sleeve facts carry no bindings")
+    bound = bindings.get("parent_ledger_generation_id")
+    provider = str(document.get("provider_id") or "")
+    parent = str(document.get("parent_account_id") or "")
+    if not isinstance(bound, str) or not bound or not provider or not parent:
+        raise StrategyBasisError("sleeve facts binding identity is incomplete")
+    if not isinstance(provider_generations, list):
+        raise StrategyBasisError(
+            "a strategy basis declaration needs a provider ledger that records "
+            "its provider generations"
+        )
+    found = [
+        row
+        for row in provider_generations
+        if isinstance(row, Mapping)
+        and str(row.get("provider_id", "")).casefold() == provider.casefold()
+    ]
+    if len(found) != 1 or found[0].get("generation_id") != bound:
+        raise StrategyBasisError(
+            "sleeve facts parent_ledger_generation_id differs from the provider "
+            f"generation the selected ledger records for {provider}"
+        )
+    if tag_map is None:
+        raise StrategyBasisError(
+            "a strategy basis declaration needs the tag map the sleeve facts bind"
+        )
+    import nested_strategy_tag_map as tag_maps
+
+    try:
+        parsed = tag_maps.validate_tag_map(tag_map)
+        parsed.parent(parent)
+    except tag_maps.TagMapError as exc:
+        raise StrategyBasisError(f"sleeve facts tag map is refused: {exc}") from exc
+    if bindings.get("tag_map_sha256") != parsed.sha256:
+        raise StrategyBasisError(
+            "sleeve facts tag_map_sha256 differs from the tag map supplied"
+        )
+    return {
+        "parent_account_id": parent,
+        "parent_ledger_generation_id": bound,
+        "tag_map_sha256": parsed.sha256,
+    }
