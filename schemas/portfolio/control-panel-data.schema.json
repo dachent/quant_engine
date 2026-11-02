@@ -399,6 +399,131 @@
       "properties": {
         "default_evidence_mode": { "const": "LIVE_ONLY" },
         "representation": { "const": "SURFACE_SERIES_ONCE_V1" },
+        "strategy_basis_lens_moves": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["findings", "rows", "schema", "sentence", "series_id", "summary"],
+          "properties": {
+            "schema": { "const": "strategy-basis-lens-moves/1" },
+            "series_id": { "type": "string", "minLength": 1 },
+            "sentence": { "type": "string", "minLength": 1 },
+            "findings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["code", "evidence_mode", "model_id", "surface"],
+                "properties": {
+                  "code": { "const": "NO_ACCOUNT_LANE_FIGURE" },
+                  "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+                  "model_id": { "type": "string" },
+                  "surface": { "enum": ["STATIC", "DYNAMIC_FLS"] }
+                }
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["account", "evidence_mode", "factors", "finding", "model_id", "move", "sleeve", "source_key", "surface"],
+                "properties": {
+                  "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+                  "surface": { "enum": ["STATIC", "DYNAMIC_FLS"] },
+                  "source_key": { "type": "string" },
+                  "model_id": { "type": "string" },
+                  "factors": { "type": "array", "items": { "type": "string" } },
+                  "move": { "type": "string" },
+                  "finding": { "enum": ["NO_ACCOUNT_LANE_FIGURE", null] },
+                  "sleeve": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["aligned", "cv_folds", "cv_margin", "minimum_test_observations", "minimum_train_observations", "reason", "status", "test", "test_margin", "train", "train_margin", "window"],
+                    "properties": {
+                      "aligned": { "type": ["integer", "null"] },
+                      "cv_folds": { "type": ["integer", "null"] },
+                      "cv_margin": { "type": ["integer", "null"] },
+                      "minimum_test_observations": { "type": ["integer", "null"] },
+                      "minimum_train_observations": { "type": ["integer", "null"] },
+                      "reason": { "type": "string" },
+                      "status": { "type": "string" },
+                      "test": { "type": ["integer", "null"] },
+                      "test_margin": { "type": ["integer", "null"] },
+                      "train": { "type": ["integer", "null"] },
+                      "train_margin": { "type": ["integer", "null"] },
+                      "window": { "type": "object", "additionalProperties": false, "required": ["end", "start"], "properties": { "end": { "type": ["string", "null"] }, "start": { "type": ["string", "null"] } } }
+                    }
+                  },
+                  "account": {
+                    "anyOf": [
+                      { "type": "null" },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["aligned", "figures", "status", "test", "train", "window"],
+                        "properties": {
+                          "aligned": { "type": ["integer", "null"] },
+                          "status": { "type": "string" },
+                          "test": { "type": ["integer", "null"] },
+                          "train": { "type": ["integer", "null"] },
+                          "window": { "type": "object", "additionalProperties": false, "required": ["end", "start"], "properties": { "end": { "type": ["string", "null"] }, "start": { "type": ["string", "null"] } } },
+                          "figures": {
+                            "anyOf": [
+                              { "type": "null" },
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["target_cumulative_return", "target_current_drawdown", "target_max_drawdown"],
+                                "properties": {
+                                  "target_cumulative_return": { "type": "string" },
+                                  "target_current_drawdown": { "type": "string" },
+                                  "target_max_drawdown": { "type": "string" }
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            "summary": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["account_lane_labels", "account_lane_observations", "account_lane_windows", "changed_models", "finding_count", "hybrid_min_train_margin", "live_only_min_train_margin", "models_compared", "unavailable_by_status", "unavailable_on_both_lanes", "unavailable_on_sleeve_lane"],
+              "properties": {
+                "account_lane_labels": { "type": "array", "items": { "type": "string" } },
+                "account_lane_observations": { "type": "array", "items": { "type": "integer" } },
+                "account_lane_windows": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["end", "start"], "properties": { "end": { "type": ["string", "null"] }, "start": { "type": ["string", "null"] } } } },
+                "changed_models": { "type": "integer", "minimum": 0 },
+                "finding_count": { "type": "integer", "minimum": 0 },
+                "hybrid_min_train_margin": { "type": ["integer", "null"] },
+                "live_only_min_train_margin": { "type": ["integer", "null"] },
+                "models_compared": { "type": "integer", "minimum": 1 },
+                "unavailable_by_status": { "type": "object", "additionalProperties": { "type": "integer" } },
+                "unavailable_on_sleeve_lane": { "type": "integer", "minimum": 0 },
+                "unavailable_on_both_lanes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["account_train_margin", "evidence_mode", "model_id", "sleeve_train_margin", "status", "surface"],
+                    "properties": {
+                      "account_train_margin": { "type": ["integer", "null"] },
+                      "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+                      "model_id": { "type": "string" },
+                      "sleeve_train_margin": { "type": ["integer", "null"] },
+                      "status": { "type": "string" },
+                      "surface": { "enum": ["STATIC", "DYNAMIC_FLS"] }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
         "default_lens": { "type": "string" },
         "evidence_modes": {
           "type": "array",

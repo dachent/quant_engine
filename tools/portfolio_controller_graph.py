@@ -228,6 +228,9 @@ _PATH_STAGES = {
     # is given and the layered-history generation derives the declared strategy's live
     # segment from it, so dependence, the plans and their lenses move with it as well.
     "tools/strategy_basis.py": ["analytics", "report", "panel"],
+    # #624: the table of lens models whose status changes between the sleeve lane and the
+    # account lane; the panel reads and verifies it beside the lenses.
+    "tools/strategy_basis_lens_moves.py": ["analytics", "panel"],
     # #567 stage 5: the post-ledger sleeve-facts builders and the release step that
     # runs them.  Attended preparation builds the facts, the epoch manifest selects
     # them and the HWM replay re-supplies them, so a change to any of them moves the
