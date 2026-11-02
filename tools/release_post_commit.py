@@ -91,7 +91,7 @@ def load_resolved_cycle(path: Path) -> dict[str, Any]:
         raise Refusal(f"resolved cycle schema_version is not {RESOLVED_SCHEMA}")
     # the governed shape (B0 interface, as extended by B1/B2), so a file that no longer
     # matches the cycle manifest contract is refused here too
-    import jsonschema
+    import jsonschema  # type: ignore[import-untyped]
 
     problems = sorted(
         error.message
