@@ -91,7 +91,7 @@
         "bound_ids": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
         "assert_equal": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
         "argv": {"$ref": "#/$defs/argv"},
-        "builtin": {"enum": ["inputs_only", "provider_generations", "replica_provider_generations"]},
+        "builtin": {"enum": ["inputs_only", "provider_generations", "replica_provider_generations", "remove_replica_attestation"]},
         "env": {"type": "object", "additionalProperties": {"type": "string"}},
         "expect_rc": {"type": "integer", "minimum": 0},
         "stdout_to": {"type": "string"},

@@ -1022,6 +1022,19 @@ def replica_provider_generations(run: Run, target: Path) -> dict[str, Any]:
     return {"roots": len(rows), "remapped": remapped}
 
 
+def remove_replica_attestation(run: Run, target: Path) -> dict[str, Any]:
+    """Drop the attestation the replica copy brought along: the replica gets its own, written create-only."""
+
+    path = Path(run.expand("{replica_coordination_root}")) / ATTESTATION_FILENAME
+    replica = Path(run.values["replica_workspace"])
+    if not _inside(path, replica) or _in_real_root(run, path) is not None:
+        raise Refusal(f"refusing to remove {path}: not inside the replica workspace")
+    removed = path.is_file()
+    if removed:
+        path.unlink()
+    return {"removed": removed}
+
+
 def _no_builtin_work(run: Run, target: Path) -> dict[str, Any]:
     return {}
 
@@ -1030,6 +1043,7 @@ _BUILTINS: dict[str, Callable[[Run, Path], dict[str, Any]]] = {
     "inputs_only": _no_builtin_work,
     "provider_generations": provider_generations,
     "replica_provider_generations": replica_provider_generations,
+    "remove_replica_attestation": remove_replica_attestation,
 }
 
 

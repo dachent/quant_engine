@@ -829,11 +829,21 @@
       ]
     },
     {
-      "id": "replica-attest",
+      "id": "replica-clear-attestation",
       "only_scheme": "git-tree-v2",
       "only_ceremony": "replica-only",
       "requires": [
         "replica-provider-generations"
+      ],
+      "builtin": "remove_replica_attestation"
+    },
+    {
+      "id": "replica-attest",
+      "only_scheme": "git-tree-v2",
+      "only_ceremony": "replica-only",
+      "requires": [
+        "replica-provider-generations",
+        "replica-clear-attestation"
       ],
       "outputs": [
         "{replica_coordination_root}/merge-attestation.json"
@@ -967,7 +977,7 @@
         "--replica-panel-dir",
         "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
         "--expected",
-        "acceptance/expected-baseline.json",
+        "{expected_baseline_arg}",
         "--cutoff",
         "{requested_as_of}",
         "--crosswalk",

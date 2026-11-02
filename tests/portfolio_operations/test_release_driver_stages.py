@@ -1495,3 +1495,42 @@ def test_the_prepared_recipe_must_carry_the_runs_code_identity(
         "0" * 40
     )  # the stage ran as the other scheme: its recipe names another identity
     assert _drive(world, _graph(world, [stage]), "--only", "attended", "--replace") == 1
+
+
+def test_a_copied_attestation_is_removed_in_the_replica_only_and_the_ceremony_uses_the_bound_baseline(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    ceremony = _ceremony_world(world)
+    real_attestation = (
+        ceremony["real"] / "dataPortfolio" / "releases" / "merge-attestation.json"
+    )
+    real_attestation.write_text("{}", encoding="utf-8")
+    replica_root = ceremony["replica"] / "dataPortfolio" / "releases"
+    replica_root.mkdir(parents=True)
+    (replica_root / "merge-attestation.json").write_text("copied", encoding="utf-8")
+    graph = _graph(
+        world,
+        [{"id": "clear", "builtin": "remove_replica_attestation"}],
+        paths={"replica_coordination_root": str(replica_root)},
+    )
+    assert _drive(world, graph) == 0
+    assert not (replica_root / "merge-attestation.json").exists()
+    assert (
+        real_attestation.read_text(encoding="utf-8") == "{}"
+    )  # the real one is never touched
+    # a replica root that is really the real root is refused, not emptied
+    graph = _graph(
+        world,
+        [{"id": "clear", "builtin": "remove_replica_attestation"}],
+        paths={
+            "replica_coordination_root": str(
+                ceremony["real"] / "dataPortfolio" / "releases"
+            )
+        },
+    )
+    assert _drive(world, graph, "--only", "clear", "--replace") == 2
+    assert real_attestation.is_file()
+    argv = _stage("ceremony")["argv"]
+    assert argv[argv.index("--expected") + 1] == "{expected_baseline_arg}"
+    ids = [s["id"] for s in _shipped()["stages"]]
+    assert ids.index("replica-clear-attestation") < ids.index("replica-attest")
