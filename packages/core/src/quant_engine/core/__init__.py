@@ -30,6 +30,7 @@ from quant_engine.core.code_identity import (
     TREE_SCHEME as CODE_IDENTITY_TREE_SCHEME,
 )
 from quant_engine.core.retained_cache_base import (
+    COLD_CACHE_KINDS,
     CacheBaseError,
     iter_cache_files,
     promote_cache_base,
@@ -199,6 +200,7 @@ __all__ = [
     "timed_call",
     "timed_stage",
     "release_directory_identity",
+    "COLD_CACHE_KINDS",
     "CacheBaseError",
     "iter_cache_files",
     "process_alive",
