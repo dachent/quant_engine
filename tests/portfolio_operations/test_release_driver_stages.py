@@ -1270,3 +1270,19 @@ def test_the_shipped_replica_only_stages_are_data_declared() -> None:
     assert "--out-dir" in ceremony["argv"] and "{lane_replica}" in ceremony["argv"]
     for stage_id in ("lanes", "attest", "commit", "pack-evidence"):
         assert _stage(stage_id)["only_ceremony"] == "full"
+
+
+def test_choosing_the_ceremony_does_not_invalidate_stages_that_already_ran(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph, "--through", "one") == 0
+    one_started = json.loads(
+        (world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8")
+    )["stages"]["one"]["started_at"]
+    _config(world, ceremony="replica-only")
+    assert _drive(world, graph) == 0
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert state["stages"]["one"]["started_at"] == one_started  # kept, not rerun
+    _config(world, requested_as_of="2026-01-01")
+    assert _drive(world, graph) == 2  # any other config change still invalidates

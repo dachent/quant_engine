@@ -176,8 +176,10 @@ class Run:
             else {"stages": {}}
         )
         self.derived: dict[str, str] = {}
+        # which ceremony runs decides which later stages apply, not what an earlier stage produced
+        bound = {key: value for key, value in config.items() if key != "ceremony"}
         self.binding = hashlib.sha256(
-            json.dumps([config, graph], sort_keys=True).encode()
+            json.dumps([bound, graph], sort_keys=True).encode()
         ).hexdigest()
         self.confirmed_release_id: str | None = None
 
