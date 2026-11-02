@@ -330,6 +330,18 @@
   const costAmountText = (row) => (number(row.annual_external_cost_usd) == null ? "annual amount not published" : `${currencyExact(row.annual_external_cost_usd)} per year`);
   // N2: the producer states, per strategy row, which account scope its return, drawdown, current value and weight carry
   // (`return_scope_label`); it is printed beside the row it qualifies, verbatim.
+  // T6 fix: the strategy row's mixed-basis label is not printed on an epoch row of the sleeve; such a row (it carries
+  // `sleeve_id`) says it is that sleeve throughout, from its own window fields, and points to the strategy row.
+  const sleeveEpochRowNote = (row) => {
+    if (!row?.sleeve_id) return "";
+    const strategy = currentStrategies().find((item) => item.strategy_name === row.strategy_name);
+    if (!strategy?.return_scope_label) return "";
+    const windowed = Object.values(row.annualisation_basis && typeof row.annualisation_basis === "object" ? row.annualisation_basis : {}).find((entry) => number(entry?.window_days) != null);
+    const start = row.return_window_start || row.observed_start;
+    const end = row.return_close_date || row.observed_end;
+    const span = start && end ? ` (${formatDate(start)} to ${formatDate(end)}${windowed ? `, ${integer.format(windowed.window_days)} days` : ""})` : "";
+    return `<span class="cell-secondary">This epoch row is sleeve ${safe(row.sleeve_id)} throughout${span}; the strategy row elsewhere mixes bases, see MIXED BASIS on the strategy row.</span>`;
+  };
   const scopeNote = (row) => (typeof row?.return_scope_label === "string" && row.return_scope_label ? `<span class="cell-secondary">${safe(row.return_scope_label)}</span>` : "");
   const costLabel = (row) => `${humanStatus(row.cost_status)} · ${costAmountText(row)}`;
   // R2.1: the producer's structured cost components (subscription, execution) are printed as published: kind, amount,
@@ -447,11 +459,11 @@
     }
     const background = sized ? `conic-gradient(${stops.join(", ")})` : CAPITAL_HATCH;
     const legend = parts.map((part) => {
-      const label = !part.ready ? `${part.label} · Not ready at the cutoff` : sized ? `${part.label} · ${part.share.toFixed(1)}%` : part.label;
+      const label = !part.ready ? `${part.label} · Not ready at the cutoff` : sized ? `${part.label} · ${part.share.toFixed(1)}%${part.key === "systematic" ? capitalAggregateSuffix("systematic") : ""}` : `${part.label}${part.key === "systematic" ? capitalAggregateSuffix("systematic") : ""}`;
       const dot = part.ready ? `<span class="legend-dot" style="background:${part.color}"></span>` : `<span class="legend-dot is-hatched" style="background:${CAPITAL_HATCH}"></span>`;
       return `<div class="legend-item" data-capital-component="${part.key}" data-capital-status="${safe(part.status)}">${dot}<span>${safe(label)}</span><strong>${part.ready ? currency(part.value) : "—"}</strong></div>`;
     }).join("");
-    return `<div class="capital-donut" data-capital-state="${sized ? "CURRENT" : "NOT_READY"}" style="background:${background}"><div class="donut-center"><strong>${sized ? currency(total.value) : "Not ready"}</strong><span>${sized ? "liquid" : "liquid at cutoff"}</span></div></div><div class="legend-list">${legend}</div>`;
+    return `<div class="capital-donut" data-capital-state="${sized ? "CURRENT" : "NOT_READY"}" style="background:${background}"><div class="donut-center"><strong>${sized ? currency(total.value) : "Not ready"}</strong><span>${sized ? "liquid" : "liquid at cutoff"}</span>${sized && capitalAggregateText("total_liquid") ? `<span class="cell-secondary">${safe(capitalAggregateText("total_liquid"))}</span>` : ""}</div></div><div class="legend-list">${legend}</div>`;
   };
   const weightBasisText = (basis) => {
     const text = String(basis || "");
@@ -668,16 +680,16 @@
     $("#command-reason").textContent = performanceLineageMismatch
       ? `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`
       : data.advisory.reason;
-    const liquidNote = capitalState("total_liquid").ready ? `Systematic plus reserve plus retained excluded${capitalAsOf("total_liquid")}` : capitalNotReadyNote();
-    const reserveNote = capitalState("reserve").ready ? `Zero strategy risk budget${capitalAsOf("reserve")}` : "Not ready at the cutoff · zero strategy risk budget";
+    const liquidNote = capitalState("total_liquid").ready ? `Systematic plus reserve plus retained excluded${capitalAsOf("total_liquid")}${capitalAggregateSuffix("total_liquid")}` : capitalNotReadyNote();
+    const reserveNote = capitalState("reserve").ready ? `Zero strategy risk budget${capitalAsOf("reserve")}${capitalAggregateSuffix("reserve")}` : "Not ready at the cutoff · zero strategy risk budget";
     renderKpis("#command-kpis", performanceLineageMismatch ? [
       ["Total liquid", capitalAmount("total_liquid"), liquidNote],
-      ["Systematic capital", capitalAmount("systematic"), "Report-derived risk-control status withheld"],
+      ["Systematic capital", capitalAmount("systematic"), `Report-derived risk-control status withheld${capitalAggregateSuffix("systematic")}`],
       ["Reserve", capitalAmount("reserve"), reserveNote, "reserve"],
       ["Report coverage", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
     ] : [
       ["Total liquid", capitalAmount("total_liquid"), liquidNote],
-      ["Systematic capital", capitalAmount("systematic"), `Subject to the accepted HWM policy${capitalAsOf("systematic")}`],
+      ["Systematic capital", capitalAmount("systematic"), `Subject to the accepted HWM policy${capitalAsOf("systematic")}${capitalAggregateSuffix("systematic")}`],
       ["Reserve", capitalAmount("reserve"), reserveNote, "reserve"],
       ["Governed NAV coverage", pct(data.advisory.nav_coverage), `${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}; ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered. ${hwmExclusionNote()}`, "warning"],
     ]);
@@ -819,7 +831,7 @@
     const rows = accepted.map((row, index) => {
       const target = targetState(row);
       const current = currents[index];
-      const currentValue = current.value != null ? `${currency(current.value)}${row.scope === "RESERVE" ? reserveBasisNote() : ""}` : current.status ? statusText(current.status) : "—";
+      const currentValue = current.value != null ? `${currency(current.value)}${row.scope === "RESERVE" ? reserveBasisNote() : aggregateBasisNote([row.strategy_id])}` : current.status ? statusText(current.status) : "—";
       const identity = "Reserve classification";
       return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
     });
@@ -831,7 +843,7 @@
     const currentWeights = currents.map((item) => item.weight).filter((value) => value != null);
     const notReady = accepted.length - currentValues.length;
     const footer = accepted.length
-      ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${snapshotValues.length ? currency(sumOf(snapshotValues)) : "—"}</td><td class="numeric">${snapshotWeights.length ? pct(sumOf(snapshotWeights)) : "—"}</td><td class="numeric">${currentValues.length ? currency(sumOf(currentValues)) : "—"}${notReady ? `<span class="cell-secondary">excludes ${integer.format(notReady)} not ready</span>` : ""}</td><td class="numeric">${currentWeights.length ? pct(sumOf(currentWeights)) : "—"}</td><td colspan="4"></td></tr>`
+      ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${snapshotValues.length ? currency(sumOf(snapshotValues)) : "—"}</td><td class="numeric">${snapshotWeights.length ? pct(sumOf(snapshotWeights)) : "—"}</td><td class="numeric">${currentValues.length ? currency(sumOf(currentValues)) : "—"}${currentValues.length ? aggregateBasisNote(accepted.filter((row, index) => row.scope !== "RESERVE" && currents[index].value != null).map((row) => row.strategy_id), accepted.some((row, index) => row.scope === "RESERVE" && currents[index].value != null)) : ""}${notReady ? `<span class="cell-secondary">excludes ${integer.format(notReady)} not ready</span>` : ""}</td><td class="numeric">${currentWeights.length ? pct(sumOf(currentWeights)) : "—"}</td><td colspan="4"></td></tr>`
       : "";
     const table = $("#allocation-table");
     table.dataset.visibleRows = String(accepted.length);
@@ -902,6 +914,41 @@
     return first && members.every((summary) => summary.value_basis?.basis === first) ? accountBasisNote(members[0]) : "";
   };
 
+  // An aggregate (a strategy's current value, a capital total) is a sum over member accounts' values.  It is derived when any
+  // member's own-date value is declared derived in account_summary; the counts and the day come from those rows, and the
+  // wording is the account-row label (valueBasisLabel) with the member counts.
+  const derivedAccountRows = () => new Map(accountDimension.filter((summary) => summary.value_basis)
+    .map((summary) => [`${summary.account_id}|${String(summary.as_of_date || "").slice(0, 10)}`, summary]));
+  const aggregateBasisStats = (members) => {
+    const derived = derivedAccountRows();
+    const list = Array.isArray(members) ? members : [];
+    const hits = list.map((member) => derived.get(`${member.account_id}|${String(member.as_of_date || "").slice(0, 10)}`)).filter(Boolean);
+    return { k: hits.length, n: list.length, hits };
+  };
+  const aggregateBasisText = (stats) => {
+    if (!stats.k) return "";
+    const days = [...new Set(stats.hits.map((summary) => String(summary.as_of_date).slice(0, 10)))];
+    const label = valueBasisLabel({ value_basis: stats.hits[0].value_basis, as_of_date: days.length === 1 ? days[0] : "" });
+    return `${stats.k === stats.n ? label : `Partly ${label.charAt(0).toLowerCase()}${label.slice(1)}`} (${integer.format(stats.k)} of ${integer.format(stats.n)} account${stats.n === 1 ? "" : "s"})`;
+  };
+  const strategyMembers = (ids) => (data.custody_current_capital?.strategies || []).filter((row) => ids.includes(row.strategy_id)).flatMap((row) => row.members || []);
+  const aggregateBasisNote = (ids, withReserve = false) => {
+    const text = aggregateBasisText(aggregateBasisStats([...strategyMembers(ids), ...(withReserve ? data.custody_current_capital?.reserve?.members || [] : [])]));
+    return text ? `<span class="cell-secondary">${safe(text)}</span>` : "";
+  };
+  // The capital totals: systematic is the sum of its component strategies; total liquid adds the reserve and the retained
+  // excluded strategies.  Text only, "" when no member is derived.
+  const capitalAggregateText = (key) => {
+    const custody = data.custody_current_capital || {};
+    const systematic = strategyMembers(custody.systematic?.components || []);
+    const members = key === "systematic" ? systematic
+      : key === "reserve" ? custody.reserve?.members || []
+      : key === "total_liquid" ? [...(custody.reserve?.members || []), ...strategyMembers(custody.retained_excluded?.components || []), ...systematic]
+        : [];
+    return aggregateBasisText(aggregateBasisStats(members));
+  };
+  const capitalAggregateSuffix = (key) => (capitalState(key).ready && capitalAggregateText(key) ? ` · ${capitalAggregateText(key)}` : "");
+
   function renderPositionTable() {
     const query = positionSearch.toLowerCase();
     const accepted = currentPositionRows().filter((row) => matchesContext(row)
@@ -965,7 +1012,7 @@
 
   function renderCapitalKpis() {
     renderKpis("#capital-kpis", [
-      ["Liquid capital", capitalAmount("total_liquid"), capitalState("total_liquid").ready ? `Current at the cutoff${capitalAsOf("total_liquid")}` : capitalNotReadyNote()],
+      ["Liquid capital", capitalAmount("total_liquid"), capitalState("total_liquid").ready ? `Current at the cutoff${capitalAsOf("total_liquid")}${capitalAggregateSuffix("total_liquid")}` : capitalNotReadyNote()],
       ["Current strategies", String(data.counts.strategies), "Reserve is not a strategy"],
       ["Accounts", String(data.counts.accounts), "Stable internal identities"],
       ["Positions", humanStatus(data.fact_status.positions), data.counts.positions ? positionKpiNote() : "No accepted position source", data.counts.positions ? "warning" : "danger"],
@@ -982,7 +1029,7 @@
     const rows = currentStrategies().map((row) => {
       const qualification = hwmQualification(row);
       const navStatus = performanceLineageMismatch ? "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" : row.nav_status;
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span>${scopeNote(row)}</td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(navStatus)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span>${scopeNote(row)}</td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}${aggregateBasisNote([row.strategy_id])}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(navStatus)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Provider/model comparison"]], rows, evidenceCaption("Current strategy evidence"));
     renderLifecycleTable();
@@ -1399,7 +1446,8 @@
       const missing = (Array.isArray(kpiBlock.missing_daily_points) ? kpiBlock.missing_daily_points : []).map((point) => `${point.strategy_id || point.strategy} ${formatDate(point.date)}${fillText(point)}`);
       const window = kpiBlock.window_start && kpiBlock.window_end ? ` over ${formatDate(kpiBlock.window_start)} to ${formatDate(kpiBlock.window_end)}${number(kpiBlock.index_points) == null ? "" : ` (${integer.format(kpiBlock.index_points)} daily points)`}` : candidate.complete_through ? ` through ${formatDate(candidate.complete_through)}` : "";
       const gateText = `${gated.hwm_numerical_status ? ` Numeric HWM (${gated.policy_id || "legacy gate"}): ${humanStatus(gated.hwm_numerical_status).toLowerCase()}.` : ""}${missing.length ? ` Missing daily points: ${missing.join(", ")}.` : ""}`;
-      return ["Systematic HWM", decimal(index, 4), `${hwmNotAccepted}. HWM ${decimal(hwmValue, 4)} · drawdown ${pct(drawdown, 2)}${window}.${gateText}`, "warning"];
+      // F1: the big number is the current index (kpi.value), so the title says so; the HWM keeps its own label and acceptance state.
+      return ["Systematic index, current", decimal(index, 4), `${hwmNotAccepted}. HWM ${decimal(hwmValue, 4)} (${hwmAcceptanceWords}) · drawdown ${pct(drawdown, 2)}${window}.${gateText}`, "warning"];
     })();
     renderKpis("#risk-kpis", performanceLineageMismatch ? [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Stress scenario", "danger"],
@@ -1469,7 +1517,7 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${scopeNote(currentStrategies().find((item) => item.strategy_name === row.strategy_name))}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
@@ -2091,7 +2139,7 @@
     return `<h4>All covered strategies (${integer.format((aggregate.included_series || []).length)}, capital coverage ${pct(aggregate.capital_coverage, 0)})</h4>${oraComponentBars(aggregate.components)}${oraClosureStrip(aggregate)}<p class="cell-secondary">${safe(block.aggregate_note || "")} ${weighting ? `Weighting: ${safe(weighting)}.` : ""}${excluded ? ` Excluded: ${safe(excluded)}.` : ""}</p>${ranges}`;
   }
   function orthogonalRiskShareMarkup(row) {
-    const heading = "<h4>Share of total risk (Euler allocation)</h4>";
+    const heading = "<h4>Share of explained variance (Euler allocation)</h4>";
     const block = oraBlock();
     if (!block) return `<div class="risk-share">${heading}<div class="callout callout-neutral">The producer's orthogonal risk attribution is not in this snapshot, so the shares are not shown (the training-window allocations remain in the data tables below).</div></div>`;
     if (block.status === "UNAVAILABLE") return `<div class="risk-share">${heading}<div class="callout callout-neutral">Unavailable: ${safe(humanStatus(block.reason || "UNAVAILABLE"))}.</div></div>`;
@@ -2267,7 +2315,19 @@
     const methodBoundary = row.estimator === "DYNAMIC_FLS"
       ? "Dynamic exposures are effective-dated, selected on training evidence, and evaluated on a sealed holdout."
       : "Static exposures are an independent returns-based lens and are not concatenated with dynamic, sector, or industry models.";
-    const proxyRows = (analysis.proxy_governance?.proxies || []).map((proxy) => `<tr><td><span class="cell-primary">${safe(proxy.factor_id)}</span><span class="cell-secondary">${safe(proxy.economic_family || "UNCLASSIFIED")}</span></td><td>${safe(proxy.source_id || "UNAVAILABLE")}</td><td>${safe(proxy.effective_start || "—")}<span class="cell-secondary">${safe(proxy.effective_end || "—")}</span></td><td>${statusText(proxy.candidate_disposition || "UNAVAILABLE")}</td><td>${safe(proxy.selection_rationale || "No governed rationale")}</td></tr>`);
+    // T5: `candidate_disposition` is lens-wide (some series in the lens selected the factor).  For the viewed strategy the
+    // cell leads with whether THIS strategy selected it (`selected_series_ids` holds the viewed series id) and says the
+    // disposition is lens-wide, naming the series that selected it; nothing is recomputed.
+    const proxyDispositionCell = (proxy, viewed) => {
+      const disposition = proxy.candidate_disposition || "UNAVAILABLE";
+      const selectors = Array.isArray(proxy.selected_series_ids) ? proxy.selected_series_ids : null;
+      if (!selectors || !/^(SELECTED|NOT_SELECTED|CANDIDATE_NOT_REQUESTED)/.test(disposition)) return statusText(disposition);
+      const own = selectors.includes(viewed.series_id);
+      const names = selectors.map((id) => strategyNameById(id));
+      const scope = `Lens-wide: ${humanStatus(disposition)}${names.length ? ` (selected by ${names.join(", ")})` : ""}`;
+      return `<span class="cell-primary">${own ? "Selected by this strategy" : "Not selected by this strategy"}</span><span class="cell-secondary">${safe(scope)}</span>`;
+    };
+    const proxyRows = (analysis.proxy_governance?.proxies || []).map((proxy) => `<tr><td><span class="cell-primary">${safe(proxy.factor_id)}</span><span class="cell-secondary">${safe(proxy.economic_family || "UNCLASSIFIED")}</span></td><td>${safe(proxy.source_id || "UNAVAILABLE")}</td><td>${safe(proxy.effective_start || "—")}<span class="cell-secondary">${safe(proxy.effective_end || "—")}</span></td><td>${proxyDispositionCell(proxy, row)}</td><td>${safe(proxy.selection_rationale || "No governed rationale")}</td></tr>`);
     const proxyTable = proxyRows.length
       ? `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Governed candidate universe</div><h3>Economic rationale and train-only disposition</h3></div><span class="badge">${integer.format(proxyRows.length)} proxies</span></div><div class="table-wrap wide"><table id="factor-proxy-table"><caption>Factor proxy governance</caption>${tableMarkup([["Proxy / family"], ["Source"], ["Effective interval"], ["Disposition"], ["Selection rationale"]], proxyRows)}</table></div></div>`
       : "";
@@ -2742,7 +2802,21 @@
         renderFactScopeTables();
       };
     });
-    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} declared fact paths</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).`;
+    // N1: the FACT_COVERAGE_DETAIL coverage rows include accounts that are not in the current-perimeter
+    // matrix; they are named here with their own counts, from the rows, so the matrix total is not read as the page's.
+    const matrixKeys = new Set(factMatrix.map((row) => `${row.fact_type}|${row.account_id}`));
+    const outsideMatrix = (Array.isArray(data.coverage) ? data.coverage : []).filter((row) => row.category === "FACT_COVERAGE_DETAIL" && !matrixKeys.has(`${row.fact_type}|${row.account_id}`));
+    const outsideByAccount = new Map();
+    outsideMatrix.forEach((row) => {
+      const known = row.account_id ? accountLabel(row.account_id) : "";
+      const label = row.account_id ? (known && known !== "Unrecognized account" ? known : `account …${String(row.account_id).slice(-4)}`) : "Provider-level (no account)";
+      const key = `${providerName(row.provider_id)} · ${label}`;
+      outsideByAccount.set(key, [...(outsideByAccount.get(key) || []), `${row.fact_type} ${integer.format(Number(row.record_count) || 0)}`]);
+    });
+    const outsideNote = outsideByAccount.size
+      ? ` Not in this matrix (not in the current perimeter), but counted in the coverage totals: ${[...outsideByAccount].map(([key, counts]) => `${key} (${counts.join(", ")})`).join("; ")}.`
+      : "";
+    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} declared fact paths</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}`;
     const intervalText = (row) => {
       if (Array.isArray(row.missing_intervals) && row.missing_intervals.length) return row.missing_intervals.map((item) => typeof item === "object" ? `${item.start || item.missing_interval_start || "?"}–${item.end || item.missing_interval_end || "?"}: ${item.reason || item.missing_interval_reason || "reason not recorded"}` : String(item)).join(" · ");
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;
@@ -3105,6 +3179,13 @@
     $$("[data-perf-mode]").forEach((button) => { const active = button.dataset.perfMode === built.mode; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
   }
 
+  // T1: an equation label ("... residual R = memo M (gloss) +T cash left ...") keeps every term and drops only the
+  // parenthesised gloss, so the printed parts foot; a plain name keeps the text before its first parenthesis.
+  function perfResidualLabelText(label) {
+    const text = String(label);
+    const kept = / = /.test(text) ? text.replace(/\s*\([^()]*\)/g, "") : text.split(" (")[0];
+    return kept.toLowerCase().replaceAll("_", " ");
+  }
   function perfPublishedValue() {
     const tab = perfTab();
     if (!tab) return { unavailable: "the producer published no performance block in this snapshot" };
@@ -3136,13 +3217,20 @@
         trailing: entry.trailing || null, methodDefinition: entry.method_definition || "", triBasis: entry.tri_basis || null, flowTiming: entry.flow_timing || null,
       };
     });
+    // T6 fix: a slice row that is a sleeve epoch says which basis its dollar value is on; where the strategy row
+    // states a mixed basis, the legend says the strategy row states its own basis for current value and weight.
+    const sleeveRows = slices.rows.filter((row) => row.sleeve_id);
+    const mixedStrategy = sleeveRows.some((row) => (data.strategies || []).find((item) => item.strategy_id === row.strategy_id)?.return_scope_label);
+    const basisNote = sleeveRows.length
+      ? `Dollar values: ${sleeveRows.map((row) => `${names[row.slice_id]} is the sleeve ${row.sleeve_id} epoch value`).join("; ")}.${mixedStrategy ? " The strategy row states its own basis for current value and weight (MIXED BASIS)." : ""}`
+      : "";
     const flows = slices.flows && typeof slices.flows === "object" ? slices.flows : null;
     const flowText = flows && number(flows.total_contributed_cents) != null
       ? `Net contributed ${currencyExact(Number(flows.total_contributed_cents) / divisor)}, implied profit ${number(flows.implied_pnl_cents) == null ? "unavailable" : currencyExact(Number(flows.implied_pnl_cents) / divisor)}${flows.internal_cancellation && flows.internal_cancellation.status !== "PROVED" ? `; internal transfers ${humanStatus(flows.internal_cancellation.status || "UNAVAILABLE").toLowerCase()} (residual ${currencyExact(Number(flows.internal_cancellation.residual_cents || 0) / divisor)})` : ""}.`
       : "";
     return {
-      ids, names, table, benchmarks, benchmarksPublished: benchmarkRows !== null, flowText,
-      reconciliation: residual == null ? (reconciliation.reason ? `Residual against systematic capital unavailable: ${reconciliation.reason}.` : "") : `Residual against systematic capital at ${formatDate(reconciliation.reference_date)}: ${currencyExact(residual)}${reconciliation.residual_label ? ` (${String(reconciliation.residual_label).split(" (")[0].toLowerCase().replaceAll("_", " ")})` : ""}.`,
+      ids, names, table, benchmarks, benchmarksPublished: benchmarkRows !== null, flowText, basisNote,
+      reconciliation: residual == null ? (reconciliation.reason ? `Residual against systematic capital unavailable: ${reconciliation.reason}.` : "") : `Residual against systematic capital at ${formatDate(reconciliation.reference_date)}: ${currencyExact(residual)}${reconciliation.residual_label ? ` (${perfResidualLabelText(reconciliation.residual_label)})` : ""}.`,
     };
   }
 
@@ -3236,7 +3324,7 @@
       : `<span class="perf-legend-item is-missing" title="${safe(item.reason)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`)).join("");
     const methodNote = drawnBenchmarks.length ? `${safe(drawnBenchmarks[0].methodDefinition)}${drawnBenchmarks.some((item) => item.triBasis) ? ` Index basis: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.triBasis).toLowerCase()))].join(", "))}${drawnBenchmarks.some((item) => item.flowTiming) ? `; flow timing: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.flowTiming).toLowerCase()))].join(", "))}` : ""}.` : ""}` : "";
     const benchmarkMissingNote = spec.benchmarksPublished ? "" : `<span class="cell-secondary">Benchmark dollar series unavailable: the producer published no slices.benchmarks in this snapshot.</span>`;
-    $("#perf-value-legend").innerHTML = ids.map((id, index) => `<span class="perf-legend-item"><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>`).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${benchmarkLegend}${benchmarkMissingNote}${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}${spec.flowText ? `<span class="cell-secondary">${safe(spec.flowText)}</span>` : ""}${methodNote ? `<span class="cell-secondary">${methodNote}</span>` : ""}`;
+    $("#perf-value-legend").innerHTML = ids.map((id, index) => `<span class="perf-legend-item"><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>`).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${benchmarkLegend}${benchmarkMissingNote}${spec.basisNote ? `<span class="cell-secondary">${safe(spec.basisNote)}</span>` : ""}${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}${spec.flowText ? `<span class="cell-secondary">${safe(spec.flowText)}</span>` : ""}${methodNote ? `<span class="cell-secondary">${methodNote}</span>` : ""}`;
     const trailing = [["1w", 7, "1w"], ["1m", 30, "1m"], ["3m", 91, "3m"], ["6m", 183, "6m"], ["YTD", null, "YTD"], ["1y", 365, "1y"], ["Since start", "start", "SINCE_START"]];
     const endTime = lastTime;
     const ytdStart = perfTime(`${new Date(endTime).getUTCFullYear() - 1}-12-31`);

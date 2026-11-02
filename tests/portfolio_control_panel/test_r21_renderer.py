@@ -98,12 +98,38 @@ def test_risk_kpi_shows_the_candidate_pending_acceptance_with_the_reason(
     )
     kpis = _flat(dom, "#risk-kpis")
 
-    assert "Systematic HWM 143.7000" in kpis
+    # F1: the big number is the current index and says so; the HWM keeps its own label
+    assert "Systematic index, current 143.7000" in kpis
+    assert "Systematic HWM 143.7000" not in kpis
     assert "pending owner acceptance" in kpis
-    assert "HWM 150.0000" in kpis and "drawdown -5.00%" in kpis
+    assert (
+        "HWM 150.0000 (pending owner acceptance)" in kpis and "drawdown -5.00%" in kpis
+    )
+    assert "150.0000" not in kpis.split("HWM 150.0000")[0]
     assert "703 daily points" in kpis
     assert "Missing daily points: Robuxio Jan 27, 2026" in kpis
     assert "Systematic HWM Unavailable" not in kpis
+
+
+def test_risk_kpi_title_follows_the_kpi_fields_not_a_fixed_number(
+    tmp_path: Path,
+) -> None:
+    """F1: swapping the synthetic index and HWM moves the numbers, never the labels."""
+
+    for index, hwm in (("101.2500", "120.5000"), ("88.0000", "99.0000")):
+        advisory = _risk_payload()["advisory"]
+        candidate = _hwm_candidate()
+        candidate["kpi"] = {"value": index, "hwm": hwm, "drawdown": "-0.1000"}
+        advisory["hwm_candidate"] = candidate
+        dom = _run(
+            tmp_path,
+            _risk_payload(advisory=advisory, hwm_governed_proof=_governed_proof()),
+            "renderRisk",
+        )
+        kpis = _flat(dom, "#risk-kpis")
+        assert f"Systematic index, current {index}" in kpis
+        assert f"HWM {hwm} (" in kpis
+        assert f"Systematic HWM {index}" not in kpis
 
 
 def test_risk_kpi_without_the_kpi_block_reads_the_candidate_fields(
@@ -118,7 +144,7 @@ def test_risk_kpi_without_the_kpi_block_reads_the_candidate_fields(
     )
 
     kpis = _flat(dom, "#risk-kpis")
-    assert "Systematic HWM " in kpis and "pending owner acceptance" in kpis
+    assert "Systematic index, current " in kpis and "pending owner acceptance" in kpis
 
 
 def _alpha_series(context: dict[str, Any] | None, net_status: str) -> dict[str, Any]:
@@ -393,4 +419,152 @@ def test_strategy_rows_carry_the_producers_return_scope_label(tmp_path: Path) ->
         "#implementation-table",
     )
     assert implementation.count("Synthetic scope: parent account X") == 1
-    assert performance.count("Synthetic scope: parent account X") == 1
+    # T6 fix: an epoch row never carries the strategy row's label
+    assert performance.count("Synthetic scope: parent account X") == 0
+
+
+def test_a_sleeve_epoch_row_is_not_given_the_strategy_rows_mixed_basis_label(
+    tmp_path: Path,
+) -> None:
+    """The label is about the strategy row; a row that is the sleeve says so from its own fields."""
+
+    scoped = _cost_strategy(
+        strategy_name="S",
+        return_scope_label="MIXED BASIS: synthetic parent-account scope.",
+    )
+    row = {
+        "account_id": "a-s2",
+        "sleeve_id": "s2",
+        "mwr_status": "AVAILABLE",
+        "strategy_name": "S",
+        "twr": "0.1",
+        "twr_status": "AVAILABLE",
+        "observed_start": "2030-02-01",
+        "observed_end": "2030-09-30",
+        "return_window_start": "2030-02-01",
+        "return_close_date": "2030-09-30",
+        "annualisation_basis": {"mwr_xirr": {"window_days": 241}},
+    }
+    payload = _risk_payload(performance=[row])
+    payload["strategies"] = [scoped]
+    text = _flat(_run(tmp_path, payload, "renderRisk"), "#performance-table")
+
+    assert "MIXED BASIS: synthetic parent-account scope." not in text
+    assert (
+        "This epoch row is sleeve s2 throughout (Feb 1, 2030 to Sep 30, 2030, 241 days); "
+        "the strategy row elsewhere mixes bases, see MIXED BASIS on the strategy row."
+    ) in text
+    # a strategy without a label, or a row that is not a sleeve, prints no such statement
+    payload["strategies"] = [_cost_strategy(strategy_name="S")]
+    assert "This epoch row" not in _flat(
+        _run(tmp_path, payload, "renderRisk"), "#performance-table"
+    )
+
+
+def _proxy(factor_id: str, disposition: str, selectors: list[str]) -> dict[str, Any]:
+    return {
+        "factor_id": factor_id,
+        "economic_family": "SYN_FAMILY",
+        "source_id": "syn-source",
+        "effective_start": "2020-01-01",
+        "effective_end": "2026-01-01",
+        "candidate_disposition": disposition,
+        "selected_series_ids": selectors,
+        "selection_rationale": "synthetic rationale",
+    }
+
+
+def test_candidate_universe_rows_say_whether_the_viewed_strategy_selected_the_factor(
+    tmp_path: Path,
+) -> None:
+    """T5: the lens-wide disposition is labelled lens-wide; this strategy's own selection leads."""
+
+    row = _alpha_series(_context(), "AVAILABLE_OBSERVED_BASIS")
+    row["series_id"] = "Synthetic Viewed"
+    governance = {
+        "candidate_count": 4,
+        "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+        "selection_boundary": "TRAIN_ONLY",
+        "proxies": [
+            _proxy(
+                "SYN_OWN",
+                "SELECTED_BY_TRAIN_ONLY_MODEL_SELECTION",
+                ["Synthetic Viewed", "Synthetic Other"],
+            ),
+            _proxy(
+                "SYN_OTHER_ONLY",
+                "SELECTED_BY_TRAIN_ONLY_MODEL_SELECTION",
+                ["Synthetic Other"],
+            ),
+            _proxy("SYN_NOBODY", "NOT_SELECTED_BY_TRAIN_ONLY_MODEL_SELECTION", []),
+            _proxy("SYN_LEGACY", "UNAVAILABLE_LEGACY_SPEC_NO_PROXY_GOVERNANCE", []),
+        ],
+    }
+    payload = _alpha_payload(row)
+    lens = payload["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]
+    lens["proxy_governance"] = governance
+    lens["surfaces"]["STATIC"]["proxy_governance"] = governance
+    dom = _run(tmp_path, payload, "renderFactorDetail")
+    html = dom["#factor-detail"]["innerHTML"]
+    rows = {
+        name: re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cells)).strip()
+        for name, cells in re.findall(
+            r"<tr><td><span class=\"cell-primary\">(SYN_[A-Z_]+)</span>(.*?)</tr>", html
+        )
+    }
+
+    assert rows, html[:500]
+    assert rows["SYN_OWN"].count("Selected by this strategy") == 1
+    assert (
+        "Lens-wide: Selected by train only model selection (selected by Synthetic Viewed, Synthetic Other)"
+        in rows["SYN_OWN"]
+    )
+    assert "Not selected by this strategy" in rows["SYN_OTHER_ONLY"]
+    assert "(selected by Synthetic Other)" in rows["SYN_OTHER_ONLY"]
+    assert "Not selected by this strategy" in rows["SYN_NOBODY"]
+    assert "Lens-wide: Not selected by train only model selection" in rows["SYN_NOBODY"]
+    assert "Unavailable legacy spec" in rows["SYN_LEGACY"]
+    assert "this strategy" not in rows["SYN_LEGACY"]
+
+
+def test_the_fact_matrix_names_the_coverage_accounts_it_does_not_contain(
+    tmp_path: Path,
+) -> None:
+    """N1: accounts in the coverage detail but not in the matrix are named with their own counts."""
+
+    def matrix_row(account: str, fact: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "provider_id": "SYNPROV",
+            "fact_type": fact,
+            "status": "OBSERVED_NOT_COMPLETENESS_PROOF",
+            "record_count": 7,
+        }
+
+    def coverage_row(account: str, fact: str, count: int) -> dict[str, Any]:
+        return {
+            "category": "FACT_COVERAGE_DETAIL",
+            "account_id": account,
+            "provider_id": "SYNOUT",
+            "fact_type": fact,
+            "record_count": count,
+        }
+
+    payload = _risk_payload()
+    payload["fact_coverage_matrix"] = [matrix_row("acct-in00aaaa", "flows")]
+    payload["coverage"] = [
+        coverage_row("acct-in00aaaa", "flows", 7),
+        coverage_row("acct-out0bbbb", "flows", 3),
+        coverage_row("acct-out0bbbb", "nav", 11),
+    ]
+    text = _flat(
+        _run(tmp_path, payload, "renderFactScopeTables"), "#fact-matrix-summary"
+    )
+
+    assert "not in the current perimeter" in text
+    assert "…bbbb (flows 3, nav 11)" in text
+    assert "acct-in00aaaa" not in text and "…aaaa" not in text
+    payload["coverage"] = payload["coverage"][:1]
+    assert "Not in this matrix" not in _flat(
+        _run(tmp_path, payload, "renderFactScopeTables"), "#fact-matrix-summary"
+    )

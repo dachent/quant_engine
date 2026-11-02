@@ -2025,8 +2025,13 @@ def _annualization_label(
     observations: object = None,
     periods_per_year: object = None,
     frequency: str | None = None,
+    calendar_day_exponent: bool = False,
 ) -> dict[str, Any] | None:
     """The basis and window an annualized figure stands on, or None without a window.
+
+    ``calendar_day_exponent`` is for a figure whose annualization exponent is the window's
+    calendar days (the account-live CAGR): its label names those days and the observation
+    count as the daily returns the cumulative return compounds, not as the scaling basis.
 
     A window under 365 days is a short-window annualization: ``short_window`` is true
     and the label says so beside the dates.  The label names the observation count
@@ -2053,6 +2058,11 @@ def _annualization_label(
     short = window_days < _ONE_YEAR_DAYS
     if frequency == "CASH_FLOW_DATES":
         text = f"annualized from cash flows, {start}..{end}"
+    elif calendar_day_exponent and count is not None and word is not None:
+        text = (
+            f"annualized over {window_days} calendar days "
+            f"({count} {word} returns), {start}..{end}"
+        )
     elif count is not None and word is not None:
         text = f"annualized from {count} {word} observations, {start}..{end}"
     else:
@@ -2114,6 +2124,7 @@ def _account_annualization_labels(
             end=row.get("account_live_observed_end"),
             observations=row.get("account_live_return_observations"),
             frequency="DAILY",
+            calendar_day_exponent=True,
         )
     mwr = None
     if row.get("mwr_xirr") is not None:
@@ -4665,11 +4676,87 @@ def _noun(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
 
 
+def _derived_aggregate_text(
+    account_summary: Sequence[Mapping[str, Any]], capital: Mapping[str, Any] | None
+) -> str:
+    """The aggregates and totals that are sums over labelled account values, from the payload.
+
+    A strategy's current value is derived when one of its member accounts carries a
+    ``value_basis`` on the member's own date; a capital total is derived when it is ready
+    and one of its components is. Returns "" when nothing is derived or no capital block
+    is given.
+    """
+
+    if not isinstance(capital, Mapping):
+        return ""
+    labelled = {
+        (str(row.get("account_id")), row.get("as_of_date"))
+        for row in account_summary
+        if isinstance(row.get("value_basis"), Mapping)
+    }
+
+    def member_derived(members: object) -> bool:
+        return any(
+            isinstance(member, Mapping)
+            and (str(member.get("account_id")), member.get("as_of_date")) in labelled
+            for member in (members if isinstance(members, Sequence) else [])
+        )
+
+    strategies = [
+        str(row.get("strategy_id"))
+        for row in capital.get("strategies", [])
+        if isinstance(row, Mapping)
+        and row.get("status") == "AVAILABLE"
+        and member_derived(row.get("members"))
+    ]
+    totals: list[str] = []
+    derived_blocks: set[str] = set()
+    for key, label in (
+        ("reserve", "reserve"),
+        ("retained_excluded", "retained excluded capital"),
+        ("systematic", "systematic capital"),
+        ("total_liquid", "total liquid"),
+    ):
+        block = capital.get(key)
+        if not isinstance(block, Mapping) or block.get("status") != "AVAILABLE":
+            continue
+        components = block.get("components") or []
+        if key == "reserve":
+            hit = member_derived(block.get("members"))
+        elif key == "total_liquid":
+            hit = any(str(part) in derived_blocks for part in components)
+        else:
+            hit = any(str(part) in strategies for part in components)
+        if hit:
+            derived_blocks.add(key)
+            totals.append(label)
+    parts: list[str] = []
+    if strategies:
+        parts.append(
+            f"{len(strategies)} strategy current "
+            f"{'value' if len(strategies) == 1 else 'values'} ({_join_words(strategies)})"
+        )
+    if totals:
+        parts.append(f"the totals {_join_words(totals)}")
+    if not parts:
+        return ""
+    return (
+        f"aggregates computed from those values are derived too: {' and '.join(parts)}"
+    )
+
+
+def _join_words(items: Sequence[str]) -> str:
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + f" and {items[-1]}"
+
+
 def _restate_value_authority(
     coverage: Sequence[Mapping[str, Any]],
     account_summary: Sequence[Mapping[str, Any]],
     positions: Sequence[Mapping[str, Any]],
     cutoff: str,
+    capital: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Re-word the baseline's "provider-reported USD authority" clause from the value labels.
 
@@ -4704,6 +4791,9 @@ def _restate_value_authority(
         for label, pair in sorted(counts.items())
     )
     replacement = f"remain USD authority and are provider-reported except {labelled}"
+    aggregates = _derived_aggregate_text(account_summary, capital)
+    if aggregates:
+        replacement += f"; {aggregates}"
     restated: list[dict[str, Any]] = []
     for row in coverage:
         item = dict(row)
@@ -10898,6 +10988,7 @@ def build_report_data(
             account_summary,
             position_rows,
             str(calculation_cutoff_date or catalog.get("as_of_date")),
+            verified_capital,
         ),
         "dependence_analysis": dependence_analysis,
         "dependence_rows": dependence_rows,
@@ -13411,6 +13502,72 @@ def _restated_catalog(
         raise ReportValidationError(str(exc)) from exc
 
 
+# T6 (owner ruling): a strategy whose row mixes the parent account's series with its sleeve epoch says so
+# plainly, names the owner's restatement ruling and its release, and shows the audit bridge.  The bridge terms
+# are fixed disclosure inputs, not payload fields: they come from ADR 0002 (entry day excluded, date-only
+# transfers at end of day) and issue #624 (allocated costs); no panel or report field carries them.
+MIXED_BASIS_AUDIT_FIGURE_PERCENT: Final = "14.348"
+MIXED_BASIS_BRIDGE_POINTS: Final[tuple[tuple[str, str], ...]] = (
+    ("allocated costs", "-0.256"),
+    ("entry-day exclusion", "+1.661"),
+    ("ADR 0002 end-of-day flow", "-0.319"),
+)
+MIXED_BASIS_SCHEDULED_RELEASE: Final = "R2.2"
+MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 / #624"
+
+
+def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    """The structured disclosure and its sentence, from the row's own windows and the fixed bridge."""
+
+    def span(start: Any, end: Any, days: Any) -> str:
+        if not (isinstance(start, str) and isinstance(end, str)):
+            return "its own window"
+        tail = f", {days} days exclusive (end minus start)" if days is not None else ""
+        return f"{start} to {end}{tail}"
+
+    basis = item.get("annualisation_basis")
+    mwr_days = (
+        basis.get("mwr_xirr", {}).get("window_days")
+        if isinstance(basis, Mapping) and isinstance(basis.get("mwr_xirr"), Mapping)
+        else None
+    )
+    parent_window = span(
+        item.get("return_window_start"),
+        item.get("return_close_date"),
+        item.get("window_days"),
+    )
+    sleeve_window = span(
+        item.get("mwr_opening_date"), item.get("mwr_terminal_date"), mwr_days
+    )
+    net = sum((Decimal(value) for _, value in MIXED_BASIS_BRIDGE_POINTS), Decimal(0))
+    terms = ", ".join(f"{name} {value}" for name, value in MIXED_BASIS_BRIDGE_POINTS)
+    sentence = (
+        "MIXED BASIS: this row mixes account and sleeve bases. On the strategy row, "
+        "return, drawdown, current value, weight and weekly series are the parent "
+        f"account's ({parent_window}); MWR and governed capital are the sleeve epoch's "
+        f"({sleeve_window}). Epoch rows and the dollar-value chart show the sleeve's own "
+        "values. The owner ruled that this row be restated to the sleeve basis; the "
+        f"restatement is scheduled as release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from "
+        f"the audit figure {MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, "
+        f"in percentage points: {terms} (net {net:+}) [source: {MIXED_BASIS_BRIDGE_SOURCE}]."
+    )
+    disclosure = {
+        "status": "MIXED_BASIS",
+        "restatement_basis": "SLEEVE_EPOCH",
+        "restatement_ruled_by": "OWNER",
+        "scheduled_release": MIXED_BASIS_SCHEDULED_RELEASE,
+        "parent_window": parent_window,
+        "sleeve_window": sleeve_window,
+        "audit_figure_percent": MIXED_BASIS_AUDIT_FIGURE_PERCENT,
+        "bridge_points": [
+            {"term": name, "points": value} for name, value in MIXED_BASIS_BRIDGE_POINTS
+        ],
+        "bridge_net_points": f"{net:+}",
+        "bridge_source": MIXED_BASIS_BRIDGE_SOURCE,
+    }
+    return disclosure, sentence
+
+
 def _apply_return_scope(
     report: dict[str, Any],
     rows: Sequence[Mapping[str, Any]],
@@ -13479,6 +13636,8 @@ def _apply_return_scope(
             "mwr_and_governed_capital_basis": "SLEEVE_EPOCH",
             "sleeve_epoch_accounts": sleeves,
         }
+        disclosure, disclosure_text = _mixed_basis_disclosure(item)
+        item["return_scope"]["mixed_basis_disclosure"] = disclosure
         item["return_scope_label"] = (
             f"Return (cumulative, year-to-date, calendar-year, annualised), drawdowns "
             f"(account-live and HWM), current value, weight, cost-rate denominator and "
@@ -13486,7 +13645,7 @@ def _apply_return_scope(
             f"{', '.join(parents)} (includes retired sleeves "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in retired) or 'none'} and its "
             f"unallocated cash and margin). MWR and governed capital: sleeve "
-            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
+            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}. {disclosure_text}"
         )
 
 

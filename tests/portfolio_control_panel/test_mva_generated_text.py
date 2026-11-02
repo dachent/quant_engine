@@ -253,3 +253,22 @@ def test_the_unavailable_note_lists_the_reasons_of_the_entries_it_counts() -> No
     for reason, count in reasons.items():
         assert f"{reason} ({count})" in note
     assert "has no admitted model leg" not in note
+
+
+def test_the_static_intro_does_not_promise_a_pull_for_every_unavailable_term() -> None:
+    """T2: the intro states only what the payload guarantees; counts live in the block."""
+
+    from pathlib import Path
+
+    html = (
+        Path(__file__).resolve().parents[2]
+        / "apps"
+        / "portfolio-control-panel"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+    intro = re.search(r'id="modelvsactual-heading".*?</p>', html, re.S)
+    assert intro is not None
+    text = re.sub(r"<[^>]+>", " ", intro.group(0))
+    assert "and the pull that replaces them" not in text
+    assert "only where the audit input names one" in text
+    assert not re.search(r"\d", text.split("Why did")[-1].split("?")[-1])
