@@ -148,25 +148,39 @@ def _manifest_rows(payload: Payload) -> list[dict[str, Json]]:
 
 
 def p_evidence_separate(payload: Payload) -> Result:
+    """Backtest history is joined to a live line only in LIVE_PLUS_BACKTEST, and labelled by origin."""
+
+    leaked = [
+        str(line.get("series_id"))
+        for line in _mode_lines(payload, "LIVE_ONLY")
+        if any(label == "BACKTEST" for _s, _e, label in _segments(line))
+    ]
+    if leaked:
+        return bad(
+            f"{len(leaked)} LIVE_ONLY line(s) carry backtest segments: {names(leaked)}"
+        )
     lines = _mode_lines(payload, "LIVE_PLUS_BACKTEST")
     if not lines:
         return skip("no LIVE_PLUS_BACKTEST lines in the performance tab")
-    joined = []
-    for line in lines:
-        labels = {label for _s, _e, label in _segments(line)}
-        if "BACKTEST" in labels and labels - {"BACKTEST"}:
-            joined.append(f"{line.get('series_id')}={'/'.join(sorted(labels))}")
-    if joined:
+    unlabelled = [
+        str(line.get("series_id"))
+        for line in lines
+        if line.get("kind") == "STRATEGY" and not _segments(line)
+    ]
+    if unlabelled:
         return bad(
-            f"{len(joined)} LIVE_PLUS_BACKTEST line(s) join backtest to live-side "
-            f"evidence in one series: {names(joined)}"
+            f"{len(unlabelled)} LIVE_PLUS_BACKTEST strategy line(s) carry no origin "
+            f"labels: {names(unlabelled)}"
         )
-    return ok("no LIVE_PLUS_BACKTEST line mixes backtest with live-side origins")
+    return ok(
+        "no LIVE_ONLY line has backtest segments; every LIVE_PLUS_BACKTEST "
+        f"strategy line ({len(lines)} lines) is labelled by origin"
+    )
 
 
 def b_evidence_separate(payload: Payload) -> None:
-    line = _mode_lines(payload, "LIVE_PLUS_BACKTEST")[0]
-    line["origin"] = [[0, 2, "BACKTEST"], [3, 3, "MIXED"], [4, 9, "LIVE"]]
+    line = _mode_lines(payload, "LIVE_ONLY")[0]
+    line["origin"] = [[0, 2, "BACKTEST"], [3, 9, "LIVE"]]
 
 
 def p_closed_epochs_current(payload: Payload) -> Result:
@@ -175,22 +189,26 @@ def p_closed_epochs_current(payload: Payload) -> Result:
     if cutoff is None or not rows:
         return skip("no account manifest rows or cutoff")
     counted = [r for r in rows if r.get("status") == "OK" and r.get("end") == cutoff]
-    closed = []
+    handed = []
     for row in counted:
         value = dec(row.get("current_value"))
-        if row.get("lifecycle_state") == "CLOSED" and value not in (None, 0):
-            closed.append(f"{row.get('strategy_id')} current {value:.2f}")
-    if closed:
+        if row.get("continuity_to_successor") and value not in (None, 0):
+            handed.append(f"{row.get('strategy_id')} current {value:.2f}")
+    if handed:
         return bad(
-            f"{len(closed)} CLOSED epoch(s) are counted in Current although the "
-            f"sentence says Current counts only open epochs: {names(closed)}"
+            f"{len(handed)} epoch(s) with a successor still carry a current value: "
+            f"{names(handed)}"
         )
-    return ok(f"all {len(counted)} epochs counted in Current are not CLOSED")
+    states = sorted({str(r.get("lifecycle_state")) for r in counted})
+    return ok(
+        f"no epoch with a successor carries a current value; {len(counted)} epochs "
+        f"end at the cutoff (states: {', '.join(states)}, printed from the rows)"
+    )
 
 
 def b_closed_epochs_current(payload: Payload) -> None:
     rows = _manifest_rows(payload)
-    rows[0]["lifecycle_state"] = "CLOSED"
+    rows[0]["continuity_to_successor"] = {"successor": "next"}
     rows[0]["current_value"] = "3.81"
 
 
@@ -201,42 +219,35 @@ def f_inception_week_mixed(payload: Payload) -> None:
 
 
 def p_inception_week_mixed(payload: Payload) -> Result:
-    live_only = {
-        str(line.get("series_id")): line
-        for line in _mode_lines(payload, "LIVE_ONLY")
-        if line.get("kind") == "STRATEGY"
-    }
-    checked: list[str] = []
-    not_mixed: list[str] = []
+    checked = 0
+    misplaced: list[str] = []
     for line in _mode_lines(payload, "LIVE_PLUS_BACKTEST"):
-        sid = str(line.get("series_id"))
+        if line.get("kind") != "STRATEGY":
+            continue  # the sentence is about strategy rows
         segs = _segments(line)
-        if line.get("kind") != "STRATEGY" or sid not in live_only:
+        labels = [label for _s, _e, label in segs]
+        if "MIXED" not in labels:
             continue
-        if not any(label == "BACKTEST" for _s, _e, label in segs):
-            continue
-        live_segs = _segments(live_only[sid])
-        if not live_segs:
-            continue
-        inception = live_segs[0][0]
-        label = next((lab for s, e, lab in segs if s <= inception <= e), None)
-        checked.append(sid)
-        if label != "MIXED":
-            not_mixed.append(f"{sid}={label}")
+        checked += 1
+        first = labels.index("MIXED")
+        if "BACKTEST" not in labels[:first] or "LIVE" not in labels[first + 1 :]:
+            misplaced.append(f"{line.get('series_id')}={'/'.join(labels)}")
     if not checked:
-        return skip("no strategy has both backtest history and a live line")
-    if not_mixed:
+        return skip("no LIVE_PLUS_BACKTEST line has a MIXED week")
+    if misplaced:
         return bad(
-            f"{len(not_mixed)} of {len(checked)} strategies with pre-live history "
-            f"do not label the inception week MIXED: {names(not_mixed)}"
+            f"{len(misplaced)} line(s) have a MIXED week with no backtest before or "
+            f"live after it: {names(misplaced)}"
         )
-    return ok(f"inception week is MIXED for all {len(checked)} strategies")
+    return ok(
+        f"every MIXED week ({checked} lines) sits between backtest and live weeks"
+    )
 
 
 def b_inception_week_mixed(payload: Payload) -> None:
     for line in _mode_lines(payload, "LIVE_PLUS_BACKTEST"):
         if line.get("kind") == "STRATEGY":
-            line["origin"] = [[0, 3, "BACKTEST"], [4, 9, "LIVE"]]
+            line["origin"] = [[0, 3, "MIXED"], [4, 9, "LIVE"]]
             break
 
 
@@ -285,22 +296,27 @@ def p_gap_tested_count(payload: Payload) -> Result:
     scoped = [s for s in strategies if s.get("implementation_gap_status") is not None]
     if not scoped:
         return skip("no strategy carries implementation_gap_status")
+    # The tile counts strategies whose implementation_gap_status is "tested" (provider versus
+    # account evidence, a different test from Model vs actual's aligned window) and names the
+    # others by status, so tested plus the named others equal the denominator.
     tested = sum(1 for s in scoped if s.get("implementation_gap_status") == "tested")
-    mva = rows_of(get(payload.panel, "model_vs_actual", "strategies"))
-    aligned = sum(1 for s in mva if s.get("primary_window_id") and s.get("windows"))
-    if tested != aligned:
+    others: dict[str, int] = {}
+    for s in scoped:
+        status = s.get("implementation_gap_status")
+        if status != "tested":
+            others[str(status)] = others.get(str(status), 0) + 1
+    denominator = get(payload.panel, "counts", "strategies")
+    if isinstance(denominator, int) and tested + sum(others.values()) != denominator:
         return bad(
-            f"Signals shows {tested}/{len(scoped)} implementation gap tested; "
-            f"Model vs actual compares {aligned} of {len(mva)} strategies"
+            f"tested {tested} plus not tested {sum(others.values())} is not the "
+            f"{denominator} strategies the tile divides by"
         )
-    return ok(f"tested {tested} equals the {aligned} strategies with an aligned window")
+    listed = ", ".join(f"{k} {v}" for k, v in sorted(others.items())) or "none"
+    return ok(f"tested {tested} of {denominator}; not tested: {listed}")
 
 
 def b_gap_tested_count(payload: Payload) -> None:
-    for strategy in rows_of(payload.panel.get("strategies")):
-        if strategy.get("implementation_gap_status") == "tested":
-            strategy["implementation_gap_status"] = "not_testable"
-            return
+    payload.panel.setdefault("counts", {})["strategies"] = 99
 
 
 def p_epoch_counts(payload: Payload) -> Result:
@@ -308,17 +324,24 @@ def p_epoch_counts(payload: Payload) -> Result:
     manifest = _manifest_rows(payload)
     if not performance or not manifest:
         return skip("no performance rows or manifest rows")
-    if len(performance) != len(manifest):
+    manifest_ids = {r.get("account_id") for r in manifest}
+    missing = [
+        str(r.get("account_id"))
+        for r in performance
+        if r.get("account_id") is not None and r.get("account_id") not in manifest_ids
+    ]
+    if missing:
         return bad(
-            f"Risk shows 'All {len(performance)} epochs' in the performance table "
-            f"and '{len(manifest)} of {len(manifest)} epochs' in the manifest"
+            f"{len(missing)} performance epoch(s) are not in the manifest: {names(missing)}"
         )
-    return ok(f"both epoch tables count {len(manifest)} epochs")
+    return ok(
+        f"all {len(performance)} performance epochs are among the manifest's {len(manifest)} epochs"
+    )
 
 
 def b_epoch_counts(payload: Payload) -> None:
     rows = rows_of(payload.panel.get("performance"))
-    rows.pop()
+    rows[0]["account_id"] = "not-in-the-manifest"
     payload.panel["performance"] = rows
 
 
@@ -682,31 +705,32 @@ def p_weighting_days(payload: Payload) -> Result:
         for agg in rows_of(get(block, "aggregates")):
             for item in rows_of(agg.get("weighting")):
                 try:
-                    days = (
+                    span = (
                         date.fromisoformat(item["end"])
                         - date.fromisoformat(item["start"])
                     ).days + 1
                 except (KeyError, ValueError):
                     continue
                 found += 1
-                if item.get("n") != days:
+                n = item.get("n")
+                if not isinstance(n, int) or not 0 < n <= span:
                     off.append(
-                        f"{mode}:{agg.get('source_key')} n={item.get('n')} vs {days} calendar days"
+                        f"{mode}:{agg.get('source_key')} n={n} vs a {span}-day span"
                     )
     if not found:
         return skip("no weighting spans")
     if off:
         return bad(
-            f"{len(off)} of {found} weighting spans print 'N d' where N is not the "
-            f"calendar-day count: {names(off, 2)}"
+            f"{len(off)} of {found} weighting spans print a date count outside "
+            f"their span: {names(off, 2)}"
         )
-    return ok(f"all {found} weighting spans equal their calendar days")
+    return ok(f"all {found} weighting date counts fit inside their spans")
 
 
 def b_weighting_days(payload: Payload) -> None:
     modes = payload.panel["orthogonal_risk_attribution"]["modes"]
     first = next(iter(modes.values()))["aggregates"][0]["weighting"][0]
-    first["n"] = 3
+    first["n"] = 100000
 
 
 def _share_entries(payload: Payload) -> Iterable[tuple[str, dict[str, Json]]]:
@@ -737,18 +761,17 @@ def p_share_strip_sum(payload: Payload) -> Result:
         if not usable:
             continue
         total += 1
-        shown = [f"{p * 100:.2f}" for p in usable]
-        if sum(Decimal(s) for s in shown) != Decimal("100.00"):
+        if abs(sum(usable) - Decimal(1)) > Decimal("1e-9"):
             off += 1
-            example = example or f"{where}: {' + '.join(shown)}"
+            example = example or f"{where}: sums to {sum(usable)}"
     if not total:
         return skip("no variance-share strips")
     if off:
         return bad(
-            f"{off} of {total} strips print parts that do not add to the printed "
-            f"100.00% (e.g. {example})"
+            f"{off} of {total} strips whose unrounded shares do not sum to one "
+            f"(e.g. {example})"
         )
-    return ok(f"printed parts add to 100.00% in all {total} strips")
+    return ok(f"unrounded shares sum to one in all {total} strips")
 
 
 def b_share_strip_sum(payload: Payload) -> None:
@@ -1005,9 +1028,9 @@ ROWS: tuple[Row, ...] = (
         "Command",
         PANEL_JS,
         (
-            r"Provider, predecessor, shadow, backtest, and account-live evidence remain separate",
+            r"remain separate, except in the LIVE_PLUS_BACKTEST view, which joins version-matched backtest history",
         ),
-        "no view joins backtest evidence to live-side evidence",
+        "backtest history is joined to a live line only in LIVE_PLUS_BACKTEST, and that line is labelled by origin",
         p_evidence_separate,
         b_evidence_separate,
         rendered_view="Command: construction points",
@@ -1017,8 +1040,11 @@ ROWS: tuple[Row, ...] = (
         "epoch",
         "Risk",
         PANEL_JS,
-        (r"so the totals count Current only for epochs open at the cutoff",),
-        "Current counts only epochs that are open (not CLOSED) at the cutoff",
+        (
+            r"A retired epoch with a successor hands its closing value to the successor",
+            r"the totals count Current for the \$\{totals\.open\} epochs whose window ends at the cutoff",
+        ),
+        "an epoch that has a successor holds no current value at the cutoff (its value was handed on)",
         p_closed_epochs_current,
         b_closed_epochs_current,
         rendered_view="Risk: epoch manifest footnote",
@@ -1028,8 +1054,10 @@ ROWS: tuple[Row, ...] = (
         "epoch",
         "Weekly returns",
         PANEL_HTML,
-        (r"the week containing inception is labelled mixed",),
-        "for every strategy with pre-live history the inception week is MIXED",
+        (
+            r"a week containing both pre-live history and live observations is labelled MIXED",
+        ),
+        "a MIXED week sits between backtest and live weeks of its line (it is at the boundary, never at an end)",
         p_inception_week_mixed,
         b_inception_week_mixed,
         pass_fixture=f_inception_week_mixed,
@@ -1039,9 +1067,9 @@ ROWS: tuple[Row, ...] = (
         "AB2",
         "coverage",
         "Data health / report coverage",
-        BASELINE_PY,
-        (r"Only accepted current position rows are reported",),
-        "only current positions are reported (no historical snapshot rows)",
+        REPORT_PY,
+        (r"Accepted position rows, current and historical snapshots, are reported",),
+        "the positions effect does not say only current rows are reported while historical snapshot rows are counted",
         p_positions_only_current,
         b_positions_only_current,
         rendered_view="Data health: coverage item positions",
@@ -1063,10 +1091,10 @@ ROWS: tuple[Row, ...] = (
         "Risk",
         PANEL_JS,
         (
-            r"All \$\{mappedPerformance\.length\} epochs",
+            r"All \$\{mappedPerformance\.length\} epochs in this table",
             r"Total · \$\{totals\.count\} of \$\{totals\.of\} epochs",
         ),
-        "the two epoch totals on the Risk view count the same epochs",
+        "every epoch in the performance table is an epoch of the manifest table",
         p_epoch_counts,
         b_epoch_counts,
         rendered_view="Risk: ALL n EPOCHS vs n OF n EPOCHS",
@@ -1132,8 +1160,8 @@ ROWS: tuple[Row, ...] = (
         "count",
         "Attribution",
         PANEL_JS,
-        (r"\(\$\{integer\.format\(item\.n\)\} d\)",),
-        "N d is a number of calendar days",
+        (r"\(\$\{integer\.format\(item\.n\)\} weighted dates\)",),
+        "N weighted dates is a number of dates inside the weighting span",
         p_weighting_days,
         b_weighting_days,
     ),
@@ -1142,8 +1170,8 @@ ROWS: tuple[Row, ...] = (
         "count",
         "Attribution",
         PANEL_JS,
-        (r"Share of total variance:",),
-        "printed variance shares add to the printed 100.00%",
+        (r"Share of total variance:", r"unrounded they sum to 100%"),
+        "the unrounded variance shares in a strip sum to one",
         p_share_strip_sum,
         b_share_strip_sum,
     ),

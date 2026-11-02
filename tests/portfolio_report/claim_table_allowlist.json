@@ -55,6 +55,16 @@
    "file": "tools/portfolio_control_panel.py",
    "pattern": "^(No accepted strategy history is recorded|No effective-dated compatibility evidence is recorded)",
    "justification": "empty-state or reason notice rendered only on the branch where the data it names is absent; true by the branch condition, nothing to test in a payload that has the data"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^(Only accepted current position rows are reported;|accounts without reported rows remain unavailable\\.)$",
+   "justification": "the baseline's old positions-effect sentence, kept in the report builder only as the exact text its replacement matches; it is replaced before it reaches any payload (the claim-table row AB2 asserts the replacement)"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "pattern": "^accounts without reported rows remain unavailable\\.$",
+   "justification": "the baseline's own positions-effect sentence; the report builder replaces it before it reaches the report or panel (row AB2 asserts the replacement), and the baseline bytes are pinned"
   }
  ]
 }

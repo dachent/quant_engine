@@ -121,3 +121,11 @@ def test_V2_the_implementation_gap_tile_names_what_the_untested_strategies_are(
 def test_V3_the_page_spells_annualized_one_way() -> None:
     for source in (_app(), _html()):
         assert not re.search(r"(?<![A-Za-z_])[Aa]nnualised(?![A-Za-z_])", source)
+
+
+def test_S09_S10_the_attribution_prose_says_what_its_numbers_count() -> None:
+    app = _app()
+    assert "weighted dates)" in app and "(${integer.format(item.n)} d)" not in app
+    assert "each share is rounded to two decimals; unrounded they sum to 100%" in app
+    # the printed total is the sum of the printed (rounded) parts, so the strip foots as printed
+    assert "Number((Number(value) * 100).toFixed(2))" in app

@@ -1958,7 +1958,7 @@
   function oraClosureStrip(entry) {
     const closure = entry.closure || {};
     const parts = [...oraComponents(entry.components, "share_of_total").map((item) => [item.label, item.value]), ["Residual", closure.residual_share], ["Cross term", closure.cross_term_share]].filter(([, value]) => number(value) != null);
-    return `<p class="cell-secondary risk-closure">Share of total variance: ${parts.map(([label, value]) => `${safe(label)} ${oraShare(value)}`).join(" + ")} = ${oraShare(parts.reduce((total, [, value]) => total + Number(value), 0))}. Explained ${oraShare(closure.explained_share)}. A negative share or cross term is printed as published, never clamped or folded into the residual.</p>`;
+    return `<p class="cell-secondary risk-closure">Share of total variance: ${parts.map(([label, value]) => `${safe(label)} ${oraShare(value)}`).join(" + ")} = ${`${parts.reduce((total, [, value]) => total + Number((Number(value) * 100).toFixed(2)), 0).toFixed(2)}%`} (each share is rounded to two decimals; unrounded they sum to 100%). Explained ${oraShare(closure.explained_share)}. A negative share or cross term is printed as published, never clamped or folded into the residual.</p>`;
   }
   function oraEvidenceLine(entry, block) {
     const window = entry.window || {};
@@ -1982,7 +1982,7 @@
     const unweighted = (aggregate.unweighted_ranges || []).map((item) => `${formatDate(item.start)} to ${formatDate(item.end)} (${integer.format(item.days)} d): ${humanStatus(item.reason).toLowerCase()}`);
     const ranges = unweighted.length ? `<p class="cell-secondary">Dates with no weight, named and not filled: ${safe(unweighted.join("; "))}.</p>` : "";
     if (!aggregate.components) return `<h4>All covered strategies</h4><div class="callout callout-neutral">Unavailable: ${safe(humanStatus(aggregate.reason || "UNAVAILABLE"))}${excluded ? `. Excluded: ${safe(excluded)}` : ""}.</div>${ranges}`;
-    const weighting = (aggregate.weighting || []).map((item) => `${humanStatus(item.basis)} ${formatDate(item.start)} to ${formatDate(item.end)} (${integer.format(item.n)} d)`).join("; ");
+    const weighting = (aggregate.weighting || []).map((item) => `${humanStatus(item.basis)} ${formatDate(item.start)} to ${formatDate(item.end)} (${integer.format(item.n)} weighted dates)`).join("; ");
     return `<h4>All covered strategies (${integer.format((aggregate.included_series || []).length)}, capital coverage ${pct(aggregate.capital_coverage, 0)})</h4>${oraComponentBars(aggregate.components)}${oraClosureStrip(aggregate)}<p class="cell-secondary">${safe(block.aggregate_note || "")} ${weighting ? `Weighting: ${safe(weighting)}.` : ""}${excluded ? ` Excluded: ${safe(excluded)}.` : ""}</p>${ranges}`;
   }
   function orthogonalRiskShareMarkup(row) {

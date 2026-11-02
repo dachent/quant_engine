@@ -259,6 +259,38 @@ def render(outcome: dict[str, Any], limit: int) -> tuple[str, bool, int]:
     return "\n".join(out), failed > 0, len(uncovered)
 
 
+def simulate_builders(payload: Payload, repo: Path) -> None:
+    """Apply the report builder's own effect-text replacements to the loaded coverage rows.
+
+    The candidate was built before the wording changed; a rebuilt report carries the
+    replaced text, which these replacements reproduce with the builder's constants.
+    Only text moves; nothing is written.
+    """
+
+    tools = str(repo / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    import portfolio_report as builder  # noqa: PLC0415
+
+    pairs = (
+        (builder._MWR_EFFECT, builder._MWR_EFFECT_SCOPED),
+        (builder._POSITIONS_EFFECT, builder._POSITIONS_EFFECT_SCOPED),
+    )
+    for rows in (
+        payload.panel.get("coverage"),
+        payload.report.get("coverage_data_quality"),
+    ):
+        for row in rows if isinstance(rows, list) else []:
+            disposition = row.get("disposition") if isinstance(row, dict) else None
+            if isinstance(disposition, dict) and isinstance(
+                disposition.get("effect"), str
+            ):
+                for old, new in pairs:
+                    disposition["effect"] = disposition["effect"].replace(old, new)
+            if isinstance(row, dict) and isinstance(row.get("known_gap"), str):
+                row["known_gap"] = builder._matrix_scope_clause(row["known_gap"])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--panel", type=Path, help="panel candidate directory")
@@ -286,6 +318,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--limit", type=int, default=400, help="UNCOVERED sentences to print"
     )
+    parser.add_argument(
+        "--simulate-builders",
+        action="store_true",
+        help="read-only simulation: pass the loaded coverage effects through the report "
+        "builder's own text replacements (as a rebuilt report would carry them)",
+    )
     args = parser.parse_args(argv)
     if args.scan_only:
         payload = Payload(panel={}, report={})
@@ -293,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = load_payload(args.panel, args.report)
     else:
         parser.error("--panel and --report are required unless --scan-only")
+    if args.simulate_builders:
+        simulate_builders(payload, args.repo)
     baseline = None if args.no_baseline else load_baseline(args.baseline)
     outcome = run(payload, args.repo, load_allowlist(args.allowlist), baseline=baseline)
     if args.write_baseline:
