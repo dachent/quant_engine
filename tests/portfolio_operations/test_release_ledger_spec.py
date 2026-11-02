@@ -449,3 +449,15 @@ def test_a_catalog_outside_its_generation_directory_or_behind_a_link_is_refused(
     with pytest.raises(tool.LedgerSpecError) as linked:
         tool._file_facts(inside, "catalog", generation)
     assert linked.value.code == "MISSING"
+
+
+def test_a_linked_generation_directory_itself_is_refused_for_every_file_read_from_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation = tmp_path / "generations" / "g1"
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cycle_tool, "link_like", lambda path: path == generation)
+    with pytest.raises(tool.LedgerSpecError) as linked:
+        tool._file_facts(generation / "generation.json", "manifest", generation)
+    assert linked.value.code == "PATH_ESCAPES_ROOT"

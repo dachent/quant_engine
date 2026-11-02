@@ -1016,9 +1016,15 @@ def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
             if root_id in overrides
             else str(Path(ref["root"]) / "generations" / generation_id)
         )
+        source = Path(directory)
+        # the provider root, its generations directory and the generation itself: no link among them
+        # (what lies above the provider root is the workstation's own layout)
         if (
-            _link_like(Path(directory))
-            or Path(directory).resolve().name != generation_id
+            any(
+                _link_like(part)
+                for part in (source, source.parent, source.parent.parent)
+            )
+            or source.resolve().name != generation_id
         ):
             raise Refusal(
                 f"provider-generations: {root_id} source {directory} is a symlink or junction, or resolves "
