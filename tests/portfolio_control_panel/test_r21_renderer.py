@@ -419,7 +419,46 @@ def test_strategy_rows_carry_the_producers_return_scope_label(tmp_path: Path) ->
         "#implementation-table",
     )
     assert implementation.count("Synthetic scope: parent account X") == 1
-    assert performance.count("Synthetic scope: parent account X") == 1
+    # T6 fix: an epoch row never carries the strategy row's label
+    assert performance.count("Synthetic scope: parent account X") == 0
+
+
+def test_a_sleeve_epoch_row_is_not_given_the_strategy_rows_mixed_basis_label(
+    tmp_path: Path,
+) -> None:
+    """The label is about the strategy row; a row that is the sleeve says so from its own fields."""
+
+    scoped = _cost_strategy(
+        strategy_name="S",
+        return_scope_label="MIXED BASIS: synthetic parent-account scope.",
+    )
+    row = {
+        "account_id": "a-s2",
+        "sleeve_id": "s2",
+        "mwr_status": "AVAILABLE",
+        "strategy_name": "S",
+        "twr": "0.1",
+        "twr_status": "AVAILABLE",
+        "observed_start": "2030-02-01",
+        "observed_end": "2030-09-30",
+        "return_window_start": "2030-02-01",
+        "return_close_date": "2030-09-30",
+        "annualisation_basis": {"mwr_xirr": {"window_days": 241}},
+    }
+    payload = _risk_payload(performance=[row])
+    payload["strategies"] = [scoped]
+    text = _flat(_run(tmp_path, payload, "renderRisk"), "#performance-table")
+
+    assert "MIXED BASIS: synthetic parent-account scope." not in text
+    assert (
+        "This epoch row is sleeve s2 throughout (Feb 1, 2030 to Sep 30, 2030, 241 days); "
+        "the strategy row elsewhere mixes bases, see MIXED BASIS on the strategy row."
+    ) in text
+    # a strategy without a label, or a row that is not a sleeve, prints no such statement
+    payload["strategies"] = [_cost_strategy(strategy_name="S")]
+    assert "This epoch row" not in _flat(
+        _run(tmp_path, payload, "renderRisk"), "#performance-table"
+    )
 
 
 def _proxy(factor_id: str, disposition: str, selectors: list[str]) -> dict[str, Any]:

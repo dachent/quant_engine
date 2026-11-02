@@ -328,6 +328,18 @@
   const costAmountText = (row) => (number(row.annual_external_cost_usd) == null ? "annual amount not published" : `${currencyExact(row.annual_external_cost_usd)} per year`);
   // N2: the producer states, per strategy row, which account scope its return, drawdown, current value and weight carry
   // (`return_scope_label`); it is printed beside the row it qualifies, verbatim.
+  // T6 fix: the strategy row's mixed-basis label is not printed on an epoch row of the sleeve; such a row (it carries
+  // `sleeve_id`) says it is that sleeve throughout, from its own window fields, and points to the strategy row.
+  const sleeveEpochRowNote = (row) => {
+    if (!row?.sleeve_id) return "";
+    const strategy = currentStrategies().find((item) => item.strategy_name === row.strategy_name);
+    if (!strategy?.return_scope_label) return "";
+    const windowed = Object.values(row.annualisation_basis && typeof row.annualisation_basis === "object" ? row.annualisation_basis : {}).find((entry) => number(entry?.window_days) != null);
+    const start = row.return_window_start || row.observed_start;
+    const end = row.return_close_date || row.observed_end;
+    const span = start && end ? ` (${formatDate(start)} to ${formatDate(end)}${windowed ? `, ${integer.format(windowed.window_days)} days` : ""})` : "";
+    return `<span class="cell-secondary">This epoch row is sleeve ${safe(row.sleeve_id)} throughout${span}; the strategy row elsewhere mixes bases, see MIXED BASIS on the strategy row.</span>`;
+  };
   const scopeNote = (row) => (typeof row?.return_scope_label === "string" && row.return_scope_label ? `<span class="cell-secondary">${safe(row.return_scope_label)}</span>` : "");
   const costLabel = (row) => `${humanStatus(row.cost_status)} · ${costAmountText(row)}`;
   // R2.1: the producer's structured cost components (subscription, execution) are printed as published: kind, amount,
@@ -1370,7 +1382,7 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${scopeNote(currentStrategies().find((item) => item.strategy_name === row.strategy_name))}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
@@ -3025,12 +3037,19 @@
         trailing: entry.trailing || null, methodDefinition: entry.method_definition || "", triBasis: entry.tri_basis || null, flowTiming: entry.flow_timing || null,
       };
     });
+    // T6 fix: a slice row that is a sleeve epoch says which basis its dollar value is on; where the strategy row
+    // states a mixed basis, the legend says the strategy row states its own basis for current value and weight.
+    const sleeveRows = slices.rows.filter((row) => row.sleeve_id);
+    const mixedStrategy = sleeveRows.some((row) => (data.strategies || []).find((item) => item.strategy_id === row.strategy_id)?.return_scope_label);
+    const basisNote = sleeveRows.length
+      ? `Dollar values: ${sleeveRows.map((row) => `${names[row.slice_id]} is the sleeve ${row.sleeve_id} epoch value`).join("; ")}.${mixedStrategy ? " The strategy row states its own basis for current value and weight (MIXED BASIS)." : ""}`
+      : "";
     const flows = slices.flows && typeof slices.flows === "object" ? slices.flows : null;
     const flowText = flows && number(flows.total_contributed_cents) != null
       ? `Net contributed ${currencyExact(Number(flows.total_contributed_cents) / divisor)}, implied profit ${number(flows.implied_pnl_cents) == null ? "unavailable" : currencyExact(Number(flows.implied_pnl_cents) / divisor)}${flows.internal_cancellation && flows.internal_cancellation.status !== "PROVED" ? `; internal transfers ${humanStatus(flows.internal_cancellation.status || "UNAVAILABLE").toLowerCase()} (residual ${currencyExact(Number(flows.internal_cancellation.residual_cents || 0) / divisor)})` : ""}.`
       : "";
     return {
-      ids, names, table, benchmarks, benchmarksPublished: benchmarkRows !== null, flowText,
+      ids, names, table, benchmarks, benchmarksPublished: benchmarkRows !== null, flowText, basisNote,
       reconciliation: residual == null ? (reconciliation.reason ? `Residual against systematic capital unavailable: ${reconciliation.reason}.` : "") : `Residual against systematic capital at ${formatDate(reconciliation.reference_date)}: ${currencyExact(residual)}${reconciliation.residual_label ? ` (${perfResidualLabelText(reconciliation.residual_label)})` : ""}.`,
     };
   }
@@ -3125,7 +3144,7 @@
       : `<span class="perf-legend-item is-missing" title="${safe(item.reason)}"><i class="perf-dash-swatch" style="border-color:${item.color}"></i>${safe(item.ticker)}, same cash flows <b>unavailable: ${safe(String(item.reason).toLowerCase().replaceAll("_", " "))}</b></span>`)).join("");
     const methodNote = drawnBenchmarks.length ? `${safe(drawnBenchmarks[0].methodDefinition)}${drawnBenchmarks.some((item) => item.triBasis) ? ` Index basis: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.triBasis).toLowerCase()))].join(", "))}${drawnBenchmarks.some((item) => item.flowTiming) ? `; flow timing: ${safe([...new Set(drawnBenchmarks.map((item) => humanStatus(item.flowTiming).toLowerCase()))].join(", "))}` : ""}.` : ""}` : "";
     const benchmarkMissingNote = spec.benchmarksPublished ? "" : `<span class="cell-secondary">Benchmark dollar series unavailable: the producer published no slices.benchmarks in this snapshot.</span>`;
-    $("#perf-value-legend").innerHTML = ids.map((id, index) => `<span class="perf-legend-item"><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>`).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${benchmarkLegend}${benchmarkMissingNote}${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}${spec.flowText ? `<span class="cell-secondary">${safe(spec.flowText)}</span>` : ""}${methodNote ? `<span class="cell-secondary">${methodNote}</span>` : ""}`;
+    $("#perf-value-legend").innerHTML = ids.map((id, index) => `<span class="perf-legend-item"><i style="background:${perfColor(index)}"></i>${safe((spec.names?.[id] || strategyNameById(id)))} <b>${currency(end.slices[id])}</b></span>`).join("") + `<span class="perf-legend-item"><i style="background:#edf4f7"></i>Total <b>${currency(end.total)}</b></span>${benchmarkLegend}${benchmarkMissingNote}${spec.basisNote ? `<span class="cell-secondary">${safe(spec.basisNote)}</span>` : ""}${spec.reconciliation ? `<span class="cell-secondary">${safe(spec.reconciliation)}</span>` : ""}${spec.flowText ? `<span class="cell-secondary">${safe(spec.flowText)}</span>` : ""}${methodNote ? `<span class="cell-secondary">${methodNote}</span>` : ""}`;
     const trailing = [["1w", 7, "1w"], ["1m", 30, "1m"], ["3m", 91, "3m"], ["6m", 183, "6m"], ["YTD", null, "YTD"], ["1y", 365, "1y"], ["Since start", "start", "SINCE_START"]];
     const endTime = lastTime;
     const ytdStart = perfTime(`${new Date(endTime).getUTCFullYear() - 1}-12-31`);

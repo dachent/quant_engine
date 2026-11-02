@@ -12778,7 +12778,7 @@ MIXED_BASIS_BRIDGE_POINTS: Final[tuple[tuple[str, str], ...]] = (
     ("ADR 0002 end-of-day flow", "-0.319"),
 )
 MIXED_BASIS_SCHEDULED_RELEASE: Final = "R2.2"
-MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 and issue #624"
+MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 / #624"
 
 
 def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
@@ -12807,14 +12807,14 @@ def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], st
     net = sum((Decimal(value) for _, value in MIXED_BASIS_BRIDGE_POINTS), Decimal(0))
     terms = ", ".join(f"{name} {value}" for name, value in MIXED_BASIS_BRIDGE_POINTS)
     sentence = (
-        "MIXED BASIS: this row mixes account and sleeve bases (return, drawdown, current "
-        f"value, weight and weekly series over the parent account, {parent_window}; MWR "
-        f"and governed capital over the sleeve epoch, {sleeve_window}). The owner ruled "
-        "that this row be restated to the sleeve basis; the restatement is scheduled as "
-        f"release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from the audit figure "
-        f"{MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, in percentage "
-        f"points: {terms} (net {net:+}; source: {MIXED_BASIS_BRIDGE_SOURCE}; these terms "
-        "are fixed disclosure inputs, not payload fields)."
+        "MIXED BASIS: this row mixes account and sleeve bases. On the strategy row, "
+        "return, drawdown, current value, weight and weekly series are the parent "
+        f"account's ({parent_window}); MWR and governed capital are the sleeve epoch's "
+        f"({sleeve_window}). Epoch rows and the dollar-value chart show the sleeve's own "
+        "values. The owner ruled that this row be restated to the sleeve basis; the "
+        f"restatement is scheduled as release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from "
+        f"the audit figure {MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, "
+        f"in percentage points: {terms} (net {net:+}) [source: {MIXED_BASIS_BRIDGE_SOURCE}]."
     )
     disclosure = {
         "status": "MIXED_BASIS",
