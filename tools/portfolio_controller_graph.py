@@ -134,6 +134,10 @@ _PATH_STAGES = {
     "packages/core/src/quant_engine/core/gate_profile.py": [],
     "packages/core/src/quant_engine/core/release_diff.py": [],
     "tools/gate_profile.py": [],
+    # Loader for cutoff-dependent inputs kept outside Git: resolves and verifies bytes the
+    # run reads; produces no delivery artifact.
+    "packages/core/src/quant_engine/core/release_inputs.py": [],
+    "tools/release_inputs.py": [],
     "tools/release_cache_base.py": [],
     "tools/release_measurements.py": [],
     _CORRELATION: ["analytics", "report", "panel"],

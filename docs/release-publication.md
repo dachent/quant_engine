@@ -168,3 +168,30 @@ What it gives up, in plain terms: no rehearsal of this week's commit on a copy (
 refusal is found on the real commit and rolls back), no fresh injected-failure recovery rehearsal,
 no fresh semantic review while every change is input-explained, and lineage is coarse (one changed
 upstream input explains all downstream changes).
+
+## Release inputs outside Git (`release_inputs`)
+
+Cutoff-dependent inputs (the expected baseline, the governed capital/HWM/sleeve/receipt inputs,
+retained baselines) change every period. While tracked they change the git tree, so the data-only
+gate profile (`gate_profile`) always falls back to the full gates. `quant_engine.core.release_inputs`
+resolves them from a **release-inputs root outside the repository** instead.
+
+* The root holds the files at their repo-relative paths plus `release-inputs.manifest.json`
+  (path, sha256, size per file, and the cutoff). The sha256 of the manifest file is the **pin**; the
+  run config carries it (`release_inputs_manifest_sha256`), so the release identity names the bytes.
+* `release_inputs_root` and the pin come from the run config (`release_driver.py`) or from
+  `RELEASE_INPUTS_ROOT` / `RELEASE_INPUTS_MANIFEST_SHA256` / `RELEASE_INPUTS_CUTOFF` (`build_vertical.sh`; a set built for another cutoff refuses). Nothing is hardcoded.
+  With neither set, the repo copies are used and nothing changes.
+* The loader fails closed and verifies **every** entry at load: a missing root, manifest or file, a
+  pin mismatch, a changed or resized file, an unsafe path, a symlink, a duplicate entry, a path the
+  registry does not classify as a release input, a baseline cutoff other than the run's, or an
+  `expected_baseline_sha256` that disagrees with the manifest all refuse. There is no fallback to a
+  repo copy once a root is configured.
+* `tools/release_inputs.py`: `census` (tracked files by disposition), `extract` (copy a commit's
+  release-input blobs into a new root outside the repo and write the manifest; prints the pin),
+  `verify`, `path` (both take `--cutoff` and refuse a set for another one). The driver re-hashes the pinned baseline at every stage start and every kept-stage check; `stop`/`status` never load the root.
+* The registry (`REGISTRY` in `release_inputs.py`) classifies tracked paths: `release-input` (leaves
+  Git), `code-bound` (embeds the cutoff but is read by code from a fixed repo path; moving it needs a
+  code change, so it still moves the tool identity), `policy` (stays).
+* Git holds synthetic fixtures only. Removing the tracked real copies is a separate, owner-timed
+  step (the R2.1 path still reads them); until then the gate profile does not engage.

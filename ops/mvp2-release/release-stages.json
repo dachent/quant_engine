@@ -22,6 +22,8 @@
     "recipe": "{cycle}/pipeline-recipe.json",
     "prod_spec": "{cycle}/production/production-spec.json",
     "tools": "{repo_root}/tools",
+    "expected_baseline": "{repo_root}/acceptance/expected-baseline.json",
+    "expected_baseline_arg": "acceptance/expected-baseline.json",
     "mvp2": "{repo_root}/ops/mvp2-release/scripts",
     "contract": "{repo_root}/contracts/portfolio-financial-mvp-source-v1.json",
     "source_matrix": "{repo_root}/generated/financial-mvp/source-matrix.json",
@@ -107,12 +109,12 @@
         "workspace": "{source_workspace}"
       },
       "expected_baseline": {
-        "file": "{repo_root}/acceptance/expected-baseline.json",
+        "file": "{expected_baseline}",
         "cutoff": "{requested_as_of}"
       },
       "pinned_inputs": [
         [
-          "{repo_root}/acceptance/expected-baseline.json",
+          "{expected_baseline}",
           "{expected_baseline_sha256}"
         ]
       ]
@@ -694,7 +696,7 @@
         "{tools}/validate_generation.py",
         "{panel_root}/generations/{panel_gid}",
         "--expected",
-        "acceptance/expected-baseline.json",
+        "{expected_baseline_arg}",
         "--cutoff",
         "{requested_as_of}",
         "--crosswalk",
@@ -860,7 +862,7 @@
         "--replica-panel-dir",
         "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
         "--expected",
-        "acceptance/expected-baseline.json",
+        "{expected_baseline_arg}",
         "--cutoff",
         "{requested_as_of}",
         "--crosswalk",
