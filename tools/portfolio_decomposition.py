@@ -4159,6 +4159,22 @@ def _proxy_governance(
     }
 
 
+# The lens lane's figures are computed over the lens window by the lens engine, under the
+# lens coverage names.  Branch X's ``account_basis.figures`` (the strategy row's parent
+# account figures) names the same quantities as the row does; this is the one mapping
+# between the two vocabularies.  Values are not converted: the lens depths are positive
+# fractions (0.105 is a 10.5% drawdown) where the row publishes them as negative
+# percentages, and the lens window is the model's, the row's the whole account window.
+# ``target_max_drawdown`` is the account-live max drawdown; the current drawdown is the
+# one the row publishes as ``hwm_current_drawdown`` (the path's depth below its peak).
+LANE_FIGURE_TO_ACCOUNT_BASIS_FIGURE: Final = {
+    "target_cumulative_return": "account_live_cumulative_return",
+    "target_current_drawdown": "hwm_current_drawdown",
+    "target_max_drawdown": "account_live_max_drawdown",
+}
+LANE_SERIES_SCHEMA: Final = "ordered-date-return/1"
+
+
 def _public_composition(value: Mapping[str, object]) -> dict[str, object]:
     """A series composition as published: the account-lane rows stay in the spec."""
 
@@ -4169,6 +4185,29 @@ def _public_composition(value: Mapping[str, object]) -> dict[str, object]:
             key: item for key, item in lane.items() if key != "rows"
         }
     return published
+
+
+def _split_margin(
+    coverage: Mapping[str, object], model: ModelDefinition
+) -> dict[str, object]:
+    """How far the train and test windows clear the model's own minimums.
+
+    Published beside a restated series, whose shorter window is what could push a model
+    under its minimum: a margin of zero is a model one observation from UNAVAILABLE.
+    """
+
+    train = coverage.get("train_observations")
+    test = coverage.get("test_observations")
+    train_count = train if isinstance(train, int) else 0
+    test_count = test if isinstance(test, int) else 0
+    return {
+        "minimum_test_observations": model.minimum_test_observations,
+        "minimum_train_observations": model.minimum_train_observations,
+        "test_margin": test_count - model.minimum_test_observations,
+        "test_observations": test_count,
+        "train_margin": train_count - model.minimum_train_observations,
+        "train_observations": train_count,
+    }
 
 
 def _account_basis_coverage(
@@ -4238,11 +4277,13 @@ def _account_basis_coverage(
         "label": lane.get("label"),
         "observations": len(live),
         "series": {
+            "schema": LANE_SERIES_SCHEMA,
             "sha256": _canonical_live_series_sha256(live) if live else None,
             "target_observations": len(rows),
         },
         "strategy_id": lane.get("strategy_id"),
         "window": {
+            "days": (rows[-1].day - rows[0].day).days if rows else None,
             "end": rows[-1].day.isoformat() if rows else None,
             "start": rows[0].day.isoformat() if rows else None,
         },
@@ -4276,6 +4317,7 @@ def build_decomposition(
         )
         for model in spec.models
     ]
+    definitions_by_id = {model.model_id: model for model in spec.models}
     for model_result in results:
         model_result["evidence_mode"] = spec.evidence_mode
         model_result["evidence_layers"] = sorted(
@@ -4297,6 +4339,9 @@ def build_decomposition(
                 end if isinstance(end, str) else None,
                 coverage.get("target_cumulative_return") is not None,
             )
+            definition = definitions_by_id.get(str(model_result.get("model_id")))
+            if definition is not None:
+                coverage["split_margin"] = _split_margin(coverage, definition)
     selections = _select_models(results, spec.models)
     selected_model_ids = {str(item["model_id"]) for item in selections}
     for model_result in results:

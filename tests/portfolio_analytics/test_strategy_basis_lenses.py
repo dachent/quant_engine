@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -149,7 +150,10 @@ def test_the_plan_selects_the_sleeve_rows_and_carries_the_account_lane(
         (row["date"], row["return"]) for row in parent
     ]
     assert {row["evidence_layer"] for row in lane["rows"]} == {"ACCOUNT_LIVE"}
-    assert lane["basis"] == "ACCOUNT"
+    assert lane["basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
+    assert lane["label"] == (
+        "whole account synthetic-account-01 incl. the unallocated cash bucket"
+    )
     assert lane["account_id"] == "synthetic-account-01"
     assert "account" in lane["label"] and "synthetic-account-01" in lane["label"]
     assert lane["restated_series_sha256"] == strategy_basis.series_sha256(sleeve)
@@ -379,7 +383,7 @@ def test_the_engine_lane_equals_the_engines_own_figures_on_the_parent_series(
         account["series"]["sha256"] == parent_coverage["canonical_live_series_sha256"]
     )
     assert account["observations"] == parent_coverage["canonical_live_observations"]
-    assert account["window"] == {
+    assert {k: account["window"][k] for k in ("start", "end")} == {
         "start": parent_coverage["target_observed_start"],
         "end": parent_coverage["target_observed_end"],
     }
@@ -528,3 +532,101 @@ def test_the_hybrid_lane_splits_the_backtest_at_the_parent_start_not_the_sleeve_
         provider_ledger_catalog_path=world["fixture"]["provider_ledger_catalog_path"],
     )
     assert {r["evidence_layer"] for r in live_only[SERIES]["rows"]} == {"ACCOUNT_LIVE"}
+
+
+# the figure names of branch X's account_basis.figures (ACCOUNT_BASIS_FIELDS in
+# tools/strategy_basis_disclosure.py on feat/ai624-x), copied for the quantities the lens
+# lane carries; refreshed against X by `test_the_copied_names_are_x_names` when X is readable
+X_FIGURE_NAMES = frozenset(
+    {
+        "account_live_cumulative_return",
+        "account_live_max_drawdown",
+        "hwm_current_drawdown",
+        "hwm_max_drawdown",
+        "account_live_cagr",
+        "ytd_twr",
+        "calendar_year_twr",
+    }
+)
+
+
+def test_every_lane_figure_maps_to_an_account_basis_figure_name(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    target, days = _write_sources(root)
+    rows = list(csv.DictReader(target.open(encoding="utf-8")))
+    spec = json.loads(_spec(root, target, days).read_text("utf-8"))
+    spec["series_composition"] = {
+        "synthetic-strategy": {
+            "account_basis": {
+                "account_id": "a",
+                "basis": "PARENT_ACCOUNT_LIVE_SERIES",
+                "label": "l",
+                "strategy_id": "s",
+                "rows": [
+                    {
+                        "date": r["date"],
+                        "return": r["return"],
+                        "evidence_layer": "ACCOUNT_LIVE",
+                    }
+                    for r in rows
+                ],
+            }
+        }
+    }
+    path = root / "spec-lane.json"
+    path.write_text(json.dumps(spec, sort_keys=True), encoding="utf-8")
+    result, _, _ = decomposition.build_decomposition(path, root)
+    lane = result["model_results"][0]["coverage"]["account_basis"]
+    mapping = decomposition.LANE_FIGURE_TO_ACCOUNT_BASIS_FIGURE
+    assert set(lane["figures"]) == set(mapping), "a lane figure has no mapping"
+    assert set(mapping.values()) <= X_FIGURE_NAMES, "a mapped name is not an X figure"
+    assert len(set(mapping.values())) == len(mapping)
+    assert lane["series"]["schema"] == "ordered-date-return/1"
+    assert (
+        lane["window"]["days"]
+        == (
+            __import__("datetime").date.fromisoformat(lane["window"]["end"])
+            - __import__("datetime").date.fromisoformat(lane["window"]["start"])
+        ).days
+    )
+    # the model's own split margin is published beside the lane
+    margin = result["model_results"][0]["coverage"]["split_margin"]
+    assert margin["train_margin"] == (
+        margin["train_observations"] - margin["minimum_train_observations"]
+    )
+    assert margin["test_margin"] == (
+        margin["test_observations"] - margin["minimum_test_observations"]
+    )
+    assert (
+        margin["train_observations"]
+        == result["model_results"][0]["coverage"]["train_observations"]
+    )
+
+
+def test_the_copied_names_are_x_names() -> None:
+    import subprocess
+
+    try:
+        text = subprocess.run(
+            [
+                "git",
+                "-C",
+                os.environ.get("QE_AI624_X_REPO", ""),
+                "show",
+                "feat/ai624-x:tools/strategy_basis_disclosure.py",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("branch X is not readable")
+    for name in decomposition.LANE_FIGURE_TO_ACCOUNT_BASIS_FIGURE.values():
+        assert f'"{name}"' in text
+
+
+def test_without_a_lane_there_is_no_split_margin(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    target, days = _write_sources(root)
+    result, _, _ = decomposition.build_decomposition(_spec(root, target, days), root)
+    assert "split_margin" not in result["model_results"][0]["coverage"]

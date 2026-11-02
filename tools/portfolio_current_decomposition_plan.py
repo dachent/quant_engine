@@ -1046,6 +1046,49 @@ def _series_path_sha256(rows: Sequence[Mapping[str, object]]) -> str:
     ).hexdigest()
 
 
+# Copied from branch X's ``strategy_basis_disclosure`` (ACCOUNT_BASIS_FALLBACK and
+# ``account_basis_label``/``retired_sleeves``/``unallocated_bucket``) so the lens lane
+# and the report's account_basis block carry one basis value and one label wording.  To
+# be replaced by an import once X's module is on the integrated branch.  The lens lane
+# only knows the parent account id, so that stands for the report's account name.
+ACCOUNT_BASIS_LANE_BASIS = "PARENT_ACCOUNT_LIVE_SERIES"
+
+
+def _account_basis_label(
+    *,
+    account_name: str,
+    facts: Mapping[str, Any],
+    sleeve_account_id: str,
+    cutoff: str,
+) -> str:
+    retired = 0
+    for sleeve in _objects(facts.get("sleeves"), "facts sleeves"):
+        if sleeve.get("account_id") == sleeve_account_id:
+            continue
+        days = [
+            row
+            for row in _objects(sleeve.get("days"), "sleeve days")
+            if str(row["day"]) <= cutoff
+        ]
+        if days and Decimal(str(days[-1]["nav_end_after_alloc"])) == 0:
+            retired += 1
+    bucket = Decimal(0)
+    perimeter = facts.get("perimeter_account")
+    if isinstance(perimeter, Mapping):
+        for row in _objects(perimeter.get("days"), "perimeter days"):
+            if str(row["day"]) == cutoff:
+                bucket = Decimal(str(row["nav_end"]))
+    parts = [f"whole account {account_name}"]
+    holds: list[str] = []
+    if retired:
+        holds.append("retired sleeves")
+    holds.append(
+        "the unallocated margin bucket" if bucket < 0 else "the unallocated cash bucket"
+    )
+    parts.append("incl. " + " and ".join(holds))
+    return " ".join(parts)
+
+
 def _account_basis_lanes(
     *,
     manifest: Mapping[str, Any],
@@ -1149,10 +1192,12 @@ def _account_basis_lanes(
         )
         lanes[series_id] = {
             "account_id": parent_account,
-            "basis": "ACCOUNT",
-            "label": (
-                f"whole account {parent_account}, account basis: every sleeve of the "
-                "account and its unallocated cash and margin bucket"
+            "basis": ACCOUNT_BASIS_LANE_BASIS,
+            "label": _account_basis_label(
+                account_name=parent_account,
+                facts=facts,
+                sleeve_account_id=str(identity.get("account_id")),
+                cutoff=str(live[-1]["date"]),
             ),
             "ledger_catalog_sha256": catalog_sha256,
             "parent_series_sha256": _series_path_sha256(parent),
