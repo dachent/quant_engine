@@ -191,6 +191,7 @@ _PATH_STAGES = {
     "tools/release_driver.py": [],
     "tools/release_cycle_manifest.py": [],
     "tools/release_ledger_spec.py": [],
+    "tools/release_hwm_calendar.py": [],
     "schemas/portfolio/release-cycle-manifest.schema.json": [],
     "schemas/portfolio/release-resolved-cycle.schema.json": [],
     "tools/release_baseline_spec.py": [],

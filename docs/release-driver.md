@@ -190,9 +190,12 @@ Three stale inputs each cost R2 hours; the driver refuses them at the first stag
   to the run's inputs; the full invariant check remains the validator at the findings step.
 - **Calendar authority** (`attended`, `pinned_inputs`): `calendar_authority` must hash to the run's
   `calendar_authority_sha256`, so the previous pass's authority is refused before the 9-minute attended start.
-  The authority itself is re-authored from the cycle's epoch manifest with the retained
-  `mk_calendar2.py <first-attempt run dir> <authority.json>` (two passes), then its sha256 is pinned in the
-  run config. The driver does not derive it: that needs the epoch stage's output and the adapter internals.
+  The authority itself is re-authored from the first attempt's staged evidence with
+  `tools/release_hwm_calendar.py author --resolved-cycle <resolved.json> --resolved-cycle-sha256 <pin> --run <first-attempt run dir> --spec <spec.json>
+  --seed-authority <predecessor authority> --out <authority.json>` (two passes; create-only, with a receipt beside it;
+  `--check` re-derives and refuses a differing file), then its sha256 is pinned in the run config. The driver does not
+  derive it: that needs the epoch stage's output and the adapter internals. The policy id and owner decision text are
+  carried from the predecessor authority; every interval value is one the adapter derived.
 
 ## Ceremony: real roots or replica only
 
