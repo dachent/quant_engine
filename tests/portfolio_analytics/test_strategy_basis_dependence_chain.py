@@ -63,7 +63,12 @@ def _facts() -> bytes:
                 "first_day": days[0][0],
                 "last_day": days[-1][0],
                 "days": [
-                    {"day": day, "event": "", "nav_end": nav, "nav_end_after_alloc": nav}
+                    {
+                        "day": day,
+                        "event": "",
+                        "nav_end": nav,
+                        "nav_end_after_alloc": nav,
+                    }
                     for day, nav in days
                 ],
             }
@@ -115,7 +120,9 @@ def _extend_parent(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     out = list(rows)
     for mode in ("INCLUDE_SELECTED_LIVE", "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"):
         template = next(
-            row for row in rows if row["strategy_id"] == AI and row["mode_admission"] == mode
+            row
+            for row in rows
+            if row["strategy_id"] == AI and row["mode_admission"] == mode
         )
         out.append({**template, "date": "2025-12-31", "return": "0.001"})
     return out
@@ -127,7 +134,10 @@ def _restate(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     kept = [
         row
         for row in extended
-        if not (row["strategy_id"] == AI and row["mode_admission"] == "INCLUDE_SELECTED_LIVE")
+        if not (
+            row["strategy_id"] == AI
+            and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+        )
     ]
     template = next(
         row
@@ -135,7 +145,8 @@ def _restate(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         if row["strategy_id"] == AI and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
     )
     kept.extend(
-        {**template, "date": item["date"], "return": item["return"]} for item in restated
+        {**template, "date": item["date"], "return": item["return"]}
+        for item in restated
     )
     return kept
 
@@ -144,9 +155,13 @@ class _HistoryVerifier:
     """Stands in for the layered-history verifier (proven in test_strategy_basis_history)."""
 
     @staticmethod
-    def verify_layered_history_generation(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    def verify_layered_history_generation(
+        *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
         available = {"status": "AVAILABLE"}
-        return {"mode_status": {"LIVE_ONLY": available, "LIVE_PLUS_BACKTEST": available}}
+        return {
+            "mode_status": {"LIVE_ONLY": available, "LIVE_PLUS_BACKTEST": available}
+        }
 
     _materialized_segment_identities = staticmethod(
         target_series._materialized_segment_identities
@@ -157,13 +172,18 @@ def _source_manifests() -> dict[str, str]:
     """Source manifests naming the generations the segments cite (what the real history embeds)."""
 
     contract = json.loads(
-        (Path(__file__).parents[2] / "contracts" / "portfolio-financial-mvp-source-v1.json")
-        .read_text(encoding="utf-8")
+        (
+            Path(__file__).parents[2]
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
     )
     ids = sorted(
         {
             row["source_generation_id"]
-            for row in contract["history_corrections"]["materialized_segment_identities"]
+            for row in contract["history_corrections"][
+                "materialized_segment_identities"
+            ]
         }
     )
     names = (
@@ -176,7 +196,10 @@ def _source_manifests() -> dict[str, str]:
         "portfolio-fx-rates",
         "portfolio123-provider-history",
     )
-    return {name: json.dumps({"generation_id": gid}) for name, gid in zip(names, ids, strict=False)}
+    return {
+        name: json.dumps({"generation_id": gid})
+        for name, gid in zip(names, ids, strict=False)
+    }
 
 
 def _selected(
@@ -230,7 +253,9 @@ def _selected(
     monkeypatch.setattr(current, "_target_series_module", lambda: _HistoryVerifier)
     real_allocations = current._verified_allocations
 
-    def allocations(root: Path, policy: Any, ids: Any, evaluated_on: Any, **_: Any) -> Any:
+    def allocations(
+        root: Path, policy: Any, ids: Any, evaluated_on: Any, **_: Any
+    ) -> Any:
         # the synthetic allocation catalog is not a selected-ledger one; its own gates stay
         return real_allocations(root, policy, ids, evaluated_on)
 
@@ -311,7 +336,9 @@ def test_restated_history_builds_verifies_and_moves_only_the_declared_series(
     receipt = on["receipt"]
     assert isinstance(receipt, dict)
     block = receipt["strategy_basis_restatement"]
-    assert block["declaration_sha256"] == hashlib.sha256(DECLARATION.encode()).hexdigest()
+    assert (
+        block["declaration_sha256"] == hashlib.sha256(DECLARATION.encode()).hexdigest()
+    )
     assert block["strategies"][0]["series_sha256"] == strategy_basis.series_sha256(rows)
     package = _package(tmp_path / "on", on)
     assert _verify(fixture, package)["verification"] == "VALID"
@@ -323,7 +350,9 @@ def test_restated_history_builds_verifies_and_moves_only_the_declared_series(
             if row["series_id"] == name and row["evidence_layer"] == layer
         ]
 
-    assert series(on, AI_SERIES, "ACCOUNT_LIVE") == [(r["date"], r["return"]) for r in rows]
+    assert series(on, AI_SERIES, "ACCOUNT_LIVE") == [
+        (r["date"], r["return"]) for r in rows
+    ]
     assert len(series(off, AI_SERIES, "ACCOUNT_LIVE")) == 3
     assert series(on, OTHER_SERIES, "ACCOUNT_LIVE") == series(
         off, OTHER_SERIES, "ACCOUNT_LIVE"
@@ -334,10 +363,13 @@ def test_restated_history_builds_verifies_and_moves_only_the_declared_series(
         for row in receipt["history_authority"]["selected_segment_identities"]
         if row["strategy_id"] == AI and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
     )
-    assert _spec_entry(on, AI_SERIES)["live_version_ref"] == f"account-live-segment:{sha}"
-    assert _spec_entry(on, AI_SERIES)["live_version_ref"] != _spec_entry(
-        off, AI_SERIES
-    )["live_version_ref"]
+    assert (
+        _spec_entry(on, AI_SERIES)["live_version_ref"] == f"account-live-segment:{sha}"
+    )
+    assert (
+        _spec_entry(on, AI_SERIES)["live_version_ref"]
+        != _spec_entry(off, AI_SERIES)["live_version_ref"]
+    )
     assert _spec_entry(on, OTHER_SERIES) == _spec_entry(off, OTHER_SERIES)
     # the strategy version (design/config identity) is the same: the sleeve is the same model
     assert (
@@ -364,7 +396,9 @@ def test_a_block_over_unrestated_rows_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _selected(tmp_path, monkeypatch, restated=True, restate_rows=False)
-    with pytest.raises(current.CurrentDependenceError, match="differs from the history block"):
+    with pytest.raises(
+        current.CurrentDependenceError, match="differs from the history block"
+    ):
         _build(fixture)
 
 
@@ -372,14 +406,18 @@ def test_a_tampered_series_hash_in_the_block_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _selected(tmp_path, monkeypatch, restated=True, series_sha256="0" * 64)
-    with pytest.raises(current.CurrentDependenceError, match="differs from the history block"):
+    with pytest.raises(
+        current.CurrentDependenceError, match="differs from the history block"
+    ):
         _build(fixture)
 
 
 # --- the whole chain: history -> dependence -> correlation -> weekly -> panel parity ----
 
 
-def _chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, restated: bool) -> dict[str, Any]:
+def _chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, restated: bool
+) -> dict[str, Any]:
     fixture = _selected(tmp_path, monkeypatch, restated=restated)
     built = _build(fixture)
     package = _package(tmp_path, built)
@@ -406,9 +444,13 @@ def _chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, restated: bool) -
     }
 
 
-def _history_live_rows(fixture: dict[str, Any], strategy_id: str) -> list[dict[str, str]]:
+def _history_live_rows(
+    fixture: dict[str, Any], strategy_id: str
+) -> list[dict[str, str]]:
     rows = csv.DictReader(
-        io.StringIO((fixture["history_root"] / "segments.csv").read_text(encoding="utf-8"))
+        io.StringIO(
+            (fixture["history_root"] / "segments.csv").read_text(encoding="utf-8")
+        )
     )
     return [
         {"strategy_id": strategy_id, "evidence_layer": "ACCOUNT_LIVE", **row}
@@ -500,9 +542,9 @@ def test_the_restated_chain_agrees_end_to_end_and_the_parity_gate_passes(
     assert by_strategy[AI]["observed_start"] == "2026-01-01"
     assert by_strategy[AI]["live_version_ref"] == ai["live_version_ref"]
     # the hybrid view: the admitted prehistory now ends strictly before the sleeve's start
-    hybrid = chain["result"]["dependence_modes"]["LIVE_PLUS_BACKTEST"]["series_composition"][
-        AI_SERIES
-    ]
+    hybrid = chain["result"]["dependence_modes"]["LIVE_PLUS_BACKTEST"][
+        "series_composition"
+    ][AI_SERIES]
     assert hybrid["live_inception"] == "2026-01-01"
     assert hybrid["backtest_observations_used"] == 1
     assert hybrid["backtest_observations_excluded_at_or_after_live_inception"] == 2
@@ -513,11 +555,13 @@ def test_the_unrestated_chain_is_unchanged_and_also_passes_the_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     chain = _chain(tmp_path, monkeypatch, restated=False)
-    ai = chain["result"]["dependence_modes"]["LIVE_ONLY"]["series_composition"][AI_SERIES]
-    assert ai["live_inception"] == "2025-12-31"
-    hybrid = chain["result"]["dependence_modes"]["LIVE_PLUS_BACKTEST"]["series_composition"][
+    ai = chain["result"]["dependence_modes"]["LIVE_ONLY"]["series_composition"][
         AI_SERIES
     ]
+    assert ai["live_inception"] == "2025-12-31"
+    hybrid = chain["result"]["dependence_modes"]["LIVE_PLUS_BACKTEST"][
+        "series_composition"
+    ][AI_SERIES]
     assert hybrid["backtest_observations_used"] == 0
     assert len(_gate(chain, _gate_inputs(chain))) == 2
 
@@ -528,7 +572,12 @@ def test_the_gate_fails_closed_when_the_report_is_not_restated(
     chain = _chain(tmp_path, monkeypatch, restated=True)
     gate = _gate_inputs(chain)
     parent = [
-        {"strategy_id": AI, "evidence_layer": "ACCOUNT_LIVE", "date": day, "return": value}
+        {
+            "strategy_id": AI,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "date": day,
+            "return": value,
+        }
         for day, value in (("2026-01-01", "0.01"), ("2026-01-02", "-0.02"))
     ]
     gate["report_rows"] = [
@@ -554,7 +603,12 @@ def test_the_gate_fails_closed_when_the_dependence_is_restated_and_the_factor_is
     chain = _chain(tmp_path, monkeypatch, restated=True)
     gate = _gate_inputs(chain)
     parent = [
-        {"strategy_id": AI, "evidence_layer": "ACCOUNT_LIVE", "date": day, "return": value}
+        {
+            "strategy_id": AI,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "date": day,
+            "return": value,
+        }
         for day, value in (
             ("2025-12-31", "0.001"),
             ("2026-01-01", "0.003"),
@@ -568,7 +622,8 @@ def test_the_gate_fails_closed_when_the_dependence_is_restated_and_the_factor_is
         canonical_live_observations=3,
     )
     with pytest.raises(
-        panel.ControlPanelValidationError, match="factor canonical-series window differs"
+        panel.ControlPanelValidationError,
+        match="factor canonical-series window differs",
     ):
         _gate(chain, gate)
 

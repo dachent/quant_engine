@@ -320,19 +320,11 @@ STRATEGY_BASIS_BLOCK: Final = "strategy_basis_restatement"
 
 
 def _strategy_basis_module() -> Any:
-    module_path = Path(__file__).resolve().with_name("strategy_basis.py")
-    module_name = "strategy_basis_for_current_dependence"
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise CurrentDependenceError("strategy basis module is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
     try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        sys.modules.pop(module_name, None)
-        raise CurrentDependenceError("strategy basis module cannot be loaded") from exc
-    return module
+        import strategy_basis
+    except ImportError as exc:
+        raise CurrentDependenceError("strategy basis module is unavailable") from exc
+    return strategy_basis
 
 
 def _history_restatement(manifest: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
