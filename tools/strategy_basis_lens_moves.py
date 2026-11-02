@@ -475,6 +475,100 @@ def _read_lane(spec: str, series_id: str) -> list[dict[str, Any]]:
     return rows
 
 
+def restated_series_ids(spec: Mapping[str, Any]) -> list[str]:
+    """The series a lens spec declares an account-basis lane for (its restated series)."""
+
+    composition = spec.get("series_composition")
+    if not isinstance(composition, Mapping):
+        return []
+    return sorted(
+        str(series_id)
+        for series_id, value in composition.items()
+        if isinstance(value, Mapping)
+        and isinstance(value.get("account_basis"), Mapping)
+    )
+
+
+def rows_from_generation(
+    *,
+    mode: str,
+    source_key: str,
+    spec_path: Path,
+    generation_dir: Path,
+    series_id: str,
+) -> list[dict[str, Any]]:
+    """One published lens generation's models, read from its own ``decomposition.json``."""
+
+    spec = json.loads(spec_path.read_text("utf-8"))
+    payload = json.loads((generation_dir / "decomposition.json").read_text("utf-8"))
+    return rows_from_results(
+        mode=mode,
+        source_key=source_key,
+        spec_name=spec_path.stem,
+        spec=spec,
+        results=payload["model_results"],
+        series_id=series_id,
+    )
+
+
+def table_from_runs(
+    sleeve_runs: Sequence[Mapping[str, Any]],
+    control_runs: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The closed table from the release's sleeve-lane lens runs and its control runs.
+
+    A run is ``{mode, source_key, spec_path, generation_dir}``.  The control runs are the
+    very same plan on the parent-account series; each sleeve-lane run must have exactly
+    its control counterpart, or the table is refused.  Exactly one series is restated.
+    """
+
+    def key(run: Mapping[str, Any]) -> tuple[str, str, str]:
+        return (str(run["mode"]), str(run.get("surface", "")), str(run["source_key"]))
+
+    sleeve_by_key = {key(run): run for run in sleeve_runs}
+    control_by_key = {key(run): run for run in control_runs}
+    if (
+        len(sleeve_by_key) != len(sleeve_runs)
+        or len(control_by_key) != len(control_runs)
+        or set(sleeve_by_key) != set(control_by_key)
+    ):
+        raise LensMovesError(
+            "the control runs are not the sleeve-lane runs' counterparts"
+        )
+    series: set[str] = set()
+    for run in sleeve_runs:
+        series.update(
+            restated_series_ids(json.loads(Path(run["spec_path"]).read_text("utf-8")))
+        )
+    if len(series) != 1:
+        raise LensMovesError(
+            f"exactly one restated series is expected: {sorted(series)}"
+        )
+    series_id = next(iter(series))
+
+    def rows(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        for run in sorted(runs, key=key):
+            collected.extend(
+                rows_from_generation(
+                    mode=str(run["mode"]),
+                    source_key=str(run["source_key"]),
+                    spec_path=Path(run["spec_path"]),
+                    generation_dir=Path(run["generation_dir"]),
+                    series_id=series_id,
+                )
+            )
+        return collected
+
+    return build_table(rows(sleeve_runs), rows(control_runs), series_id=series_id)
+
+
+def table_bytes(block: Mapping[str, Any]) -> bytes:
+    """The table file's bytes (the one serialisation both writer and verifier use)."""
+
+    return (json.dumps(block, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import csv
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, localcontext
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence, TypedDict
 
 from quant_engine.core import (
@@ -715,8 +717,10 @@ def _recipe(path: Path) -> dict[str, Any]:
     if (
         set(recipe)
         - {
+            "decomposition_control_plan_bundle",
             "dependence_selected_inputs",
             "evaluated_on",
+            "hybrid_decomposition_control_plan_bundle",
             "implementation_sleeve_basis",
             "model_vs_actual_input",
             "nested_tag_map",
@@ -868,6 +872,12 @@ def _recipe(path: Path) -> dict[str, Any]:
     ]
     if "hybrid_decomposition_plan_bundle" in recipe:
         directory_keys.append("hybrid_decomposition_plan_bundle")
+    for control_key in (
+        "decomposition_control_plan_bundle",
+        "hybrid_decomposition_control_plan_bundle",
+    ):
+        if control_key in recipe:
+            directory_keys.append(control_key)
     for key in directory_keys:
         definition = recipe[key]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1011,6 +1021,8 @@ def create_recipe(
     release_commit: str,
     output: Path,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    decomposition_control_plan_bundle: Path | None = None,
+    hybrid_decomposition_control_plan_bundle: Path | None = None,
     account_strategy_ledger: Path | None = None,
     account_strategy_ledger_identity: Path | None = None,
     account_strategy_classified_flows: Path | None = None,
@@ -1132,6 +1144,18 @@ def create_recipe(
             "path": str(hybrid_plan),
             **_directory_inventory(hybrid_plan),
         }
+    for control_key, control_bundle in (
+        ("decomposition_control_plan_bundle", decomposition_control_plan_bundle),
+        (
+            "hybrid_decomposition_control_plan_bundle",
+            hybrid_decomposition_control_plan_bundle,
+        ),
+    ):
+        if control_bundle is not None:
+            payload[control_key] = {
+                "path": str(control_bundle.resolve()),
+                **_directory_inventory(control_bundle.resolve()),
+            }
     if dependence_selected_inputs_path is not None:
         payload["dependence_selected_inputs"] = _file_definition(
             dependence_selected_inputs_path.resolve()
@@ -4453,6 +4477,306 @@ def _weekly_history_coverage_arguments(correlation_source: Path) -> tuple[str, .
     return ("--history-coverage", str(coverage))
 
 
+LENS_WORKERS_ENV = "QE_LENS_WORKERS"
+LENS_MOVES_NAME = "strategy-basis-lens-moves.json"
+_CONTROL_PLAN_KEYS = (
+    ("decomposition_control_plan_bundle", "LIVE_ONLY"),
+    ("hybrid_decomposition_control_plan_bundle", "LIVE_PLUS_BACKTEST"),
+)
+
+
+def _lens_identity(row: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        _text(row.get("evidence_mode"), "lens evidence_mode"),
+        _text(row.get("surface"), "lens surface"),
+        _text(row.get("source_key"), "lens source_key"),
+        _text(row.get("spec_id"), "lens spec_id"),
+    )
+
+
+def _control_spec_sources(
+    recipe: Mapping[str, Any],
+    *,
+    current_plan: bool,
+    spec_sources: Sequence[tuple[Path, Mapping[str, Any]]],
+    mode_plans: Mapping[str, tuple[Path, Mapping[str, Any]]],
+    selected_inputs_path: Path | None,
+    recipe_evaluated_on: str,
+) -> list[tuple[Path, Mapping[str, Any]]]:
+    """The lens specs of the account-lane control run (#624), or none without a declaration.
+
+    A release that declares a strategy basis must run the control: the lens-moves table is
+    derived from data, so a retained one would be stale.  The control plan bundles are the
+    same plan built from the declaration-free history; their lens specs must be exactly the
+    sleeve lane's specs (same modes, surfaces, sources), or the release is refused.
+    """
+
+    present = [key for key, _mode in _CONTROL_PLAN_KEYS if key in recipe]
+    declared = "strategy_basis" in recipe
+    if not present:
+        if declared and current_plan:
+            raise VerticalBuildError(
+                "a strategy basis declaration requires the lens control run: "
+                "the recipe carries no control plan bundle"
+            )
+        return []
+    if not declared or not current_plan:
+        raise VerticalBuildError(
+            "control plan bundles need a strategy basis declaration and a current plan"
+        )
+    wanted = {
+        key
+        for key, mode in _CONTROL_PLAN_KEYS
+        if mode == "LIVE_ONLY" or mode in mode_plans
+    }
+    if set(present) != wanted:
+        raise VerticalBuildError("control plan bundles differ from the plan modes")
+    sources: list[tuple[Path, Mapping[str, Any]]] = []
+    for key, mode in _CONTROL_PLAN_KEYS:
+        if key not in recipe:
+            continue
+        bundle = _path(recipe[key]["path"], key)
+        plan = _load(bundle / "plan-manifest.json", key)
+        if (
+            plan.get("builder") != "portfolio-current-decomposition-plan"
+            or plan["policies"]["strategy_evidence_mode"] != mode
+            or plan.get("evaluation_date") != recipe_evaluated_on
+        ):
+            raise VerticalBuildError(f"{key} mode, builder or date differs")
+        rows = _current_release_plan_specs(
+            bundle, plan, dependence_selected_inputs_path=selected_inputs_path
+        )
+        sources.extend((bundle, row) for row in rows)
+    if sorted(_lens_identity(row) for _bundle, row in sources) != sorted(
+        _lens_identity(row) for _bundle, row in spec_sources
+    ):
+        raise VerticalBuildError("control lens specs are not the sleeve lane's specs")
+    return sources
+
+
+def _lens_worker_count(tasks: int, *, parallel: bool) -> int:
+    """Pool size of the lens builds: one (the original sequential order) unless parallel."""
+
+    if not parallel:
+        return 1
+    raw = os.environ.get(LENS_WORKERS_ENV, "")
+    workers = (
+        int(raw) if raw.isdigit() and int(raw) > 0 else min(4, os.cpu_count() or 1)
+    )
+    return max(1, min(workers, tasks))
+
+
+def _run_current_lens_builds(
+    spec_sources: Sequence[tuple[Path, Mapping[str, Any]]],
+    control_sources: Sequence[tuple[Path, Mapping[str, Any]]],
+    *,
+    lenses_root: Path,
+    control_root: Path,
+    retained_cache_root: Path | None,
+) -> tuple[dict[int, tuple[Any, Any]], dict[str, Any] | None]:
+    """Stage and publish every lens of a current plan; the control runs beside them.
+
+    Without a control the builds run one after the other, in plan order, exactly as before.
+    With one, sleeve-lane and control builds share one small pool; the results are read
+    back in the fixed task order (sleeve lane by plan order, then control), never in
+    completion order, so what the caller records does not depend on timing.
+    """
+
+    tasks: list[tuple[str, int, Path, Mapping[str, Any], Path]] = []
+    for index, (bundle, row) in enumerate(spec_sources):
+        _mode, surface, source_key, _spec = _lens_identity(row)
+        tasks.append(
+            (
+                "sleeve",
+                index,
+                bundle,
+                row,
+                lenses_root / str(row["evidence_mode"]) / surface / source_key,
+            )
+        )
+    for index, (bundle, row) in enumerate(control_sources):
+        _mode, surface, source_key, _spec = _lens_identity(row)
+        tasks.append(
+            (
+                "control",
+                index,
+                bundle,
+                row,
+                control_root / str(row["evidence_mode"]) / surface / source_key,
+            )
+        )
+
+    def run(
+        task: tuple[str, int, Path, Mapping[str, Any], Path],
+    ) -> tuple[Any, Any, float]:
+        kind, _index, bundle, row, root = task
+        spec = bundle / _text(row.get("path"), "lens spec path")
+        _note_progress(f"decomposition lens {kind} {root.name}/{spec.stem}")
+        started = time.monotonic()
+        cache = (
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        )
+        staged = _tool(
+            "portfolio_decomposition.py",
+            "stage",
+            "--spec",
+            str(spec),
+            "--source-root",
+            str(bundle),
+            "--output-root",
+            str(root),
+            *cache,
+            timeout=7200,
+        )
+        published = _tool(
+            "portfolio_decomposition.py",
+            "publish",
+            "--spec",
+            str(spec),
+            "--source-root",
+            str(bundle),
+            "--output-root",
+            str(root),
+            *cache,
+            timeout=7200,
+        )
+        return staged, published, time.monotonic() - started
+
+    workers = _lens_worker_count(len(tasks), parallel=bool(control_sources))
+    wall_started = time.monotonic()
+    if workers == 1:
+        outcomes = [run(task) for task in tasks]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run, task) for task in tasks]
+            outcomes = [future.result() for future in futures]
+    wall = time.monotonic() - wall_started
+    sleeve_results: dict[int, tuple[Any, Any]] = {}
+    control_runs: list[dict[str, Any]] = []
+    seconds = {"sleeve": 0.0, "control": 0.0}
+    for task, (staged, published, elapsed) in zip(tasks, outcomes, strict=True):
+        kind, index, bundle, row, root = task
+        seconds[kind] += elapsed
+        if kind == "sleeve":
+            sleeve_results[index] = (staged, published)
+        else:
+            control_runs.append(
+                {
+                    "evidence_mode": str(row["evidence_mode"]),
+                    "generation_id": _generation_id(
+                        published.get("generation_id"), "control lens generation_id"
+                    ),
+                    "plan_bundle_id": bundle.name,
+                    "root": str(root),
+                    "source_key": str(row["source_key"]),
+                    "spec_id": str(row["spec_id"]),
+                    "spec_path": str(bundle / _text(row.get("path"), "lens spec path")),
+                    "surface": str(row["surface"]),
+                }
+            )
+    if not control_sources:
+        return sleeve_results, None
+    return sleeve_results, {
+        "runs": control_runs,
+        "timing_seconds": {
+            "control_lane_builds": round(seconds["control"], 3),
+            "sleeve_lane_builds": round(seconds["sleeve"], 3),
+            "wall": round(wall, 3),
+            "workers": workers,
+        },
+    }
+
+
+def _lens_runs(
+    root: Path, entries: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Run descriptors (the table tool's input) of published lens generations."""
+
+    return [
+        {
+            "generation_dir": str(
+                Path(str(entry["root"])) / "generations" / str(entry["generation_id"])
+            ),
+            "mode": str(entry["evidence_mode"]),
+            "source_key": str(entry["source_key"]),
+            "spec_path": str(entry["spec_path"]),
+            "surface": str(entry["surface"]),
+        }
+        for entry in entries
+    ]
+
+
+def _lens_moves_import() -> Any:
+    try:
+        return importlib.import_module("tools.strategy_basis_lens_moves")
+    except ModuleNotFoundError as exc:
+        if exc.name != "tools":
+            raise
+        return importlib.import_module("strategy_basis_lens_moves")
+
+
+def _write_lens_moves(
+    lenses_root: Path,
+    sleeve_entries: Sequence[Mapping[str, Any]],
+    control: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The lens-moves table from the sleeve-lane and control lens generations.
+
+    Written beside the lens generations (``<lenses root>/strategy-basis-lens-moves.json``)
+    and bound in the stage result with the identities of every run it came from, so a
+    verifier recomputes the very same bytes from the release's own roots.
+    """
+
+    moves = _lens_moves_import()
+    runs = {
+        "sleeve": _lens_runs(lenses_root, sleeve_entries),
+        "control": _lens_runs(lenses_root, control["runs"]),
+    }
+    table_bytes = moves.table_bytes(
+        moves.table_from_runs(runs["sleeve"], runs["control"])
+    )
+    _write_exact(lenses_root / LENS_MOVES_NAME, table_bytes)
+    return {
+        "control_lens_generations": {
+            f"{run['evidence_mode']}:{run['surface']}:{run['source_key']}": run[
+                "generation_id"
+            ]
+            for run in control["runs"]
+        },
+        "control_plan_bundle_ids": sorted(
+            {run["plan_bundle_id"] for run in control["runs"]}
+        ),
+        "control_runs": list(control["runs"]),
+        "table_sha256": hashlib.sha256(table_bytes).hexdigest(),
+        "table_size_bytes": len(table_bytes),
+    }
+
+
+def verify_lens_moves(
+    lenses_root: Path,
+    lens_control: Mapping[str, Any],
+    sleeve_entries: Sequence[Mapping[str, Any]],
+) -> None:
+    """Recompute the lens-moves table from the release's own roots and compare bytes."""
+
+    moves = _lens_moves_import()
+    runs_control = _lens_runs(lenses_root, lens_control["control_runs"])
+    runs_sleeve = _lens_runs(lenses_root, sleeve_entries)
+    expected = moves.table_bytes(moves.table_from_runs(runs_sleeve, runs_control))
+    path = lenses_root / LENS_MOVES_NAME
+    if path.is_symlink() or not path.is_file():
+        raise VerticalBuildError("the lens-moves table is missing")
+    actual = path.read_bytes()
+    if (
+        actual != expected
+        or hashlib.sha256(actual).hexdigest() != lens_control.get("table_sha256")
+        or len(actual) != lens_control.get("table_size_bytes")
+    ):
+        raise VerticalBuildError("the lens-moves table differs from its control run")
+
+
 def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
@@ -4564,6 +4888,14 @@ def build_analytics(
             )
         mode_plans["LIVE_PLUS_BACKTEST"] = (hybrid_bundle, hybrid_plan)
         spec_sources.extend((hybrid_bundle, row) for row in hybrid_specs)
+    control_sources = _control_spec_sources(
+        recipe,
+        current_plan=current_plan,
+        spec_sources=spec_sources,
+        mode_plans=mode_plans,
+        selected_inputs_path=selected_inputs_path,
+        recipe_evaluated_on=recipe_evaluated_on,
+    )
     base_factor = _path(recipe["base_factor_file"]["path"], "base factor file")
     producer_operations: list[dict[str, Any]] = []
     decomposition_root = output_root / "decomposition"
@@ -4617,7 +4949,17 @@ def build_analytics(
         hybrid_bundles["dynamic-style"] = _text(
             hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
         )
-    for lens_bundle, row in spec_sources:
+    lens_results: dict[int, tuple[Any, Any]] = {}
+    lens_control: dict[str, Any] | None = None
+    if current_plan:
+        lens_results, lens_control = _run_current_lens_builds(
+            spec_sources,
+            control_sources,
+            lenses_root=lenses_root,
+            control_root=output_root / "lens-control",
+            retained_cache_root=retained_cache_root,
+        )
+    for lens_index, (lens_bundle, row) in enumerate(spec_sources):
         source_key = _text(row.get("source_key"), "lens source_key")
         if current_plan:
             surface = _text(row.get("surface"), "lens surface")
@@ -4627,23 +4969,26 @@ def build_analytics(
         else:
             lens_root = lenses_root / source_key
         lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
-        _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
-        staged = _tool(
-            "portfolio_decomposition.py",
-            "stage",
-            "--spec",
-            str(lens_spec),
-            "--source-root",
-            str(lens_bundle),
-            "--output-root",
-            str(lens_root),
-            *(
-                ("--retained-cache-root", str(retained_cache_root))
-                if retained_cache_root is not None
-                else ()
-            ),
-            timeout=7200,
-        )
+        if current_plan:
+            staged, result = lens_results[lens_index]
+        else:
+            _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
+            staged = _tool(
+                "portfolio_decomposition.py",
+                "stage",
+                "--spec",
+                str(lens_spec),
+                "--source-root",
+                str(lens_bundle),
+                "--output-root",
+                str(lens_root),
+                *(
+                    ("--retained-cache-root", str(retained_cache_root))
+                    if retained_cache_root is not None
+                    else ()
+                ),
+                timeout=7200,
+            )
         _record_numerical_producer_operation(
             producer_operations,
             tool="portfolio_decomposition.py",
@@ -4653,22 +4998,23 @@ def build_analytics(
             output_root=lens_root,
             producer_result=staged,
         )
-        result = _tool(
-            "portfolio_decomposition.py",
-            "publish",
-            "--spec",
-            str(lens_spec),
-            "--source-root",
-            str(lens_bundle),
-            "--output-root",
-            str(lens_root),
-            *(
-                ("--retained-cache-root", str(retained_cache_root))
-                if retained_cache_root is not None
-                else ()
-            ),
-            timeout=7200,
-        )
+        if not current_plan:
+            result = _tool(
+                "portfolio_decomposition.py",
+                "publish",
+                "--spec",
+                str(lens_spec),
+                "--source-root",
+                str(lens_bundle),
+                "--output-root",
+                str(lens_root),
+                *(
+                    ("--retained-cache-root", str(retained_cache_root))
+                    if retained_cache_root is not None
+                    else ()
+                ),
+                timeout=7200,
+            )
         _record_numerical_producer_operation(
             producer_operations,
             tool="portfolio_decomposition.py",
@@ -4715,6 +5061,27 @@ def build_analytics(
             hybrid_bundles[source_key] = _text(
                 hybrid.get("bundle_id"), "hybrid lens bundle_id"
             )
+    lens_control_result: dict[str, Any] | None = None
+    if lens_control is not None:
+        sleeve_entries = [
+            {**binding, "spec_path": str(bundle / binding["path"])}
+            for binding, (bundle, _row) in zip(lens_bindings, spec_sources, strict=True)
+        ]
+        lens_control_result = _write_lens_moves(
+            lenses_root, sleeve_entries, lens_control
+        )
+        verify_lens_moves(lenses_root, lens_control_result, sleeve_entries)
+        _write_exact(
+            output_root / "lens-control-timing.json",
+            (
+                json.dumps(lens_control["timing_seconds"], indent=2, sort_keys=True)
+                + "\n"
+            ).encode("utf-8"),
+        )
+        _note_progress(
+            "lens control timing "
+            + json.dumps(lens_control["timing_seconds"], sort_keys=True)
+        )
     correlation_root = output_root / "correlation"
     correlation_spec = correlation_source / "spec.json"
     correlation_staged = _tool(
@@ -4839,6 +5206,8 @@ def build_analytics(
         "weekly_generation_id": weekly_generation_id,
         "weekly_root": str(weekly_root),
     }
+    if lens_control_result is not None:
+        result["lens_control"] = lens_control_result
     if current_plan:
         result.update(
             {
