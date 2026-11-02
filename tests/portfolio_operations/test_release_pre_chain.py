@@ -90,13 +90,20 @@ _STUB_ATTRIBUTION = """
 from pathlib import Path
 import hashlib, json, sys
 
-args = sys.argv[1:]
-out = Path(args[args.index("--output-root") + 1])
-digest = hashlib.sha256(json.dumps(args).encode()).hexdigest()
-target = out / "generations" / digest
-target.mkdir(parents=True)
-(target / "attribution.json").write_text(json.dumps(args), encoding="utf-8")
-print("staged", digest)
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    out = Path(args[args.index("--output-root") + 1])
+    digest = hashlib.sha256(json.dumps(args).encode()).hexdigest()
+    target = out / "generations" / digest
+    target.mkdir(parents=True)
+    (target / "attribution.json").write_text(json.dumps(args), encoding="utf-8")
+    print("staged", digest)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 """
 
 
@@ -389,7 +396,7 @@ def test_the_attribution_stage_failure_is_the_stage_exit_code(tmp_path: Path) ->
     repo = _repo(tmp_path)
     world = _cycle(tmp_path)
     (repo / "tools" / "portfolio_attribution.py").write_text(
-        "import sys\nprint('refused', file=sys.stderr)\nraise SystemExit(7)\n"
+        "import sys\n\n\ndef main(argv=None):\n    print('refused', file=sys.stderr)\n    return 7\n"
     )
     done = _run_tool(repo, world)
     assert done.returncode == 7 and "refused" in done.stdout

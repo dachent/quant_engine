@@ -18,12 +18,13 @@ file that names another cycle manifest or commit refuses the run.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from datetime import date
+import io
 import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import tempfile
 from typing import Any, Sequence
@@ -31,7 +32,6 @@ from typing import Any, Sequence
 RESOLVED_SCHEMA = "qe-release-resolved-cycle/1"
 IDENTITY_NAME = "pre-chain-cycle.json"
 IDENTITY_SCHEMA = "qe-release-pre-chain-cycle/1"
-REPO_ROOT = Path(__file__).resolve().parents[1]
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 
@@ -111,14 +111,12 @@ def _bind_cycle_identity(cycle: Path, identity: str, commit: str) -> None:
         raise
 
 
-def _load_modules(repo_root: Path) -> tuple[Any, Any]:
-    tools = str(repo_root / "tools")
-    if tools not in sys.path:
-        sys.path.insert(0, tools)
+def _load_modules() -> tuple[Any, Any, Any]:
     import portfolio_attended_preparation as prep
+    import portfolio_attribution as attribution
     import portfolio_current_dependence as dependence
 
-    return prep, dependence
+    return prep, dependence, attribution
 
 
 def pre_chain(
@@ -128,10 +126,9 @@ def pre_chain(
     baseline_gid: str,
     evaluated_on: date,
     commit: str,
-    repo_root: Path = REPO_ROOT,
-    modules: tuple[Any, Any] | None = None,
+    modules: tuple[Any, Any, Any] | None = None,
 ) -> int:
-    prep, dependence = modules or _load_modules(repo_root)
+    prep, dependence, attribution = modules or _load_modules()
     repo = prep.ROOT
     contract = repo / "contracts" / "portfolio-financial-mvp-source-v1.json"
     policy = repo / "contracts" / "portfolio-dependence-policy-v1.json"
@@ -189,30 +186,30 @@ def pre_chain(
         selected_inputs_path=selected_path,
     )
     print("DEPENDENCE", dependence_root)
-    done = subprocess.run(
-        [
-            sys.executable,
-            "tools/portfolio_attribution.py",
-            "stage",
-            "--baseline-root",
-            str(cycle / "baseline"),
-            "--baseline-generation-id",
-            baseline_gid,
-            "--dependence-source-root",
-            str(dependence_root),
-            "--dependence-selected-inputs",
-            str(selected_path),
-            "--spec",
-            str(cycle / "attribution-spec.json"),
-            "--output-root",
-            str(cycle / "attribution"),
-        ],
-        capture_output=True,
-        text=True,
-        cwd=str(repo),
-    )
-    print(done.returncode, done.stdout[-600:], done.stderr[-800:])
-    return done.returncode
+    captured, errors = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(errors):
+        try:
+            code = attribution.main(
+                [
+                    "stage",
+                    "--baseline-root",
+                    str(cycle / "baseline"),
+                    "--baseline-generation-id",
+                    baseline_gid,
+                    "--dependence-source-root",
+                    str(dependence_root),
+                    "--dependence-selected-inputs",
+                    str(selected_path),
+                    "--spec",
+                    str(cycle / "attribution-spec.json"),
+                    "--output-root",
+                    str(cycle / "attribution"),
+                ]
+            )
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+    print(code, captured.getvalue()[-600:], errors.getvalue()[-800:])
+    return code
 
 
 def _parser() -> argparse.ArgumentParser:

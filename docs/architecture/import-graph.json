@@ -574,6 +574,21 @@
       1
     ],
     [
+      "release_pre_chain",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_current_dependence",
+      1
+    ],
+    [
       "schwab_capture_ingest",
       "schwab_capture_driver",
       1
