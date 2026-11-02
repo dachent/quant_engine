@@ -649,3 +649,179 @@ def test_the_gate_fails_closed_when_the_dependence_stage_is_not_restated(
 
 
 _ = (copy, _SYNTHETIC_LAYERED_HISTORY_SEGMENT_FIELDS)
+
+
+# --- derived items follow the restated path; policy constants stay (and are labelled) ----
+
+
+def _central(chain: dict[str, Any], mode: str = "LIVE_ONLY") -> dict[str, Any]:
+    return chain["result"]["dependence_modes"][mode]["central_case"]
+
+
+def _component(block: dict[str, Any], series: str) -> dict[str, Any]:
+    return next(row for row in block["components"] if row["series_id"] == series)
+
+
+def _max_drawdown(rows: list[dict[str, str]]) -> Decimal:
+    wealth = peak = Decimal(1)
+    worst = Decimal(0)
+    for row in sorted(rows, key=lambda item: item["date"]):
+        wealth *= 1 + Decimal(row["return"])
+        peak = max(peak, wealth)
+        worst = min(worst, wealth / peak - 1)
+    return abs(worst)
+
+
+def test_the_central_case_adverse_loss_is_derived_from_the_restated_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    restated = _chain(tmp_path / "on", monkeypatch, restated=True)
+    parent = _chain(tmp_path / "off", monkeypatch, restated=False)
+    on = _component(_central(restated), AI_SERIES)
+    off = _component(_central(parent), AI_SERIES)
+    assert on["method"] == off["method"] == "ACCEPTED_PATH_MAXIMUM_DRAWDOWN"
+    sleeve = strategy_basis.rows_from_sleeve_facts(_facts(), AI)
+    assert Decimal(on["adverse_loss_fraction"]) == _max_drawdown(sleeve)
+    assert Decimal(off["adverse_loss_fraction"]) == _max_drawdown(
+        _history_live_rows(parent["fixture"], AI)
+    )
+    assert on["adverse_loss_fraction"] != off["adverse_loss_fraction"]
+
+    # an untouched strategy's derived loss is the same on both bases
+    def stripped(chain: dict[str, Any]) -> dict[str, Any]:
+        # the authority names the whole returns.csv hash, which moved with the AI series
+        row = dict(_component(_central(chain), OTHER_SERIES))
+        row.pop("authority")
+        return row
+
+    assert stripped(restated) == stripped(parent)
+    # the hybrid central case is derived from the hybrid path, which gained prehistory
+    hybrid_on = _component(_central(restated, "LIVE_PLUS_BACKTEST"), AI_SERIES)
+    assert hybrid_on["return_observations"] == 3
+
+
+def test_the_policy_constants_do_not_move_with_the_basis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    restated = _chain(tmp_path / "on", monkeypatch, restated=True)
+    parent = _chain(tmp_path / "off", monkeypatch, restated=False)
+    on = restated["result"]["dependence_modes"]["LIVE_ONLY"]["correlation_one"]
+    off = parent["result"]["dependence_modes"]["LIVE_ONLY"]["correlation_one"]
+    assert on == off
+    ai = _component(on, AI_SERIES)
+    policy = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "contracts"
+            / "portfolio-dependence-policy-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    literal = next(row for row in policy["series"] if row["series_id"] == AI_SERIES)
+    assert Decimal(ai["conservative_loss_fraction"]) == pytest.approx(
+        Decimal(literal["adverse_loss_fraction"]), abs=Decimal("1e-9")
+    )
+
+
+def _strategy_rows(chain: dict[str, Any], *, restated: bool) -> list[dict[str, Any]]:
+    names = chain["result"]["dependence_modes"]["LIVE_ONLY"]["series_ids"]
+    weights = {name: Decimal(index + 2) for index, name in enumerate(names)}
+    weights[AI_SERIES] = Decimal(9)
+    total = sum(weights.values())
+    return [
+        {
+            "strategy_name": name,
+            "systematic_weight": str(weights[name] / total),
+            **(
+                {"return_scope": {"basis": "SLEEVE_EPOCH"}}
+                if restated and name == AI_SERIES
+                else {}
+            ),
+        }
+        for name in names
+    ]
+
+
+def test_the_sensitivity_sits_beside_the_policy_constants_and_matches_the_formula(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import numpy as np
+
+    chain = _chain(tmp_path, monkeypatch, restated=True)
+    dependence = chain["result"]["dependence_modes"]["LIVE_ONLY"]
+    rows = _strategy_rows(chain, restated=True)
+    names = {row["strategy_name"] for row in rows}
+    block = panel._policy_constant_sensitivity(dependence, rows, names)
+    assert block is not None
+    assert block["classification"] == "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED"
+    assert block["restated_strategies"] == [AI_SERIES]
+    # independent formula: loss = sqrt(v' C v), v = weight * |max drawdown|
+    central = dependence["central_case"]
+    order = [row["series_id"] for row in central["components"]]
+    matrix = np.asarray(central["dependence_matrix"]["values"], dtype=float)
+    adverse = np.asarray(
+        [float(row["adverse_loss_fraction"]) for row in central["components"]]
+    )
+    capital = np.asarray(
+        [
+            float(next(r for r in rows if r["strategy_name"] == n)["systematic_weight"])
+            for n in order
+        ]
+    )
+    weights = capital / capital.sum()
+    vector = weights * adverse
+    assert float(block["sensitivity"]["central_case_loss"]) == pytest.approx(
+        float(np.sqrt(vector @ matrix @ vector)), rel=1e-9, abs=1e-12
+    )
+    policy_weights = np.asarray(
+        [float(r["allocation_weight"]) for r in central["components"]]
+    )
+    policy_vector = policy_weights * adverse
+    assert float(block["policy"]["central_case_loss"]) == pytest.approx(
+        float(np.sqrt(policy_vector @ matrix @ policy_vector)), rel=1e-9, abs=1e-12
+    )
+    assert float(block["policy"]["correlation_one_loss"]) == pytest.approx(
+        float(dependence["correlation_one"]["loss"]), rel=1e-9
+    )
+    # the block is schema-valid in the closed panel schema
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "schemas"
+            / "portfolio"
+            / "control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator(
+        {
+            "$defs": schema["$defs"],
+            **schema["properties"]["dependence_analysis"]["properties"][
+                "policy_constant_sensitivity"
+            ],
+        }
+    ).validate(block)
+
+
+def test_no_sensitivity_without_a_restated_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chain = _chain(tmp_path, monkeypatch, restated=False)
+    rows = _strategy_rows(chain, restated=False)
+    assert (
+        panel._policy_constant_sensitivity(
+            chain["result"]["dependence_modes"]["LIVE_ONLY"],
+            rows,
+            {row["strategy_name"] for row in rows},
+        )
+        is None
+    )
+
+
+def test_the_scope_separates_measurements_from_policy_constants() -> None:
+    assert "dependence_and_correlation" not in strategy_basis.NOT_RESTATED
+    assert strategy_basis.POLICY_CONSTANTS == (
+        "dependence_policy_weight",
+        "dependence_conservative_loss_bound",
+    )
+    assert not set(strategy_basis.NOT_RESTATED) & set(strategy_basis.POLICY_CONSTANTS)

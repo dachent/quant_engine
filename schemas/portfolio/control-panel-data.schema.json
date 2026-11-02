@@ -451,6 +451,41 @@
         "pair_count": { "const": 21 },
         "series_ids": { "type": "array", "minItems": 7, "maxItems": 7, "items": { "type": "string" }, "uniqueItems": true },
         "series_composition": { "type": "object", "additionalProperties": { "type": "object" } },
+        "policy_constant_sensitivity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["classification", "constants", "policy_id", "restated_strategies", "policy", "sensitivity", "statement"],
+          "properties": {
+            "classification": { "const": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED" },
+            "constants": { "type": "array", "items": { "enum": ["allocation_weight", "conservative_loss_fraction"] }, "minItems": 2, "maxItems": 2 },
+            "policy_id": { "const": "PORT-DEPENDENCE-1" },
+            "restated_strategies": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+            "policy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["allocation_weight", "central_case_loss", "correlation_one_loss"],
+              "properties": {
+                "allocation_weight": { "type": "object", "additionalProperties": { "type": "string" } },
+                "central_case_loss": { "type": "string" },
+                "correlation_one_loss": { "type": "string" }
+              }
+            },
+            "sensitivity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["basis", "allocation_weight", "central_case_loss", "correlation_one_loss", "central_case_loss_difference", "correlation_one_loss_difference"],
+              "properties": {
+                "basis": { "const": "RESTATED_CURRENT_CAPITAL_WEIGHT_NORMALIZED_WITHIN_DEPENDENCE_PERIMETER" },
+                "allocation_weight": { "type": "object", "additionalProperties": { "type": "string" } },
+                "central_case_loss": { "type": "string" },
+                "correlation_one_loss": { "type": "string" },
+                "central_case_loss_difference": { "type": "string" },
+                "correlation_one_loss_difference": { "type": "string" }
+              }
+            },
+            "statement": { "type": "string", "minLength": 1 }
+          }
+        },
         "source_sha256": { "$ref": "#/$defs/hash" },
         "weight_authority": {
           "type": "object",

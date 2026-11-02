@@ -4181,6 +4181,148 @@ def _dependence_weight_authority() -> dict[str, str]:
     }
 
 
+def _policy_constant_sensitivity(
+    dependence: Mapping[str, Any],
+    strategies: Sequence[Mapping[str, Any]],
+    series_names: set[str],
+) -> dict[str, Any] | None:
+    """Beside the owner-approved dependence weights, what the restated weights would give.
+
+    The PORT-DEPENDENCE-1 allocation weights and conservative loss fractions are static
+    owner inputs and are never restated.  When a strategy is on its sleeve basis the
+    payload says so and shows, from data, the central-case and conservative-bound losses
+    with the weights replaced by the restated current-capital weights of the dependence
+    strategies, normalized within that perimeter exactly as the policy weights are.  The
+    adverse loss fractions and the dependence matrix are the payload's own (measured on
+    the restated path), so only the weights differ.  ``None`` when nothing is restated.
+    """
+
+    try:
+        basis = import_module("tools.strategy_basis")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        basis = import_module("strategy_basis")
+    restated = sorted(
+        _text(row.get("strategy_name"), "strategy_name")
+        for row in strategies
+        if isinstance(row.get("return_scope"), dict)
+        and row["return_scope"].get("basis") == basis.BASIS_SLEEVE_EPOCH
+        and row.get("strategy_name") in series_names
+    )
+    if not restated:
+        return None
+    central = _object(dependence.get("central_case"), "dependence.central_case")
+    components = _objects(central.get("components"), "central_case.components")
+    matrix = _object(central.get("dependence_matrix"), "central_case.dependence_matrix")
+    values = matrix.get("values")
+    bound = _object(dependence.get("correlation_one"), "dependence.correlation_one")
+    bound_components = {
+        _text(item.get("series_id"), "correlation_one series"): item
+        for item in _objects(bound.get("components"), "correlation_one.components")
+    }
+    weight_by_name = {
+        _text(row.get("strategy_name"), "strategy_name"): row.get("systematic_weight")
+        for row in strategies
+        if row.get("strategy_name") in series_names
+    }
+    names = [_text(item.get("series_id"), "central series") for item in components]
+    if (
+        not isinstance(values, list)
+        or len(values) != len(names)
+        or set(names) != set(weight_by_name)
+        or any(weight_by_name[name] is None for name in names)
+    ):
+        raise ControlPanelValidationError(
+            "policy-constant sensitivity inputs are unavailable"
+        )
+    with localcontext() as context:
+        context.prec = 50
+        capital = {name: Decimal(str(weight_by_name[name])) for name in names}
+        total = sum(capital.values(), Decimal(0))
+        if total <= 0:
+            raise ControlPanelValidationError("restated capital weights are empty")
+        restated_weights = {name: capital[name] / total for name in names}
+        policy_weights = {
+            _text(item.get("series_id"), "central series"): Decimal(
+                str(item.get("allocation_weight"))
+            )
+            for item in components
+        }
+        adverse = {
+            _text(item.get("series_id"), "central series"): Decimal(
+                str(item.get("adverse_loss_fraction"))
+            )
+            for item in components
+        }
+
+        def central_loss(weights: Mapping[str, Decimal]) -> Decimal:
+            vector = [weights[name] * adverse[name] for name in names]
+            quadratic = sum(
+                (
+                    vector[row] * Decimal(str(values[row][column])) * vector[column]
+                    for row in range(len(names))
+                    for column in range(len(names))
+                ),
+                Decimal(0),
+            )
+            return quadratic.sqrt() if quadratic > 0 else Decimal(0)
+
+        def bound_loss(weights: Mapping[str, Decimal]) -> Decimal:
+            return sum(
+                (
+                    weights[name]
+                    * Decimal(str(bound_components[name]["conservative_loss_fraction"]))
+                    for name in names
+                ),
+                Decimal(0),
+            )
+
+        policy_central, policy_bound = (
+            central_loss(policy_weights),
+            bound_loss(policy_weights),
+        )
+        restated_central, restated_bound = (
+            central_loss(restated_weights),
+            bound_loss(restated_weights),
+        )
+    return {
+        "classification": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED",
+        "constants": ["allocation_weight", "conservative_loss_fraction"],
+        "policy_id": DEPENDENCE_POLICY_ID,
+        "restated_strategies": restated,
+        "policy": {
+            "allocation_weight": {
+                n: _number_text(float(policy_weights[n])) for n in names
+            },
+            "central_case_loss": _number_text(float(policy_central)),
+            "correlation_one_loss": _number_text(float(policy_bound)),
+        },
+        "sensitivity": {
+            "basis": "RESTATED_CURRENT_CAPITAL_WEIGHT_NORMALIZED_WITHIN_DEPENDENCE_PERIMETER",
+            "allocation_weight": {
+                n: _number_text(float(restated_weights[n])) for n in names
+            },
+            "central_case_loss": _number_text(float(restated_central)),
+            "correlation_one_loss": _number_text(float(restated_bound)),
+            "central_case_loss_difference": _number_text(
+                float(restated_central - policy_central)
+            ),
+            "correlation_one_loss_difference": _number_text(
+                float(restated_bound - policy_bound)
+            ),
+        },
+        "statement": (
+            "The dependence allocation weights and conservative loss fractions are "
+            "owner-approved policy constants (PORT-DEPENDENCE-1), not restated. "
+            "Shown beside them: the same central-case and conservative-bound losses "
+            "with the weights replaced by the restated current-capital weights of "
+            "the dependence strategies, normalized within the perimeter. The adverse "
+            "loss fractions and correlations are measured on the restated paths."
+        ),
+    }
+
+
 def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
     summary = _summary(report)
     counts = {
@@ -10280,6 +10422,12 @@ def _panel_data(
                         f"{strategy_name}"
                     )
         dependence_analysis = dependence_modes[default_dependence_mode]
+    for mode_payload in dependence_modes.values():
+        sensitivity = _policy_constant_sensitivity(
+            mode_payload, strategies, dependence_strategy_names
+        )
+        if sensitivity is not None:
+            mode_payload["policy_constant_sensitivity"] = sensitivity
     canonical_strategy_series = _canonical_strategy_series_contracts(
         evidence_by_strategy,
         strategy_names,
