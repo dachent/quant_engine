@@ -586,6 +586,15 @@
         "recipe"
       ],
       "builtin": "provider_generations",
+      "config_inputs": {
+        "provider_sources": {
+          "from_ledger": [
+            "{cycle}/ledger-spec.json",
+            "{resolved_cycle}",
+            "{ledger_catalog}"
+          ]
+        }
+      },
       "outputs": [
         "{cycle}/provider-generations.json"
       ]

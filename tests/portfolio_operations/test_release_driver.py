@@ -451,6 +451,15 @@ def _ledger_world(
             {
                 "id": "provider-generations",
                 "builtin": "provider_generations",
+                "config_inputs": {
+                    "provider_sources": {
+                        "from_ledger": [
+                            "{cycle}/ledger-spec.json",
+                            "{resolved_cycle}",
+                            "{ledger_catalog}",
+                        ]
+                    }
+                },
                 "outputs": ["{cycle}/pg.json"],
             }
         ],
@@ -517,6 +526,38 @@ def test_a_ledger_spec_root_that_is_not_the_cycle_manifest_root_is_refused(
     assert _from_ledger(world, graph) == 2
     assert "is not the cycle manifest root" in capsys.readouterr().err
     assert not (world["cycle"] / "pg.json").exists()
+
+
+def test_a_kept_provider_generations_stage_is_refused_when_its_derivation_inputs_changed(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    _config(world, provider_sources="from_ledger")
+    assert _drive(world, graph) == 0
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    recorded = state["stages"]["provider-generations"]["inputs"]
+    assert {Path(path).name for path in recorded} == {
+        "ledger-spec.json",
+        "resolved-cycle.json",
+        "provider-ledger.json",
+    }
+    # unchanged inputs: the completed stage is kept; any changed input refuses the resume
+    assert _drive(world, graph) == 0
+    resolved = world["cycle"] / "resolved-cycle.json"
+    resolved.write_text(resolved.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    assert _drive(world, graph) == 2
+
+
+def test_an_explicit_map_records_no_derivation_inputs(world: dict[str, Any]) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    explicit = world["tmp"] / "typed" / "G1"
+    explicit.mkdir(parents=True)
+    _config(world, provider_sources={"provider-alpaca": str(explicit)})
+    assert _drive(world, graph) == 0
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert state["stages"]["provider-generations"]["inputs"] == {}
 
 
 def test_derived_sources_refuse_when_the_ledger_catalog_admitted_another_generation(
@@ -659,6 +700,16 @@ def test_the_shipped_graph_is_self_consistent() -> None:
     ids = [stage["id"] for stage in graph["stages"]]
     assert len(ids) == len(set(ids))
     assert graph["paths"]["resolved_cycle"] == "{cycle}/resolved-cycle.json"
+    derivation = next(s for s in graph["stages"] if s["id"] == "provider-generations")
+    assert derivation["config_inputs"] == {
+        "provider_sources": {
+            "from_ledger": [
+                "{cycle}/ledger-spec.json",
+                "{resolved_cycle}",
+                "{ledger_catalog}",
+            ]
+        }
+    }
     config_keys = set()
     known = set(graph["paths"]) | set(graph["derive"])
 

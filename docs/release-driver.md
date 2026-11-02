@@ -38,7 +38,8 @@ provider staged in one root and bound from another is refused instead of guessed
 staged ledger catalog (graph path `ledger_catalog`) admitted another generation id for a provider, or when the
 directory is not that generation inside its root (a link leaving the root counts). A provider whose bytes live in
 another root is declared that way in the cycle manifest; the former config key `real_root_overrides` is retired
-and any run configuration that still has it is refused. See `docs/release-ledger-spec.md`. A test fails if the graph starts using a key this list does not name.
+and any run configuration that still has it is refused. In this mode the stage records the ledger spec, the
+resolved cycle and the ledger catalog as inputs (graph key `config_inputs`), so a kept stage is refused when one changed. See `docs/release-ledger-spec.md`. A test fails if the graph starts using a key this list does not name.
 
 ## Probe and release mode
 

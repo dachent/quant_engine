@@ -861,9 +861,25 @@ def check_ready(
             raise Refusal(
                 f"{stage['id']}: {left_template} = {left[:16]} but {right_template} = {right[:16]}"
             )
-    for item in stage.get("inputs", []):
+    for item in stage_inputs(run, stage):
         if not Path(run.expand(item)).exists():
             raise Refusal(f"{stage['id']}: input {run.expand(item)} does not exist")
+
+
+def stage_inputs(run: Run, stage: Mapping[str, Any]) -> list[str]:
+    """Input path templates: the stage's own, plus those it reads only for one run configuration value.
+
+    ``config_inputs`` maps a run configuration key to ``{value: [paths]}``; a string configuration
+    value that is a key of that map adds its paths, so a stage that reads a file only in one mode
+    records (and, when kept, rechecks) that file only then.
+    """
+
+    found = list(stage.get("inputs", []))
+    for key, by_value in stage.get("config_inputs", {}).items():
+        value = run.config.get(key)
+        if isinstance(value, str) and value in by_value:
+            found.extend(by_value[value])
+    return found
 
 
 def _json_path(document: Any, dotted: str) -> Any:
@@ -1406,7 +1422,7 @@ def execute_stage(
             "status": "ok" if not failures else "failed",
             "inputs": {
                 str(Path(run.expand(item))): path_digest(Path(run.expand(item)))
-                for item in stage.get("inputs", [])
+                for item in stage_inputs(run, stage)
             },
             "failures": failures,
             "finished_at": _now(),
