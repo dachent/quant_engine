@@ -882,6 +882,7 @@ def check_ready(
                 f"{stage['id']} would collide with {path}, left by {where}; rerun with --replace"
             )
     check_bound_ids(run, stage)
+    check_inventory(run, stage)
     check_scheme(run, stage)
     check_replica_guard(run, stage)
     run.recheck_release_inputs()
@@ -1145,6 +1146,48 @@ def replica_provider_generations(run: Run, target: Path) -> dict[str, Any]:
     return {"roots": len(rows), "remapped": remapped}
 
 
+def _tree_inventory(root: Path) -> dict[str, str]:
+    return {
+        item.relative_to(root).as_posix(): _file_sha(item)
+        for item in sorted(root.rglob("*"))
+        if item.is_file()
+    }
+
+
+def replica_inventory(run: Run, target: Path) -> dict[str, Any]:
+    """Digest of every file the replica copy produced, written before any later stage can change the tree."""
+
+    root = Path(run.values["replica_workspace"])
+    inventory = _tree_inventory(root)
+    _write_json(target, {"root": str(root), "files": inventory})
+    return {"files": len(inventory)}
+
+
+def check_inventory(run: Run, stage: Mapping[str, Any]) -> None:
+    """The replica tree is still the copy that was inventoried, except for the paths named as expected to change."""
+
+    rule = stage.get("verify_inventory")
+    if rule is None:
+        return
+    recorded = _read_json(Path(run.expand(rule["file"])))["files"]
+    root = Path(run.expand(rule["root"]))
+    skipped = {
+        Path(run.expand(item)).resolve().relative_to(root.resolve()).as_posix()
+        for item in rule.get("except", [])
+    }
+    now = _tree_inventory(root)
+    changed = sorted(
+        name
+        for name in set(recorded) | set(now)
+        if name not in skipped and recorded.get(name) != now.get(name)
+    )
+    if changed:
+        raise Refusal(
+            f"{stage['id']}: the replica no longer matches its copy inventory ({len(changed)} path(s), e.g. {changed[:3]}); "
+            "recopy it with --only replica-copy --replace"
+        )
+
+
 def remove_replica_attestation(run: Run, target: Path) -> dict[str, Any]:
     """Drop the attestation the replica copy brought along: the replica gets its own, written create-only."""
 
@@ -1167,6 +1210,7 @@ _BUILTINS: dict[str, Callable[[Run, Path], dict[str, Any]]] = {
     "provider_generations": provider_generations,
     "replica_provider_generations": replica_provider_generations,
     "remove_replica_attestation": remove_replica_attestation,
+    "replica_inventory": replica_inventory,
 }
 
 
