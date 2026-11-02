@@ -79,9 +79,7 @@ def _dec(value: Any, where: str) -> Decimal:
     return result
 
 
-def derive_sleeve_inputs(
-    facts: Mapping[str, Any], strategy_id: str
-) -> SleeveInputs:
+def derive_sleeve_inputs(facts: Mapping[str, Any], strategy_id: str) -> SleeveInputs:
     """Sleeve beginning capital and daily return per day, from the sleeve facts alone."""
 
     with localcontext() as context:
@@ -214,7 +212,9 @@ def derive_composite(
                         )
                     capital, day_return = known
                 else:
-                    matches = by_reference.get(str(period["return_source_record_id"]), [])
+                    matches = by_reference.get(
+                        str(period["return_source_record_id"]), []
+                    )
                     if len(matches) != 1:
                         return unavailable("UNRESOLVED_RETURN_REFERENCE")
                     capital = Decimal(str(period["beginning_capital_usd"]))
@@ -258,7 +258,9 @@ def compare_published(
     problems: list[str] = []
     for key in ("hwm_numerical_status", "hwm_numerical_reason"):
         if published.get(key) != derived.get(key):
-            problems.append(f"{key}: published {published.get(key)!r}, derived {derived.get(key)!r}")
+            problems.append(
+                f"{key}: published {published.get(key)!r}, derived {derived.get(key)!r}"
+            )
     if derived.get("hwm_numerical_status") == "AVAILABLE":
         for key in ("hwm_index", "hwm_current_drawdown", "hwm_maximum_drawdown"):
             try:

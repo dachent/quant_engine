@@ -187,7 +187,9 @@ def _catalog() -> dict[str, Any]:
     }
 
 
-def _expected_index(weights_by_day: list[list[tuple[Decimal, Decimal]]]) -> dict[str, str]:
+def _expected_index(
+    weights_by_day: list[list[tuple[Decimal, Decimal]]],
+) -> dict[str, str]:
     """Independent composite: capital-weighted day returns, linked, from 1."""
 
     with localcontext() as context:
@@ -208,9 +210,10 @@ def _expected_index(weights_by_day: list[list[tuple[Decimal, Decimal]]]) -> dict
 
 
 def _restated_days() -> list[list[tuple[Decimal, Decimal]]]:
-    sleeve = {row["date"]: (Decimal(base), Decimal(row["return"])) for row, base in zip(
-        _restatement().rows, _restatement().base_navs, strict=True
-    )}
+    sleeve = {
+        row["date"]: (Decimal(base), Decimal(row["return"]))
+        for row, base in zip(_restatement().rows, _restatement().base_navs, strict=True)
+    }
     out = []
     for index, day in enumerate(_days()):
         members = [(PLAIN_CAPITAL, Decimal(PLAIN_RETURNS[index]))]
@@ -310,11 +313,15 @@ def test_restated_rows_without_the_declarations_are_refused_fail_closed() -> Non
 def test_the_reference_is_derived_from_the_row_and_changes_with_it() -> None:
     rows = strategy_basis.hwm_crosswalk_rows(_restatement())
     assert len(rows) == 4 and rows[0]["beginning_capital"] == "300"
-    assert rows[0]["account_reconciliation_sha256"] == strategy_basis.sleeve_return_reference(
+    assert rows[0][
+        "account_reconciliation_sha256"
+    ] == strategy_basis.sleeve_return_reference(
         SLEEVE, "acct-1-s2", "2026-01-05", "300", rows[0]["return"]
     )
     assert len({row["account_reconciliation_sha256"] for row in rows}) == 4
-    assert rows[0]["account_reconciliation_sha256"] != strategy_basis.sleeve_return_reference(
+    assert rows[0][
+        "account_reconciliation_sha256"
+    ] != strategy_basis.sleeve_return_reference(
         SLEEVE, "acct-1-s2", "2026-01-05", "301", rows[0]["return"]
     )
 
@@ -348,9 +355,7 @@ def test_an_envelope_day_the_sleeve_cannot_return_is_refused() -> None:
 
 def test_a_trace_without_base_navs_cannot_restate_the_envelope() -> None:
     restatement = _restatement()
-    bare = strategy_basis.SleeveRestatement(
-        **{**restatement.__dict__, "base_navs": ()}
-    )
+    bare = strategy_basis.SleeveRestatement(**{**restatement.__dict__, "base_navs": ()})
     with pytest.raises(strategy_basis.StrategyBasisError, match="base NAV"):
         strategy_basis.restate_hwm_catalog(_catalog(), {SLEEVE: bare})
 
@@ -368,7 +373,9 @@ def test_tampered_restated_envelope_is_rejected_by_the_contract() -> None:
                 envelope,
                 as_of_date=AS_OF,
                 perimeter=[PLAIN, SLEEVE],
-                crosswalk=crosswalk if crosswalk is not None else basis.catalog["strategy_returns"],
+                crosswalk=crosswalk
+                if crosswalk is not None
+                else basis.catalog["strategy_returns"],
                 artifact_roles=artifact_roles,
                 policy_exclusions={},
                 allocations=basis.catalog["allocations"],
@@ -384,23 +391,43 @@ def test_tampered_restated_envelope_is_rejected_by_the_contract() -> None:
     assert check(envelope) == "PASSED"
 
     forged = copy.deepcopy(envelope)
-    row = next(p for p in forged["periods"] if p["strategy_id"] == SLEEVE and p["date"] == "2026-01-07")
+    row = next(
+        p
+        for p in forged["periods"]
+        if p["strategy_id"] == SLEEVE and p["date"] == "2026-01-07"
+    )
     row["beginning_capital_usd"] = "999"
     assert check(forged) == "CAPITAL_MISMATCH"
 
     forged = copy.deepcopy(envelope)
-    row = next(p for p in forged["periods"] if p["strategy_id"] == SLEEVE and p["date"] == "2026-01-07")
-    row["return_source_record_id"] = _ref(SLEEVE, "2026-01-07")  # the parent's reference
+    row = next(
+        p
+        for p in forged["periods"]
+        if p["strategy_id"] == SLEEVE and p["date"] == "2026-01-07"
+    )
+    row["return_source_record_id"] = _ref(
+        SLEEVE, "2026-01-07"
+    )  # the parent's reference
     assert check(forged) == "UNRESOLVED_RETURN_REFERENCE"
 
     forged = copy.deepcopy(envelope)
-    row = next(p for p in forged["periods"] if p["strategy_id"] == SLEEVE and p["date"] == "2026-01-07")
+    row = next(
+        p
+        for p in forged["periods"]
+        if p["strategy_id"] == SLEEVE and p["date"] == "2026-01-07"
+    )
     row["component_account_ids"] = ["acct-1"]
     assert check(forged) == "COMPONENT_MISMATCH"
 
     forged = copy.deepcopy(envelope)
     forged["periods"].append(
-        {**row, "date": "2026-01-03", "return_source_record_id": None, "beginning_capital_usd": None, "disposition": "UNAVAILABLE"}
+        {
+            **row,
+            "date": "2026-01-03",
+            "return_source_record_id": None,
+            "beginning_capital_usd": None,
+            "disposition": "UNAVAILABLE",
+        }
     )
     assert check(forged) == "KEYSPACE_DIFFERS"
 
@@ -468,10 +495,18 @@ def test_real_r2_governed_index_carries_the_sleeve_path() -> None:
     assert generation["generation_evidence_sha256"].startswith("cec9b530")
     restated = strategy_basis.restatement_from_sleeve_facts(facts, "p123-ai-factor")
     periods = sorted(
-        (p for p in generation["component_periods"] if p["strategy_id"] == "p123-ai-factor"),
+        (
+            p
+            for p in generation["component_periods"]
+            if p["strategy_id"] == "p123-ai-factor"
+        ),
         key=lambda p: p["interval_end"],
     )
     assert [p["interval_end"] for p in periods] == [r["date"] for r in restated.rows]
     for period, row in zip(periods, restated.rows, strict=True):
-        assert abs(Decimal(period["net_return"]) - Decimal(row["return"])) < Decimal("1e-25")
-    assert [Decimal(p["beginning_capital_usd"]) for p in periods[-1:]] == [restated.base_navs[-1]]
+        assert abs(Decimal(period["net_return"]) - Decimal(row["return"])) < Decimal(
+            "1e-25"
+        )
+    assert [Decimal(p["beginning_capital_usd"]) for p in periods[-1:]] == [
+        restated.base_navs[-1]
+    ]

@@ -148,8 +148,16 @@ def catalog() -> dict[str, Any]:
     return {
         "as_of_date": DAYS[-1],
         "source_artifacts": [
-            {"artifact_id": "anchor-1", "schema_name": "hwm-anchor-acceptance", "sha256": "a" * 64},
-            {"artifact_id": "calendar-1", "schema_name": "hwm-calendar-authority-account", "sha256": "b" * 64},
+            {
+                "artifact_id": "anchor-1",
+                "schema_name": "hwm-anchor-acceptance",
+                "sha256": "a" * 64,
+            },
+            {
+                "artifact_id": "calendar-1",
+                "schema_name": "hwm-calendar-authority-account",
+                "sha256": "b" * 64,
+            },
         ],
         "hwm_acceptance_record": {
             "anchor_date": DAYS[0],
@@ -189,7 +197,9 @@ def catalog() -> dict[str, Any]:
     }
 
 
-def _producer(parent: dict[str, Any], the_facts: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+def _producer(
+    parent: dict[str, Any], the_facts: dict[str, Any]
+) -> tuple[dict[str, Any], Any]:
     restated = strategy_basis.restatement_from_sleeve_facts(the_facts, SLEEVE)
     basis = strategy_basis.restate_hwm_catalog(parent, {SLEEVE: restated})
     result = reporter._hwm_numerical_from_envelope(
@@ -253,21 +263,31 @@ def test_a_forged_published_number_is_caught() -> None:
     )
     forged = {**produced, "hwm_maximum_drawdown": "0.5"}
     assert validator.compare_published(forged, derived)
-    assert validator.compare_published({**produced, "hwm_numerical_status": "UNAVAILABLE"}, derived)
+    assert validator.compare_published(
+        {**produced, "hwm_numerical_status": "UNAVAILABLE"}, derived
+    )
 
 
 def test_a_tampered_restated_row_is_caught() -> None:
     parent, the_facts = catalog(), facts()
     _, basis = _producer(parent, the_facts)
     sleeve = validator.derive_sleeve_inputs(the_facts, SLEEVE)
-    rows = [dict(r) for r in basis.catalog["strategy_returns"] if r["strategy_id"] == SLEEVE]
+    rows = [
+        dict(r) for r in basis.catalog["strategy_returns"] if r["strategy_id"] == SLEEVE
+    ]
     rows[0]["beginning_capital"] = "301"
-    assert any("beginning capital" in p for p in validator.compare_restated_rows(sleeve, rows))
-    rows = [dict(r) for r in basis.catalog["strategy_returns"] if r["strategy_id"] == SLEEVE]
+    assert any(
+        "beginning capital" in p for p in validator.compare_restated_rows(sleeve, rows)
+    )
+    rows = [
+        dict(r) for r in basis.catalog["strategy_returns"] if r["strategy_id"] == SLEEVE
+    ]
     rows[1]["account_reconciliation_sha256"] = "0" * 64
     assert any("reference" in p for p in validator.compare_restated_rows(sleeve, rows))
     rows = rows[:-1]
-    assert any("different days" in p for p in validator.compare_restated_rows(sleeve, rows))
+    assert any(
+        "different days" in p for p in validator.compare_restated_rows(sleeve, rows)
+    )
 
 
 def test_validator_refusals_carry_codes() -> None:
@@ -299,7 +319,9 @@ def test_span_receipts_and_absence_give_the_same_states_as_the_report() -> None:
         "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
     }
     bare = {k: v for k, v in parent.items() if k != "hwm_inputs"}
-    assert validator.derive_composite(bare, {}) == reporter._hwm_numerical_from_envelope(bare)
+    assert validator.derive_composite(
+        bare, {}
+    ) == reporter._hwm_numerical_from_envelope(bare)
 
 
 def test_the_validator_imports_nothing_but_the_standard_library() -> None:
@@ -336,11 +358,17 @@ def test_real_r2_validator_matches_the_governed_generation_path() -> None:
     assert generation["generation_evidence_sha256"].startswith("cec9b530")
     sleeve = validator.derive_sleeve_inputs(real, "p123-ai-factor")
     periods = sorted(
-        (p for p in generation["component_periods"] if p["strategy_id"] == "p123-ai-factor"),
+        (
+            p
+            for p in generation["component_periods"]
+            if p["strategy_id"] == "p123-ai-factor"
+        ),
         key=lambda p: p["interval_end"],
     )
     assert [p["interval_end"] for p in periods] == [d for d, _, _ in sleeve.days]
     for period, (_, capital, day_return) in zip(periods, sleeve.days, strict=True):
         assert abs(Decimal(period["net_return"]) - day_return) < Decimal("1e-25")
         # the governed generation states the beginning capital at 4 places on the interval
-        assert abs(Decimal(period["beginning_capital_usd"]) - capital) < Decimal("1e-20")
+        assert abs(Decimal(period["beginning_capital_usd"]) - capital) < Decimal(
+            "1e-20"
+        )
