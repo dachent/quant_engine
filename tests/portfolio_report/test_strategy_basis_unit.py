@@ -305,6 +305,8 @@ def test_recorded_allocations_are_labelled_not_rewritten() -> None:
     assert "value_basis" not in rows[0]
 
 
+# R2 regression reference values (ledger 058f471a): sleeve gross and whole-account value; both
+# are unchanged on the R2.1 lineage (the IBKR NAV rows are equal), only the perimeter moves.
 def _cost_row(**override: Any) -> dict[str, Any]:
     row: dict[str, Any] = {
         "annual_external_cost_usd": "6000",

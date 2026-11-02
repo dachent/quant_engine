@@ -18,6 +18,9 @@ import pytest
 
 import portfolio_control_panel as panel
 
+# Figures here (57,200.88, 77,258.13, 0.1739, 0.1348) are synthetic-equivalent R2 regression
+# references (ledger 058f471a); the sleeve value does not move on the R2.1 lineage, the
+# perimeter and weights do (see branch-m-notes.md, lineage ruling).
 SID = "strat-x"
 SHA = "a" * 64
 
