@@ -37,8 +37,6 @@ _WEIGHT_PRECISION: Final = 34
 # hash-bound artifacts (attribution, dependence, decomposition) that this switch does not
 # rebuild, so the row names them instead of letting them pass for sleeve figures.
 NOT_RESTATED: Final = (
-    "benchmark_comparison",
-    "provider_comparison",
     "implementation_return_attribution",
     "dependence_and_correlation",
     "decomposition_lenses",
@@ -386,6 +384,8 @@ def return_scope(
             "ytd_twr",
             "calendar_year_twr",
             "account_live_cagr",
+            "benchmark_comparison",
+            "provider_comparison",
         ],
         "excludes_retired_sleeve_accounts": sorted(retained_sleeve_accounts),
         "mwr_and_governed_capital_basis": BASIS_SLEEVE_EPOCH,
@@ -405,9 +405,10 @@ def return_scope_label(restatement: SleeveRestatement) -> str:
         f"{restatement.parent_account_id}, from {restatement.opening_date} "
         f"(sleeve NAV with the sleeve's transfers external; the parent's unallocated "
         f"cash and margin and its other sleeves are excluded). MWR and governed "
-        f"capital: the same sleeve. Benchmark and provider comparisons, the "
-        f"implementation bridge, dependence and the decomposition lenses stay on the "
-        f"parent account series."
+        f"capital: the same sleeve. Benchmark and provider comparisons are the "
+        f"sleeve path on the dates it shares with each reference series (the account "
+        f"basis figures are kept beside them, labelled); the implementation bridge, "
+        f"dependence and the decomposition lenses stay on the parent account series."
     )
 
 

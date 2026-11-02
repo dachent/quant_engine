@@ -634,7 +634,14 @@
       "type": "array",
       "minItems": 7,
       "maxItems": 15,
-      "items": { "type": "object" }
+      "items": {
+        "type": "object",
+        "properties": {
+          "benchmark_account_basis": { "$ref": "#/$defs/benchmark_account_basis" },
+          "comparison_basis": { "$ref": "#/$defs/comparison_sleeve_basis" },
+          "provider_account_basis": { "$ref": "#/$defs/provider_account_basis" }
+        }
+      }
     },
     "lifecycle_schema_version": { "const": 1 },
     "strategy_underwriting": {
@@ -1110,6 +1117,411 @@
     }
   ],
   "$defs": {
+    "benchmark_account_basis": {
+      "$comment": "The account-basis comparison of a strategy restated to its sleeve, under the strategy row's own field names (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "parent_account_id"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "benchmark_comparison_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_comparison_disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_comparison_observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "benchmark_comparison_observed_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "benchmark_comparison_observed_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "benchmark_annualization": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "benchmark_comparison_window": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "benchmark_account_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_reference_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_cumulative_gap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_active_return_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_tracking_error_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_information_ratio": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_beta": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_correlation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_upside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_downside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_relative_drawdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "provider_account_basis": {
+      "$comment": "The account-basis comparison of a strategy restated to its sleeve, under the strategy row's own field names (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "parent_account_id"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_comparison_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_comparison_disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_comparison_observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "provider_comparison_observed_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "provider_comparison_observed_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "provider_annualization": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "provider_comparison_window": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "provider_comparison_version_compatibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_account_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_reference_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_cumulative_gap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_active_return_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_tracking_error_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_information_ratio": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_beta": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_correlation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_upside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_downside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_relative_drawdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "comparison_sleeve_closure": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "common_observations",
+        "reference_series_id",
+        "reference_stored_end",
+        "reference_stored_start",
+        "reference_subset_sha256",
+        "sleeve_dates_without_reference",
+        "sleeve_observations_in_window",
+        "window_open_date"
+      ],
+      "properties": {
+        "common_observations": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "reference_series_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_stored_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "reference_stored_start": {
+          "type": "string",
+          "format": "date"
+        },
+        "reference_subset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sleeve_dates_without_reference": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date"
+          }
+        },
+        "sleeve_observations_in_window": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "window_open_date": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "comparison_sleeve_basis": {
+      "$comment": "The basis the comparison fields of a restated strategy row stand on, with the closure of each comparison's pairing (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "benchmark_closure",
+        "label",
+        "opening_date",
+        "parent_account_id",
+        "provider_closure",
+        "sleeve_account_id",
+        "sleeve_series_sha256"
+      ],
+      "properties": {
+        "basis": {
+          "const": "SLEEVE_EPOCH"
+        },
+        "benchmark_closure": {
+          "$ref": "#/$defs/comparison_sleeve_closure"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "opening_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_closure": {
+          "$ref": "#/$defs/comparison_sleeve_closure"
+        },
+        "sleeve_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sleeve_series_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "strategy_basis_attribution_block": {
+      "$comment": "Present only when a strategy-basis declaration restated the comparisons.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "declaration_sha256",
+        "sleeve_facts_sha256",
+        "strategies"
+      ],
+      "properties": {
+        "basis": {
+          "const": "SLEEVE_EPOCH"
+        },
+        "declaration_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sleeve_facts_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
     "custody_handoff_current_capital": {
       "type": "object",
       "additionalProperties": false,
