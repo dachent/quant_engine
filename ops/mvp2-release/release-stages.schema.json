@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "release stage graph (RELEASE-DRIVER-001)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "paths", "derive", "stages"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "description": {"type": "string"},
+    "provider_roots": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "provider_run_sources": {"type": "object", "additionalProperties": {"type": "string"}},
+    "config_paths": {
+      "description": "Run-configuration path keys the driver checks before any stage: existence and containment in the cycle.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {"exists": {"type": "boolean"}, "under": {"type": "string"}}
+      }
+    },
+    "paths": {"type": "object", "additionalProperties": {"type": "string"}},
+    "derive": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "properties": {
+          "single_dir": {"type": "string"},
+          "json_field": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
+          "spec_root": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
+          "spec_node_field": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}, {"type": "string"}], "minItems": 3, "maxItems": 3}
+        },
+        "additionalProperties": false
+      }
+    },
+    "stages": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/stage"}}
+  },
+  "$defs": {
+    "strings": {"type": "array", "items": {"type": "string"}},
+    "argv_item": {
+      "oneOf": [
+        {"type": "string"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["if", "args"],
+          "properties": {"if": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}
+        }
+      ]
+    },
+    "argv": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/argv_item"}},
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        {"required": ["exists"]},
+        {"required": ["json", "path", "equals"]},
+        {"required": ["json", "path", "one_of"]}
+      ],
+      "properties": {
+        "exists": {"type": "string"},
+        "json": {"type": "string"},
+        "path": {"type": "string"},
+        "equals": {},
+        "one_of": {"type": "array", "minItems": 1}
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "oneOf": [{"required": ["argv"]}, {"required": ["builtin"]}],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+        "requires": {"$ref": "#/$defs/strings"},
+        "inputs": {"$ref": "#/$defs/strings"},
+        "outputs": {"$ref": "#/$defs/strings"},
+        "must_not_exist": {"$ref": "#/$defs/strings"},
+        "only_scheme": {"enum": ["git-commit-v1", "git-tree-v2"]},
+        "needs_attestation": {"type": "boolean"},
+        "pinned_inputs": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
+        "predecessor_check": {"type": "object", "additionalProperties": false, "required": ["inputs", "current_release", "panel_current", "workspace"], "properties": {"inputs": {"type": "string"}, "current_release": {"type": "string"}, "panel_current": {"type": "string"}, "workspace": {"type": "string"}}},
+        "expected_baseline": {"type": "object", "additionalProperties": false, "required": ["file", "cutoff"], "properties": {"file": {"type": "string"}, "cutoff": {"type": "string"}}},
+        "pinned_script": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2},
+        "updates": {"$ref": "#/$defs/strings"},
+        "bound_ids": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
+        "assert_equal": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
+        "argv": {"$ref": "#/$defs/argv"},
+        "builtin": {"enum": ["inputs_only", "provider_generations", "replica_provider_generations"]},
+        "env": {"type": "object", "additionalProperties": {"type": "string"}},
+        "expect_rc": {"type": "integer", "minimum": 0},
+        "stdout_to": {"type": "string"},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+        "counters": {"type": "string"},
+        "counter_keys": {"$ref": "#/$defs/strings"},
+        "resume": {
+          "type": "object",
+          "additionalProperties": false,
+          "oneOf": [{"required": ["argv"]}, {"required": ["same_argv"]}],
+          "properties": {"argv": {"$ref": "#/$defs/argv"}, "same_argv": {"const": true}}
+        },
+        "explicit": {"type": "boolean"},
+        "only_mode": {"enum": ["probe", "release"]},
+        "live_guard_keys": {"$ref": "#/$defs/strings"},
+        "guard_spec": {"type": "string"},
+        "pointers_unchanged": {"type": "string"},
+        "snapshot_to": {"type": "string"},
+        "commit_gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["spec", "pointer_snapshot"],
+          "properties": {
+            "spec": {"type": "string"},
+            "pointer_snapshot": {"type": "string"},
+            "replica_receipt": {"type": "string"},
+            "replica_spec": {"type": "string"},
+            "replica_verify": {"$ref": "#/$defs/argv"},
+            "replica_stages": {"$ref": "#/$defs/strings"},
+            "inputs_same": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}}
+          }
+        }
+      }
+    }
+  }
+}
