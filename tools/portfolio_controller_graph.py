@@ -111,6 +111,7 @@ _PATH_STAGES = {
     # Observational stage timings written to stderr and a log file; nothing here is hashed
     # into any delivery artifact, so it affects no stage.
     "packages/core/src/quant_engine/core/stage_timing.py": [],
+    "packages/core/src/quant_engine/core/parallel_hash.py": [],
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
