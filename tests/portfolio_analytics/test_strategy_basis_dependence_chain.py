@@ -40,6 +40,7 @@ AI_SERIES = "AI Factor [P123]"
 OTHER = "qsi"
 OTHER_SERIES = "QSI"
 SLEEVE = "synthetic-account-01-s2"
+TAG_MAP = '{"artifact_id": "nested-strategy-tag-map"}'
 DECLARATION = json.dumps(
     {
         "schema": "strategy-basis-declaration/1",
@@ -95,6 +96,12 @@ def _block(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "declaration_sha256": hashlib.sha256(DECLARATION.encode()).hexdigest(),
         "sleeve_facts": facts.decode(),
         "sleeve_facts_sha256": hashlib.sha256(facts).hexdigest(),
+        # the facts bindings the real builder records (branch K); the history verifier is
+        # stubbed here, so their values only have to be well formed
+        "tag_map": TAG_MAP,
+        "tag_map_sha256": hashlib.sha256(TAG_MAP.encode()).hexdigest(),
+        "parent_account_id": "synthetic-account-01",
+        "parent_ledger_generation_id": "a" * 64,
         "strategies": [
             {
                 "account_id": SLEEVE,
