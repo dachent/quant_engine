@@ -51,6 +51,7 @@ def world(tmp_path: Path) -> dict[str, Any]:
         "run": str(run),
         "code_commit": _git(repo, "rev-parse", "HEAD"),
         "mode": "release",
+        "ceremony": "full",
     }
     config_path = tmp_path / "run.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")

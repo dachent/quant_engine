@@ -148,7 +148,11 @@ class Run:
             raise Refusal(
                 f"run config identity_scheme must be {COMMIT_SCHEME} or {TREE_SCHEME}"
             )
-        self.values.setdefault("ceremony", FULL_CEREMONY)
+        if "ceremony" not in self.values:
+            raise Refusal(
+                f"run config must declare ceremony: {FULL_CEREMONY!r} (real roots are written) "
+                f"or {REPLICA_ONLY!r} (nothing outside the replica is written)"
+            )
         if self.values["ceremony"] not in (FULL_CEREMONY, REPLICA_ONLY):
             raise Refusal(
                 f"run config ceremony must be {FULL_CEREMONY} or {REPLICA_ONLY}"
@@ -182,6 +186,22 @@ class Run:
             json.dumps([bound, graph], sort_keys=True).encode()
         ).hexdigest()
         self.confirmed_release_id: str | None = None
+        # roots a replica-only run must never write into
+        self.real_roots = [
+            Path(str(item))
+            for item in [
+                *config.get("real_roots", []),
+                *(
+                    self.values[key]
+                    for key in (
+                        "source_workspace",
+                        "live_workspace",
+                        "coordination_root",
+                    )
+                    if key in self.values
+                ),
+            ]
+        ]
 
     def _bind_release_inputs(self) -> None:
         """Take the expected baseline from a pinned release-inputs root outside Git.
@@ -429,6 +449,61 @@ def check_script_in_repo(
         raise Refusal(
             f"{stage['id']}: script {script} is outside the run's repository {run.repo}"
         )
+
+
+def mode_line(run: Run) -> str:
+    if run.values["ceremony"] == REPLICA_ONLY:
+        return (
+            "ceremony: replica-only (no write outside the replica; real roots refused)"
+        )
+    return "ceremony: full (real roots may be written)"
+
+
+def _in_real_root(run: Run, path: Path) -> Path | None:
+    for root in run.real_roots:
+        if _inside(path, root):
+            return root
+    return None
+
+
+def check_replica_guard(run: Run, stage: Mapping[str, Any]) -> None:
+    """A replica-only run writes nothing inside a root registered as real, and its replica spec binds none."""
+
+    if run.values["ceremony"] != REPLICA_ONLY:
+        return
+    written = [
+        *(Path(run.expand(item)) for item in stage.get("outputs", [])),
+        *(
+            Path(run.expand(stage[key]))
+            for key in ("stdout_to", "snapshot_to", "state_snapshot_to")
+            if key in stage
+        ),
+        *(Path(run.expand(item)) for item in stage.get("updates", [])),
+        *(Path(run.expand(item)) for item in stage.get("must_not_exist", [])),
+    ]
+    for path in written:
+        root = _in_real_root(run, path)
+        if root is not None:
+            raise Refusal(
+                f"{stage['id']}: replica-only run would write {path}, inside the real root {root}"
+            )
+    if "replica_spec_guard" in stage:
+        spec = _read_json(Path(run.expand(stage["replica_spec_guard"])))
+        replica = Path(run.values["replica_workspace"])
+        bound = [("coordination_root", spec["coordination_root"])]
+        bound += [("state_root", spec.get("state_root", ""))]
+        bound += list(spec["roots"].items())
+        for name, value in bound:
+            if not value:
+                continue
+            real = _in_real_root(run, Path(value))
+            if real is not None or (
+                name != "state_root" and not _inside(Path(value), replica)
+            ):
+                raise Refusal(
+                    f"{stage['id']}: the replica spec binds {name}={value}, outside the replica {replica}"
+                    + (f" (inside the real root {real})" if real else "")
+                )
 
 
 def check_scheme(run: Run, stage: Mapping[str, Any]) -> None:
@@ -760,6 +835,7 @@ def check_ready(
             )
     check_bound_ids(run, stage)
     check_scheme(run, stage)
+    check_replica_guard(run, stage)
     run.recheck_release_inputs()
     check_pinned_inputs(run, stage)
     check_predecessor(run, stage)
@@ -1454,6 +1530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.ids is not None:
                 run.derived.update(_read_json(args.ids))
             recorded = _read_json(args.recorded) if args.recorded else None
+            print(mode_line(run), file=sys.stderr)
             lines, problems = offline_plan(run, selected, recorded)
             print("\n".join(lines))
             for problem in problems:
@@ -1470,6 +1547,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             return 0
         if args.command == "check":
+            print(mode_line(run))
             problems = check_run(run, selected)
             for problem in problems:
                 print(f"refused: {problem}", file=sys.stderr)
@@ -1486,6 +1564,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             for line in stop_own(run) or ["nothing of this run is running"]:
                 print(line)
             return 0
+        print(mode_line(run), flush=True)
         for stage_id in reconcile_state(run):
             print(f"{stage_id}: interrupted earlier; will resume from its own boundary")
         for stage_id in selected:

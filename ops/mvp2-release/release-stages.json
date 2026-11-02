@@ -950,7 +950,8 @@
           "{panel_gid}",
           "{spec_panel_gid}"
         ]
-      ]
+      ],
+      "replica_spec_guard": "{replica_spec}"
     },
     {
       "id": "pack-probe",

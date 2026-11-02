@@ -1286,3 +1286,151 @@ def test_choosing_the_ceremony_does_not_invalidate_stages_that_already_ran(
     assert state["stages"]["one"]["started_at"] == one_started  # kept, not rerun
     _config(world, requested_as_of="2026-01-01")
     assert _drive(world, graph) == 2  # any other config change still invalidates
+
+
+# -- ceremony guard: real mode must be chosen, replica mode never writes a real root --------
+
+
+def _tree(root: Path) -> dict[str, str]:
+    return {
+        p.relative_to(root).as_posix(): driver.path_digest(p) or ""
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def _ceremony_world(world: dict[str, Any]) -> dict[str, Any]:  # noqa: F811
+    real = world["tmp"] / "real-workspace"
+    (real / "dataPortfolio" / "releases").mkdir(parents=True)
+    (real / "dataPortfolio" / "releases" / "CURRENT_RELEASE.json").write_text(
+        '{"release_id": "R"}', encoding="utf-8"
+    )
+    replica = world["tmp"] / "replica" / "_quant_engine"
+    replica.mkdir(parents=True)
+    _config(
+        world,
+        ceremony="replica-only",
+        source_workspace=str(real),
+        replica_workspace=str(replica),
+        coordination_root=str(real / "dataPortfolio" / "releases"),
+    )
+    return {"real": real, "replica": replica}
+
+
+def test_a_run_must_declare_its_ceremony(world: dict[str, Any]) -> None:  # noqa: F811
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    del config["ceremony"]
+    world["config"].write_text(json.dumps(config), encoding="utf-8")
+    graph = _graph(world, [CHAIN[0]])
+    assert _drive(world, graph) == 2
+    assert not (world["cycle"] / "one.txt").exists()
+    _config(world, ceremony="full")
+    assert _drive(world, graph) == 0
+
+
+def test_replica_only_never_writes_a_real_root_and_refuses_before_anything_runs(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    ceremony = _ceremony_world(world)
+    before = _tree(ceremony["real"])
+    good = {
+        "id": "good",
+        "outputs": [str(ceremony["replica"] / "out.txt")],
+        "argv": _write_stage(str(ceremony["replica"] / "out.txt")),
+    }
+    assert _drive(world, _graph(world, [good])) == 0
+    for key in ("outputs", "must_not_exist", "updates"):
+        bad = {
+            "id": "bad",
+            "outputs": ["{cycle}/bad.txt"],
+            "argv": _write_stage("{cycle}/bad.txt"),
+        }
+        bad[key] = [str(ceremony["real"] / "dataPortfolio" / "merge-attestation.json")]
+        if key == "updates":
+            bad["updates"] = [str(ceremony["real"] / "dataPortfolio" / "releases")]
+        assert _drive(world, _graph(world, [bad])) == 2, key
+    snapshot = {
+        "id": "snap",
+        "outputs": ["{cycle}/snap.txt"],
+        "state_snapshot_to": str(ceremony["real"] / "state.json"),
+        "argv": _write_stage("{cycle}/snap.txt"),
+    }
+    assert _drive(world, _graph(world, [snapshot])) == 2
+    assert _tree(ceremony["real"]) == before  # not one byte under the real root changed
+    assert not (world["cycle"] / "bad.txt").exists()
+
+
+def test_a_replica_spec_that_binds_a_real_root_is_refused(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    ceremony = _ceremony_world(world)
+    spec = world["tmp"] / "replica-spec.json"
+
+    def write(coordination: Path, root: Path) -> None:
+        spec.write_text(
+            json.dumps(
+                {
+                    "coordination_root": str(coordination),
+                    "state_root": str(world["cycle"] / "cache"),
+                    "roots": {"portfolio": str(root)},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    stage = {
+        "id": "ceremony",
+        "replica_spec_guard": str(spec),
+        "outputs": ["{cycle}/c.txt"],
+        "argv": _write_stage("{cycle}/c.txt"),
+    }
+    graph = _graph(world, [stage])
+    write(ceremony["real"] / "dataPortfolio" / "releases", ceremony["replica"] / "p")
+    assert _drive(world, graph) == 2  # coordination root is the real one
+    write(ceremony["replica"] / "c", ceremony["real"] / "dataPortfolio")
+    assert _drive(world, graph) == 2  # a release root is the real one
+    write(world["tmp"] / "elsewhere", ceremony["replica"] / "p")
+    assert _drive(world, graph) == 2  # not inside the replica either
+    write(ceremony["replica"] / "c", ceremony["replica"] / "p")
+    assert _drive(world, graph) == 0
+
+
+def test_full_mode_is_unchanged_and_replica_mode_runs_the_same_code_path(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    full = {p.name: p.read_bytes() for p in world["cycle"].glob("*.txt")}
+    assert full == {
+        "one.txt": b"1",
+        "two.txt": b"2",
+    }  # bytes as before the guard existed
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert [s["status"] for s in state["stages"].values()] == ["ok", "ok"]
+    # the same chain under replica-only: the same files from the same code, nothing else differs
+    ceremony = _ceremony_world(world)
+    _config(world, cycle=str(world["tmp"] / "cycle2"))
+    assert _drive(world, graph) == 0
+    again = {p.name: p.read_bytes() for p in (world["tmp"] / "cycle2").glob("*.txt")}
+    assert again == full
+    assert _tree(ceremony["real"]) == {
+        "dataPortfolio/releases/CURRENT_RELEASE.json": driver.path_digest(
+            ceremony["real"] / "dataPortfolio" / "releases" / "CURRENT_RELEASE.json"
+        )
+    }
+
+
+def test_check_and_run_print_which_ceremony_they_are_in(
+    world: dict[str, Any],  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    graph = _graph(world, [CHAIN[0]])
+    args = ["check", "--config", str(world["config"]), "--graph", str(graph)]
+    capsys.readouterr()
+    assert driver.main(args) == 0
+    assert "ceremony: full (real roots may be written)" in capsys.readouterr().out
+    _ceremony_world(world)
+    assert driver.main(args) == 0
+    assert "ceremony: replica-only" in capsys.readouterr().out
+    assert _drive(world, graph) == 0
+    assert "ceremony: replica-only" in capsys.readouterr().out

@@ -185,3 +185,19 @@ Three stale inputs each cost R2 hours; the driver refuses them at the first stag
   The authority itself is re-authored from the cycle's epoch manifest with the retained
   `mk_calendar2.py <first-attempt run dir> <authority.json>` (two passes), then its sha256 is pinned in the
   run config. The driver does not derive it: that needs the epoch stage's output and the adapter internals.
+
+## Ceremony: real roots or replica only
+
+The run config must declare `ceremony`; a run without it is refused, so writing the real roots is never a default.
+
+- `full`: the release path (`attest`, `lanes`, `commit`, `pack-evidence` write or prepare on the real roots).
+- `replica-only`: a rehearsal. The real-root stages are refused (`only_ceremony: full`) and the replica stages run instead:
+  `replica-copy`, `replica-attest` (the attestation goes to the replica coordination root, derived from the real layout),
+  `replica-spec`, `ceremony` (`release_replica.py ceremony`; the receipt is at the path the commit gate reads).
+  Every stage's declared outputs, snapshots and updated paths are refused when they lie inside a root registered as real
+  (`source_workspace`, `live_workspace`, `coordination_root`, plus any `real_roots` in the config), and the `ceremony`
+  stage refuses a replica spec whose coordination, state or release roots are real or outside the replica workspace.
+  Both modes run the same code: the config value only selects which stages apply and which guard is active.
+
+`check`, `run` and `plan --offline` print which ceremony they are in. Switching the ceremony keeps completed stages (it is
+left out of the run binding); any other configuration change invalidates them.

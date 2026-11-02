@@ -35,6 +35,7 @@ def write(OUT: Path) -> None:
         "qa": QA,
         "code_commit": SHA,
         "mode": "release",
+        "ceremony": "full",
         "pipeline_id": "r2-2026-10-27",
         "requested_as_of": "2026-09-17",
         "evaluated_on": "2026-10-27",

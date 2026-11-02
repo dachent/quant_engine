@@ -79,6 +79,7 @@
         "outputs": {"$ref": "#/$defs/strings"},
         "must_not_exist": {"$ref": "#/$defs/strings"},
         "only_scheme": {"enum": ["git-commit-v1", "git-tree-v2"]},
+        "replica_spec_guard": {"type": "string"},
         "only_ceremony": {"enum": ["full", "replica-only"]},
         "needs_attestation": {"type": ["boolean", "string"]},
         "state_snapshot_to": {"type": "string"},
