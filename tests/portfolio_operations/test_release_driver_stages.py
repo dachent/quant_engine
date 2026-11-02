@@ -797,3 +797,45 @@ def test_incident_a_pinned_evidence_file_that_no_longer_matches_is_refused(
         == 2
     )
     assert _drive(world, graph, "--only", "one", "--replace") == 2
+
+
+def test_only_revalidates_a_prerequisites_inputs_and_its_whole_chain(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    source = world["tmp"] / "selected.json"
+    source.write_text("a", encoding="utf-8")
+    stages = [
+        {
+            "id": "one",
+            "inputs": [str(source)],
+            "outputs": ["{cycle}/one.txt"],
+            "argv": _write_stage("{cycle}/one.txt", "1"),
+        },
+        {**CHAIN[1], "id": "two", "requires": ["one"]},
+        {
+            "id": "three",
+            "requires": ["two"],
+            "outputs": ["{cycle}/three.txt"],
+            "argv": _write_stage("{cycle}/three.txt", "3"),
+        },
+    ]
+    graph = _graph(world, stages)
+    assert _drive(world, graph) == 0
+    source.write_text("changed after stage one ran", encoding="utf-8")
+    # `three` requires `two`, which requires `one`: the changed input of `one` refuses it
+    assert _drive(world, graph, "--only", "three", "--replace") == 2
+
+
+def test_state_is_written_atomically_without_leftover_temporaries(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    assert _drive(world, _graph(world, CHAIN)) == 0
+    assert not list(world["cycle"].glob("*.tmp-*"))
+    json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+
+
+def test_the_shipped_graph_tracks_packed_evidence_and_the_pre_chain_inputs() -> None:
+    for stage_id in ("pack-evidence", "pack-probe"):
+        assert _stage(stage_id)["outputs"] == ["{evidence_dest}/manifest.json"]
+    inputs = _stage("pre-chain")["inputs"]
+    assert any("baseline/generations" in item for item in inputs)
