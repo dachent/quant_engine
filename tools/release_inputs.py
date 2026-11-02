@@ -19,13 +19,13 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from quant_engine.core.release_inputs import (
-    CODE_BOUND,
-    POLICY,
-    RELEASE_INPUT,
+from quant_engine.core import (
+    RELEASE_INPUTS_CODE_BOUND as CODE_BOUND,
+    RELEASE_INPUTS_KIND as RELEASE_INPUT,
+    RELEASE_INPUTS_POLICY as POLICY,
     ReleaseInputsError,
-    build_manifest,
-    classify,
+    build_release_inputs_manifest as build_manifest,
+    classify_release_input as classify,
     load_release_inputs,
 )
 
