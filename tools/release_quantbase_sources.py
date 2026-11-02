@@ -120,8 +120,45 @@ def assemble(
     if not isinstance(quantbase, dict) or "generation_id" not in quantbase:
         raise Refusal("the resolved cycle has no providers.quantbase generation")
     wanted = pins(_json(policy_bytes, "policy manifest"))
+    receipt_path = output_dir.with_name(output_dir.name + ".receipt.json")
+
+    def make_receipt(sources: dict[str, str]) -> dict[str, Any]:
+        return {
+            "kind": "qe-release-quantbase-sources-receipt",
+            "schema_version": 1,
+            "cycle_id": resolved.get("cycle_id"),
+            "cutoff": resolved.get("cutoff"),
+            "quantbase_generation_id": quantbase["generation_id"],
+            "policy_manifest_sha256": policy_sha256,
+            "files": {
+                name: {"sha256": wanted[name], "source": sources[name]}
+                for name in sorted(wanted)
+            },
+        }
+
+    def write_receipt(receipt: dict[str, Any]) -> None:
+        partial = receipt_path.with_name(receipt_path.name + ".partial")
+        partial.write_bytes(
+            (json.dumps(receipt, indent=1, sort_keys=True) + "\n").encode("utf-8")
+        )
+        partial.replace(receipt_path)
+
     if output_dir.exists():
-        raise Refusal(f"output directory already exists: {output_dir}")
+        if receipt_path.exists():
+            raise Refusal(f"output directory already exists: {output_dir}")
+        # an earlier run renamed the directory and stopped before its receipt: finish it, but
+        # only when the directory is exactly the pinned set
+        present = {item.name for item in output_dir.iterdir()}
+        if present != set(wanted) or any(
+            hashlib.sha256((output_dir / name).read_bytes()).hexdigest() != sha
+            for name, sha in wanted.items()
+        ):
+            raise Refusal(
+                f"output directory exists without a receipt and is not the pinned set: {output_dir}"
+            )
+        receipt = make_receipt({name: "existing-output" for name in wanted})
+        write_receipt(receipt)
+        return receipt
     pool = _candidates(dirs, zips, set(wanted))
     chosen: dict[str, tuple[str, bytes]] = {}
     problems: list[str] = []
@@ -149,22 +186,8 @@ def assemble(
     except OSError:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    receipt = {
-        "kind": "qe-release-quantbase-sources-receipt",
-        "schema_version": 1,
-        "cycle_id": resolved.get("cycle_id"),
-        "cutoff": resolved.get("cutoff"),
-        "quantbase_generation_id": quantbase["generation_id"],
-        "policy_manifest_sha256": policy_sha256,
-        "files": {
-            name: {"sha256": wanted[name], "source": origin}
-            for name, (origin, _) in sorted(chosen.items())
-        },
-    }
-    receipt_path = output_dir.with_name(output_dir.name + ".receipt.json")
-    receipt_path.write_bytes(
-        (json.dumps(receipt, indent=1, sort_keys=True) + "\n").encode("utf-8")
-    )
+    receipt = make_receipt({name: origin for name, (origin, _) in chosen.items()})
+    write_receipt(receipt)
     return receipt
 
 
@@ -172,6 +195,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resolved-cycle", type=Path, required=True)
     parser.add_argument("--policy-manifest", type=Path)
+    parser.add_argument(
+        "--policy-manifest-sha256", help="pin for an explicit policy file"
+    )
     parser.add_argument("--release-inputs-root", type=Path)
     parser.add_argument("--release-inputs-manifest-sha256")
     parser.add_argument("--source-dir", type=Path, action="append", default=[])
@@ -183,7 +209,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise Refusal(
                 "give exactly one of --policy-manifest and --release-inputs-root"
             )
+        explicit_pin = None
         if args.policy_manifest is not None:
+            # a policy file without a release-inputs pin is bound by an explicit sha256 instead
+            if not args.policy_manifest_sha256:
+                raise Refusal("--policy-manifest needs --policy-manifest-sha256")
+            explicit_pin = args.policy_manifest_sha256.lower()
             policy_file = args.policy_manifest
         else:
             if not args.release_inputs_manifest_sha256:
@@ -203,6 +234,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"release inputs are for cutoff {inputs.cutoff}, the cycle's is {cycle.get('cutoff')}"
                 )
         raw = policy_file.read_bytes()
+        if explicit_pin is not None and hashlib.sha256(raw).hexdigest() != explicit_pin:
+            raise Refusal("policy manifest differs from --policy-manifest-sha256")
         receipt = assemble(
             args.resolved_cycle,
             raw,

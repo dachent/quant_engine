@@ -182,7 +182,19 @@ def build(
             )
         )
 
-    # every input verified: only now do the committed builders write (create-only)
+    # Stage everything first: build every bundle in memory (the builders' own validation of
+    # catalog, source contents and universes) and refuse an existing destination, so a rejected
+    # style input cannot leave the factor bundle behind. Only then does anything write.
+    _, factor_manifest = factors.build_bundle(
+        catalog, source_paths, manifest_paths, started, ended, evaluation
+    )
+    planned = [(out_factors, str(factor_manifest["bundle_id"]))]
+    for out, source, receipt, universes in builds:
+        _, style_manifest = style.build_bundle(catalog, source, receipt, universes)
+        planned.append((out, str(style_manifest["bundle_id"])))
+    for root, bundle_id in planned:
+        if (root.resolve() / bundle_id).exists():
+            raise Refusal(f"bundle already exists: {root / bundle_id}")
     factor_result = factors.write_bundle(
         catalog, source_paths, manifest_paths, out_factors, started, ended, evaluation
     )

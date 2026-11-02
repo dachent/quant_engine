@@ -144,6 +144,12 @@ def test_public_build_end_to_end_matches_the_builders(
         calls.setdefault("style", []).append((catalog, src, man, out, universes))
         return {"bundle_id": "b-s", "destination": str(out / "b-s")}
 
+    monkeypatch.setattr(
+        pub.factors, "build_bundle", lambda *a, **k: ({}, {"bundle_id": "b-f"})
+    )
+    monkeypatch.setattr(
+        pub.style, "build_bundle", lambda *a, **k: ({}, {"bundle_id": "b-s"})
+    )
     monkeypatch.setattr(pub.factors, "write_bundle", fake_factors)
     monkeypatch.setattr(pub.style, "write_bundle", fake_style)
     result = _build(tmp_path, world)
@@ -168,8 +174,12 @@ def test_public_build_end_to_end_matches_the_builders(
 
 
 def test_public_real_builders_run_on_verified_feeds_and_are_create_only(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # the style fixture has its own catalog; only the factor writer is real here
+    monkeypatch.setattr(
+        pub.style, "build_bundle", lambda *a, **k: ({}, {"bundle_id": "b-s"})
+    )
     world = _public_world(tmp_path)
     cycle = _resolved(tmp_path)
     spec = world["spec"]
@@ -193,7 +203,7 @@ def test_public_real_builders_run_on_verified_feeds_and_are_create_only(
     )
     assert Path(result["destination"]).is_dir()
     assert cycle.is_file()
-    with pytest.raises(pub.factors.PublicSourceError, match="already exists"):
+    with pytest.raises(pub.Refusal, match="already exists"):
         _build(
             tmp_path, world, resolved=cycle
         )  # the committed writer never replaces a bundle
@@ -360,6 +370,7 @@ def _qb_main(tmp_path: Path, *extra: str, out: str = "qb-sources") -> int:
         [
             "--resolved-cycle", str(_resolved(tmp_path)),
             "--policy-manifest", str(_policy_file(tmp_path)),
+            "--policy-manifest-sha256", _sha(tmp_path / "policy.json"),
             "--source-dir", str(directory),
             "--source-zip", str(archive),
             "--output-dir", str(tmp_path / out),
@@ -408,7 +419,7 @@ def test_qb_refuses_bad_cycle_and_policy(tmp_path: Path) -> None:
     policy = _policy_file(tmp_path)
 
     def run(cycle: Path, pol: Path, out: str) -> int:
-        return qb.main(["--resolved-cycle", str(cycle), "--policy-manifest", str(pol),
+        return qb.main(["--resolved-cycle", str(cycle), "--policy-manifest", str(pol), "--policy-manifest-sha256", _sha(pol),
                         "--source-dir", str(directory), "--source-zip", str(archive),
                         "--output-dir", str(tmp_path / out)])  # fmt: skip
 
@@ -459,3 +470,55 @@ def test_qb_policy_from_pinned_release_inputs_and_cutoff(tmp_path: Path) -> None
     other.write_text(json.dumps(cycle))
     assert run(other, "badcutoff", pin) == 1
     assert not (tmp_path / "badcutoff").exists()
+
+
+def test_public_stages_all_bundles_before_writing_any(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A style input the builder rejects must not leave the factor bundle behind."""
+
+    world = _public_world(tmp_path)
+    written: list[str] = []
+    monkeypatch.setattr(
+        pub.factors, "build_bundle", lambda *a, **k: ({}, {"bundle_id": "b-f"})
+    )
+
+    def reject(*args: Any, **kwargs: Any) -> Any:
+        raise pub.style.StyleSourceError("rejected style source")
+
+    monkeypatch.setattr(pub.style, "build_bundle", reject)
+    monkeypatch.setattr(
+        pub.factors, "write_bundle", lambda *a, **k: written.append("factors")
+    )
+    with pytest.raises(pub.style.StyleSourceError):
+        _build(tmp_path, world)
+    assert written == []
+
+
+def test_qb_explicit_policy_needs_its_pin(tmp_path: Path) -> None:
+    directory, archive = _candidates(tmp_path)
+    policy = _policy_file(tmp_path)
+    base = [
+        "--resolved-cycle", str(_resolved(tmp_path)),
+        "--policy-manifest", str(policy),
+        "--source-dir", str(directory),
+        "--source-zip", str(archive),
+    ]  # fmt: skip
+    assert qb.main([*base, "--output-dir", str(tmp_path / "a")]) == 1  # no pin
+    wrong = ["--policy-manifest-sha256", "0" * 64]
+    assert qb.main([*base, *wrong, "--output-dir", str(tmp_path / "b")]) == 1
+    assert not (tmp_path / "a").exists() and not (tmp_path / "b").exists()
+
+
+def test_qb_finishes_an_interrupted_run_only_for_the_pinned_set(tmp_path: Path) -> None:
+    assert _qb_main(tmp_path) == 0
+    out = tmp_path / "qb-sources"
+    receipt = tmp_path / "qb-sources.receipt.json"
+    receipt.unlink()  # the crash between the directory rename and the receipt
+    assert _qb_main(tmp_path) == 0
+    done = json.loads(receipt.read_text())
+    assert {v["source"] for v in done["files"].values()} == {"existing-output"}
+    receipt.unlink()
+    (out / "accounts.csv").write_bytes(b"tampered")
+    assert _qb_main(tmp_path) == 1  # not the pinned set: refuse, never complete it
+    assert not receipt.exists()
