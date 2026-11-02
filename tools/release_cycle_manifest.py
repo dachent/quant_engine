@@ -103,18 +103,28 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
             f"cutoff {manifest['cutoff']} is after evaluated_on {manifest['evaluated_on']}",
         )
     for provider_id, provider in manifest["providers"].items():
-        needs = provider["finality_source"] == CYCLE_MANIFEST_NATIVE
+        needs = provider["finality_source"] != GENERATION_MANIFEST
         has = "finality_evidence" in provider
         if needs and not has:
             raise CycleManifestError(
                 "FINALITY_EVIDENCE_REQUIRED",
-                f"{provider_id} needs a native finality-evidence file in the cycle manifest",
+                f"{provider_id} needs a finality-evidence file in the cycle manifest",
             )
         if has and not needs:
             raise CycleManifestError(
                 "FINALITY_EVIDENCE_NOT_ALLOWED",
                 f"{provider_id} finality evidence is "
                 f"{provider['finality_source'].lower()}, not a cycle-manifest file",
+            )
+        if needs and "finalized_through" not in provider:
+            raise CycleManifestError(
+                "FINALIZED_THROUGH_REQUIRED",
+                f"{provider_id} needs a declared finalized_through date",
+            )
+        if not needs and "finalized_through" in provider:
+            raise CycleManifestError(
+                "FINALIZED_THROUGH_NOT_ALLOWED",
+                f"{provider_id} finality is its generation manifest; the date is derived",
             )
     for what, ref in _refs(manifest):
         _relative_parts(ref["relative"], what)
@@ -267,13 +277,13 @@ def _generation(
     source = provider["finality_source"]
     if source == GENERATION_MANIFEST:
         evidence: dict[str, Any] | None = dict(manifest)
-    elif source == CYCLE_MANIFEST_NATIVE:
+    else:
         evidence = _pin(
             provider["finality_evidence"], roots, f"{what} finality evidence"
         )
-    else:
-        evidence = None
     return {
+        "qualification": provider["qualification"],
+        "finalized_through": provider.get("finalized_through"),
         "root": root.as_posix(),
         "generation_id": generation_id,
         "generation_dir": directory.as_posix(),

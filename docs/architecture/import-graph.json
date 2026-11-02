@@ -564,6 +564,16 @@
       1
     ],
     [
+      "release_ledger_spec",
+      "provider_ledger",
+      1
+    ],
+    [
+      "release_ledger_spec",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "release_public_bundles",
       "portfolio_public_decomposition_sources",
       1
