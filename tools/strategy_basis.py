@@ -42,7 +42,6 @@ NOT_RESTATED: Final = (
     "implementation_return_attribution",
     "dependence_and_correlation",
     "decomposition_lenses",
-    "hwm_numerical_envelope",
     "allocation_history",
 )
 
@@ -66,6 +65,8 @@ class SleeveRestatement:
     assignment_id: str
     effective_start: str
     effective_end: str | None
+    # the sleeve's prior closing NAV of each row (the link's base NAV), aligned with `rows`
+    base_navs: tuple[Decimal, ...] = ()
 
 
 def load_declaration(raw: bytes) -> dict[str, str]:
@@ -156,6 +157,11 @@ def sleeve_restatement(
         assignment_id=f"derived-sleeve:{account_id}:{effective_start or opening}",
         effective_start=effective_start or opening,
         effective_end=effective_end,
+        base_navs=(
+            tuple(_decimal(link["base_nav"], "sleeve base NAV") for link in links)
+            if all("base_nav" in link for link in links)
+            else ()
+        ),
     )
 
 
@@ -624,3 +630,153 @@ def rows_from_sleeve_facts(
             facts, strategy_id, sleeve_id=sleeve_id, provider_id=provider_id
         ).rows
     ]
+
+
+# --- The legacy HWM numerical envelope on the sleeve basis (#624 option B, branch H) ---
+#
+# `hwm_inputs` (PORT-HWM-3) binds each (strategy, date) period to a baseline rollforward
+# row by `account_reconciliation_sha256` and states the period's beginning capital.  A
+# restated sleeve has no baseline row, so both are re-derived from the sleeve's own
+# trace: the beginning capital is the sleeve's prior closing NAV (the link's base NAV)
+# and the return reference is a hash over the sleeve row itself.  A restated strategy is
+# a member from its first sleeve return date (the sleeve did not exist before it), and the
+# owner's allocation snapshot, which records the parent account, is no endpoint of the
+# sleeve: the endpoint check stays on the baseline's parent rows, where it was proven.
+
+HWM_REFERENCE_SCHEMA: Final = "sleeve-return-reference/1"
+
+
+@dataclass(frozen=True)
+class HwmBasis:
+    """The catalog the legacy HWM envelope is computed from, with its sleeve declarations."""
+
+    catalog: Mapping[str, Any]
+    membership_starts: Mapping[str, date]
+    endpoint_exempt: frozenset[str]
+
+
+def sleeve_return_reference(
+    strategy_id: str,
+    account_id: str,
+    day: str,
+    beginning_capital: str,
+    period_return: str,
+) -> str:
+    """Data-derived return reference of one sleeve row: sha256 of its canonical JSON."""
+
+    payload = {
+        "schema": HWM_REFERENCE_SCHEMA,
+        "strategy_id": strategy_id,
+        "account_id": account_id,
+        "date": day,
+        "beginning_capital": beginning_capital,
+        "return": period_return,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def hwm_crosswalk_rows(restatement: SleeveRestatement) -> list[dict[str, Any]]:
+    """The sleeve's rows in the shape of a baseline rollforward row (capital and reference)."""
+
+    if len(restatement.base_navs) != len(restatement.rows):
+        raise StrategyBasisError(
+            f"sleeve trace carries no base NAV per row: {restatement.strategy_id}"
+        )
+    rows: list[dict[str, Any]] = []
+    for row, base in zip(restatement.rows, restatement.base_navs, strict=True):
+        capital = decimal_text(base)
+        rows.append(
+            {
+                **row,
+                "beginning_capital": capital,
+                "component_account_count": 1,
+                "account_reconciliation_sha256": sleeve_return_reference(
+                    restatement.strategy_id,
+                    restatement.account_id,
+                    str(row["date"]),
+                    capital,
+                    str(row["return"]),
+                ),
+            }
+        )
+    return rows
+
+
+def restate_hwm_catalog(
+    catalog: Mapping[str, Any],
+    restatements: Mapping[str, SleeveRestatement],
+) -> HwmBasis:
+    """The catalog's HWM envelope and crosswalk with each restated strategy on its sleeve.
+
+    A catalog without an envelope is returned as it is: there is nothing to restate and
+    the numerical state is the one the envelope's absence gives.
+    """
+
+    raw = catalog.get("hwm_inputs")
+    if raw is None or not restatements:
+        return HwmBasis(catalog, {}, frozenset())
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("periods"), list):
+        raise StrategyBasisError("hwm_inputs has no periods to restate")
+    periods: list[dict[str, Any]] = [dict(item) for item in raw["periods"]]
+    crosswalk = [dict(item) for item in catalog.get("strategy_returns", [])]
+    starts: dict[str, date] = {}
+    for strategy_id in sorted(restatements):
+        restatement = restatements[strategy_id]
+        sleeve_rows = hwm_crosswalk_rows(restatement)
+        if not sleeve_rows:
+            raise StrategyBasisError(f"sleeve has no rows: {strategy_id}")
+        by_day = {str(row["date"]): row for row in sleeve_rows}
+        first = min(by_day)
+        starts[strategy_id] = date.fromisoformat(first)
+        kept: list[dict[str, Any]] = []
+        for period in periods:
+            if period.get("strategy_id") != strategy_id:
+                kept.append(period)
+                continue
+            day = str(period.get("date"))
+            if day < first:
+                continue  # the sleeve did not exist: not a member yet
+            row = by_day.get(day)
+            available = period.get("disposition") == "AVAILABLE"
+            if row is None:
+                if available:
+                    raise StrategyBasisError(
+                        f"envelope admits {strategy_id} on {day} but the sleeve has no "
+                        "return that day"
+                    )
+                kept.append(period)
+                continue
+            if not available or period.get("lane") != "ACCOUNT":
+                raise StrategyBasisError(
+                    f"sleeve of {strategy_id} returns on {day}, which the envelope does "
+                    "not admit as an account-lane period"
+                )
+            kept.append(
+                {
+                    **period,
+                    "beginning_capital_usd": row["beginning_capital"],
+                    "return_source_record_id": row["account_reconciliation_sha256"],
+                    "component_account_ids": [restatement.account_id],
+                }
+            )
+        periods = kept
+        crosswalk = [
+            item
+            for item in crosswalk
+            if not (
+                item.get("strategy_id") == strategy_id
+                and item.get("evidence_layer") == "ACCOUNT_LIVE"
+            )
+        ]
+        crosswalk.extend(sleeve_rows)
+    return HwmBasis(
+        {
+            **catalog,
+            "hwm_inputs": {**raw, "periods": periods},
+            "strategy_returns": crosswalk,
+        },
+        starts,
+        frozenset(restatements),
+    )
