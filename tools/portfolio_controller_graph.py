@@ -139,6 +139,9 @@ _PATH_STAGES = {
     # run reads; produces no delivery artifact.
     "packages/core/src/quant_engine/core/release_inputs.py": [],
     "tools/release_inputs.py": [],
+    # B7 builders: write input bundles/sources the release stages consume; no delivery artifact.
+    "tools/release_public_bundles.py": [],
+    "tools/release_quantbase_sources.py": [],
     "tools/release_cache_base.py": [],
     "tools/release_measurements.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
