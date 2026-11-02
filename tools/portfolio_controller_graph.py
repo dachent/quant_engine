@@ -188,6 +188,9 @@ _PATH_STAGES = {
     "tools/release_driver.py": [],
     "tools/release_cycle_manifest.py": [],
     "tools/release_ledger_spec.py": [],
+    # Layered history, dependence and attribution feed the attribution stage and every
+    # stage after it.
+    "tools/release_pre_chain.py": list(_STAGE_ORDER[2:]),
     "schemas/portfolio/release-cycle-manifest.schema.json": [],
     "schemas/portfolio/release-resolved-cycle.schema.json": [],
     "tools/release_restore_world.py": [],
