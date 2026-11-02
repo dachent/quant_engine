@@ -17,7 +17,7 @@ value is:
 At promotion under ``git-tree-v2`` the code that is *executing* is verified too,
 not only the checkout the spec names (``verify_executing_code``): the git checkout
 that owns each loaded module must have the attested tree, be clean, and every loaded
-file must equal the attested tree's blob. The path is irrelevant (a second worktree
+file and tracked python source must equal the attested tree's blob. The path is irrelevant (a second worktree
 of the same tree is the same code); a different tree, a dirty tree, an untracked
 python file, a modified loaded file, or a non-git copy is refused.
 
@@ -304,32 +304,62 @@ def _verify_checkout(top: Path, files: list[Path], claimed: str) -> None:
         raise ExecutingCodeError(
             EXECUTING_TRACKED_MODIFIED, f"checkout has a modified tracked file {path}"
         )
+    # Ignored python under the package/tool directories is invisible to status but
+    # importable (the tools are loaded by path after the gate): refuse it too.
+    ignored = _git_bytes(
+        top,
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--",
+        "packages",
+        "tools",
+    )
+    for entry in ignored.split(b"\0"):
+        path = entry.decode("utf-8", errors="replace")
+        if path.lower().endswith(".py"):
+            raise ExecutingCodeError(
+                EXECUTING_UNTRACKED_PYTHON, f"has an ignored python file {path}"
+            )
     blobs = _tracked_blobs(top)
-    relatives: list[str] = []
+    loaded: set[str] = set()
     for file in files:
         try:
-            relatives.append(file.relative_to(top).as_posix())
+            loaded.add(file.relative_to(top).as_posix())
         except ValueError as exc:
             raise ExecutingCodeError(
                 EXECUTING_UNIDENTIFIED, f"file {file} is outside its checkout"
             ) from exc
+    # Every tracked python source is checked, not only the modules loaded so far:
+    # the promotion path loads further tools by path after this gate, and a file
+    # hidden from status (assume-unchanged, skip-worktree) must not be runnable.
+    relatives = sorted(loaded | {path for path in blobs if path.endswith(".py")})
+    for relative in relatives:
+        if not (top / relative).is_file():
+            raise ExecutingCodeError(
+                EXECUTING_FILE_DIFFERS, f"source file {relative} is missing"
+            )
     hashed = (
         _git_bytes(
             top,
             "hash-object",
             "--stdin-paths",
-            stdin=("\n".join(str(file) for file in files) + "\n").encode("utf-8"),
+            stdin=("\n".join(str(top / name) for name in relatives) + "\n").encode(
+                "utf-8"
+            ),
         )
         .decode("ascii")
         .split()
     )
-    if len(hashed) != len(files):
+    if len(hashed) != len(relatives):
         raise ExecutingCodeError(EXECUTING_UNIDENTIFIED, "file hashing is incomplete")
     for relative, actual in zip(relatives, hashed, strict=True):
         if blobs.get(relative) != actual:
             raise ExecutingCodeError(
                 EXECUTING_FILE_DIFFERS,
-                f"loaded file {relative} is not the attested tree's content",
+                f"source file {relative} is not the attested tree's content",
             )
 
 
@@ -338,8 +368,10 @@ def verify_executing_code(claimed_tree: str, files: tuple[Path, ...]) -> None:
 
     ``files`` are the loaded source files (``executing_code_files``). Every
     distinct git checkout that owns one must have ``HEAD^{tree}`` equal to
-    ``claimed_tree``, no modified tracked file, no untracked python file, and every
-    loaded file byte-equal (git blob hash) to the attested tree's file. A second
+    ``claimed_tree``, no modified tracked file, no untracked python file (and no
+    ignored python under ``packages``/``tools``), and every loaded file and every
+    tracked ``*.py`` byte-equal (git blob hash) to the attested tree's file, since
+    the promotion path also loads tools by path after this gate. A second
     worktree of the same tree is the same code and is accepted; a different tree,
     a dirty tree or a modified loaded file is refused wherever it lives.
 

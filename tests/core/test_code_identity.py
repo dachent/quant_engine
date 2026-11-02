@@ -398,6 +398,8 @@ def test_pipeline_runtime_gate_enforces_scheme_and_attestation(
 def code_repo(repo: Path) -> Path:
     """A repository whose tree carries a python module (the "running code")."""
     (repo / "pkg").mkdir()
+    (repo / "tools").mkdir()
+    commit_file(repo, "tools/verifier.py", "OK = True\n", "tool loaded by path later")
     commit_file(repo, "pkg/mod.py", "VALUE = 1\n", "module")
     return repo
 
@@ -501,6 +503,44 @@ def test_executing_code_refuses_a_loaded_ignored_file_that_is_not_in_the_tree(
     # An ignored file is invisible to status but, when loaded, must be in the tree.
     assert git(second, "status", "--porcelain") == ""
     assert refusal(tree, (second / "ignored.py",)).code == ci.EXECUTING_FILE_DIFFERS
+
+
+def test_executing_code_refuses_a_hidden_modification_of_a_not_yet_loaded_tool(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    # The promotion path loads tools by path after the gate, so every tracked python
+    # source is verified, whatever git status flags say.
+    tree = ci.head_tree(code_repo)
+    module = Path("pkg") / "mod.py"
+    for index, flag in enumerate(("--assume-unchanged", "--skip-worktree")):
+        second = worktree(code_repo, tmp_path, f"wt-hidden{index}")
+        git(second, "update-index", flag, "tools/verifier.py")
+        (second / "tools" / "verifier.py").write_bytes(b"OK = False\n")
+        assert git(second, "status", "--porcelain") == ""
+        err = refusal(tree, (second / module,))
+        assert err.code == ci.EXECUTING_FILE_DIFFERS
+        assert "tools/verifier.py" in str(err)
+    deleted = worktree(code_repo, tmp_path, "wt-deleted")
+    git(deleted, "update-index", "--skip-worktree", "tools/verifier.py")
+    (deleted / "tools" / "verifier.py").unlink()
+    assert refusal(tree, (deleted / module,)).code == ci.EXECUTING_FILE_DIFFERS
+
+
+def test_executing_code_refuses_ignored_python_under_tools_and_packages(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    second = worktree(code_repo, tmp_path)
+    exclude = Path(
+        git(second, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    )
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_bytes(b"shadow.py\n")
+    (second / "tools" / "shadow.py").write_bytes(b"import os\n")
+    assert git(second, "status", "--porcelain") == ""
+    assert refusal(tree, (second / "pkg" / "mod.py",)).code == (
+        ci.EXECUTING_UNTRACKED_PYTHON
+    )
 
 
 def test_executing_code_refuses_non_git_copies_equal_or_not(
