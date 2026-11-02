@@ -690,7 +690,7 @@ def exclusion_disclosure(
         "statement": (
             f"The governed provider ledger excludes Portfolio123 live returns "
             f"(disposition {fields['action']} of {fields['data_class']}, policy "
-            f"{fields['policy_id']} version of {fields['policy_owner']}, effective from "
+            f"{fields['policy_id']} owned by {fields['policy_owner']}, effective from "
             f"{fields['policy_effective_start']}, reason {fields['reason']}, authority "
             f"{fields['authority_ref']}). This model comparison therefore reads the "
             f"pinned performance export of the model book (sha256 "
