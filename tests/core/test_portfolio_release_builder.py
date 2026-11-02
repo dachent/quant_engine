@@ -2491,13 +2491,16 @@ def test_generation_id_requires_canonical_hash(value: object) -> None:
         (False, None, "UNKNOWN"),
     ),
 )
+@pytest.mark.parametrize("lens_workers", ("1", "4"))
 def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     include_hybrid: bool,
     reused: bool | None,
     expected_warm_status: str,
+    lens_workers: str,
 ) -> None:
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, lens_workers)
     recipe_root = tmp_path / "recipe-fixture"
     recipe_root.mkdir()
     recipe = _recipe(recipe_root)
@@ -2672,9 +2675,19 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
         and call[1] in {"stage", "publish"}
     ]
     operations = result["numerical_producer_evidence"]["operations"]
-    assert [(row["tool"], row["operation"]) for row in operations] == [
-        (call[0], call[1]) for call in numerical_calls
-    ]
+    recorded = [(row["tool"], row["operation"]) for row in operations]
+    executed = [(call[0], call[1]) for call in numerical_calls]
+    if lens_workers == "1":
+        assert recorded == executed
+    else:
+        # Concurrent lens builds interleave their calls; the recorded operations
+        # stay in declared order, each lens contributing its stage then publish.
+        assert sorted(recorded) == sorted(executed)
+        lens_operations = recorded[2:-2]
+        assert lens_operations == [
+            ("portfolio_decomposition.py", "stage"),
+            ("portfolio_decomposition.py", "publish"),
+        ] * (len(lens_operations) // 2)
     assert all(row["producer_result"].get("reused") is reused for row in operations)
     assert all(len(row["source_identity"]["spec_sha256"]) == 64 for row in operations)
     assert result["numerical_producer_evidence"]["warm_status"] == expected_warm_status
@@ -5931,3 +5944,90 @@ def test_expected_model_annualisation_comes_from_the_base_spec_not_a_literal() -
     assert builder._declared_periods({"Strategy 0": 52}, "Strategy 0") == 52
     with pytest.raises(builder.VerticalBuildError, match="periods_per_year"):
         builder._declared_periods({"Strategy 0": 252}, "Strategy 1")
+
+
+def test_lens_builds_overlap_but_results_keep_declared_order() -> None:
+    import threading
+    import time
+
+    items = [
+        (Path(f"bundle-{index}"), {"sha256": f"{index:064x}"}) for index in range(6)
+    ]
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def build(bundle: Path, row: dict[str, str]) -> tuple[str, list[dict[str, object]]]:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        # Later lenses finish first, so completion order is not declared order.
+        time.sleep(0.05 * (len(items) - int(row["sha256"], 16)))
+        with guard:
+            active -= 1
+        return bundle.name, [{"lens": bundle.name}]
+
+    results = list(builder._build_lenses(items, build, workers=3))
+    assert [name for name, _ in results] == [bundle.name for bundle, _ in items]
+    assert peak >= 2
+    assert list(builder._build_lenses(items, build, workers=1)) == results
+
+
+def test_lens_builds_with_the_same_spec_bytes_never_run_together() -> None:
+    import threading
+    import time
+
+    digest = "a" * 64
+    items = [
+        (Path("one"), {"sha256": digest}),
+        (Path("two"), {"sha256": digest}),
+        (Path("three"), {"sha256": "b" * 64}),
+    ]
+    running: set[str] = set()
+    overlapped = []
+    guard = threading.Lock()
+
+    def build(bundle: Path, row: dict[str, str]) -> tuple[str, list[dict[str, object]]]:
+        with guard:
+            if row["sha256"] in running:
+                overlapped.append(bundle.name)
+            running.add(row["sha256"])
+        time.sleep(0.05)
+        with guard:
+            running.discard(row["sha256"])
+        return bundle.name, []
+
+    list(builder._build_lenses(items, build, workers=3))
+    assert overlapped == []
+
+
+def test_lens_build_failure_stops_the_walk_and_propagates() -> None:
+    items = [
+        (Path(f"bundle-{index}"), {"sha256": f"{index:064x}"}) for index in range(5)
+    ]
+
+    def build(bundle: Path, row: dict[str, str]) -> tuple[str, list[dict[str, object]]]:
+        if bundle.name == "bundle-2":
+            raise builder.VerticalBuildError("lens failed")
+        return bundle.name, []
+
+    with pytest.raises(builder.VerticalBuildError, match="lens failed"):
+        list(builder._build_lenses(items, build, workers=3))
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "many", ""))
+def test_lens_worker_count_rejects_a_non_positive_setting(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, value)
+    with pytest.raises(builder.VerticalBuildError, match="positive integer"):
+        builder._lens_worker_count(5)
+
+
+def test_lens_worker_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, "64")
+    assert builder._lens_worker_count(26) == 8
+    assert builder._lens_worker_count(3) == 3
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, "1")
+    assert builder._lens_worker_count(26) == 1
