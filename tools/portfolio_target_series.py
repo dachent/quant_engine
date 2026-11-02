@@ -319,6 +319,201 @@ def _require_trusted_layered_history_dependencies(
         raise TargetSeriesError("layered history imported core dependency differs")
 
 
+# A strategy-basis restatement (issue #624) runs two more repository modules.  They are
+# pinned only for a generation that carries one, so every generation without a
+# declaration keeps exactly the dependency set it had.
+STRATEGY_BASIS_CODE: Final = (
+    "tools/strategy_basis.py",
+    "tools/account_strategy_manifest.py",
+)
+STRATEGY_BASIS_BLOCK: Final = "strategy_basis_restatement"
+
+
+def _strategy_basis_module(repository_sha: str) -> Any:
+    """Import ``strategy_basis`` after proving its code is the recorded commit's."""
+
+    repository_root = Path(__file__).resolve().parents[1]
+    for relative_path in STRATEGY_BASIS_CODE:
+        try:
+            completed = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository_root),
+                    "show",
+                    f"{repository_sha}:{relative_path}",
+                ],
+                capture_output=True,
+                check=False,
+                env=_clean_git_environment(),
+                timeout=10,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            raise TargetSeriesError(
+                "strategy basis committed dependency is unavailable"
+            ) from exc
+        path = repository_root.joinpath(*relative_path.split("/"))
+        if completed.returncode != 0:
+            raise TargetSeriesError(
+                "strategy basis committed dependency is unavailable"
+            )
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest()
+            != hashlib.sha256(completed.stdout).hexdigest()
+        ):
+            raise TargetSeriesError(
+                f"layered history repository dependency differs: {relative_path}",
+                kind="staleness",
+            )
+    try:
+        import strategy_basis
+    except ImportError as exc:
+        raise TargetSeriesError("strategy basis module is unavailable") from exc
+    return strategy_basis
+
+
+def _restated_live_rows(
+    *,
+    declaration: bytes,
+    facts: bytes,
+    repository_sha: str,
+    series_by_strategy: Mapping[str, str],
+    original_rows: Mapping[str, Sequence[Mapping[str, str]]],
+    accepted_as_of: date,
+    provider_generations: object,
+    tag_map: bytes | None,
+) -> tuple[dict[str, list[dict[str, str]]], dict[str, object]]:
+    """The sleeve live segment of every declared strategy, and the block that binds it.
+
+    One derivation serves the builder and the verifier: the declared strategy's
+    ACCOUNT_LIVE rows are the open derived sleeve's own return path, computed from the
+    sleeve facts alone (``strategy_basis.rows_from_sleeve_facts``), never read from the
+    parent account's rows.  A declared strategy without exactly one open derived sleeve,
+    or without a ledger series to replace, is refused.
+    """
+
+    basis = _strategy_basis_module(repository_sha)
+    try:
+        declared = basis.load_declaration(declaration)
+    except basis.StrategyBasisError as exc:
+        raise TargetSeriesError(f"strategy basis declaration refused: {exc}") from exc
+    try:
+        bindings = basis.require_facts_bindings(
+            facts, provider_generations=provider_generations, tag_map=tag_map
+        )
+    except basis.StrategyBasisError as exc:
+        raise TargetSeriesError(f"strategy basis facts refused: {exc}") from exc
+    assert tag_map is not None
+    restated: dict[str, list[dict[str, str]]] = {}
+    identities: list[dict[str, object]] = []
+    for strategy_id in sorted(declared):
+        series_id = series_by_strategy.get(strategy_id)
+        originals = original_rows.get(strategy_id) or ()
+        conventions = {(row["return_basis"], row["return_type"]) for row in originals}
+        if series_id is None or not originals or len(conventions) != 1:
+            raise TargetSeriesError(
+                f"declared strategy has no provider-ledger live series: {strategy_id}"
+            )
+        return_basis, return_type = next(iter(conventions))
+        try:
+            restatement = basis.restatement_from_sleeve_facts(facts, strategy_id)
+        except basis.StrategyBasisError as exc:
+            raise TargetSeriesError(
+                f"strategy basis restatement refused: {exc}"
+            ) from exc
+        rows = [
+            {
+                "series_id": series_id,
+                "date": row["date"],
+                "return": row["return"],
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return_basis": return_basis,
+                "return_type": return_type,
+                "cost": "",
+            }
+            for row in restatement.rows
+        ]
+        if date.fromisoformat(rows[-1]["date"]) > accepted_as_of:
+            raise TargetSeriesError("strategy basis return exceeds accepted as-of")
+        restated[strategy_id] = rows
+        identities.append(
+            {
+                "account_id": restatement.account_id,
+                "observed_end": rows[-1]["date"],
+                "observed_start": rows[0]["date"],
+                "opening_date": restatement.opening_date,
+                "return_observations": len(rows),
+                "series_id": series_id,
+                "series_sha256": basis.series_sha256(rows),
+                "strategy_id": strategy_id,
+            }
+        )
+    block: dict[str, object] = {
+        "declaration": declaration.decode("utf-8"),
+        "declaration_sha256": hashlib.sha256(declaration).hexdigest(),
+        "sleeve_facts": facts.decode("utf-8"),
+        "sleeve_facts_sha256": hashlib.sha256(facts).hexdigest(),
+        "strategies": identities,
+        "tag_map": tag_map.decode("utf-8"),
+        **bindings,
+    }
+    return restated, block
+
+
+def _restated_live_rows_from_block(
+    block: object,
+    *,
+    repository_sha: str,
+    series_by_strategy: Mapping[str, str],
+    original_rows: Mapping[str, Sequence[Mapping[str, str]]],
+    accepted_as_of: date,
+    provider_generations: object,
+) -> dict[str, list[dict[str, str]]]:
+    """Re-derive the restated live rows from a manifest's embedded declaration and facts."""
+
+    if (
+        not isinstance(block, dict)
+        or set(block)
+        != {
+            "declaration",
+            "declaration_sha256",
+            "sleeve_facts",
+            "sleeve_facts_sha256",
+            "strategies",
+            "tag_map",
+            "parent_account_id",
+            "parent_ledger_generation_id",
+            "tag_map_sha256",
+        }
+        or not isinstance(block["declaration"], str)
+        or not isinstance(block["sleeve_facts"], str)
+        or not isinstance(block["tag_map"], str)
+    ):
+        raise TargetSeriesError("strategy basis restatement block differs")
+    declaration = block["declaration"].encode("utf-8")
+    facts = block["sleeve_facts"].encode("utf-8")
+    if (
+        hashlib.sha256(declaration).hexdigest() != block["declaration_sha256"]
+        or hashlib.sha256(facts).hexdigest() != block["sleeve_facts_sha256"]
+    ):
+        raise TargetSeriesError("strategy basis restatement inputs differ")
+    restated, expected = _restated_live_rows(
+        declaration=declaration,
+        facts=facts,
+        repository_sha=repository_sha,
+        series_by_strategy=series_by_strategy,
+        original_rows=original_rows,
+        accepted_as_of=accepted_as_of,
+        provider_generations=provider_generations,
+        tag_map=block["tag_map"].encode("utf-8"),
+    )
+    if block != expected:
+        raise TargetSeriesError("strategy basis restatement identity differs")
+    return restated
+
+
 LAYERED_HISTORY_SEGMENT_FIELDS: Final = (
     "strategy_id",
     "series_id",
@@ -4339,6 +4534,9 @@ def build_layered_history_generation(
     strategy_backtests_generation_path: Path | None = None,
     portfolio_fx_rates_manifest_path: Path | None = None,
     source_selection_mode: str = "CURRENT_POINTERS",
+    strategy_basis_declaration_path: Path | None = None,
+    sleeve_facts_path: Path | None = None,
+    nested_tag_map_path: Path | None = None,
 ) -> tuple[dict[str, bytes], bytes]:
     """Build one deterministic, content-addressed current history generation.
 
@@ -4603,6 +4801,32 @@ def build_layered_history_generation(
         if date.fromisoformat(row["date"]) > accepted_as_of:
             raise TargetSeriesError("provider-ledger return exceeds accepted as-of")
         live_by_strategy[mapped_strategy_id].append(dict(row))
+    strategy_basis_block: dict[str, object] | None = None
+    if (strategy_basis_declaration_path is None) != (sleeve_facts_path is None):
+        raise TargetSeriesError(
+            "strategy basis declaration and sleeve facts must be supplied together"
+        )
+    if strategy_basis_declaration_path is not None:
+        assert sleeve_facts_path is not None
+        if current_admission is None:
+            raise TargetSeriesError(
+                "a strategy basis restatement needs the current source admission"
+            )
+        restated_rows, strategy_basis_block = _restated_live_rows(
+            declaration=strategy_basis_declaration_path.read_bytes(),
+            facts=sleeve_facts_path.read_bytes(),
+            repository_sha=repository_sha,
+            series_by_strategy=series_by_strategy,
+            original_rows=live_by_strategy,
+            accepted_as_of=accepted_as_of,
+            provider_generations=ledger_catalog.get("provider_generations"),
+            tag_map=(
+                None
+                if nested_tag_map_path is None
+                else nested_tag_map_path.read_bytes()
+            ),
+        )
+        live_by_strategy.update(restated_rows)
     echo_correction = corrections.get("echotrade-event-only-account-live-rejected")
     if not isinstance(echo_correction, dict):
         raise TargetSeriesError("EchoTrade event-only disposition is absent")
@@ -6057,6 +6281,8 @@ def build_layered_history_generation(
         )
     if qsi_revision is not None:
         manifest_without_id["qsi_source_revision"] = qsi_revision[0]
+    if strategy_basis_block is not None:
+        manifest_without_id[STRATEGY_BASIS_BLOCK] = strategy_basis_block
 
     generation_id = hashlib.sha256(
         canonical_json_bytes(manifest_without_id)
@@ -6280,6 +6506,8 @@ def validate_layered_history_generation(
         expected_manifest_keys.add("portfolio123_version_equivalence")
     if "qsi_source_revision" in manifest:
         expected_manifest_keys.add("qsi_source_revision")
+    if STRATEGY_BASIS_BLOCK in manifest:
+        expected_manifest_keys.add(STRATEGY_BASIS_BLOCK)
     if "source_selection_mode" in manifest:
         expected_manifest_keys.add("source_selection_mode")
     if source_selection_mode == "CURRENT_POINTERS":
@@ -6339,6 +6567,10 @@ def validate_layered_history_generation(
             provider_ledger_manifest_path=cast(Path, provider_ledger_manifest_path),
             provider_ledger_catalog_path=cast(Path, provider_ledger_catalog_path),
             accepted_as_of=accepted_as_of,
+        )
+    if current_admission is None and STRATEGY_BASIS_BLOCK in manifest:
+        raise TargetSeriesError(
+            "a restated layered history is verified only with its current admission"
         )
     if (
         current_admission is not None
@@ -7200,6 +7432,44 @@ def validate_layered_history_generation(
             if strategy.get("product_requirement") == "REQUIRED"
             and isinstance(strategy.get("history_series_id"), str)
         }
+        ledger_live_rows = [
+            row
+            for row in _target_rows(selected_targets)
+            if row["series_id"] in required_series
+            and row["evidence_layer"] == "ACCOUNT_LIVE"
+            and date.fromisoformat(row["date"]) <= accepted_as_of
+        ]
+        if STRATEGY_BASIS_BLOCK in manifest:
+            # The declared strategy's live segment is its sleeve's own path, re-derived
+            # here from the embedded sleeve facts; every other series stays the ledger's.
+            series_to_strategy_id = {
+                str(strategy["history_series_id"]): strategy_id
+                for strategy_id, strategy in strategies.items()
+                if isinstance(strategy.get("history_series_id"), str)
+            }
+            original_by_strategy: dict[str, list[dict[str, str]]] = {}
+            for row in ledger_live_rows:
+                original_by_strategy.setdefault(
+                    series_to_strategy_id[row["series_id"]], []
+                ).append(row)
+            restated_live = _restated_live_rows_from_block(
+                manifest[STRATEGY_BASIS_BLOCK],
+                repository_sha=repository_sha,
+                series_by_strategy={
+                    strategy_id: series_id
+                    for series_id, strategy_id in series_to_strategy_id.items()
+                },
+                original_rows=original_by_strategy,
+                accepted_as_of=accepted_as_of,
+                provider_generations=_load_json(
+                    cast(Path, provider_ledger_catalog_path),
+                    "provider-ledger catalog",
+                ).get("provider_generations"),
+            )
+            replaced = {rows[0]["series_id"] for rows in restated_live.values()}
+            ledger_live_rows = [
+                row for row in ledger_live_rows if row["series_id"] not in replaced
+            ] + [row for rows in restated_live.values() for row in rows]
         expected_live_rows = sorted(
             [
                 (
@@ -7210,10 +7480,7 @@ def validate_layered_history_generation(
                     row["return_basis"],
                     row["return_type"],
                 )
-                for row in _target_rows(selected_targets)
-                if row["series_id"] in required_series
-                and row["evidence_layer"] == "ACCOUNT_LIVE"
-                and date.fromisoformat(row["date"]) <= accepted_as_of
+                for row in ledger_live_rows
             ]
         )
         actual_live_rows = sorted(

@@ -224,8 +224,10 @@ _PATH_STAGES = {
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
     # derived sleeves); the report, the panel and the HWM selection bind to it.
     "tools/derived_epoch_perimeter.py": ["report", "panel"],
-    # #624: the opt-in strategy-basis restatement the report reads when a declaration is given.
-    "tools/strategy_basis.py": ["report", "panel"],
+    # #624: the opt-in strategy-basis restatement.  The report reads it when a declaration
+    # is given and the layered-history generation derives the declared strategy's live
+    # segment from it, so dependence, the plans and their lenses move with it as well.
+    "tools/strategy_basis.py": ["analytics", "report", "panel"],
     # #567 stage 5: the post-ledger sleeve-facts builders and the release step that
     # runs them.  Attended preparation builds the facts, the epoch manifest selects
     # them and the HWM replay re-supplies them, so a change to any of them moves the
@@ -329,6 +331,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "tools/portfolio_strategy_backtests.py",
             "tools/portfolio_provider_track_record.py",
             "tools/account_strategy_manifest.py",
+            "tools/strategy_basis.py",
             _PREPARATION,
             "contracts/portfolio-financial-mvp-source-v1.json",
             "schemas/portfolio/layered-history-generation.schema.json",
