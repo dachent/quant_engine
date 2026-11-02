@@ -744,7 +744,11 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
     ids = [stage["id"] for stage in _shipped()["stages"]]
     assert [i for i in ids if i in pass26] == pass26
     # a default run covers exactly that path, then stops before the explicit commit
-    assert [i for i in ids if not _stage(i).get("explicit")] == [
+    assert [
+        i
+        for i in ids
+        if not _stage(i).get("explicit") and "only_scheme" not in _stage(i)
+    ] == [
         "selected-inputs",
         *pass26,
     ]
@@ -971,3 +975,191 @@ def test_incident_calendar_authority_carried_over_from_another_pass_is_refused(
     )
     assert _drive(world, early["graph"]) == 2
     assert not (world["cycle"] / "early.txt").exists()
+
+
+# -- identity scheme (PR 709: git-commit-v1 and git-tree-v2) -------------------------------
+
+
+def _v2_world(world: dict[str, Any]) -> dict[str, Any]:  # noqa: F811
+    repo = world["repo"]
+    (repo / "uv.lock").write_text("lock\n", encoding="utf-8")
+    _git(repo, "add", "uv.lock")
+    _git(repo, "commit", "-q", "-m", "lock")
+    commit = _git(repo, "rev-parse", "HEAD")
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    coordination = world["tmp"] / "coordination"
+    _config(
+        world,
+        code_commit=tree,
+        identity_scheme="git-tree-v2",
+        coordination_root=str(coordination),
+        candidate_commit=commit,
+        base_ref="HEAD",
+    )
+    needing = {
+        "id": "needs",
+        "needs_attestation": True,
+        "outputs": ["{cycle}/needs.txt"],
+        "argv": _write_stage("{cycle}/needs.txt"),
+    }
+    attest = next(s for s in _shipped()["stages"] if s["id"] == "attest")
+    attest = {**attest, "requires": [], "live_guard_keys": []}
+    return {
+        "commit": commit,
+        "tree": tree,
+        "coordination": coordination,
+        "needs": needing,
+        "attest": attest,
+    }
+
+
+def test_a_tree_run_binds_the_tree_and_a_commit_run_binds_the_commit(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    v2 = _v2_world(world)
+    graph = _graph(world, [CHAIN[0]])
+    assert (
+        _drive(world, graph) == 0
+    )  # config code identity is the tree under git-tree-v2
+    _config(world, code_commit=v2["commit"])
+    assert (
+        _drive(world, graph, "--only", "one", "--replace") == 2
+    )  # a commit id is not the v2 identity
+    _config(world, code_commit=v2["tree"], identity_scheme="git-commit-v1")
+    assert (
+        _drive(world, graph, "--only", "one", "--replace") == 2
+    )  # a tree id is not the v1 identity
+    _config(world, code_commit=v2["commit"])
+    assert _drive(world, graph, "--only", "one", "--replace") == 0
+
+
+def test_a_tree_run_needs_its_coordination_candidate_and_base(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    config["identity_scheme"] = "git-tree-v2"
+    world["config"].write_text(json.dumps(config), encoding="utf-8")
+    assert _drive(world, _graph(world, [CHAIN[0]])) == 2
+    _config(world, identity_scheme="git-sha1")
+    assert _drive(world, _graph(world, [CHAIN[0]])) == 2
+
+
+def test_a_tree_stage_run_without_attestation_is_refused(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    v2 = _v2_world(world)
+    graph = _graph(world, [v2["needs"]])
+    assert _drive(world, graph) == 2
+    assert not (world["cycle"] / "needs.txt").exists()
+    v2["coordination"].mkdir()
+    attestation = v2["coordination"] / "merge-attestation.json"
+    bad = {"tree": "0" * 40, "merged_commit": v2["commit"]}
+    attestation.write_text(json.dumps(bad), encoding="utf-8")
+    assert _drive(world, graph) == 2  # another tree
+    attestation.write_text(
+        json.dumps({"tree": v2["tree"], "merged_commit": "0" * 40}), encoding="utf-8"
+    )
+    assert _drive(world, graph) == 2  # another merged commit
+    attestation.write_text(
+        json.dumps({"tree": v2["tree"], "merged_commit": v2["commit"]}),
+        encoding="utf-8",
+    )
+    assert _drive(world, graph) == 0
+
+
+def test_the_attest_stage_writes_the_attestation_core_verifies_and_gates_the_next_stage(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    from quant_engine.core import code_identity
+
+    v2 = _v2_world(world)
+    needs = {**v2["needs"], "requires": ["attest"]}
+    graph = _graph(world, [v2["attest"], needs])
+    assert _drive(world, graph) == 0
+    attestation = code_identity.verify_promotion_identity(
+        world["repo"],
+        v2["tree"],
+        "git-tree-v2",
+        coordination_root=v2["coordination"],
+        lock_path=world["repo"] / "uv.lock",
+    )
+    assert attestation is not None and attestation.merged_commit == v2["commit"]
+
+
+def test_the_attest_stage_runs_only_under_the_tree_scheme(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    attest = next(s for s in _shipped()["stages"] if s["id"] == "attest")
+    stages = [
+        CHAIN[0],
+        {**attest, "requires": ["one"], "live_guard_keys": []},
+        {**CHAIN[1], "requires": ["attest"]},
+    ]
+    graph = _graph(world, stages)
+    assert _drive(world, graph) == 0  # v1: attest skipped, its dependents still run
+    assert (world["cycle"] / "two.txt").is_file()
+    assert _drive(world, graph, "--only", "attest", "--replace") == 2
+
+
+def test_a_kept_stage_rechecks_its_guarded_inputs_on_resume(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    early = _early_world(world)
+    assert _drive(world, early["graph"]) == 0
+    assert _drive(world, early["graph"]) == 0  # unchanged: kept
+    early["calendar"].write_text("carried over from another pass", encoding="utf-8")
+    assert _drive(world, early["graph"]) == 2
+    early["calendar"].write_text(
+        '{"authority_evidence_sha256": "d26c6d5c"}', encoding="utf-8"
+    )
+    (early["coordination"] / "CURRENT_RELEASE.json").write_text(
+        json.dumps({"release_id": "ff" * 32, "state": "COMMITTED"}), encoding="utf-8"
+    )
+    assert (
+        _drive(world, early["graph"]) == 2
+    )  # the predecessor is no longer the committed release
+
+
+def test_a_stage_that_archives_the_state_gets_it_without_itself_running(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    code = (
+        "import json,sys;s=json.load(open(sys.argv[1]))['stages'];"
+        "open(sys.argv[2],'w').write(','.join(sorted(s)))"
+    )
+    stages = [
+        dict(CHAIN[0]),
+        {
+            "id": "pack",
+            "requires": ["one"],
+            "state_snapshot_to": "{cycle}/state-at-pack.json",
+            "outputs": ["{cycle}/pack.txt"],
+            "argv": [
+                "{python}",
+                "-c",
+                code,
+                "{cycle}/state-at-pack.json",
+                "{cycle}/pack.txt",
+            ],
+        },
+    ]
+    assert _drive(world, _graph(world, stages)) == 0
+    assert (world["cycle"] / "pack.txt").read_text(encoding="utf-8") == "one"
+    for stage in ("pack-evidence", "pack-probe"):
+        argv = _stage(stage)["argv"]
+        assert "release-driver-state.json" not in argv
+        assert "release-driver-state-at-pack.json" in argv and f"logs/{stage}.*" in argv
+
+
+def test_pack_exclusions_apply_to_nested_files(tmp_path: Path) -> None:
+    import release_evidence_pack as pack
+
+    cycle = tmp_path / "cycle"
+    (cycle / "production" / "state" / "cache").mkdir(parents=True)
+    (cycle / "production" / "state" / "cache" / "receipt.json").write_text(
+        "x", encoding="utf-8"
+    )
+    (cycle / "production" / "plan.json").write_text("p", encoding="utf-8")
+    (cycle / "production" / "plan.json.prev-1").write_text("old", encoding="utf-8")
+    chosen = pack.select(cycle, ["production"], ["production/state/*", "*.prev-*"])
+    assert [p.name for p in chosen] == ["plan.json"]

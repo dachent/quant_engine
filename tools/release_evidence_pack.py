@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -53,7 +54,10 @@ def select(cycle: Path, includes: Sequence[str], excludes: Sequence[str]) -> lis
     chosen = [
         file
         for file in found
-        if not any(file.relative_to(cycle).match(pattern) for pattern in excludes)
+        if not any(
+            fnmatch.fnmatchcase(file.relative_to(cycle).as_posix(), pattern)
+            for pattern in excludes
+        )
     ]
     for file in chosen:
         if file.is_symlink() or cycle.resolve() not in file.resolve().parents:
