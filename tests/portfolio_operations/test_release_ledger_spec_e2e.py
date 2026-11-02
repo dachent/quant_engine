@@ -198,4 +198,6 @@ def test_the_cli_builds_from_the_cycle_manifest_and_roots(
         Path(printed["ledger_spec"]).is_file()
         and Path(printed["run_observation"]).is_file()
     )
-    assert tool.main(argv) == 1  # create-only
+    assert tool.main(argv) == 0  # an identical finished pair is re-validated
+    Path(printed["run_observation"]).write_bytes(b"{}")
+    assert tool.main(argv) == 1  # other bytes are never overwritten
