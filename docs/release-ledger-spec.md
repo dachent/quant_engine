@@ -34,7 +34,10 @@ regenerated blocks are ignored; any other key is a refusal. The provenance block
 provenance generation directory (its name is the id). Rebinding the layered `returns.csv` stays with
 the existing rebind tool.
 
-Outputs (create-only, `--out-root` must lie inside the cycle scratch root): `run-observation.json`
+Outputs (create-only and resumable: each file is written through a temporary name and renamed into place;
+a file already holding exactly the bytes the builder produces is kept and the self-check runs again, so a
+killed run resumes; a file with other bytes is refused as `OUTPUT_EXISTS`; `--out-root` must lie inside the
+cycle scratch root): `run-observation.json`
 and `ledger-spec.json`, whose `run_observation` block points at the first. The new spec is then
 checked by the committed ledger validator (`provider_ledger.build_catalog`, writes nothing). Any error
 is a refusal and both files are renamed `*.rejected`. `--plan` builds and prints without writing or
