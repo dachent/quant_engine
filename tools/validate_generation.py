@@ -2,6 +2,7 @@
 
     python tools/validate_generation.py <generation_dir>
         [--expected expected-baseline.json] [--out findings.json]
+        [--strategy-basis strategy-basis-declaration.json --sleeve-facts facts.json]
 
 Reads the generation's published outputs (report payload, panel payload, shell and
 candidate record), runs every deterministic acceptance check in
@@ -40,8 +41,12 @@ from acceptance.validate.checks import (  # noqa: E402
     CLASSES,
     Context,
     Finding,
+    FactsSources,
+    StrategyBasisRefusal,
     expected_exclusions,
     findings_document,
+    load_facts_sources,
+    parse_strategy_basis,
     rollup,
     run_checks,
     to_date,
@@ -215,6 +220,28 @@ def _parser() -> argparse.ArgumentParser:
         "of each strategy's opening capital anchor for the CAGR window check",
     )
     parser.add_argument(
+        "--strategy-basis",
+        type=Path,
+        help="strategy-basis-declaration/1 the generation was built with (#624): the "
+        "named strategies' rows are validated against an independent sleeve derivation",
+    )
+    parser.add_argument(
+        "--sleeve-facts",
+        type=Path,
+        help="sleeve-account-facts the declared sleeve rows are derived from",
+    )
+    parser.add_argument(
+        "--ibkr-root",
+        type=Path,
+        help="the dataIBKR root: the facts are bound to the catalog of the generation "
+        "the provider ledger records",
+    )
+    parser.add_argument(
+        "--tag-map",
+        type=Path,
+        help="the nested-strategy tag map the facts' tag_map_sha256 must equal",
+    )
+    parser.add_argument(
         "--independent-no-oracle",
         action="store_true",
         help="validate against no expected baseline (requires --cutoff, forbids "
@@ -280,6 +307,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise ContractError("--provider-ledger carries no capital_anchors list")
             provider_ledger = loaded
+        strategy_basis: dict[str, str] | None = None
+        if args.strategy_basis is not None:
+            try:
+                strategy_basis = parse_strategy_basis(args.strategy_basis.read_bytes())
+            except (OSError, StrategyBasisRefusal) as exc:
+                raise ContractError(f"--strategy-basis is unusable: {exc}") from exc
+        sleeve_facts: dict[str, Any] | None = None
+        if args.sleeve_facts is not None:
+            try:
+                facts = json.loads(args.sleeve_facts.read_bytes())
+            except (OSError, ValueError) as exc:
+                raise ContractError(f"--sleeve-facts is unreadable: {exc}") from exc
+            if not isinstance(facts, dict):
+                raise ContractError("--sleeve-facts is not an object")
+            sleeve_facts = facts
+        facts_sources: FactsSources | None = None
+        if sleeve_facts is not None and provider_ledger is not None:
+            try:
+                facts_sources = load_facts_sources(
+                    provider_ledger, sleeve_facts, args.ibkr_root, args.tag_map
+                )
+            except StrategyBasisRefusal as exc:
+                raise ContractError(f"the sleeve facts cannot be bound: {exc}") from exc
         generation = load_generation(
             args.generation_dir,
             discover=not args.no_discover,
@@ -323,6 +373,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_not_derivable=not_derivable,
         corrections=corrections,
         provider_ledger=provider_ledger,
+        strategy_basis=strategy_basis,
+        sleeve_facts=sleeve_facts,
+        facts_sources=facts_sources,
     )
     findings = run_checks(context)
     document = findings_document(

@@ -31,7 +31,7 @@ from pathlib import Path
 import re
 from typing import Any, cast
 
-from . import shell
+from . import facts_bindings, shell, sleeve_basis
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -210,6 +210,14 @@ class Context:
     # the governed source of each strategy's opening capital anchor. ``None`` when the
     # run was given no ledger; the opening date then comes from the manifest trace.
     provider_ledger: Mapping[str, Any] | None = None
+    # #624: the ``strategy-basis-declaration/1`` the generation was built with ({strategy id:
+    # basis}) and the sleeve facts its sleeve epochs stand on.  ``None`` is no declaration:
+    # every strategy is on its parent-account basis and nothing below changes.
+    strategy_basis: Mapping[str, str] | None = None
+    sleeve_facts: Mapping[str, Any] | None = None
+    # the ledger run's own sources the facts are bound against (provider ledger, the IBKR
+    # catalog of its generation, the tag map); refused when absent
+    facts_sources: facts_bindings.FactsSources | None = None
 
     @property
     def report(self) -> dict[str, Any]:
@@ -4420,6 +4428,229 @@ def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
         )
 
 
+StrategyBasisRefusal = sleeve_basis.Refusal
+FactsSources = facts_bindings.FactsSources
+
+
+def load_facts_sources(
+    ledger: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    ibkr_root: Path | None,
+    tag_map_path: Path | None,
+) -> facts_bindings.FactsSources:
+    """The sources a facts file is bound against (the CLI's reader)."""
+
+    return facts_bindings.load_sources(ledger, facts, ibkr_root, tag_map_path)
+
+
+def parse_strategy_basis(raw: bytes) -> dict[str, str]:
+    """``{strategy id: basis}`` of a ``strategy-basis-declaration/1`` (the CLI's reader)."""
+
+    return sleeve_basis.parse_declaration(raw)
+
+
+def declared_sleeve_values(ctx: Context) -> dict[str, Decimal]:
+    """The value of each strategy the declaration states on its sleeve (#624).
+
+    With the sleeve facts, the independent derivation's closing NAV.  Without them, the
+    open sleeve epoch's own manifest value; a strategy with neither is left on the
+    account basis here and ``returns.sleeve_basis`` reports why.
+    """
+
+    declared = ctx.strategy_basis or {}
+    if not declared:
+        return {}
+    cached = ctx._cache.get("declared_sleeve_values")
+    if isinstance(cached, dict):
+        return cached
+    values: dict[str, Decimal] = {}
+    for strategy in sorted(declared):
+        if ctx.sleeve_facts is not None:
+            try:
+                values[strategy] = sleeve_basis.derive_sleeve(
+                    ctx.sleeve_facts, strategy
+                ).value
+            except sleeve_basis.Refusal:
+                pass
+            continue
+        epochs = [
+            to_decimal(row.get("current_value"))
+            for _, row in manifest_rows(ctx)
+            if str(row.get("strategy_id")) == strategy
+            and row.get("effective_end") is None
+        ]
+        if len(epochs) == 1 and epochs[0] is not None:
+            values[strategy] = epochs[0]
+    ctx._cache["declared_sleeve_values"] = values
+    return values
+
+
+def _other_strategy_values(
+    ctx: Context, declared: Mapping[str, str]
+) -> dict[str, Decimal]:
+    """Every undeclared systematic strategy's value: the oracle's, else the published."""
+
+    values: dict[str, Decimal] = {}
+    for expected in ctx.expected or []:
+        if expected.get("metric_id") == "capital.strategy.cutoff":
+            amount = to_decimal(expected.get("expected"))
+            if amount is not None and str(expected.get("entity")) not in declared:
+                values[str(expected.get("entity"))] = amount
+    if values:
+        return values
+    for row in rows(ctx.panel, "strategies"):
+        amount = to_decimal(row.get("current_value_usd"))
+        strategy = str(row.get("strategy_id"))
+        if (
+            amount is not None
+            and strategy not in declared
+            and row.get("record_kind") != "RETAINED_HISTORY_ONLY"
+        ):
+            values[strategy] = amount
+    return values
+
+
+def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
+    """#624: a declared strategy's row is the independent sleeve derivation, no other is.
+
+    The derivation reads the sleeve facts only (``sleeve_basis``); the panel is read
+    afterwards, to compare.  A generation that states a strategy on its sleeve without a
+    declaration naming it is refused, and so is a declared strategy still on its parent
+    account.  With no declaration and no sleeve-basis row this check emits nothing.
+    """
+
+    declared = ctx.strategy_basis or {}
+    for position, row in enumerate(rows(ctx.panel, "strategies")):
+        scope = row.get("return_scope")
+        strategy = str(row.get("strategy_id"))
+        if (
+            isinstance(scope, Mapping)
+            and scope.get("basis") == sleeve_basis.BASIS_SLEEVE
+            and strategy not in declared
+        ):
+            yield _finding(
+                "returns.sleeve_basis",
+                BLOCKER_AUTHORITY,
+                strategy,
+                sleeve_basis.BASIS_SLEEVE,
+                "a strategy-basis declaration naming the strategy",
+                PANEL,
+                f"$.strategies[{position}].return_scope.basis",
+                (),
+                "the row is stated on its sleeve but no declaration names the strategy",
+            )
+    if not declared:
+        return
+    if ctx.sleeve_facts is None:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_AUTHORITY,
+            "declaration",
+            sorted(declared),
+            "sleeve facts to derive the declared rows from",
+            "(validator)",
+            "--sleeve-facts",
+            (),
+            "a declaration is in force but no sleeve facts were supplied: the sleeve "
+            "basis cannot be verified independently",
+        )
+        return
+    try:
+        facts_bindings.check_bindings(ctx.sleeve_facts, ctx.facts_sources)
+    except sleeve_basis.Refusal as exc:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_AUTHORITY,
+            "sleeve-facts",
+            exc.code,
+            "sleeve facts bound to this run's provider ledger, catalog and tag map",
+            "(sleeve facts)",
+            "bindings",
+            (),
+            str(exc),
+        )
+        return
+    figures = []
+    listed = {
+        str(row.get("account_id")): row for row in rows(ctx.panel, "account_summary")
+    }
+    for strategy in sorted(declared):
+        parent = to_decimal(
+            (listed.get(str(ctx.sleeve_facts.get("parent_account_id"))) or {}).get(
+                "latest_value_usd"
+            )
+        )
+        try:
+            figures.append(
+                sleeve_basis.derive_sleeve(
+                    ctx.sleeve_facts, strategy, parent_equity=parent
+                )
+            )
+        except sleeve_basis.Refusal as exc:
+            yield _finding(
+                "returns.sleeve_basis",
+                BLOCKER_AUTHORITY,
+                strategy,
+                exc.code,
+                "an internally consistent sleeve derivation",
+                "(sleeve facts)",
+                "--sleeve-facts",
+                (),
+                str(exc),
+            )
+    if len(figures) != len(declared):
+        return
+    try:
+        perimeter, weights = sleeve_basis.perimeter_and_weights(
+            figures, _other_strategy_values(ctx, declared)
+        )
+    except sleeve_basis.Refusal as exc:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_AUTHORITY,
+            "portfolio",
+            exc.code,
+            "a positive restated perimeter",
+            "(validator)",
+            "perimeter",
+            (),
+            str(exc),
+        )
+        return
+    events = node(ctx.panel, "invested_capital", "events") or node(
+        ctx.report, "invested_capital", "events"
+    )
+    mwr = None
+    if isinstance(events, list) and figures:
+        try:
+            mwr = sleeve_basis.portfolio_mwr(events, perimeter, figures[0].end_date)
+        except sleeve_basis.Refusal:
+            mwr = None
+    others = _other_strategy_values(ctx, declared)
+    other_weights = {k: v for k, v in weights.items() if k in others}
+    for item in figures:
+        for finding in sleeve_basis.compare_published(
+            item,
+            perimeter,
+            weights[item.strategy_id],
+            ctx.panel,
+            mwr,
+            other_weights,
+            others,
+        ):
+            yield _finding(
+                "returns.sleeve_basis",
+                BLOCKER_INVARIANT,
+                item.strategy_id,
+                finding.published,
+                finding.derived,
+                PANEL,
+                finding.where,
+                (),
+                f"{finding.code}: {finding.message}",
+            )
+
+
 def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[str]]]:
     values = {
         str(row.get("account_id")): to_decimal(row.get("latest_value_usd"))
@@ -4427,10 +4658,15 @@ def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[st
     }
     cash = derived_cash_by_strategy(ctx)
     parents = derived_account_parents(ctx)
+    declared = declared_sleeve_values(ctx)
     totals: dict[str, tuple[Decimal, list[str]]] = {}
     for strategy, accounts in current_accounts_by_strategy(ctx).items():
         amount = cash.get(strategy, Decimal(0))
         counted: set[str] = set()
+        if strategy in declared:
+            # #624: a declared strategy stands on its sleeve, not on the account it hangs on
+            totals[strategy] = (amount + declared[strategy], sorted(accounts))
+            continue
         for account in accounts:
             # a derived sleeve epoch's strategy capital is on the account basis of the
             # provider account it hangs on, counted once however many sleeves it has
@@ -11142,6 +11378,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("capital.as_of_cutoff", check_capital_as_of),
     ("capital.strategy_vs_cutoff_accounts", check_strategy_vs_cutoff_accounts),
     ("capital.account_identity", check_account_identity),
+    ("returns.sleeve_basis", check_sleeve_basis),
     ("universe.authority_missing", check_universe_authority),
     ("universe.active_set_consistent", check_active_universe),
     ("universe.hardcoded_count_text", check_hardcoded_count_text),

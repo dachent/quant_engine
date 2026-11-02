@@ -3196,7 +3196,16 @@ def derive(
     qe_root: Path,
     inputs_manifest: dict[str, object] | None = None,
     sleeve_inputs: Path | None = None,
+    strategy_basis: Path | None = None,
 ) -> dict[str, object]:
+    declared_basis: tuple[list[str], str] | None = None
+    if strategy_basis is not None:
+        if sleeve_inputs is None:
+            raise SleeveInputError(
+                "--strategy-basis restates strategy rows on the sleeve basis: it "
+                "requires --sleeve-inputs"
+            )
+        declared_basis = load_strategy_basis(strategy_basis)
     input_paths = default_input_paths()
     schema_v3 = False
     authority_paths: list[Path] = []
@@ -4577,7 +4586,320 @@ def derive(
             "value."
         )
         output["sleeve_derivation"] = sleeve_result["sleeve_derivation"]
+        if declared_basis is not None and strategy_basis is not None:
+            moved = apply_strategy_basis(
+                output,
+                declared_basis[0],
+                declared_basis[1],
+                strategy_basis.as_posix(),
+                sleeve_result,
+                aggregate,
+            )
+            output["strategy_basis"] = {
+                "schema": STRATEGY_BASIS_SCHEMA,
+                "path": strategy_basis.as_posix(),
+                "sha256": declared_basis[1],
+                "strategies": declared_basis[0],
+                "restated_rows": sorted(moved),
+            }
+            output["convention_notes"].append(
+                "SLEEVE BASIS (#624): the declared strategies' twr.strategy, "
+                "capital.strategy.cutoff, capital.portfolio.systematic.cutoff and "
+                "weight.strategy.cutoff rows are stated on the open sleeve epoch "
+                "(its own ITD return and closing NAV); no other row moves."
+            )
     return output
+
+
+# ======================================================================
+# Declared sleeve basis (#624, option B)
+# ======================================================================
+
+STRATEGY_BASIS_SCHEMA = "strategy-basis-declaration/1"
+STRATEGY_BASIS_SLEEVE = "SLEEVE_EPOCH"
+
+
+def load_strategy_basis(path: Path) -> tuple[list[str], str]:
+    """The strategies a ``strategy-basis-declaration/1`` states on their sleeve.
+
+    Returns the sorted strategy ids and the declaration bytes' sha256.  Anything else
+    in the file is refused (exit status 2): a declaration is read whole or not at all.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise SleeveInputError(
+            f"cannot read strategy basis declaration {path}: {error}"
+        ) from error
+    try:
+        document = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SleeveInputError(
+            f"strategy basis declaration {path} is not JSON"
+        ) from error
+    if not isinstance(document, dict) or set(document) != {"schema", "strategies"}:
+        raise SleeveInputError(f"strategy basis declaration {path}: keys differ")
+    if document["schema"] != STRATEGY_BASIS_SCHEMA:
+        raise SleeveInputError(f"strategy basis declaration {path}: schema differs")
+    entries = document["strategies"]
+    if not isinstance(entries, list) or not entries:
+        raise SleeveInputError(f"strategy basis declaration {path} names no strategy")
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"strategy_id", "basis"}:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: an entry's keys differ"
+            )
+        name = entry["strategy_id"]
+        if not isinstance(name, str) or not name:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: an entry has no strategy id"
+            )
+        if entry["basis"] != STRATEGY_BASIS_SLEEVE:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: {entry['basis']!r} is not "
+                "restatable"
+            )
+        if name in names:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: {name} is declared twice"
+            )
+        names.append(name)
+    return sorted(names), hashlib.sha256(raw).hexdigest()
+
+
+def _basis_row(
+    rows: list[dict[str, object]],
+    metric_id: str,
+    entity: str,
+    replacement: dict[str, object],
+) -> None:
+    """Replace the row of a key in place (appending when it had none)."""
+    for index, row in enumerate(rows):
+        if row["metric_id"] == metric_id and row["entity"] == entity:
+            rows[index] = replacement
+            return
+    rows.append(replacement)
+
+
+def apply_strategy_basis(
+    output: dict[str, object],
+    declared: list[str],
+    declaration_sha256: str,
+    declaration_label: str,
+    sleeve_result: dict[str, object],
+    aggregate: dict[str, object],
+) -> list[str]:
+    """State each declared strategy on its open sleeve epoch; return the moved row keys.
+
+    Four row families move, for that stated reason only: ``twr.strategy`` (the epoch's
+    ITD return from this derivation's own epoch engine), ``capital.strategy.cutoff`` (the
+    epoch's closing NAV), ``capital.portfolio.systematic.cutoff`` (old strategy value
+    replaced, exact Decimal) and every ``weight.strategy.cutoff`` (over the new total).
+    ``mwr.strategy`` already stands on the sleeve; no other row is touched.
+    """
+    metrics = cast(list[dict[str, object]], output["metrics"])
+    unavailable = cast(list[dict[str, object]], output["not_derivable"])
+    records = cast(list[dict[str, object]], sleeve_result["epoch_records"])
+    sleeve_rows = cast(list[dict[str, object]], sleeve_result["metrics"])
+    sleeve_unavailable = cast(list[dict[str, object]], sleeve_result["not_derivable"])
+    sleeve_paths = sorted(
+        str(row["path"])
+        for row in cast(list[dict[str, object]], sleeve_result["inputs"])
+    )
+    values = cast(dict[str, Decimal], aggregate["strategies"])
+    stated_by = f"strategy-basis-declaration/1 {declaration_sha256[:16]}"
+    moved: list[str] = []
+    after: dict[str, Decimal] = {}
+    for strategy_id in declared:
+        found = [
+            record
+            for record in records
+            if record["strategy_id"] == strategy_id and record["effective_end"] is None
+        ]
+        if len(found) != 1:
+            raise SleeveInputError(
+                f"declared strategy {strategy_id}: {len(found)} derived sleeve epochs "
+                "are open at the cutoff, exactly one is required"
+            )
+        if strategy_id not in values:
+            raise SleeveInputError(
+                f"declared strategy {strategy_id} has no capital row to restate"
+            )
+        account = str(found[0]["account_id"])
+        nav = cast(list[list[str]], found[0]["nav"])
+        closing = D(nav[-1][1])
+        last_day = nav[-1][0]
+        after[strategy_id] = closing
+        used = sorted({*sleeve_paths, declaration_label})
+        twr = next(
+            (
+                row
+                for row in sleeve_rows
+                if row["metric_id"] == "twr.account"
+                and row["entity"] == account
+                and row.get("window") == "ITD"
+            ),
+            None,
+        )
+        before_twr = next(
+            (
+                row
+                for row in metrics
+                if row["metric_id"] == "twr.strategy" and row["entity"] == strategy_id
+            ),
+            None,
+        )
+        before_capital = next(
+            (
+                row
+                for row in metrics
+                if row["metric_id"] == "capital.strategy.cutoff"
+                and row["entity"] == strategy_id
+            ),
+            None,
+        )
+        stated = (
+            f"{stated_by} states {strategy_id} on its sleeve epoch {account} "
+            f"(opening NAV {found[0]['effective_start']})"
+        )
+        unavailable[:] = [
+            row
+            for row in unavailable
+            if not (row["metric_id"] == "twr.strategy" and row["entity"] == strategy_id)
+            and not (
+                row["metric_id"] == "capital.strategy.cutoff"
+                and row["entity"] == strategy_id
+            )
+        ]
+        if twr is None:
+            reason = next(
+                (
+                    str(row["reason"])
+                    for row in sleeve_unavailable
+                    if row["metric_id"] == "twr.account" and row["entity"] == account
+                ),
+                f"{account} has no derived return",
+            )
+            if before_twr is not None:
+                metrics.remove(before_twr)
+            add_not_derivable(
+                output, "twr.strategy", strategy_id, f"{stated}: {reason}", "ITD"
+            )
+        else:
+            _basis_row(
+                metrics,
+                "twr.strategy",
+                strategy_id,
+                metric(
+                    "twr.strategy",
+                    strategy_id,
+                    twr["value"],
+                    "ratio",
+                    sorted({*used, *cast(list[str], twr["inputs_used"])}),
+                    str(twr["as_of"]),
+                    window="ITD",
+                    notes=stated
+                    + "; the return is that epoch's ITD return: sleeve NAV with the "
+                    "sleeve's transfers external, date-only at end of day"
+                    + (
+                        f"; the parent-account basis row was {before_twr['value']}"
+                        if before_twr is not None
+                        else ""
+                    ),
+                ),
+            )
+        moved.append(f"twr.strategy|{strategy_id}")
+        _basis_row(
+            metrics,
+            "capital.strategy.cutoff",
+            strategy_id,
+            metric(
+                "capital.strategy.cutoff",
+                strategy_id,
+                money(closing),
+                "USD",
+                used,
+                last_day,
+                notes=stated
+                + "; capital is the sleeve's closing NAV after allocated costs"
+                + (
+                    f"; the parent-account basis row was {before_capital['value']}"
+                    if before_capital is not None
+                    else ""
+                ),
+            ),
+        )
+        moved.append(f"capital.strategy.cutoff|{strategy_id}")
+    total_row = next(
+        (
+            row
+            for row in metrics
+            if row["metric_id"] == "capital.portfolio.systematic.cutoff"
+        ),
+        None,
+    )
+    if total_row is None:
+        return moved
+    total = cast(Decimal, aggregate["systematic"])
+    for strategy_id in declared:
+        total += after[strategy_id] - values[strategy_id]
+    _basis_row(
+        metrics,
+        "capital.portfolio.systematic.cutoff",
+        "portfolio",
+        metric(
+            "capital.portfolio.systematic.cutoff",
+            "portfolio",
+            money(total),
+            "USD",
+            sorted(
+                {
+                    *cast(list[str], total_row["inputs_used"]),
+                    *sleeve_paths,
+                    declaration_label,
+                }
+            ),
+            str(total_row["as_of"]),
+            notes=(
+                f"{stated_by}: {', '.join(declared)} valued as its sleeve; the "
+                f"parent-account total was {total_row['value']}"
+            ),
+        ),
+    )
+    moved.append("capital.portfolio.systematic.cutoff|portfolio")
+    capitals = {**values, **after}
+    for row in [row for row in metrics if row["metric_id"] == "weight.strategy.cutoff"]:
+        strategy_id = str(row["entity"])
+        if strategy_id not in capitals:
+            continue
+        _basis_row(
+            metrics,
+            "weight.strategy.cutoff",
+            strategy_id,
+            metric(
+                "weight.strategy.cutoff",
+                strategy_id,
+                ratio(capitals[strategy_id] / total),
+                "ratio",
+                sorted(
+                    {
+                        *cast(list[str], row["inputs_used"]),
+                        *sleeve_paths,
+                        declaration_label,
+                    }
+                ),
+                str(row["as_of"]),
+                notes=(
+                    "the strategy is stated on its sleeve"
+                    if strategy_id in after
+                    else "the perimeter moved because a declared strategy is stated "
+                    "on its sleeve"
+                ),
+            ),
+        )
+        moved.append(f"weight.strategy.cutoff|{strategy_id}")
+    return moved
 
 
 # ======================================================================
@@ -7044,9 +7366,20 @@ def main() -> None:
             "(requires --sleeve-inputs)"
         ),
     )
+    parser.add_argument(
+        "--strategy-basis",
+        type=Path,
+        default=None,
+        help=(
+            "strategy-basis-declaration/1: states the named strategies on their "
+            "open sleeve epoch (requires --sleeve-inputs)"
+        ),
+    )
     args = parser.parse_args()
     if args.sleeves_only and args.sleeve_inputs is None:
         parser.exit(2, "input error: --sleeves-only requires --sleeve-inputs\n")
+    if args.strategy_basis is not None and args.sleeves_only:
+        parser.exit(2, "input error: --strategy-basis cannot be --sleeves-only\n")
     manifest = None
     if args.inputs is not None:
         try:
@@ -7068,7 +7401,12 @@ def main() -> None:
                 "sleeve_derivation": sleeve_result["sleeve_derivation"],
             }
         else:
-            result = derive(args.qe_root, manifest, sleeve_inputs=args.sleeve_inputs)
+            result = derive(
+                args.qe_root,
+                manifest,
+                sleeve_inputs=args.sleeve_inputs,
+                strategy_basis=args.strategy_basis,
+            )
     except SleeveInputError as error:
         parser.exit(2, f"input error: {error}\n")
     except ManifestError as error:
