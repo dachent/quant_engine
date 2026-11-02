@@ -71,8 +71,15 @@ def _file(path: Path, what: str) -> Path:
     return path
 
 
-def load_resolved_cycle(path: Path) -> Mapping[str, Any]:
-    cycle = _read_json(_file(path, "resolved cycle"), "resolved cycle")
+def load_resolved_cycle(path: Path, pinned_sha256: str) -> Mapping[str, Any]:
+    """The resolved cycle, authenticated by the digest the run pinned for it."""
+
+    actual = _sha256(_file(path, "resolved cycle").read_bytes())
+    if actual != pinned_sha256:
+        raise CalendarAuthorityError(
+            "HASH_MISMATCH", "resolved cycle bytes differ from --resolved-cycle-sha256"
+        )
+    cycle = _read_json(path, "resolved cycle")
     if not isinstance(cycle, dict) or cycle.get("schema_version") != RESOLVED_VERSION:
         raise CalendarAuthorityError(
             "RESOLVED_CYCLE", f"schema_version is not {RESOLVED_VERSION}"
@@ -363,7 +370,7 @@ def _write_create_only(path: Path, data: bytes) -> None:
 
 
 def author(args: argparse.Namespace) -> int:
-    resolved = load_resolved_cycle(args.resolved_cycle)
+    resolved = load_resolved_cycle(args.resolved_cycle, args.resolved_cycle_sha256)
     spec = _read_json(_file(args.spec, "spec"), "spec")
     seed_path = _file(args.seed_authority, "seed authority")
     seed_bytes = seed_path.read_bytes()
@@ -382,19 +389,27 @@ def author(args: argparse.Namespace) -> int:
         baseline_generation=args.baseline_generation,
     )
     data = render(authority)
+    receipt_path = args.out.with_name(args.out.name + ".receipt.json")
+    receipt = _receipt(resolved, seed_bytes, data, facts)
+    pair = ((args.out, data), (receipt_path, receipt))
     if args.check:
-        if not args.out.is_file() or args.out.read_bytes() != data:
-            raise CalendarAuthorityError(
-                "DIFFERS", f"{args.out} is not what the run derives"
-            )
+        for path, expected in pair:
+            if not path.is_file() or path.read_bytes() != expected:
+                raise CalendarAuthorityError(
+                    "DIFFERS", f"{path} is not what the run derives"
+                )
         print(json.dumps({"authority_sha256": _sha256(data), "check": "ok"}))
         return 0
-    receipt_path = args.out.with_name(args.out.name + ".receipt.json")
-    if args.out.exists() or receipt_path.exists():
-        raise CalendarAuthorityError("OUTPUT_EXISTS", str(args.out))
+    # The pair is written as a checkpoint: a half-written pair (interrupted run) is
+    # completed by a rerun that derives the same bytes; anything else already
+    # there is a refusal.
+    for path, expected in pair:
+        if path.exists() and path.read_bytes() != expected:
+            raise CalendarAuthorityError("OUTPUT_EXISTS", str(path))
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    _write_create_only(args.out, data)
-    _write_create_only(receipt_path, _receipt(resolved, seed_bytes, data, facts))
+    for path, expected in pair:
+        if not path.exists():
+            _write_create_only(path, expected)
     print(
         json.dumps(
             {
@@ -414,6 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
         "author", help="derive the authority from a first attempt"
     )
     cmd.add_argument("--resolved-cycle", type=Path, required=True)
+    cmd.add_argument("--resolved-cycle-sha256", required=True)
     cmd.add_argument("--run", type=Path, required=True, help="first attempt run dir")
     cmd.add_argument("--spec", type=Path, required=True, help="prepared spec JSON")
     cmd.add_argument("--seed-authority", type=Path, required=True)

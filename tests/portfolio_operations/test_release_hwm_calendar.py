@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -119,6 +120,8 @@ class World:
             "author",
             "--resolved-cycle",
             str(self.resolved),
+            "--resolved-cycle-sha256",
+            hashlib.sha256(self.resolved.read_bytes()).hexdigest(),
             "--run",
             str(self.run),
             "--spec",
@@ -211,8 +214,33 @@ def test_output_is_create_only(
 ) -> None:
     world = World(tmp_path)
     assert cal.main(world.argv()) == 0
+    world.out.write_bytes(b"different")
     assert cal.main(world.argv()) == 1
     assert "OUTPUT_EXISTS" in capsys.readouterr().err
+
+
+def test_an_interrupted_pair_is_completed_and_a_missing_receipt_fails_check(
+    tmp_path: Path, fake_adapter: dict[str, Any]
+) -> None:
+    world = World(tmp_path)
+    assert cal.main(world.argv()) == 0
+    receipt = world.out.with_name("authority.json.receipt.json")
+    receipt.unlink()
+    assert cal.main(world.argv("--check")) == 1
+    assert cal.main(world.argv()) == 0
+    assert cal.main(world.argv("--check")) == 0
+
+
+def test_an_edited_resolved_cycle_is_refused(
+    tmp_path: Path, fake_adapter: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = World(tmp_path)
+    argv = world.argv()
+    document = json.loads(world.resolved.read_bytes())
+    document["cutoff"] = "2027-01-01"
+    world.resolved.write_bytes(json.dumps(document).encode("utf-8"))
+    assert cal.main(argv) == 1
+    assert "HASH_MISMATCH" in capsys.readouterr().err
 
 
 def test_an_interval_the_adapter_did_not_derive_is_refused(
