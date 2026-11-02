@@ -630,8 +630,15 @@ def compare_published(
     weight: Decimal,
     panel: Mapping[str, Any],
     mwr: MwrFigures | None = None,
+    other_weights: Mapping[str, Decimal] | None = None,
+    other_values: Mapping[str, Decimal] | None = None,
 ) -> list[Finding]:
-    """Findings where the panel's row for a declared strategy is not the derived one."""
+    """Findings where the panel's row for a declared strategy is not the derived one.
+
+    ``other_weights`` / ``other_values`` are every other strategy's independently
+    derived weight (its ledger-side capital over the restated perimeter) and capital:
+    the published weight must equal the first, the published value the second.
+    """
 
     found: list[Finding] = []
     row = _row(panel.get("strategies"), figures.strategy_id)
@@ -733,6 +740,43 @@ def compare_published(
                 "the systematic perimeter is not the sum of the restated values",
             )
         )
+    for other, expected_weight in sorted((other_weights or {}).items()):
+        if other == figures.strategy_id:
+            continue
+        other_row = _row(panel.get("strategies"), other)
+        if other_row is None:
+            continue
+        place = f"$.strategies[{other}]"
+        published_weight = other_row.get("systematic_weight")
+        if published_weight is not None and not _close(
+            published_weight, expected_weight, RATE_TOLERANCE
+        ):
+            found.append(
+                Finding(
+                    "PUBLISHED_OTHER_WEIGHT_DIFFERS",
+                    f"{place}.systematic_weight",
+                    expected_weight,
+                    published_weight,
+                    "an undeclared strategy's weight is its capital over the restated "
+                    "perimeter",
+                )
+            )
+        capital = (other_values or {}).get(other)
+        published_value = other_row.get("current_value_usd")
+        if (
+            capital is not None
+            and published_value is not None
+            and not _close(published_value, capital, USD_TOLERANCE)
+        ):
+            found.append(
+                Finding(
+                    "PUBLISHED_OTHER_CAPITAL_DIFFERS",
+                    f"{place}.current_value_usd",
+                    capital,
+                    published_value,
+                    "an undeclared strategy's capital must not move",
+                )
+            )
     if mwr is not None:
         block = panel.get("portfolio_mwr_annualised")
         if not isinstance(block, Mapping) or block.get("status") != "AVAILABLE":
@@ -926,9 +970,6 @@ def _tolerance(row: Mapping[str, Any]) -> Decimal:
         return USD_TOLERANCE if row.get("unit") == "USD" else RATE_TOLERANCE
 
 
-_COMPARED = ("expected", "unit", "tolerance", "as_of", "window", "entity", "metric_id")
-
-
 def diff_expected(
     before: Mapping[str, Any],
     after: Mapping[str, Any],
@@ -971,7 +1012,8 @@ def diff_expected(
             continue
         change = allowed.get(key)
         if change is None:
-            for name in _COMPARED:
+            # nothing declared moves this row: every field of it must be identical
+            for name in sorted(set(old[key]) | set(new[key])):
                 if old[key].get(name) != new[key].get(name):
                     found.append(
                         Finding(

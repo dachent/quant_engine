@@ -4596,9 +4596,17 @@ def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
             mwr = sleeve_basis.portfolio_mwr(events, perimeter, figures[0].end_date)
         except sleeve_basis.Refusal:
             mwr = None
+    others = _other_strategy_values(ctx, declared)
+    other_weights = {k: v for k, v in weights.items() if k in others}
     for item in figures:
         for finding in sleeve_basis.compare_published(
-            item, perimeter, weights[item.strategy_id], ctx.panel, mwr
+            item,
+            perimeter,
+            weights[item.strategy_id],
+            ctx.panel,
+            mwr,
+            other_weights,
+            others,
         ):
             yield _finding(
                 "returns.sleeve_basis",

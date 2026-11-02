@@ -868,3 +868,103 @@ def test_a_strategy_with_no_figures_before_is_reported() -> None:
         _fixture(), _fixture(), {"synthetic-unknown": "SLEEVE_EPOCH"}
     )
     assert [f.code for f in found] == ["NO_FIGURES_BEFORE"]
+
+
+# ------------------------------------- every other strategy: weight, capital, the rest
+
+
+def _expected_capital() -> list[dict[str, Any]]:
+    return [
+        {
+            "metric_id": "capital.strategy.cutoff",
+            "entity": name,
+            "expected": format(value, "f"),
+        }
+        for name, value in synth.OTHER_STRATEGIES.items()
+    ]
+
+
+def _panel_with_other_weights() -> dict[str, Any]:
+    panel = _honest_panel()
+    for row in panel["strategies"][1:]:
+        row["systematic_weight"] = format(
+            synth.OTHER_STRATEGIES[row["strategy_id"]] / Decimal(9575), ".40f"
+        )
+    return panel
+
+
+def _other_findings(panel: dict[str, Any]) -> list[str]:
+    context = _context(
+        panel,
+        declaration=_declared(),
+        facts=synth.facts(),
+        expected=_expected_capital(),
+    )
+    return [f.message.split(":")[0] for f in checks.check_sleeve_basis(context)]
+
+
+def test_other_strategies_published_as_capital_over_the_restated_perimeter_pass() -> (
+    None
+):
+    assert _other_findings(_panel_with_other_weights()) == []
+
+
+def test_a_nudged_weight_of_another_strategy_is_found() -> None:
+    panel = _panel_with_other_weights()
+    panel["strategies"][1]["systematic_weight"] = "0.3134"
+    assert _other_findings(panel) == ["PUBLISHED_OTHER_WEIGHT_DIFFERS"]
+
+
+def test_the_old_perimeter_weight_of_another_strategy_is_found() -> None:
+    panel = _panel_with_other_weights()
+    panel["strategies"][1]["systematic_weight"] = format(
+        Decimal(3000) / Decimal(8175), ".30f"
+    )
+    assert _other_findings(panel) == ["PUBLISHED_OTHER_WEIGHT_DIFFERS"]
+
+
+def test_a_moved_capital_of_another_strategy_is_found_against_the_oracle() -> None:
+    panel = _panel_with_other_weights()
+    panel["strategies"][2]["current_value_usd"] = "5001"
+    assert _other_findings(panel) == ["PUBLISHED_OTHER_CAPITAL_DIFFERS"]
+
+
+def test_a_perimeter_changed_without_the_sleeve_restatement_is_found() -> None:
+    panel = _panel_with_other_weights()
+    panel["capital"]["systematic"] = "8175"  # the parent-account total
+    assert _other_findings(panel) == ["PUBLISHED_PERIMETER_DIFFERS"]
+
+
+def test_a_moved_perimeter_in_the_baseline_without_the_restatement_is_found() -> None:
+    after = _after()
+    _row(after, "capital.portfolio.systematic.cutoff", "portfolio")["expected"] = (
+        "8175.00"
+    )
+    found = sleeve_basis.diff_expected(synth.baseline(), after, _declared())
+    assert [f.code for f in found] == ["ROW_NOT_THE_RESTATED_VALUE"]
+    assert found[0].where.startswith("capital.portfolio.systematic.cutoff")
+
+
+def test_a_nudged_weight_in_the_baseline_is_found() -> None:
+    after = _after()
+    _row(after, "weight.strategy.cutoff", "synthetic-beta")["expected"] = "0.3134"
+    found = sleeve_basis.diff_expected(synth.baseline(), after, _declared())
+    assert [f.code for f in found] == ["ROW_NOT_THE_RESTATED_VALUE"]
+
+
+def test_any_other_field_or_family_that_moves_in_the_baseline_is_found() -> None:
+    after = _after()
+    _row(after, "mwr.strategy", synth.DECLARED)["as_of"] = "2026-02-05"
+    _row(after, "capital.account.cutoff", synth.PARENT)["note"] = "x"
+    _row(
+        after,
+        "twr.account",
+        synth.SLEEVE,
+    )["expected"] = "0.1"
+    found = sleeve_basis.diff_expected(synth.baseline(), after, _declared())
+    assert {f.code for f in found} == {"ROW_CHANGED_WITHOUT_REASON"}
+    assert {f.where for f in found} == {
+        "mwr.strategy|synthetic-alpha|ITD.as_of",
+        "capital.account.cutoff|acct-parent|.note",
+        "twr.account|acct-parent-sa|ITD.expected",
+    }
