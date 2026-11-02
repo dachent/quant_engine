@@ -15,6 +15,8 @@ import shutil
 import sys
 from typing import Any, Mapping, Sequence, cast
 
+import strategy_basis_disclosure
+
 
 BUILDER_VERSION = "0.18.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
@@ -1046,47 +1048,37 @@ def _series_path_sha256(rows: Sequence[Mapping[str, object]]) -> str:
     ).hexdigest()
 
 
-# Copied from branch X's ``strategy_basis_disclosure`` (ACCOUNT_BASIS_FALLBACK and
-# ``account_basis_label``/``retired_sleeves``/``unallocated_bucket``) so the lens lane
-# and the report's account_basis block carry one basis value and one label wording.  To
-# be replaced by an import once X's module is on the integrated branch.  The lens lane
-# only knows the parent account id, so that stands for the report's account name.
-ACCOUNT_BASIS_LANE_BASIS = "PARENT_ACCOUNT_LIVE_SERIES"
-
-
-def _account_basis_label(
+def _account_basis_lane_label(
     *,
-    account_name: str,
-    facts: Mapping[str, Any],
+    parent_account: str,
+    facts: object,
+    block: Mapping[str, Any],
     sleeve_account_id: str,
     cutoff: str,
 ) -> str:
-    retired = 0
-    for sleeve in _objects(facts.get("sleeves"), "facts sleeves"):
-        if sleeve.get("account_id") == sleeve_account_id:
-            continue
-        days = [
-            row
-            for row in _objects(sleeve.get("days"), "sleeve days")
-            if str(row["day"]) <= cutoff
-        ]
-        if days and Decimal(str(days[-1]["nav_end_after_alloc"])) == 0:
-            retired += 1
-    bucket = Decimal(0)
-    perimeter = facts.get("perimeter_account")
-    if isinstance(perimeter, Mapping):
-        for row in _objects(perimeter.get("days"), "perimeter days"):
-            if str(row["day"]) == cutoff:
-                bucket = Decimal(str(row["nav_end"]))
-    parts = [f"whole account {account_name}"]
-    holds: list[str] = []
-    if retired:
-        holds.append("retired sleeves")
-    holds.append(
-        "the unallocated margin bucket" if bucket < 0 else "the unallocated cash bucket"
-    )
-    parts.append("incl. " + " and ".join(holds))
-    return " ".join(parts)
+    """The lane's label, from branch X's helpers: one basis value and one wording.
+
+    The lens lane only knows the parent account id, so that stands for the report's
+    account name.
+    """
+
+    try:
+        sealed = strategy_basis_disclosure.SleeveFacts(
+            document=_object(facts, "sleeve facts"),
+            sha256=_text(block.get("sleeve_facts_sha256"), "sleeve facts sha256"),
+        )
+        others = strategy_basis_disclosure.retired_sleeves(
+            sealed, sleeve_account_id=sleeve_account_id, cutoff=cutoff
+        )
+        return strategy_basis_disclosure.account_basis_label(
+            account_name=parent_account,
+            retired_sleeves=sum(1 for item in others if not item["live_at_cutoff"]),
+            bucket=strategy_basis_disclosure.unallocated_bucket(sealed, cutoff),
+        )
+    except strategy_basis_disclosure.DisclosureError as exc:
+        raise CurrentPlanError(
+            f"the account-basis lane label is refused: {exc}"
+        ) from exc
 
 
 def _account_basis_lanes(
@@ -1192,10 +1184,11 @@ def _account_basis_lanes(
         )
         lanes[series_id] = {
             "account_id": parent_account,
-            "basis": ACCOUNT_BASIS_LANE_BASIS,
-            "label": _account_basis_label(
-                account_name=parent_account,
+            "basis": strategy_basis_disclosure.ACCOUNT_BASIS_FALLBACK,
+            "label": _account_basis_lane_label(
+                parent_account=parent_account,
                 facts=facts,
+                block=block_value,
                 sleeve_account_id=str(identity.get("account_id")),
                 cutoff=str(live[-1]["date"]),
             ),

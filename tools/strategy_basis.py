@@ -36,13 +36,10 @@ _WEIGHT_PRECISION: Final = 34
 
 # What stays on the parent account basis when a row is restated: MEASUREMENTS that come
 # from other hash-bound artifacts this switch does not rebuild, so the row names them
-# instead of letting them pass for sleeve figures.  (The dependence and correlation
-# measurements follow the restated history and are not listed.)
-NOT_RESTATED: Final = (
-    "implementation_return_attribution",
-    "decomposition_lenses",
-    "hwm_numerical_envelope",
-)
+# instead of letting them pass for sleeve figures.  The benchmark and provider
+# comparisons, the implementation bridge, dependence, correlation, the decomposition
+# lenses and the allocation history follow the restated basis and are not listed.
+NOT_RESTATED: Final = ("hwm_numerical_envelope",)
 # Owner-approved policy inputs (PORT-DEPENDENCE-1) are static owner inputs, not
 # measurements: the dependence allocation weight and the conservative loss fractions of
 # the stress bound.  They are never restated; the dependence payload carries a data
@@ -52,12 +49,7 @@ POLICY_CONSTANTS: Final = (
     "dependence_conservative_loss_bound",
 )
 _NAMES: Final = {
-    "benchmark_comparison": "benchmark comparisons",
-    "provider_comparison": "provider comparisons",
-    "implementation_return_attribution": "the implementation bridge",
-    "decomposition_lenses": "the decomposition lenses",
     "hwm_numerical_envelope": "the HWM numerical envelope",
-    "allocation_history": "the allocation history",
     "dependence_policy_weight": "the dependence policy weight",
     "dependence_conservative_loss_bound": "the dependence conservative loss bound",
 }
