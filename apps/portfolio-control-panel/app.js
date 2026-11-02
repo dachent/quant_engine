@@ -480,7 +480,6 @@
   // "sleeve") and the parenthesis both come from the code, never from a typed assumption.
   const ACCOUNT_BASIS_LABELS = Object.freeze({
     BASELINE_ACCOUNT_LIVE: "governed account-live series",
-    SLEEVE_EPOCH: "epoch series, opening NAV to end date",
   });
   const MODEL_BASIS_LABELS = Object.freeze({
     SIGNAL_STATE_TIMES_SPXL_ADJUSTED_CLOSE_PROXY: "Signal-state × SPXL adjusted-close proxy model",

@@ -57,7 +57,7 @@ def test_a_sleeve_return_is_not_named_an_account_return(tmp_path: Path) -> None:
     )
     assert got == [
         "sleeve",
-        "epoch series, opening NAV to end date",
+        "sleeve epoch",
         "account",
         "governed account-live series",
         "account",

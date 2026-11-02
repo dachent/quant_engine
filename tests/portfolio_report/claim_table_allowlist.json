@@ -68,7 +68,7 @@
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
-   "pattern": "^(epoch series, opening NAV to end date|Gross sleeve NAV \\(the row's value\\)|Less the other live sleeves|Sleeve value, margin liability line and net equivalent|What the row carried before it stood on its sleeve|Account basis to sleeve basis|Bridge from the account basis to the sleeve basis|Return on gross sleeve assets, before the margin loan)$",
+   "pattern": "^(Gross sleeve NAV \\(the row's value\\)|Less the other live sleeves|Sleeve value, margin liability line and net equivalent|What the row carried before it stood on its sleeve|Account basis to sleeve basis|Bridge from the account basis to the sleeve basis|Return on gross sleeve assets, before the margin loan)$",
    "justification": "a column, row or section label naming the basis of the figures beneath it: a label, not a claim; the figures it names are the payload's own and are asserted by rows R22-1 to R22-7"
   },
   {
