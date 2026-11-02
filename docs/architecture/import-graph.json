@@ -124,6 +124,11 @@
       1
     ],
     [
+      "gate_profile",
+      "verify_release_restore",
+      1
+    ],
+    [
       "portfolio_attended_preparation",
       "build_sleeve_facts_release",
       1
