@@ -426,6 +426,43 @@ def test_every_account_basis_figure_of_the_published_r2_row_has_a_home() -> None
         assert block["figures"][name] == value
 
 
+def _capital(values: dict[str, str]) -> dict[str, Any]:
+    weights = strategy_basis.closed_weights({k: Decimal(v) for k, v in values.items()})
+    return {
+        "strategies": [
+            {
+                "strategy_id": name,
+                "scope": "SYSTEMATIC",
+                "current_value": {"value": value},
+                "current_weight": str(weights[name]),
+            }
+            for name, value in values.items()
+        ]
+    }
+
+
+def test_weights_shrink_by_one_common_factor_and_sum_to_one() -> None:
+    before = _capital({"a": "100", "b": "300", "c": "600"})
+    after = _capital({"a": "100", "b": "300", "c": "1600"})
+    block = disclosure.weight_restatement(before, after, restated_strategy_id="c")
+    assert Decimal(block["common_factor"]) == Decimal("0.5")
+    assert Decimal(block["difference_usd"]) == 1000
+    assert Decimal(block["weights_sum_after"]) == 1
+
+
+def test_weights_that_are_not_reproduced_fail_closed() -> None:
+    before = _capital({"a": "100", "b": "300", "c": "600"})
+    after = _capital({"a": "100", "b": "300", "c": "1600"})
+    tampered = deepcopy(before)
+    tampered["strategies"][0]["current_weight"] = "0.2"
+    with pytest.raises(disclosure.DisclosureError, match="not reproduced"):
+        disclosure.weight_restatement(tampered, after, restated_strategy_id="c")
+    tampered_after = deepcopy(after)
+    tampered_after["strategies"][1]["current_weight"] = "0.5"
+    with pytest.raises(disclosure.DisclosureError, match="not reproduced"):
+        disclosure.weight_restatement(before, tampered_after, restated_strategy_id="c")
+
+
 def test_the_copy_helpers_do_not_alias_the_fixture() -> None:
     first = build_facts(account_value=ACCOUNT_VALUE, tag_map_sha256=TAG_SHA)
     second = deepcopy(first)

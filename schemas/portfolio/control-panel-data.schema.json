@@ -1111,6 +1111,77 @@
     }
   ],
   "$defs": {
+    "weight_restatement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "perimeter_before_usd",
+        "perimeter_after_usd",
+        "difference_usd",
+        "common_factor",
+        "weights_sum_after",
+        "statement",
+        "rows"
+      ],
+      "properties": {
+        "perimeter_before_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "perimeter_after_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "difference_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "common_factor": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "weights_sum_after": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "restated",
+              "value_before_usd",
+              "value_after_usd",
+              "weight_before",
+              "weight_after"
+            ],
+            "properties": {
+              "strategy_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "restated": {
+                "type": "boolean"
+              },
+              "value_before_usd": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "value_after_usd": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "weight_before": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "weight_after": {
+                "$ref": "#/$defs/basis_decimal"
+              }
+            }
+          }
+        }
+      }
+    },
     "basis_decimal": {
       "type": "string",
       "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
@@ -1521,6 +1592,7 @@
               "cutoff_date",
               "account_basis_ref",
               "margin_liability",
+ "weight_restatement",
               "bridges"
             ],
             "properties": {
@@ -1592,7 +1664,8 @@
                   }
                 }
               },
-              "margin_liability": {
+              "weight_restatement": {"$ref": "#/$defs/weight_restatement"},
+ "margin_liability": {
                 "type": "object",
                 "additionalProperties": false,
                 "required": [

@@ -286,3 +286,43 @@ def test_the_report_bytes_are_deterministic_with_the_disclosure(
     one = LAST_BYTES["content"]
     _on(full, second, monkeypatch)
     assert LAST_BYTES["content"] == one
+
+
+def test_the_weights_before_and_after_are_disclosed_from_the_two_capital_blocks(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "off").mkdir()
+    (tmp_path / "on").mkdir()
+    off = _build(full, tmp_path / "off", monkeypatch, tag_map=_tag_map())
+    on = _on(full, tmp_path / "on", monkeypatch)
+    (entry,) = on["strategy_basis_disclosure"]["strategies"]
+    weights = entry["weight_restatement"]
+    rows = {row["strategy_id"]: row for row in weights["rows"]}
+    assert len(rows) == 7
+    assert rows["strategy-1"]["restated"] is True
+    assert sum(1 for row in rows.values() if not row["restated"]) == 6
+    # the 'before' weight of the restated row is the unrestated row's own published weight
+    assert rows["strategy-1"]["weight_before"] == _row(off)["systematic_weight"]
+    assert rows["strategy-1"]["weight_after"] == _row(on)["systematic_weight"]
+    assert Decimal(rows["strategy-1"]["value_after_usd"]) == Decimal(104)
+    assert Decimal(weights["weights_sum_after"]) == 1
+    factor = Decimal(weights["common_factor"])
+    for row in rows.values():
+        if not row["restated"]:
+            assert abs(
+                Decimal(row["weight_after"]) - Decimal(row["weight_before"]) * factor
+            ) < Decimal("1e-25")
+    assert Decimal(weights["difference_usd"]) == Decimal(94)
+    assert weights["statement"] in {
+        item["value"]
+        for item in on["methodology"]
+        if item["item"] == "Weight restatement"
+    }
+    assert (
+        _validate(
+            "report-data.schema.json",
+            "strategy_basis_disclosure",
+            on["strategy_basis_disclosure"],
+        )
+        == []
+    )

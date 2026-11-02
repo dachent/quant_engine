@@ -102,6 +102,12 @@ def test_the_block_reaches_the_dom_as_the_report_states_it(
         assert step["description"] in bridges
     assert "Residual after the three steps" in bridges
     assert "holds no NAV" in bridges
+    weights = dom["#strategy-basis-weights-table"]["innerHTML"]
+    assert "Weight before" in weights and "restated sleeve" in weights
+    assert (
+        block["weight_restatement"]["statement"].replace("'", "&#39;")
+        in dom["#strategy-basis-weights-note"]["innerHTML"]
+    )
 
 
 def test_a_payload_without_the_block_shows_nothing(tmp_path: Path) -> None:

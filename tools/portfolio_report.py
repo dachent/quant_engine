@@ -10900,6 +10900,7 @@ def build_report_data(
                 sleeve_facts,
                 account_lane_rows,
                 current_capital=_current_capital(series_catalog),
+                unrestated_capital=_current_capital(catalog),
                 perimeter=epoch_perimeter,
                 details=epoch_verified_details,
                 ledger_generation_id=_facts_ledger_generation_id(
@@ -13098,6 +13099,7 @@ def _apply_strategy_basis_disclosure(
     account_lane_rows: Mapping[str, Mapping[str, Any]],
     *,
     current_capital: Mapping[str, Any],
+    unrestated_capital: Mapping[str, Any],
     perimeter: derived_epoch_perimeter.EffectivePerimeter | None,
     details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
     ledger_generation_id: str | None,
@@ -13222,9 +13224,17 @@ def _apply_strategy_basis_disclosure(
             ),
         }
         sleeve_name = disclosure.sleeve_id(facts, restated.account_id)
+        weights = disclosure.weight_restatement(
+            unrestated_capital, current_capital, restated_strategy_id=strategy_id
+        )
     except (disclosure.DisclosureError, ArithmeticError) as exc:
         raise ReportValidationError(str(exc)) from exc
     parent_row["account_basis"] = basis
+    methodology = report.get("methodology")
+    if isinstance(methodology, list):
+        methodology.append(
+            {"item": "Weight restatement", "value": weights["statement"]}
+        )
     scope = summary_row.get("return_scope")
     if not isinstance(scope, dict):
         raise ReportValidationError("the restated row has no return scope to reference")
@@ -13267,6 +13277,7 @@ def _apply_strategy_basis_disclosure(
                 "cutoff_date": cutoff,
                 "account_basis_ref": scope["account_basis_ref"],
                 "margin_liability": margin,
+                "weight_restatement": weights,
                 "bridges": bridges,
             }
         ],

@@ -1008,6 +1008,8 @@
     const accountRows = [];
     const accountBridge = [];
     const auditBridge = [];
+    const weightRows = [];
+    const weightNotes = [];
     const statements = [];
     for (const entry of block.strategies) {
       const margin = entry.margin_liability || {};
@@ -1057,6 +1059,14 @@
           ...(toSleeve.account_series_also_holds || []).map((other) => `<tr><td colspan="2" class="cell-secondary">The account series also holds sleeve ${safe(other.sleeve_id)} (${safe(other.strategy_id)}), ${safe(formatDate(other.first_day))} to ${safe(formatDate(other.last_day))}, at the cutoff it ${other.live_at_cutoff ? "holds a NAV" : "holds no NAV"}</td></tr>`),
         );
       }
+      const weights = entry.weight_restatement;
+      if (weights) {
+        weightNotes.push(`<p>${safe(weights.statement)}</p>`);
+        for (const row of weights.rows || []) {
+          weightRows.push(`<tr><td>${safe(strategyNameById(row.strategy_id))}${row.restated ? ' <span class="cell-secondary">restated sleeve</span>' : ""}</td><td class="numeric">${pct(row.weight_before, 4)}</td><td class="numeric">${pct(row.weight_after, 4)}</td><td class="numeric">${currencyExact(row.value_before_usd)}</td><td class="numeric">${currencyExact(row.value_after_usd)}</td></tr>`);
+        }
+        weightRows.push(`<tr><td colspan="3">Perimeter before and after (common factor ${safe(decimal(weights.common_factor, 6))})</td><td class="numeric">${currencyExact(weights.perimeter_before_usd)}</td><td class="numeric">${currencyExact(weights.perimeter_after_usd)}</td></tr>`);
+      }
       const toAudit = (entry.bridges || {}).sleeve_to_audit;
       if (toAudit) {
         const sw = toAudit.window || {};
@@ -1072,6 +1082,8 @@
     $("#strategy-basis-lines-table").innerHTML = tableMarkup([["Strategy"], ["Value line"], ["Amount", "numeric"]], lines, "Sleeve value, margin liability line and net equivalent");
     $("#account-basis-table").innerHTML = tableMarkup([["Parent-account figure"], ["Value", "numeric"]], accountRows.length ? accountRows : [emptyRow(2, "No account-basis block")], "What the row carried before it stood on its sleeve");
     $("#strategy-basis-account-bridge-table").innerHTML = tableMarkup([["Account basis to sleeve basis"], ["Figure", "numeric"]], accountBridge, "Bridge from the account basis to the sleeve basis");
+    $("#strategy-basis-weights-note").innerHTML = weightNotes.join("");
+    $("#strategy-basis-weights-table").innerHTML = tableMarkup([["Strategy"], ["Weight before (account perimeter)", "numeric"], ["Weight after (restated perimeter)", "numeric"], ["Value before", "numeric"], ["Value after", "numeric"]], weightRows.length ? weightRows : [emptyRow(5, "No weight restatement")], "Systematic weights before and after the restatement");
     $("#strategy-basis-audit-bridge-table").innerHTML = tableMarkup([["Audit convention to panel convention"], ["Figure", "numeric"]], auditBridge, "Bridge from the audit's convention to the panel's sleeve return");
   }
 

@@ -700,3 +700,101 @@ def sleeve_cumulative_return(restatement: strategy_basis.SleeveRestatement) -> D
         return _chain(
             [_dec(row["return"], "restated return") for row in restatement.rows]
         )
+
+
+WEIGHT_TOLERANCE: Final = Decimal("1e-25")
+
+
+def _systematic(block: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    rows = block.get("strategies")
+    if not isinstance(rows, list):
+        raise DisclosureError("current capital has no strategy rows")
+    return {
+        str(row["strategy_id"]): row for row in rows if row.get("scope") == "SYSTEMATIC"
+    }
+
+
+def weight_restatement(
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    *,
+    restated_strategy_id: str,
+) -> dict[str, Any]:
+    """Every systematic weight before (account perimeter) and after (restated perimeter).
+
+    ``before`` is the unrestated current-capital block, ``after`` the restated one.  The
+    published weights of both are re-derived from their values by the baseline's own closed
+    rule; a published weight that is not reproduced, weights that do not sum to one, or
+    other strategies that do not all shrink by one common factor stop the build.
+    """
+
+    old = _systematic(before)
+    new = _systematic(after)
+    if set(old) != set(new) or restated_strategy_id not in old:
+        raise DisclosureError(
+            "the two current-capital blocks name different strategies"
+        )
+    values_before = {
+        k: _dec(v["current_value"]["value"], "value") for k, v in old.items()
+    }
+    values_after = {
+        k: _dec(v["current_value"]["value"], "value") for k, v in new.items()
+    }
+    rederived_before = strategy_basis.closed_weights(values_before)
+    rederived_after = strategy_basis.closed_weights(values_after)
+    rows: list[dict[str, Any]] = []
+    factors: dict[str, Decimal] = {}
+    with localcontext() as context:
+        context.prec = _PRECISION
+        for name in sorted(old):
+            published_before = _dec(old[name]["current_weight"], "weight before")
+            published_after = _dec(new[name]["current_weight"], "weight after")
+            if abs(published_before - rederived_before[name]) > WEIGHT_TOLERANCE:
+                raise DisclosureError(
+                    f"the weight before is not reproduced from the unrestated block: {name}"
+                )
+            if abs(published_after - rederived_after[name]) > WEIGHT_TOLERANCE:
+                raise DisclosureError(
+                    f"the weight after is not reproduced from the restated block: {name}"
+                )
+            if name != restated_strategy_id:
+                factors[name] = published_after / published_before
+            rows.append(
+                {
+                    "strategy_id": name,
+                    "restated": name == restated_strategy_id,
+                    "value_before_usd": _text(values_before[name]),
+                    "value_after_usd": _text(values_after[name]),
+                    "weight_before": _text(published_before),
+                    "weight_after": _text(published_after),
+                }
+            )
+        total_after = sum(
+            (_dec(row["weight_after"], "weight") for row in rows), Decimal(0)
+        )
+        if abs(total_after - 1) > WEIGHT_TOLERANCE:
+            raise DisclosureError("the restated weights do not sum to one")
+        perimeter_before = sum(values_before.values(), Decimal(0))
+        perimeter_after = sum(values_after.values(), Decimal(0))
+        factor = perimeter_before / perimeter_after
+        if any(abs(item - factor) > WEIGHT_TOLERANCE for item in factors.values()):
+            raise DisclosureError(
+                "the other strategies' weights do not shrink by one common factor"
+            )
+        difference = perimeter_after - perimeter_before
+        sign = "grows" if difference >= 0 else "shrinks"
+    statement = (
+        f"The perimeter now counts the restated sleeve at its gross NAV: it {sign} from "
+        f"{_usd(perimeter_before)} (account basis) to {_usd(perimeter_after)}, a change of "
+        f"{_usd(difference)} of margin-funded value counted as value. The other "
+        f"{len(factors)} strategies' weights are each multiplied by {_text(factor)}."
+    )
+    return {
+        "perimeter_before_usd": _text(perimeter_before),
+        "perimeter_after_usd": _text(perimeter_after),
+        "difference_usd": _text(difference),
+        "common_factor": _text(factor),
+        "weights_sum_after": _text(total_after),
+        "statement": statement,
+        "rows": rows,
+    }
