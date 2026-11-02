@@ -1758,16 +1758,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "rerecord re-binds completed stages to the current configuration and graph; "
                     "pass --confirm-same-config after checking that neither changed what they produced"
                 )
+            # a live stage would later save its older in-memory state over these bindings
+            check_no_live_stage(run)
             todo = [i for i in selected if run.state["stages"].get(i)]
+            current: dict[str, tuple[dict[str, str | None], dict[str, str | None]]] = {}
             for stage_id in todo:
                 record = run.state["stages"][stage_id]
+                stage = run.stage(stage_id)
                 if record.get("status") != "ok":
                     raise Refusal(
                         f"{stage_id} is {record.get('status')}, not ok: nothing is re-recorded"
                     )
-                verify_kept(run, run.stage(stage_id), record, check_binding=False)
+                verify_kept(run, stage, record, check_binding=False)
+                # the stage's declared artifacts as the current graph names them: all must exist, and
+                # they are what later runs verify, so a newly declared output is bound from now on
+                missing = [p for p in _outputs(run, stage) if not p.exists()]
+                missing += [
+                    Path(run.expand(i))
+                    for i in stage.get("inputs", [])
+                    if not Path(run.expand(i)).exists()
+                ]
+                if missing:
+                    raise Refusal(
+                        f"{stage_id}: declared artifact {missing[0]} does not exist: nothing is re-recorded"
+                    )
+                current[stage_id] = (
+                    {str(p): path_digest(p) for p in _outputs(run, stage)},
+                    {
+                        str(Path(run.expand(i))): path_digest(Path(run.expand(i)))
+                        for i in stage.get("inputs", [])
+                    },
+                )
             for stage_id in todo:
                 record = run.state["stages"][stage_id]
+                record["outputs"], record["inputs"] = current[stage_id]
                 record["binding"] = run.stage_binding(stage_id)
                 record["rerecorded_at"] = _now()
                 print(f"{stage_id}: re-recorded")

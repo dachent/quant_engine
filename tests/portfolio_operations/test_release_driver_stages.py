@@ -1769,3 +1769,72 @@ def test_the_replica_must_still_be_its_inventoried_copy_before_the_next_stage_us
     shipped = _stage("replica-spec")["verify_inventory"]
     assert shipped["file"] == "{cycle}/replica-inventory.json"
     assert shipped["except"] == ["{replica_coordination_root}/merge-attestation.json"]
+
+
+def test_rerecord_binds_a_newly_declared_output(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    assert _drive(world, _graph(world, CHAIN)) == 0
+    extra = world["cycle"] / "extra.txt"
+    extra.write_text("new", encoding="utf-8")
+    # `one` now also declares `extra.txt` (a graph change after it ran)
+    stages = [
+        {**CHAIN[0], "outputs": ["{cycle}/one.txt", "{cycle}/extra.txt"]},
+        CHAIN[1],
+    ]
+    changed = _graph(world, stages)
+    args = [
+        "rerecord",
+        "--config",
+        str(world["config"]),
+        "--graph",
+        str(changed),
+        "--confirm-same-config",
+    ]
+    assert driver.main(args) == 0
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert str(extra) in state["stages"]["one"]["outputs"]  # bound from now on
+    assert _drive(world, changed) == 0
+    extra.unlink()
+    assert _drive(world, changed) == 2  # deleting it is no longer invisible
+    extra.write_text("new", encoding="utf-8")
+    (world["cycle"] / "two.txt").unlink()
+    extra.unlink()
+    assert (
+        driver.main(args) == 2
+    )  # a declared artifact that does not exist: nothing is re-recorded
+
+
+def test_rerecord_refuses_while_a_stage_of_the_run_is_live(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    state_path = world["cycle"] / driver.STATE_NAME
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"])
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        before = json.dumps(state, sort_keys=True)
+        state["stages"]["two"]["status"] = "running"
+        state["stages"]["two"]["pid"] = sleeper.pid
+        state["stages"]["two"]["process_started"] = process_started(sleeper.pid)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        args = [
+            "rerecord",
+            "--config",
+            str(world["config"]),
+            "--graph",
+            str(graph),
+            "--confirm-same-config",
+        ]
+        assert driver.main(args) == 2
+        assert (
+            json.loads(state_path.read_text(encoding="utf-8"))["stages"]["two"][
+                "status"
+            ]
+            == "running"
+        )
+        assert before  # nothing was saved over the running record
+    finally:
+        sleeper.kill()
+        sleeper.wait()
