@@ -29,13 +29,16 @@ Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
 generation directory the release binds, or the string `from_ledger`, below). The epoch manifest
 generation comes from the run itself.
 
-`provider_sources: "from_ledger"` derives the seven provider rows from `{cycle}/ledger-spec.json`
-(built by `tools/release_ledger_spec.py`) instead of a typed map: each source is
-`<providers.<id>.root>/generations/<generation_id>`. The stage refuses when the staged ledger
-catalog (graph path `ledger_catalog`) admitted another generation id for a provider, or when a
-directory is not that generation. The optional config key `real_root_overrides` (root id to a full
-source directory) points a provider at its copy in another root, again only at a directory of the
-same generation id. See `docs/release-ledger-spec.md`. A test fails if the graph starts using a key this list does not name.
+`provider_sources: "from_ledger"` derives the seven provider rows from the cycle manifest's roots, not a
+typed map: each source is the `generation_dir` the resolved cycle (`{resolved_cycle}`, default
+`{cycle}/resolved-cycle.json`, written by `release_cycle_manifest.py resolve --out`) carries for the provider,
+`<root of the provider's manifest root key>/generations/<generation_id>`. `{cycle}/ledger-spec.json` (built by
+`tools/release_ledger_spec.py` from the same manifest) must agree on root, generation id and manifest hash, so a
+provider staged in one root and bound from another is refused instead of guessed. The stage also refuses when the
+staged ledger catalog (graph path `ledger_catalog`) admitted another generation id for a provider, or when the
+directory is not that generation inside its root (a link leaving the root counts). A provider whose bytes live in
+another root is declared that way in the cycle manifest; the former config key `real_root_overrides` is retired
+and any run configuration that still has it is refused. See `docs/release-ledger-spec.md`. A test fails if the graph starts using a key this list does not name.
 
 ## Probe and release mode
 

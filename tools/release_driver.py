@@ -58,6 +58,8 @@ from quant_engine.core import (
     process_started,
 )
 
+import release_cycle_manifest
+
 GRAPH_DEFAULT = (
     Path(__file__).resolve().parents[1] / "ops" / "mvp2-release" / "release-stages.json"
 )
@@ -955,14 +957,40 @@ FROM_LEDGER = "from_ledger"
 PROVIDER_ROOT_PREFIX = "provider-"
 
 
-def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
-    """Derive the provider source directories from the cycle's ledger spec, not a typed map.
+def _resolved_cycle(run: Run) -> dict[str, Any]:
+    """The resolved cycle (``release_cycle_manifest resolve --out``): the cycle manifest's root keys, resolved."""
 
-    Each ``provider-<id>`` root's source is ``<providers.<id>.root>/generations/<generation_id>`` of
-    ``{cycle}/ledger-spec.json``; ``real_root_overrides`` (root id to a full source directory) may
-    point a provider at its copy in another root, but only at a directory of the same generation id.
-    The ledger's own staged catalog (graph path ``ledger_catalog``) must name the same generation
-    id for every provider, or the stage refuses.
+    if "resolved_cycle" not in run.graph.get("paths", {}):
+        raise Refusal(
+            "provider-generations: from_ledger needs the graph path resolved_cycle"
+        )
+    path = Path(run.expand("{resolved_cycle}"))
+    if not path.is_file():
+        raise Refusal(
+            f"provider-generations: from_ledger needs the resolved cycle at {path} "
+            "(written by the cycle manifest tool's resolve command)"
+        )
+    resolved = _read_json(path)
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("schema_version") != release_cycle_manifest.RESOLVED_VERSION
+        or not isinstance(resolved.get("providers"), dict)
+    ):
+        raise Refusal(f"provider-generations: {path} is not a resolved release cycle")
+    return resolved
+
+
+def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
+    """Derive the provider source directories from the cycle manifest's roots, not a typed map.
+
+    Each ``provider-<id>`` root's source is the ``generation_dir`` the resolved cycle carries for the
+    provider: ``<root of the cycle manifest's root key>/generations/<generation_id>``, one place per
+    provider, declared in the cycle manifest. The ledger spec (``{cycle}/ledger-spec.json``, built
+    from the same manifest) must agree on root, generation id and manifest hash, and the ledger's own
+    staged catalog (graph path ``ledger_catalog``) must admit that generation id, or the stage
+    refuses. The directory must be the generation named by its own id inside the provider root,
+    whatever links lie on the way. There is no per-run override: a provider whose bytes live in
+    another root is declared that way in the cycle manifest.
     """
 
     spec = _read_json(Path(run.expand("{cycle}/ledger-spec.json")))
@@ -970,12 +998,12 @@ def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
         raise Refusal(
             "provider-generations: from_ledger needs the graph path ledger_catalog"
         )
+    resolved = _resolved_cycle(run)
     catalog = _read_json(Path(run.expand("{ledger_catalog}")))
     admitted = {
         item["provider_id"]: item["generation_id"]
         for item in catalog.get("provider_generations", [])
     }
-    overrides = dict(run.config.get("real_root_overrides", {}))
     own = set(run.graph.get("provider_run_sources", {}))
     sources: dict[str, str] = {}
     for root_id in wanted:
@@ -989,28 +1017,41 @@ def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
             raise Refusal(
                 f"provider-generations: ledger spec has no provider {provider_id}"
             )
+        cycle_ref = resolved["providers"].get(provider_id)
+        if not isinstance(cycle_ref, dict):
+            raise Refusal(
+                f"provider-generations: resolved cycle has no provider {provider_id}"
+            )
         generation_id = ref["generation_id"]
         if admitted.get(provider_id) != generation_id:
             raise Refusal(
                 f"provider-generations: {provider_id} ledger spec names {generation_id[:12]} "
                 f"but the ledger catalog admitted {str(admitted.get(provider_id))[:12]}"
             )
-        directory = (
-            run.expand(overrides[root_id])
-            if root_id in overrides
-            else str(Path(ref["root"]) / "generations" / generation_id)
-        )
-        if Path(directory).name != generation_id:
+        if cycle_ref.get("generation_id") != generation_id or cycle_ref.get(
+            "manifest_sha256"
+        ) != ref.get("manifest_sha256"):
+            raise Refusal(
+                f"provider-generations: {provider_id} resolved cycle and ledger spec name "
+                "another generation or manifest"
+            )
+        root = Path(str(cycle_ref.get("root")))
+        if root.resolve() != Path(ref["root"]).resolve():
+            raise Refusal(
+                f"provider-generations: {provider_id} ledger spec root {ref['root']} is not the "
+                f"cycle manifest root {cycle_ref.get('root')}; rebuild the ledger spec from the "
+                "resolved cycle"
+            )
+        directory = Path(str(cycle_ref.get("generation_dir")))
+        if (
+            directory.name != generation_id
+            or directory.resolve() != root.resolve() / "generations" / generation_id
+        ):
             raise Refusal(
                 f"provider-generations: {root_id} source {directory} is not generation "
-                f"{generation_id[:12]}"
+                f"{generation_id[:12]} inside {root}"
             )
-        sources[root_id] = directory
-    extra = sorted(set(overrides) - set(sources))
-    if extra:
-        raise Refusal(
-            f"provider-generations: real_root_overrides for unbound roots: {extra}"
-        )
+        sources[root_id] = str(directory)
     return sources
 
 
@@ -1018,6 +1059,11 @@ def provider_generations(run: Run, target: Path) -> dict[str, Any]:
     """Write the provider-generations list the production spec binds; refuse an incomplete one."""
 
     wanted = list(run.graph["provider_roots"])
+    if "real_root_overrides" in run.config:
+        raise Refusal(
+            "provider-generations: real_root_overrides is retired; declare the provider's root "
+            "in the cycle manifest (the resolved cycle drives the sources)"
+        )
     configured = run.config.get("provider_sources", {})
     if configured == FROM_LEDGER:
         sources = _sources_from_ledger(run, wanted)

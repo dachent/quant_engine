@@ -15,6 +15,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
+import release_cycle_manifest  # noqa: E402
 import release_driver as driver  # noqa: E402
 
 
@@ -388,14 +389,51 @@ def test_provider_generations_is_generated_complete_and_refuses_gaps(
     assert _drive(world, graph, "--only", "provider-generations", "--replace") == 2
 
 
-def _ledger_world(world: dict[str, Any], catalog_id: str) -> Path:
-    """A ledger spec naming one provider generation, and the staged ledger catalog admitting it."""
+def _ledger_world(
+    world: dict[str, Any],
+    catalog_id: str,
+    *,
+    ledger_root: Path | None = None,
+    cycle_root: Path | None = None,
+    cycle_dir: Path | None = None,
+) -> Path:
+    """A ledger spec, a resolved cycle and the staged ledger catalog for one provider generation.
+
+    ``ledger_root`` is the provider root the ledger spec names, ``cycle_root`` the one the resolved
+    cycle names (the cycle manifest's), ``cycle_dir`` the resolved generation directory.
+    """
 
     root = world["tmp"] / "alpaca-root"
-    (root / "generations" / "G1").mkdir(parents=True)
-    spec = {"providers": {"alpaca": {"root": str(root), "generation_id": "G1"}}}
+    (root / "generations" / "G1").mkdir(parents=True, exist_ok=True)
+    ledger_root = ledger_root or root
+    cycle_root = cycle_root or root
+    cycle_dir = cycle_dir or cycle_root / "generations" / "G1"
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+    spec = {
+        "providers": {
+            "alpaca": {
+                "root": str(ledger_root),
+                "generation_id": "G1",
+                "manifest_sha256": "a" * 64,
+            }
+        }
+    }
+    resolved = {
+        "schema_version": release_cycle_manifest.RESOLVED_VERSION,
+        "providers": {
+            "alpaca": {
+                "root": cycle_root.as_posix(),
+                "generation_id": "G1",
+                "generation_dir": cycle_dir.as_posix(),
+                "manifest_sha256": "a" * 64,
+            }
+        },
+    }
     world["cycle"].mkdir(parents=True, exist_ok=True)
     (world["cycle"] / "ledger-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    (world["cycle"] / "resolved-cycle.json").write_text(
+        json.dumps(resolved), encoding="utf-8"
+    )
     ledger = world["run"] / "stages" / "ledger" / "generations" / "L1"
     (ledger / "provider-ledger.json").write_text(
         json.dumps(
@@ -419,13 +457,19 @@ def _ledger_world(world: dict[str, Any], catalog_id: str) -> Path:
         provider_roots=["provider-alpaca", "epoch-manifest"],
         provider_run_sources={"epoch-manifest": "{run}/ep"},
         paths={
-            "ledger_catalog": "{run}/stages/ledger/generations/{ledger_id}/provider-ledger.json"
+            "ledger_catalog": "{run}/stages/ledger/generations/{ledger_id}/provider-ledger.json",
+            "resolved_cycle": "{cycle}/resolved-cycle.json",
         },
         derive={"ledger_id": {"single_dir": "{run}/stages/ledger/generations"}},
     )
 
 
-def test_provider_sources_can_be_derived_from_the_ledger_spec(
+def _from_ledger(world: dict[str, Any], graph: Path) -> int:
+    _config(world, provider_sources="from_ledger")
+    return _drive(world, graph, "--only", "provider-generations", "--replace")
+
+
+def test_provider_sources_are_derived_from_the_cycle_manifest_roots(
     world: dict[str, Any],
 ) -> None:
     (world["run"] / "ep").mkdir()
@@ -440,6 +484,41 @@ def test_provider_sources_can_be_derived_from_the_ledger_spec(
     assert rows[1]["root_id"] == "epoch-manifest"
 
 
+def test_a_cycle_directory_root_and_a_data_root_are_both_declared_by_the_manifest(
+    world: dict[str, Any],
+) -> None:
+    """A provider staged in the cycle directory and one whose bytes live in the data root are both
+    declared by the manifest's root key; neither needs a per-run override."""
+
+    (world["run"] / "ep").mkdir()
+    in_cycle = world["cycle"] / "ibkr-like"
+    in_data = world["tmp"] / "data" / "data-ibkr-like"
+    for place in (in_cycle, in_data):
+        graph = _ledger_world(world, "G1", ledger_root=place, cycle_root=place)
+        assert _from_ledger(world, graph) == 0
+        rows = json.loads((world["cycle"] / "pg.json").read_text(encoding="utf-8"))
+        assert rows[0]["source_dir"] == str(place / "generations" / "G1")
+        (world["cycle"] / "pg.json").unlink()
+
+
+def test_a_ledger_spec_root_that_is_not_the_cycle_manifest_root_is_refused(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ibkr-style disagreement: the ledger was staged from the cycle directory while the
+    manifest names the data root (the retained hand cycle bound one and staged the other)."""
+
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(
+        world,
+        "G1",
+        ledger_root=world["cycle"] / "ibkr-like",
+        cycle_root=world["tmp"] / "data" / "data-ibkr-like",
+    )
+    assert _from_ledger(world, graph) == 2
+    assert "is not the cycle manifest root" in capsys.readouterr().err
+    assert not (world["cycle"] / "pg.json").exists()
+
+
 def test_derived_sources_refuse_when_the_ledger_catalog_admitted_another_generation(
     world: dict[str, Any],
 ) -> None:
@@ -449,27 +528,117 @@ def test_derived_sources_refuse_when_the_ledger_catalog_admitted_another_generat
     assert _drive(world, graph) == 2
 
 
-def test_derived_sources_accept_an_override_only_for_the_same_generation(
+def _edit_resolved(world: dict[str, Any], **changes: Any) -> None:
+    path = world["cycle"] / "resolved-cycle.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["providers"]["alpaca"].update(changes)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"generation_id": "G2"},
+        {"manifest_sha256": "b" * 64},
+    ],
+)
+def test_derived_sources_refuse_a_resolved_cycle_that_names_another_generation(
+    world: dict[str, Any], changes: dict[str, Any]
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    _edit_resolved(world, **changes)
+    assert _from_ledger(world, graph) == 2
+
+
+def test_derived_sources_refuse_a_directory_that_is_not_inside_its_provider_root(
     world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    elsewhere = world["tmp"] / "elsewhere" / "generations" / "G1"
+    graph = _ledger_world(world, "G1", cycle_dir=elsewhere)
+    assert _from_ledger(world, graph) == 2
+    # a directory named for another generation is refused even inside the root
+    other = world["tmp"] / "alpaca-root" / "generations" / "G9"
+    graph = _ledger_world(world, "G1", cycle_dir=other)
+    assert _from_ledger(world, graph) == 2
+
+
+def test_derived_sources_refuse_a_generation_directory_linked_out_of_its_root(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    target = world["tmp"] / "outside-copy"
+    target.mkdir()
+    link = world["tmp"] / "alpaca-root" / "generations" / "G1"
+    link.rmdir()
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert _from_ledger(world, graph) == 2
+
+
+def test_derived_sources_need_a_resolved_cycle_of_the_right_shape(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    resolved = world["cycle"] / "resolved-cycle.json"
+    resolved.write_text(
+        json.dumps({"schema_version": "other", "providers": {}}), encoding="utf-8"
+    )
+    assert _from_ledger(world, graph) == 2
+    resolved.unlink()
+    assert _from_ledger(world, graph) == 2
+    graph = _ledger_world(world, "G1")
+    document = json.loads(resolved.read_text(encoding="utf-8"))
+    document["providers"] = {}
+    resolved.write_text(json.dumps(document), encoding="utf-8")
+    assert _from_ledger(world, graph) == 2
+
+
+def test_derived_sources_need_the_graph_to_name_the_resolved_cycle(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    document = json.loads(graph.read_text(encoding="utf-8"))
+    del document["paths"]["resolved_cycle"]
+    graph.write_text(json.dumps(document), encoding="utf-8")
+    assert _from_ledger(world, graph) == 2
+
+
+def test_the_per_run_override_is_retired_in_every_mode(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
     (world["run"] / "ep").mkdir()
     graph = _ledger_world(world, "G1")
     copy_dir = world["tmp"] / "real" / "generations" / "G1"
     copy_dir.mkdir(parents=True)
+    overrides = {"provider-alpaca": str(copy_dir)}
+    _config(world, provider_sources="from_ledger", real_root_overrides=overrides)
+    assert _drive(world, graph, "--only", "provider-generations", "--replace") == 2
+    assert "real_root_overrides is retired" in capsys.readouterr().err
     _config(
         world,
-        provider_sources="from_ledger",
-        real_root_overrides={"provider-alpaca": str(copy_dir)},
+        provider_sources={"provider-alpaca": str(copy_dir)},
+        real_root_overrides=overrides,
     )
-    assert _drive(world, graph) == 0
-    rows = json.loads((world["cycle"] / "pg.json").read_text(encoding="utf-8"))
-    assert rows[0]["source_dir"] == str(copy_dir)
-    wrong = world["tmp"] / "real" / "generations" / "G2"
-    wrong.mkdir()
-    _config(world, real_root_overrides={"provider-alpaca": str(wrong)})
     assert _drive(world, graph, "--only", "provider-generations", "--replace") == 2
-    _config(world, real_root_overrides={"provider-nothing": str(copy_dir)})
-    assert _drive(world, graph, "--only", "provider-generations", "--replace") == 2
+
+
+def test_the_explicit_provider_sources_map_does_not_need_a_resolved_cycle(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    (world["cycle"] / "resolved-cycle.json").unlink()
+    explicit = world["tmp"] / "typed" / "G1"
+    explicit.mkdir(parents=True)
+    _config(world, provider_sources={"provider-alpaca": str(explicit)})
+    assert _drive(world, graph, "--only", "provider-generations", "--replace") == 0
 
 
 def test_a_provider_sources_string_other_than_from_ledger_is_refused(
@@ -489,6 +658,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
     )
     ids = [stage["id"] for stage in graph["stages"]]
     assert len(ids) == len(set(ids))
+    assert graph["paths"]["resolved_cycle"] == "{cycle}/resolved-cycle.json"
     config_keys = set()
     known = set(graph["paths"]) | set(graph["derive"])
 
