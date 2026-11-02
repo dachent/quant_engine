@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/release-resolved-cycle.schema.json",
+  "title": "Resolved release cycle (output of release_cycle_manifest resolve)",
+  "description": "The shape later hand-script-replacement blocks read instead of importing tools/release_cycle_manifest.py. Absolute paths are machine-local outputs; every one was verified against its pin when the file was written.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "cycle_id",
+    "cutoff",
+    "evaluated_on",
+    "captured_at_utc",
+    "cycle_manifest_sha256",
+    "predecessor",
+    "roots",
+    "scratch",
+    "providers",
+    "strategy_evidence",
+    "cost_inputs",
+    "public_bundles"
+  ],
+  "properties": {
+    "schema_version": { "const": "qe-release-resolved-cycle/1" },
+    "cycle_id": { "type": "string" },
+    "cutoff": { "type": "string" },
+    "evaluated_on": { "type": "string" },
+    "captured_at_utc": { "type": "string" },
+    "cycle_manifest_sha256": { "$ref": "#/$defs/sha256" },
+    "predecessor": { "type": "object" },
+    "roots": { "type": "object", "additionalProperties": { "type": "string" } },
+    "scratch": { "type": "string" },
+    "providers": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/provider" }
+    },
+    "strategy_evidence": { "$ref": "#/$defs/file" },
+    "epoch_admission_policy": { "$ref": "#/$defs/file" },
+    "cost_inputs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/file" } },
+    "public_bundles": { "type": "object", "additionalProperties": { "type": "string" } }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size_bytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "generation_id",
+        "generation_dir",
+        "manifest_path",
+        "manifest_sha256",
+        "manifest_size_bytes",
+        "finality_source",
+        "finality_evidence",
+        "qualification",
+        "finalized_through"
+      ],
+      "properties": {
+        "qualification": { "type": "string" },
+        "finalized_through": { "type": ["string", "null"] },
+        "root": { "type": "string" },
+        "generation_id": { "type": "string" },
+        "generation_dir": { "type": "string" },
+        "manifest_path": { "type": "string" },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "manifest_size_bytes": { "type": "integer", "minimum": 0 },
+        "finality_source": {
+          "enum": ["GENERATION_MANIFEST", "SELECTED_SOURCE_ARTIFACT", "CYCLE_MANIFEST_NATIVE"]
+        },
+        "finality_evidence": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/file" }]
+        }
+      }
+    }
+  }
+}

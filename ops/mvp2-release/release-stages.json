@@ -28,6 +28,7 @@
     "contract": "{repo_root}/contracts/portfolio-financial-mvp-source-v1.json",
     "source_matrix": "{repo_root}/generated/financial-mvp/source-matrix.json",
     "ledger_receipt": "{run}/stages/ledger/generations/{ledger_id}/admit-or-declare-receipt.json",
+    "ledger_catalog": "{run}/stages/ledger/generations/{ledger_id}/provider-ledger.json",
     "pre": "{cycle}/pre",
     "attribution": "{cycle}/attribution",
     "laneout": "{cycle}/laneout",

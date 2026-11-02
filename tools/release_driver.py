@@ -951,11 +951,82 @@ def pointers_moved(
     return failures
 
 
+FROM_LEDGER = "from_ledger"
+PROVIDER_ROOT_PREFIX = "provider-"
+
+
+def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
+    """Derive the provider source directories from the cycle's ledger spec, not a typed map.
+
+    Each ``provider-<id>`` root's source is ``<providers.<id>.root>/generations/<generation_id>`` of
+    ``{cycle}/ledger-spec.json``; ``real_root_overrides`` (root id to a full source directory) may
+    point a provider at its copy in another root, but only at a directory of the same generation id.
+    The ledger's own staged catalog (graph path ``ledger_catalog``) must name the same generation
+    id for every provider, or the stage refuses.
+    """
+
+    spec = _read_json(Path(run.expand("{cycle}/ledger-spec.json")))
+    if "ledger_catalog" not in run.graph.get("paths", {}):
+        raise Refusal(
+            "provider-generations: from_ledger needs the graph path ledger_catalog"
+        )
+    catalog = _read_json(Path(run.expand("{ledger_catalog}")))
+    admitted = {
+        item["provider_id"]: item["generation_id"]
+        for item in catalog.get("provider_generations", [])
+    }
+    overrides = dict(run.config.get("real_root_overrides", {}))
+    own = set(run.graph.get("provider_run_sources", {}))
+    sources: dict[str, str] = {}
+    for root_id in wanted:
+        if root_id in own:
+            continue
+        if not root_id.startswith(PROVIDER_ROOT_PREFIX):
+            raise Refusal(f"provider-generations: cannot derive a source for {root_id}")
+        provider_id = root_id[len(PROVIDER_ROOT_PREFIX) :]
+        ref = spec.get("providers", {}).get(provider_id)
+        if ref is None:
+            raise Refusal(
+                f"provider-generations: ledger spec has no provider {provider_id}"
+            )
+        generation_id = ref["generation_id"]
+        if admitted.get(provider_id) != generation_id:
+            raise Refusal(
+                f"provider-generations: {provider_id} ledger spec names {generation_id[:12]} "
+                f"but the ledger catalog admitted {str(admitted.get(provider_id))[:12]}"
+            )
+        directory = (
+            run.expand(overrides[root_id])
+            if root_id in overrides
+            else str(Path(ref["root"]) / "generations" / generation_id)
+        )
+        if Path(directory).name != generation_id:
+            raise Refusal(
+                f"provider-generations: {root_id} source {directory} is not generation "
+                f"{generation_id[:12]}"
+            )
+        sources[root_id] = directory
+    extra = sorted(set(overrides) - set(sources))
+    if extra:
+        raise Refusal(
+            f"provider-generations: real_root_overrides for unbound roots: {extra}"
+        )
+    return sources
+
+
 def provider_generations(run: Run, target: Path) -> dict[str, Any]:
     """Write the provider-generations list the production spec binds; refuse an incomplete one."""
 
     wanted = list(run.graph["provider_roots"])
-    sources = dict(run.config.get("provider_sources", {}))
+    configured = run.config.get("provider_sources", {})
+    if configured == FROM_LEDGER:
+        sources = _sources_from_ledger(run, wanted)
+    elif isinstance(configured, str):
+        raise Refusal(
+            f"provider-generations: provider_sources must be a map or {FROM_LEDGER!r}"
+        )
+    else:
+        sources = dict(configured)
     rows = []
     for root_id in wanted:
         template = sources.get(root_id) or run.graph.get(
