@@ -307,6 +307,7 @@ def test_a_catalog_is_cut_to_the_declared_account_and_window(tmp_path: Path) -> 
         "transactions": document["transactions"],
         "positions": [*document["positions"], other, early],
         "change_in_nav_observations": document["change_in_nav_observations"],
+        "corporate_actions": [],
     }
     raw = _bytes(catalog)
     rows, sha = builder.rows_from_catalog(raw, ACCOUNT, "provider-a", DAYS[0], DAYS[-1])
@@ -367,6 +368,7 @@ def _catalog_bytes(document: dict[str, Any], *, reverse: bool = False) -> bytes:
             "transactions": order(document["transactions"]),
             "positions": order(document["positions"]),
             "change_in_nav_observations": order(document["change_in_nav_observations"]),
+            "corporate_actions": order(document.get("corporate_actions", [])),
         }
     )
 
@@ -582,6 +584,7 @@ def test_the_builder_and_the_independent_verifier_admit_later_catalog_schemas(
             "transactions": document["transactions"],
             "positions": positions,
             "change_in_nav_observations": document["change_in_nav_observations"],
+            "corporate_actions": [],
         }
     )
     built_rows, built_sha = builder.rows_from_catalog(

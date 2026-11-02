@@ -97,6 +97,23 @@ class AccountRows:
     transactions: tuple[Mapping[str, Any], ...]
     positions: tuple[Mapping[str, Any], ...]
     change_in_nav: tuple[Mapping[str, Any], ...]
+    # The account's corporate-action rows (catalog ``corporate_actions``).  They
+    # are bound by their own digest: ``account_rows_sha256`` covers the other
+    # three tables exactly as before.
+    corporate_actions: tuple[Mapping[str, Any], ...] = ()
+
+
+def corporate_actions_sha256(rows: AccountRows) -> str:
+    """SHA-256 of the canonical bytes of the account's corporate-action rows."""
+
+    return hashlib.sha256(
+        json.dumps(
+            list(rows.corporate_actions),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("ascii")
+    ).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -674,6 +691,7 @@ def build_sleeve_account_facts(
                 parent,
                 base_currency=declared.base_currency,
                 days=days,
+                corporate_actions=rows.corporate_actions,
             )
         except inputs_module.SleeveInputError as error:
             raise SleeveFactsError(str(error)) from error
@@ -700,6 +718,7 @@ def build_sleeve_account_facts(
             inputs.dividends,
             inputs.resolve,
             policy,
+            inputs.corporate_actions,
         )
         nav = nav_module.derive_sleeve_nav(
             ledger,
@@ -724,6 +743,7 @@ def build_sleeve_account_facts(
             days,
             rows_sha256,
             parent_ledger_generation_id,
+            corporate_actions_sha256(rows),
         )
     return (
         json.dumps(artifact, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -742,6 +762,7 @@ def _artifact(
     days: Sequence[str],
     rows_sha256: str,
     generation_id: str,
+    actions_sha256: str,
 ) -> dict[str, Any]:
     by_sleeve: dict[str, list[nav_module.SleeveNavDay]] = {}
     for row in nav.rows:
@@ -857,6 +878,7 @@ def _artifact(
             "parent_ledger_generation_id": generation_id,
             "declared_inputs_sha256": declared.sha256,
             "account_rows_sha256": rows_sha256,
+            "corporate_actions_sha256": actions_sha256,
             "builder_code": _builder_code(_SOURCE_MODULES),
         },
         "closure_policy": {
@@ -937,6 +959,57 @@ def _artifact(
                 {"day": day, "amount": _dec(amount)}
                 for day, amount in sorted(ledger.unallocated_dividends.items())
             ],
+            "corporate_action_fractions": [
+                _fraction_block(item) for item in ledger.cash_in_lieu
+            ],
+        },
+    }
+
+
+def _fraction_block(item: ledger_module.CashInLieu) -> dict[str, Any]:
+    """The cash in lieu of a corporate-action fraction and how it was split."""
+
+    action = item.action
+    return {
+        "day": item.day,
+        "security_id": item.security_id,
+        "old_security_id": action.old_security,
+        "action": {
+            "event_date": action.day,
+            "kind": action.kind,
+            "old_quantity": None
+            if action.old_quantity is None
+            else _dec(action.old_quantity),
+            "new_quantity": _dec(action.new_quantity),
+            "ratio": _dec(item.ratio),
+        },
+        "execution": {
+            "record_id": item.reference,
+            "timestamp": item.timestamp,
+            "quantity": _dec(item.quantity),
+            "price": _dec(item.price),
+            "commission": _dec(item.commission),
+        },
+        "rule": "OWN_FRACTIONAL_ENTITLEMENT",
+        "sleeves": [
+            {
+                "sleeve_id": row.sleeve_id,
+                "held_quantity": _dec(row.held_quantity),
+                "entitlement": _dec(row.entitlement),
+                "whole_shares": _dec(row.whole_shares),
+                "fraction": _dec(row.fraction),
+                "charged_quantity": _dec(row.charged_quantity),
+                "cash_credited": _dec(row.cash_credited),
+                "commission": _dec(row.commission),
+            }
+            for row in item.sleeves
+        ],
+        "closure": {
+            "entitled_total": _dec(item.entitled_total),
+            "whole_total": _dec(item.whole_total),
+            "fraction_total": _dec(item.fraction_total),
+            "sold_quantity": _dec(-item.quantity),
+            "account_position": _dec(item.account_position),
         },
     }
 
@@ -994,6 +1067,19 @@ def rows_from_catalog(
             if first_day <= _iso_day(day, f"{key} day") <= last_day:
                 chosen.append(item)
         selected[key] = chosen
+    actions = catalog.get("corporate_actions")
+    if not isinstance(actions, list) or not all(
+        isinstance(item, Mapping) for item in actions
+    ):
+        raise SleeveFactsError("catalog corporate_actions must be a list of objects")
+    chosen_actions = tuple(
+        item
+        for item in actions
+        if item.get("account_id") == parent_account_id
+        and first_day
+        <= _iso_day(item.get("event_date"), "corporate action day")
+        <= last_day
+    )
     canonical = json.dumps(
         selected, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("ascii")
@@ -1002,15 +1088,22 @@ def rows_from_catalog(
             tuple(selected["transactions"]),
             tuple(selected["positions"]),
             tuple(selected["change_in_nav_observations"]),
+            chosen_actions,
         ),
         hashlib.sha256(canonical).hexdigest(),
     )
 
 
 def _rows_from_file(raw: bytes) -> AccountRows:
+    loaded = _load_json(raw, "account rows")
     document = _strict(
-        _load_json(raw, "account rows"),
-        {"transactions", "positions", "change_in_nav_observations"},
+        loaded,
+        {"transactions", "positions", "change_in_nav_observations"}
+        | (
+            {"corporate_actions"}
+            if isinstance(loaded, Mapping) and "corporate_actions" in loaded
+            else set()
+        ),
         "account rows",
     )
     for key, value in document.items():
@@ -1022,6 +1115,7 @@ def _rows_from_file(raw: bytes) -> AccountRows:
         tuple(document["transactions"]),
         tuple(document["positions"]),
         tuple(document["change_in_nav_observations"]),
+        tuple(document.get("corporate_actions", ())),
     )
 
 

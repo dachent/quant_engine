@@ -16,7 +16,15 @@ Inputs (all strings for numbers and days):
   ``unheld_fallback``;
 * ``funding``: sleeve -> day -> ``{"kind", "evidence"}``;
 * ``trades``, ``positions``, ``marks``, ``dividends``, ``account`` (per day:
-  start/end NAV, external flow, interest, fees, dividend accrual), ``days``.
+  start/end NAV, external flow, interest, fees, dividend accrual), ``days``;
+* ``corporate_actions`` (optional): ``day``, ``kind``, ``new_security``,
+  ``new_quantity`` and, when one security was surrendered, ``old_security`` and
+  ``old_quantity``.  An untagged sale of a security that several sleeves hold is
+  split pro rata by held quantity, EXCEPT the sale that liquidates the fractional
+  part of an action's entitlement: that one is split by each sleeve's own
+  fractional entitlement (held x new / old, whole shares kept), and the run stops
+  if those fractions do not add up to the sale or the sleeves' whole shares to the
+  account's position.  Pro rata on such a sale is a mismatch, never accepted.
 
 ``published`` carries ``ledger_rows``, ``nav_rows`` and ``closure`` as lists of
 dictionaries with the builders' field names.
@@ -31,6 +39,7 @@ from decimal import Decimal, localcontext
 from fractions import Fraction
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
@@ -39,6 +48,9 @@ _ZERO = Fraction(0)
 _EPS = Fraction(1, 10**9)
 _TOL = Fraction(1, 10**6)
 _FLOOR = Fraction(1)
+# An independent statement of the cash-in-lieu window: ledger days after the
+# action's date within which its fraction is sold.
+_CASH_IN_LIEU_WINDOW = 5
 _DIV_TYPES = {"Dividends", "Payment In Lieu Of Dividends", "Withholding Tax"}
 
 
@@ -142,6 +154,11 @@ def _rederive_ledger(
 
     held: dict[str, dict[str, Fraction]] = {sleeve: {} for sleeve in every}
     out: dict[tuple[str, str], dict[str, Fraction]] = {}
+    actions: dict[str, list[Mapping[str, Any]]] = {}
+    for action in inputs.get("corporate_actions", ()):
+        actions.setdefault(action["new_security"], []).append(action)
+    consumed: set[int] = set()
+    fractions: list[dict[str, Any]] = notes.setdefault("fractions", [])
     for index, day in enumerate(days):
         previous = days[index - 1] if index else None
         for old, new in aliases.items():
@@ -179,6 +196,41 @@ def _rederive_ledger(
                     sleeve = holders[0]
                     manual.append((day, symbol, quantity, "assigned", sleeve))
                 elif len(holders) > 1:
+                    action = _fraction_action(
+                        trade, quantity, day, days, actions.get(symbol, ()), consumed
+                    )
+                    if action is not None:
+                        consumed.add(id(action))
+                        charged = _own_entitlements(
+                            trade,
+                            action,
+                            held,
+                            every,
+                            residual,
+                            positions[day].get(symbol, _ZERO),
+                            day,
+                        )
+                        fractions.append(charged)
+                        for row in charged["sleeves"]:
+                            if row["fraction"] == 0:
+                                continue
+                            s = row["sleeve_id"]
+                            legs.append((s, trade, row["charged"], row["commission"]))
+                            held[s][symbol] += row["charged"] * charged["to_held"]
+                        manual.append(
+                            (
+                                day,
+                                symbol,
+                                quantity,
+                                "corporate_action_fraction",
+                                ",".join(
+                                    r["sleeve_id"]
+                                    for r in charged["sleeves"]
+                                    if r["fraction"] != 0
+                                ),
+                            )
+                        )
+                        continue
                     total = sum((abs(held[s][symbol]) for s in holders), _ZERO)
                     for s in holders:
                         share = abs(held[s][symbol]) / total
@@ -324,6 +376,112 @@ def _rederive_ledger(
                 else _ZERO,
             }
     return out
+
+
+def _fraction_action(
+    trade: Mapping[str, Any],
+    quantity: Fraction,
+    day: str,
+    days: Sequence[str],
+    candidates: Sequence[Mapping[str, Any]],
+    consumed: set[int],
+) -> Mapping[str, Any] | None:
+    """The action whose entitlement fraction this untagged sale is, from the data."""
+
+    if quantity >= 0:
+        return None
+    for action in candidates:
+        if id(action) in consumed or day < action["day"]:
+            continue
+        starts = [i for i, item in enumerate(days) if item >= action["day"]]
+        if not starts or days.index(day) - starts[0] > _CASH_IN_LIEU_WINDOW:
+            continue
+        entitled = _q(action["new_quantity"])
+        fraction = entitled - math.floor(entitled)
+        if fraction > 0 and abs(-quantity - fraction) <= _TOL:
+            return action
+    return None
+
+
+def _own_entitlements(
+    trade: Mapping[str, Any],
+    action: Mapping[str, Any],
+    held: Mapping[str, Mapping[str, Fraction]],
+    every: Sequence[str],
+    residual: str,
+    account_position: Fraction,
+    day: str,
+) -> dict[str, Any]:
+    """Each sleeve's own fractional entitlement, or the reason it cannot be derived."""
+
+    symbol = trade["symbol"]
+    where = f"cash in lieu of {symbol} on {day}"
+    if action.get("old_security") is None or not action.get("old_quantity"):
+        raise SleeveVerificationError(
+            f"{where}: the action names no surrendered security"
+        )
+    old, new = _q(action["old_quantity"]), _q(action["new_quantity"])
+    quantity = _q(trade["quantity"])
+    holding = {
+        s: held[s][symbol] for s in every if abs(held[s].get(symbol, _ZERO)) > _EPS
+    }
+    if any(v < 0 for v in holding.values()) or residual in holding:
+        raise SleeveVerificationError(f"{where}: a short or residual holding")
+    total = sum(holding.values(), _ZERO)
+    if abs(total - old) <= _TOL:
+        to_new, to_held = new / old, old / new
+    elif abs(total - new) <= _TOL:
+        to_new, to_held = Fraction(1), Fraction(1)
+    else:
+        raise SleeveVerificationError(
+            f"{where}: holdings {total} match neither {old} nor {new}"
+        )
+    own = {s: v * to_new for s, v in holding.items()}
+    whole = {s: Fraction(math.floor(v)) for s, v in own.items()}
+    fraction = {s: own[s] - whole[s] for s in own}
+    fraction_total = sum(fraction.values(), _ZERO)
+    if abs(fraction_total + quantity) > _TOL:
+        raise SleeveVerificationError(
+            f"{where}: own fractions total {fraction_total}, the sale is {-quantity}"
+        )
+    whole_total = sum(whole.values(), _ZERO)
+    if abs(whole_total - account_position) > _TOL:
+        raise SleeveVerificationError(
+            f"{where}: sleeves keep {whole_total} whole shares, the account {account_position}"
+        )
+    price = _q(trade["price"])
+    commission = _q(trade["commission"])
+    rows = []
+    for s in every:
+        if s not in holding:
+            continue
+        charged = quantity * fraction[s] / fraction_total if fraction[s] else _ZERO
+        rows.append(
+            {
+                "sleeve_id": s,
+                "held": holding[s],
+                "entitlement": own[s],
+                "whole": whole[s],
+                "fraction": fraction[s],
+                "charged": charged,
+                "cash": -charged * price,
+                "commission": commission * fraction[s] / fraction_total
+                if fraction[s]
+                else _ZERO,
+            }
+        )
+    return {
+        "action": action,
+        "trade": trade,
+        "day": day,
+        "to_held": to_held,
+        "ratio": new / old,
+        "sleeves": rows,
+        "entitled_total": sum((r["entitlement"] for r in rows), _ZERO),
+        "whole_total": whole_total,
+        "fraction_total": fraction_total,
+        "account_position": account_position,
+    }
 
 
 def _rederive_nav(
@@ -735,7 +893,55 @@ def select_catalog_rows(
     canonical = json.dumps(
         chosen, sort_keys=True, separators=(",", ":"), ensure_ascii=True
     ).encode("ascii")
+    actions = catalog.get("corporate_actions")
+    if not isinstance(actions, list):
+        raise SleeveVerificationError("the catalog has no corporate_actions list")
+    chosen["corporate_actions"] = [
+        item
+        for item in actions
+        if item.get("account_id") == parent_account_id
+        and isinstance(item.get("event_date"), str)
+        and first_day <= item["event_date"] <= last_day
+    ]
     return chosen, hashlib.sha256(canonical).hexdigest()
+
+
+def _corporate_actions(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """One action per delivered security and date (this module's own reading).
+
+    Rows equal in date, kind, security and quantity count once; a date and kind
+    with exactly one surrendered and one delivered security is one action, any
+    other delivered quantity stands alone without a surrendered security.
+    """
+
+    seen: set[tuple[str, str, str, Fraction]] = set()
+    groups: dict[tuple[str, str], list[tuple[str, Fraction]]] = {}
+    for row in rows:
+        amount = _stated(row.get("quantity"), "corporate action quantity")
+        key = (row["event_date"], row["kind"], row["security_id"], amount)
+        if key in seen or amount == 0:
+            continue
+        seen.add(key)
+        groups.setdefault((row["event_date"], row["kind"]), []).append(
+            (row["security_id"], amount)
+        )
+    out: list[dict[str, Any]] = []
+    for (day, kind), items in sorted(groups.items()):
+        gave = [item for item in items if item[1] < 0]
+        got = [item for item in items if item[1] > 0]
+        paired = len(gave) == 1 and len(got) == 1
+        for security, amount in sorted(got):
+            out.append(
+                {
+                    "day": day,
+                    "kind": kind,
+                    "new_security": security,
+                    "new_quantity": str(amount),
+                    "old_security": gave[0][0] if paired else None,
+                    "old_quantity": str(-gave[0][1]) if paired else None,
+                }
+            )
+    return out
 
 
 def _facts_inputs(
@@ -761,6 +967,7 @@ def _facts_inputs(
         for item in table:
             if item.get("account_id") != parent_id:
                 raise SleeveVerificationError("a row belongs to another account")
+    corporate = _corporate_actions(rows.get("corporate_actions", ()))
 
     # ChangeInNAV: one contiguous row per day, components summed by declared role.
     by_day: dict[str, Mapping[str, Any]] = {}
@@ -874,6 +1081,9 @@ def _facts_inputs(
                     else str(_stated(close, "close price")),
                     "commission": str(_stated(item["commission"], "commission", base)),
                     "tag": tag,
+                    "reference": item["record_id"]
+                    if isinstance(item.get("record_id"), str)
+                    else None,
                 }
             )
         elif kind in _DIVIDEND_KINDS and isinstance(security, str):
@@ -944,6 +1154,7 @@ def _facts_inputs(
         "dividends": dividends,
         "account": account,
         "days": days,
+        "corporate_actions": corporate,
     }
     return inputs, parent
 
@@ -1297,6 +1508,54 @@ def _expected_facts(
                 for day, symbol, residue in notes["offsets"]
             ],
             "unallocated_dividends": unallocated_dividends,
+            "corporate_action_fractions": [
+                _expected_fraction(item) for item in notes["fractions"]
+            ],
+        },
+    }
+
+
+def _expected_fraction(item: Mapping[str, Any]) -> dict[str, Any]:
+    action, trade = item["action"], item["trade"]
+    old = action.get("old_quantity")
+    return {
+        "day": item["day"],
+        "security_id": trade["symbol"],
+        "old_security_id": action["old_security"],
+        "action": {
+            "event_date": action["day"],
+            "kind": action["kind"],
+            "old_quantity": None if old is None else _q(old),
+            "new_quantity": _q(action["new_quantity"]),
+            "ratio": item["ratio"],
+        },
+        "execution": {
+            "record_id": trade.get("reference"),
+            "timestamp": trade["timestamp"],
+            "quantity": _q(trade["quantity"]),
+            "price": _q(trade["price"]),
+            "commission": _q(trade["commission"]),
+        },
+        "rule": "OWN_FRACTIONAL_ENTITLEMENT",
+        "sleeves": [
+            {
+                "sleeve_id": row["sleeve_id"],
+                "held_quantity": row["held"],
+                "entitlement": row["entitlement"],
+                "whole_shares": row["whole"],
+                "fraction": row["fraction"],
+                "charged_quantity": row["charged"],
+                "cash_credited": row["cash"],
+                "commission": row["commission"],
+            }
+            for row in item["sleeves"]
+        ],
+        "closure": {
+            "entitled_total": item["entitled_total"],
+            "whole_total": item["whole_total"],
+            "fraction_total": item["fraction_total"],
+            "sold_quantity": -_q(trade["quantity"]),
+            "account_position": item["account_position"],
         },
     }
 
@@ -1383,9 +1642,10 @@ def verify_sleeve_account_facts(
         "parent_ledger_generation_id",
         "declared_inputs_sha256",
         "account_rows_sha256",
+        "corporate_actions_sha256",
         "builder_code",
     }:
-        bad("bindings", bindings, "the five bindings")
+        bad("bindings", bindings, "the six bindings")
     else:
         compare(
             "bindings.tag_map_sha256",
@@ -1408,6 +1668,18 @@ def verify_sleeve_account_facts(
         )
         compare(
             "bindings.account_rows_sha256", bindings["account_rows_sha256"], rows_sha256
+        )
+        compare(
+            "bindings.corporate_actions_sha256",
+            bindings["corporate_actions_sha256"],
+            hashlib.sha256(
+                json.dumps(
+                    list(rows.get("corporate_actions", ())),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii")
+            ).hexdigest(),
         )
         generation = bindings["parent_ledger_generation_id"]
         counts["compared"] += 1
