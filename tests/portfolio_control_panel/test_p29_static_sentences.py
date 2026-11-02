@@ -71,7 +71,10 @@ def test_S17_S18_the_model_vs_actual_and_chart_headings_are_not_universal() -> N
 
 
 def test_S15_the_weekly_boundary_says_the_inception_week_is_mixed() -> None:
-    assert "the week containing inception is labelled mixed" in _html()
+    assert (
+        "a week containing both pre-live history and live observations is labelled MIXED."
+        in _html()
+    )
 
 
 def test_S19_the_matrix_heading_claims_only_the_rows_in_it() -> None:
