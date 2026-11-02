@@ -166,7 +166,12 @@ def test_the_recorded_allocation_rows_of_a_restated_strategy_are_labelled(
 ) -> None:
     off = _build(full, tmp_path, monkeypatch, tag_map=_tag_map())
     on = _build(
-        full, tmp_path, monkeypatch, tag_map=_tag_map(), strategy_basis=DECLARATION
+        full,
+        tmp_path,
+        monkeypatch,
+        tag_map=_tag_map(),
+        strategy_basis=DECLARATION,
+        sleeve_facts=_facts(),
     )
     assert all("value_basis" not in row for row in off["allocation_history"])
     mine = [r for r in on["allocation_history"] if r.get("strategy_id") == "strategy-1"]
