@@ -153,7 +153,16 @@ def _model_csv(days: list[str], returns: list[str]) -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
-MODEL_RETURNS = ["0.011", "-0.007", "0.013", "-0.018", "0.008", "0.005", "-0.003", "0.010"]
+MODEL_RETURNS = [
+    "0.011",
+    "-0.007",
+    "0.013",
+    "-0.018",
+    "0.008",
+    "0.005",
+    "-0.003",
+    "0.010",
+]
 
 
 def _chain(values: list[float]) -> float:
@@ -163,7 +172,9 @@ def _chain(values: list[float]) -> float:
     return wealth - 1.0
 
 
-def _contract(document: dict[str, Any], days: list[str]) -> tuple[bytes, dict[str, bytes]]:
+def _contract(
+    document: dict[str, Any], days: list[str]
+) -> tuple[bytes, dict[str, bytes]]:
     sources = {
         "declaration": DECLARATION,
         "sleeve_facts": json.dumps(document, sort_keys=True).encode(),
@@ -208,7 +219,9 @@ def _retained(
         "observed_end": "2026-07-24",
         key: comparison,
         "account_leg": {"basis": "BASELINE_ACCOUNT_LIVE", "series_sha256": "a" * 64},
-        "return_window_comparison": {"status": "EXPANDED_BEYOND_PRIOR_DECLARED_OVERLAP"},
+        "return_window_comparison": {
+            "status": "EXPANDED_BEYOND_PRIOR_DECLARED_OVERLAP"
+        },
         "execution_shortfall": {"fill_price_effect_pp": 0.22},
     }
     return json.dumps(
@@ -248,11 +261,15 @@ def test_the_bridge_matches_an_independent_computation_and_closes() -> None:
     nav = [float(_OPENING)]
     cumulative = [0.0]
     for price, commission, dividend, allocation, inflow in _DAILY:
-        nav.append(nav[-1] + float(price) + float(commission) + float(dividend) + float(inflow))
+        nav.append(
+            nav[-1] + float(price) + float(commission) + float(dividend) + float(inflow)
+        )
         cumulative.append(cumulative[-1] + float(allocation))
     after = [n + c for n, c in zip(nav, cumulative, strict=True)]
     gross, with_commission, net_start, governed = [], [], [], []
-    for index, (price, commission, dividend, allocation, inflow) in enumerate(_DAILY, 1):
+    for index, (price, commission, dividend, allocation, inflow) in enumerate(
+        _DAILY, 1
+    ):
         opening = after[index - 1]
         base = opening + float(inflow)
         pnl = float(price) + float(dividend)
@@ -277,9 +294,7 @@ def test_the_bridge_matches_an_independent_computation_and_closes() -> None:
     for category, value in expected.items():
         assert found[category] == pytest.approx(value, abs=1e-9), category
     # the ruling: terms sum to the gap to 1e-8
-    assert math.isclose(
-        sum(found.values()), bridge["gap_pp"], abs_tol=1e-8
-    )
+    assert math.isclose(sum(found.values()), bridge["gap_pp"], abs_tol=1e-8)
     assert bridge["closure"]["difference_pp"] == pytest.approx(0, abs=1e-8)
     # a flow-free sleeve has no timing term; this one has two inflows, so it has one
     assert found[sbm.CAT_TIMING] != 0.0
@@ -289,8 +304,14 @@ def test_the_bridge_matches_an_independent_computation_and_closes() -> None:
     )
 
 
-def test_a_flow_free_costless_sleeve_that_equals_the_model_has_only_zero_terms() -> None:
-    daily = [("10", "0", "0", "0", "0"), ("-5", "0", "0", "0", "0"), ("7", "0", "0", "0", "0")]
+def test_a_flow_free_costless_sleeve_that_equals_the_model_has_only_zero_terms() -> (
+    None
+):
+    daily = [
+        ("10", "0", "0", "0", "0"),
+        ("-5", "0", "0", "0", "0"),
+        ("7", "0", "0", "0", "0"),
+    ]
     document, days = _facts(daily=daily)
     # model returns equal the sleeve's own daily result over its prior NAV
     navs = [Decimal(1000)]
@@ -318,10 +339,22 @@ def test_a_flow_free_costless_sleeve_that_equals_the_model_has_only_zero_terms()
 def test_verify_rebuilds_the_contract_from_its_sources_and_refuses_a_change() -> None:
     document, days = _facts()
     content, sources = _contract(document, days)
-    assert sbm.verify_contract(content, **{**sources, "filenames": {k: f"{k}.bin" for k in sources}})["schema"] == sbm.SCHEMA
-    tampered = {**sources, "model_book_perf": sources["model_book_perf"].replace(b"2,000,000.00", b"2,000,001.00")}
+    assert (
+        sbm.verify_contract(
+            content, **{**sources, "filenames": {k: f"{k}.bin" for k in sources}}
+        )["schema"]
+        == sbm.SCHEMA
+    )
+    tampered = {
+        **sources,
+        "model_book_perf": sources["model_book_perf"].replace(
+            b"2,000,000.00", b"2,000,001.00"
+        ),
+    }
     with pytest.raises(sbm.SleeveBasisError, match="differs from its sources"):
-        sbm.verify_contract(content, **{**tampered, "filenames": {k: f"{k}.bin" for k in tampered}})
+        sbm.verify_contract(
+            content, **{**tampered, "filenames": {k: f"{k}.bin" for k in tampered}}
+        )
 
 
 def test_a_sleeve_day_that_does_not_close_to_its_nav_is_refused() -> None:
@@ -355,13 +388,19 @@ def _restatement(document: dict[str, Any]) -> strategy_basis.SleeveRestatement:
     )
 
 
-def _validated(content: bytes, document: dict[str, Any], sources: dict[str, bytes]) -> dict[str, Any]:
+def _validated(
+    content: bytes, document: dict[str, Any], sources: dict[str, bytes]
+) -> dict[str, Any]:
     payload = json.loads(content)
     return sbm.validate_payload(
         payload,
         {STRATEGY: _restatement(document)},
-        retained_attribution_sha256=hashlib.sha256(sources["retained_attribution"]).hexdigest(),
-        retained_reconciliation_sha256=hashlib.sha256(sources["retained_reconciliation"]).hexdigest(),
+        retained_attribution_sha256=hashlib.sha256(
+            sources["retained_attribution"]
+        ).hexdigest(),
+        retained_reconciliation_sha256=hashlib.sha256(
+            sources["retained_reconciliation"]
+        ).hexdigest(),
     )
 
 
@@ -376,8 +415,12 @@ def test_the_report_side_check_accepts_the_contract_and_rejects_tampering() -> N
         sbm.validate_payload(
             payload,
             {STRATEGY: _restatement(document)},
-            retained_attribution_sha256=hashlib.sha256(sources["retained_attribution"]).hexdigest(),
-            retained_reconciliation_sha256=hashlib.sha256(sources["retained_reconciliation"]).hexdigest(),
+            retained_attribution_sha256=hashlib.sha256(
+                sources["retained_attribution"]
+            ).hexdigest(),
+            retained_reconciliation_sha256=hashlib.sha256(
+                sources["retained_reconciliation"]
+            ).hexdigest(),
         )
     payload = json.loads(content)
     payload["strategies"][0]["sleeve_leg"]["series_sha256"] = "0" * 64
@@ -385,23 +428,33 @@ def test_the_report_side_check_accepts_the_contract_and_rejects_tampering() -> N
         sbm.validate_payload(
             payload,
             {STRATEGY: _restatement(document)},
-            retained_attribution_sha256=hashlib.sha256(sources["retained_attribution"]).hexdigest(),
-            retained_reconciliation_sha256=hashlib.sha256(sources["retained_reconciliation"]).hexdigest(),
+            retained_attribution_sha256=hashlib.sha256(
+                sources["retained_attribution"]
+            ).hexdigest(),
+            retained_reconciliation_sha256=hashlib.sha256(
+                sources["retained_reconciliation"]
+            ).hexdigest(),
         )
     with pytest.raises(sbm.SleeveBasisError, match="different retained contracts"):
         sbm.validate_payload(
             json.loads(content),
             {STRATEGY: _restatement(document)},
             retained_attribution_sha256="1" * 64,
-            retained_reconciliation_sha256=hashlib.sha256(sources["retained_reconciliation"]).hexdigest(),
+            retained_reconciliation_sha256=hashlib.sha256(
+                sources["retained_reconciliation"]
+            ).hexdigest(),
         )
     other = _restatement(_facts(daily=_DAILY[:-1])[0])
     with pytest.raises(sbm.SleeveBasisError, match="sleeve leg differs"):
         sbm.validate_payload(
             json.loads(content),
             {STRATEGY: other},
-            retained_attribution_sha256=hashlib.sha256(sources["retained_attribution"]).hexdigest(),
-            retained_reconciliation_sha256=hashlib.sha256(sources["retained_reconciliation"]).hexdigest(),
+            retained_attribution_sha256=hashlib.sha256(
+                sources["retained_attribution"]
+            ).hexdigest(),
+            retained_reconciliation_sha256=hashlib.sha256(
+                sources["retained_reconciliation"]
+            ).hexdigest(),
         )
 
 
@@ -413,13 +466,17 @@ def _leaves(value: Any, path: str = "") -> list[tuple[str, Any]]:
     return [(path, value)]
 
 
-def test_the_account_basis_rows_stay_visible_under_a_label_and_the_sleeve_is_primary() -> None:
+def test_the_account_basis_rows_stay_visible_under_a_label_and_the_sleeve_is_primary() -> (
+    None
+):
     document, days = _facts()
     content, sources = _contract(document, days)
     block = _validated(content, document, sources)[STRATEGY]
     attribution_row = json.loads(sources["retained_attribution"])["strategies"][0]
     reconciliation_row = json.loads(sources["retained_reconciliation"])["strategies"][0]
-    attribution, reconciled = sbm.apply_to_rows(block, attribution_row, reconciliation_row)
+    attribution, reconciled = sbm.apply_to_rows(
+        block, attribution_row, reconciliation_row
+    )
     assert attribution is not None and reconciled is not None
     assert attribution["basis"] == "SLEEVE_EPOCH"
     assert attribution["bridge"]["account_basis"] == "SLEEVE_EPOCH"
@@ -435,20 +492,27 @@ def test_the_account_basis_rows_stay_visible_under_a_label_and_the_sleeve_is_pri
         wanted = [leaf for leaf in _leaves(source) if leaf[0] != "/strategy_id"]
         have = [leaf[1] for leaf in _leaves(derived)]
         # the reconciliation row keeps its event evidence at the top level, outside the sub-block
-        remaining = {
-            path: value
-            for path, value in wanted
-            if value not in have
-        }
-        carried = {**{p: v for p, v in _leaves(reconciled)}} if derived is reconciled["account_basis"] else {}
+        remaining = {path: value for path, value in wanted if value not in have}
+        carried = (
+            {**{p: v for p, v in _leaves(reconciled)}}
+            if derived is reconciled["account_basis"]
+            else {}
+        )
         assert all(value in carried.values() for value in remaining.values()), remaining
     assert attribution["account_basis"]["bridge"]["gap_pp"] == pytest.approx(
         (-0.0446 - 0.150) * 100
     )
-    assert reconciled["account_basis"]["return_reconciliation"]["account_cumulative_return"] == -0.0446
+    assert (
+        reconciled["account_basis"]["return_reconciliation"][
+            "account_cumulative_return"
+        ]
+        == -0.0446
+    )
 
 
-def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(tmp_path: Path) -> None:
+def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(
+    tmp_path: Path,
+) -> None:
     document, days = _facts()
     content, sources = _contract(document, days)
     path = tmp_path / "implementation-sleeve-basis.json"
@@ -457,8 +521,12 @@ def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(tmp_path
     attribution_row = json.loads(sources["retained_attribution"])["strategies"][0]
     reconciliation_row = json.loads(sources["retained_reconciliation"])["strategies"][0]
     refs = {
-        "attribution": {"sha256": hashlib.sha256(sources["retained_attribution"]).hexdigest()},
-        "reconciliation": {"sha256": hashlib.sha256(sources["retained_reconciliation"]).hexdigest()},
+        "attribution": {
+            "sha256": hashlib.sha256(sources["retained_attribution"]).hexdigest()
+        },
+        "reconciliation": {
+            "sha256": hashlib.sha256(sources["retained_reconciliation"]).hexdigest()
+        },
     }
     reconciliation, attribution, ids = reporter._apply_implementation_sleeve_basis(
         path,
@@ -476,14 +544,24 @@ def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(tmp_path
         reporter._apply_implementation_sleeve_basis(path, {}, None, None, None, None)
     with pytest.raises(reporter.ReportValidationError, match="different retained"):
         reporter._apply_implementation_sleeve_basis(
-            path, restatements, None, None, {STRATEGY: dict(attribution_row)}, {"sha256": "2" * 64}
+            path,
+            restatements,
+            None,
+            None,
+            {STRATEGY: dict(attribution_row)},
+            {"sha256": "2" * 64},
         )
     # the scope marker drops the implementation bridge from the parent-basis list
     report = {
         "strategy_summary": [
             {
                 "strategy_id": STRATEGY,
-                "return_scope": {"not_restated": ["benchmark_comparison", "implementation_return_attribution"]},
+                "return_scope": {
+                    "not_restated": [
+                        "benchmark_comparison",
+                        "implementation_return_attribution",
+                    ]
+                },
                 "return_scope_label": "x, the implementation bridge, dependence",
             }
         ]

@@ -48,7 +48,7 @@ import math
 from pathlib import Path
 from typing import Any, Final
 
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import canonical_json_bytes
 
 import portfolio_implementation_reconciliation as reconciliation
 import strategy_basis
@@ -140,7 +140,9 @@ def model_returns_from_book_perf(raw: bytes) -> list[tuple[str, Decimal]]:
         raise SleeveBasisError("model book performance is not CSV text") from exc
     fields = set(reader.fieldnames or ())
     if not {"Date", "Total Equity", "Cash Added"} <= fields:
-        raise SleeveBasisError("model book performance lacks Date/Total Equity/Cash Added")
+        raise SleeveBasisError(
+            "model book performance lacks Date/Total Equity/Cash Added"
+        )
     equity: dict[str, Decimal] = {}
     added: dict[str, Decimal] = {}
     for row in parsed:
@@ -168,7 +170,9 @@ def model_returns_from_book_perf(raw: bytes) -> list[tuple[str, Decimal]]:
 
 def _sleeve_days(
     document: Mapping[str, Any], restatement: strategy_basis.SleeveRestatement
-) -> tuple[list[str], dict[str, Mapping[str, Any]], dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[
+    list[str], dict[str, Mapping[str, Any]], dict[str, Decimal], dict[str, Decimal]
+]:
     sleeve = strategy_basis.open_sleeve_for_strategy(
         document, restatement.strategy_id, None
     )
@@ -181,7 +185,10 @@ def _sleeve_days(
     flows_in: dict[str, Decimal] = {}
     flows_net: dict[str, Decimal] = {}
     for leg in document.get("flows") or ():
-        if not isinstance(leg, Mapping) or leg.get("account_id") != restatement.account_id:
+        if (
+            not isinstance(leg, Mapping)
+            or leg.get("account_id") != restatement.account_id
+        ):
             continue
         recognised = str(leg["nav_recognition_date"])
         amount = _decimal(leg["amount"], "flow amount")
@@ -231,7 +238,9 @@ def strategy_block(
         raise SleeveBasisError("the model starts after the sleeve's first return")
     missing = [day for day in dates if day not in model]
     if missing:
-        raise SleeveBasisError(f"the model has no return on sleeve dates: {missing[:3]}")
+        raise SleeveBasisError(
+            f"the model has no return on sleeve dates: {missing[:3]}"
+        )
 
     with localcontext() as context:
         context.prec = _PRECISION
@@ -520,7 +529,9 @@ def build_contract(
         retained_reconciliation, "reconciliation", "return_reconciliation"
     )
     if strategy_id not in attribution_rows or strategy_id not in reconciliation_rows:
-        raise SleeveBasisError("the retained contracts do not carry the declared strategy")
+        raise SleeveBasisError(
+            "the retained contracts do not carry the declared strategy"
+        )
     retained_bridge = attribution_rows[strategy_id]["bridge"]
     composition_rows = [
         item
@@ -548,9 +559,13 @@ def build_contract(
         "builder_version": BUILDER_VERSION,
         "schema": SCHEMA,
         "source_artifacts": [
-            _source("strategy-basis-declaration", filenames["declaration"], declaration),
+            _source(
+                "strategy-basis-declaration", filenames["declaration"], declaration
+            ),
             _source("sleeve-account-facts", filenames["sleeve_facts"], sleeve_facts),
-            _source("model-book-performance", filenames["model_book_perf"], model_book_perf),
+            _source(
+                "model-book-performance", filenames["model_book_perf"], model_book_perf
+            ),
             _source(
                 "retained-implementation-return-attribution",
                 filenames["retained_attribution"],
@@ -683,9 +698,7 @@ def apply_to_rows(
     attribution: dict[str, Any] | None = None
     if attribution_row is not None:
         account_fields = {
-            key: value
-            for key, value in attribution_row.items()
-            if key != "strategy_id"
+            key: value for key, value in attribution_row.items() if key != "strategy_id"
         }
         attribution = {
             **common,
@@ -713,7 +726,11 @@ def apply_to_rows(
             **common,
             "account_basis": {
                 **_account_label(reference, "reconciliation"),
-                **{key: reconciliation_row[key] for key in moved if key in reconciliation_row},
+                **{
+                    key: reconciliation_row[key]
+                    for key in moved
+                    if key in reconciliation_row
+                },
             },
             "return_reconciliation": block["return_reconciliation"],
         }
