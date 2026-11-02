@@ -231,3 +231,35 @@ closing NAV, so the entry day's own result is outside the sleeve TWR, and date-o
 transfers are placed at end of day. An audit that counts the entry day and places
 transfers at the start of day gets a different figure for the same NAV series
 (AI Factor s2: panel 15.43%, audit 14.35%, of which the entry day is 1.66 points).
+
+### What a restated row discloses, and the sleeve facts it needs
+
+A declaration also requires the sleeve facts (`build --sleeve-facts <file>`, or
+`sleeve_facts_path`): the `sleeve-account-facts` artifact of the parent account. It is
+validated against its closed schema, copied into the candidate as
+`sleeve-account-facts.json` (provenance entry with its sha256, publish artifact
+`input/sleeve-account-facts.json`) and read back from the candidate by `verify`, exactly as the
+declaration is. Without the declaration the facts are refused, and the report bytes do not change.
+
+With the declaration on, nothing the row used to carry for the parent account disappears:
+
+- `account_summary[parent].account_basis` holds the parent-account figures (cumulative return,
+  annualised, maximum and current drawdown, YTD and calendar-year, current value, systematic
+  weight on the account perimeter, series sha256, window, observations), produced by the same
+  engine over the UNRESTATED parent series, with a label generated from what the account holds
+  ("whole account 6907 incl. retired sleeves and the unallocated margin bucket"). The restated
+  row's `return_scope.account_basis_ref` points at it.
+- `strategy_basis_disclosure` (a closed block in the report and panel schemas) holds, per
+  restated strategy: the margin liability line (gross sleeve NAV, the unallocated cash and
+  margin bucket read from `perimeter_account.days[].nav_end` at the cutoff, the net equivalent,
+  the identity "sleeve NAVs plus bucket equal the ledger account NAV", a pointer to the account's
+  `leverage_disclosures` rows, and the statement that the other strategy rows are broker NAVs
+  while this row is gross by definition); the bridge from the account basis to the sleeve basis
+  (value and return, both windows, what the account series also holds); and the three-step bridge
+  from the audit's convention (own P&L, entry day included, inflows at the start of the day) to the
+  panel's (ADR 0002), each step and the residual recomputed from the facts and closed against the
+  sleeve trace.
+
+Every derivation fails closed: a broken identity, a facts binding the report can check and that
+differs (parent account, tag map digest, provider-ledger generation), flow legs that differ from the
+daily flows, or a bridge residual beyond 1e-9 stops the build.
