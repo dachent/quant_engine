@@ -2002,8 +2002,13 @@ def _annualization_label(
     observations: object = None,
     periods_per_year: object = None,
     frequency: str | None = None,
+    calendar_day_exponent: bool = False,
 ) -> dict[str, Any] | None:
     """The basis and window an annualized figure stands on, or None without a window.
+
+    ``calendar_day_exponent`` is for a figure whose annualization exponent is the window's
+    calendar days (the account-live CAGR): its label names those days and the observation
+    count as the daily returns the cumulative return compounds, not as the scaling basis.
 
     A window under 365 days is a short-window annualization: ``short_window`` is true
     and the label says so beside the dates.  The label names the observation count
@@ -2030,6 +2035,11 @@ def _annualization_label(
     short = window_days < _ONE_YEAR_DAYS
     if frequency == "CASH_FLOW_DATES":
         text = f"annualized from cash flows, {start}..{end}"
+    elif calendar_day_exponent and count is not None and word is not None:
+        text = (
+            f"annualized over {window_days} calendar days "
+            f"({count} {word} returns), {start}..{end}"
+        )
     elif count is not None and word is not None:
         text = f"annualized from {count} {word} observations, {start}..{end}"
     else:
@@ -2091,6 +2101,7 @@ def _account_annualization_labels(
             end=row.get("account_live_observed_end"),
             observations=row.get("account_live_return_observations"),
             frequency="DAILY",
+            calendar_day_exponent=True,
         )
     mwr = None
     if row.get("mwr_xirr") is not None:

@@ -2636,7 +2636,21 @@
         renderFactScopeTables();
       };
     });
-    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} declared fact paths</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).`;
+    // N1: the FACT_COVERAGE_DETAIL coverage rows include accounts that are not in the current-perimeter
+    // matrix; they are named here with their own counts, from the rows, so the matrix total is not read as the page's.
+    const matrixKeys = new Set(factMatrix.map((row) => `${row.fact_type}|${row.account_id}`));
+    const outsideMatrix = (Array.isArray(data.coverage) ? data.coverage : []).filter((row) => row.category === "FACT_COVERAGE_DETAIL" && !matrixKeys.has(`${row.fact_type}|${row.account_id}`));
+    const outsideByAccount = new Map();
+    outsideMatrix.forEach((row) => {
+      const known = row.account_id ? accountLabel(row.account_id) : "";
+      const label = row.account_id ? (known && known !== "Unrecognized account" ? known : `account …${String(row.account_id).slice(-4)}`) : "Provider-level (no account)";
+      const key = `${providerName(row.provider_id)} · ${label}`;
+      outsideByAccount.set(key, [...(outsideByAccount.get(key) || []), `${row.fact_type} ${integer.format(Number(row.record_count) || 0)}`]);
+    });
+    const outsideNote = outsideByAccount.size
+      ? ` Not in this matrix (not in the current perimeter), but counted in the coverage totals: ${[...outsideByAccount].map(([key, counts]) => `${key} (${counts.join(", ")})`).join("; ")}.`
+      : "";
+    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} declared fact paths</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}`;
     const intervalText = (row) => {
       if (Array.isArray(row.missing_intervals) && row.missing_intervals.length) return row.missing_intervals.map((item) => typeof item === "object" ? `${item.start || item.missing_interval_start || "?"}–${item.end || item.missing_interval_end || "?"}: ${item.reason || item.missing_interval_reason || "reason not recorded"}` : String(item)).join(" · ");
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;

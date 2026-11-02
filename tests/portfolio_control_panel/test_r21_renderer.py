@@ -525,3 +525,46 @@ def test_candidate_universe_rows_say_whether_the_viewed_strategy_selected_the_fa
     assert "Lens-wide: Not selected by train only model selection" in rows["SYN_NOBODY"]
     assert "Unavailable legacy spec" in rows["SYN_LEGACY"]
     assert "this strategy" not in rows["SYN_LEGACY"]
+
+
+def test_the_fact_matrix_names_the_coverage_accounts_it_does_not_contain(
+    tmp_path: Path,
+) -> None:
+    """N1: accounts in the coverage detail but not in the matrix are named with their own counts."""
+
+    def matrix_row(account: str, fact: str) -> dict[str, Any]:
+        return {
+            "account_id": account,
+            "provider_id": "SYNPROV",
+            "fact_type": fact,
+            "status": "OBSERVED_NOT_COMPLETENESS_PROOF",
+            "record_count": 7,
+        }
+
+    def coverage_row(account: str, fact: str, count: int) -> dict[str, Any]:
+        return {
+            "category": "FACT_COVERAGE_DETAIL",
+            "account_id": account,
+            "provider_id": "SYNOUT",
+            "fact_type": fact,
+            "record_count": count,
+        }
+
+    payload = _risk_payload()
+    payload["fact_coverage_matrix"] = [matrix_row("acct-in00aaaa", "flows")]
+    payload["coverage"] = [
+        coverage_row("acct-in00aaaa", "flows", 7),
+        coverage_row("acct-out0bbbb", "flows", 3),
+        coverage_row("acct-out0bbbb", "nav", 11),
+    ]
+    text = _flat(
+        _run(tmp_path, payload, "renderFactScopeTables"), "#fact-matrix-summary"
+    )
+
+    assert "not in the current perimeter" in text
+    assert "…bbbb (flows 3, nav 11)" in text
+    assert "acct-in00aaaa" not in text and "…aaaa" not in text
+    payload["coverage"] = payload["coverage"][:1]
+    assert "Not in this matrix" not in _flat(
+        _run(tmp_path, payload, "renderFactScopeTables"), "#fact-matrix-summary"
+    )
