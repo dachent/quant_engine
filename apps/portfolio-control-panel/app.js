@@ -2102,7 +2102,19 @@
     const methodBoundary = row.estimator === "DYNAMIC_FLS"
       ? "Dynamic exposures are effective-dated, selected on training evidence, and evaluated on a sealed holdout."
       : "Static exposures are an independent returns-based lens and are not concatenated with dynamic, sector, or industry models.";
-    const proxyRows = (analysis.proxy_governance?.proxies || []).map((proxy) => `<tr><td><span class="cell-primary">${safe(proxy.factor_id)}</span><span class="cell-secondary">${safe(proxy.economic_family || "UNCLASSIFIED")}</span></td><td>${safe(proxy.source_id || "UNAVAILABLE")}</td><td>${safe(proxy.effective_start || "—")}<span class="cell-secondary">${safe(proxy.effective_end || "—")}</span></td><td>${statusText(proxy.candidate_disposition || "UNAVAILABLE")}</td><td>${safe(proxy.selection_rationale || "No governed rationale")}</td></tr>`);
+    // T5: `candidate_disposition` is lens-wide (some series in the lens selected the factor).  For the viewed strategy the
+    // cell leads with whether THIS strategy selected it (`selected_series_ids` holds the viewed series id) and says the
+    // disposition is lens-wide, naming the series that selected it; nothing is recomputed.
+    const proxyDispositionCell = (proxy, viewed) => {
+      const disposition = proxy.candidate_disposition || "UNAVAILABLE";
+      const selectors = Array.isArray(proxy.selected_series_ids) ? proxy.selected_series_ids : null;
+      if (!selectors || !/^(SELECTED|NOT_SELECTED|CANDIDATE_NOT_REQUESTED)/.test(disposition)) return statusText(disposition);
+      const own = selectors.includes(viewed.series_id);
+      const names = selectors.map((id) => strategyNameById(id));
+      const scope = `Lens-wide: ${humanStatus(disposition)}${names.length ? ` (selected by ${names.join(", ")})` : ""}`;
+      return `<span class="cell-primary">${own ? "Selected by this strategy" : "Not selected by this strategy"}</span><span class="cell-secondary">${safe(scope)}</span>`;
+    };
+    const proxyRows = (analysis.proxy_governance?.proxies || []).map((proxy) => `<tr><td><span class="cell-primary">${safe(proxy.factor_id)}</span><span class="cell-secondary">${safe(proxy.economic_family || "UNCLASSIFIED")}</span></td><td>${safe(proxy.source_id || "UNAVAILABLE")}</td><td>${safe(proxy.effective_start || "—")}<span class="cell-secondary">${safe(proxy.effective_end || "—")}</span></td><td>${proxyDispositionCell(proxy, row)}</td><td>${safe(proxy.selection_rationale || "No governed rationale")}</td></tr>`);
     const proxyTable = proxyRows.length
       ? `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Governed candidate universe</div><h3>Economic rationale and train-only disposition</h3></div><span class="badge">${integer.format(proxyRows.length)} proxies</span></div><div class="table-wrap wide"><table id="factor-proxy-table"><caption>Factor proxy governance</caption>${tableMarkup([["Proxy / family"], ["Source"], ["Effective interval"], ["Disposition"], ["Selection rationale"]], proxyRows)}</table></div></div>`
       : "";
