@@ -4457,7 +4457,11 @@ def _effective_hwm_policy_for_current_strategies(
 
 
 def _validate_panel_hwm_envelope(
-    envelope: Mapping[str, Any], catalog: Mapping[str, Any]
+    envelope: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    *,
+    membership_starts: Mapping[str, date] | None = None,
+    endpoint_exempt: frozenset[str] = frozenset(),
 ) -> None:
     """Enforce the FULL hwm_inputs envelope contract against the governed
     baseline catalog before the panel trusts the envelope for recomputation.
@@ -4522,6 +4526,8 @@ def _validate_panel_hwm_envelope(
             ),
             allocations=_objects(hwm_allocations, "allocations"),
             acceptance_record=hwm_acceptance_record,
+            membership_starts=membership_starts,
+            endpoint_exempt=endpoint_exempt,
         )
     except HwmInputsContractError as exc:
         raise ControlPanelValidationError(str(exc)) from exc
@@ -4686,6 +4692,9 @@ def _source_clock_display_lines(value: object) -> list[str]:
 def _compute_panel_numerical_hwm(
     catalog: Mapping[str, Any],
     epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    membership_starts: Mapping[str, date] | None = None,
+    endpoint_exempt: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Recompute the numerical full-systematic HWM from the governed
     baseline catalog so the panel can reconcile it against the report.
@@ -4744,7 +4753,12 @@ def _compute_panel_numerical_hwm(
         return _unavailable("HWM_INPUTS_INVALID")
     # The envelope is never trusted on its own: it must satisfy the full
     # governed contract against the catalog before any recomputation runs.
-    _validate_panel_hwm_envelope(envelope, catalog)
+    _validate_panel_hwm_envelope(
+        envelope,
+        catalog,
+        membership_starts=membership_starts,
+        endpoint_exempt=endpoint_exempt,
+    )
 
     crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
@@ -9988,6 +10002,8 @@ def _panel_data(
     underwriting_policy_snapshot: bytes | None = None,
     correlation_strategy_names: Mapping[str, str] | None = None,
     epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
+    hwm_basis: tuple[Mapping[str, Any], Mapping[str, date], frozenset[str]]
+    | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -10712,8 +10728,19 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "governed HWM proof differs from the accepted portfolio report"
             )
+    # a strategy restated onto its sleeve (#624): the catalog with its envelope periods and
+    # return references on the sleeve, derived by the caller from the verified account
+    # manifest (the same derivation the report makes); without it, the baseline catalog
+    hwm_catalog, hwm_starts, hwm_exempt = (
+        hwm_basis
+        if hwm_basis is not None
+        else (current_product_catalog, {}, frozenset())
+    )
     hwm_numerical = _compute_panel_numerical_hwm(
-        current_product_catalog, epoch_hpr_receipts
+        hwm_catalog,
+        epoch_hpr_receipts,
+        membership_starts=hwm_starts,
+        endpoint_exempt=hwm_exempt,
     )
     # The coverage rows inherit the current cutoff values and weights of the strategy
     # rows; the summary says which weight set it shows (the report says the same).

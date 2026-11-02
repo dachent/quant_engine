@@ -8756,6 +8756,8 @@ def _hwm_numerical_from_envelope(
     policy_path: Path = HWM_POLICY,
     *,
     value_basis_bounds: ValueBasisBounds | None = None,
+    membership_starts: Mapping[str, date] | None = None,
+    endpoint_exempt: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Compute the numerical full-systematic HWM from the governed envelope.
 
@@ -8850,6 +8852,8 @@ def _hwm_numerical_from_envelope(
             ),
             allocations=_objects(hwm_allocations, "allocations"),
             acceptance_record=hwm_acceptance_record,
+            membership_starts=membership_starts,
+            endpoint_exempt=endpoint_exempt,
         )
     except HwmInputsContractError as exc:
         return _unavailable(
@@ -10740,10 +10744,19 @@ def build_report_data(
             evaluation_date,
             hwm_policy_sha256,
         )
+    # a restated strategy's envelope periods and return references are its sleeve's (#624)
+    try:
+        hwm_basis = strategy_basis.restate_hwm_catalog(
+            current_product_catalog, basis_restatements
+        )
+    except strategy_basis.StrategyBasisError as exc:
+        raise ReportValidationError(str(exc)) from exc
     hwm_numerical = _hwm_numerical_from_envelope(
-        current_product_catalog,
+        hwm_basis.catalog,
         hwm_policy_path,
         value_basis_bounds=value_basis_bounds,
+        membership_starts=hwm_basis.membership_starts,
+        endpoint_exempt=hwm_basis.endpoint_exempt,
     )
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
@@ -11336,6 +11349,14 @@ def build_report_data(
                         "account basis to the sleeve basis and the three-step bridge "
                         "from the audit's convention to the panel's, all computed from "
                         "the sleeve facts and the sleeve trace."
+                    ),
+                }
+            )
+            report["methodology"].append(
+                {
+                    "item": "Legacy HWM envelope basis",
+                    "value": strategy_basis.hwm_basis_disclosure(
+                        hwm_basis, basis_restatements
                     ),
                 }
             )

@@ -144,6 +144,8 @@ def validate_hwm_inputs_envelope(
     policy_exclusions: Mapping[str, date],
     allocations: Sequence[Mapping[str, Any]] | None = None,
     acceptance_record: Mapping[str, Any] | None = None,
+    membership_starts: Mapping[str, date] | None = None,
+    endpoint_exempt: frozenset[str] = frozenset(),
 ) -> None:
     """Enforce the full hwm_inputs contract at every boundary.
 
@@ -161,6 +163,12 @@ def validate_hwm_inputs_envelope(
     production consumers must refuse (they fail closed on missing
     context instead).  Any violation raises
     :class:`HwmInputsContractError` with a stable ``code``.
+
+    Two optional declarations carry a strategy restated onto a sleeve (#624): a strategy
+    in ``membership_starts`` is a member only from that date, so its keyspace (and its
+    periods) start there; a strategy in ``endpoint_exempt`` is left out of the allocation
+    endpoint check, because the allocation snapshot records its parent account, not the
+    sleeve, and the parent endpoint was proven by the baseline.  Omitted, nothing changes.
     """
     if set(envelope) != {
         "contract_version",
@@ -331,6 +339,8 @@ def validate_hwm_inputs_envelope(
         verified_endpoints: dict[str, Decimal] = {}
         for row in periods:
             if row.get("disposition") != "AVAILABLE" or row.get("lane") != "ACCOUNT":
+                continue
+            if str(row.get("strategy_id")) in endpoint_exempt:
                 continue
             day = _date(row["date"], "periods.date")
             if day != snapshot_date:
@@ -559,9 +569,12 @@ def validate_hwm_inputs_envelope(
     # Governed keyspace: every systematic perimeter strategy on every day
     # from the anchor through the catalog as-of date.
     expected: set[tuple[str, str]] = set()
+    starts = membership_starts or {}
     current = anchor_date
     while current <= as_of_date:
         for strategy_id in perimeter:
+            if strategy_id in starts and current < starts[strategy_id]:
+                continue
             expected.add((strategy_id, current.isoformat()))
         current += timedelta(days=1)
     if seen_keys != expected:
