@@ -1264,7 +1264,8 @@
       const missing = (Array.isArray(kpiBlock.missing_daily_points) ? kpiBlock.missing_daily_points : []).map((point) => `${point.strategy_id || point.strategy} ${formatDate(point.date)}${fillText(point)}`);
       const window = kpiBlock.window_start && kpiBlock.window_end ? ` over ${formatDate(kpiBlock.window_start)} to ${formatDate(kpiBlock.window_end)}${number(kpiBlock.index_points) == null ? "" : ` (${integer.format(kpiBlock.index_points)} daily points)`}` : candidate.complete_through ? ` through ${formatDate(candidate.complete_through)}` : "";
       const gateText = `${gated.hwm_numerical_status ? ` Numeric HWM (${gated.policy_id || "legacy gate"}): ${humanStatus(gated.hwm_numerical_status).toLowerCase()}.` : ""}${missing.length ? ` Missing daily points: ${missing.join(", ")}.` : ""}`;
-      return ["Systematic HWM", decimal(index, 4), `${hwmNotAccepted}. HWM ${decimal(hwmValue, 4)} · drawdown ${pct(drawdown, 2)}${window}.${gateText}`, "warning"];
+      // F1: the big number is the current index (kpi.value), so the title says so; the HWM keeps its own label and acceptance state.
+      return ["Systematic index, current", decimal(index, 4), `${hwmNotAccepted}. HWM ${decimal(hwmValue, 4)} (${hwmAcceptanceWords}) · drawdown ${pct(drawdown, 2)}${window}.${gateText}`, "warning"];
     })();
     renderKpis("#risk-kpis", performanceLineageMismatch ? [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Stress scenario", "danger"],
@@ -1925,7 +1926,7 @@
     return `<h4>All covered strategies (${integer.format((aggregate.included_series || []).length)}, capital coverage ${pct(aggregate.capital_coverage, 0)})</h4>${oraComponentBars(aggregate.components)}${oraClosureStrip(aggregate)}<p class="cell-secondary">${safe(block.aggregate_note || "")} ${weighting ? `Weighting: ${safe(weighting)}.` : ""}${excluded ? ` Excluded: ${safe(excluded)}.` : ""}</p>${ranges}`;
   }
   function orthogonalRiskShareMarkup(row) {
-    const heading = "<h4>Share of total risk (Euler allocation)</h4>";
+    const heading = "<h4>Share of explained variance (Euler allocation)</h4>";
     const block = oraBlock();
     if (!block) return `<div class="risk-share">${heading}<div class="callout callout-neutral">The producer's orthogonal risk attribution is not in this snapshot, so the shares are not shown (the training-window allocations remain in the data tables below).</div></div>`;
     if (block.status === "UNAVAILABLE") return `<div class="risk-share">${heading}<div class="callout callout-neutral">Unavailable: ${safe(humanStatus(block.reason || "UNAVAILABLE"))}.</div></div>`;
@@ -2101,7 +2102,19 @@
     const methodBoundary = row.estimator === "DYNAMIC_FLS"
       ? "Dynamic exposures are effective-dated, selected on training evidence, and evaluated on a sealed holdout."
       : "Static exposures are an independent returns-based lens and are not concatenated with dynamic, sector, or industry models.";
-    const proxyRows = (analysis.proxy_governance?.proxies || []).map((proxy) => `<tr><td><span class="cell-primary">${safe(proxy.factor_id)}</span><span class="cell-secondary">${safe(proxy.economic_family || "UNCLASSIFIED")}</span></td><td>${safe(proxy.source_id || "UNAVAILABLE")}</td><td>${safe(proxy.effective_start || "—")}<span class="cell-secondary">${safe(proxy.effective_end || "—")}</span></td><td>${statusText(proxy.candidate_disposition || "UNAVAILABLE")}</td><td>${safe(proxy.selection_rationale || "No governed rationale")}</td></tr>`);
+    // T5: `candidate_disposition` is lens-wide (some series in the lens selected the factor).  For the viewed strategy the
+    // cell leads with whether THIS strategy selected it (`selected_series_ids` holds the viewed series id) and says the
+    // disposition is lens-wide, naming the series that selected it; nothing is recomputed.
+    const proxyDispositionCell = (proxy, viewed) => {
+      const disposition = proxy.candidate_disposition || "UNAVAILABLE";
+      const selectors = Array.isArray(proxy.selected_series_ids) ? proxy.selected_series_ids : null;
+      if (!selectors || !/^(SELECTED|NOT_SELECTED|CANDIDATE_NOT_REQUESTED)/.test(disposition)) return statusText(disposition);
+      const own = selectors.includes(viewed.series_id);
+      const names = selectors.map((id) => strategyNameById(id));
+      const scope = `Lens-wide: ${humanStatus(disposition)}${names.length ? ` (selected by ${names.join(", ")})` : ""}`;
+      return `<span class="cell-primary">${own ? "Selected by this strategy" : "Not selected by this strategy"}</span><span class="cell-secondary">${safe(scope)}</span>`;
+    };
+    const proxyRows = (analysis.proxy_governance?.proxies || []).map((proxy) => `<tr><td><span class="cell-primary">${safe(proxy.factor_id)}</span><span class="cell-secondary">${safe(proxy.economic_family || "UNCLASSIFIED")}</span></td><td>${safe(proxy.source_id || "UNAVAILABLE")}</td><td>${safe(proxy.effective_start || "—")}<span class="cell-secondary">${safe(proxy.effective_end || "—")}</span></td><td>${proxyDispositionCell(proxy, row)}</td><td>${safe(proxy.selection_rationale || "No governed rationale")}</td></tr>`);
     const proxyTable = proxyRows.length
       ? `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Governed candidate universe</div><h3>Economic rationale and train-only disposition</h3></div><span class="badge">${integer.format(proxyRows.length)} proxies</span></div><div class="table-wrap wide"><table id="factor-proxy-table"><caption>Factor proxy governance</caption>${tableMarkup([["Proxy / family"], ["Source"], ["Effective interval"], ["Disposition"], ["Selection rationale"]], proxyRows)}</table></div></div>`
       : "";
@@ -2939,6 +2952,13 @@
     $$("[data-perf-mode]").forEach((button) => { const active = button.dataset.perfMode === built.mode; button.classList.toggle("is-active", active); button.setAttribute("aria-pressed", String(active)); });
   }
 
+  // T1: an equation label ("... residual R = memo M (gloss) +T cash left ...") keeps every term and drops only the
+  // parenthesised gloss, so the printed parts foot; a plain name keeps the text before its first parenthesis.
+  function perfResidualLabelText(label) {
+    const text = String(label);
+    const kept = / = /.test(text) ? text.replace(/\s*\([^()]*\)/g, "") : text.split(" (")[0];
+    return kept.toLowerCase().replaceAll("_", " ");
+  }
   function perfPublishedValue() {
     const tab = perfTab();
     if (!tab) return { unavailable: "the producer published no performance block in this snapshot" };
@@ -2976,7 +2996,7 @@
       : "";
     return {
       ids, names, table, benchmarks, benchmarksPublished: benchmarkRows !== null, flowText,
-      reconciliation: residual == null ? (reconciliation.reason ? `Residual against systematic capital unavailable: ${reconciliation.reason}.` : "") : `Residual against systematic capital at ${formatDate(reconciliation.reference_date)}: ${currencyExact(residual)}${reconciliation.residual_label ? ` (${String(reconciliation.residual_label).split(" (")[0].toLowerCase().replaceAll("_", " ")})` : ""}.`,
+      reconciliation: residual == null ? (reconciliation.reason ? `Residual against systematic capital unavailable: ${reconciliation.reason}.` : "") : `Residual against systematic capital at ${formatDate(reconciliation.reference_date)}: ${currencyExact(residual)}${reconciliation.residual_label ? ` (${perfResidualLabelText(reconciliation.residual_label)})` : ""}.`,
     };
   }
 

@@ -2166,7 +2166,8 @@ def test_mockup_F_risk_shares_are_the_producers_bars_with_a_closure_strip(
             mode_coefficients={"MKT_RF": 0.01, "HML": -0.002}, per_date=per_date
         ),
     )
-    assert "Share of total risk (Euler allocation)" in markup
+    assert "Share of explained variance (Euler allocation)" in markup
+    assert "Share of total risk" not in markup
     assert 'class="risk-share-row"' in markup
     assert "Share of total variance" in markup and "never clamped" in markup
     assert "Dates with no weight, named and not filled" in markup

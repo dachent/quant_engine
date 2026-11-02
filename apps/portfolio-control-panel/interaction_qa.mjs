@@ -1354,10 +1354,10 @@ checks.push(check(
 ));
 const hwmCandidate = dashboardData.advisory?.hwm_candidate;
 await page.locator('[data-nav="risk"]').click();
-const hwmKpi = (await page.locator("#risk-kpis .kpi-card", { hasText: "Systematic HWM" }).first().textContent()) || "";
+const hwmKpi = (await page.locator("#risk-kpis .kpi-card", { hasText: "Systematic index, current" }).first().textContent()) || "";
 checks.push(check(
   "Systematic HWM KPI shows the governed candidate labelled pending acceptance",
-  !hwmCandidate || (hwmKpi.includes(Number(hwmCandidate.current_index).toFixed(4)) && /pending/i.test(hwmKpi) && !/^Systematic HWMUnavailable/.test(hwmKpi)),
+  !hwmCandidate || (hwmKpi.includes(Number(hwmCandidate.current_index).toFixed(4)) && /pending/i.test(hwmKpi) && !/^Systematic HWMUnavailable/.test(hwmKpi) && (!hwmCandidate.current_hwm || hwmKpi.includes(`HWM ${Number(hwmCandidate.current_hwm).toFixed(4)}`))),
   { applicable: Boolean(hwmCandidate), kpi: hwmKpi },
 ));
 const alphaContextPublished = Object.values(dashboardData.decomposition_lenses?.modes || {}).some((lenses) => Array.isArray(lenses) && lenses.some((lens) => Object.values(lens.surfaces || {}).some((surface) => (surface.series || []).some((row) => row.alpha_context))));
