@@ -1900,7 +1900,12 @@
       const history = row.long_history;
       const gap = row.model_account_gap;
       const implementation = layers.implementation_reconciliation;
-      const implementationDetail = implementation.detail;
+      // a restated strategy's detail is carried once, in `strategies`, and named by key
+      const detailRef = implementation.detail?.strategy_row_ref;
+      const detailRow = detailRef ? (data.strategies || []).find((item) => item.strategy_id === detailRef.strategy_id) : null;
+      const implementationDetail = detailRow
+        ? { ...(detailRow[detailRef.reconciliation] || {}), return_attribution: detailRow[detailRef.return_attribution] }
+        : implementation.detail;
       const regimes = row.regime_conformance;
       const fit = row.portfolio_fit;
       const disposition = row.advisory_disposition;

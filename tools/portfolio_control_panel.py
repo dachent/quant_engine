@@ -9645,7 +9645,25 @@ def _strategy_underwriting(
                         or gap["status"],
                         "comparison_status": implementation_comparison_status,
                         "contracts": contract_context,
-                        "detail": implementation_detail,
+                        # a restated strategy's detail is exactly its own row's
+                        # implementation contracts: carried once, in `strategies`, and
+                        # named here (the page resolves it); every other row is unchanged
+                        "detail": (
+                            {
+                                "strategy_row_ref": {
+                                    "block": "strategies",
+                                    "strategy_id": strategy_id,
+                                    "return_attribution": (
+                                        "implementation_return_attribution"
+                                    ),
+                                    "reconciliation": "implementation_reconciliation",
+                                }
+                            }
+                            if account_lanes is not None
+                            and strategy_id in account_lanes
+                            and implementation_detail is not None
+                            else implementation_detail
+                        ),
                     },
                 },
                 "design_fit": {

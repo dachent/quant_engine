@@ -404,3 +404,30 @@ def test_the_closed_panel_schema_admits_the_labelled_account_lane_on_a_canonical
     assert list(
         validator.iter_errors({**row, "account_basis": {**lane, "series_sha256": "z"}})
     )
+
+
+def test_a_restated_rows_implementation_detail_is_named_not_copied() -> None:
+    lanes = panel._restated_account_lanes([_strategy()], [_account_row()])
+    strategy = _strategy()
+    strategy["implementation_return_attribution"] = {"bridge": {"gap_pp": 1.0}}
+    strategy["implementation_reconciliation"] = {"return_reconciliation": {"x": 1}}
+    detail = _underwriting(strategy, lanes)["evidence_layers"][
+        "implementation_reconciliation"
+    ]["detail"]
+    assert detail == {
+        "strategy_row_ref": {
+            "block": "strategies",
+            "strategy_id": SID,
+            "return_attribution": "implementation_return_attribution",
+            "reconciliation": "implementation_reconciliation",
+        }
+    }
+    # a strategy that is not restated keeps its detail in place
+    plain = _strategy(restated=False)
+    plain["strategy_id"], plain["strategy_name"] = "other", "Other"
+    plain["implementation_return_attribution"] = {"bridge": {"gap_pp": 1.0}}
+    plain["implementation_reconciliation"] = {"return_reconciliation": {"x": 1}}
+    kept = _underwriting(plain, lanes)["evidence_layers"][
+        "implementation_reconciliation"
+    ]["detail"]
+    assert kept["return_attribution"] == {"bridge": {"gap_pp": 1.0}}
