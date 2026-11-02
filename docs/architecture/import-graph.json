@@ -554,6 +554,11 @@
       1
     ],
     [
+      "portfolio_target_series",
+      "strategy_basis",
+      1
+    ],
+    [
       "sleeve_inputs",
       "nested_strategy_tag_map",
       1
@@ -566,6 +571,11 @@
     [
       "sleeve_nav",
       "sleeve_ledger",
+      1
+    ],
+    [
+      "strategy_basis",
+      "account_strategy_manifest",
       1
     ],
     [

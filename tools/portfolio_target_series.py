@@ -367,9 +367,6 @@ def _strategy_basis_module(repository_sha: str) -> Any:
                 f"layered history repository dependency differs: {relative_path}",
                 kind="staleness",
             )
-    tools_directory = str(Path(__file__).resolve().parent)
-    if tools_directory not in sys.path:
-        sys.path.insert(0, tools_directory)
     try:
         import strategy_basis
     except ImportError as exc:

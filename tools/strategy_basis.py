@@ -15,9 +15,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import json
+import re
 from typing import Any, Final
 
 from quant_engine.portfolio_ledger import decimal_text
@@ -437,6 +439,31 @@ def series_sha256(rows: Sequence[Mapping[str, Any]]) -> str:
     ).hexdigest()
 
 
+_FACTS_DECIMAL: Final = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]+)?$")
+
+
+def _facts_day(value: object, field: str) -> str:
+    """An ISO calendar date, as the manifest reads a sleeve facts date."""
+
+    try:
+        if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+            raise ValueError(value)
+    except ValueError as exc:
+        raise StrategyBasisError(f"sleeve facts {field} must be an ISO date") from exc
+    return value
+
+
+def _facts_decimal(value: object, field: str) -> Decimal:
+    """Canonical decimal text, as the manifest reads a sleeve facts amount."""
+
+    if not isinstance(value, str) or _FACTS_DECIMAL.fullmatch(value) is None:
+        raise StrategyBasisError(f"sleeve facts {field} must be canonical decimal text")
+    result = Decimal(value)
+    if value.startswith("-") and result == 0:
+        raise StrategyBasisError(f"sleeve facts {field} must be canonical decimal text")
+    return result
+
+
 def _facts_document(facts: bytes | Mapping[str, Any]) -> tuple[Mapping[str, Any], str]:
     if isinstance(facts, bytes):
         try:
@@ -521,8 +548,8 @@ def restatement_from_sleeve_facts(
     navs: dict[str, Decimal] = {}
     try:
         for raw_day in sleeve["days"]:
-            day = manifest._sleeve_day(raw_day.get("day"), f"{account_id} day")  # noqa: SLF001
-            navs[day] = manifest._sleeve_decimal(  # noqa: SLF001
+            day = _facts_day(raw_day.get("day"), f"{account_id} day")
+            navs[day] = _facts_decimal(
                 raw_day.get(after_key), f"{account_id} {after_key}"
             )
         first_day = min(navs)
@@ -537,11 +564,11 @@ def restatement_from_sleeve_facts(
                 raise StrategyBasisError(
                     "sleeve facts flow class is not INTERNAL_IN/OUT"
                 )
-            event_day = manifest._sleeve_day(leg.get("event_date"), "flow event_date")  # noqa: SLF001
-            recognition = manifest._sleeve_day(  # noqa: SLF001
+            event_day = _facts_day(leg.get("event_date"), "flow event_date")
+            recognition = _facts_day(
                 leg.get("nav_recognition_date"), "flow nav_recognition_date"
             )
-            amount = manifest._sleeve_decimal(leg.get("amount"), "flow amount")  # noqa: SLF001
+            amount = _facts_decimal(leg.get("amount"), "flow amount")
             key = (
                 event_day,
                 recognition,
