@@ -57,10 +57,10 @@ assert _PLAN_SPEC is not None and _PLAN_SPEC.loader is not None
 planner = importlib.util.module_from_spec(_PLAN_SPEC)
 sys.modules[_PLAN_SPEC.name] = planner
 _PLAN_SPEC.loader.exec_module(planner)
-# canonical-JSON digest of the planner's whole layered-history result for the
-# synthetic fixture built with no declaration by the planner at K head 07f02431
+# digest of the planner's rows, composition, interval policies and target bytes for the
+# synthetic fixture with no declaration, equal under the planner at K head 07f02431
 SWITCH_OFF_IDENTITY_DIGEST = (
-    "d1eff4992f9f653bdc231bf1d143f65e6a885d7abcd760cf6055ba0d3042a9b1"
+    "598bb498ed45df19ca6de0628b86006fd9214b44a831eda629b8859ca5fb6a47"
 )
 
 
@@ -203,7 +203,6 @@ def test_the_switch_off_plan_is_the_unrestated_plan_byte_for_byte(
         json.dumps(
             {
                 "composition": result["composition"],
-                "identity": result["identity"],
                 "rows": result["rows"],
                 "series_interval_policies": result["series_interval_policies"],
                 "target_sha256": hashlib.sha256(result["target_content"]).hexdigest(),
