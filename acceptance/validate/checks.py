@@ -4482,7 +4482,7 @@ def declared_sleeve_figures(ctx: Context) -> dict[str, sleeve_basis.SleeveFigure
     and every basis-aware check that needs the figures fails closed on their absence.
     """
 
-    declared = ctx.strategy_basis or {}
+    declared = getattr(ctx, "strategy_basis", None) or {}
     if not declared or ctx.sleeve_facts is None:
         return {}
     cached = ctx._cache.get("declared_sleeve_figures")
@@ -4506,7 +4506,7 @@ def declared_sleeve_values(ctx: Context) -> dict[str, Decimal]:
     account basis here and ``returns.sleeve_basis`` reports why.
     """
 
-    declared = ctx.strategy_basis or {}
+    declared = getattr(ctx, "strategy_basis", None) or {}
     if not declared:
         return {}
     cached = ctx._cache.get("declared_sleeve_values")
@@ -4636,7 +4636,7 @@ def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
     account.  With no declaration and no sleeve-basis row this check emits nothing.
     """
 
-    declared = ctx.strategy_basis or {}
+    declared = getattr(ctx, "strategy_basis", None) or {}
     for position, row in enumerate(rows(ctx.panel, "strategies")):
         scope = row.get("return_scope")
         strategy = str(row.get("strategy_id"))
@@ -5950,7 +5950,7 @@ def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
             continue
         metrics = row["metrics"]
         strategy = str(row.get("strategy_id"))
-        if strategy in (ctx.strategy_basis or {}):
+        if strategy in (getattr(ctx, "strategy_basis", None) or {}):
             yield from _declared_benchmark_findings(
                 ctx, position, row, summary.get(strategy)
             )
@@ -8791,7 +8791,7 @@ def _strategy_opening_date(
 
     if first_return is None:
         return None
-    if strategy_id in (ctx.strategy_basis or {}):
+    if strategy_id in (getattr(ctx, "strategy_basis", None) or {}):
         # a declared strategy stands on its sleeve: the window opens at the sleeve's
         # opening NAV, derived from the facts (never the parent account's anchor)
         figures = declared_sleeve_figures(ctx).get(str(strategy_id))
@@ -8832,7 +8832,9 @@ def _opening_window_problems(ctx: Context, row: Mapping[str, Any]) -> dict[str, 
     if end is None or first_return is None:
         return {}
     opened = _strategy_opening_date(ctx, row.get("strategy_id"), first_return)
-    declared_row = row.get("strategy_id") in (ctx.strategy_basis or {})
+    declared_row = row.get("strategy_id") in (
+        getattr(ctx, "strategy_basis", None) or {}
+    )
     if opened is None:
         if declared_row:
             # fail closed: a declared strategy's window cannot be derived without facts
