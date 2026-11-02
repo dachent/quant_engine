@@ -647,7 +647,9 @@ ADMISSION_RULING: Final = (
 )
 
 
-def exclusion_disclosure(receipt: bytes, model_source_sha256: str) -> dict[str, Any]:
+def exclusion_disclosure(
+    receipt: bytes, model_source_sha256: str, model_provider_id: str
+) -> dict[str, Any]:
     """Why the model comparison reads a pinned capture: the ledger exclusion, from the receipt.
 
     The selected provider-ledger admission receipt carries the explicit zero-admission
@@ -661,7 +663,7 @@ def exclusion_disclosure(receipt: bytes, model_source_sha256: str) -> dict[str, 
             row
             for row in document["dispositions"]
             if isinstance(row, dict)
-            and row.get("provider_id") == "portfolio123"
+            and row.get("provider_id") == model_provider_id
             and row.get("item_kind") == "PRODUCT_DATA_CLASS"
             and row.get("data_class") == "PROVIDER_LIVE_RETURN"
         ]
@@ -733,6 +735,7 @@ def build_contract(
     retained_attribution: bytes,
     retained_reconciliation: bytes,
     provider_admission_receipt: bytes,
+    model_provider_id: str,
     filenames: Mapping[str, str],
 ) -> bytes:
     """The canonical ``implementation-sleeve-basis/1`` bytes."""
@@ -752,7 +755,7 @@ def build_contract(
         model_source_sha256=_sha256(model_book_perf),
     )
     block["model_leg"]["admission_disclosure"] = exclusion_disclosure(
-        provider_admission_receipt, _sha256(model_book_perf)
+        provider_admission_receipt, _sha256(model_book_perf), model_provider_id
     )
     attribution_payload, attribution_rows = _retained_rows(
         retained_attribution, "attribution", "bridge"
@@ -991,6 +994,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--retained-attribution", type=Path, required=True)
     parser.add_argument("--retained-reconciliation", type=Path, required=True)
     parser.add_argument("--provider-admission-receipt", type=Path, required=True)
+    parser.add_argument("--model-provider-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -1012,6 +1016,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         retained_attribution=args.retained_attribution.read_bytes(),
         retained_reconciliation=args.retained_reconciliation.read_bytes(),
         provider_admission_receipt=args.provider_admission_receipt.read_bytes(),
+        model_provider_id=args.model_provider_id,
         filenames={key: path.name for key, path in paths.items()},
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

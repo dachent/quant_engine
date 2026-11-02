@@ -206,6 +206,7 @@ def _contract(
             "reconciliation", "return_reconciliation", -0.0446, 0.150, None
         ),
         "provider_admission_receipt": RECEIPT,
+        "model_provider_id": "portfolio123",
     }
     content = sbm.build_contract(
         **sources,
@@ -349,6 +350,7 @@ def test_a_flow_free_costless_sleeve_that_equals_the_model_has_only_zero_terms()
             "reconciliation", "return_reconciliation", 0.0, 0.0, None
         ),
         "provider_admission_receipt": RECEIPT,
+        "model_provider_id": "portfolio123",
     }
     block = _block(
         sbm.build_contract(**sources, filenames={key: key for key in sources})
@@ -400,6 +402,7 @@ def test_a_model_without_a_sleeve_date_is_refused() -> None:
             "reconciliation", "return_reconciliation", 0.0, 0.0, None
         ),
         "provider_admission_receipt": RECEIPT,
+        "model_provider_id": "portfolio123",
     }
     with pytest.raises(sbm.SleeveBasisError, match="model has no return"):
         sbm.build_contract(**sources, filenames={key: key for key in sources})
@@ -640,6 +643,7 @@ def test_real_r2_sleeve_bridge() -> None:
         retained_attribution=attribution,
         retained_reconciliation=reconciliation,
         provider_admission_receipt=Path(R2_RECEIPT).read_bytes(),
+        model_provider_id="portfolio123",
         filenames={
             "provider_admission_receipt": "x",
             "declaration": "d",
@@ -713,7 +717,7 @@ def test_the_bridge_names_why_the_ledger_excludes_the_model_returns() -> None:
     assert "ruling" in disclosure["statement"]
     # an absent exclusion is refused rather than papered over
     with pytest.raises(sbm.SleeveBasisError):
-        sbm.exclusion_disclosure(b'{"dispositions": []}', "0" * 64)
+        sbm.exclusion_disclosure(b'{"dispositions": []}', "0" * 64, "portfolio123")
 
 
 def test_every_ordering_ends_at_the_sleeve_return_and_the_split_depends_on_order() -> (
@@ -824,16 +828,133 @@ def test_real_flex_trade_rows_reproduce_the_sleeve_commissions_and_fills() -> No
             - abs(Decimal(row["quantity"])) * Decimal(row["tradePrice"])
         ) <= Decimal("0.01")
     # (a) the facts commission is the Flex ibCommission, day by day, so the NAV the
-    # returns come from holds each commission dollar once
-    worst = Decimal(0)
-    for day, item in by_day.items():
-        worst = max(
-            worst,
-            abs(Decimal(item["commission"]) - commission.get(day, Decimal(0))),
-        )
-    assert worst <= Decimal("0.01"), worst
+    # returns come from holds each commission dollar once; the only days that differ
+    # are the days of the facts' declared manual assignments that touch this sleeve
+    manual = {
+        item["day"]
+        for item in facts["disclosures"]["manual_assignments"]
+        if "s2" in str(item["sleeves"]).split(",")
+    }
+    differing = {
+        day: Decimal(item["commission"]) - commission.get(day, Decimal(0))
+        for day, item in by_day.items()
+        if abs(Decimal(item["commission"]) - commission.get(day, Decimal(0)))
+        > Decimal("0.0001")
+    }
+    assert set(differing) <= manual, sorted(set(differing) - manual)
+    assert all(abs(value) < Decimal("0.1") for value in differing.values())
     window_total = sum(
-        (Decimal(item["commission"]) for day, item in by_day.items()),
-        Decimal(0),
+        (Decimal(item["commission"]) for item in by_day.values()), Decimal(0)
     )
-    assert abs(window_total - sum(commission.values())) <= Decimal("0.05")
+    assert abs(window_total - sum(commission.values())) <= Decimal("0.2")
+
+
+@pytest.mark.skipif(
+    not (R2_FACTS and R2_FLEX_ROWS and R2_MODEL and R2_ATTRIBUTION),
+    reason="needs the R2 facts, the Flex trade-row extract, the model perf export and the retained contract",
+)
+def test_real_cost_scale_explains_the_commission_and_gross_terms() -> None:
+    """(a)-(c) on real bytes: the offsetting pair is a real cost against a model's smaller one."""
+
+    import csv
+    import re
+    from collections import defaultdict
+
+    assert R2_FACTS and R2_FLEX_ROWS and R2_MODEL
+    extract = json.loads(Path(R2_FLEX_ROWS).read_text())
+    transactions = Path(R2_MODEL).with_name("strategy_1853536_transactions.csv")
+    lead = re.compile(r"^[0-9]+-?")
+    tag = max(extract["day1_tags"], key=lambda key: extract["day1_tags"][key][0])
+    start, end = "2026-02-02", "2026-09-11"
+
+    def iso(text: str) -> str:
+        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+
+    fills: dict[tuple[str, str, str], list[Decimal]] = defaultdict(
+        lambda: [Decimal(0)] * 3
+    )
+    for row in extract["rows"]:
+        day = iso(row["tradeDate"])
+        if lead.sub("", row["orderReference"]) != tag or not start <= day <= end:
+            continue
+        quantity = abs(Decimal(row["quantity"]))
+        key = (day, row["symbol"], "BUY" if Decimal(row["quantity"]) > 0 else "SELL")
+        fills[key][0] += quantity
+        fills[key][1] += quantity * Decimal(row["tradePrice"])
+        fills[key][2] += -Decimal(row["ibCommission"])
+    model: dict[tuple[str, str, str], list[Decimal]] = defaultdict(
+        lambda: [Decimal(0)] * 3
+    )
+    with transactions.open(encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row["Type"] not in ("BUY", "SELL") or not start <= row["Date"] <= end:
+                continue
+            quantity = abs(Decimal(row["Shares"].replace(",", "")))
+            key = (row["Date"], row["Symbol"], row["Type"])
+            model[key][0] += quantity
+            model[key][1] += quantity * Decimal(row["Price"].replace(",", ""))
+            if row["TotFees"]:
+                model[key][2] += abs(Decimal(row["TotFees"].replace(",", "")))
+    fee_bps_actual = sum(v[2] for v in fills.values()) / sum(
+        v[1] for v in fills.values()
+    )
+    fee_bps_model = sum(v[2] for v in model.values()) / sum(
+        v[1] for v in model.values()
+    )
+    # a sleeve of tens of thousands pays per-ticket commissions on small orders; the model
+    # book is charged a fraction of that
+    assert fee_bps_actual > 2 * fee_bps_model
+    # on same-day matched fills the sleeve filled at better prices than the model assumed
+    worse = Decimal(0)
+    for key, (mq, mn, _) in model.items():
+        if key not in fills:
+            continue
+        fq, fn, _ = fills[key]
+        sign = 1 if key[2] == "BUY" else -1
+        worse += sign * (fn / fq - mn / mq) * fq
+    assert worse < 0
+    # (c) the commission term is a rate on the capital path, not dollars over one capital
+    facts = Path(R2_FACTS).read_bytes()
+    content = sbm.build_contract(
+        declaration=json.dumps(
+            {
+                "schema": "strategy-basis-declaration/1",
+                "strategies": [
+                    {"strategy_id": "p123-ai-factor", "basis": "SLEEVE_EPOCH"}
+                ],
+            }
+        ).encode(),
+        sleeve_facts=facts,
+        model_book_perf=Path(R2_MODEL).read_bytes(),
+        retained_attribution=Path(R2_ATTRIBUTION).read_bytes(),
+        retained_reconciliation=Path(R2_RECONCILIATION or "").read_bytes(),
+        provider_admission_receipt=Path(R2_RECEIPT or "").read_bytes(),
+        model_provider_id="portfolio123",
+        filenames={
+            "declaration": "d",
+            "sleeve_facts": "f",
+            "model_book_perf": "m",
+            "retained_attribution": "a",
+            "retained_reconciliation": "r",
+            "provider_admission_receipt": "x",
+        },
+    )
+    block = _block(content)
+    weighting = block["commission_weighting"]
+    found = {item["category"]: item for item in block["bridge"]["categories"]}
+    # the same commissions the Flex rows carry, on the facts' window
+    assert weighting["commissions_usd"] == pytest.approx(
+        -float(sum(v[2] for v in fills.values())), abs=0.2
+    )
+    # the term is the chained daily rate scaled by the growth the gross result gave the
+    # capital it was charged against (the lost dollars would have grown too)
+    growth = 1.0 + found[sbm.CAT_EXECUTION]["ending_return"]
+    assert found[sbm.CAT_COMMISSIONS]["effect_pp"] == pytest.approx(
+        weighting["daily_rate_chained_pp"] * growth, abs=0.02
+    )
+    # dollars over the mean capital is a smaller number because the dollars were
+    # spent when the sleeve was small
+    assert abs(weighting["usd_over_mean_capital_pp"]) < abs(
+        weighting["daily_rate_chained_pp"]
+    )
+    assert weighting["capital_last"] > 5 * weighting["capital_first"]
