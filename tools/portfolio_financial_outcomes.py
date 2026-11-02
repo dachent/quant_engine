@@ -21,6 +21,7 @@ import re
 from typing import Any, NamedTuple, cast
 
 import derived_epoch_perimeter
+from quant_engine.core import timed_stage
 from quant_engine.core.pipeline import ArtifactNode, GenerationNode
 from quant_engine.core import GenerationManifest, VerificationStatus
 from quant_engine.core.contracts import canonical_json_bytes
@@ -2154,8 +2155,16 @@ def validate_financial_outcomes(
     Every invocation writes one ledger file into ``spec.state_root`` naming the
     ``caller``, so a call that drops the returned counters is still counted.
     """
-    with _verification_ledger(spec, caller) as (work_counters, calls):
-        return _validate_financial_outcomes(spec, allow_synthetic, work_counters, calls)
+    with (
+        _verification_ledger(spec, caller) as (work_counters, calls),
+        timed_stage("financial_outcomes", caller=caller) as timing,
+    ):
+        try:
+            return _validate_financial_outcomes(
+                spec, allow_synthetic, work_counters, calls
+            )
+        finally:
+            timing.update(work_counters)
 
 
 def validate_financial_outcomes_with_deferred_ledger(
@@ -2194,9 +2203,13 @@ def validate_financial_outcomes_with_deferred_ledger(
         _write_verification_ledger(final_spec, caller, work_counters, calls)
 
     try:
-        proof = _validate_financial_outcomes(
-            spec, allow_synthetic, work_counters, calls
-        )
+        with timed_stage("financial_outcomes", caller=caller) as timing:
+            try:
+                proof = _validate_financial_outcomes(
+                    spec, allow_synthetic, work_counters, calls
+                )
+            finally:
+                timing.update(work_counters)
     except BaseException:
         finalize(spec)
         raise
