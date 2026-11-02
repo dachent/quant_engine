@@ -130,6 +130,11 @@ def test_a_sleeve_with_too_few_navs_has_no_return_path() -> None:
 
 _R2_FACTS = os.environ.get("QE_AI624_R2_FACTS")
 _R2_FIXTURE = os.environ.get("QE_AI624_R2_FIXTURE")
+# The R2.1 rebuild (builder with the own-entitlement rule for a corporate-action
+# fraction): the applicable lineage.  The R2 oracle file above was built with the
+# pro-rata rule; its numbers (series sha 4243e026, return 0.154347647891, value
+# 77258.1346867) are R2 REGRESSION REFERENCES, not the figures R2.2 reports.
+_R21_FACTS = os.environ.get("QE_AI624_R21_FACTS")
 
 
 @pytest.mark.skipif(
@@ -137,6 +142,8 @@ _R2_FIXTURE = os.environ.get("QE_AI624_R2_FIXTURE")
     reason="QE_AI624_R2_FACTS is not set to the R2 sleeve facts",
 )
 def test_the_real_r2_facts_derive_the_published_sleeve_path() -> None:
+    """R2 regression reference: the oracle file's pro-rata figures (4243e026)."""
+
     assert _R2_FACTS is not None
     facts = Path(_R2_FACTS).read_bytes()
     document = json.loads(facts)
@@ -163,3 +170,31 @@ def test_the_real_r2_facts_derive_the_published_sleeve_path() -> None:
     # 164 links from 165 sleeve NAV days: the R2 path
     assert len(derived.rows) == 164
     assert strategy_basis.series_sha256(derived.rows).startswith("4243e026")
+
+
+@pytest.mark.skipif(
+    not _R21_FACTS or not Path(_R21_FACTS or "").is_file(),
+    reason="QE_AI624_R21_FACTS is not set to the R2.1 rebuilt sleeve facts",
+)
+def test_the_real_r21_rebuild_derives_the_corrected_sleeve_path() -> None:
+    """The applicable lineage: the cash in lieu is split by own fractional entitlement."""
+
+    assert _R21_FACTS is not None
+    facts = Path(_R21_FACTS).read_bytes()
+    document = json.loads(facts)
+    assert document["disclosures"]["offsetting_residues"] == []
+    assert len(document["disclosures"]["corporate_action_fractions"]) == 1
+    strategy_id = next(
+        sleeve["strategy_id"]
+        for sleeve in document["sleeves"]
+        if sleeve["sleeve_id"] == "s2"
+    )
+    derived = strategy_basis.restatement_from_sleeve_facts(facts, strategy_id)
+    assert len(derived.rows) == 164
+    sha = strategy_basis.series_sha256(derived.rows)
+    assert sha.startswith("29c2b718") and not sha.startswith("4243e026")
+    cumulative = Decimal(1)
+    for row in derived.rows:
+        cumulative *= 1 + Decimal(row["return"])
+    assert str(cumulative - 1).startswith("0.15433337")
+    assert str(derived.value).startswith("77258.0018")
