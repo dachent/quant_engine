@@ -839,3 +839,135 @@ def test_the_shipped_graph_tracks_packed_evidence_and_the_pre_chain_inputs() -> 
         assert _stage(stage_id)["outputs"] == ["{evidence_dest}/manifest.json"]
     inputs = _stage("pre-chain")["inputs"]
     assert any("baseline/generations" in item for item in inputs)
+
+
+def _early_world(world: dict[str, Any]) -> dict[str, Any]:  # noqa: F811
+    import hashlib
+
+    tmp = world["tmp"]
+    workspace = tmp / "qe"
+    panel = "b216a53e" + "0" * 56
+    release = "01fbe4d8" + "0" * 56
+    data = (
+        workspace / "dataPortfolio" / "control-panel" / "generations" / panel / "d.json"
+    )
+    data.parent.mkdir(parents=True)
+    data.write_text("dashboard", encoding="utf-8")
+    (workspace / "dataPortfolio" / "control-panel" / "CURRENT.json").write_text(
+        json.dumps({"generation_id": panel}), encoding="utf-8"
+    )
+    coordination = workspace / "dataPortfolio" / "releases"
+    coordination.mkdir()
+    (coordination / "CURRENT_RELEASE.json").write_text(
+        json.dumps({"release_id": release, "state": "COMMITTED"}), encoding="utf-8"
+    )
+    disclosure = tmp / "disclosure-inputs.json"
+    disclosure.write_text(
+        json.dumps(
+            {
+                "predecessor_comparison": {
+                    "release_id": release,
+                    "panel_generation_id": panel,
+                    "data_file": {
+                        "relative_path": data.relative_to(workspace).as_posix(),
+                        "sha256": hashlib.sha256(data.read_bytes()).hexdigest(),
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline = tmp / "expected-baseline.json"
+    baseline.write_text('{"cutoff": "2026-09-17"}', encoding="utf-8")
+    calendar = tmp / "calendar-authority.json"
+    calendar.write_text('{"authority_evidence_sha256": "d26c6d5c"}', encoding="utf-8")
+    stage = {
+        "id": "early",
+        "outputs": ["{cycle}/early.txt"],
+        "predecessor_check": {
+            "inputs": str(disclosure),
+            "current_release": str(coordination / "CURRENT_RELEASE.json"),
+            "panel_current": str(
+                workspace / "dataPortfolio" / "control-panel" / "CURRENT.json"
+            ),
+            "workspace": str(workspace),
+        },
+        "expected_baseline": {"file": str(baseline), "cutoff": "{requested_as_of}"},
+        "pinned_inputs": [
+            [str(baseline), "{baseline_sha}"],
+            [str(calendar), "{calendar_sha}"],
+        ],
+        "argv": _write_stage("{cycle}/early.txt"),
+    }
+    _config(
+        world,
+        requested_as_of="2026-09-17",
+        baseline_sha=hashlib.sha256(baseline.read_bytes()).hexdigest(),
+        calendar_sha=hashlib.sha256(calendar.read_bytes()).hexdigest(),
+    )
+    return {
+        "graph": _graph(world, [stage]),
+        "disclosure": disclosure,
+        "baseline": baseline,
+        "calendar": calendar,
+        "coordination": coordination,
+        "panel_current": workspace / "dataPortfolio" / "control-panel" / "CURRENT.json",
+        "data": data,
+    }
+
+
+def test_early_checks_pass_for_the_committed_predecessor_baseline_and_calendar(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    early = _early_world(world)
+    assert _drive(world, early["graph"]) == 0
+
+
+def test_incident_predecessor_pin_that_is_not_the_committed_release_is_refused(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # R2 shipped "+3.86" against the R1 release because nothing compared the pin with CURRENT_RELEASE
+    early = _early_world(world)
+    (early["coordination"] / "CURRENT_RELEASE.json").write_text(
+        json.dumps({"release_id": "aa40fc6d" + "0" * 56, "state": "COMMITTED"}),
+        encoding="utf-8",
+    )
+    assert _drive(world, early["graph"]) == 2
+    (early["coordination"] / "CURRENT_RELEASE.json").write_text(
+        json.dumps({"release_id": "01fbe4d8" + "0" * 56, "state": "COMMITTED"}),
+        encoding="utf-8",
+    )
+    early["panel_current"].write_text('{"generation_id": "85d0e609"}', encoding="utf-8")
+    assert _drive(world, early["graph"]) == 2
+    early["panel_current"].write_text(
+        json.dumps({"generation_id": "b216a53e" + "0" * 56}), encoding="utf-8"
+    )
+    early["data"].write_text("edited", encoding="utf-8")
+    assert _drive(world, early["graph"]) == 2
+
+
+def test_incident_expected_baseline_for_another_cutoff_or_pin_is_refused(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # R2.1: a baseline that did not match the run cost 9 invariant and 69 regression blockers at validation
+    early = _early_world(world)
+    early["baseline"].write_text('{"cutoff": "2026-09-10"}', encoding="utf-8")
+    assert (
+        _drive(world, early["graph"]) == 2
+    )  # wrong cutoff and no longer the pinned bytes
+    early["baseline"].write_text(
+        '{"cutoff": "2026-09-17", "stale": true}', encoding="utf-8"
+    )
+    assert _drive(world, early["graph"]) == 2  # right cutoff, bytes differ from the pin
+
+
+def test_incident_calendar_authority_carried_over_from_another_pass_is_refused(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # pass 26 attempt 1 ran 9 minutes on the previous pass's authority before the tool refused it
+    early = _early_world(world)
+    early["calendar"].write_text(
+        '{"authority_evidence_sha256": "previous-pass"}', encoding="utf-8"
+    )
+    assert _drive(world, early["graph"]) == 2
+    assert not (world["cycle"] / "early.txt").exists()

@@ -337,6 +337,60 @@ def check_script_in_repo(
         )
 
 
+def check_pinned_inputs(run: Run, stage: Mapping[str, Any]) -> None:
+    """Inputs bound to this cycle by a sha256 the operator pinned (a carried-over file from another pass differs)."""
+
+    for path_template, sha_template in stage.get("pinned_inputs", []):
+        file = Path(run.expand(path_template))
+        if not file.is_file():
+            raise Refusal(f"{stage['id']}: pinned input {file} does not exist")
+        if _file_sha(file) != run.expand(sha_template):
+            raise Refusal(
+                f"{stage['id']}: {file.name} is not the file pinned for this run (carried over from another pass?)"
+            )
+
+
+def check_predecessor(run: Run, stage: Mapping[str, Any]) -> None:
+    """The predecessor the disclosures compare against is the committed release and panel, byte for byte."""
+
+    rule = stage.get("predecessor_check")
+    if rule is None:
+        return
+    pin = _read_json(Path(run.expand(rule["inputs"])))["predecessor_comparison"]
+    current = _read_json(Path(run.expand(rule["current_release"])))
+    panel = _read_json(Path(run.expand(rule["panel_current"])))
+    if current.get("state") != "COMMITTED":
+        raise Refusal(f"{stage['id']}: CURRENT_RELEASE is not COMMITTED")
+    if pin["release_id"] != current["release_id"]:
+        raise Refusal(
+            f"{stage['id']}: predecessor pin names release {pin['release_id'][:12]}, "
+            f"CURRENT_RELEASE is {current['release_id'][:12]}"
+        )
+    if pin["panel_generation_id"] != panel["generation_id"]:
+        raise Refusal(
+            f"{stage['id']}: predecessor pin names panel {pin['panel_generation_id'][:12]}, "
+            f"the current panel is {panel['generation_id'][:12]}"
+        )
+    data = Path(run.expand(rule["workspace"])) / pin["data_file"]["relative_path"]
+    if not data.is_file() or _file_sha(data) != pin["data_file"]["sha256"]:
+        raise Refusal(
+            f"{stage['id']}: the predecessor data file {data} is missing or differs from its pin"
+        )
+
+
+def check_expected_baseline(run: Run, stage: Mapping[str, Any]) -> None:
+    """The acceptance baseline is for this run's financial cutoff."""
+
+    rule = stage.get("expected_baseline")
+    if rule is None:
+        return
+    cutoff = _read_json(Path(run.expand(rule["file"])))["cutoff"]
+    if cutoff != run.expand(rule["cutoff"]):
+        raise Refusal(
+            f"{stage['id']}: expected baseline is for cutoff {cutoff}, the run's is {run.expand(rule['cutoff'])}"
+        )
+
+
 def check_bound_ids(run: Run, stage: Mapping[str, Any]) -> None:
     """A hand-built input file must name the generations this run produced, not another pass's."""
 
@@ -579,6 +633,9 @@ def check_ready(
                 f"{stage['id']} would collide with {path}, left by {where}; rerun with --replace"
             )
     check_bound_ids(run, stage)
+    check_pinned_inputs(run, stage)
+    check_predecessor(run, stage)
+    check_expected_baseline(run, stage)
     for item in stage.get("updates", []):
         if not Path(run.expand(item)).exists():
             raise Refusal(

@@ -168,3 +168,20 @@ written only by the `lanes` ceremony and names all seven steps (preflight, dry-r
 COMMIT, post-release verify, recovery rehearsal, clean-room restore, each rc 0) for the real
 spec's topology and code commit; the driver's gate adds the confirmed release id, the topology of
 the replica spec, a prepared release and unmoved pointers.
+
+## Refusals before staging and before the attended run
+
+Three stale inputs each cost R2 hours; the driver refuses them at the first stage that could use them:
+
+- **Predecessor vs CURRENT_RELEASE** (`selected-inputs`, `predecessor_check`): the disclosure inputs'
+  `predecessor_comparison.release_id` must equal the COMMITTED `CURRENT_RELEASE.json` release id,
+  `panel_generation_id` the panel `CURRENT.json` generation, and the pinned data file must hash to its pin.
+- **Expected baseline** (`selected-inputs`, `expected_baseline`, `pinned_inputs`): its `cutoff` must equal
+  `requested_as_of` and its bytes the run's `expected_baseline_sha256`. The baseline file records no ledger
+  or Schwab generation id, so the sha256 pin (set when the baseline is derived for this ledger) is what binds it
+  to the run's inputs; the full invariant check remains the validator at the findings step.
+- **Calendar authority** (`attended`, `pinned_inputs`): `calendar_authority` must hash to the run's
+  `calendar_authority_sha256`, so the previous pass's authority is refused before the 9-minute attended start.
+  The authority itself is re-authored from the cycle's epoch manifest with the retained
+  `mk_calendar2.py <first-attempt run dir> <authority.json>` (two passes), then its sha256 is pinned in the
+  run config. The driver does not derive it: that needs the epoch stage's output and the adapter internals.

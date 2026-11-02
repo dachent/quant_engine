@@ -99,6 +99,22 @@
       "inputs": [
         "{selected_inputs}",
         "{cycle}/attribution-spec.json"
+      ],
+      "predecessor_check": {
+        "inputs": "{disclosure_inputs}",
+        "current_release": "{coordination_root}/CURRENT_RELEASE.json",
+        "panel_current": "{portfolio_root}/control-panel/CURRENT.json",
+        "workspace": "{source_workspace}"
+      },
+      "expected_baseline": {
+        "file": "{repo_root}/acceptance/expected-baseline.json",
+        "cutoff": "{requested_as_of}"
+      },
+      "pinned_inputs": [
+        [
+          "{repo_root}/acceptance/expected-baseline.json",
+          "{expected_baseline_sha256}"
+        ]
       ]
     },
     {
@@ -229,6 +245,12 @@
             "PASSED"
           ]
         }
+      ],
+      "pinned_inputs": [
+        [
+          "{calendar_authority}",
+          "{calendar_authority_sha256}"
+        ]
       ]
     },
     {
