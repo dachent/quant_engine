@@ -127,15 +127,16 @@ def test_underwriting_keeps_both_lanes_sleeve_primary_account_labelled() -> None
     # the primary figures are the row's own (the sleeve's), named by its basis label
     assert live["cumulative_return"] == "0.1543" and live["max_drawdown"] == "-0.0673"
     assert live["basis"] == "SLEEVE_EPOCH"
-    assert live["basis_label"] == "sleeve s2 of parent account acct"
-    # the account lane is beside them with its own label and series
-    assert live["account_basis"]["cumulative_return"] == "0.0245"
-    assert live["account_basis"]["max_drawdown"] == "-0.105"
-    assert live["account_basis"]["series_sha256"] == SHA
+    # carried once: the label is the strategy row's own, the account figures are the
+    # account row's account_basis block; the underwriting row names them by key
+    assert "basis_label" not in live
+    assert set(live["account_basis_ref"]) == {"account_id", "block", "series_sha256"}
+    assert live["account_basis_ref"]["series_sha256"] == SHA
+    assert "account_basis" not in live
     fit = row["portfolio_fit"]
     assert fit["strategy_systematic_weight"] == "0.1739"
-    assert fit["strategy_systematic_weight_account_basis"] == "0.1348"
-    assert "whole account" in fit["strategy_weight_account_basis_label"]
+    assert "strategy_systematic_weight_account_basis" not in fit
+    assert "strategy_weight_account_basis_label" not in fit
     # the layer key set the panel validates is unchanged
     assert set(row["evidence_layers"]) == {
         "design",
@@ -403,3 +404,44 @@ def test_the_closed_panel_schema_admits_the_labelled_account_lane_on_a_canonical
     assert list(
         validator.iter_errors({**row, "account_basis": {**lane, "series_sha256": "z"}})
     )
+
+
+def test_a_restated_rows_implementation_detail_is_named_not_copied() -> None:
+    lanes = panel._restated_account_lanes([_strategy()], [_account_row()])
+    strategy = _strategy()
+    strategy["implementation_return_attribution"] = {"bridge": {"gap_pp": 1.0}}
+    strategy["implementation_reconciliation"] = {"return_reconciliation": {"x": 1}}
+    detail = _underwriting(strategy, lanes)["evidence_layers"][
+        "implementation_reconciliation"
+    ]["detail"]
+    assert detail == {
+        "strategy_row_ref": {
+            "block": "strategies",
+            "strategy_id": SID,
+            "return_attribution": "implementation_return_attribution",
+            "reconciliation": "implementation_reconciliation",
+        }
+    }
+    # a strategy that is not restated keeps its detail in place
+    plain = _strategy(restated=False)
+    plain["strategy_id"], plain["strategy_name"] = "other", "Other"
+    plain["implementation_return_attribution"] = {"bridge": {"gap_pp": 1.0}}
+    plain["implementation_reconciliation"] = {"return_reconciliation": {"x": 1}}
+    kept = _underwriting(plain, lanes)["evidence_layers"][
+        "implementation_reconciliation"
+    ]["detail"]
+    assert kept["return_attribution"] == {"bridge": {"gap_pp": 1.0}}
+
+
+def test_the_verifier_resolves_a_named_detail_from_the_strategies_row() -> None:
+    lanes = panel._restated_account_lanes([_strategy()], [_account_row()])
+    strategy = _strategy()
+    strategy["implementation_return_attribution"] = {"bridge": {"gap_pp": 1.0}}
+    strategy["implementation_reconciliation"] = {"return_reconciliation": {"x": 1}}
+    row = _underwriting(strategy, lanes)
+    detail = row["evidence_layers"]["implementation_reconciliation"]["detail"]
+    resolved = panel._resolved_implementation_detail(detail, [strategy])  # noqa: SLF001
+    assert resolved["return_attribution"] == {"bridge": {"gap_pp": 1.0}}
+    assert resolved["return_reconciliation"] == {"x": 1}
+    with pytest.raises(panel.ControlPanelValidationError, match="absent"):
+        panel._resolved_implementation_detail(detail, [])  # noqa: SLF001

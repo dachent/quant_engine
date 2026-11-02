@@ -10,8 +10,9 @@ same change that grows the block.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any
@@ -90,12 +91,61 @@ def check(
     return findings
 
 
+def raise_budgets(
+    budget: dict[str, Any],
+    blocks: Sequence[str],
+    before: Mapping[str, int],
+    after: Mapping[str, int],
+    *,
+    margin: float,
+    generation: str,
+) -> dict[str, Any]:
+    """The budget with ``blocks`` raised to their measured size plus a stated margin.
+
+    The new limit is the measured size times ``1 + margin`` rounded up to 1000 B, never
+    typed; ``committed_bytes`` takes the measurement, and ``history`` records, per
+    block, the size before, the size after, the margin and the measured generation, so
+    the file is reproducible from ``--before`` and ``generation`` alone.
+    """
+
+    result: dict[str, Any] = json.loads(json.dumps(budget))
+    entries = result.setdefault("history", [])
+    record: dict[str, Any] = {
+        "generation": generation,
+        "margin": margin,
+        "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+        "blocks": {},
+    }
+    for name in blocks:
+        measured = after[name]
+        limit = math.ceil(measured * (1 + margin) / 1000) * 1000
+        record["blocks"][name] = {
+            "before": before.get(name, 0),
+            "after": measured,
+            "previous_limit": result["blocks"].get(name),
+            "limit": limit,
+        }
+        result["blocks"][name] = limit
+        result["committed_bytes"]["blocks"][name] = measured
+    entries.append(record)
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("generation", type=Path)
     parser.add_argument("--budget", type=Path, default=BUDGET_PATH)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--no-check", action="store_true")
+    parser.add_argument(
+        "--raise-block",
+        action="append",
+        default=[],
+        help="raise this block's budget to the measured size plus --margin "
+        "(rewrites the budget file; needs --before)",
+    )
+    parser.add_argument("--before", type=Path, help="generation measured as 'before'")
+    parser.add_argument("--margin", type=float, default=0.01)
     args = parser.parse_args(argv)
     data = json.loads((args.generation / "data" / "dashboard_data.json").read_bytes())
     blocks = block_sizes(data)
@@ -104,6 +154,25 @@ def main(argv: list[str] | None = None) -> int:
     findings: list[str] = []
     if not args.no_check:
         findings = check(blocks, sizes, json.loads(args.budget.read_bytes()))
+        report["findings"] = findings
+    if args.raise_block:
+        if args.before is None:
+            parser.error("--raise-block needs --before")
+        before = block_sizes(
+            json.loads((args.before / "data" / "dashboard_data.json").read_bytes())
+        )
+        raised = raise_budgets(
+            json.loads(args.budget.read_bytes()),
+            args.raise_block,
+            before,
+            blocks,
+            margin=args.margin,
+            generation=args.generation.name,
+        )
+        args.budget.write_bytes(
+            (json.dumps(raised, indent=2) + chr(10)).encode("utf-8")
+        )
+        findings = check(blocks, sizes, raised)
         report["findings"] = findings
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.out:

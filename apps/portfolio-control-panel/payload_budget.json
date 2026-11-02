@@ -16,7 +16,7 @@
       "dependence_modes": 271278,
       "dependence_analysis": 134096,
       "coverage": 129325,
-      "strategies": 121117,
+      "strategies": 156861,
       "hwm_governed_proof": 112859,
       "performance_tab": 375785,
       "orthogonal_risk_attribution": 168346,
@@ -35,7 +35,7 @@
     "dependence_modes": 280000,
     "dependence_analysis": 139000,
     "coverage": 134000,
-    "strategies": 125000,
+    "strategies": 159000,
     "hwm_governed_proof": 117000,
     "performance_tab": 388000,
     "orthogonal_risk_attribution": 174000,
@@ -53,5 +53,20 @@
   "fixture": {
     "basis": "performance_tab built from the eight-week panel of tests/portfolio_control_panel/test_performance_tab.py measured 9549 B at R2 (schema 2) and 15898 B on r21-integration (schema 3: union grid, benchmark series); guards block shape in CI, where no real generation exists",
     "performance_tab_max_bytes": 16400
-  }
+  },
+  "history": [
+    {
+      "generation": "23540d7541dcc0107caea10eef4548eb260b7a3a690ffd28dd1996555a397c36",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "blocks": {
+        "strategies": {
+          "before": 136732,
+          "after": 156861,
+          "previous_limit": 125000,
+          "limit": 159000
+        }
+      }
+    }
+  ]
 }

@@ -9432,18 +9432,6 @@ def _strategy_underwriting(
                 cluster.get("observed_pair_correlation_maximum") if cluster else None
             ),
             "strategy_systematic_weight": strategy.get("systematic_weight"),
-            **(
-                {
-                    "strategy_systematic_weight_account_basis": account_lanes[
-                        strategy_id
-                    ]["systematic_weight"],
-                    "strategy_weight_account_basis_label": account_lanes[strategy_id][
-                        "label"
-                    ],
-                }
-                if account_lanes is not None and strategy_id in account_lanes
-                else {}
-            ),
             # The two weights come from two sets: the strategy's current cutoff weight
             # and the policy weights behind the cluster budget.
             "strategy_weight_basis": strategy.get("weight_basis"),
@@ -9638,8 +9626,14 @@ def _strategy_underwriting(
                                 "basis": _object(
                                     strategy.get("return_scope"), "return scope"
                                 ).get("basis"),
-                                "basis_label": strategy.get("return_scope_label"),
-                                "account_basis": dict(account_lanes[strategy_id]),
+                                # carried once: the label is the strategy row's own
+                                # `return_scope_label`, the figures (return, drawdowns,
+                                # value, weight, series, window) are the account row's
+                                # `account_basis` block, named here by key
+                                "account_basis_ref": {
+                                    key: account_lanes[strategy_id][key]
+                                    for key in ("account_id", "block", "series_sha256")
+                                },
                             }
                             if account_lanes is not None
                             and strategy_id in account_lanes
@@ -9651,7 +9645,25 @@ def _strategy_underwriting(
                         or gap["status"],
                         "comparison_status": implementation_comparison_status,
                         "contracts": contract_context,
-                        "detail": implementation_detail,
+                        # a restated strategy's detail is exactly its own row's
+                        # implementation contracts: carried once, in `strategies`, and
+                        # named here (the page resolves it); every other row is unchanged
+                        "detail": (
+                            {
+                                "strategy_row_ref": {
+                                    "block": "strategies",
+                                    "strategy_id": strategy_id,
+                                    "return_attribution": (
+                                        "implementation_return_attribution"
+                                    ),
+                                    "reconciliation": "implementation_reconciliation",
+                                }
+                            }
+                            if account_lanes is not None
+                            and strategy_id in account_lanes
+                            and implementation_detail is not None
+                            else implementation_detail
+                        ),
                     },
                 },
                 "design_fit": {
@@ -10324,7 +10336,23 @@ def _panel_data(
     # capital as the report carried it; the report's rows are reconciled with the
     # baseline here and with the panel's own strategy rows below.
     capital_parts = _capital_summary(summary)
-    _reconcile_capital_with_baseline(capital_parts, baseline_catalog)
+    _reconcile_capital_with_baseline(
+        capital_parts,
+        (
+            {
+                **baseline_catalog,
+                "current_capital": _strategy_basis_module().restate_current_capital(
+                    _object(
+                        baseline_catalog.get("current_capital"),
+                        "baseline current_capital",
+                    ),
+                    basis_restatements,
+                ),
+            }
+            if basis_restatements
+            else baseline_catalog
+        ),
+    )
     account_ids = [
         _text(row.get("account_id"), "account_summary.account_id") for row in accounts
     ]
@@ -13507,8 +13535,37 @@ def _replication_disposition_counts(
     }
 
 
+def _resolved_implementation_detail(
+    detail: Mapping[str, Any], strategies: Sequence[Mapping[str, Any]]
+) -> Mapping[str, Any]:
+    """The detail a ``strategy_row_ref`` names: the strategies row's own contracts."""
+
+    reference = detail.get("strategy_row_ref")
+    if reference is None:
+        return detail
+    ref = _object(reference, "underwriting detail reference")
+    row = next(
+        (
+            item
+            for item in strategies
+            if item.get("strategy_id") == ref.get("strategy_id")
+        ),
+        None,
+    )
+    if row is None or ref.get("block") != "strategies":
+        raise ControlPanelValidationError(
+            "underwriting detail names a strategies row that is absent"
+        )
+    resolved = dict(_object(row.get(str(ref.get("reconciliation"))), "reconciliation"))
+    resolved["return_attribution"] = _object(
+        row.get(str(ref.get("return_attribution"))), "return attribution"
+    )
+    return resolved
+
+
 def _check_implementation_layers(
     underwriting_rows: Sequence[Mapping[str, Any]],
+    strategies: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Recompute the underwriting gap and implementation layers from their rows.
 
@@ -13561,7 +13618,12 @@ def _check_implementation_layers(
             if comparison_status == STALE_IMPLEMENTATION_STATUS:
                 stale_shapes_valid = False
             continue
-        detail = _object(detail_value, "underwriting implementation detail")
+        detail = _object(
+            _resolved_implementation_detail(
+                _object(detail_value, "underwriting implementation detail"), strategies
+            ),
+            "underwriting implementation detail",
+        )
         stale_present = False
         for stale_key, kind, stale_ids, live_key in (
             (
@@ -14405,7 +14467,9 @@ def verify_candidate(
         "account_live",
         "implementation_reconciliation",
     }
-    implementation_findings = _check_implementation_layers(underwriting_rows)
+    implementation_findings = _check_implementation_layers(
+        underwriting_rows, _objects(data.get("strategies"), "strategies")
+    )
     causal_contract_present = any(
         row.get("artifact") == "strategy-implementation-return-attribution"
         for row in _objects(data.get("provenance"), "panel provenance")

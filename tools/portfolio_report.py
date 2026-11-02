@@ -2546,7 +2546,6 @@ def _account_basis_block(
         block[f"{prefix}_{name}"] = metrics.get(name)
     if annualization is not None:
         block[f"{prefix}_annualization"] = annualization
-        block[f"{prefix}_comparison_window"] = _label_window(annualization)
     return block
 
 
@@ -2591,11 +2590,8 @@ def _window_limit(
     return {
         "calculation_cutoff_date": cutoff.isoformat(),
         "days_short": short,
-        "reference_series_id": series_id,
-        "reference_stored_end": closure["reference_stored_end"],
         "sentence": sentence,
         "status": "AT_CUTOFF" if short == 0 else "SHORT_OF_CUTOFF",
-        "uncovered_sleeve_dates": {"count": count, "first": first, "last": last},
         "window_end": end.isoformat(),
         "window_start": start,
     }
