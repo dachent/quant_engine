@@ -125,3 +125,18 @@ def test_the_child_exit_code_survives_unencodable_output(
         "sys.stdout.buffer.flush()\nraise SystemExit(7)"
     )
     assert stall_watchdog.run([sys.executable, "-c", code], 5.0) == 7
+
+
+def test_an_incomplete_sequence_before_a_stall_is_flushed_not_lost(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code = (
+        "import sys, time\n"
+        "sys.stdout.buffer.write(b'end of output ' + bytes([0xE2, 0x82]))\n"
+        "sys.stdout.buffer.flush()\n"
+        "time.sleep(60)"
+    )
+    assert stall_watchdog.run([sys.executable, "-c", code], 2.0) == 124
+    out = capsys.readouterr().out
+    assert "end of output \ufffd" in out
+    assert "STALL" in out

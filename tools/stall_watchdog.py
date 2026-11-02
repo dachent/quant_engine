@@ -97,6 +97,11 @@ def run(command: Sequence[str], stall_seconds: float) -> int:
         except queue.Empty:
             if time.monotonic() - last > stall_seconds:
                 _kill_tree(process)
+                # bytes of an incomplete trailing sequence are still in the decoder
+                rest = decoder.decode(b"", final=True)
+                if rest:
+                    _write(rest)
+                    tail.extend(rest.splitlines())
                 _write(
                     f"\nSTALL: no output for {stall_seconds:.0f}s; killed. Last output:\n"
                 )
