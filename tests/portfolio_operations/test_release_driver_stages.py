@@ -1610,3 +1610,53 @@ def test_replica_only_still_refuses_to_execute_a_spec_bound_to_a_real_root(
         "findings-targets",
     ):
         assert _stage(stage_id)["only_ceremony"] == "full"
+
+
+def test_later_stages_may_change_the_replica_tree_the_copy_stage_only_binds_its_marker(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    replica = world["tmp"] / "replica-root"
+    code = (
+        "import pathlib,sys;r=pathlib.Path(sys.argv[1]);(r/'dataPortfolio').mkdir(parents=True);"
+        "(r/'dataPortfolio'/'a.txt').write_text('x');(r/'.replica-root.json').write_text('{}')"
+    )
+    copy = {
+        "id": "replica-copy",
+        "must_not_exist": [str(replica)],
+        "outputs": [str(replica / ".replica-root.json")],
+        "argv": ["{python}", "-c", code, str(replica)],
+    }
+    mutate = {
+        "id": "attest",
+        "requires": ["replica-copy"],
+        "outputs": [str(replica / "dataPortfolio" / "merge-attestation.json")],
+        "argv": _write_stage(str(replica / "dataPortfolio" / "merge-attestation.json")),
+    }
+    after = {
+        "id": "spec",
+        "requires": ["attest"],
+        "outputs": ["{cycle}/spec.txt"],
+        "argv": _write_stage("{cycle}/spec.txt"),
+    }
+    graph = _graph(world, [copy, mutate, after])
+    assert _drive(world, graph, "--through", "attest") == 0
+    (replica / "dataPortfolio" / "a.txt").write_text(
+        "changed by a later stage", encoding="utf-8"
+    )
+    (replica / "dataPortfolio" / "merge-attestation.json").unlink()
+    (replica / "dataPortfolio" / "merge-attestation.json").write_text(
+        "recreated", encoding="utf-8"
+    )
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    state["stages"]["attest"]["outputs"] = {
+        str(replica / "dataPortfolio" / "merge-attestation.json"): driver.path_digest(
+            replica / "dataPortfolio" / "merge-attestation.json"
+        )
+    }
+    (world["cycle"] / driver.STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
+    assert (
+        _drive(world, graph) == 0
+    )  # the tree changed; the copy's recorded marker did not
+    shipped = _stage("replica-copy")
+    assert shipped["outputs"] == ["{replica_workspace}/.replica-root.json"]
+    assert shipped["must_not_exist"] == ["{replica_workspace}"]

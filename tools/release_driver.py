@@ -993,7 +993,7 @@ def verify_kept(run: Run, stage: Mapping[str, Any], record: Mapping[str, Any]) -
     for path, recorded in {**record["outputs"], **record.get("inputs", {})}.items():
         if path_digest(Path(path)) != recorded:
             raise Refusal(
-                f"{stage['id']}: {path} changed or vanished since the stage recorded it"
+                f"{stage['id']}: {path} changed or vanished since the stage recorded it; rerun it with --only {stage['id']} --replace"
             )
     # the guarded inputs of the stage are rechecked too, not only the paths it recorded
     check_bound_ids(run, stage)
