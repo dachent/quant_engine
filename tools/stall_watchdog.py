@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 from collections import deque
+import codecs
 from io import BufferedReader
 import os
 from pathlib import Path
@@ -39,6 +40,24 @@ def _kill_tree(process: subprocess.Popen[bytes]) -> None:
     else:
         os.killpg(process.pid, signal.SIGKILL)
     process.kill()
+
+
+def _write(text: str) -> None:
+    """Write to stdout without ever raising on an unencodable character.
+
+    On a cp1252 console a character outside the code page (or an undecodable byte, which
+    arrives as U+FFFD) makes ``write`` raise, and an exception here would end the run
+    before the failing test's name is printed. Such a character is written as a
+    backslash escape instead.
+    """
+
+    out = sys.stdout
+    try:
+        out.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(out, "encoding", None) or "ascii"
+        out.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
+    out.flush()
 
 
 def _summary(line: str) -> None:
@@ -67,6 +86,8 @@ def run(command: Sequence[str], stall_seconds: float) -> int:
         lines.put(None)
 
     threading.Thread(target=pump, daemon=True).start()
+    # A multibyte character can straddle two reads, so decode incrementally.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     tail: deque[str] = deque(maxlen=TAIL_LINES)
     started = last = time.monotonic()
     longest = 0.0
@@ -76,11 +97,10 @@ def run(command: Sequence[str], stall_seconds: float) -> int:
         except queue.Empty:
             if time.monotonic() - last > stall_seconds:
                 _kill_tree(process)
-                print(
-                    f"\nSTALL: no output for {stall_seconds:.0f}s; killed. Last output:",
-                    flush=True,
+                _write(
+                    f"\nSTALL: no output for {stall_seconds:.0f}s; killed. Last output:\n"
                 )
-                print("\n".join(tail), flush=True)
+                _write("\n".join(tail) + "\n")
                 _summary(
                     f"**stall watchdog**: killed after {stall_seconds:.0f}s of silence "
                     f"(run {time.monotonic() - started:.0f}s)"
@@ -92,10 +112,12 @@ def run(command: Sequence[str], stall_seconds: float) -> int:
         now = time.monotonic()
         longest = max(longest, now - last)
         last = now
-        text = raw.decode("utf-8", errors="replace")
+        text = decoder.decode(raw)
         tail.extend(text.splitlines())
-        sys.stdout.write(text)
-        sys.stdout.flush()
+        _write(text)
+    rest = decoder.decode(b"", final=True)
+    if rest:
+        _write(rest)
     code = process.wait()
     longest = max(longest, time.monotonic() - last)
     _summary(
