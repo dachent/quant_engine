@@ -610,11 +610,13 @@ def check_probe_guard(run: Run, stage: Mapping[str, Any]) -> None:
 
     if run.values["mode"] != "probe":
         return
-    if run.values["ceremony"] == REPLICA_ONLY:
-        # a replica-only run may READ the real roots (the replica copy and its spec bind them); what it
-        # may never do is write one, which ``check_replica_guard`` refuses for every declared output
-        return
+    # a replica-only run may READ the real roots through arguments (the replica copy and its spec bind
+    # them); a stage that EXECUTES a spec (preflight, plan, dry-run) writes under the roots the spec names,
+    # so a spec bound to a real root stays refused (``guard_spec``) and ``check_replica_guard`` refuses
+    # every declared output
     keys, spec_template = stage.get("live_guard_keys", []), stage.get("guard_spec")
+    if run.values["ceremony"] == REPLICA_ONLY:
+        keys = []
     if not keys and spec_template is None:
         return
     if "live_workspace" not in run.values:

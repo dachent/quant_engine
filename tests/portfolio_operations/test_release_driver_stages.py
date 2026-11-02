@@ -1572,3 +1572,41 @@ def test_replica_only_may_read_the_live_workspace_but_full_probe_still_refuses_i
     )  # writing it is refused
     assert not (live / "dataPortfolio" / "x.txt").exists()
     assert ceremony["real"]
+
+
+def test_replica_only_still_refuses_to_execute_a_spec_bound_to_a_real_root(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    live = world["tmp"] / "live"
+    (live / "dataPortfolio").mkdir(parents=True)
+    _ceremony_world(world)
+    spec = world["tmp"] / "real-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "coordination_root": str(live / "dataPortfolio" / "releases"),
+                "state_root": "",
+                "roots": {"p": str(live / "dataPortfolio")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    executing = {
+        "id": "dry",
+        "guard_spec": str(spec),
+        "outputs": ["{cycle}/dry.txt"],
+        "argv": _write_stage("{cycle}/dry.txt"),
+    }
+    _config(world, mode="probe", live_workspace=str(live))
+    assert (
+        _drive(world, _graph(world, [executing])) == 2
+    )  # executing a real-bound spec writes the real roots
+    assert not (world["cycle"] / "dry.txt").exists()
+    for stage_id in (
+        "preflight",
+        "plan",
+        "dry-run",
+        "findings-panel",
+        "findings-targets",
+    ):
+        assert _stage(stage_id)["only_ceremony"] == "full"
