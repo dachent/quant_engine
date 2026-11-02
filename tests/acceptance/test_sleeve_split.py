@@ -186,7 +186,9 @@ def test_only_each_sleeves_own_fractional_entitlement_closes_the_whole_shares() 
             assert not candidate.closes, name
 
 
-def test_the_old_builders_pro_rata_split_leaves_the_residue_its_facts_disclosed() -> None:
+def test_the_old_builders_pro_rata_split_leaves_the_residue_its_facts_disclosed() -> (
+    None
+):
     evidence = _evaluate()
     pro_rata = evidence.candidates[sp.SPLIT_PRO_RATA_QUANTITY]
     assert _near(pro_rata.residual_shares["s1"], Fraction(1, 35))
@@ -397,7 +399,24 @@ def test_an_ordinary_untagged_sale_is_not_a_corporate_action_fraction() -> None:
     assert sp.derive_fractions(own_fraction_facts(), other, tag_map(), catalog()) == []
 
 
-def test_the_data_that_break_the_closure_stop_the_derivation() -> None: with pytest.raises(sleeve_basis.Refusal) as caught: sp.derive_fractions( own_fraction_facts(), trades(), tag_map(), catalog(whole="44") ) assert caught.value.code == sp.SPLIT_WHOLE_CLOSURE # the sleeves hold more than the surrendered quantity: the pre-split closure fails extra = [*trades(), _trade(9, "2026-01-27", "9-AlphaModel", "10", "0.7", "0")] with pytest.raises(sleeve_basis.Refusal) as caught: sp.derive_fractions(own_fraction_facts(), extra, tag_map(), catalog()) assert caught.value.code == sp.SPLIT_PRE_QUANTITY # with no corporate action in the catalog there is nothing to apply the rule to assert ( sp.derive_fractions( own_fraction_facts(), trades(), tag_map(), catalog(action=False) ) == [] )
+def test_the_data_that_break_the_closure_stop_the_derivation() -> None:
+    with pytest.raises(sleeve_basis.Refusal) as caught:
+        sp.derive_fractions(
+            own_fraction_facts(), trades(), tag_map(), catalog(whole="44")
+        )
+    assert caught.value.code == sp.SPLIT_WHOLE_CLOSURE
+    # the sleeves hold more than the surrendered quantity: the pre-split closure fails
+    extra = [*trades(), _trade(9, "2026-01-27", "9-AlphaModel", "10", "0.7", "0")]
+    with pytest.raises(sleeve_basis.Refusal) as caught:
+        sp.derive_fractions(own_fraction_facts(), extra, tag_map(), catalog())
+    assert caught.value.code == sp.SPLIT_PRE_QUANTITY
+    # with no corporate action in the catalog there is nothing to apply the rule to
+    assert (
+        sp.derive_fractions(
+            own_fraction_facts(), trades(), tag_map(), catalog(action=False)
+        )
+        == []
+    )
 
 
 # ------------------------------------------------------------------------ real bytes
