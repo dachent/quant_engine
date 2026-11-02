@@ -374,3 +374,26 @@ def test_the_printed_residual_equation_foots_with_every_term_it_names(
     left, memo, rest = (float(g.replace(",", "")) for g in match.groups())
     assert round(memo + rest, 2) == left
     assert "the residual parent account" not in text
+
+
+def test_the_dollar_legend_says_which_basis_a_sleeve_slice_is_on(
+    tmp_path: Path,
+) -> None:
+    """T6 fix: a sleeve slice's value is named as the sleeve's; the strategy row states its own basis."""
+
+    payload = _payload()
+    payload["strategies"] = [
+        {
+            "strategy_id": "alpha",
+            "strategy_name": "Alpha",
+            "return_scope_label": "MIXED BASIS: synthetic.",
+        }
+    ]
+    payload["performance_tab"]["slices"]["rows"][0]["sleeve_id"] = "sx"
+    text = _plain(_run(tmp_path, payload, "renderPerformance"), "#perf-value-legend")
+
+    assert "is the sleeve sx epoch value" in text
+    assert "The strategy row states its own basis for current value and weight" in text
+    payload["performance_tab"]["slices"]["rows"][0].pop("sleeve_id")
+    plain = _plain(_run(tmp_path, payload, "renderPerformance"), "#perf-value-legend")
+    assert "epoch value" not in plain

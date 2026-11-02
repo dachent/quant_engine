@@ -112,13 +112,19 @@ def test_the_mixed_basis_disclosure_is_stated_with_a_bridge_that_foots() -> None
 
     assert "MIXED BASIS: this row mixes account and sleeve bases" in label
     assert "2030-01-02 to 2030-09-03, 244 days" in label
+    assert (
+        "parent account's (2030-01-02" in label
+        and "sleeve epoch's (2030-01-10" in label
+    )
+    assert "Epoch rows and the dollar-value chart show the sleeve's own values" in label
+    assert "[source: ADR 0002 / #624]" in label
     assert "2030-01-10 to 2030-09-03, 236 days" in label
     assert "owner ruled" in label and "restated to the sleeve basis" in label
     assert f"release {report_module.MIXED_BASIS_SCHEDULED_RELEASE}" in label
     assert disclosure["status"] == "MIXED_BASIS"
     assert disclosure["scheduled_release"] == "R2.2"
     # footing: the terms as printed in the label sum to the printed net
-    bridge = re.search(r"points: (.*?) \(net ([+-][\d.]+);", label)
+    bridge = re.search(r"points: (.*?) \(net ([+-][\d.]+)\)", label)
     assert bridge is not None
     terms = [Decimal(m) for m in re.findall(r" ([+-]\d+\.\d+)(?:,|$)", bridge.group(1))]
     assert len(terms) == len(report_module.MIXED_BASIS_BRIDGE_POINTS) == 3

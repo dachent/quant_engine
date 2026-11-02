@@ -2002,8 +2002,13 @@ def _annualization_label(
     observations: object = None,
     periods_per_year: object = None,
     frequency: str | None = None,
+    calendar_day_exponent: bool = False,
 ) -> dict[str, Any] | None:
     """The basis and window an annualized figure stands on, or None without a window.
+
+    ``calendar_day_exponent`` is for a figure whose annualization exponent is the window's
+    calendar days (the account-live CAGR): its label names those days and the observation
+    count as the daily returns the cumulative return compounds, not as the scaling basis.
 
     A window under 365 days is a short-window annualization: ``short_window`` is true
     and the label says so beside the dates.  The label names the observation count
@@ -2030,6 +2035,11 @@ def _annualization_label(
     short = window_days < _ONE_YEAR_DAYS
     if frequency == "CASH_FLOW_DATES":
         text = f"annualized from cash flows, {start}..{end}"
+    elif calendar_day_exponent and count is not None and word is not None:
+        text = (
+            f"annualized over {window_days} calendar days "
+            f"({count} {word} returns), {start}..{end}"
+        )
     elif count is not None and word is not None:
         text = f"annualized from {count} {word} observations, {start}..{end}"
     else:
@@ -2091,6 +2101,7 @@ def _account_annualization_labels(
             end=row.get("account_live_observed_end"),
             observations=row.get("account_live_return_observations"),
             frequency="DAILY",
+            calendar_day_exponent=True,
         )
     mwr = None
     if row.get("mwr_xirr") is not None:
@@ -12778,7 +12789,7 @@ MIXED_BASIS_BRIDGE_POINTS: Final[tuple[tuple[str, str], ...]] = (
     ("ADR 0002 end-of-day flow", "-0.319"),
 )
 MIXED_BASIS_SCHEDULED_RELEASE: Final = "R2.2"
-MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 and issue #624"
+MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 / #624"
 
 
 def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
@@ -12807,14 +12818,14 @@ def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], st
     net = sum((Decimal(value) for _, value in MIXED_BASIS_BRIDGE_POINTS), Decimal(0))
     terms = ", ".join(f"{name} {value}" for name, value in MIXED_BASIS_BRIDGE_POINTS)
     sentence = (
-        "MIXED BASIS: this row mixes account and sleeve bases (return, drawdown, current "
-        f"value, weight and weekly series over the parent account, {parent_window}; MWR "
-        f"and governed capital over the sleeve epoch, {sleeve_window}). The owner ruled "
-        "that this row be restated to the sleeve basis; the restatement is scheduled as "
-        f"release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from the audit figure "
-        f"{MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, in percentage "
-        f"points: {terms} (net {net:+}; source: {MIXED_BASIS_BRIDGE_SOURCE}; these terms "
-        "are fixed disclosure inputs, not payload fields)."
+        "MIXED BASIS: this row mixes account and sleeve bases. On the strategy row, "
+        "return, drawdown, current value, weight and weekly series are the parent "
+        f"account's ({parent_window}); MWR and governed capital are the sleeve epoch's "
+        f"({sleeve_window}). Epoch rows and the dollar-value chart show the sleeve's own "
+        "values. The owner ruled that this row be restated to the sleeve basis; the "
+        f"restatement is scheduled as release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from "
+        f"the audit figure {MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, "
+        f"in percentage points: {terms} (net {net:+}) [source: {MIXED_BASIS_BRIDGE_SOURCE}]."
     )
     disclosure = {
         "status": "MIXED_BASIS",
