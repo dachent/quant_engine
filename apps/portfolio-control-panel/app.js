@@ -774,7 +774,16 @@
       components == null ? null : `${integer.format(components)} components`,
       number(row.weight_denominator_usd) == null ? null : currency(row.weight_denominator_usd),
     ].filter(Boolean).join(", ");
-    return `<span class="cell-secondary">Weight is the share of the snapshot's recorded systematic perimeter${detail ? ` (${detail})` : ""}</span>`;
+    // P28-A2: the listed rows of that perimeter may not be all of its components; the first row of the group says
+    // how many are listed, what they total and how much of the perimeter is in components this table does not list.
+    const group = (Array.isArray(data.allocations) ? data.allocations : []).filter((item) => item.weight_perimeter === row.weight_perimeter
+      && item.weight_denominator_usd === row.weight_denominator_usd && item.systematic_weight != null);
+    const listedTotal = group.reduce((sum, item) => sum + (Number(item.current_value_usd) || 0), 0);
+    const unlisted = components == null ? 0 : components - group.length;
+    const unlistedNote = group[0] === row && unlisted > 0 && number(row.weight_denominator_usd) != null
+      ? `<span class="cell-secondary">${integer.format(group.length)} of the ${integer.format(components)} components are listed in this table, totalling ${currency(listedTotal)}; the other ${integer.format(unlisted)} (${currency(Number(row.weight_denominator_usd) - listedTotal)} of the perimeter) are not listed here</span>`
+      : "";
+    return `<span class="cell-secondary">Weight is the share of the perimeter recorded at ${row.as_of_date ? formatDate(row.as_of_date) : "the snapshot date"}${detail ? ` (${detail})` : ""}, not of the current systematic perimeter</span>${unlistedNote}`;
   };
 
   // F06/F22: the reserve at the cutoff.  The custody current-capital block is read when the
@@ -1366,7 +1375,7 @@
       const rate = number(row.mwr_xirr);
       if (!(days > 0 && days < 365) || rate == null) return "";
       const windowEquivalent = Math.pow(1 + Number(rate), days / 365) - 1;
-      return `<span class="cell-secondary">annualised from ${integer.format(days)} days · ${pct(windowEquivalent)} over the window (derived)</span>`;
+      return `<span class="cell-secondary">annualized from ${integer.format(days)} days · ${pct(windowEquivalent)} over the window (derived)</span>`;
     };
     const rows = mappedPerformance.map((row) => {
       if (performanceLineageMismatch) {
@@ -2650,7 +2659,7 @@
     const outsideNote = outsideByAccount.size
       ? ` Not in this matrix (not in the current perimeter), but counted in the coverage totals: ${[...outsideByAccount].map(([key, counts]) => `${key} (${counts.join(", ")})`).join("; ")}.`
       : "";
-    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} declared fact paths</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}`;
+    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} current-perimeter fact paths</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}`;
     const intervalText = (row) => {
       if (Array.isArray(row.missing_intervals) && row.missing_intervals.length) return row.missing_intervals.map((item) => typeof item === "object" ? `${item.start || item.missing_interval_start || "?"}–${item.end || item.missing_interval_end || "?"}: ${item.reason || item.missing_interval_reason || "reason not recorded"}` : String(item)).join(" · ");
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;

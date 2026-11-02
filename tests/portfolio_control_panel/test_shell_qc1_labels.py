@@ -775,11 +775,13 @@ def test_snapshot_weight_names_the_recorded_perimeter_it_divides_by(
 
     assert "12.7%" in table
     assert (
-        "Weight is the share of the snapshot's recorded systematic perimeter "
-        "(9 components, $446,546)"
+        "Weight is the share of the perimeter recorded at Aug 16, 2026 "
+        "(9 components, $446,546), not of the current systematic perimeter"
     ) in table
+    assert "1 of the 9 components are listed in this table, totalling $56,833" in table
+    assert "the other 8 ($389,714 of the perimeter) are not listed here" in table
     # The reserve row carries no weight and no perimeter note.
-    assert table.count("recorded systematic perimeter") == 1
+    assert table.count("perimeter recorded at") == 1
 
 
 # ---- N74 (K11): one header per field ---------------------------------------------

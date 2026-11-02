@@ -116,7 +116,11 @@ def test_the_mixed_basis_disclosure_is_stated_with_a_bridge_that_foots() -> None
         "parent account's (2030-01-02" in label
         and "sleeve epoch's (2030-01-10" in label
     )
-    assert "Epoch rows and the dollar-value chart show the sleeve's own values" in label
+    assert (
+        "Account-by-strategy epoch rows (Performance & HWM) and the dollar-value chart "
+        "show the sleeve's own values; model-vs-actual audit epochs are on the parent "
+        "account (the parent account)"
+    ) in label
     assert "[source: ADR 0002 / #624]" in label
     assert "2030-01-10 to 2030-09-03, 236 days" in label
     assert "owner ruled" in label and "restated to the sleeve basis" in label
@@ -135,3 +139,37 @@ def test_the_mixed_basis_disclosure_is_stated_with_a_bridge_that_foots() -> None
     assert [t["points"] for t in disclosure["bridge_points"]] == [
         f"{t:+}" for t in terms
     ]
+
+
+def test_the_audit_epoch_clause_names_the_parent_account_from_the_rows_own_fields() -> (
+    None
+):
+    """Pass 29: model-vs-actual audit epochs are on the parent account; it is named from provider and last four."""
+
+    rows = _rows()
+    for row in rows:
+        if row["account_id"].startswith(PARENT):
+            row.update(provider="SYNBROKER", last_four="0042")
+    item = {"strategy_id": "p123-ai-factor"}
+    report: dict[str, Any] = {"strategy_summary": [item]}
+    sleeves = {f"{PARENT}-s{n}": PARENT for n in (1, 2, 3)}
+    report_module._apply_return_scope(report, rows, sleeves, ["p123-ai-factor"])
+    assert (
+        "model-vs-actual audit epochs are on the parent account (SYNBROKER 0042)"
+        in item["return_scope_label"]
+    )
+
+
+def test_the_matrix_clause_is_scoped_to_the_current_perimeter_matrix() -> None:
+    """Pass 29: providers with no admitted path are not all in the matrix the page prints."""
+
+    text = (
+        "7 accepted flow records across SYNPROV; providers without an admitted flow path "
+        "remain explicit in the account fact matrix"
+    )
+    scoped = report_module._matrix_scope_clause(text)
+    assert "remain explicit in the account fact matrix" not in scoped
+    assert scoped.startswith("7 accepted flow records across SYNPROV; ")
+    assert "current-perimeter account fact matrix" in scoped
+    assert "accounts not in it are named in the note under the matrix" in scoped
+    assert report_module._matrix_scope_clause("unrelated") == "unrelated"
