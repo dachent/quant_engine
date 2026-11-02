@@ -234,6 +234,9 @@ _PATH_STAGES = {
     # #624: the disclosure of a restated row (account basis, margin liability line, the two
     # bridges), computed from the sleeve facts the report is then given.
     "tools/strategy_basis_disclosure.py": ["report", "panel"],
+    # #624: the table of lens models whose status changes between the sleeve lane and the
+    # account lane; the panel reads and verifies it beside the lenses.
+    "tools/strategy_basis_lens_moves.py": ["analytics", "panel"],
     # #567 stage 5: the post-ledger sleeve-facts builders and the release step that
     # runs them.  Attended preparation builds the facts, the epoch manifest selects
     # them and the HWM replay re-supplies them, so a change to any of them moves the
