@@ -57,6 +57,7 @@ def _resolved(tmp_path: Path, **extra: Any) -> Path:
         "public_bundles": {
             "public_factors": str(tmp_path / "out-factors"),
             "sector_returns": str(tmp_path / "out-style"),
+            "etf_style": str(tmp_path / "out-etf"),
         },
         **extra,
     }
@@ -89,11 +90,19 @@ def _public_world(tmp_path: Path) -> dict[str, Any]:
             key: {"source": row(sources[key]), "manifest": row(manifests[key])}
             for key in sources
         },
-        "style": {
-            "source": row(yahoo),
-            "manifest": row(yahoo_manifest),
-            "universe_ids": ["style-fixture"],
-        },
+        "styles": [
+            {
+                "bundle_key": "sector_returns",
+                "source": row(yahoo),
+                "manifest": row(yahoo_manifest),
+                "universe_ids": ["style-fixture"],
+            },
+            {  # a second build with the builder's default universes (the R2 ETF-style shape)
+                "bundle_key": "etf_style",
+                "source": row(yahoo),
+                "manifest": row(yahoo_manifest),
+            },
+        ],
     }
     return {"raw": raw, "catalog_f": catalog_f, "catalog_s": catalog_s, "spec": spec}
 
@@ -112,7 +121,6 @@ def _build(tmp_path: Path, world: dict[str, Any], **override: Any) -> dict[str, 
         world["raw"],
         world["catalog_f"],
         factors_bundle_key="public_factors",
-        style_bundle_key="sector_returns",
     )
 
 
@@ -133,7 +141,7 @@ def test_public_build_end_to_end_matches_the_builders(
     def fake_style(
         catalog: Path, src: Path, man: Path, out: Path, universes: Any
     ) -> dict[str, Any]:
-        calls["style"] = (catalog, src, man, out, list(universes))
+        calls.setdefault("style", []).append((catalog, src, man, out, universes))
         return {"bundle_id": "b-s", "destination": str(out / "b-s")}
 
     monkeypatch.setattr(pub.factors, "write_bundle", fake_factors)
@@ -141,11 +149,13 @@ def test_public_build_end_to_end_matches_the_builders(
     result = _build(tmp_path, world)
     assert (
         result["factors"]["bundle_id"] == "b-f"
-        and result["style"]["bundle_id"] == "b-s"
+        and result["styles"][0]["bundle_id"] == "b-s"
+        and len(result["styles"]) == 2
     )
     catalog, srcs, mans, out, start, end, ev = calls["factors"]
     assert (
-        out == tmp_path / "out-factors" and calls["style"][3] == tmp_path / "out-style"
+        out == tmp_path / "out-factors"
+        and calls["style"][0][3] == tmp_path / "out-style"
     )
     assert set(srcs) == set(pub.factors.SOURCE_KEYS) == set(mans)
     assert (start, end, ev) == (
@@ -153,7 +163,8 @@ def test_public_build_end_to_end_matches_the_builders(
         _FACTOR_TESTS.RUN_ENDED_AT_UTC,
         _FACTOR_TESTS.EVALUATION_DATE,
     )
-    assert calls["style"][4] == ["style-fixture"]
+    assert [c[4] for c in calls["style"]] == [["style-fixture"], None]
+    assert calls["style"][1][3] == tmp_path / "out-etf"
 
 
 def test_public_real_builders_run_on_verified_feeds_and_are_create_only(
@@ -222,7 +233,9 @@ def test_public_refuses_a_changed_raw_file(tmp_path: Path) -> None:
 def test_public_refuses_missing_and_escaping_paths(
     tmp_path: Path, path: str, match: str
 ) -> None:
-    _refused(tmp_path, match, lambda spec, w: spec["style"]["source"].update(path=path))
+    _refused(
+        tmp_path, match, lambda spec, w: spec["styles"][0]["source"].update(path=path)
+    )
 
 
 def test_public_refuses_wrong_feed_set_window_and_cycle(tmp_path: Path) -> None:
@@ -250,7 +263,7 @@ def test_public_refuses_wrong_feed_set_window_and_cycle(tmp_path: Path) -> None:
             lambda s: s["acquisition_run"].update(evaluation_date="17/03/2026"),
             "malformed",
         ),
-        (lambda s: s["style"].update(universe_ids=[]), "universe_ids"),
+        (lambda s: s["styles"][0].update(universe_ids=[]), "universe_ids"),
         (lambda s: s.update(schema_version="other/1"), "schema_version"),
         (lambda s: s.update(extra=1), "keys differ"),
     ],

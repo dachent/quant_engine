@@ -16,7 +16,6 @@ acquisition window that is malformed, reversed, or whose evaluation date is afte
 Usage::
 
     release_public_bundles.py --resolved-cycle F --sources-manifest M --raw-root DIR --catalog C
-        [--factors-bundle-key public_factors] [--style-bundle-key sector_returns]
 """
 
 from __future__ import annotations
@@ -96,20 +95,18 @@ def build(
     catalog: Path,
     *,
     factors_bundle_key: str,
-    style_bundle_key: str,
 ) -> dict[str, Any]:
     resolved = _json(resolved_cycle, "resolved cycle")
     if resolved.get("schema_version") != RESOLVED_SCHEMA:
         raise Refusal(f"resolved cycle schema_version is not {RESOLVED_SCHEMA}")
     spec = _json(sources_manifest, "public-sources manifest")
-    if set(spec) != {"schema_version", "acquisition_run", "factor_feeds", "style"}:
+    if set(spec) != {"schema_version", "acquisition_run", "factor_feeds", "styles"}:
         raise Refusal("public-sources manifest keys differ from the schema")
     if spec["schema_version"] != SOURCES_SCHEMA:
         raise Refusal(f"public-sources manifest schema_version is not {SOURCES_SCHEMA}")
     if not raw_root.is_dir():
         raise Refusal(f"raw root is not a directory: {raw_root}")
     out_factors = _bundle_root(resolved, factors_bundle_key)
-    out_style = _bundle_root(resolved, style_bundle_key)
 
     run = spec["acquisition_run"]
     if not isinstance(run, Mapping) or set(run) != {
@@ -150,34 +147,55 @@ def build(
         manifest_paths[key] = _pinned(
             raw_root, row["manifest"], f"factor_feeds.{key}.manifest"
         )
-    sector = spec["style"]
-    if not isinstance(sector, Mapping) or set(sector) != {
-        "source",
-        "manifest",
-        "universe_ids",
-    }:
-        raise Refusal("style needs source, manifest and universe_ids")
-    universes = sector["universe_ids"]
-    if (
-        not isinstance(universes, list)
-        or not universes
-        or not all(isinstance(u, str) for u in universes)
-    ):
-        raise Refusal("style.universe_ids must be a non-empty list of strings")
-    yahoo = _pinned(raw_root, sector["source"], "style.source")
-    yahoo_manifest = _pinned(raw_root, sector["manifest"], "style.manifest")
+    rows = spec["styles"]
+    if not isinstance(rows, list) or not rows:
+        raise Refusal("styles must be a non-empty list")
+    keys = [str(r.get("bundle_key")) if isinstance(r, Mapping) else "" for r in rows]
+    if len(set(keys)) != len(keys):
+        raise Refusal("styles repeat a bundle_key")
+    builds = []
+    for index, row in enumerate(rows):
+        what = f"styles[{index}]"
+        allowed = {"bundle_key", "source", "manifest", "universe_ids"}
+        if (
+            not isinstance(row, Mapping)
+            or not {"bundle_key", "source", "manifest"} <= set(row) <= allowed
+        ):
+            raise Refusal(
+                f"{what} needs bundle_key, source, manifest and optional universe_ids"
+            )
+        universes = row.get("universe_ids")
+        if universes is not None and (
+            not isinstance(universes, list)
+            or not universes
+            or not all(isinstance(u, str) for u in universes)
+        ):
+            raise Refusal(
+                f"{what}.universe_ids must be a non-empty list of strings when given"
+            )
+        builds.append(
+            (
+                _bundle_root(resolved, str(row["bundle_key"])),
+                _pinned(raw_root, row["source"], f"{what}.source"),
+                _pinned(raw_root, row["manifest"], f"{what}.manifest"),
+                universes,
+            )
+        )
 
     # every input verified: only now do the committed builders write (create-only)
     factor_result = factors.write_bundle(
         catalog, source_paths, manifest_paths, out_factors, started, ended, evaluation
     )
-    style_result = style.write_bundle(
-        catalog, yahoo, yahoo_manifest, out_style, universes
-    )
+    style_results = [
+        style.write_bundle(catalog, source, receipt, out, universes)
+        for out, source, receipt, universes in builds
+    ]
     return {
         "cutoff": resolved["cutoff"],
         "factors": {k: factor_result[k] for k in ("bundle_id", "destination")},
-        "style": {k: style_result[k] for k in ("bundle_id", "destination")},
+        "styles": [
+            {k: r[k] for k in ("bundle_id", "destination")} for r in style_results
+        ],
     }
 
 
@@ -188,7 +206,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--raw-root", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--factors-bundle-key", default="public_factors")
-    parser.add_argument("--style-bundle-key", default="sector_returns")
     args = parser.parse_args(argv)
     try:
         result = build(
@@ -197,7 +214,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.raw_root,
             args.catalog,
             factors_bundle_key=args.factors_bundle_key,
-            style_bundle_key=args.style_bundle_key,
         )
     except (Refusal, OSError, ValueError) as exc:
         print(f"release-public-bundles: FAIL: {exc}", file=sys.stderr)
