@@ -720,7 +720,9 @@ def _recipe(path: Path) -> dict[str, Any]:
             "model_vs_actual_input",
             "nested_tag_map",
             "sleeve_disclosure_sources",
+            "sleeve_facts",
             "source_clock",
+            "strategy_basis",
             "vendor_gap_fills",
             "weekly_gap_fill_spec",
         }
@@ -829,6 +831,19 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("sleeve_disclosure_sources identity differs")
+    for optional_file in ("strategy_basis", "sleeve_facts"):
+        if optional_file in recipe:
+            definition = recipe[optional_file]
+            if not isinstance(definition, dict) or set(definition) != {
+                "path",
+                "sha256",
+                "size_bytes",
+            }:
+                raise VerticalBuildError(f"{optional_file} definition differs")
+            artifact = _path(definition["path"], f"{optional_file}.path")
+            sha256, size = _sha(artifact)
+            if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+                raise VerticalBuildError(f"{optional_file} identity differs")
     if schema_version == 6:
         definition = recipe["provider_ledger_spec"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1004,6 +1019,8 @@ def create_recipe(
     evaluated_on: str | None = None,
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
+    strategy_basis_path: Path | None = None,
+    sleeve_facts_path: Path | None = None,
     weekly_gap_fill_spec_path: Path | None = None,
     vendor_gap_fills_path: Path | None = None,
     model_vs_actual_input_path: Path | None = None,
@@ -1132,6 +1149,10 @@ def create_recipe(
         payload["sleeve_disclosure_sources"] = _file_definition(
             sleeve_disclosure_sources_path.resolve()
         )
+    if strategy_basis_path is not None:
+        payload["strategy_basis"] = _file_definition(strategy_basis_path.resolve())
+    if sleeve_facts_path is not None:
+        payload["sleeve_facts"] = _file_definition(sleeve_facts_path.resolve())
     if normalized_evaluated_on is not None:
         payload["evaluated_on"] = normalized_evaluated_on
     if provider_ledger_spec is not None:
@@ -4859,6 +4880,8 @@ def build_report_candidate(
     source_clock_path: Path | None = None,
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
+    strategy_basis_path: Path | None = None,
+    sleeve_facts_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -4937,6 +4960,16 @@ def build_report_candidate(
         *(
             ("--sleeve-disclosure-sources", str(sleeve_disclosure_sources_path))
             if sleeve_disclosure_sources_path is not None
+            else ()
+        ),
+        *(
+            ("--strategy-basis", str(strategy_basis_path))
+            if strategy_basis_path is not None
+            else ()
+        ),
+        *(
+            ("--sleeve-facts", str(sleeve_facts_path))
+            if sleeve_facts_path is not None
             else ()
         ),
         "--implementation-reconciliation",
@@ -5022,6 +5055,8 @@ def build_report(
     source_clock_path: Path | None = None,
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
+    strategy_basis_path: Path | None = None,
+    sleeve_facts_path: Path | None = None,
 ) -> dict[str, Any]:
     if workbook_runtime_path is not None:
         raise VerticalBuildError(
@@ -5104,6 +5139,8 @@ def build_report(
         source_clock_path=source_clock_path,
         nested_tag_map_path=nested_tag_map_path,
         sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
+        strategy_basis_path=strategy_basis_path,
+        sleeve_facts_path=sleeve_facts_path,
     )
     candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
     report_arguments = (
@@ -6526,6 +6563,11 @@ def build_stage(
         if isinstance(recipe.get("sleeve_disclosure_sources"), dict)
         else {}
     )
+    optional_report_paths = {
+        f"{key}_path": _path(recipe[key]["path"], f"{key}.path")
+        for key in ("strategy_basis", "sleeve_facts")
+        if isinstance(recipe.get(key), dict)
+    }
     implementation_reconciliation = _path(
         recipe["implementation_reconciliation"]["path"],
         "implementation reconciliation",
@@ -6596,6 +6638,7 @@ def build_stage(
             **source_clock_paths,
             **nested_tag_map_paths,
             **sleeve_disclosure_paths,
+            **optional_report_paths,
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,

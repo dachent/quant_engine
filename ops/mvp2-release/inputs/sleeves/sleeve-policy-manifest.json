@@ -57,5 +57,10 @@
       "sha256": "10befe29ae13aeeb57e26eec0a1bec46316beae78bdf67d5e8578f1be3ac8d8e",
       "size_bytes": 3796
     }
+  },
+  "strategy-basis-declaration": {
+    "path": "strategy-basis-declaration.json",
+    "sha256": "93db30c814a9e92fb9a387626863ee9008225616d92b19dbbdf7eb889d7bfd86",
+    "size_bytes": 151
   }
 }

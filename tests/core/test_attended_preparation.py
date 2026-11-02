@@ -2774,6 +2774,7 @@ def _preparation_function_fixture(
                 "quantbase_fund_facts",
                 "nested_tag_map",
                 "sleeve_disclosures",
+                "strategy_basis",
                 "sleeve_inputs",
                 "sleeve_ledger",
                 "sleeve_nav",
@@ -4110,6 +4111,8 @@ def test_preparation_forwards_evaluation_to_each_release_recipe(
     assert len(recipes) == 2
     assert all(recipe["as_of_date"] == "2026-09-17" for recipe in recipes)
     assert all(recipe["evaluated_on"] == "2026-09-19" for recipe in recipes)
+    # no sleeve policy in this fixture: no declaration is passed, the default path
+    assert recipes[1]["strategy_basis_path"] is None
 
 
 def test_source_clock_excludes_finite_history_from_live_common_eod() -> None:
@@ -5019,3 +5022,128 @@ def test_ledger_stage_identity_binds_the_vendor_gap_fills_pin() -> None:
         _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "2"}), "c" * 40
     )["ledger"]
     assert first["vendor_gap_fills"] != second["vendor_gap_fills"]
+
+
+_BASIS_DECLARATION = {
+    "schema": "strategy-basis-declaration/1",
+    "strategies": [{"strategy_id": "synthetic-strategy", "basis": "SLEEVE_EPOCH"}],
+}
+
+
+def _pin_basis_declaration(
+    tmp_path: Path, section: dict[str, object], declaration: object
+) -> bytes:
+    """Pin ``declaration`` in the sleeve policy manifest beside the manifest."""
+
+    import json
+
+    raw = json.dumps(declaration).encode()
+    (tmp_path / "strategy-basis-declaration.json").write_bytes(raw)
+    manifest_path = tmp_path / "sleeve-policy-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["strategy-basis-declaration"] = {
+        "path": "strategy-basis-declaration.json",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    section["policy_manifest"] = preparation._definition(manifest_path)
+    return raw
+
+
+def test_strategy_basis_declaration_is_absent_without_a_pin(tmp_path: Path) -> None:
+    section = _sleeve_section(tmp_path)
+    assert preparation._strategy_basis_declaration_path(None) is None
+    assert preparation._strategy_basis_declaration_path(section) is None
+    assert preparation._strategy_basis_stage_input(section) == {}
+    assert preparation._strategy_basis_stage_input(None) == {}
+
+
+def test_strategy_basis_declaration_is_returned_when_pinned(tmp_path: Path) -> None:
+    section = _sleeve_section(tmp_path)
+    _pin_basis_declaration(tmp_path, section, _BASIS_DECLARATION)
+    path = preparation._strategy_basis_declaration_path(section)
+    assert path == (tmp_path / "strategy-basis-declaration.json").resolve()
+    assert preparation._strategy_basis_stage_input(section) == {
+        "strategy_basis_declaration": preparation._definition(path)
+    }
+
+
+def test_strategy_basis_declaration_tamper_is_refused(tmp_path: Path) -> None:
+    import json
+
+    section = _sleeve_section(tmp_path)
+    raw = _pin_basis_declaration(tmp_path, section, _BASIS_DECLARATION)
+    target = tmp_path / "strategy-basis-declaration.json"
+    manifest_path = tmp_path / "sleeve-policy-manifest.json"
+    original = manifest_path.read_bytes()
+    # bytes differ from the pin (sha and size)
+    target.write_bytes(raw + b" ")
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="differs from its pin"
+    ):
+        preparation._strategy_basis_declaration_path(section)
+    # same size, different bytes
+    target.write_bytes(raw.replace(b"SLEEVE_EPOCH", b"SLEEVE_EPOCI"))
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="differs from its pin"
+    ):
+        preparation._strategy_basis_declaration_path(section)
+    # missing file
+    target.unlink()
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="differs from its pin"
+    ):
+        preparation._strategy_basis_declaration_path(section)
+    target.write_bytes(raw)
+    # an extra key in the pin, and a path that leaves the policy directory
+    manifest = json.loads(original)
+    for pin in (
+        {**manifest["strategy-basis-declaration"], "note": "x"},
+        {**manifest["strategy-basis-declaration"], "path": "../outside.json"},
+        {**manifest["strategy-basis-declaration"], "path": "a\b.json"},
+    ):
+        manifest["strategy-basis-declaration"] = pin
+        manifest_path.write_bytes(canonical_json_bytes(manifest))
+        section["policy_manifest"] = preparation._definition(manifest_path)
+        with pytest.raises(preparation.AttendedPreparationError, match="declaration"):
+            preparation._strategy_basis_declaration_path(section)
+
+
+def test_strategy_basis_declaration_that_is_not_valid_is_refused(
+    tmp_path: Path,
+) -> None:
+    section = _sleeve_section(tmp_path)
+    _pin_basis_declaration(
+        tmp_path,
+        section,
+        {**_BASIS_DECLARATION, "strategies": [{"strategy_id": "s", "basis": "NAV"}]},
+    )
+    with pytest.raises(preparation.AttendedPreparationError, match="is refused"):
+        preparation._strategy_basis_declaration_path(section)
+
+
+def test_epoch_stage_identity_changes_with_the_basis_declaration(
+    tmp_path: Path,
+) -> None:
+    section = _sleeve_section(tmp_path)
+    without = preparation._preparation_stage_inputs(
+        _AnyConfig(sleeve_facts=section), "c" * 40
+    )["epoch"]
+    assert "strategy_basis_declaration" not in without
+    _pin_basis_declaration(tmp_path, section, _BASIS_DECLARATION)
+    first = preparation._preparation_stage_inputs(
+        _AnyConfig(sleeve_facts=section), "c" * 40
+    )["epoch"]
+    other = {
+        **_BASIS_DECLARATION,
+        "strategies": [{"strategy_id": "other-strategy", "basis": "SLEEVE_EPOCH"}],
+    }
+    _pin_basis_declaration(tmp_path, section, other)
+    second = preparation._preparation_stage_inputs(
+        _AnyConfig(sleeve_facts=section), "c" * 40
+    )["epoch"]
+    assert first != without and second != first
+    assert first["strategy_basis_declaration"] != second["strategy_basis_declaration"]
+    # the code identity of the epoch stage binds the declaration loader
+    assert "strategy_basis" in preparation._PREPARATION_STAGE_CODE["epoch"]
