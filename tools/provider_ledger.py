@@ -223,13 +223,50 @@ _SOURCE_FACT_TARGET: Final = {
 }
 _MATRIXPORT: Final = "matrixport"
 _QUANTBASE: Final = "quantbase"
+# Provenance derives an account id from its tracker source alias (the bare
+# institution name for an account without a label), exactly as below
+# (``portfolio_provenance``); the CSV-derived providers are tracked as one
+# account named for the provider, so no id is stored here.
+_QUANTBASE_FUND_TITLE: Final = "Volatis Strategy"
+_QUANTBASE_PRICEHISTORY: Final = (
+    f"csv/dashboard_{_QUANTBASE_FUND_TITLE.replace(' ', '_')}_pricehistory.csv"
+)
+
+
+def _institution_account_id(institution: str) -> str:
+    digest = hashlib.sha256(institution.encode("utf-8")).hexdigest()
+    return f"account-{digest[:16]}"
+
+
 _CSV_FACT_ACCOUNT: Final[dict[str, str]] = {
-    _MATRIXPORT: "account-d2e5821e608e25f1",
-    _QUANTBASE: "account-58e75e8d952fa1b8",
+    provider_id: _institution_account_id(provider_id.capitalize())
+    for provider_id in (_MATRIXPORT, _QUANTBASE)
 }
-_MATRIXPORT_ROBUXIO_PRODUCT_ID: Final = "7361599360326447104"
-_MATRIXPORT_ROBUXIO_ORDER_ID: Final = "7402822649690198016"
-_QUANTBASE_FUND_ID: Final = "107"
+
+
+def _quantbase_fund_id(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Return the fund the Quantbase dashboard series belongs to.
+
+    Activity rows that name their fund (``fund_title``) bind the title of the
+    ingested dashboard series to exactly one fund id; a capture that names no
+    fund at all can only be bound when it touches a single fund.  Anything else
+    fails closed rather than guessing.
+    """
+    titled = {
+        str(row.get("fund") or "").strip()
+        for row in rows
+        if str(row.get("fund_title") or "").strip() == _QUANTBASE_FUND_TITLE
+    }
+    if any(str(row.get("fund_title") or "").strip() for row in rows):
+        candidates = titled
+    else:
+        candidates = {str(row.get("fund") or "").strip() for row in rows}
+    candidates.discard("")
+    if len(candidates) != 1:
+        raise ProviderLedgerError("QUANTBASE_FUND_IDENTITY_DIFFERS")
+    return next(iter(candidates))
+
+
 _SCHWAB_FLOW_KINDS: Final = frozenset(
     {
         "Bank Transfer",
@@ -259,150 +296,6 @@ _NATIVE_LEVERAGE_DATE_FIELDS: Final = (
     "settlement_date",
     "report_date",
 )
-# Pins the retained, independently audited Schwab Journal records to the
-# accepted Schwab refresh generation 4e47b7b8 (dataSchwab CURRENT) as of
-# 2026-09-04, whose per-account WCH transaction captures re-assigned two
-# record_ids and renamed both source artifacts.
-_SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
-    (
-        "account-38b653b91ff43a10",
-        "txn-84ed102899eaaa7ba1d2f0d4",
-        "2025-12-29",
-        Decimal("7000"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-38b653b91ff43a10.json",
-        "source_artifact_sha256": (
-            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
-        ),
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": (
-            "b9b1dbee9c9204408c81a823dde6d734d50104c6289aeb4da0b460a5e0f7fe95"
-        ),
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-38b653b91ff43a10",
-        "txn-855f069db9ce99988c6707ea",
-        "2026-01-02",
-        Decimal("7500"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-38b653b91ff43a10.json",
-        "source_artifact_sha256": (
-            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
-        ),
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": (
-            "1d7acaaa5abb230c0cb48200c066e49fa0b554c2f2a4b3c321fcf0342fc85957"
-        ),
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-a13937e26b8ae46d",
-        "txn-249d9f96964cbf7860830e82",
-        "2025-12-29",
-        Decimal("7000"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-a13937e26b8ae46d.json",
-        "source_artifact_sha256": "46ed86a97801fa9fc8905b7ccd2857b65ebed8f8915d6ba1fd81bad88a565688",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "3a2ef670763f2bf9938ee37386b05f376a46a2d3233d9541b49bfad56db5c747",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-a13937e26b8ae46d",
-        "txn-2f56f4cba6c5742b593c4ef2",
-        "2026-01-02",
-        Decimal("7500"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-a13937e26b8ae46d.json",
-        "source_artifact_sha256": "46ed86a97801fa9fc8905b7ccd2857b65ebed8f8915d6ba1fd81bad88a565688",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "d0b1437e4bcab56cc53f76f88206c36dc2c7b21301303705c695606fb3ac9f32",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-1825d6880d891d57",
-        "txn-dcaf6ac1f18e29cc54a3016c",
-        "2025-12-29",
-        Decimal("-7000"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
-        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "b9b1dbee9c9204408c81a823dde6d734d50104c6289aeb4da0b460a5e0f7fe95",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-1825d6880d891d57",
-        "txn-1270308650488c57b650afdc",
-        "2025-12-29",
-        Decimal("-7000"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
-        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "3a2ef670763f2bf9938ee37386b05f376a46a2d3233d9541b49bfad56db5c747",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-1825d6880d891d57",
-        "txn-16dd3f367043beadcabd3387",
-        "2026-01-02",
-        Decimal("-7500"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
-        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "1d7acaaa5abb230c0cb48200c066e49fa0b554c2f2a4b3c321fcf0342fc85957",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-1825d6880d891d57",
-        "txn-8e9ac98ba8accadd5544238b",
-        "2026-01-02",
-        Decimal("-7500"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
-        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "d0b1437e4bcab56cc53f76f88206c36dc2c7b21301303705c695606fb3ac9f32",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-61092059d066f056",
-        "txn-3361828c64f99b1e768e2575",
-        "2026-01-02",
-        Decimal("50000"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-61092059d066f056.json",
-        "source_artifact_sha256": "5349b613f8863df1931f13cc8cc787c5e766c0bd0e749f21c5a5ae00e90d0425",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "6a69ba3b1c0054bd7c77fd972ad21af4beca0871600a2c62cd7e3d49e57b370a",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-    (
-        "account-702c489650e59956",
-        "txn-1699da38ec4afacd94bd2876",
-        "2026-01-02",
-        Decimal("-50000"),
-    ): {
-        "source_artifact_id": "wch/transactions/account-702c489650e59956.json",
-        "source_artifact_sha256": "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a",
-        "flow_type": "ACCOUNT_TRANSFER",
-        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
-        "provider_activity_id_sha256": "6a69ba3b1c0054bd7c77fd972ad21af4beca0871600a2c62cd7e3d49e57b370a",
-        "source_classification": "PAIRED_INTERNAL_JOURNAL",
-    },
-}
 _DATE_FIELDS: Final = (
     "as_of_date",
     "event_date",
@@ -423,7 +316,7 @@ _NAV_SOURCE_ARTIFACT_IDS_BY_PROVIDER: Final = {
     "matrixport": frozenset(
         {"csv/daily_holdings.csv", "csv/daily_portfolio_totals.csv"}
     ),
-    "quantbase": frozenset({"source/csv/dashboard_Volatis_Strategy_pricehistory.csv"}),
+    "quantbase": frozenset({f"source/{_QUANTBASE_PRICEHISTORY}"}),
 }
 
 
@@ -1531,15 +1424,13 @@ def _matrixport_capital_anchors(
         },
         "matrixport subscription details",
     )
-    matching_rows = [
-        row
-        for row in rows
-        if row.get("product_id") == _MATRIXPORT_ROBUXIO_PRODUCT_ID
-        and row.get("order_id") == _MATRIXPORT_ROBUXIO_ORDER_ID
-    ]
-    if len(rows) != 1 or len(matching_rows) != 1:
+    # The tracked product is the account's one subscription: its identity is
+    # read from that row, and any second subscription (or a row without an
+    # exact product and order) is refused rather than chosen between.
+    if len(rows) != 1 or not all(
+        str(rows[0].get(field) or "").strip() for field in ("product_id", "order_id")
+    ):
         raise ProviderLedgerError("MATRIXPORT_ROBUXIO_SUBSCRIPTION_IDENTITY_DIFFERS")
-    rows = matching_rows
     nav_artifact_id = "csv/daily_portfolio_totals.csv"
     nav_artifact = _find_manifest_artifact(
         manifest, nav_artifact_id, "matrixport daily portfolio totals"
@@ -1787,7 +1678,7 @@ def _quantbase_nav_observations(
         ),
         "quantbase.legacy_lineage.run_id",
     )
-    relative_path = "csv/dashboard_Volatis_Strategy_pricehistory.csv"
+    relative_path = _QUANTBASE_PRICEHISTORY
     artifact_id = f"source/{relative_path}"
     artifact = _find_manifest_artifact(
         manifest, artifact_id, "quantbase Volatis pricehistory"
@@ -1878,7 +1769,7 @@ def _quantbase_capital_anchors(
         "quantbase.legacy_lineage.run_id",
     )
     run_root = root / "source-runs" / run_id / "artifacts"
-    price_rel = Path("csv/dashboard_Volatis_Strategy_pricehistory.csv")
+    price_rel = Path(_QUANTBASE_PRICEHISTORY)
     price_artifact = _find_manifest_artifact(
         manifest, f"source/{price_rel.as_posix()}", "quantbase Volatis pricehistory"
     )
@@ -1908,13 +1799,14 @@ def _quantbase_capital_anchors(
         },
         "quantbase account activity",
     )
+    fund_id = _quantbase_fund_id(activity_rows)
     order_fills: dict[str, list[datetime]] = defaultdict(list)
     for row in activity_rows:
         filled_at = str(row.get("filled_at") or "").strip()
         transaction = str(row.get("transaction") or "").strip()
         if (
             row.get("activity_type") != "order"
-            or row.get("fund") != _QUANTBASE_FUND_ID
+            or row.get("fund") != fund_id
             or not filled_at
             or not transaction
         ):
@@ -1930,7 +1822,7 @@ def _quantbase_capital_anchors(
     for row in activity_rows:
         if (
             row.get("activity_type") != "filled_txn"
-            or row.get("fund") != _QUANTBASE_FUND_ID
+            or row.get("fund") != fund_id
             or str(row.get("is_rebalance") or "").lower() != "false"
             or str(row.get("type") or "").upper() != "SELL"
         ):
@@ -1948,7 +1840,7 @@ def _quantbase_capital_anchors(
     for row in activity_rows:
         if (
             row["activity_type"] != "filled_txn"
-            or row["fund"] != _QUANTBASE_FUND_ID
+            or row["fund"] != fund_id
             or row["is_rebalance"].lower() != "false"
         ):
             continue
@@ -2311,6 +2203,7 @@ def _quantbase_cash_activity(
         "quantbase account activity",
     )
     source_artifact_id = f"source/{activity_rel.as_posix()}"
+    fund_id = _quantbase_fund_id(rows)
 
     def timestamp(value: object, name: str) -> datetime:
         return datetime.fromisoformat(
@@ -2358,7 +2251,7 @@ def _quantbase_cash_activity(
         return False
 
     def mapped(fund: str | None, day: date) -> tuple[str | None, str]:
-        if fund != _QUANTBASE_FUND_ID:
+        if fund != fund_id:
             return None, "UNMAPPED"
         return _mapped_strategy_for_account(
             account_id, day, accounts, strategies, assignments
@@ -2500,7 +2393,7 @@ def _quantbase_cash_activity(
                     source_id,
                     created.date(),
                     -amount,
-                    _QUANTBASE_FUND_ID,
+                    fund_id,
                     **funding,
                 )
             )
@@ -3068,8 +2961,8 @@ def _finality_quantbase(ctx: _FinalityContext) -> dict[str, Any]:
             raise ProviderLedgerError("quantbase finality dataset binding differs")
     daily = _bound_source_bytes(
         manifest,
-        "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-        path.parent / "artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+        f"source/{_QUANTBASE_PRICEHISTORY}",
+        path.parent / "artifacts" / _QUANTBASE_PRICEHISTORY,
     )
     labels = {
         _quantbase_day(r["time"], "Quantbase native label")
@@ -5334,8 +5227,6 @@ def _project_account_facts(
                 transfer: dict[str, Any] | None = current_journal_transfers.get(
                     source_id
                 )
-                if transfer is None:
-                    transfer = _schwab_pinned_journal_external_flow(row, manifest)
                 if transfer is None and row.get("kind") == "Journaled Shares":
                     transfer = _schwab_share_transfer(row, rows)
                 elif (
@@ -5631,45 +5522,6 @@ def _schwab_share_transfer(
             ).hexdigest(),
         )
     return transfer
-
-
-def _schwab_pinned_journal_external_flow(
-    row: Mapping[str, Any],
-    manifest: GenerationManifest | None,
-) -> dict[str, str] | None:
-    """Classify retained, independently audited Schwab Journal pairs."""
-
-    if str(row.get("kind") or "").strip().upper() != "JOURNAL":
-        return None
-    effective_date = row.get("effective_date") or row.get("event_date")
-    if not isinstance(effective_date, str):
-        return None
-    try:
-        amount = _observed_decimal(row.get("amount"), "Schwab Journal amount")
-    except ProviderLedgerError:
-        return None
-    if amount is None:
-        return None
-    key = (
-        str(row.get("account_id") or ""),
-        str(row.get("record_id") or ""),
-        effective_date,
-        amount,
-    )
-    pinned = _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS.get(key)
-    if pinned is None:
-        return None
-    if manifest is None:
-        raise ProviderLedgerError("pinned Journal source requires a Schwab manifest")
-    source_artifact_id = pinned["source_artifact_id"]
-    source_artifact_sha256 = pinned["source_artifact_sha256"]
-    artifact_by_id = {artifact.artifact_id: artifact for artifact in manifest.artifacts}
-    source_artifact = artifact_by_id.get(source_artifact_id)
-    if source_artifact is None or source_artifact.sha256 != source_artifact_sha256:
-        raise ProviderLedgerError(
-            "pinned Journal source artifact is absent or has a different hash"
-        )
-    return dict(pinned)
 
 
 def _schwab_native_journal_day(

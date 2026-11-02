@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 
 COORDINATION = Path("dataPortfolio") / "releases-refresh-2026"
@@ -78,10 +79,23 @@ def committed_release_panel(data_root: Path) -> tuple[str, str]:
 
 
 EVIDENCE = "timestamp-delta-result.txt"
-ENTRIES = (
-    ("p123-ai-factor", "account-1b44c987969b9e47"),
-    ("p123-eu", "account-d69701da9143c430"),
+# One header per measured sleeve: `=== <strategy_id> <label> <account_id>  legs=<n> ...`.
+_EVIDENCE_HEADER = re.compile(
+    r"^=== (?P<strategy>[a-z0-9-]+) .* (?P<account>account-[0-9a-f]{16})  legs=",
+    re.MULTILINE,
 )
+
+
+def entries_from_evidence(text: str) -> tuple[tuple[str, str], ...]:
+    """The (strategy, account) pairs the evidence file measured, in file order."""
+
+    entries = tuple(
+        (match["strategy"], match["account"])
+        for match in _EVIDENCE_HEADER.finditer(text)
+    )
+    if not entries or len({strategy for strategy, _ in entries}) != len(entries):
+        raise Refused("evidence names no sleeve, or names one twice")
+    return entries
 
 
 def main() -> int:
@@ -96,6 +110,7 @@ def main() -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
     evidence = args.out.parent / EVIDENCE
+    entries = entries_from_evidence(evidence.read_text(encoding="utf-8"))
     relative = f"dataPortfolio/control-panel/generations/{predecessor_panel}/data/dashboard_data.json"
     data_file = args.data_root / relative
     document = {
@@ -109,7 +124,7 @@ def main() -> int:
             },
             "entries": [
                 {"strategy_id": strategy, "account_id": account}
-                for strategy, account in ENTRIES
+                for strategy, account in entries
             ],
         },
         "predecessor_comparison": {

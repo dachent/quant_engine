@@ -36,7 +36,7 @@ from quant_engine.core import (
 from tools import provider_ledger as ledger
 
 
-MX_ACCOUNT = "account-d2e5821e608e25f1"
+MX_ACCOUNT = ledger._CSV_FACT_ACCOUNT["matrixport"]
 BASE_RUN_ID = "20260903T051029.331Z"
 INC_RUN_ID = "20260918T184248.013Z"
 # 2026-09-03T05:10:29.513Z in epoch milliseconds (the base run end bound).
@@ -253,7 +253,7 @@ def _anchor_fixture(
         "status,time_stamp_utc\n"
     )
     subscription_row = (
-        "49891.55,USDT,14214,7402822649690198016,1,57300.3869283637466547,"
+        "49891.55,USDT,14214,2222222222222222222,1,57300.3869283637466547,"
         "/strategy/api/v2/user/trade_record,300,2025-12-05T21:34:17.414000+00:00\n"
     )
     base_trades_path = _write(
@@ -336,7 +336,7 @@ def test_matrixport_anchor_coverage_tiled_windows_extend_to_the_incremental_end(
                     "mapping_status": "MAPPED",
                     "provider_id": "matrixport",
                     "record_id": "matrixport-anchor:2025-12-05",
-                    "source_record_id": "7402822649690198016",
+                    "source_record_id": "2222222222222222222",
                     "strategy_id": "robuxio-crypto",
                 }
             ]
@@ -560,7 +560,7 @@ def test_matrixport_anchor_coverage_refuses_a_contradictory_duplicate_order_id(
     """MX-2: a duplicate order_id whose order_type disagrees fails closed."""
 
     contradictory = (
-        "49891.55,USDT,14214,7402822649690198016,2,57300.3869283637466547,"
+        "49891.55,USDT,14214,2222222222222222222,2,57300.3869283637466547,"
         "/strategy/api/v2/user/trade_record,300,2026-03-01T00:00:00+00:00\n"
     )
     manifest, catalog, root = _anchor_fixture(
@@ -581,7 +581,7 @@ def test_matrixport_anchor_coverage_accepts_a_consistent_duplicate_order_id(
     order_id AND same order_type dedups silently."""
 
     restated = (
-        "49891.55,USDT,14214,7402822649690198016,1,57300.3869283637466547,"
+        "49891.55,USDT,14214,2222222222222222222,1,57300.3869283637466547,"
         "/strategy/api/v2/user/trade_record,300,2025-12-05T21:34:17.414000+00:00\n"
     )
     manifest, catalog, root = _anchor_fixture(
@@ -706,7 +706,11 @@ def test_retained_matrixport_captures_prove_the_2025_12_05_boundary(
         trades = list(csv.DictReader(handle))
     assert len(trades) == 1
     (trade,) = trades
-    assert trade["order_id"] == "7402822649690198016"
+    with open(
+        base_csv / "subscription_details.csv", encoding="utf-8-sig", newline=""
+    ) as handle:
+        (subscription,) = list(csv.DictReader(handle))
+    assert trade["order_id"] == subscription["order_id"]
     assert trade["order_type"] == "1"
     assert trade["time_stamp_utc"] == "2025-12-05T21:34:17.414000+00:00"
 

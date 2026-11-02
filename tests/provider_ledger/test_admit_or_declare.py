@@ -540,7 +540,7 @@ def _staged_observation(
                 + f"{prior},P1,1,USD,100,api_reported_usd_value,1,100,100\n{last},P1,1,USD,100,api_reported_usd_value,1,100,100\n",
                 "csv/valuation_quality_issues.csv": "source_index,source_table,reason\n",
                 "csv/subscription_details.csv": "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,subscription_amount,subscription_currency,subscription_time_utc\n"
-                + f"100,{prior}T00:00:00Z,{ledger._MATRIXPORT_ROBUXIO_ORDER_ID},{ledger._MATRIXPORT_ROBUXIO_PRODUCT_ID},100,USD,{prior}T00:00:00Z\n",
+                + f"100,{prior}T00:00:00Z,2222222222222222222,1111111111111111111,100,USD,{prior}T00:00:00Z\n",
             }
             for artifact_id, text in contents.items():
                 bind(artifact_id, root / "output" / run_id / artifact_id, text.encode())
@@ -2251,33 +2251,6 @@ def _schwab_retained_journal_lane(
         admitted_too=admit_external_flow,
     )
     return authority, identities, manifests, catalogs, provider_facts
-
-
-def test_schwab_pinned_journal_artifact_admits_external_flow() -> None:
-    """The retained Schwab Journal wch capture is an admitted capital fact."""
-
-    authority, identities, manifests, catalogs, provider_facts = (
-        _schwab_retained_journal_lane(admit_external_flow=True)
-    )
-
-    receipt, _ = ledger._admit_or_declare_receipt(
-        authority,
-        identities,
-        manifests,
-        catalogs,
-        provider_facts,
-        (),
-    )
-    journal = next(
-        row
-        for row in receipt["dispositions"]
-        if row["provider_id"] == "schwab"
-        and row["item_id"] == "wch/transactions/account-38b653b91ff43a10.json"
-    )
-    assert journal["item_kind"] == "ARTIFACT"
-    assert journal["action"] == "ADMIT"
-    assert journal["target_facts"] == ["flows"]
-    assert journal["materialized_record_count"] == 1
 
 
 def test_schwab_retained_journal_flow_requires_the_admitted_fact() -> None:

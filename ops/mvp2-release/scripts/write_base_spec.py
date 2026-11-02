@@ -7,12 +7,13 @@ recovered 2026-08-11 spec, which the published decomposition generation
 same repinning every other pin in this release needed.
 """
 
+import os
 import json
 import sys
 from pathlib import Path
 
 RECOVERED = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio"
+    f"{os.environ['QUANT_ENGINE_DATA_ROOT']}/dataPortfolio"
     r"/source-runs/anl-decomp-current-plan-v7-20260811"
     r"/1fcffb81e1f81e7c8079f35d3c42929daeda05257786bd666f68ef47f2800d0d"
     r"/inputs/governance/base-decomposition-spec.json"
