@@ -77,6 +77,8 @@
         "inputs": {"$ref": "#/$defs/strings"},
         "outputs": {"$ref": "#/$defs/strings"},
         "must_not_exist": {"$ref": "#/$defs/strings"},
+        "only_scheme": {"enum": ["git-commit-v1", "git-tree-v2"]},
+        "needs_attestation": {"type": "boolean"},
         "pinned_inputs": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
         "predecessor_check": {"type": "object", "additionalProperties": false, "required": ["inputs", "current_release", "panel_current", "workspace"], "properties": {"inputs": {"type": "string"}, "current_release": {"type": "string"}, "panel_current": {"type": "string"}, "workspace": {"type": "string"}}},
         "expected_baseline": {"type": "object", "additionalProperties": false, "required": ["file", "cutoff"], "properties": {"file": {"type": "string"}, "cutoff": {"type": "string"}}},

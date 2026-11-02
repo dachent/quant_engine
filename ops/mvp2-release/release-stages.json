@@ -725,9 +725,37 @@
       "explicit": true
     },
     {
-      "id": "replica-copy",
+      "id": "attest",
+      "only_scheme": "git-tree-v2",
       "requires": [
         "production-spec"
+      ],
+      "live_guard_keys": [
+        "coordination_root"
+      ],
+      "outputs": [
+        "{coordination_root}/merge-attestation.json"
+      ],
+      "argv": [
+        "{python}",
+        "-m",
+        "quant_engine.core.code_identity",
+        "attest",
+        "--repo",
+        "{repo_root}",
+        "--candidate-commit",
+        "{candidate_commit}",
+        "--base-ref",
+        "{base_ref}",
+        "--coordination-root",
+        "{coordination_root}"
+      ]
+    },
+    {
+      "id": "replica-copy",
+      "requires": [
+        "production-spec",
+        "attest"
       ],
       "outputs": [
         "{replica_workspace}"
@@ -744,7 +772,8 @@
         "{replica_workspace}",
         "--allow-state-root",
         "{retained_cache_root}"
-      ]
+      ],
+      "needs_attestation": true
     },
     {
       "id": "replica-provider-generations",
@@ -842,7 +871,8 @@
         "{replica_rehearsal}",
         "--clean-room",
         "{clean_room}"
-      ]
+      ],
+      "needs_attestation": true
     },
     {
       "id": "pack-probe",
@@ -917,7 +947,8 @@
           "path": "release_state",
           "equals": "COMMITTED"
         }
-      ]
+      ],
+      "needs_attestation": true
     },
     {
       "id": "pack-evidence",

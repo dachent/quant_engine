@@ -440,6 +440,8 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "pre_chain_script",
         "pre_chain_sha256",
         "disclosure_inputs",
+        "candidate_commit",
+        "base_ref",
         "coordination_root",
         "expected_baseline_sha256",
         "calendar_authority",

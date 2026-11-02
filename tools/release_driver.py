@@ -58,6 +58,9 @@ GRAPH_DEFAULT = (
 SCHEMA_DEFAULT = GRAPH_DEFAULT.with_name("release-stages.schema.json")
 STATE_NAME = "release-driver-state.json"
 TIMING_NAME = "release-driver-timing.log"
+COMMIT_SCHEME = "git-commit-v1"
+TREE_SCHEME = "git-tree-v2"
+ATTESTATION_FILENAME = "merge-attestation.json"
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -129,6 +132,18 @@ class Run:
         }
         self.config = config
         self.values.setdefault("node", "node")
+        self.values.setdefault("identity_scheme", COMMIT_SCHEME)
+        if self.values["identity_scheme"] not in (COMMIT_SCHEME, TREE_SCHEME):
+            raise Refusal(
+                f"run config identity_scheme must be {COMMIT_SCHEME} or {TREE_SCHEME}"
+            )
+        if self.values["identity_scheme"] == TREE_SCHEME and not all(
+            key in self.values
+            for key in ("coordination_root", "candidate_commit", "base_ref")
+        ):
+            raise Refusal(
+                "a git-tree-v2 run needs coordination_root, candidate_commit and base_ref in its config"
+            )
         for key in ("repo_root", "python", "cycle", "run", "code_commit", "mode"):
             if key not in self.values:
                 raise Refusal(f"run config lacks {key!r}")
@@ -228,9 +243,16 @@ class Run:
             raise Refusal(f"git {' '.join(args)} failed: {done.stderr.strip()}")
         return done.stdout.strip()
 
+    @property
+    def scheme(self) -> str:
+        return self.values["identity_scheme"]
+
     def repo_identity(self) -> dict[str, Any]:
+        # the identity value under the run's scheme: the commit (v1) or the tree (v2)
+        revision = "HEAD^{tree}" if self.scheme == TREE_SCHEME else "HEAD"
         return {
-            "head": self._git("rev-parse", "HEAD"),
+            "head": self._git("rev-parse", revision),
+            "commit": self._git("rev-parse", "HEAD"),
             "dirty": len(self._git("status", "--porcelain").splitlines()),
         }
 
@@ -335,6 +357,26 @@ def check_script_in_repo(
         raise Refusal(
             f"{stage['id']}: script {script} is outside the run's repository {run.repo}"
         )
+
+
+def check_scheme(run: Run, stage: Mapping[str, Any]) -> None:
+    """A stage that exists for one identity scheme refuses the other; a tree-bound release needs its attestation."""
+
+    only = stage.get("only_scheme")
+    if only is not None and only != run.scheme:
+        raise Refusal(f"{stage['id']} runs only under {only}, this run is {run.scheme}")
+    if run.scheme != TREE_SCHEME or not stage.get("needs_attestation"):
+        return
+    path = Path(run.values["coordination_root"]) / ATTESTATION_FILENAME
+    if not path.is_file():
+        raise Refusal(
+            f"{stage['id']}: merge attestation is mandatory for a tree-bound release ({path} is missing)"
+        )
+    attestation = _read_json(path)
+    if attestation.get("tree") != run.values["code_commit"]:
+        raise Refusal(f"{stage['id']}: merge attestation names another tree")
+    if attestation.get("merged_commit") != run.repo_identity()["commit"]:
+        raise Refusal(f"{stage['id']}: merge attestation names another merged commit")
 
 
 def check_pinned_inputs(run: Run, stage: Mapping[str, Any]) -> None:
@@ -594,6 +636,8 @@ def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None
         if required in seen:
             continue
         seen.add(required)
+        if run.stage(required).get("only_scheme", run.scheme) != run.scheme:
+            continue
         record = state.get(required)
         if not record or record.get("status") != "ok":
             raise Refusal(f"{stage['id']} requires {required}, which has not completed")
@@ -633,6 +677,7 @@ def check_ready(
                 f"{stage['id']} would collide with {path}, left by {where}; rerun with --replace"
             )
     check_bound_ids(run, stage)
+    check_scheme(run, stage)
     check_pinned_inputs(run, stage)
     check_predecessor(run, stage)
     check_expected_baseline(run, stage)
@@ -1103,6 +1148,10 @@ def load_run(
     return run
 
 
+def _in_scheme(run: Run, stage_id: str) -> bool:
+    return bool(run.stage(stage_id).get("only_scheme", run.scheme) == run.scheme)
+
+
 def _select(run: Run, only: str | None, through: str | None) -> list[str]:
     ids = run.stage_ids()
     for name in (only, through):
@@ -1119,9 +1168,9 @@ def _select(run: Run, only: str | None, through: str | None) -> list[str]:
         return [
             i
             for i in ids[: ids.index(through) + 1]
-            if i in needed or not run.stage(i).get("explicit")
+            if (i in needed or not run.stage(i).get("explicit")) and _in_scheme(run, i)
         ]
-    return [i for i in ids if not run.stage(i).get("explicit")]
+    return [i for i in ids if not run.stage(i).get("explicit") and _in_scheme(run, i)]
 
 
 def check_run(run: Run, selected: Sequence[str]) -> list[str]:
