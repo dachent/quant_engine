@@ -186,7 +186,7 @@
     [
       "portfolio_attended_preparation",
       "portfolio_target_series",
-      3
+      4
     ],
     [
       "portfolio_attended_preparation",
@@ -586,6 +586,21 @@
     [
       "release_post_commit",
       "release_driver",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_current_dependence",
       1
     ],
     [

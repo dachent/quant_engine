@@ -53,9 +53,7 @@ def write(OUT: Path) -> None:
         "playwright_module": R + "/qa-node/node_modules/playwright/index.mjs",
         "playwright_executable": "C:/Users/BorisVaisman/AppData/Local/ms-playwright/chromium-1200/chrome-win64/chrome.exe",
         "evidence_dest": "C:/unused/evidence",
-        "pre_chain_script": R + "/work/pre_chain.py",
-        "pre_chain_sha256": "0" * 64,
-        "resolved_cycle": "/synthetic/resolved-cycle.json",
+        "resolved_cycle": C + "/in/resolved-cycle.json",
     }
     ids = {
         "ledger_id": LEDGER,
@@ -127,14 +125,20 @@ def write(OUT: Path) -> None:
     HTML = RUN + f"/stages/panel/candidates/{CAND}/index.html"
     rows = {
         "pre-chain": (
-            "chain_p26.sh/chain_a21.sh:12 (pre_chain.py <cycle> <selected> <BG> <evaluated-on> <sha>)",
+            "chain_p26.sh/chain_a21.sh:12 (pre_chain.py <cycle> <selected> <BG> <evaluated-on> <sha>)"
+            " replaced by B5 release_pre_chain.py; the evaluation date comes from the resolved cycle",
             [
                 PY,
-                "pre_chain.py",
+                REPO + "/tools/release_pre_chain.py",
+                "--resolved-cycle",
+                C + "/in/resolved-cycle.json",
+                "--cycle",
                 C,
+                "--selected-inputs",
                 C + "/in/selected-inputs.json",
+                "--baseline-id",
                 BASE,
-                "2026-10-27",
+                "--commit",
                 SHA,
             ],
         ),
