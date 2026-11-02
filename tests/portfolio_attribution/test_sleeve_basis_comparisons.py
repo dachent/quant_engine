@@ -644,25 +644,52 @@ def test_the_sleeve_window_label_opens_at_the_sleeve_opening_observation(
 
 # --- the real R2 bytes (env gated) --------------------------------------------------
 
+# QE_AI624_R2_FACTS is the oracle facts file (pro rata split): the R2 regression
+# reference.  QE_AI624_R21_FACTS is the rebuilt file (R2.1 lineage, whole-share
+# corporate-action rule): its sleeve series is derived in the test, nothing is typed.
 _R2 = {
     name: os.environ.get(name)
     for name in (
         "QE_AI624_R2_FACTS",
+        "QE_AI624_R21_FACTS",
         "QE_AI624_R2_ATTRIBUTION_RETURNS",
         "QE_AI624_R2_ATTRIBUTION_SPEC",
     )
 }
 
 
-@pytest.mark.skipif(
-    not all(_R2.values()),
-    reason="QE_AI624_R2_FACTS, QE_AI624_R2_ATTRIBUTION_RETURNS and "
-    "QE_AI624_R2_ATTRIBUTION_SPEC are not set (real R2 bytes are never committed)",
-)
+def _needs(facts_name: str) -> Any:
+    names = (
+        facts_name,
+        "QE_AI624_R2_ATTRIBUTION_RETURNS",
+        "QE_AI624_R2_ATTRIBUTION_SPEC",
+    )
+    return pytest.mark.skipif(
+        not all(_R2[name] for name in names),
+        reason=f"{', '.join(names)} are not set (real R2 bytes are never committed)",
+    )
+
+
+@_needs("QE_AI624_R2_FACTS")
 def test_real_r2_sleeve_comparisons_close_and_equal_an_independent_computation() -> (
     None
 ):
-    facts = Path(str(_R2["QE_AI624_R2_FACTS"])).read_bytes()
+    """R2 regression reference (pro rata split, oracle facts)."""
+
+    _real_comparisons("QE_AI624_R2_FACTS", pinned=True)
+
+
+@_needs("QE_AI624_R21_FACTS")
+def test_real_r21_sleeve_comparisons_close_and_equal_an_independent_computation() -> (
+    None
+):
+    """R2.1 lineage: the series is derived from the rebuilt facts, not pinned."""
+
+    _real_comparisons("QE_AI624_R21_FACTS", pinned=False)
+
+
+def _real_comparisons(facts_name: str, *, pinned: bool) -> None:
+    facts = Path(str(_R2[facts_name])).read_bytes()
     spec = json.loads(Path(str(_R2["QE_AI624_R2_ATTRIBUTION_SPEC"])).read_text("utf-8"))
     series, identities = attribution._rows(  # noqa: SLF001
         Path(str(_R2["QE_AI624_R2_ATTRIBUTION_RETURNS"]))
@@ -672,7 +699,11 @@ def test_real_r2_sleeve_comparisons_close_and_equal_an_independent_computation()
     sleeve = {
         date.fromisoformat(r["date"]): Decimal(r["return"]) for r in restated.rows
     }
-    assert len(sleeve) == 164 and restated.opening_date == "2026-01-30"
+    if pinned:
+        assert len(sleeve) == 164 and restated.opening_date == "2026-01-30"
+    else:
+        # derived: the rebuilt series has its own sha and the same trading days
+        assert len(sleeve) == len(restated.rows) > 0
     lane_source = attribution._SleeveSeries(  # noqa: SLF001
         declared,
         restated.account_id,
@@ -681,9 +712,25 @@ def test_real_r2_sleeve_comparisons_close_and_equal_an_independent_computation()
         sleeve,
         strategy_basis.series_sha256(restated.rows),
     )
-    assert lane_source.series_sha256 == (
-        "4243e0268646c7b542094951ce6b7f6fb5b92d39b041780512bcd196abd04a77"
-    )
+    if pinned:
+        assert lane_source.series_sha256 == (
+            "4243e0268646c7b542094951ce6b7f6fb5b92d39b041780512bcd196abd04a77"
+        )
+    else:
+        assert lane_source.series_sha256 == strategy_basis.series_sha256(
+            strategy_basis.restatement_from_sleeve_facts(facts, declared).rows
+        )
+        oracle = (
+            strategy_basis.restatement_from_sleeve_facts(
+                Path(str(_R2["QE_AI624_R2_FACTS"])).read_bytes(), declared
+            )
+            if _R2["QE_AI624_R2_FACTS"]
+            else None
+        )
+        if oracle is not None:
+            assert lane_source.series_sha256 != strategy_basis.series_sha256(
+                oracle.rows
+            )
     for key in ("benchmark_comparisons", "comparisons"):
         row = next(r for r in spec[key] if r["strategy_id"] == declared)
         lane = attribution._sleeve_comparison(  # noqa: SLF001

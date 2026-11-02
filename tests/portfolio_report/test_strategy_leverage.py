@@ -400,6 +400,8 @@ def _pct(value: Decimal, places: int) -> Decimal:
 
 
 def test_r2_prototype_numbers_on_the_real_sleeve_facts() -> None:
+    """R2 regression reference (pro rata split, oracle facts)."""
+
     facts = _load("QE_AI624_R2_FACTS")
     fixture_path = os.environ.get("QE_AI624_R2_FIXTURE")
     links = (
@@ -435,6 +437,37 @@ def test_r2_prototype_numbers_on_the_real_sleeve_facts() -> None:
     if links is not None:
         assert len(links) == 164
         assert D(result.closure["trace"]["chain_gap"]) < D("1e-20")
+
+
+def test_r21_numbers_on_the_rebuilt_sleeve_facts() -> None:
+    """R2.1 lineage (whole-share corporate-action rule): derived from QE_AI624_R21_FACTS.
+
+    The oracle file's links (QE_AI624_R2_FIXTURE) trace the pro rata series, so none are
+    passed here; every expectation is computed from the rebuilt facts.
+    """
+
+    import strategy_basis
+
+    facts = _load("QE_AI624_R21_FACTS")
+    raw = Path(os.environ["QE_AI624_R21_FACTS"]).read_bytes()
+    sleeve = next(item for item in facts["sleeves"] if item["sleeve_id"] == "s2")
+    result = sl.derive_sleeve_leverage(
+        facts, "s2", ledger_account_nav="57200.88", links=None
+    )
+    rows = strategy_basis.rows_from_sleeve_facts(raw, sleeve["strategy_id"])
+    wealth = D(1)
+    for row in rows:
+        wealth *= 1 + D(row["return"])
+    assert abs(result.unlevered_cumulative - (wealth - 1)) < D("1e-20")
+    closing = {day["day"]: D(day["nav_end_after_alloc"]) for day in sleeve["days"]}
+    assert result.end_nav == closing[result.end_date]
+    assert result.end_equity == result.end_nav - result.end_loan
+    assert result.levered_cumulative > result.unlevered_cumulative
+    if os.environ.get("QE_AI624_R2_FACTS"):
+        oracle = sl.derive_sleeve_leverage(
+            _load("QE_AI624_R2_FACTS"), "s2", ledger_account_nav="57200.88", links=None
+        )
+        assert oracle.series_sha256 != result.series_sha256
 
 
 def test_r2_closures_fail_on_tampered_real_facts() -> None:

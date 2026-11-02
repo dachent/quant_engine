@@ -612,7 +612,11 @@ def test_the_contract_is_deterministic() -> None:
 
 # --- real R2 bytes, only when the environment names them ----------------------------
 
+# QE_AI624_R2_FACTS is the oracle facts file (pro rata split): the R2 regression
+# reference.  QE_AI624_R21_FACTS is the rebuilt file (R2.1 lineage): the sleeve leg is
+# derived from it in the test and the oracle-specific figures are not asserted.
 R2_FACTS = os.environ.get("QE_AI624_R2_FACTS")
+R21_FACTS = os.environ.get("QE_AI624_R21_FACTS")
 R2_MODEL = os.environ.get("QE_AI624_R2_MODEL_PERF")
 R2_ATTRIBUTION = os.environ.get("QE_AI624_R2_RETAINED_ATTRIBUTION")
 R2_RECONCILIATION = os.environ.get("QE_AI624_R2_RETAINED_RECONCILIATION")
@@ -620,13 +624,32 @@ R2_RECEIPT = os.environ.get("QE_AI624_R2_ADMISSION_RECEIPT")
 R2_FLEX_XML = os.environ.get("QE_AI624_R2_FLEX_XML")
 
 
-@pytest.mark.skipif(
-    not (R2_FACTS and R2_MODEL and R2_ATTRIBUTION and R2_RECONCILIATION and R2_RECEIPT),
-    reason="real R2 bytes are named by QE_AI624_R2_FACTS, _MODEL_PERF, _RETAINED_ATTRIBUTION, _RETAINED_RECONCILIATION and _ADMISSION_RECEIPT",
+_R2_INPUTS = (R2_MODEL, R2_ATTRIBUTION, R2_RECONCILIATION, R2_RECEIPT)
+_R2_REASON = (
+    "real R2 bytes are named by QE_AI624_R2_FACTS (or QE_AI624_R21_FACTS), "
+    "_MODEL_PERF, _RETAINED_ATTRIBUTION, _RETAINED_RECONCILIATION and _ADMISSION_RECEIPT"
 )
+
+
+@pytest.mark.skipif(not (R2_FACTS and all(_R2_INPUTS)), reason=_R2_REASON)
 def test_real_r2_sleeve_bridge() -> None:
-    assert R2_FACTS and R2_MODEL and R2_ATTRIBUTION and R2_RECONCILIATION and R2_RECEIPT
-    facts = Path(R2_FACTS).read_bytes()
+    """R2 regression reference (pro rata split, oracle facts)."""
+
+    assert R2_FACTS
+    _real_sleeve_bridge(R2_FACTS, pinned=True)
+
+
+@pytest.mark.skipif(not (R21_FACTS and all(_R2_INPUTS)), reason=_R2_REASON)
+def test_real_r21_sleeve_bridge() -> None:
+    """R2.1 lineage: the sleeve leg is derived from the rebuilt facts, not pinned."""
+
+    assert R21_FACTS
+    _real_sleeve_bridge(R21_FACTS, pinned=False)
+
+
+def _real_sleeve_bridge(facts_path: str, *, pinned: bool) -> None:
+    assert R2_MODEL and R2_ATTRIBUTION and R2_RECONCILIATION and R2_RECEIPT
+    facts = Path(facts_path).read_bytes()
     model = Path(R2_MODEL).read_bytes()
     attribution = Path(R2_ATTRIBUTION).read_bytes()
     reconciliation = Path(R2_RECONCILIATION).read_bytes()
@@ -667,14 +690,27 @@ def test_real_r2_sleeve_bridge() -> None:
         retained["model_return"], abs=1e-12
     )
     # the sleeve leg is the K series and the closure holds to the ruling
-    assert block["sleeve_leg"]["full_series_sha256"] == (
-        "4243e0268646c7b542094951ce6b7f6fb5b92d39b041780512bcd196abd04a77"
-    )
+    if pinned:
+        assert block["sleeve_leg"]["full_series_sha256"] == (
+            "4243e0268646c7b542094951ce6b7f6fb5b92d39b041780512bcd196abd04a77"
+        )
+    else:
+        import strategy_basis
+
+        assert block["sleeve_leg"]["full_series_sha256"] == (
+            strategy_basis.series_sha256(
+                strategy_basis.restatement_from_sleeve_facts(
+                    facts, "p123-ai-factor"
+                ).rows
+            )
+        )
     assert math.isclose(
         sum(item["effect_pp"] for item in bridge["categories"]),
         bridge["gap_pp"],
         abs_tol=1e-8,
     )
+    if not pinned:
+        return
     # X's ADR 0002 end-of-day term over the sleeve window, derived there a second way
     assert block["sleeve_window_extension"][
         "flow_timing_effect_pp_over_full_sleeve_window"

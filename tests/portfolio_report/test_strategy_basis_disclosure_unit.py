@@ -325,6 +325,8 @@ def _four(value: str) -> Decimal:
 
 @_real
 def test_the_real_r2_facts_reproduce_the_figures_the_owner_quotes() -> None:
+    """R2 regression reference (pro rata split, oracle facts)."""
+
     assert _FACTS_PATH is not None and _FIXTURE_PATH is not None
     facts = disclosure.parse_facts(Path(_FACTS_PATH).read_bytes())
     fixture = json.loads(Path(_FIXTURE_PATH).read_text(encoding="utf-8"))
@@ -481,3 +483,80 @@ def test_the_copy_helpers_do_not_alias_the_fixture() -> None:
     second = deepcopy(first)
     second["sleeves"][1]["days"][0]["flow_in"] = "1"
     assert first["sleeves"][1]["days"][0]["flow_in"] == "102"
+
+
+# R2.1 lineage: the rebuilt facts (whole-share corporate-action rule).  The tests above,
+# keyed to QE_AI624_R2_FACTS, are the R2 regression reference (pro rata split, oracle
+# facts).  This variant derives every applicable figure from the rebuilt file named by
+# QE_AI624_R21_FACTS and checks the disclosure's identities on it; nothing is typed.
+_R21_FACTS_PATH = os.environ.get("QE_AI624_R21_FACTS")
+_real_r21 = pytest.mark.skipif(
+    not (
+        _R21_FACTS_PATH
+        and _FIXTURE_PATH
+        and Path(_R21_FACTS_PATH).is_file()
+        and Path(_FIXTURE_PATH).is_file()
+    ),
+    reason="QE_AI624_R21_FACTS and QE_AI624_R2_FIXTURE are not set",
+)
+
+
+@_real_r21
+def test_the_rebuilt_r21_facts_close_the_disclosure_identities() -> None:
+    assert _R21_FACTS_PATH is not None and _FIXTURE_PATH is not None
+    raw = Path(_R21_FACTS_PATH).read_bytes()
+    facts = disclosure.parse_facts(raw)
+    fixture = json.loads(Path(_FIXTURE_PATH).read_text(encoding="utf-8"))
+    restated = strategy_basis.restatement_from_sleeve_facts(
+        raw, _strategy_of(facts, fixture["sleeve_account_id"])
+    )
+    ledger = Decimal(fixture["published_row_before"]["current_value_usd"])
+    margin = disclosure.margin_liability(
+        facts,
+        sleeve_account_id=restated.account_id,
+        cutoff=restated.as_of_date,
+        sleeve_value=restated.value,
+        ledger_account_value=ledger,
+        leverage_pointer={},
+        other_strategy_rows=6,
+        strategy_name="AI Factor",
+        account_label="IBKR 6907",
+    )
+    assert Decimal(margin["gross_sleeve_nav_usd"]) == restated.value
+    assert abs(Decimal(margin["net_equivalent_usd"]) - ledger) < Decimal("0.005")
+    assert margin["identity"]["status"] == "HOLDS"
+    sleeve_return = disclosure.sleeve_cumulative_return(restated)
+    wealth = Decimal(1)
+    for row in restated.rows:
+        wealth *= 1 + Decimal(row["return"])
+    assert abs(sleeve_return - (wealth - 1)) < Decimal("1e-25")
+    bridge = disclosure.sleeve_to_audit_bridge(
+        facts,
+        sleeve_account_id=restated.account_id,
+        opening_date=restated.opening_date,
+        cutoff=restated.as_of_date,
+        sleeve_return=sleeve_return,
+    )
+    assert abs(Decimal(bridge["residual"])) < Decimal("1e-9")
+    assert bridge["window"] == {
+        "start": restated.opening_date,
+        "end": restated.as_of_date,
+    }
+    # the rebuilt series is not the R2 one
+    if _FACTS_PATH and Path(_FACTS_PATH).is_file():
+        oracle = strategy_basis.restatement_from_sleeve_facts(
+            Path(_FACTS_PATH).read_bytes(), restated.strategy_id
+        )
+        assert strategy_basis.series_sha256(
+            oracle.rows
+        ) != strategy_basis.series_sha256(restated.rows)
+
+
+def _strategy_of(facts: disclosure.SleeveFacts, sleeve_account_id: str) -> str:
+    return str(
+        next(
+            sleeve["strategy_id"]
+            for sleeve in facts.document["sleeves"]
+            if sleeve["account_id"] == sleeve_account_id
+        )
+    )
