@@ -25,6 +25,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 from typing import Any, Sequence
@@ -70,6 +71,11 @@ def _same(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.realpath(left)) == os.path.normcase(
         os.path.realpath(right)
     )
+
+
+def _inside(path: Path, root: Path) -> bool:
+    child, base = Path(os.path.realpath(path)), Path(os.path.realpath(root))
+    return base in child.parents
 
 
 def _single_dir(directory: Path, what: str) -> Path:
@@ -144,7 +150,21 @@ def pre_chain(
         )
     else:
         history_source = _single_dir(history_root_out, "existing layered history")
-        print("reusing history", history_source)
+        try:
+            prep.verify_selected_layered_history(history_source, contract, authorities)
+        except (OSError, ValueError) as exc:
+            # A kill during the history write leaves a generation that cannot verify and
+            # whose truncated file the idempotent writer would refuse. The directory is
+            # this stage's own output (bound to this cycle above), so rebuild it whole.
+            print("rebuilding incomplete history", history_source, exc)
+            if not _inside(history_root_out, cycle):
+                raise PreChainError("history root is outside the cycle") from exc
+            shutil.rmtree(history_root_out)
+            history_source = prep.rebuild_layered_history(
+                selection, history_root_out, commit, contract, authorities
+            )
+        else:
+            print("reusing history", history_source)
     print("HISTORY", history_source)
 
     baseline_source = cycle / "baseline" / "generations" / baseline_gid

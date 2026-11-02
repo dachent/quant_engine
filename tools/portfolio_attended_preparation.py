@@ -800,6 +800,19 @@ def rebuild_layered_history(
     )
 
 
+def verify_selected_layered_history(
+    generation_root: Path, contract_path: Path, authorities: _HistoryAuthorities
+) -> None:
+    """Public entry for the release driver's pre-chain stage (release_pre_chain.py)."""
+
+    import portfolio_target_series as history
+
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        history.verify_layered_history_generation(
+            generation_root, contract_path, require_mode=mode, **authorities
+        )
+
+
 def _validate_hwm_authority_inputs(config: Mapping[str, Any]) -> None:
     """Admit existing HWM policy/calendar bindings before preparation has effects."""
     import portfolio_invested_capital as capital

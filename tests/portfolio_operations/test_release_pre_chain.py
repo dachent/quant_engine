@@ -65,6 +65,12 @@ def _rebuild_layered_history(selection, output_root, release_commit, contract_pa
 
 def rebuild_layered_history(*args):
     return _rebuild_layered_history(*args)
+
+
+def verify_selected_layered_history(root, contract_path, authorities):
+    root = Path(root)
+    if (root / "history.json").read_text(encoding="utf-8") != root.name:
+        raise ValueError("history is incomplete")
 """
 
 _STUB_DEPENDENCE = """
@@ -380,6 +386,22 @@ def test_a_cycle_identity_from_another_manifest_blocks_a_resume(tmp_path: Path) 
     done = _run_tool(repo, world, resolved=resolved)
     assert done.returncode == 1
     assert "another cycle manifest or commit" in done.stderr
+
+
+def test_a_partially_written_history_is_rebuilt_on_resume(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    world = _cycle(tmp_path)
+    assert _run_tool(repo, world).returncode == 0
+    expected = _snapshot(world["cycle"])
+    history = next((world["cycle"] / "pre" / "history").iterdir())
+    # killed mid-write: the file is truncated and the later outputs are gone
+    (history / "history.json").write_text("par", encoding="utf-8")
+    shutil.rmtree(world["cycle"] / "pre" / "dependence")
+    shutil.rmtree(world["cycle"] / "attribution")
+    again = _run_tool(repo, world)
+    assert again.returncode == 0, again.stderr
+    assert "rebuilding incomplete history" in again.stdout
+    assert _snapshot(world["cycle"]) == expected
 
 
 def test_an_ambiguous_existing_history_is_refused(tmp_path: Path) -> None:
