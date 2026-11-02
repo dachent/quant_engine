@@ -287,6 +287,8 @@ EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk
 NESTED_TAG_MAP_EVIDENCE_NAME: Final = "nested-strategy-tag-map.json"
 SLEEVE_DISCLOSURE_EVIDENCE_NAME: Final = "sleeve-disclosure-sources.json"
 STRATEGY_BASIS_EVIDENCE_NAME: Final = "strategy-basis-declaration.json"
+PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH: Final = "input/strategy-basis-declaration.json"
+PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH: Final = "input/sleeve-account-facts.json"
 # The sleeve facts a restated candidate was built with (#624): the margin liability line and
 # the two bridges are computed from them, so verification rebuilds from the same bytes.
 SLEEVE_FACTS_EVIDENCE_NAME: Final = "sleeve-account-facts.json"
@@ -17226,7 +17228,7 @@ def publish_report(
         artifact_specs.append(
             (
                 basis_declaration,
-                "input/strategy-basis-declaration.json",
+                PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH,
                 "strategy-basis-declaration",
                 # the version the declaration schema name carries, not a literal here
                 strategy_basis.DECLARATION_SCHEMA.rsplit("/", 1)[-1],
@@ -17238,7 +17240,7 @@ def publish_report(
         artifact_specs.append(
             (
                 sleeve_facts_evidence,
-                "input/sleeve-account-facts.json",
+                PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH,
                 strategy_basis_disclosure.FACTS_ARTIFACT_ID,
                 str(strategy_basis_disclosure.FACTS_SCHEMA_VERSION),
             )
@@ -17557,6 +17559,20 @@ def publish_report(
             generation_dir / "epoch-independent-verification.json",
             epoch_history_verification[1],
         )
+    # A restated report (#624) carries, in the generation itself, the exact declaration
+    # and sleeve facts it was built from: the manifest names them as input artifacts, and
+    # the panel reads them from here (bound by sha to the report's provenance and
+    # disclosure), so no consumer needs the candidate directory.
+    for evidence_name, published_relative in (
+        (STRATEGY_BASIS_EVIDENCE_NAME, PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH),
+        (SLEEVE_FACTS_EVIDENCE_NAME, PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH),
+    ):
+        evidence_source = candidate_dir / evidence_name
+        if evidence_source.is_file() and not evidence_source.is_symlink():
+            _write_exact(
+                generation_dir / published_relative,
+                _regular_file_bytes(evidence_source, "restated report evidence"),
+            )
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     _recheck_snapshot_identities(originals, inventories)
     delivery_dir: Path | None = None

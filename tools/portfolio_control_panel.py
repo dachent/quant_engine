@@ -2829,6 +2829,30 @@ def _panel_strategy_basis_restatements(
     return result
 
 
+def _expected_custody_current_capital(
+    baseline_catalog: Mapping[str, Any], restatements: Mapping[str, Any] | None
+) -> Mapping[str, Any] | None:
+    """The custody capital the selected baseline authorises, restated like the report's (#624).
+
+    A restated report carries each declared strategy at its sleeve value; the expectation
+    is the same ``restate_current_capital`` over the baseline's block.
+    """
+
+    capital = baseline_catalog.get("current_capital")
+    if not isinstance(capital, Mapping) or not capital.get("custody_authority"):
+        return None
+    if not restatements:
+        return capital
+    basis = _strategy_basis_module()
+    try:
+        restated: Mapping[str, Any] = basis.restate_current_capital(
+            capital, restatements
+        )
+    except basis.StrategyBasisError as exc:
+        raise ControlPanelValidationError(str(exc)) from exc
+    return restated
+
+
 def _validate_current_product_baseline_projection(
     report: Mapping[str, Any],
     baseline_catalog: Mapping[str, Any],
@@ -10246,11 +10270,9 @@ def _panel_data(
     if not fact_coverage_matrix:
         raise ControlPanelValidationError("fact coverage matrix is unavailable")
     report_capital_expectations = _report_panel_expectations(report)
-    if report_capital_expectations.get("custody_current_capital") != (
-        baseline_catalog.get("current_capital")
-        if baseline_catalog.get("current_capital", {}).get("custody_authority")
-        else None
-    ):
+    if report_capital_expectations.get(
+        "custody_current_capital"
+    ) != _expected_custody_current_capital(baseline_catalog, basis_restatements):
         raise ControlPanelValidationError(
             "custody report differs from selected baseline"
         )

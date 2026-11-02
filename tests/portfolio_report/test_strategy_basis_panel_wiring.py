@@ -13,6 +13,7 @@ by ``test_strategy_basis_dependence_chain``.
 
 from __future__ import annotations
 
+from decimal import Decimal
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -253,3 +254,39 @@ def test_the_hwm_recompute_follows_the_restated_catalog(
     )
     for key, value in numerical.items():
         assert world["report"]["hwm_summary"][key] == value
+
+
+def test_the_custody_capital_expectation_is_the_restated_baseline_capital(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _world(full, tmp_path, monkeypatch, restated=True)
+    restatements = panel._panel_strategy_basis_restatements(
+        _declaration_bytes(),
+        world["manifest"],
+        world["crosswalk"],
+        world["controls"],
+        world["catalog"],
+    )
+    capital = world["catalog"]["current_capital"]
+    governed = {
+        **world["catalog"],
+        "current_capital": {**capital, "custody_authority": {"x": 1}},
+    }
+    # no restatement: the baseline's block as it is
+    assert (
+        panel._expected_custody_current_capital(governed, None)
+        == governed["current_capital"]
+    )
+    restated = panel._expected_custody_current_capital(governed, restatements)
+    assert restated == strategy_basis.restate_current_capital(
+        governed["current_capital"], restatements
+    )
+    assert restated != governed["current_capital"]
+    # the declared strategy stands at its sleeve value, the others are untouched
+    (sleeve,) = restatements.values()
+    rows = {row["strategy_id"]: row for row in restated["strategies"]}
+    assert Decimal(rows[sleeve.strategy_id]["current_value"]["value"]) == sleeve.value
+    # a baseline without a custody authority expects none, restated or not
+    assert (
+        panel._expected_custody_current_capital(world["catalog"], restatements) is None
+    )
