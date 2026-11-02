@@ -108,7 +108,7 @@ def test_the_alpha_tile_pin_matches_the_tile_with_and_without_a_standard_error(
         _run(tmp_path, _alpha_payload(with_se), "renderFactorDetail"), "#factor-detail"
     )
     assert pin.search(tile), tile[:400]
-    assert "annualized SE" in tile
+    assert re.search(r"annuali[sz]ed SE", tile)
 
     without_se: dict[str, Any] = _alpha_series(_context(), "AVAILABLE_OBSERVED_BASIS")
     tile = _flat(

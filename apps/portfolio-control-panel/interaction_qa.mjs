@@ -1366,7 +1366,7 @@ const alphaTiles = (await page.locator("#factor-detail").textContent()) || "";
 checks.push(check(
   "Alpha tiles never print the fixed observed-basis suffix and carry window, observations and standard error or its reason",
   !/ · observed basis/.test(alphaTiles)
-    && (!alphaContextPublished || (/\d+ days/.test(alphaTiles) && /\bn \d+/.test(alphaTiles) && /(annualized SE|no t-statistic)/.test(alphaTiles))),
+    && (!alphaContextPublished || (/\d+ days/.test(alphaTiles) && /\bn \d+/.test(alphaTiles) && /(annuali[sz]ed SE|no t-statistic)/.test(alphaTiles))),
   { applicable: alphaContextPublished },
 ));
 const performanceTab = dashboardData.performance_tab;
