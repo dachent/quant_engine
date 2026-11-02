@@ -364,6 +364,16 @@
       1
     ],
     [
+      "portfolio_implementation_sleeve_basis",
+      "portfolio_implementation_reconciliation",
+      1
+    ],
+    [
+      "portfolio_implementation_sleeve_basis",
+      "strategy_basis",
+      1
+    ],
+    [
       "portfolio_invested_capital",
       "account_strategy_manifest",
       3
@@ -501,6 +511,11 @@
     [
       "portfolio_report",
       "portfolio_implementation_reconciliation",
+      1
+    ],
+    [
+      "portfolio_report",
+      "portfolio_implementation_sleeve_basis",
       1
     ],
     [
