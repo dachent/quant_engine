@@ -451,7 +451,7 @@ def _own_entitlements(
         )
     price = _q(trade["price"])
     commission = _q(trade["commission"])
-    rows = []
+    rows: list[dict[str, Any]] = []
     for s in every:
         if s not in holding:
             continue
