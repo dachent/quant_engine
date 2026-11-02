@@ -13556,9 +13556,9 @@ def _resolved_implementation_detail(
         raise ControlPanelValidationError(
             "underwriting detail names a strategies row that is absent"
         )
-    resolved = dict(_object(row.get(ref.get("reconciliation")), "reconciliation"))
+    resolved = dict(_object(row.get(str(ref.get("reconciliation"))), "reconciliation"))
     resolved["return_attribution"] = _object(
-        row.get(ref.get("return_attribution")), "return attribution"
+        row.get(str(ref.get("return_attribution"))), "return attribution"
     )
     return resolved
 
