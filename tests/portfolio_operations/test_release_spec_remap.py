@@ -396,7 +396,7 @@ def _cli(world: dict[str, Any], out: Path, *extra: str) -> int:
     )
 
 
-def test_the_command_writes_the_remapped_spec_create_only(
+def test_the_command_writes_the_remapped_spec_atomically_and_create_only(
     world: dict[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
     out = world["tmp"] / "out" / "pred.json"
@@ -408,8 +408,24 @@ def test_the_command_writes_the_remapped_spec_create_only(
     assert summary["sha256"] == _sha(data) and summary["rewritten"] == 5
     assert data.endswith(b"\n") and b"\r" not in data
     assert json.loads(data)["output_root"].endswith("/ledger")
+    assert not list(out.parent.glob("*.tmp"))
+    # the same bytes again are accepted (a repeated step); other bytes are never overwritten
+    assert _cli(world, out) == 0
+    world["spec"]["strategy_provider_map"] = {"strategy-one": "other"}
     assert _cli(world, out) == 1
+    assert "OUTPUT_EXISTS" in capsys.readouterr().err
     assert out.read_bytes() == data
+
+
+def test_a_partial_temporary_file_from_an_interrupted_run_does_not_block_the_output(
+    world: dict[str, Any],
+) -> None:
+    out = world["tmp"] / "out" / "pred.json"
+    out.parent.mkdir()
+    out.with_name("pred.json.tmp").write_bytes(b"{trunc")
+    assert _cli(world, out) == 0
+    assert json.loads(out.read_bytes())["strategy_provider_map"]
+    assert not out.with_name("pred.json.tmp").exists()
 
 
 def test_the_command_refuses_with_a_code_and_writes_nothing(
@@ -421,3 +437,67 @@ def test_the_command_refuses_with_a_code_and_writes_nothing(
     assert _cli(world, out) == 1
     assert "FOREIGN_PATH" in capsys.readouterr().err
     assert not out.exists()
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        "D:\\legacy\\src\\..\\..\\elsewhere\\x.csv",
+        "D:\\legacy\\src\\.\\targets.csv",
+        "D:/legacy/src/fx/../../../escape",
+    ],
+)
+def test_a_path_with_dot_segments_is_refused_even_when_it_would_stay_inside(
+    world: dict[str, Any], written: str
+) -> None:
+    world["spec"]["strategy_inputs"]["returns_path"] = written
+    message = _refused(world, "FOREIGN_PATH")
+    assert "/strategy_inputs/returns_path" in message
+
+
+def test_a_declared_root_path_with_dot_segments_is_not_kept(
+    world: dict[str, Any],
+) -> None:
+    sneaky = f"{world['data'].as_posix()}/chain/../../outside/x"
+    world["spec"]["strategy_inputs"]["strategy_evidence_path"] = sneaky
+    _refused(world, "FOREIGN_PATH")
+
+
+def test_a_link_below_the_old_prefix_that_leaves_the_target_is_refused(
+    world: dict[str, Any],
+) -> None:
+    outside = world["tmp"] / "outside"
+    outside.mkdir()
+    (outside / "t.csv").write_text("x", encoding="utf-8")
+    link = world["data"] / "src" / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    world["spec"]["strategy_inputs"]["returns_path"] = "D:\\legacy\\src\\linked\\t.csv"
+    message = _refused(world, "FOREIGN_PATH")
+    assert "linked" in message
+
+
+def test_posix_and_unc_paths_embedded_in_longer_strings_are_refused(
+    world: dict[str, Any],
+) -> None:
+    world["spec"]["note"] = "see /srv/old/file for it"
+    world["spec"]["other"] = "copy \\\\fileserver\\share\\x"
+    world["spec"]["quoted"] = 'path="/srv/old/dir"'
+    message = _refused(world, "FOREIGN_PATH")
+    assert "3 absolute path(s)" in message
+
+
+def test_ordinary_text_is_not_mistaken_for_an_embedded_path(
+    world: dict[str, Any],
+) -> None:
+    world["spec"]["fine"] = [
+        "and/or",
+        "2026/01/02",
+        "https://example.test/a/b",
+        "./relative/path",
+        "a/b/c",
+        "plain",
+    ]
+    _remap(world)

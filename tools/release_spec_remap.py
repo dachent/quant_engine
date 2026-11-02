@@ -25,11 +25,14 @@ Inputs:
 
 A string value counts as an absolute path when it starts with a drive letter and a slash, with two
 slashes (UNC), or with ``/`` and a second path segment. A path that already lies under a declared
-root is kept byte for byte. Every other absolute path is a refusal that lists all offenders, also
-a drive path embedded inside a longer string. Further refusals: a mapping naming a root key the
+root, dot segments and links resolved, is kept byte for byte. Every other absolute path is a refusal
+that lists all offenders, also a drive, UNC or POSIX path embedded inside a longer string. Further refusals: a mapping naming a root key the
 manifest does not declare or the run does not bind, two old prefixes that are equal or nested (the
 rewrite would depend on rule order), an old prefix that overlaps a declared root, a mapping target
-that does not exist or leaves its root, and a rewritten path under a carried key that does not exist.
+that does not exist or leaves its root, a rewritten path under a carried key that does not exist,
+and a rewritten path that, with dot segments and links resolved, leaves its mapping target (reported
+as ``FOREIGN_PATH``). The output is written to a temporary name and renamed; an existing output is
+accepted only when it holds exactly the same bytes, so an interrupted run can be repeated.
 
 ``--carried-only`` drops the blocks ``release_ledger_spec`` regenerates itself before any check, so
 only the carried keys are remapped and verified. ``--plan`` does everything but write.
@@ -44,6 +47,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -65,7 +69,13 @@ REGENERATED_KEYS = (
 )
 
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
-_EMBEDDED_DRIVE_PATH = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
+# An absolute path inside a longer string: a drive path, a UNC path, or a POSIX path that starts
+# after something that cannot continue a path (a space, a quote, an equals sign).
+_EMBEDDED_PATH = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]"
+    r"|(?<![\w.~:/\\-])[\\/]{2}[^\s\\/]+[\\/]"
+    r"|(?<![\w.~:/\\-])/[^\s/]+/"
+)
 
 
 class SpecRemapError(Exception):
@@ -132,6 +142,7 @@ class Rule:
     old: str
     old_text: str
     target: str
+    base: Path
     root_key: str
 
 
@@ -219,7 +230,9 @@ def build_rules(mapping: Any, roots: Mapping[str, Path]) -> list[Rule]:
                 "MISSING_TARGET",
                 f"{what}: mapping target {target.as_posix()} (root {key!r}) does not exist",
             )
-        rules.append(Rule(normalize(old_text), old_text, target.as_posix(), key))
+        rules.append(
+            Rule(normalize(old_text), old_text, target.as_posix(), target, key)
+        )
     for position, first in enumerate(rules):
         for second in rules[position + 1 :]:
             if (
@@ -252,11 +265,27 @@ class Outcome:
     foreign: list[tuple[str, str]]
 
 
+def _contained(path: str, base: Path) -> bool:
+    """``path`` has no dot segments and, links resolved, lies inside ``base``."""
+
+    if {".", ".."} & set(path.split("/")):
+        return False
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved == base or base in resolved.parents
+
+
 def _remap_value(
-    pointer: str, value: str, rules: Sequence[Rule], roots: Sequence[str], out: Outcome
+    pointer: str,
+    value: str,
+    rules: Sequence[Rule],
+    roots: Sequence[tuple[str, Path]],
+    out: Outcome,
 ) -> str:
     if not is_absolute_path(value):
-        if _EMBEDDED_DRIVE_PATH.search(value):
+        if _EMBEDDED_PATH.search(value):
             out.foreign.append((pointer, value))
         return value
     path = normalize(value)
@@ -264,9 +293,15 @@ def _remap_value(
         rest = _split_prefix(path, rule.old)
         if rest is not None:
             new = rule.target + rest
+            if not _contained(new, rule.base):
+                out.foreign.append((pointer, value))
+                return value
             out.rewritten.append((pointer, value, new))
             return new
-    if any(_split_prefix(path, root) is not None for root in roots):
+    if any(
+        _split_prefix(path, text) is not None and _contained(path, base)
+        for text, base in roots
+    ):
         out.kept += 1
         return value
     out.foreign.append((pointer, value))
@@ -276,7 +311,7 @@ def _remap_value(
 def remap_document(
     spec: Any, rules: Sequence[Rule], roots: Mapping[str, Path]
 ) -> Outcome:
-    current = [normalize(root.as_posix()) for root in roots.values()]
+    current = [(normalize(root.as_posix()), root.resolve()) for root in roots.values()]
     out = Outcome(None, [], 0, [])
 
     def walk(node: Any, pointer: str) -> Any:
@@ -335,15 +370,20 @@ def dumps(value: Any) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _write_create_only(path: Path, data: bytes) -> None:
+def _put(path: Path, data: bytes) -> None:
+    """Create ``path`` atomically with ``data``; an existing file is accepted only if identical."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with path.open("xb") as handle:
-            handle.write(data)
-    except FileExistsError as exc:
-        raise SpecRemapError(
-            "OUTPUT_EXISTS", f"{path} already exists; outputs are create-only"
-        ) from exc
+    if path.exists():
+        if path.read_bytes() != data:
+            raise SpecRemapError(
+                "OUTPUT_EXISTS",
+                f"{path} exists with other content; outputs are create-only",
+            )
+        return
+    staging = path.with_name(path.name + ".tmp")
+    staging.write_bytes(data)
+    os.replace(staging, path)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -376,7 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         data = dumps(outcome.document)
         if not args.plan:
-            _write_create_only(args.out, data)
+            _put(args.out, data)
         print(
             json.dumps(
                 {
