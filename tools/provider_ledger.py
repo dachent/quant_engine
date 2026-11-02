@@ -159,6 +159,12 @@ _PROVIDER_SOURCE_SEGMENTS: Final = {
 }
 
 
+def provider_catalog_names() -> dict[str, str]:
+    """Public view for spec builders: provider id -> catalog file name in a generation."""
+
+    return {provider_id: item[0] for provider_id, item in _PROVIDER_CATALOGS.items()}
+
+
 def _canonical_json_value_bytes(value: object) -> bytes:
     """Serialize any JSON value with the repository's canonical JSON settings."""
 

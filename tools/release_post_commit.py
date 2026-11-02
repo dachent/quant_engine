@@ -52,6 +52,12 @@ import release_driver  # noqa: E402
 
 RESOLVED_SCHEMA = "qe-release-resolved-cycle/1"
 RECEIPT_SCHEMA = "qe-post-commit-verify/1"
+RESOLVED_SCHEMA_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "schemas"
+    / "portfolio"
+    / "release-resolved-cycle.schema.json"
+)
 POST_VERIFY_KIND = "portfolio-post-release-verify-v1"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -85,6 +91,18 @@ def load_resolved_cycle(path: Path) -> dict[str, Any]:
     cycle = _read_object(path, "resolved cycle")
     if cycle.get("schema_version") != RESOLVED_SCHEMA:
         raise Refusal(f"resolved cycle schema_version is not {RESOLVED_SCHEMA}")
+    # the governed shape (B0 interface, as extended by B1/B2), so a file that no longer
+    # matches the cycle manifest contract is refused here too
+    import jsonschema
+
+    problems = sorted(
+        error.message
+        for error in jsonschema.Draft202012Validator(
+            _read_object(RESOLVED_SCHEMA_FILE, "resolved-cycle schema")
+        ).iter_errors(cycle)
+    )
+    if problems:
+        raise Refusal(f"resolved cycle does not match its schema: {problems[0]}")
     _hex(cycle.get("cycle_manifest_sha256"), _HEX64, "cycle_manifest_sha256")
     predecessor = cycle.get("predecessor")
     if not isinstance(predecessor, dict):

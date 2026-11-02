@@ -146,9 +146,35 @@ def world(tmp_path: Path) -> dict[str, Any]:
         json.dumps(
             {
                 "schema_version": tool.RESOLVED_SCHEMA,
+                "cycle_id": "cycle-synthetic",
+                "cutoff": "2026-01-02",
+                "evaluated_on": "2026-01-05",
+                "captured_at_utc": "2026-01-04T10:00:00Z",
                 "cycle_manifest_sha256": CYCLE_SHA,
                 "predecessor": {"release_id": PRED},
+                "roots": {"data": str(tmp_path)},
                 "scratch": str(tmp_path / "scratch"),
+                "providers": {
+                    "alpaca": {
+                        "root": str(tmp_path),
+                        "generation_id": "g",
+                        "generation_dir": str(tmp_path),
+                        "manifest_path": str(tmp_path / "generation.json"),
+                        "manifest_sha256": "1" * 64,
+                        "manifest_size_bytes": 1,
+                        "finality_source": "GENERATION_MANIFEST",
+                        "finality_evidence": None,
+                        "qualification": "QUALIFIED",
+                        "finalized_through": None,
+                    }
+                },
+                "strategy_evidence": {
+                    "path": str(tmp_path / "s.json"),
+                    "sha256": "2" * 64,
+                    "size_bytes": 1,
+                },
+                "cost_inputs": {},
+                "public_bundles": {},
             }
         ),
         encoding="utf-8",
@@ -263,6 +289,7 @@ def _rewrite(path: Path, **changes: Any) -> None:
         ("dirty-repo", "not clean"),
         ("wrong-head", "not clean"),
         ("bad-resolved-schema", "schema_version"),
+        ("resolved-cycle-off-contract", "does not match its schema"),
     ],
 )
 def test_the_commit_and_pointer_state_must_be_exactly_this_release(
@@ -301,6 +328,10 @@ def test_the_commit_and_pointer_state_must_be_exactly_this_release(
         (world["repo"] / "tracked.txt").write_text("changed\n", encoding="utf-8")
     elif mutate == "wrong-head":
         args = _set(args, "--harness-code-commit", "1" * 40)
+    elif mutate == "resolved-cycle-off-contract":
+        resolved = json.loads(world["resolved"].read_bytes())
+        del resolved["providers"]["alpaca"]["qualification"]
+        world["resolved"].write_text(json.dumps(resolved), encoding="utf-8")
     elif mutate == "bad-resolved-schema":
         _rewrite(world["resolved"], schema_version="qe-release-resolved-cycle/0")
     assert tool.main(args) == 1

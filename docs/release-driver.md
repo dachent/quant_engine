@@ -26,8 +26,16 @@ Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
 `run` (the attended run's output root), `qa`, `code_commit`, `pipeline_id`,
 `mode`, `live_workspace` (probe), `requested_as_of`, `history_store`, `expect_superseded`, `build_portfolio_root`,
 `portfolio_root`, `retained_cache_root`, `resolved_cycle` (the `qe-release-resolved-cycle/1` file of the cycle manifest; read by `post-commit-verify`), and `provider_sources` (root id to the provider
-generation directory the release binds). The epoch manifest generation comes from the run
-itself. A test fails if the graph starts using a key this list does not name.
+generation directory the release binds, or the string `from_ledger`, below). The epoch manifest
+generation comes from the run itself.
+
+`provider_sources: "from_ledger"` derives the seven provider rows from `{cycle}/ledger-spec.json`
+(built by `tools/release_ledger_spec.py`) instead of a typed map: each source is
+`<providers.<id>.root>/generations/<generation_id>`. The stage refuses when the staged ledger
+catalog (graph path `ledger_catalog`) admitted another generation id for a provider, or when a
+directory is not that generation. The optional config key `real_root_overrides` (root id to a full
+source directory) points a provider at its copy in another root, again only at a directory of the
+same generation id. See `docs/release-ledger-spec.md`. A test fails if the graph starts using a key this list does not name.
 
 ## Probe and release mode
 

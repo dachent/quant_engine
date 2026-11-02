@@ -17,7 +17,8 @@ Files:
 |---|---|
 | Cycle dates `cutoff`, `evaluated_on`, `captured_at_utc` | the cycle manifest (never `now()`) |
 | Provider generations: root and which generation | the cycle manifest, per provider; `single` (the one generation under the root) or `explicit` (named id); the manifest sha256 is always pinned |
-| Native finality-evidence files | the cycle manifest, `providers.<id>.finality_evidence`, required for matrixport, quantbase and schwab only |
+| Finality-evidence files | the cycle manifest, `providers.<id>.finality_evidence`, required for every provider whose `finality_source` is not `GENERATION_MANIFEST` (matrixport, quantbase, schwab: a native file; ibkr: the Flex statement, which B1 also requires to be a source artifact of the selected manifest) |
+| Qualification and finality date | `providers.<id>.qualification` (required; the ledger validator is the authority on what is admissible) and `finalized_through` (required with a finality-evidence file, refused otherwise: a finite provider's date is derived from its manifest by B1) |
 | Strategy evidence, cost inputs, epoch admission policy, public bundle roots | the cycle manifest, pinned by sha256 (bundle roots are directories, resolved but not hashed) |
 | Predecessor release | `predecessor.release_id` (+ optional `release_manifest_sha256`) |
 | Canonical scratch root | `scratch` is a `{root_key, relative}` pair; the directory behind the root key is a run argument |
@@ -54,7 +55,8 @@ portfolio123, quantbase, schwab):
 | `generation_id`, `generation_dir` | the chosen generation (B2 provider_sources row = `generation_dir`) |
 | `manifest_path`, `manifest_sha256`, `manifest_size_bytes` | `generation.json`, verified against the pin |
 | `finality_source` | `GENERATION_MANIFEST` (alpaca, fidelity, portfolio123), `SELECTED_SOURCE_ARTIFACT` (ibkr), `CYCLE_MANIFEST_NATIVE` (matrixport, quantbase, schwab) |
-| `finality_evidence` | a file object: the generation manifest itself, or the native file; `null` for ibkr (B1 reads the Flex artifact the selected manifest names) |
+| `finality_evidence` | a file object: the generation manifest itself, or the pinned evidence file (always present) |
+| `qualification`, `finalized_through` | as declared; `finalized_through` is `null` for `GENERATION_MANIFEST` providers (B1 derives it) |
 
 `finality_source` is declared per provider in the manifest and the schema pins the only allowed
 value for each provider id (the tool holds no provider names); B1 re-checks it against the
@@ -80,13 +82,16 @@ here: B1 reads them through the provider ledger's registry.
       "root": {"root_key": "data", "relative": "dataAlpaca"},
       "generation": {"mode": "single"},
       "manifest_sha256": "<64 hex>",
-      "finality_source": "GENERATION_MANIFEST"
+      "finality_source": "GENERATION_MANIFEST",
+      "qualification": "PUBLISHED_COMPLETE"
     },
     "schwab": {
       "root": {"root_key": "data", "relative": "dataSchwab"},
       "generation": {"mode": "explicit", "generation_id": "gen-schwab-example"},
       "manifest_sha256": "<64 hex>",
       "finality_source": "CYCLE_MANIFEST_NATIVE",
+      "qualification": "STAGED_COMPLETE",
+      "finalized_through": "2026-01-02",
       "finality_evidence": {
         "path": {"root_key": "data", "relative": "dataSchwab/native/evidence.json"},
         "sha256": "<64 hex>"
@@ -118,8 +123,9 @@ Every refusal is `release-cycle-manifest: FAIL: <CODE>: <detail>` on stderr, exi
 | `SIZE_MISMATCH` | a `size_bytes` pin differs |
 | `AMBIGUOUS_GENERATION` | `mode: single` and the root holds more than one generation |
 | `ID_MISMATCH` | `generation.json` names a different generation than its directory |
-| `FINALITY_EVIDENCE_REQUIRED` | matrixport, quantbase or schwab without a `finality_evidence` pin |
-| `FINALITY_EVIDENCE_NOT_ALLOWED` | alpaca, fidelity, portfolio123 or ibkr with one |
+| `FINALITY_EVIDENCE_REQUIRED` | a provider whose finality source is not its generation manifest, without a `finality_evidence` pin |
+| `FINALITY_EVIDENCE_NOT_ALLOWED` | a `GENERATION_MANIFEST` provider with one |
+| `FINALIZED_THROUGH_REQUIRED` / `FINALIZED_THROUGH_NOT_ALLOWED` | `finalized_through` missing with evidence, or present without it |
 | `OUTPUT_EXISTS` | `resolve --out` target exists (outputs are create-only) |
 | `RESOLVED_SHAPE` | internal: the produced file fails its own schema |
 | `INPUT` | unreadable or non-JSON input |
