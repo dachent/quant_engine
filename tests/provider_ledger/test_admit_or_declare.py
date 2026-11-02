@@ -71,8 +71,123 @@ P123_ADMITTED_ITEM_SET_SHA256 = (
 )
 P123_EU_ENTITY_ID = "1897754"
 P123_EU_REPORTED_TOTAL_RETURN_PERCENT = "30.46"
-P123_RETAINED_SOURCE_SEGMENT = (
-    Path(__file__).parent / "fixtures" / "p123_retained_10215d7b_source_segment.json"
+# portfolio123-model-generation segment of
+# contracts/portfolio-financial-mvp-source-v1.json at commit
+# 0737461f275f63f34d3a02b9b91b4c894c85cca9 (identical bytes at 4a1964e8, the
+# parent of the 750c0a55 rebind), while its current_generation was 10215d7b.
+P123_RETAINED_SOURCE_SEGMENT = json.loads(
+    r"""
+{
+ "source_id": "portfolio123-model-generation",
+ "source_version": "portfolio123-generation-v1",
+ "strategy_version": {
+  "status": "MIXED",
+  "binding": "EXACT_CONNECTED_MODEL_VERSION_REQUIRED",
+  "version_refs": {
+   "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
+  }
+ },
+ "subjects": {
+  "account_scope": "PORTFOLIO123_MODELS_NOT_OWNER_ACCOUNTS",
+  "strategy_ids": [
+   "p123-ai-factor",
+   "p123-eu"
+  ]
+ },
+ "data_classes": [
+  "PROVIDER_LIVE_RETURN"
+ ],
+ "authority": "PORTFOLIO123_EXACT_CONNECTED_MODEL_GENERATION",
+ "endpoint_or_artifact_selector": "portfolio123-generation.json and exact connected-model evidence in a governed generation",
+ "acquisition": {
+  "adapter": "portfolio123-generation",
+  "mode": "HAR_FIRST_OR_EXPLICITLY_AUTHORIZED_METERED_API_THEN_ALREADY_LOCAL_GENERATION",
+  "auth_and_metering_class": "NO_IMPLICIT_AUTHENTICATED_ACCESS"
+ },
+ "evidence_layer": "PROVIDER_LIVE",
+ "interval": {
+  "observed_start": null,
+  "observed_end": null,
+  "effective_start": null,
+  "effective_end": null,
+  "splice_policy": "EXACT_MODEL_VERSION; PROVIDER_HISTORY_REMAINS_DISTINCT_FROM_OWNER_ACCOUNT_LIVE"
+ },
+ "schema": {
+  "name": "portfolio123-generation",
+  "version": "1"
+ },
+ "units": {
+  "measurement": "DAILY_DECIMAL_RETURN_AND_MODEL_EVIDENCE",
+  "currency": "MODEL_DECLARED"
+ },
+ "temporal": {
+  "timezone": "PROVIDER_DECLARED",
+  "calendar": "MODEL_DECLARED",
+  "cadence": "MODEL_CAPTURE"
+ },
+ "freshness": {
+  "max_age_days": 7,
+  "publication_lag_days": 2,
+  "rule": "EXACT_CONNECTED_MODEL_THROUGH_ACCEPTED_PROVIDER_BOUNDARY"
+ },
+ "admission": {
+  "transform": "provider-ledger-portfolio123-evidence",
+  "version": "1",
+  "facts": [
+   "STRATEGY_VERSION_REFERENCE",
+   "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE"
+  ],
+  "dataset_disposition_policy": {
+   "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
+   "policy_version": "1",
+   "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
+   "authority_issue": 303,
+   "effective_start": "2026-08-14",
+   "effective_end": null,
+   "upstream_inventory_sha256": "3f0d3b5bd6239b6743f739226d97cde9979e6295291cdcbb694210d710b31e5f",
+   "product_data_class_count": 1,
+   "product_data_class_set_sha256": "211c807f708e2fea19065c194963775428475a7616d4b96074e21f69c0c95fcf",
+   "admitted_item_count": 2,
+   "admitted_item_set_sha256": "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643",
+   "allowed_exclusion_reasons": [
+    "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
+   ],
+   "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+   "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
+  }
+ },
+ "product_requirement": "REQUIRED",
+ "consumers": [
+  "DECOMPOSITION",
+  "DEPENDENCE",
+  "REPORT",
+  "RELEASE_RECEIPT"
+ ],
+ "current_generation": {
+  "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+  "sha256": "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
+  "as_of": "2026-08-14"
+ },
+ "existence_status": "EXISTS",
+ "capture_status": "CAPTURED_GOVERNED",
+ "absence_behavior": "FAIL_P123_VERSION_COMPATIBILITY_AND_ANY_REQUIRED_PROVIDER_HISTORY_CELL",
+ "readiness": "REQUIRED_NOT_READY",
+ "blockers": [
+  302,
+  303
+ ],
+ "invalidated_outputs": [
+  "LAYERED_HISTORY",
+  "DECOMPOSITION",
+  "DEPENDENCE",
+  "REPORT",
+  "WORKBOOK",
+  "PANEL",
+  "RELEASE_RECEIPT"
+ ],
+ "owner_policy_decision": "The current HAR generation captures the exact P123 EU connected-model provider-managed Strategy performance level and version. The layered-history builder may prove a deterministic candidate level-to-return derivation, but no provider-live return or Cash Added interpretation is admitted until #303 records admit-or-declare authority. The exact-version backtest remains not captured, and P123 AI version authority remains with #302."
+}
+"""
 )
 P123_RETAINED_INPUTS = (
     P123_GENERATION_ROOT / "generation.json",
@@ -103,10 +218,9 @@ def _retained_p123_admit_or_declare_fixture() -> tuple[
     # (750c0a55, 94161522 and onward), so it no longer names this retained
     # generation or carries its #303 dataset-disposition pins.  The retained
     # receipt is evidence of that generation under the segment as the contract
-    # stated it before the rebind (fixture provenance names the commit); the
+    # stated it before the rebind (commit named at the constant); the
     # current contract must still name the generation as governed evidence.
-    retained = json.loads(P123_RETAINED_SOURCE_SEGMENT.read_text(encoding="utf-8"))
-    source = retained["source_segment"]
+    source = copy.deepcopy(P123_RETAINED_SOURCE_SEGMENT)
     assert source["source_id"] == "portfolio123-model-generation"
     assert source["current_generation"] == {
         "as_of": DAY.isoformat(),
