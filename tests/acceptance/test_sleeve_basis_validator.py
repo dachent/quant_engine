@@ -395,7 +395,9 @@ def _published(figures: Any, perimeter: Decimal, weight: Decimal) -> dict[str, A
                 "current_value_usd": format(figures.value, "f"),
                 "cost_rate_denominator_usd": format(figures.value, "f"),
                 "systematic_weight": format(weight, "f"),
-                "account_live_observed_start": figures.opening_date.isoformat(),
+                "return_window_start": figures.opening_date.isoformat(),
+                "window_days": figures.window_days,
+                "account_live_observed_start": figures.daily_returns[0][0].isoformat(),
                 "account_live_observed_end": figures.end_date.isoformat(),
             }
         ],
