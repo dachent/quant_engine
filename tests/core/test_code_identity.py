@@ -328,6 +328,11 @@ def test_pipeline_runtime_gate_enforces_scheme_and_attestation(
     )
     candidate, merged, tree = merged_candidate(repo)
     state = tmp_path / "state"
+    # The executing-code gate has its own tests below; here the running code is the
+    # synthetic repository itself.
+    monkeypatch.setattr(
+        core_pipeline, "executing_code_files", lambda: ((repo / "a.txt").resolve(),)
+    )
 
     def spec(value: str, scheme: str) -> Any:
         return SimpleNamespace(
@@ -384,3 +389,268 @@ def test_pipeline_runtime_gate_enforces_scheme_and_attestation(
             spec(tree, ci.TREE_SCHEME),
             promote=True,
         )
+
+
+# -- executing-code identity at promotion (HASHTIME hardening) --------------------
+
+
+@pytest.fixture
+def code_repo(repo: Path) -> Path:
+    """A repository whose tree carries a python module (the "running code")."""
+    (repo / "pkg").mkdir()
+    (repo / "tools").mkdir()
+    commit_file(repo, "tools/verifier.py", "OK = True\n", "tool loaded by path later")
+    commit_file(repo, "pkg/mod.py", "VALUE = 1\n", "module")
+    return repo
+
+
+def worktree(repo: Path, tmp_path: Path, name: str = "wt") -> Path:
+    path = tmp_path / name
+    git(repo, "worktree", "add", "--detach", str(path), "HEAD")
+    return path.resolve()
+
+
+def refusal(claimed: str, files: tuple[Path, ...]) -> ci.ExecutingCodeError:
+    with pytest.raises(ci.ExecutingCodeError) as info:
+        ci.verify_executing_code(claimed, files)
+    return info.value
+
+
+def test_executing_code_files_name_the_loaded_core_module() -> None:
+    files = ci.executing_code_files()
+    assert Path(ci.__file__).resolve() in files
+    assert all(path.suffix == ".py" and path.is_absolute() for path in files)
+
+
+def test_executing_code_accepts_the_same_tree_at_the_same_and_a_second_path(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    own = (code_repo / "pkg" / "mod.py").resolve()
+    ci.verify_executing_code(tree, (own,))
+    second = worktree(code_repo, tmp_path)
+    assert second != code_repo.resolve()
+    ci.verify_executing_code(tree, (second / "pkg" / "mod.py",))
+    ci.verify_executing_code(tree, (own, second / "pkg" / "mod.py"))
+
+
+def test_executing_code_refuses_a_different_tree(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    attested = ci.head_tree(code_repo)
+    second = worktree(code_repo, tmp_path)
+    commit_file(second, "pkg/other.py", "X = 2\n", "next")
+    err = refusal(attested, (second / "pkg" / "mod.py",))
+    assert err.code == ci.EXECUTING_TREE_DIFFERS
+    assert str(err).startswith("executing code ")
+
+
+def test_executing_code_refuses_a_modified_tracked_file(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    second = worktree(code_repo, tmp_path)
+    (second / "pkg" / "mod.py").write_bytes(b"VALUE = 2\n")
+    assert refusal(tree, (second / "pkg" / "mod.py",)).code == (
+        ci.EXECUTING_TRACKED_MODIFIED
+    )
+    # Modified tracked files that are not loaded still make the tree dirty.
+    third = worktree(code_repo, tmp_path, "wt3")
+    (third / "uv.lock").write_bytes(b"lock-v2\n")
+    assert refusal(tree, (third / "pkg" / "mod.py",)).code == (
+        ci.EXECUTING_TRACKED_MODIFIED
+    )
+
+
+def test_executing_code_refuses_a_loaded_file_hidden_from_git_status(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    second = worktree(code_repo, tmp_path)
+    git(second, "update-index", "--assume-unchanged", "pkg/mod.py")
+    (second / "pkg" / "mod.py").write_bytes(b"VALUE = 99\n")
+    assert git(second, "status", "--porcelain") == ""
+    assert refusal(tree, (second / "pkg" / "mod.py",)).code == (
+        ci.EXECUTING_FILE_DIFFERS
+    )
+
+
+def test_executing_code_refuses_an_untracked_python_file_but_not_other_files(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    second = worktree(code_repo, tmp_path)
+    module = second / "pkg" / "mod.py"
+    (second / "notes.txt").write_bytes(b"scratch\n")
+    ci.verify_executing_code(tree, (module,))
+    (second / "pkg" / "shadow.py").write_bytes(b"import os\n")
+    err = refusal(tree, (module,))
+    assert err.code == ci.EXECUTING_UNTRACKED_PYTHON
+    assert "pkg/shadow.py" in str(err)
+
+
+def test_executing_code_refuses_a_loaded_ignored_file_that_is_not_in_the_tree(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    second = worktree(code_repo, tmp_path)
+    exclude = Path(
+        git(second, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    )
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_bytes(b"ignored.py\n")
+    (second / "ignored.py").write_bytes(b"X = 1\n")
+    # An ignored file is invisible to status but, when loaded, must be in the tree.
+    assert git(second, "status", "--porcelain") == ""
+    assert refusal(tree, (second / "ignored.py",)).code == ci.EXECUTING_FILE_DIFFERS
+
+
+def test_executing_code_refuses_a_hidden_modification_of_a_not_yet_loaded_tool(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    # The promotion path loads tools by path after the gate, so every tracked python
+    # source is verified, whatever git status flags say.
+    tree = ci.head_tree(code_repo)
+    module = Path("pkg") / "mod.py"
+    for index, flag in enumerate(("--assume-unchanged", "--skip-worktree")):
+        second = worktree(code_repo, tmp_path, f"wt-hidden{index}")
+        git(second, "update-index", flag, "tools/verifier.py")
+        (second / "tools" / "verifier.py").write_bytes(b"OK = False\n")
+        assert git(second, "status", "--porcelain") == ""
+        err = refusal(tree, (second / module,))
+        assert err.code == ci.EXECUTING_FILE_DIFFERS
+        assert "tools/verifier.py" in str(err)
+    deleted = worktree(code_repo, tmp_path, "wt-deleted")
+    git(deleted, "update-index", "--skip-worktree", "tools/verifier.py")
+    (deleted / "tools" / "verifier.py").unlink()
+    assert refusal(tree, (deleted / module,)).code == ci.EXECUTING_FILE_DIFFERS
+
+
+def test_executing_code_refuses_ignored_python_under_tools_and_packages(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    second = worktree(code_repo, tmp_path)
+    exclude = Path(
+        git(second, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    )
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_bytes(b"shadow.py\n")
+    (second / "tools" / "shadow.py").write_bytes(b"import os\n")
+    assert git(second, "status", "--porcelain") == ""
+    assert refusal(tree, (second / "pkg" / "mod.py",)).code == (
+        ci.EXECUTING_UNTRACKED_PYTHON
+    )
+
+
+def test_executing_code_refuses_non_git_copies_equal_or_not(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    copy = tmp_path / "installed" / "pkg"
+    copy.mkdir(parents=True)
+    shutil.copyfile(code_repo / "pkg" / "mod.py", copy / "mod.py")
+    equal = refusal(tree, ((copy / "mod.py").resolve(),))
+    assert equal.code == ci.EXECUTING_NOT_GIT
+    (copy / "mod.py").write_bytes(b"VALUE = 3\n")
+    assert refusal(tree, ((copy / "mod.py").resolve(),)).code == ci.EXECUTING_NOT_GIT
+
+
+def test_executing_code_refuses_nothing_to_identify_and_a_bad_attested_tree(
+    code_repo: Path,
+) -> None:
+    tree = ci.head_tree(code_repo)
+    assert refusal(tree, ()).code == ci.EXECUTING_UNIDENTIFIED
+    module = (code_repo / "pkg" / "mod.py").resolve()
+    assert refusal("not-hex", (module,)).code == ci.EXECUTING_UNIDENTIFIED
+
+
+def test_every_distinct_owning_checkout_must_match(
+    code_repo: Path, tmp_path: Path
+) -> None:
+    tree = ci.head_tree(code_repo)
+    good = worktree(code_repo, tmp_path)
+    bad = worktree(code_repo, tmp_path, "wt-bad")
+    commit_file(bad, "pkg/other.py", "X = 2\n", "next")
+    ci.verify_executing_code(tree, (good / "pkg" / "mod.py",))
+    assert refusal(tree, (good / "pkg" / "mod.py", bad / "pkg" / "mod.py")).code == (
+        ci.EXECUTING_TREE_DIFFERS
+    )
+
+
+def test_pipeline_promotion_checks_the_executing_code_not_the_spec_repo_root(
+    code_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        core_pipeline, "runtime_environment_sha256", lambda _path: "e" * 64
+    )
+    candidate, _merged, tree = merged_candidate(code_repo)
+    state = tmp_path / "state"
+    ci.write_merge_attestation(
+        code_repo, candidate_commit=candidate, base_ref="main", coordination_root=state
+    )
+    spec = SimpleNamespace(
+        code_commit=tree, code_identity_scheme=ci.TREE_SCHEME, coordination_root=state
+    )
+    contract = _runtime_contract(code_repo, tmp_path, tree)
+    # repo_root (the spec's checkout) is clean and attested; only the executing
+    # code varies.
+    second = worktree(code_repo, tmp_path)
+    monkeypatch.setattr(
+        core_pipeline, "executing_code_files", lambda: (second / "pkg" / "mod.py",)
+    )
+    core_pipeline._verify_portfolio_runtime(contract, spec, promote=True)
+    (second / "pkg" / "mod.py").write_bytes(b"VALUE = 2\n")
+    with pytest.raises(
+        core_pipeline.PipelineValidationError, match="executing code.*TRACKED_MODIFIED"
+    ):
+        core_pipeline._verify_portfolio_runtime(contract, spec, promote=True)
+    git(second, "checkout", "--", "pkg/mod.py")
+    core_pipeline._verify_portfolio_runtime(contract, spec, promote=True)
+    other = worktree(code_repo, tmp_path, "wt-other")
+    commit_file(other, "pkg/other.py", "X = 2\n", "next")
+    monkeypatch.setattr(
+        core_pipeline, "executing_code_files", lambda: (other / "pkg" / "mod.py",)
+    )
+    with pytest.raises(
+        core_pipeline.PipelineValidationError, match="executing code.*TREE_DIFFERS"
+    ):
+        core_pipeline._verify_portfolio_runtime(contract, spec, promote=True)
+
+
+def test_v1_and_candidate_paths_never_consult_the_executing_code(
+    code_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        core_pipeline, "runtime_environment_sha256", lambda _path: "e" * 64
+    )
+
+    def boom() -> Any:
+        raise AssertionError("executing code must not be inspected here")
+
+    monkeypatch.setattr(core_pipeline, "executing_code_files", boom)
+    state = tmp_path / "state"
+    commit = ci.head_commit(code_repo)
+    tree = ci.head_tree(code_repo)
+
+    def spec(value: str, scheme: str) -> Any:
+        return SimpleNamespace(
+            code_commit=value, code_identity_scheme=scheme, coordination_root=state
+        )
+
+    # Legacy: passes and refuses exactly as before, promoting or not.
+    core_pipeline._verify_portfolio_runtime(
+        _runtime_contract(code_repo, tmp_path, commit),
+        spec(commit, ci.COMMIT_SCHEME),
+        promote=True,
+    )
+    with pytest.raises(core_pipeline.PipelineValidationError, match="HEAD differs"):
+        core_pipeline._verify_portfolio_runtime(
+            _runtime_contract(code_repo, tmp_path, "1" * 40),
+            spec("1" * 40, ci.COMMIT_SCHEME),
+            promote=True,
+        )
+    # Tree scheme without promotion (plan/build) binds the tree only.
+    core_pipeline._verify_portfolio_runtime(
+        _runtime_contract(code_repo, tmp_path, tree), spec(tree, ci.TREE_SCHEME)
+    )

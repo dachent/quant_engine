@@ -28,6 +28,15 @@ change between cycles and this document is not regenerated automatically.
   read `<their coordination root>/merge-attestation.json`; a replica copy made
   after the attestation inherits it). The attestation is mandatory; any tree, merged-commit or runtime-lock
   difference refuses. Never reinterpret an old release id under the other scheme.
+  The spec binds the absolute `repo_root` and lock path, and that checkout must
+  still pass. Under `git-tree-v2`, promotion also verifies the code that is
+  actually executing (loaded `quant_engine` modules and the entry-script
+  directory, found by `__file__`): the owning git checkout must have the attested
+  tree, no modified tracked file and no untracked `*.py`, and each loaded file
+  must equal the attested tree's blob. The path does not matter, so promoting from
+  a second worktree of the same tree is accepted; promotion by code of a different
+  tree, a dirty tree or a non-git copy refuses (`EXECUTING_CODE_*` reasons). A
+  `git-commit-v1` promotion is unchanged.
 - **Generation ids bind `repository_sha`.** Two runs at different SHAs with
   cold caches produce different generation ids for identical content (layered
   history -> decomposition plan bundle -> lens generations -> panel candidate
