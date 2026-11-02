@@ -101,3 +101,31 @@ def test_period_recomputation_flags_a_wrong_or_early_annualised_value() -> None:
     assert len(found) == 1
     problems = found[0].observed["twr_mwr:A1|alpha|2026-08-01"]
     assert set(problems) == {"window_days", "twr_annualised"}
+
+
+def _cagr_row(opening: str) -> dict[str, Any]:
+    return {
+        "strategy_id": "alpha",
+        "account_live_cagr": "0.2",
+        "account_live_observed_start": "2025-09-18",
+        "account_live_observed_end": "2026-09-17",
+        "return_window_start": opening,
+        "annualisation_basis": {
+            "account_live_cagr": {"reported_basis": "ANNUALISED", "window_days": 365}
+        },
+    }
+
+
+def test_cagr_window_is_measured_from_the_opening_nav_date() -> None:
+    # first return 2025-09-18: 364 days from it, 365 from the opening NAV date 2025-09-17
+    report = {
+        "report_schema_version": 5,
+        "strategy_summary": [_cagr_row("2025-09-17")],
+    }
+    assert _short(list(checks.check_lint_returns(_context(report)))) == []
+    short = {
+        "report_schema_version": 5,
+        "strategy_summary": [_cagr_row("2025-09-18")],
+    }
+    found = _short(list(checks.check_lint_returns(_context(short))))
+    assert [f.klass for f in found] == [checks.BLOCKER_INVARIANT]

@@ -8257,8 +8257,12 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                 short[f"dependence.{mode}:{series}"] = days
     for row in rows(ctx.report, "strategy_summary"):
         cagr = to_decimal(row.get("account_live_cagr"))
+        # the CAGR window opens at the opening NAV date (``return_window_start``,
+        # version 5), the close before the first return; earlier rows carry no such
+        # field and keep the first return date
         days = _window_days(
-            row.get("account_live_observed_start"), row.get("account_live_observed_end")
+            row.get("return_window_start") or row.get("account_live_observed_start"),
+            row.get("account_live_observed_end"),
         )
         if cagr is not None and (cagr > 1 or cagr < Decimal("-0.5")):
             extreme[f"strategy_summary:{row.get('strategy_id')}"] = {"cagr": cagr}
