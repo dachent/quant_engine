@@ -186,6 +186,7 @@ _PATH_STAGES = {
     "tools/check_fact_admission.py": [],
     "tools/verify_release_restore.py": [],
     "tools/release_driver.py": [],
+    "tools/release_cycle_manifest.py": [],
     "tools/release_restore_world.py": [],
     "tools/release_evidence_pack.py": [],
     "tools/check_gitleaks_suppressions.py": [],
