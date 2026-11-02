@@ -1610,3 +1610,56 @@ def test_replica_only_still_refuses_to_execute_a_spec_bound_to_a_real_root(
         "findings-targets",
     ):
         assert _stage(stage_id)["only_ceremony"] == "full"
+
+
+# -- per-stage bindings and rerecord -----------------------------------------------------
+
+
+def _started(world: dict[str, Any]) -> dict[str, str]:  # noqa: F811
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    return {k: v["started_at"] for k, v in state["stages"].items()}
+
+
+def test_a_change_to_a_later_stage_keeps_the_earlier_stages_and_an_upstream_change_does_not(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph, "--through", "one") == 0
+    before = _started(world)
+    # `two` is added after `one` ran (as the replica stages were added to the shipped graph)
+    assert _drive(world, _graph(world, CHAIN)) == 0
+    assert _started(world)["one"] == before["one"]
+    # `one` itself is redefined: it and everything that requires it are no longer what ran
+    changed = [
+        {**CHAIN[0], "argv": _write_stage("{cycle}/one.txt", "changed")},
+        CHAIN[1],
+    ]
+    assert _drive(world, _graph(world, changed)) == 2
+
+
+def test_rerecord_rebinds_only_stages_whose_bytes_still_hash_and_needs_confirmation(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    state_path = world["cycle"] / driver.STATE_NAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    for record in state["stages"].values():
+        record["binding"] = "recorded-under-an-older-graph"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = _started(world)
+    assert _drive(world, graph) == 2  # the recorded binding is not the current one
+    args = ["rerecord", "--config", str(world["config"]), "--graph", str(graph)]
+    assert driver.main(args) == 2  # without confirmation nothing is re-bound
+    (world["cycle"] / "two.txt").write_text("edited", encoding="utf-8")
+    assert (
+        driver.main([*args, "--confirm-same-config"]) == 2
+    )  # a changed output is refused, and none re-bound
+    assert (
+        json.loads(state_path.read_text(encoding="utf-8"))["stages"]["one"]["binding"]
+        == "recorded-under-an-older-graph"
+    )
+    (world["cycle"] / "two.txt").write_text("2", encoding="utf-8")
+    assert driver.main([*args, "--confirm-same-config"]) == 0
+    assert _drive(world, graph) == 0  # kept, not rerun
+    assert _started(world) == before

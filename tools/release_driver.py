@@ -181,10 +181,10 @@ class Run:
         )
         self.derived: dict[str, str] = {}
         # which ceremony runs decides which later stages apply, not what an earlier stage produced
-        bound = {key: value for key, value in config.items() if key != "ceremony"}
-        self.binding = hashlib.sha256(
-            json.dumps([bound, graph], sort_keys=True).encode()
-        ).hexdigest()
+        self._bound_config = {
+            key: value for key, value in config.items() if key != "ceremony"
+        }
+        self._stage_bindings: dict[str, str] = {}
         self.confirmed_release_id: str | None = None
         # roots a replica-only run must never write into
         self.real_roots = [
@@ -325,6 +325,46 @@ class Run:
             raise Refusal(f"{name}: unknown derive rule {sorted(rule)}")
         self.derived[name] = value
         return value
+
+    # -- bindings ----------------------------------------------------------------------
+    def stage_binding(self, stage_id: str) -> str:
+        """What a stage's result depends on: the run configuration, its own definition, the definitions of
+        every stage it requires, and the shared path and derive entries those definitions use.
+
+        A change to a later or unrelated stage (a replica stage, say) leaves this unchanged, so completed
+        build stages stay valid.
+        """
+
+        if stage_id in self._stage_bindings:
+            return self._stage_bindings[stage_id]
+        closure: set[str] = set()
+        todo = [stage_id]
+        while todo:
+            current = todo.pop()
+            if current not in closure:
+                closure.add(current)
+                todo.extend(self.stage(current).get("requires", []))
+        definitions = [self.stage(item) for item in sorted(closure)]
+        names: set[str] = set(_PLACEHOLDER.findall(json.dumps(definitions)))
+        shared: dict[str, Any] = {"paths": {}, "derive": {}}
+        pending = sorted(names)
+        while pending:
+            name = pending.pop()
+            for table in ("paths", "derive"):
+                if name in self.graph.get(table, {}) and name not in shared[table]:
+                    shared[table][name] = self.graph[table][name]
+                    pending.extend(
+                        _PLACEHOLDER.findall(json.dumps(self.graph[table][name]))
+                    )
+        for key in ("provider_roots", "provider_run_sources", "config_paths"):
+            shared[key] = self.graph.get(key)
+        digest = hashlib.sha256(
+            json.dumps(
+                [self._bound_config, definitions, shared], sort_keys=True
+            ).encode()
+        ).hexdigest()
+        self._stage_bindings[stage_id] = digest
+        return digest
 
     # -- repository identity -----------------------------------------------------------
     def _git(self, *args: str) -> str:
@@ -1049,11 +1089,17 @@ def provider_generations(run: Run, target: Path) -> dict[str, Any]:
     return {"roots": len(rows)}
 
 
-def verify_kept(run: Run, stage: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+def verify_kept(
+    run: Run,
+    stage: Mapping[str, Any],
+    record: Mapping[str, Any],
+    *,
+    check_binding: bool = True,
+) -> None:
     """A completed stage is reusable only if the run, the code and its bytes are still what it recorded."""
 
     run.require_frozen_repo()
-    if record.get("binding") != run.binding:
+    if check_binding and record.get("binding") != run.stage_binding(stage["id"]):
         raise Refusal(
             f"{stage['id']} was produced under a different run configuration or stage graph; rerun it with --only {stage['id']}"
         )
@@ -1296,7 +1342,7 @@ def execute_stage(
     started_at = _now()
     record: dict[str, Any] = {
         "status": "running",
-        "binding": run.binding,
+        "binding": run.stage_binding(stage["id"]),
         "code_commit": run.values["code_commit"],
         "started_at": started_at,
         "attempt": attempt,
@@ -1578,7 +1624,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "command",
-        choices=("plan", "run", "status", "check", "gate-commit", "stop"),
+        choices=("plan", "run", "status", "check", "gate-commit", "stop", "rerecord"),
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--graph", type=Path)
@@ -1592,6 +1638,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--confirm-release-id",
         help="the exact release id the owner confirmed (commit stage)",
+    )
+    parser.add_argument(
+        "--confirm-same-config",
+        action="store_true",
+        help="rerecord: the run configuration and stage definitions have not changed what these stages produced",
     )
     parser.add_argument(
         "--offline",
@@ -1656,6 +1707,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run.require_frozen_repo()
                 check_commit_gate(run, run.stage(stage_id))
             print(f"gate-commit: open for {gated}")
+            return 0
+        if args.command == "rerecord":
+            if not args.confirm_same_config:
+                raise Refusal(
+                    "rerecord re-binds completed stages to the current configuration and graph; "
+                    "pass --confirm-same-config after checking that neither changed what they produced"
+                )
+            todo = [i for i in selected if run.state["stages"].get(i)]
+            for stage_id in todo:
+                record = run.state["stages"][stage_id]
+                if record.get("status") != "ok":
+                    raise Refusal(
+                        f"{stage_id} is {record.get('status')}, not ok: nothing is re-recorded"
+                    )
+                verify_kept(run, run.stage(stage_id), record, check_binding=False)
+            for stage_id in todo:
+                record = run.state["stages"][stage_id]
+                record["binding"] = run.stage_binding(stage_id)
+                record["rerecorded_at"] = _now()
+                print(f"{stage_id}: re-recorded")
+            run.save()
             return 0
         if args.command == "stop":
             for line in stop_own(run) or ["nothing of this run is running"]:
