@@ -337,3 +337,33 @@ def test_the_recorded_lens_operations_follow_the_plan_order_not_completion_order
     assert [b["spec_id"] for b in first["lens_generation_bindings"]] == [
         b["spec_id"] for b in second["lens_generation_bindings"]
     ]
+
+
+def test_the_stage_check_stops_a_declared_release_without_a_valid_control(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _world(short_root, monkeypatch, declared=True, control=True)
+    result = _run(world, short_root)
+    recipe = builder._recipe(world["recipe"])
+    builder.check_lens_control_stage(recipe, result)
+    # a stage result without its control
+    stripped = {key: value for key, value in result.items() if key != "lens_control"}
+    with pytest.raises(builder.VerticalBuildError, match="needs the lens control"):
+        builder.check_lens_control_stage(recipe, stripped)
+    # an edited table
+    table_path = (
+        short_root / "analytics" / "decomposition-lenses" / builder.LENS_MOVES_NAME
+    )
+    table = json.loads(table_path.read_bytes())
+    table["rows"].pop()
+    table_path.write_bytes(
+        (json.dumps(table, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
+    with pytest.raises(
+        builder.VerticalBuildError, match="differs from its control run"
+    ):
+        builder.check_lens_control_stage(recipe, result)
+    # a control with no declaration
+    plain = {key: value for key, value in recipe.items() if key != "strategy_basis"}
+    with pytest.raises(builder.VerticalBuildError, match="needs a declaration"):
+        builder.check_lens_control_stage(plain, result)

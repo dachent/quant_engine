@@ -51,9 +51,10 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "dependence": ("selected-history-normalization",),
     "plan-live-only": ("selected-history-normalization",),
     "plan-live-plus-backtest": ("selected-history-normalization",),
+    "history-control": ("sleeve-facts",),
     "ledger": ("dependence", "plan-live-only", "plan-live-plus-backtest"),
     "baseline": ("ledger",),
-    "epoch": ("ledger", "baseline", "sleeve-facts"),
+    "epoch": ("ledger", "baseline", "sleeve-facts", "history-control"),
     "hwm": ("epoch", "ledger", "baseline"),
     "capital": ("epoch", "ledger"),
     "attribution": ("ledger", "plan-live-only", "baseline"),
@@ -63,6 +64,7 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "dependence",
         "plan-live-only",
         "plan-live-plus-backtest",
+        "history-control",
         "ledger",
         "baseline",
         "epoch",
@@ -149,6 +151,13 @@ _PREPARATION_STAGE_CODE = {
     "dependence": ("attended_preparation", "current_dependence"),
     "plan-live-only": ("attended_preparation", "current_plan"),
     "plan-live-plus-backtest": ("attended_preparation", "current_plan"),
+    "history-control": (
+        "attended_preparation",
+        "target_series",
+        "layered_history_repository_dependencies",
+        "account_strategy_manifest",
+        "current_plan",
+    ),
     "ledger": (
         "attended_preparation",
         "release_builder",
@@ -220,6 +229,7 @@ _PREPARATION_STAGE_POLICY = {
     "dependence": ("dependence", "dependence_schema"),
     "plan-live-only": (),
     "plan-live-plus-backtest": (),
+    "history-control": (),
     "ledger": (),
     "baseline": ("hwm_legacy",),
     "epoch": ("flow_classification", "account_manifest_schema"),
@@ -235,6 +245,11 @@ _PREPARATION_STAGE_OUTPUTS = {
     "dependence": ("dependence_root", "selected_path"),
     "plan-live-only": ("plan_root",),
     "plan-live-plus-backtest": ("plan_root",),
+    "history-control": (
+        "control_history",
+        "control_plan_live_only",
+        "control_plan_live_plus_backtest",
+    ),
     "ledger": ("ledger_generation", "recipe_path", "stage_result"),
     "baseline": ("baseline_generation", "stage_result"),
     "epoch": (
@@ -1689,6 +1704,16 @@ def _preparation_stage_inputs(
             "dependence_selection_template": config["dependence_selection_template"],
         },
         "plan-live-only": {**common, "plan": plans["LIVE_ONLY"]},
+        "history-control": {
+            **common,
+            "history": config["retained_verified_generations"]["history"],
+            "plans": {mode: plans[mode] for mode in sorted(plans)},
+            **(
+                {"strategy_basis_declaration": config["strategy_basis_declaration"]}
+                if config.get("strategy_basis_declaration") is not None
+                else _strategy_basis_stage_input(config.get("sleeve_facts"))
+            ),
+        },
         "plan-live-plus-backtest": {
             **common,
             "plan": plans["LIVE_PLUS_BACKTEST"],
@@ -2053,6 +2078,11 @@ def _preserve_uncheckpointed_stage(root: Path, stage: str) -> None:
         "plan-live-plus-backtest": (
             root / "preparation" / "plans" / "live_plus_backtest",
         ),
+        "history-control": (
+            root / "preparation" / "history-control",
+            root / "preparation" / "plans-control",
+            root / "preparation" / "history-control-not-applicable.json",
+        ),
         "ledger": (
             root / "preparation" / "staging-recipe.json",
             root / "stage-results" / "ledger.json",
@@ -2323,13 +2353,12 @@ def _prepare_attended_inputs(
             {"dependence_root": dependence_root, "selected_path": selected_path},
         )
 
-    plan_roots: dict[str, Path] = {}
-    for mode, definition in config["plans"].items():
-        stage = "plan-live-only" if mode == "LIVE_ONLY" else "plan-live-plus-backtest"
-        plan_checkpoint = reuse(stage)
-        if plan_checkpoint is not None:
-            plan_roots[mode] = Path(str(plan_checkpoint["plan_root"])).resolve()
-            continue
+    def write_plan(
+        mode: str,
+        definition: Mapping[str, Any],
+        history_path: Path,
+        destination: Path,
+    ) -> Path:
         market = {
             key: _pin(definition[key], f"{mode} {key}")
             for key in (
@@ -2341,11 +2370,11 @@ def _prepare_attended_inputs(
             )
         }
         result = plans.write_bundle(
-            root / "preparation" / "plans" / mode.lower(),
+            destination,
             plan_path=_pin(definition["plan"], f"{mode} plan"),
             catalog_path=_pin(definition["catalog"], f"{mode} catalog"),
             financial_mvp_contract_path=contract,
-            layered_history_generation_path=history_source,
+            layered_history_generation_path=history_path,
             base_spec_path=_pin(definition["base_spec_template"], f"{mode} base spec"),
             base_source_root=Path(str(definition["base_source_template_root"])),
             market_paths=market,
@@ -2366,9 +2395,85 @@ def _prepare_attended_inputs(
             ),
             **history_authorities,
         )
-        plan_root = Path(str(result["destination"])).resolve()
+        return Path(str(result["destination"])).resolve()
+
+    plan_roots: dict[str, Path] = {}
+    for mode, definition in config["plans"].items():
+        stage = "plan-live-only" if mode == "LIVE_ONLY" else "plan-live-plus-backtest"
+        plan_checkpoint = reuse(stage)
+        if plan_checkpoint is not None:
+            plan_roots[mode] = Path(str(plan_checkpoint["plan_root"])).resolve()
+            continue
+        plan_root = write_plan(
+            mode,
+            definition,
+            history_source,
+            root / "preparation" / "plans" / mode.lower(),
+        )
         checkpoint(stage, {"plan_root": str(plan_root)}, {"plan_root": plan_root})
         plan_roots[mode] = plan_root
+
+    # The lens control (#624): the same plans over the declaration-free layered history,
+    # built here from the same ledger so the release can recompute its lens-moves table from
+    # its own roots.  Without a declaration the stage records that it does not apply.
+    control_plan_roots: dict[str, Path] = {}
+    control_checkpoint = reuse("history-control")
+    if control_checkpoint is not None:
+        control_plan_roots = {
+            str(mode): Path(str(path)).resolve()
+            for mode, path in dict(control_checkpoint.get("plan_roots", {})).items()
+        }
+    elif basis_declaration_path is None:
+        marker = root / "preparation" / "history-control-not-applicable.json"
+        _write(
+            marker,
+            {
+                "schema_version": 1,
+                "status": "NOT_APPLICABLE",
+                "reason": "no strategy basis declaration",
+            },
+        )
+        checkpoint(
+            "history-control",
+            {"plan_roots": {}},
+            {
+                "control_history": marker,
+                "control_plan_live_only": marker,
+                "control_plan_live_plus_backtest": marker,
+            },
+        )
+    else:
+        control_history = _rebuild_layered_history(
+            selection,
+            root / "preparation" / "history-control",
+            release_commit,
+            contract,
+            history_authorities,
+        )
+        control_plan_roots = {
+            mode: write_plan(
+                mode,
+                definition,
+                control_history,
+                root / "preparation" / "plans-control" / mode.lower(),
+            )
+            for mode, definition in config["plans"].items()
+        }
+        checkpoint(
+            "history-control",
+            {
+                "plan_roots": {
+                    mode: str(path) for mode, path in control_plan_roots.items()
+                }
+            },
+            {
+                "control_history": control_history,
+                "control_plan_live_only": control_plan_roots["LIVE_ONLY"],
+                "control_plan_live_plus_backtest": control_plan_roots[
+                    "LIVE_PLUS_BACKTEST"
+                ],
+            },
+        )
 
     recipe_path = root / "preparation" / "staging-recipe.json"
     ledger_checkpoint = reuse("ledger")
@@ -2617,6 +2722,10 @@ def _prepare_attended_inputs(
                 basis_facts_path if basis_declaration_path is not None else None
             ),
             implementation_sleeve_basis_path=_implementation_sleeve_basis_path(config),
+            decomposition_control_plan_bundle=control_plan_roots.get("LIVE_ONLY"),
+            hybrid_decomposition_control_plan_bundle=control_plan_roots.get(
+                "LIVE_PLUS_BACKTEST"
+            ),
         )
         checkpoint(
             "epoch",

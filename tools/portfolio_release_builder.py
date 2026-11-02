@@ -4777,6 +4777,45 @@ def verify_lens_moves(
         raise VerticalBuildError("the lens-moves table differs from its control run")
 
 
+def check_lens_control_stage(
+    recipe: Mapping[str, Any], analytics: Mapping[str, Any]
+) -> None:
+    """A declared release's analytics stage must carry a control whose table still verifies.
+
+    Run before any stage that reads the lenses (report, panel): the table is recomputed from
+    the release's own sleeve-lane and control lens generations, so an edited, stale or missing
+    table, or a stage result without its control, stops the release.
+    """
+
+    control = analytics.get("lens_control")
+    if "strategy_basis" not in recipe:
+        if control is not None:
+            raise VerticalBuildError("a lens control stage result needs a declaration")
+        return
+    if not isinstance(control, Mapping):
+        raise VerticalBuildError(
+            "a declared release needs the lens control in its analytics stage result"
+        )
+    bundles = {
+        Path(str(recipe[key]["path"])).name: Path(str(recipe[key]["path"]))
+        for key in ("decomposition_plan_bundle", "hybrid_decomposition_plan_bundle")
+        if key in recipe
+    }
+    entries = []
+    for binding in analytics.get("lens_generation_bindings") or []:
+        bundle = bundles.get(str(binding.get("plan_bundle_id")))
+        if bundle is None:
+            raise VerticalBuildError(
+                "a lens binding names a plan bundle outside the recipe"
+            )
+        entries.append({**binding, "spec_path": str(bundle / str(binding["path"]))})
+    verify_lens_moves(
+        _path(analytics.get("decomposition_lenses_root"), "decomposition lenses root"),
+        control,
+        entries,
+    )
+
+
 def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
@@ -6965,6 +7004,7 @@ def build_stage(
     elif role == "report":
         ledger = _stage_result(output_root, "ledger")
         analytics = _stage_result(output_root, "analytics")
+        check_lens_control_stage(recipe, analytics)
         epoch_identity = _epoch_manifest_panel_identity(recipe)
         result = build_report(
             stages / "baseline",
@@ -7004,6 +7044,7 @@ def build_stage(
         ledger = _stage_result(output_root, "ledger")
         attribution = _stage_result(output_root, "attribution")
         analytics = _stage_result(output_root, "analytics")
+        check_lens_control_stage(recipe, analytics)
         candidate_result_path = _stage_path(output_root, "panel-candidate")
         panel = (
             _load_panel_candidate_checkpoint(recipe_path, recipe, output_root)

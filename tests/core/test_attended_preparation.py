@@ -5099,6 +5099,7 @@ def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
 
     monkeypatch.setattr(sleeve_release, "build_release_sleeve_facts", build)
     received: dict[str, object] = {}
+    control_calls: list[dict[str, object]] = []
 
     def rebuild(
         _selection: object,
@@ -5113,11 +5114,15 @@ def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
     ) -> Path:
         order.append("history")
         calls["history"] += 1
-        received.update(
-            declaration_path=declaration_path,
-            sleeve_facts_path=sleeve_facts_path,
-            tag_map_path=tag_map_path,
-        )
+        if declaration_path is None:
+            # the lens control: the declaration-free history of the same run
+            control_calls.append({"output": output})
+        else:
+            received.update(
+                declaration_path=declaration_path,
+                sleeve_facts_path=sleeve_facts_path,
+                tag_map_path=tag_map_path,
+            )
         normalized = output / "normalized"
         normalized.mkdir(parents=True)
         (normalized / "generation.json").write_text("{}", encoding="utf-8")
@@ -5132,7 +5137,10 @@ def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
         evaluated_on="2026-09-19",
         release_commit="a" * 40,
     )
-    assert order == ["sleeve-facts", "history"]
+    assert order == ["sleeve-facts", "history", "history"]
+    assert [call["output"] for call in control_calls] == [
+        output / "preparation" / "history-control"
+    ]
     assert received["declaration_path"] == declaration.resolve()
     assert received["sleeve_facts_path"] == (
         output / "preparation" / "sleeve-facts" / "sleeve-account-facts.json"
@@ -5220,6 +5228,23 @@ def test_a_declaration_hands_its_facts_to_the_final_release_recipe(
     )
     # the pinned sleeve-basis implementation bridge rides the same recipe
     assert final["implementation_sleeve_basis_path"] == bridge.resolve()
+    # the lens control: the same plans over the declaration-free history of this run
+    assert final["decomposition_control_plan_bundle"] == (
+        output / "preparation" / "plans-control" / "live_only"
+    )
+    assert final["hybrid_decomposition_control_plan_bundle"] == (
+        output / "preparation" / "plans-control" / "live_plus_backtest"
+    )
+    control = preparation._read(
+        output / "preparation" / "checkpoints" / "history-control.json",
+        "history-control checkpoint",
+    )
+    assert set(control["outputs"]) == {
+        "control_history",
+        "control_plan_live_only",
+        "control_plan_live_plus_backtest",
+    }
+    assert "strategy_basis_declaration" in control["input_identity"]["inputs"]
 
 
 def test_an_implementation_sleeve_basis_needs_the_declaration_it_belongs_to(
@@ -5447,3 +5472,42 @@ def test_the_configured_and_the_policy_declaration_must_agree(
         preparation.AttendedPreparationError, match="declarations differ"
     ):
         preparation._strategy_basis_declaration_path(config)
+
+
+def test_without_a_declaration_the_control_stage_does_not_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_release_builder as release
+
+    spec, calls, _identity = _preparation_function_fixture(
+        tmp_path, monkeypatch, history_rebuild_required=False
+    )
+    recipes: list[dict[str, object]] = []
+
+    def create_recipe(**kwargs: object) -> None:
+        recipes.append(dict(kwargs))
+        preparation._write(Path(str(kwargs["output"])), {})
+
+    monkeypatch.setattr(release, "create_recipe", create_recipe)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    final = recipes[-1]
+    assert final["decomposition_control_plan_bundle"] is None
+    assert final["hybrid_decomposition_control_plan_bundle"] is None
+    assert not (output / "preparation" / "history-control").exists()
+    assert not (output / "preparation" / "plans-control").exists()
+    control = preparation._read(
+        output / "preparation" / "checkpoints" / "history-control.json",
+        "history-control checkpoint",
+    )
+    assert control["result"] == {"plan_roots": {}}
+    marker = preparation._read(
+        output / "preparation" / "history-control-not-applicable.json", "marker"
+    )
+    assert marker["status"] == "NOT_APPLICABLE"
