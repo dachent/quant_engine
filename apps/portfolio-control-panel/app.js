@@ -475,7 +475,13 @@
   const weightBasisSuffix = (basis, value) => (value == null ? "" : ` (${safe(weightBasisText(basis))})`);
   // N66/K8: every account and model return names its basis; "verified" is never a label of a
   // diagnostic proxy.  Codes are the implementation contract's `*_basis` fields.
-  const ACCOUNT_BASIS_LABELS = Object.freeze({ BASELINE_ACCOUNT_LIVE: "governed account-live series" });
+  // BASIS-LABELS-BEGIN
+  // A return is named for the basis the contract recorded for it: the subject word ("account",
+  // "sleeve") and the parenthesis both come from the code, never from a typed assumption.
+  const ACCOUNT_BASIS_LABELS = Object.freeze({
+    BASELINE_ACCOUNT_LIVE: "governed account-live series",
+    SLEEVE_EPOCH: "epoch series, opening NAV to end date",
+  });
   const MODEL_BASIS_LABELS = Object.freeze({
     SIGNAL_STATE_TIMES_SPXL_ADJUSTED_CLOSE_PROXY: "Signal-state × SPXL adjusted-close proxy model",
     PROVIDER_LIVE_MODEL_RETURNS: "P123 provider live model returns",
@@ -485,8 +491,13 @@
     DAILY_OPEN_SIGNAL_STATE_PROXY: "signal-state path at SPXL daily open (proxy)",
     EXACT_PROVIDER_LIVE_RETURNS: "exact provider live returns",
     EXACT_WORKBOOK_MODEL_RETURNS: "exact workbook model returns",
+    P123_BOOK_TOTAL_EQUITY_NET_OF_CASH_ADDED: "P123 model book total equity, net of cash added",
   });
   const accountBasisText = (code) => ACCOUNT_BASIS_LABELS[code] || (code ? humanStatus(code).toLowerCase() : "account basis not recorded");
+  const basisSubject = (code) => (!code || code === "BASELINE_ACCOUNT_LIVE" ? "account" : humanStatus(code).toLowerCase().split(" ")[0]);
+  const bridgeBasisText = (code) => BRIDGE_BASIS_LABELS[code] || (code ? humanStatus(code).toLowerCase() : "basis not recorded");
+  const modelBasisText = (code) => MODEL_BASIS_LABELS[code] || (code ? humanStatus(code) : "Model (basis not recorded)");
+  // BASIS-LABELS-END
   // N68: the stress scenario is labelled from the weight set it was computed on.  Only the
   // cutoff weight basis is a "current portfolio"; a policy set names its policy and date.
   const stressWeightLabel = () => {
@@ -1955,7 +1966,7 @@
         : comparisonPolicyUnavailable
         ? `<span class="cell-primary">Model comparison unavailable under the current source policy</span>${actualAccountReturns ? `<span class="cell-secondary">Actual account return ${pct(actualAccountReturns.cumulative_return)} · ${formatDateHtml(actualAccountReturns.observed_start)}–${formatDateHtml(actualAccountReturns.observed_end)} · ${integer.format(actualAccountReturns.observations)} returns</span>` : ""}<span class="cell-secondary">Account and trade evidence is retained. No model return or comparison gap is inferred.</span>`
         : verifiedMetrics
-        ? `<span class="cell-primary">${safe(MODEL_BASIS_LABELS[verifiedMetrics.model_basis] || "Model (basis not recorded)")} ${pct(verifiedMetrics.model_cumulative_return, 2)} · account ${pct(verifiedMetrics.account_cumulative_return, 2)}${verifiedMetrics.account_basis ? ` (${safe(accountBasisText(verifiedMetrics.account_basis))})` : ""} · gap ${pct(verifiedMetrics.account_minus_model_cumulative, 2)}</span><span class="cell-secondary">${formatDateHtml(verifiedMetrics.observed_start)}–${formatDateHtml(verifiedMetrics.observed_end)} · ${integer.format(verifiedMetrics.observations)} exact common dates${safe(contractDateText("reconciliation"))} · β ${decimal(verifiedMetrics.beta_to_model)} · correlation ${decimal(verifiedMetrics.daily_return_correlation)} · tracking error ${pct(verifiedMetrics.annualized_tracking_error)}</span><span class="cell-secondary">Information ratio ${decimal(verifiedMetrics.information_ratio)} · up/down capture ${pct(verifiedMetrics.up_capture)}/${pct(verifiedMetrics.down_capture)} · relative drawdown ${pct(verifiedMetrics.relative_drawdown)}</span><span class="cell-secondary">Confirmed causes: ${safe(confirmedCauses.map((item) => humanStatus(item.cause)).join(" · ") || "none")}</span>${trade ? `<span class="cell-secondary">Model events ${integer.format(trade.model_event_count)} · matched ${integer.format((trade.matched_same_date_count || 0) + (trade.matched_delayed_count || 0))} · missed ${integer.format(trade.missed_model_event_count)} · unexplained broker events ${integer.format(trade.actual_unexplained_count)}</span>` : ""}<span class="cell-secondary">${safe(humanStatus(verifiedMetrics.status))}</span>`
+        ? `<span class="cell-primary">${safe(modelBasisText(verifiedMetrics.model_basis))} ${pct(verifiedMetrics.model_cumulative_return, 2)} · ${safe(basisSubject(verifiedMetrics.account_basis))} ${pct(verifiedMetrics.account_cumulative_return, 2)}${verifiedMetrics.account_basis ? ` (${safe(accountBasisText(verifiedMetrics.account_basis))})` : ""} · gap ${pct(verifiedMetrics.account_minus_model_cumulative, 2)}</span><span class="cell-secondary">${formatDateHtml(verifiedMetrics.observed_start)}–${formatDateHtml(verifiedMetrics.observed_end)} · ${integer.format(verifiedMetrics.observations)} exact common dates${safe(contractDateText("reconciliation"))} · β ${decimal(verifiedMetrics.beta_to_model)} · correlation ${decimal(verifiedMetrics.daily_return_correlation)} · tracking error ${pct(verifiedMetrics.annualized_tracking_error)}</span><span class="cell-secondary">Information ratio ${decimal(verifiedMetrics.information_ratio)} · up/down capture ${pct(verifiedMetrics.up_capture)}/${pct(verifiedMetrics.down_capture)} · relative drawdown ${pct(verifiedMetrics.relative_drawdown)}</span><span class="cell-secondary">Confirmed causes: ${safe(confirmedCauses.map((item) => humanStatus(item.cause)).join(" · ") || "none")}</span>${trade ? `<span class="cell-secondary">Model events ${integer.format(trade.model_event_count)} · matched ${integer.format((trade.matched_same_date_count || 0) + (trade.matched_delayed_count || 0))} · missed ${integer.format(trade.missed_model_event_count)} · unexplained broker events ${integer.format(trade.actual_unexplained_count)}</span>` : ""}<span class="cell-secondary">${safe(humanStatus(verifiedMetrics.status))}</span>`
         : "";
       const causalCategoryMarkup = (causalBridge?.categories || []).map((item) => {
         const effect = Number(item.effect_pp);
@@ -1970,7 +1981,7 @@
         : causalBridge?.status === "UNAVAILABLE_POLICY_NOT_ADMITTED"
         ? `<span class="cell-secondary">Actual account return ${pct(causalBridge.account_return)} · ${formatDateHtml(returnAttribution.observed_start)}–${formatDateHtml(returnAttribution.observed_end)}. Trade P&amp;L attribution is retained; a model-gap waterfall is unavailable.</span>`
         : causalBridge
-        ? `<span class="cell-primary">Causal return waterfall · bridge model (${safe(BRIDGE_BASIS_LABELS[causalBridge.model_basis] || "basis not recorded")}) ${pct(causalBridge.model_return, 2)} · account ${pct(causalBridge.account_return, 2)}${causalBridge.account_basis ? ` (${safe(accountBasisText(causalBridge.account_basis))})` : ""} · exact gap ${decimal(causalBridge.gap_pp, 3)} pp · ${formatDateHtml(returnAttribution.observed_start)}–${formatDateHtml(returnAttribution.observed_end)}${safe(contractDateText("return_attribution"))}</span>${causalMixMarkup}${causalCategoryMarkup}<span class="cell-secondary">${safe(humanStatus(causalBridge.status))} · ${safe(humanStatus(returnAttribution.verification))}</span>`
+        ? `<span class="cell-primary">Causal return waterfall · bridge model (${safe(bridgeBasisText(causalBridge.model_basis))}) ${pct(causalBridge.model_return, 2)} · ${safe(basisSubject(causalBridge.account_basis))} ${pct(causalBridge.account_return, 2)}${causalBridge.account_basis ? ` (${safe(accountBasisText(causalBridge.account_basis))})` : ""} · exact gap ${decimal(causalBridge.gap_pp, 3)} pp · ${formatDateHtml(returnAttribution.observed_start)}–${formatDateHtml(returnAttribution.observed_end)}${safe(contractDateText("return_attribution"))}</span>${causalMixMarkup}${causalCategoryMarkup}<span class="cell-secondary">${safe(humanStatus(causalBridge.status))} · ${safe(humanStatus(returnAttribution.verification))}</span>`
         : "";
       // The retained provider/reference comparison is its own quantity.  Under a stale
       // implementation contract it is the only older gap shown, with its basis and window.
