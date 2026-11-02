@@ -219,9 +219,17 @@ echo "== build the sleeve facts the epoch manifest selects =="
 : "${IBKR_GENERATION_ROOT:?the IBKR data root holding generations/<id> is required}"
 : "${QUANTBASE_SOURCE_DIR:?the admitted Quantbase csv directory is required}"
 SLEEVE_DIR="$E/sleeve-facts"
+# Default: the repo copy. With RELEASE_INPUTS_ROOT the policy comes from the pinned
+# release-inputs root outside Git; a missing or tampered file stops the script here.
+POLICY_MANIFEST=ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json
+if [ -n "${RELEASE_INPUTS_ROOT:-}" ]; then
+  : "${RELEASE_INPUTS_MANIFEST_SHA256:?the release-inputs manifest sha256 pin is required}"
+  POLICY_MANIFEST=$("$PY" tools/release_inputs.py path --root "$RELEASE_INPUTS_ROOT" \
+    --manifest-sha256 "$RELEASE_INPUTS_MANIFEST_SHA256" --logical "$POLICY_MANIFEST")
+fi
 rm -rf "$SLEEVE_DIR"
 "$PY" tools/build_sleeve_facts_release.py \
-  --policy-manifest ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json \
+  --policy-manifest "$POLICY_MANIFEST" \
   --provider-ledger-generation "$LEDGER_GEN" \
   --ibkr-generation-root "$IBKR_GENERATION_ROOT" \
   --quantbase-source-dir "$QUANTBASE_SOURCE_DIR" \

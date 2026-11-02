@@ -48,6 +48,12 @@ from quant_engine.core.replica_gate import (
     replica_anchor,
     verify_receipt as verify_replica_receipt,
 )
+from quant_engine.core.release_inputs import (
+    MANIFEST_NAME as RELEASE_INPUTS_MANIFEST_NAME,
+    ReleaseInputs,
+    ReleaseInputsError,
+    load_release_inputs,
+)
 from quant_engine.core.gate_profile import (
     APPROVAL_KIND as GATE_PROFILE_APPROVAL_KIND,
     PROFILE_ID as GATE_PROFILE_ID,
@@ -199,6 +205,10 @@ __all__ = [
     "REPLICA_MARKER_KIND",
     "REPLICA_MARKER_NAME",
     "ReplicaGateError",
+    "RELEASE_INPUTS_MANIFEST_NAME",
+    "ReleaseInputs",
+    "ReleaseInputsError",
+    "load_release_inputs",
     "GATE_PROFILE_APPROVAL_KIND",
     "GATE_PROFILE_ID",
     "GATE_PROFILE_SCHEMA_VERSION",

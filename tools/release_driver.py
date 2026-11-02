@@ -50,7 +50,12 @@ import sys
 import time
 from typing import Any
 
-from quant_engine.core import process_alive, process_started
+from quant_engine.core import (
+    ReleaseInputsError,
+    load_release_inputs,
+    process_alive,
+    process_started,
+)
 
 GRAPH_DEFAULT = (
     Path(__file__).resolve().parents[1] / "ops" / "mvp2-release" / "release-stages.json"
@@ -58,6 +63,7 @@ GRAPH_DEFAULT = (
 SCHEMA_DEFAULT = GRAPH_DEFAULT.with_name("release-stages.schema.json")
 STATE_NAME = "release-driver-state.json"
 TIMING_NAME = "release-driver-timing.log"
+BASELINE_INPUT = "acceptance/expected-baseline.json"
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -136,6 +142,7 @@ class Run:
             raise Refusal("run config mode must be 'probe' or 'release'")
         self.repo = Path(self.values["repo_root"])
         self.cycle = Path(self.values["cycle"])
+        self._bind_release_inputs()
         self.state_path = self.cycle / STATE_NAME
         self.state: dict[str, Any] = (
             _read_json(self.state_path)
@@ -147,6 +154,39 @@ class Run:
             json.dumps([config, graph], sort_keys=True).encode()
         ).hexdigest()
         self.confirmed_release_id: str | None = None
+
+    def _bind_release_inputs(self) -> None:
+        """Take the expected baseline from a pinned release-inputs root outside Git.
+
+        Only when the run config names ``release_inputs_root``; otherwise the graph's repo
+        defaults apply unchanged. Missing, unpinned, tampered or wrong-cutoff inputs refuse.
+        """
+
+        root = self.values.get("release_inputs_root")
+        if root is None:
+            return
+        pin = self.values.get("release_inputs_manifest_sha256")
+        if pin is None:
+            raise Refusal("release_inputs_root needs release_inputs_manifest_sha256")
+        try:
+            inputs = load_release_inputs(root, pin)
+            baseline = inputs.path(BASELINE_INPUT)
+        except ReleaseInputsError as exc:
+            raise Refusal(f"release inputs: {exc}") from exc
+        requested = self.values.get("requested_as_of")
+        if requested is not None and inputs.cutoff != requested:
+            raise Refusal(
+                f"release inputs are for cutoff {inputs.cutoff}, the run's is {requested}"
+            )
+        wanted = self.values.setdefault(
+            "expected_baseline_sha256", inputs.sha256(BASELINE_INPUT)
+        )
+        if wanted != inputs.sha256(BASELINE_INPUT):
+            raise Refusal(
+                "expected_baseline_sha256 differs from the release inputs' baseline"
+            )
+        self.values["expected_baseline"] = str(baseline)
+        self.values["expected_baseline_arg"] = str(baseline)
 
     # -- templates -------------------------------------------------------------------
     def expand(self, template: str) -> str:
