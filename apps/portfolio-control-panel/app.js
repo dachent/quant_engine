@@ -751,12 +751,12 @@
       ? [
         `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`,
         "Report-derived strategy coverage and HWM qualification are withheld.",
-        "Provider, predecessor, shadow, backtest, and account-live evidence remain separate.",
+        "Provider, predecessor, shadow, backtest, and account-live evidence remain separate, except in the LIVE_PLUS_BACKTEST view, which joins version-matched backtest history before live inception to the live line and labels it by origin.",
       ]
       : [
         `Correlation-one stress is ${pct(data.advisory.correlation_one_stress)} against a ${pct(data.advisory.hwm_limit)} systematic HWM boundary (weights: ${stressWeightLabel()}).`,
         `${data.counts.twr_available} of ${data.counts.twr_rows} account-strategy segments have coverage-aware TWR.`,
-        "Provider, predecessor, shadow, backtest, and account-live evidence remain separate.",
+        "Provider, predecessor, shadow, backtest, and account-live evidence remain separate, except in the LIVE_PLUS_BACKTEST view, which joins version-matched backtest history before live inception to the live line and labels it by origin.",
       ];
     $("#construction-points").innerHTML = constructionPoints.map((point) => `<div class="thesis-point">${safe(point)}</div>`).join("");
   }
@@ -1366,7 +1366,7 @@
     const historicalGaps = Array.isArray(data.attribution_dispositions)
       ? data.attribution_dispositions.filter((row) => matchesContext(row) && row.period === "HISTORICAL" && row.disposition !== "RESERVE_NOT_APPLICABLE")
       : contextualPerformance.filter((row) => !row.strategy_name && row.strategy_mapping_disposition !== "RESERVE_NOT_APPLICABLE" && row.pool_id !== "reserve-capital");
-    // The MWR is an XIRR, annualised by construction.  Below one year the annualised rate is not the
+    // The MWR is an XIRR, annualized by construction.  Below one year the annualized rate is not the
     // result of the window, so the cell says so and shows the window-equivalent (derived here).
     const mwrBasisNote = (row) => {
       const opened = Date.parse(row.mwr_opening_date);
@@ -1395,9 +1395,9 @@
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
-      : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Epoch return (TWR, cumulative)", "numeric", "Time-weighted return over the observed interval. Cumulative, not annualised. Labelled “Accepted return” before this release."], ["Return status"], ["MWR (annualised)", "numeric", "Money-weighted return (annualised internal rate of return on the cash flows). Annualised even for windows under one year."], ["MWR status"]];
+      : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Epoch return (TWR, cumulative)", "numeric", "Time-weighted return over the observed interval. Cumulative, not annualized. Labelled “Accepted return” before this release."], ["Return status"], ["MWR (annualized)", "numeric", "Money-weighted return (annualized internal rate of return on the cash flows). Annualized even for windows under one year."], ["MWR status"]];
     const performanceFooter = !performanceLineageMismatch && mappedPerformance.length
-      ? `<tr class="total-row"><th scope="row" colspan="3">All ${mappedPerformance.length} epochs · ${new Set(mappedPerformance.map((row) => row.strategy_name)).size} strategies</th><td colspan="5" class="cell-note"><span class="cell-secondary">${data.portfolio_mwr_annualised?.status === "AVAILABLE" ? "" : "Portfolio-level MWR is not published in this snapshot. "}${data.portfolio_twr_cumulative?.status === "AVAILABLE" ? "The portfolio TWR is the governed index candidate shown on Performance &amp; HWM, with the acceptance state stated there. " : "Portfolio-level TWR is not published in this snapshot. "}Each row is one account × strategy epoch; epoch returns are not added.</span></td></tr>`
+      ? `<tr class="total-row"><th scope="row" colspan="3">All ${mappedPerformance.length} epochs in this table · ${new Set(mappedPerformance.map((row) => row.strategy_name)).size} strategies</th><td colspan="5" class="cell-note"><span class="cell-secondary">${data.portfolio_mwr_annualised?.status === "AVAILABLE" ? "" : "Portfolio-level MWR is not published in this snapshot. "}${data.portfolio_twr_cumulative?.status === "AVAILABLE" ? "The portfolio TWR is the governed index candidate shown on Performance &amp; HWM, with the acceptance state stated there. " : "Portfolio-level TWR is not published in this snapshot. "}Each row is one account × strategy epoch; epoch returns are not added.</span></td></tr>`
       : "";
     $("#performance-table").innerHTML = tableMarkup(performanceHeaders, rows, null, performanceFooter);
     $("#historical-gap-badge").textContent = `${historicalGaps.length} unresolved intervals`;
@@ -1502,7 +1502,9 @@
     const current = sum(open, "current_value");
     const net = gain == null || current == null ? null : current - gain;
     const ronc = net != null && gain != null && net !== 0n ? Number(gain) / Number(net) : null;
-    return { count: counted.length, open: open.length, of: rows.length, net, gain, current, ronc };
+    const closedOpen = open.filter((row) => row.lifecycle_state === "CLOSED");
+    const closedValue = sum(closedOpen, "current_value");
+    return { count: counted.length, open: open.length, closedOpen: closedOpen.length, closedValue, of: rows.length, net, gain, current, ronc };
   };
   const manifestFooter = (rows = []) => {
     const aggregate = data.invested_capital?.current_aggregate_usd;
@@ -1512,7 +1514,7 @@
       ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Gain: all epochs · Current: ${totals.open} with a window ending at the cutoff · Net capital = Current − Gain</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
       : "";
     const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric cell-left" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
-    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Closed epochs hand their closing value to the successor epoch, so the totals count Current only for epochs open at the cutoff and Gain for every epoch; the governed invested-capital aggregate can still differ.</span></td></tr>`;
+    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. A retired epoch with a successor hands its closing value to the successor; the totals count Current for the ${totals.open} epochs whose window ends at the cutoff (${totals.open - totals.closedOpen} active${totals.closedOpen ? ` and ${totals.closedOpen} closed holding ${money(totals.closedValue)}` : ""}) and Gain for every epoch; the governed invested-capital aggregate can still differ.</span></td></tr>`;
   };
 
   function renderAccountManifest() {
@@ -1616,9 +1618,10 @@
 
   function renderSignals() {
     const gapTested = currentStrategies().filter((row) => row.implementation_gap_status === "tested").length;
+    const gapOther = [...currentStrategies().filter((row) => row.implementation_gap_status !== "tested").reduce((map, row) => map.set(row.implementation_gap_status || "UNAVAILABLE", (map.get(row.implementation_gap_status || "UNAVAILABLE") || 0) + 1), new Map())];
     const knownCost = currentStrategies().filter((row) => String(row.cost_status).startsWith("known")).length;
     renderKpis("#signal-kpis", [
-      ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, "Provider versus account evidence"],
+      ["Implementation gap tested", `${gapTested}/${data.counts.strategies}`, gapOther.length ? `Provider versus account evidence; not tested: ${gapOther.map(([status, count]) => `${humanStatus(status).toLowerCase()} ${integer.format(count)}`).join(", ")}` : "Provider versus account evidence"],
       ["Known cost status", `${knownCost}/${data.counts.strategies}`, "Unknown stays disclosed", "warning"],
       ["Reconciliations passed", `${data.counts.reconciliation_passed}/${data.counts.reconciliation_checks}`, "Accepted report checks"],
       ["Automated action", advisoryExecutionEffect(), advisoryExecutionEffectNote(), "reserve"],
@@ -2079,7 +2082,7 @@
     const mixedBasis = typeof basisStatus === "string" && basisStatus.startsWith("DIAGNOSTIC_ONLY_MIXED");
     if (!ctx) return { basisStatus, mixedBasis, lines: [`${humanStatus(basisStatus || "UNAVAILABLE")} · window, observations, standard error and backtest share are not published for this alpha`], title: "" };
     if (ctx.status !== "AVAILABLE") return { basisStatus, mixedBasis, lines: [`Alpha context unavailable: ${humanStatus(ctx.unavailable_reason || basisStatus || "UNAVAILABLE").toLowerCase()}`], title: "" };
-    const tText = number(ctx.t_stat) != null ? `t ${decimal(ctx.t_stat, 2)} (annualised SE ${pct(ctx.se, 1)})` : `no t-statistic: ${humanStatus(ctx.t_status || "UNAVAILABLE").toLowerCase()}`;
+    const tText = number(ctx.t_stat) != null ? `t ${decimal(ctx.t_stat, 2)} (annualized SE ${pct(ctx.se, 1)})` : `no t-statistic: ${humanStatus(ctx.t_status || "UNAVAILABLE").toLowerCase()}`;
     const share = number(ctx.backtest_share) == null ? "backtest share not published" : `${pct(ctx.backtest_share, 0)} backtest`;
     const lines = [
       ctx.basis_label || humanStatus(basisStatus),
@@ -2087,7 +2090,7 @@
       tText,
     ];
     if (ctx.factor_as_of_date) lines.push(`Factors as of ${formatDate(ctx.factor_as_of_date)}${number(ctx.factor_staleness_days) == null ? "" : ` (${integer.format(ctx.factor_staleness_days)} days before the cutoff)`}`);
-    const title = `Annualised: ${humanStatus(ctx.annualisation_basis || "UNAVAILABLE").toLowerCase()} · ${humanStatus(ctx.annualisation || "UNAVAILABLE").toLowerCase()} · ${number(ctx.periods_per_year) == null ? "periods per year not published" : `${integer.format(ctx.periods_per_year)} periods per year`}`;
+    const title = `Annualized: ${humanStatus(ctx.annualisation_basis || "UNAVAILABLE").toLowerCase()} · ${humanStatus(ctx.annualisation || "UNAVAILABLE").toLowerCase()} · ${number(ctx.periods_per_year) == null ? "periods per year not published" : `${integer.format(ctx.periods_per_year)} periods per year`}`;
     return { basisStatus, mixedBasis, lines, title };
   };
   const alphaEvidenceHtml = (row, separator = "<br>") => {
@@ -2273,7 +2276,7 @@
         const betas = row.exposures.map((item) => `<span>${safe(item.factor_id)} β ${decimal(item.beta ?? item.exposure)}</span>`).join("");
         const window = row.coverage ? `${safe(row.coverage.observed_start || "—")} to ${safe(row.coverage.observed_end || "—")}` : "";
         const gate = row.alpha?.gross_status || row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · ");
-        return `<div class="model-card"><div class="model-card-head"><strong>${safe(row.series_id)}</strong>${statusText(modelState(row))}</div><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")} · ${safe(row.source_label || "—")} · ${safe(humanStatus(row.estimator || "UNAVAILABLE"))}</span><div class="model-tiles"><div><span>Aligned observations</span><b>${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</b><small>${window}</small></div><div><span>Sealed holdout R²</span><b>${pct(holdout?.predicted_r_squared)}</b></div><div><span>Accepted net alpha, annualised</span><b>${pct(row.alpha?.net_annualized)}</b><small>${alphaEvidenceHtml(row)}</small></div><div><span>Alpha gate</span>${statusText(gate)}<small>${statusText(decision)}</small></div></div><div class="model-betas">${betas || "<span>No betas</span>"}</div></div>`;
+        return `<div class="model-card"><div class="model-card-head"><strong>${safe(row.series_id)}</strong>${statusText(modelState(row))}</div><span class="cell-secondary">${safe(row.model_id || "NO ACCEPTED MODEL")} · ${safe(row.source_label || "—")} · ${safe(humanStatus(row.estimator || "UNAVAILABLE"))}</span><div class="model-tiles"><div><span>Aligned observations</span><b>${row.coverage ? integer.format(row.coverage.aligned_observations) : "—"}</b><small>${window}</small></div><div><span>Sealed holdout R²</span><b>${pct(holdout?.predicted_r_squared)}</b></div><div><span>Accepted net alpha, annualized</span><b>${pct(row.alpha?.net_annualized)}</b><small>${alphaEvidenceHtml(row)}</small></div><div><span>Alpha gate</span>${statusText(gate)}<small>${statusText(decision)}</small></div></div><div class="model-betas">${betas || "<span>No betas</span>"}</div></div>`;
       }).join("");
     }
     $("#factor-model-table").innerHTML = tableMarkup([["Strategy / model"], ["Source returns"], ["Model state"], ["Model input source"], ["Estimator"], ["Beta / loading"], ["Evidence composition"], ["Aligned / source intervals"], ["Aligned (observations)", "numeric"], ["Sealed holdout R²", "numeric"], ["Accepted net alpha", "numeric"], ["Alpha / gate state"]], rows);

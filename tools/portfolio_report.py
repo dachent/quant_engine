@@ -7780,6 +7780,14 @@ _MWR_EFFECT: Final = (
     "MWR remains unavailable outside accounts and intervals with complete admitted "
     "external-flow evidence."
 )
+_POSITIONS_EFFECT: Final = (
+    "Only accepted current position rows are reported; accounts without reported rows "
+    "remain unavailable."
+)
+_POSITIONS_EFFECT_SCOPED: Final = (
+    "Accepted position rows, current and historical snapshots, are reported; an "
+    "account with no reported row has none shown."
+)
 _MWR_EFFECT_SCOPED: Final = (
     "MWR is shown only where admitted flows are complete for that epoch; the flows "
     "fact overall remains partial."
@@ -7858,8 +7866,10 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                             **claim["disposition"],
                             **(
                                 {
-                                    "effect": claim["disposition"]["effect"].replace(
-                                        _MWR_EFFECT, _MWR_EFFECT_SCOPED
+                                    "effect": claim["disposition"]["effect"]
+                                    .replace(_MWR_EFFECT, _MWR_EFFECT_SCOPED)
+                                    .replace(
+                                        _POSITIONS_EFFECT, _POSITIONS_EFFECT_SCOPED
                                     )
                                 }
                                 if isinstance(claim["disposition"].get("effect"), str)
