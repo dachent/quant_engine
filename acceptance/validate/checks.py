@@ -4425,6 +4425,15 @@ def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
         )
 
 
+StrategyBasisRefusal = sleeve_basis.Refusal
+
+
+def parse_strategy_basis(raw: bytes) -> dict[str, str]:
+    """``{strategy id: basis}`` of a ``strategy-basis-declaration/1`` (the CLI's reader)."""
+
+    return sleeve_basis.parse_declaration(raw)
+
+
 def declared_sleeve_values(ctx: Context) -> dict[str, Decimal]:
     """The value of each strategy the declaration states on its sleeve (#624).
 

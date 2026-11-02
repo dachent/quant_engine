@@ -23,7 +23,6 @@ import sleeve_basis_synthetic as synth
 from acceptance.validate import checks, sleeve_basis
 
 REPO = Path(__file__).resolve().parents[2]
-FIXTURE = REPO / "tests" / "fixtures" / "synthetic" / "ai624_panel_before.json"
 
 
 def _derive(facts: dict[str, Any] | None = None, **kwargs: Any) -> Any:
@@ -767,13 +766,15 @@ def test_the_perimeter_and_weights_follow_from_the_moved_capital(path: Path) -> 
 
 
 def _fixture() -> dict[str, Any]:
-    loaded: dict[str, Any] = json.loads(FIXTURE.read_bytes())
-    return loaded
+    # the synthetic R2-shaped panel is built in code: the data-boundary policy admits
+    # only CSV and XLSX files under tests/fixtures/synthetic
+    return synth.panel_before()
 
 
-def test_the_committed_synthetic_panel_is_what_the_builder_makes() -> None:
-    assert _fixture() == synth.panel_before()
-    assert "SYNTHETIC" in FIXTURE.read_text(encoding="utf-8")
+def test_the_synthetic_panel_says_so_and_carries_no_real_identifier() -> None:
+    text = json.dumps(_fixture())
+    assert "SYNTHETIC" in text
+    assert "account-" not in text
 
 
 def test_the_figure_set_is_read_from_the_panel_by_path_and_value() -> None:

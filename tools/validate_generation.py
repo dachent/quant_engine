@@ -2,6 +2,7 @@
 
     python tools/validate_generation.py <generation_dir>
         [--expected expected-baseline.json] [--out findings.json]
+        [--strategy-basis strategy-basis-declaration.json --sleeve-facts facts.json]
 
 Reads the generation's published outputs (report payload, panel payload, shell and
 candidate record), runs every deterministic acceptance check in
@@ -40,8 +41,10 @@ from acceptance.validate.checks import (  # noqa: E402
     CLASSES,
     Context,
     Finding,
+    StrategyBasisRefusal,
     expected_exclusions,
     findings_document,
+    parse_strategy_basis,
     rollup,
     run_checks,
     to_date,
@@ -50,10 +53,6 @@ from acceptance.validate.generation import (  # noqa: E402
     GenerationError,
     is_placeholder,
     load_generation,
-)
-from acceptance.validate.sleeve_basis import (  # noqa: E402
-    Refusal,
-    parse_declaration,
 )
 
 EXIT_OK = 0
@@ -298,8 +297,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         strategy_basis: dict[str, str] | None = None
         if args.strategy_basis is not None:
             try:
-                strategy_basis = parse_declaration(args.strategy_basis.read_bytes())
-            except (OSError, Refusal) as exc:
+                strategy_basis = parse_strategy_basis(args.strategy_basis.read_bytes())
+            except (OSError, StrategyBasisRefusal) as exc:
                 raise ContractError(f"--strategy-basis is unusable: {exc}") from exc
         sleeve_facts: dict[str, Any] | None = None
         if args.sleeve_facts is not None:
