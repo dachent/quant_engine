@@ -16171,7 +16171,8 @@ def publish_report(
                 basis_declaration,
                 "input/strategy-basis-declaration.json",
                 "strategy-basis-declaration",
-                "1",
+                # the version the declaration schema name carries, not a literal here
+                strategy_basis.DECLARATION_SCHEMA.rsplit("/", 1)[-1],
             )
         )
     disclosure_sources = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
