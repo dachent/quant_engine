@@ -189,22 +189,24 @@ def pre_chain(
     captured, errors = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(errors):
         try:
-            code = attribution.main(
-                [
-                    "stage",
-                    "--baseline-root",
-                    str(cycle / "baseline"),
-                    "--baseline-generation-id",
-                    baseline_gid,
-                    "--dependence-source-root",
-                    str(dependence_root),
-                    "--dependence-selected-inputs",
-                    str(selected_path),
-                    "--spec",
-                    str(cycle / "attribution-spec.json"),
-                    "--output-root",
-                    str(cycle / "attribution"),
-                ]
+            code = int(
+                attribution.main(
+                    [
+                        "stage",
+                        "--baseline-root",
+                        str(cycle / "baseline"),
+                        "--baseline-generation-id",
+                        baseline_gid,
+                        "--dependence-source-root",
+                        str(dependence_root),
+                        "--dependence-selected-inputs",
+                        str(selected_path),
+                        "--spec",
+                        str(cycle / "attribution-spec.json"),
+                        "--output-root",
+                        str(cycle / "attribution"),
+                    ]
+                )
             )
         except SystemExit as exc:
             code = exc.code if isinstance(exc.code, int) else 1
