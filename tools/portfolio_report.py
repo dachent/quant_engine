@@ -105,7 +105,11 @@ from portfolio_invested_capital import (
     resolve_financial_input_authority,
     verify_governed_capital_result,
 )
-from portfolio_totals import PortfolioTotalsError, build_portfolio_totals
+from portfolio_totals import (
+    PortfolioTotalsError,
+    build_portfolio_totals,
+    perimeter_restatement,
+)
 import sleeve_disclosures
 import strategy_basis
 from portfolio_totals_verify import (
@@ -10094,6 +10098,10 @@ def build_report_data(
     # `strategy_summary`: the weights there are the current cutoff weights that
     # `_strategies` took from `current_capital`.
     allocation_history = _allocations(catalog, strategy_product_controls)
+    if basis_restatements:
+        allocation_history = strategy_basis.label_recorded_allocations(
+            allocation_history, basis_restatements
+        )
     coverage = _coverage(catalog)
     dependence_analysis: dict[str, Any] = {
         "default_evidence_mode": "LIVE_ONLY",
@@ -10776,6 +10784,13 @@ def build_report_data(
                     manifest_rows=(
                         manifest_rows_raw
                         if isinstance(manifest_rows_raw, list)
+                        else None
+                    ),
+                    perimeter_restatement_memo=(
+                        perimeter_restatement(
+                            _current_capital(catalog), verified_capital
+                        )
+                        if basis_restatements
                         else None
                     ),
                 )

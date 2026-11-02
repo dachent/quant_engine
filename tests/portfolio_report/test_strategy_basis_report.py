@@ -142,3 +142,30 @@ def test_a_malformed_declaration_is_refused(
             tag_map=_tag_map(),
             strategy_basis={"schema": "other/1", "strategies": []},
         )
+
+
+def test_the_recorded_allocation_rows_of_a_restated_strategy_are_labelled(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    off = _build(full, tmp_path, monkeypatch, tag_map=_tag_map())
+    on = _build(
+        full, tmp_path, monkeypatch, tag_map=_tag_map(), strategy_basis=DECLARATION
+    )
+    assert all("value_basis" not in row for row in off["allocation_history"])
+    mine = [r for r in on["allocation_history"] if r.get("strategy_id") == "strategy-1"]
+    assert mine and all(
+        r["value_basis"]["basis"] == "RECORDED_SNAPSHOT_PARENT_ACCOUNT"
+        and r["value_basis"]["recorded_in_account_id"] == "account-a"
+        for r in mine
+    )
+    others = [
+        r for r in on["allocation_history"] if r.get("strategy_id") != "strategy-1"
+    ]
+    assert all("value_basis" not in r for r in others)
+    # the recorded figures themselves are what the switch-off report publishes
+    by_key = {
+        (r["as_of_date"], r["allocation_id"]): r for r in off["allocation_history"]
+    }
+    for row in on["allocation_history"]:
+        before = by_key[(row["as_of_date"], row["allocation_id"])]
+        assert {k: v for k, v in row.items() if k != "value_basis"} == before

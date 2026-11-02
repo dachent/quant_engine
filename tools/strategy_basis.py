@@ -28,6 +28,7 @@ DECLARATION_SCHEMA: Final = "strategy-basis-declaration/1"
 BASIS_SLEEVE_EPOCH: Final = "SLEEVE_EPOCH"
 BASIS_PARENT_ACCOUNT: Final = "PARENT_ACCOUNT_LIVE_SERIES"
 _BASES: Final = frozenset({BASIS_SLEEVE_EPOCH})
+BASIS_RECORDED_SNAPSHOT: Final = "RECORDED_SNAPSHOT_PARENT_ACCOUNT"
 # the published sub-period return precision the report already seals trace paths with
 _RETURN_PRECISION: Final = 28
 _NAV_PRECISION: Final = 100
@@ -43,7 +44,6 @@ NOT_RESTATED: Final = (
     "dependence_and_correlation",
     "decomposition_lenses",
     "hwm_numerical_envelope",
-    "allocation_history",
 )
 
 
@@ -364,6 +364,37 @@ def restate_current_capital(
             "value": str(shifted),
         }
     return restated
+
+
+def label_recorded_allocations(
+    rows: Sequence[Mapping[str, Any]],
+    restatements: Mapping[str, SleeveRestatement],
+) -> list[dict[str, Any]]:
+    """The dated allocation snapshots, with a restated strategy's rows named for what they are.
+
+    A snapshot is the owner's record of one past date: the value it holds for a restated
+    strategy is the value that was recorded for that date, in the parent account, and it
+    is not rewritten onto the sleeve (the sleeve's value on that date is not what was
+    recorded).  The row says so, with the account it was recorded in, so that it is never
+    read next to the restated current value as the same basis.
+    """
+
+    result: list[dict[str, Any]] = []
+    for original in rows:
+        row = dict(original)
+        restatement = restatements.get(str(row.get("strategy_id")))
+        if restatement is not None:
+            row["value_basis"] = {
+                "basis": BASIS_RECORDED_SNAPSHOT,
+                "recorded_in_account_id": restatement.parent_account_id,
+                "label": (
+                    f"value as recorded in the allocation snapshot of {row.get('as_of_date')}, "
+                    f"in parent account {restatement.parent_account_id}; not restated onto "
+                    f"sleeve {restatement.account_id}"
+                ),
+            }
+        result.append(row)
+    return result
 
 
 def return_scope(

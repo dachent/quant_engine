@@ -275,3 +275,31 @@ def test_provider_evidence_scopes_move_to_the_sleeve() -> None:
     ]
     assert result[1] == evidence[1]
     assert evidence[0]["account"]["account_scopes"][0]["account_id"] == "acct"
+
+
+def test_recorded_allocations_are_labelled_not_rewritten() -> None:
+    restatement = _restatement()
+    rows = [
+        {
+            "strategy_id": SLEEVE_STRATEGY,
+            "as_of_date": "2026-08-16",
+            "current_value_usd": "57400.57",
+            "systematic_weight": "0.1285",
+        },
+        {"strategy_id": "other", "as_of_date": "2026-08-16", "current_value_usd": "1"},
+    ]
+    labelled = strategy_basis.label_recorded_allocations(
+        rows, {SLEEVE_STRATEGY: restatement}
+    )
+    first = labelled[0]
+    assert first["current_value_usd"] == "57400.57"
+    assert first["systematic_weight"] == "0.1285"
+    assert first["value_basis"]["basis"] == strategy_basis.BASIS_RECORDED_SNAPSHOT
+    assert (
+        first["value_basis"]["recorded_in_account_id"] == restatement.parent_account_id
+    )
+    assert "2026-08-16" in first["value_basis"]["label"]
+    assert restatement.account_id in first["value_basis"]["label"]
+    assert "value_basis" not in labelled[1]
+    # the input rows are not mutated
+    assert "value_basis" not in rows[0]
