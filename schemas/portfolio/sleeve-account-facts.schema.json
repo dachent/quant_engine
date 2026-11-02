@@ -31,6 +31,7 @@
         "parent_ledger_generation_id": {"type": "string", "pattern": "^[A-Za-z0-9._:@+-]{1,200}$"},
         "declared_inputs_sha256": {"$ref": "#/$defs/sha256"},
         "account_rows_sha256": {"$ref": "#/$defs/sha256"},
+        "corporate_actions_sha256": {"$ref": "#/$defs/sha256"},
         "builder_code": {
           "type": "object",
           "additionalProperties": false,
@@ -245,7 +246,7 @@
               "day": {"$ref": "#/$defs/date"},
               "security_id": {"type": "string"},
               "quantity": {"$ref": "#/$defs/decimal"},
-              "how": {"enum": ["assigned", "split", "unheld"]},
+              "how": {"enum": ["assigned", "split", "unheld", "corporate_action_fraction"]},
               "sleeves": {"type": "string"}
             }
           }
@@ -305,6 +306,76 @@
             "additionalProperties": false,
             "required": ["day", "amount"],
             "properties": {"day": {"$ref": "#/$defs/date"}, "amount": {"$ref": "#/$defs/decimal"}}
+          }
+        },
+        "corporate_action_fractions": {
+          "description": "Untagged executions that liquidated the fractional part of a corporate action's entitlement (cash in lieu). Each sleeve is charged its own fractional entitlement (held x new / old, whole shares kept) instead of a pro-rata share by held quantity, the only split that leaves every sleeve whole shares. Derived from the account's corporate-action rows and the execution; bound by bindings.corporate_actions_sha256.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["day", "security_id", "old_security_id", "action", "execution", "rule", "sleeves", "closure"],
+            "properties": {
+              "day": {"$ref": "#/$defs/date"},
+              "security_id": {"type": "string"},
+              "old_security_id": {"type": ["string", "null"]},
+              "action": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["event_date", "kind", "old_quantity", "new_quantity", "ratio"],
+                "properties": {
+                  "event_date": {"$ref": "#/$defs/date"},
+                  "kind": {"type": "string"},
+                  "old_quantity": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+                  "new_quantity": {"$ref": "#/$defs/decimal"},
+                  "ratio": {"$ref": "#/$defs/decimal"}
+                }
+              },
+              "execution": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["record_id", "timestamp", "quantity", "price", "commission"],
+                "properties": {
+                  "record_id": {"type": ["string", "null"]},
+                  "timestamp": {"type": "string"},
+                  "quantity": {"$ref": "#/$defs/decimal"},
+                  "price": {"$ref": "#/$defs/decimal"},
+                  "commission": {"$ref": "#/$defs/decimal"}
+                }
+              },
+              "rule": {"const": "OWN_FRACTIONAL_ENTITLEMENT"},
+              "sleeves": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["sleeve_id", "held_quantity", "entitlement", "whole_shares", "fraction", "charged_quantity", "cash_credited", "commission"],
+                  "properties": {
+                    "sleeve_id": {"type": "string"},
+                    "held_quantity": {"$ref": "#/$defs/decimal"},
+                    "entitlement": {"$ref": "#/$defs/decimal"},
+                    "whole_shares": {"$ref": "#/$defs/decimal"},
+                    "fraction": {"$ref": "#/$defs/decimal"},
+                    "charged_quantity": {"$ref": "#/$defs/decimal"},
+                    "cash_credited": {"$ref": "#/$defs/decimal"},
+                    "commission": {"$ref": "#/$defs/decimal"}
+                  }
+                }
+              },
+              "closure": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["entitled_total", "whole_total", "fraction_total", "sold_quantity", "account_position"],
+                "properties": {
+                  "entitled_total": {"$ref": "#/$defs/decimal"},
+                  "whole_total": {"$ref": "#/$defs/decimal"},
+                  "fraction_total": {"$ref": "#/$defs/decimal"},
+                  "sold_quantity": {"$ref": "#/$defs/decimal"},
+                  "account_position": {"$ref": "#/$defs/decimal"}
+                }
+              }
+            }
           }
         }
       }

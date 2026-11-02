@@ -158,6 +158,7 @@ class World:
             "transactions": list(rows.transactions),
             "positions": list(rows.positions),
             "change_in_nav_observations": list(rows.change_in_nav),
+            "corporate_actions": list(rows.corporate_actions),
         }
         self.ibkr_root = tmp_path / "ibkr"
         self.ibkr_dir = _generation(
