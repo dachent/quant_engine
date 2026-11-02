@@ -245,8 +245,17 @@ def _retained_p123_admit_or_declare_fixture() -> tuple[
     )
     policy["admitted_item_set_sha256"] = P123_ADMITTED_ITEM_SET_SHA256
     authority["sources"]["portfolio123-model-generation"] = source
+    # The receipt's authority_ref names the contract digest, so that digest is
+    # taken over the contract view that really contains the bound segment: the
+    # current contract with only this segment replaced by the retained one.
+    # The test is retained evidence of a past state, not of the current bytes.
+    retained_contract = copy.deepcopy(contract)
+    retained_contract["source_segments"] = [
+        source if item["source_id"] == "portfolio123-model-generation" else item
+        for item in retained_contract["source_segments"]
+    ]
     authority["contract_semantic_sha256"] = hashlib.sha256(
-        canonical_json_bytes(contract)
+        canonical_json_bytes(retained_contract)
     ).hexdigest()
 
     p123_root = ROOT.parent / "dataPortfolio123"
