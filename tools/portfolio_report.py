@@ -11311,10 +11311,9 @@ def build_report_data(
                             for strategy_id, item in sorted(basis_restatements.items())
                         )
                         + ". Return, drawdown, value, weight, the weekly series and "
-                        "the governed perimeter are the sleeve's. Measurements still on "
-                        "the parent account basis: "
-                        + strategy_basis.scope_names(strategy_basis.NOT_RESTATED)
-                        + ". Owner-approved policy constants, not restated: "
+                        "the governed perimeter are the sleeve's. "
+                        + strategy_basis.not_restated_sentence()
+                        + "Owner-approved policy constants, not restated: "
                         + strategy_basis.scope_names(strategy_basis.POLICY_CONSTANTS)
                         + "."
                     ),

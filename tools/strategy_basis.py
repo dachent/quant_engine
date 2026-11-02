@@ -493,10 +493,19 @@ def return_scope_label(restatement: SleeveRestatement) -> str:
         f"{restatement.parent_account_id}, from {restatement.opening_date} "
         f"(sleeve NAV with the sleeve's transfers external; the parent's unallocated "
         f"cash and margin and its other sleeves are excluded). MWR and governed "
-        f"capital: the same sleeve. Measurements still on the parent account "
-        f"basis: {scope_names(NOT_RESTATED)}. Owner-approved "
+        f"capital: the same sleeve. {not_restated_sentence()}Owner-approved "
         f"policy constants, not restated: "
         f"{scope_names(POLICY_CONSTANTS)}."
+    )
+
+
+def not_restated_sentence() -> str:
+    """The sentence naming what stays on the parent basis; empty when nothing does."""
+
+    if not NOT_RESTATED:
+        return ""
+    return (
+        f"Measurements still on the parent account basis: {scope_names(NOT_RESTATED)}. "
     )
 
 

@@ -2698,12 +2698,150 @@ def _current_product_baseline_projection(
     return projection
 
 
+def _strategy_basis_module() -> Any:
+    try:
+        return import_module("tools.strategy_basis")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        return import_module("strategy_basis")
+
+
+_BASIS_DECLARATION_NAMES: Final = (
+    "strategy-basis-declaration.json",
+    "input/strategy-basis-declaration.json",
+)
+
+
+def _report_strategy_basis_declaration(
+    report: Mapping[str, Any], report_path: Path
+) -> bytes | None:
+    """The declaration bytes a restated report was built from (#624), bound to its provenance.
+
+    A report that names a ``strategy-basis-declaration`` in its provenance is restated:
+    the declaration file beside it (candidate) or under its generation's ``input``
+    (published) must hash to that provenance entry, or the panel refuses.  A report that
+    carries no such entry must not look restated either (a sleeve-basis return scope or a
+    basis disclosure without its declaration refuses).
+    """
+
+    entries = [
+        item
+        for item in report.get("provenance", [])
+        if isinstance(item, Mapping)
+        and item.get("artifact") == "strategy-basis-declaration"
+    ]
+    restated_marker = report.get("strategy_basis_disclosure") is not None or any(
+        isinstance(row.get("return_scope"), Mapping)
+        and row["return_scope"].get("basis") == "SLEEVE_EPOCH"
+        for row in report.get("strategy_summary", [])
+        if isinstance(row, Mapping)
+    )
+    if not entries:
+        if restated_marker:
+            raise ControlPanelValidationError(
+                "a restated report carries no strategy basis declaration in its provenance"
+            )
+        return None
+    if len(entries) != 1:
+        raise ControlPanelValidationError("report provenance names two declarations")
+    for name in _BASIS_DECLARATION_NAMES:
+        path = report_path.parent / name
+        if path.is_file() and not path.is_symlink():
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != entries[0].get("sha256"):
+                raise ControlPanelValidationError(
+                    "strategy basis declaration differs from the report provenance"
+                )
+            return content
+    raise ControlPanelValidationError(
+        "the strategy basis declaration of a restated report is missing"
+    )
+
+
+def _panel_strategy_basis_restatements(
+    declaration: bytes,
+    account_manifest: Mapping[str, Any],
+    crosswalk: Mapping[str, Any],
+    controls: Mapping[str, Mapping[str, str]],
+    baseline_catalog: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The sleeve restatements the verified account manifest gives each declared strategy.
+
+    The same derivation the report makes from its verified epoch details: the declared
+    strategy's one open derived sleeve epoch, its own observation-trace links, and the
+    one provider the baseline's account-live rows name.  Nothing is read from the report.
+    """
+
+    basis = _strategy_basis_module()
+    try:
+        declared = basis.load_declaration(declaration)
+    except basis.StrategyBasisError as exc:
+        raise ControlPanelValidationError(str(exc)) from exc
+    included = _current_epoch_crosswalk_included_tuples(crosswalk)
+    crosswalk_accounts = {str(key[0]) for key in included}
+    product_rows = _split_manifest_epoch_rows(
+        _objects(account_manifest.get("rows"), "account_manifest.rows"),
+        included,
+        controls,
+    )[0]
+    providers: dict[str, set[str]] = {}
+    for ledger_row in _objects(
+        baseline_catalog.get("strategy_returns", []), "strategy_returns"
+    ):
+        if ledger_row.get("evidence_layer") == "ACCOUNT_LIVE":
+            providers.setdefault(str(ledger_row.get("strategy_id")), set()).add(
+                str(ledger_row.get("provider_id"))
+            )
+    result: dict[str, Any] = {}
+    for strategy_id in sorted(declared):
+        rows = [
+            row
+            for row in product_rows
+            if row.get("strategy_id") == strategy_id
+            and row.get("effective_end") is None
+            and isinstance(row.get("account_id"), str)
+            and row["account_id"] not in crosswalk_accounts
+        ]
+        if len(rows) != 1 or len(providers.get(strategy_id, ())) != 1:
+            raise ControlPanelValidationError(
+                f"restated strategy needs one open derived sleeve epoch: {strategy_id}"
+            )
+        row = rows[0]
+        parent = _derived_epoch_parent(str(row["account_id"]), crosswalk_accounts)
+        trace = row.get("observation_trace")
+        if parent is None or not isinstance(trace, Mapping):
+            raise ControlPanelValidationError(
+                f"restated strategy sleeve has no verified trace: {strategy_id}"
+            )
+        try:
+            result[strategy_id] = basis.sleeve_restatement(
+                strategy_id=strategy_id,
+                account_id=str(row["account_id"]),
+                parent_account_id=parent,
+                provider_id=next(iter(providers[strategy_id])),
+                links=_objects(trace.get("links"), "sleeve own path links"),
+                effective_start=row.get("effective_start"),
+                effective_end=row.get("effective_end"),
+            )
+        except basis.StrategyBasisError as exc:
+            raise ControlPanelValidationError(str(exc)) from exc
+    return result
+
+
 def _validate_current_product_baseline_projection(
     report: Mapping[str, Any],
     baseline_catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]],
+    restatements: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bind report HWM inputs and returns to an independent current projection."""
+    """Bind report HWM inputs and returns to an independent current projection.
+
+    A report restated onto a sleeve (#624) publishes the restated ``strategy_returns``;
+    the expectation is then the baseline's returns restated through the same function
+    from the panel's own sleeve restatements, projected the same way.  The report's
+    carried ``hwm_inputs`` stay the baseline's.
+    """
 
     calculation_cutoff_date = (
         _panel_date(
@@ -2720,7 +2858,26 @@ def _validate_current_product_baseline_projection(
         raise ControlPanelValidationError(
             "report hwm_inputs differs from the current-product baseline projection"
         )
-    if report.get("strategy_returns", []) != projection.get("strategy_returns", []):
+    expected_returns = projection.get("strategy_returns", [])
+    if restatements:
+        basis = _strategy_basis_module()
+        try:
+            restated_catalog = {
+                **baseline_catalog,
+                "strategy_returns": basis.restate_returns(
+                    _objects(
+                        baseline_catalog.get("strategy_returns", []),
+                        "strategy_returns",
+                    ),
+                    restatements,
+                ),
+            }
+        except basis.StrategyBasisError as exc:
+            raise ControlPanelValidationError(str(exc)) from exc
+        expected_returns = _current_product_baseline_projection(
+            restated_catalog, strategy_product_controls, calculation_cutoff_date
+        ).get("strategy_returns", [])
+    if report.get("strategy_returns", []) != expected_returns:
         raise ControlPanelValidationError(
             "report strategy_returns differ from the current-product baseline projection"
         )
@@ -10004,6 +10161,7 @@ def _panel_data(
     epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
     hwm_basis: tuple[Mapping[str, Any], Mapping[str, date], frozenset[str]]
     | None = None,
+    strategy_basis_declaration: bytes | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -10016,8 +10174,25 @@ def _panel_data(
     strategy_product_controls = _financial_mvp_product_controls(
         financial_contract_snapshot
     )
+    basis_restatements: dict[str, Any] = {}
+    if strategy_basis_declaration is not None:
+        if (
+            account_manifest is None
+            or account_manifest_identity is None
+            or account_manifest_identity.get("current_epoch_crosswalk") is None
+        ):
+            raise ControlPanelValidationError(
+                "a restated report needs the verified account manifest and its crosswalk"
+            )
+        basis_restatements = _panel_strategy_basis_restatements(
+            strategy_basis_declaration,
+            account_manifest,
+            account_manifest_identity["current_epoch_crosswalk"],
+            strategy_product_controls,
+            baseline_catalog,
+        )
     current_product_catalog = _validate_current_product_baseline_projection(
-        report, baseline_catalog, strategy_product_controls
+        report, baseline_catalog, strategy_product_controls, basis_restatements
     )
     _validate_current_product_boundary(report, strategy_product_controls)
     strategies = _current_product_rows(report_strategies, strategy_product_controls)
@@ -10731,6 +10906,15 @@ def _panel_data(
     # a strategy restated onto its sleeve (#624): the catalog with its envelope periods and
     # return references on the sleeve, derived by the caller from the verified account
     # manifest (the same derivation the report makes); without it, the baseline catalog
+    if hwm_basis is None and basis_restatements:
+        derived_basis = _strategy_basis_module().restate_hwm_catalog(
+            current_product_catalog, basis_restatements
+        )
+        hwm_basis = (
+            derived_basis.catalog,
+            derived_basis.membership_starts,
+            derived_basis.endpoint_exempt,
+        )
     hwm_catalog, hwm_starts, hwm_exempt = (
         hwm_basis
         if hwm_basis is not None
@@ -12718,6 +12902,9 @@ def _rendered_files(
             verified_strategy_history["epoch_hpr_receipts"]
             if verified_strategy_history is not None
             else None
+        ),
+        strategy_basis_declaration=_report_strategy_basis_declaration(
+            report, report_path
         ),
     )
     if invested_capital is not None:
