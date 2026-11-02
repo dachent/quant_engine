@@ -245,3 +245,139 @@ def test_an_owner_declared_fixed_amount_is_an_admitted_basis(tmp_path: Path) -> 
         baseline.BaselineValidationError, match="basis is not recognised"
     ):
         _attach(tmp_path, [bad], costs)
+
+
+def _settled_rows() -> list[dict[str, Any]]:
+    rates = docs.volatis_rates("NON_QUALIFIED_FLAT")
+    rates["derivation"] = docs.volatis_derivation(rates)
+    return [
+        docs.evidence_row("Volatis", rates),
+        docs.evidence_row("Robuxio", docs.robuxio_rates()),
+    ]
+
+
+def _attach_settled(tmp_path: Path, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    costs = _attach(tmp_path, rows, _costs("documented_rate_percent"))
+    return next(row for row in costs if row["strategy_id"] == "volatis")
+
+
+def test_a_closed_derivation_settles_the_non_qualified_rate(tmp_path: Path) -> None:
+    volatis = _attach_settled(tmp_path, _settled_rows())
+    rates = volatis["fee_rates"]
+    derivation = rates["derivation"]
+
+    assert volatis["annual_external_cost_usd"] is None
+    assert volatis["cost_status"] == "documented_rate_percent"
+    assert rates["tier"] == "NON_QUALIFIED_FLAT"
+    selected = next(row for row in rates["tier_table"] if row["tier"] == rates["tier"])
+    assert selected["management_rate"] == "0.035"
+    assert derivation["periods_per_year"] == 12
+    assert derivation["periodic_rate"] == "0.0029167"
+    assert derivation["performance_fee"] == "NONE_BILLED"
+    assert derivation["hwm"] == "NONE_BILLED"
+    assert derivation["rows"] == 6
+    assert derivation["first_date"] == "2025-01-01"
+    assert derivation["last_date"] == "2025-06-01"
+    assert derivation["max_abs_residual_usd"] == "0"
+    # The published form is bound to its rows by hash but does not carry them.
+    assert "closure" not in derivation
+    assert len(derivation["closure_sha256"]) == 64
+
+
+def test_a_row_without_a_derivation_is_carried_as_before(tmp_path: Path) -> None:
+    costs = _attach(
+        tmp_path, _rows("NON_QUALIFIED_FLAT"), _costs("documented_rate_percent")
+    )
+    volatis = next(row for row in costs if row["strategy_id"] == "volatis")
+
+    assert "derivation" not in volatis["fee_rates"]
+
+
+def test_a_posted_fee_that_does_not_close_is_refused(tmp_path: Path) -> None:
+    rows = _settled_rows()
+    derivation = rows[0]["rates"]["derivation"]
+    derivation["closure"][3]["posted_fee"] = "27.60"
+    docs.rehash(derivation)
+
+    with pytest.raises(baseline.BaselineValidationError, match="does not close"):
+        _attach_settled(tmp_path, rows)
+
+
+def test_a_one_cent_rounding_difference_closes_and_two_cents_do_not(
+    tmp_path: Path,
+) -> None:
+    rows = _settled_rows()
+    derivation = rows[0]["rates"]["derivation"]
+    # 9383.39 x 0.035 / 12 = 27.3669..., 27.37 to the cent; 27.36 is one cent away.
+    derivation["closure"][2]["posted_fee"] = "27.36"
+    docs.rehash(derivation)
+    settled = _attach_settled(tmp_path, rows)
+    assert settled["fee_rates"]["derivation"]["max_abs_residual_usd"] == "0.01"
+
+    derivation["closure"][2]["posted_fee"] = "27.35"
+    docs.rehash(derivation)
+    with pytest.raises(baseline.BaselineValidationError, match="does not close"):
+        _attach_settled(tmp_path, rows)
+
+
+def test_the_closure_rows_are_bound_to_their_hash(tmp_path: Path) -> None:
+    rows = _settled_rows()
+    rows[0]["rates"]["derivation"]["closure"][0]["fund_value"] = "10201.31"
+
+    with pytest.raises(baseline.BaselineValidationError, match="closure_sha256"):
+        _attach_settled(tmp_path, rows)
+
+
+def test_the_proved_rate_is_the_tier_rows_own_not_the_records(tmp_path: Path) -> None:
+    # The same closure rows no longer close when the documented rate is 4%: the rate
+    # is read from the tier table, never from the derivation record.
+    rows = _settled_rows()
+    table = rows[0]["rates"]["tier_table"]
+    flat = next(row for row in table if row["tier"] == "NON_QUALIFIED_FLAT")
+    flat["management_rate"] = "0.04"
+
+    with pytest.raises(baseline.BaselineValidationError, match="does not close"):
+        _attach_settled(tmp_path, rows)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda d: d.update(tier="QUALIFIED_0_1M"),
+        lambda d: d.update(performance_fee="20_PERCENT"),
+        lambda d: d.update(hwm="OVER_HIGH_WATER_MARK"),
+        lambda d: d.update(tolerance_usd="0.02"),
+        lambda d: d.update(periods_per_year=7),
+        lambda d: d.update(kind="OWNER_STATEMENT"),
+        lambda d: d.update(evidence=[]),
+        lambda d: d.update(closure=[], closure_sha256="0" * 64),
+    ],
+)
+def test_a_derivation_that_does_not_settle_the_selected_tier_is_refused(
+    tmp_path: Path, edit: Any
+) -> None:
+    rows = _settled_rows()
+    edit(rows[0]["rates"]["derivation"])
+
+    with pytest.raises(baseline.BaselineValidationError):
+        _attach_settled(tmp_path, rows)
+
+
+def test_a_derivation_cannot_claim_no_performance_fee_where_one_is_documented(
+    tmp_path: Path,
+) -> None:
+    rates = docs.volatis_rates("QUALIFIED_0_1M")
+    rates["derivation"] = docs.volatis_derivation(rates, "QUALIFIED_0_1M")
+    rows = [docs.evidence_row("Volatis", rates)]
+
+    with pytest.raises(baseline.BaselineValidationError, match="documents one"):
+        _attach(tmp_path, rows, _costs("documented_rate_percent")[:1])
+
+
+def test_an_unsettled_tier_cannot_carry_a_derivation(tmp_path: Path) -> None:
+    rates = docs.volatis_rates("TIER_UNSETTLED")
+    rates["derivation"] = docs.volatis_derivation(rates, "NON_QUALIFIED_FLAT")
+    rows = [docs.evidence_row("Volatis", rates)]
+
+    with pytest.raises(baseline.BaselineValidationError, match="settle the selected"):
+        _attach(tmp_path, rows, _costs("documented_rate_tier_unsettled")[:1])

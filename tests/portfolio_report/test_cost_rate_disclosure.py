@@ -145,3 +145,33 @@ def test_the_evidence_keys_stay_equal_across_producers() -> None:
     assert tuple(report.COST_EVIDENCE_KEYS) == tuple(attribution.COST_EVIDENCE_KEYS)
     assert tuple(report.COST_RATE_KEYS) == tuple(attribution.COST_RATE_KEYS)
     assert report.COST_RATE_KEYS == ("fee_rates",)
+
+
+def test_a_settled_non_qualified_sentence_states_the_derived_billing() -> None:
+    baseline = _load(
+        "portfolio_baseline_cost_rate_disclosure", ROOT / "tools/portfolio_baseline.py"
+    )
+    rates = docs.volatis_rates("NON_QUALIFIED_FLAT")
+    rates["derivation"] = docs.volatis_derivation(rates)
+    carried = baseline._fee_rates(rates, "rates")
+    sentence = report.cost_rate_disclosure(_row(carried))
+
+    assert sentence == (
+        "Documented rates, Non-qualified flat (non-qualified clients): "
+        "management fee 3.5% a year, billed monthly at 0.29167% of fund value; "
+        "performance fee none billed, no high-water mark billed; "
+        "tier settled by 6 posted fees (2025-01-01 to 2025-06-01) each within "
+        "$0.01 of that rate over fund value; "
+        "fee placement: not stated in the documentation; "
+        "sources: Strategies/Fund/Fact Sheet.pdf p.2, "
+        "quantbase/account_activity.csv p.n/a; no dollar cost is published."
+    )
+
+
+def test_a_row_without_a_derivation_keeps_the_not_stated_wording() -> None:
+    sentence = report.cost_rate_disclosure(
+        _row(docs.volatis_rates("NON_QUALIFIED_FLAT"))
+    )
+
+    assert "billed monthly" not in sentence
+    assert "none billed" not in sentence

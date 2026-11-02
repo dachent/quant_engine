@@ -87,6 +87,19 @@ carried as `fee_rates`.  The fixed-amount `declared.basis` additionally admits
 `OWNER_DECLARED` (an amount the owner stated in his own words; its source cites that
 message).
 
+`rates.derivation` (optional) settles the selected tier from posted fee journals instead of
+leaving it to the documentation alone: `kind` `POSTED_FEE_CLOSURE`, `tier` (must be the
+selected tier), `periods_per_year`, `tolerance_usd` (at most 0.01), `performance_fee` and
+`hwm` (each `NONE_BILLED`, refused for a tier whose documentation states a performance
+rate), `evidence[]` (sources, same shape as a rate source) and `closure[]`, one
+`{date, fund_value, posted_fee}` per journal, bound by `closure_sha256` (SHA-256 of the
+canonical JSON of `closure`).  Every row is recomputed as the tier row's own management
+rate over `periods_per_year` times `fund_value`, rounded to the cent, and must agree with
+`posted_fee` to within the tolerance; one row that does not close refuses the record, and
+the rate is never read from the record.  The carried form keeps the row count, first and
+last date, worst residual, hash and `periodic_rate` (annual over periods, 7 places) but not
+the rows; the rows are input held in the governed evidence root, not in git.
+
 A position row whose provider captured it after the New York close of its as-of
 date but stores it under the later native UTC date (Schwab's holdings capture)
 carries `as_of_date` = the New York financial day, `capture_date` = the native
