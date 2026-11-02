@@ -9,7 +9,10 @@ Classes (plan 4.5B):
 
 ``BLOCKER_INVARIANT``   mathematical or logical contradiction
 ``BLOCKER_AUTHORITY``   wrong, unadmitted or stale identity, status or source
-``BLOCKER_REGRESSION``  a fixed-baseline expected value regressed
+``BLOCKER_REGRESSION``  a fixed-baseline expected value regressed; also a payload block (or
+                       the generation's physical size) over its committed budget
+                       (``lint.payload_size`` against ``payload_budget.json``, #540): the
+                       committed budget is the fixed baseline, and an overrun blocks
 ``NOT_READY``           required data unavailable and honestly labelled
 ``WARNING``             plausibility lint; never blocks a run (plan 4.5E)
 
@@ -9367,6 +9370,145 @@ def check_lint_display_tokens(ctx: Context) -> Iterator[Finding]:
         )
 
 
+PAYLOAD_BUDGET_RELATIVE = (
+    Path("apps") / "portfolio-control-panel" / "payload_budget.json"
+)
+
+
+def _payload_budget(ctx: Context) -> tuple[dict[str, Any] | None, str]:
+    """The committed payload budget: the run's repo root first, else the validator's own."""
+
+    own = Path(__file__).resolve().parents[2]
+    roots = ([ctx.repo_root] if ctx.repo_root is not None else []) + [own]
+    for root in roots:
+        path = root / PAYLOAD_BUDGET_RELATIVE
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_bytes())
+            except (OSError, ValueError) as exc:
+                return None, f"{path} is unreadable: {exc}"
+            if (
+                isinstance(loaded, dict)
+                and isinstance(loaded.get("blocks"), dict)
+                and isinstance(loaded.get("physical"), dict)
+                and isinstance(loaded.get("unlisted_block_max_bytes"), int)
+                and isinstance(loaded.get("other_blocks_max_bytes"), int)
+            ):
+                return loaded, str(path)
+            return None, f"{path} lacks the budget members"
+    return None, "payload_budget.json was not found"
+
+
+def payload_block_bytes(panel: Mapping[str, Any]) -> dict[str, int]:
+    """Serialized bytes of each top-level panel block (canonical JSON, the published form)."""
+
+    return {
+        str(key): len(
+            json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        )
+        for key, value in panel.items()
+    }
+
+
+def payload_budget_findings(
+    blocks: Mapping[str, int],
+    physical: Mapping[str, int],
+    budget: Mapping[str, Any],
+) -> list[tuple[str, int, int, str]]:
+    """``(entity, measured, limit, text)`` for every figure over its committed budget."""
+
+    over: list[tuple[str, int, int, str]] = []
+    listed = budget["blocks"]
+    other = 0
+    for name, size in sorted(blocks.items()):
+        if name in listed:
+            if size > listed[name]:
+                over.append(
+                    (name, size, listed[name], f"block {name} is over its budget")
+                )
+        elif size > budget["unlisted_block_max_bytes"]:
+            over.append(
+                (
+                    name,
+                    size,
+                    budget["unlisted_block_max_bytes"],
+                    f"block {name} has no budget and exceeds the unlisted maximum",
+                )
+            )
+        else:
+            other += size
+    if other > budget["other_blocks_max_bytes"]:
+        over.append(
+            (
+                "unlisted small blocks",
+                other,
+                budget["other_blocks_max_bytes"],
+                "the unlisted small blocks together are over their budget",
+            )
+        )
+    for key, limit in sorted(budget["physical"].items()):
+        measured = physical.get(key)
+        if measured is not None and measured > limit:
+            over.append((key, measured, limit, f"{key} is over its budget"))
+    return over
+
+
+def _physical_sizes(ctx: Context) -> dict[str, int]:
+    scan = ctx.gen.scan
+    files = {rel: size for rel, (size, _) in scan.files.items()}
+    sizes: dict[str, int] = {}
+    if scan.files:
+        sizes["total_bytes"] = sum(files.values())
+    for key, rel in (
+        ("index_html_bytes", "index.html"),
+        ("dashboard_data_json_bytes", "data/dashboard_data.json"),
+        ("dashboard_data_js_bytes", "data/dashboard_data.js"),
+    ):
+        if rel in files:
+            sizes[key] = files[rel]
+    return sizes
+
+
+def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
+    """#540: the payload against its committed budget; every overrun blocks (regression)."""
+
+    budget, source = _payload_budget(ctx)
+    if budget is None:
+        yield _finding(
+            "lint.payload_size",
+            BLOCKER_AUTHORITY,
+            "payload_budget",
+            source,
+            "the committed payload budget",
+            "(validator)",
+            str(PAYLOAD_BUDGET_RELATIVE).replace("\\", "/"),
+            ("F5",),
+            "the committed payload budget cannot be read; the payload cannot be judged",
+        )
+        return
+    cached = ctx._cache.get("payload_block_bytes")
+    if not isinstance(cached, dict):
+        cached = payload_block_bytes(ctx.panel)
+        ctx._cache["payload_block_bytes"] = cached
+    for entity, measured, limit, text in payload_budget_findings(
+        cached, _physical_sizes(ctx), budget
+    ):
+        yield _finding(
+            "lint.payload_size",
+            BLOCKER_REGRESSION,
+            entity,
+            measured,
+            limit,
+            PANEL,
+            f"$.{entity}" if entity in cached else "(payload size)",
+            ("F5",),
+            f"{text}: {measured} B > {limit} B (payload_budget.json); raising a budget "
+            "is an explicit edit in the change that grows the block",
+        )
+
+
 def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     """F4/F5: payload size and duplicate copies (never a G1 prerequisite)."""
 
@@ -9405,6 +9547,7 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
         if window is not None and isinstance(weeks, list) and isinstance(series, list)
         else payload_cells
     )
+    yield from _payload_budget_findings(ctx)
     if large or duplicates:
         yield _finding(
             "lint.payload_size",
