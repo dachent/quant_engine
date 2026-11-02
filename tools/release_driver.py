@@ -67,6 +67,8 @@ TIMING_NAME = "release-driver-timing.log"
 BASELINE_INPUT = "acceptance/expected-baseline.json"
 COMMIT_SCHEME = "git-commit-v1"
 TREE_SCHEME = "git-tree-v2"
+FULL_CEREMONY = "full"
+REPLICA_ONLY = "replica-only"
 ATTESTATION_FILENAME = "merge-attestation.json"
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -145,6 +147,11 @@ class Run:
         if self.values["identity_scheme"] not in (COMMIT_SCHEME, TREE_SCHEME):
             raise Refusal(
                 f"run config identity_scheme must be {COMMIT_SCHEME} or {TREE_SCHEME}"
+            )
+        self.values.setdefault("ceremony", FULL_CEREMONY)
+        if self.values["ceremony"] not in (FULL_CEREMONY, REPLICA_ONLY):
+            raise Refusal(
+                f"run config ceremony must be {FULL_CEREMONY} or {REPLICA_ONLY}"
             )
         if self.values["identity_scheme"] == TREE_SCHEME and not all(
             key in self.values
@@ -268,6 +275,15 @@ class Run:
             if root_id not in roots:
                 raise Refusal(f"{name}: spec {file} has no root {root_id!r}")
             value = str(roots[root_id])
+        elif "relative_to" in rule:
+            path_template, base_template = rule["relative_to"]
+            path, base = (
+                Path(self.expand(path_template)),
+                Path(self.expand(base_template)),
+            )
+            if not _inside(path, base):
+                raise Refusal(f"{name}: {path} is not inside {base}")
+            value = path.resolve().relative_to(base.resolve()).as_posix()
         elif "spec_node_field" in rule:
             file_template, root_id, key = rule["spec_node_field"]
             file = Path(self.expand(file_template))
@@ -419,9 +435,19 @@ def check_scheme(run: Run, stage: Mapping[str, Any]) -> None:
     only = stage.get("only_scheme")
     if only is not None and only != run.scheme:
         raise Refusal(f"{stage['id']} runs only under {only}, this run is {run.scheme}")
-    if run.scheme != TREE_SCHEME or not stage.get("needs_attestation"):
+    ceremony = stage.get("only_ceremony")
+    if ceremony is not None and ceremony != run.values["ceremony"]:
+        raise Refusal(
+            f"{stage['id']} runs only in a {ceremony} ceremony, this run is {run.values['ceremony']}"
+        )
+    needs = stage.get("needs_attestation")
+    if run.scheme != TREE_SCHEME or not needs:
         return
-    path = Path(run.values["coordination_root"]) / ATTESTATION_FILENAME
+    # True: the run's coordination root; a template: the root that stage reads (the replica's)
+    root = (
+        run.expand(needs) if isinstance(needs, str) else run.values["coordination_root"]
+    )
+    path = Path(root) / ATTESTATION_FILENAME
     if not path.is_file():
         raise Refusal(
             f"{stage['id']}: merge attestation is mandatory for a tree-bound release ({path} is missing)"
@@ -690,7 +716,7 @@ def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None
         if required in seen:
             continue
         seen.add(required)
-        if run.stage(required).get("only_scheme", run.scheme) != run.scheme:
+        if not _applies(run, required):
             continue
         record = state.get(required)
         if not record or record.get("status") != "ok":
@@ -1225,8 +1251,14 @@ def load_run(
     return run
 
 
-def _in_scheme(run: Run, stage_id: str) -> bool:
-    return bool(run.stage(stage_id).get("only_scheme", run.scheme) == run.scheme)
+def _applies(run: Run, stage_id: str) -> bool:
+    """False for a stage that exists only for another identity scheme or another ceremony."""
+
+    stage = run.stage(stage_id)
+    return bool(
+        stage.get("only_scheme", run.scheme) == run.scheme
+        and stage.get("only_ceremony", run.values["ceremony"]) == run.values["ceremony"]
+    )
 
 
 def _select(run: Run, only: str | None, through: str | None) -> list[str]:
@@ -1245,9 +1277,9 @@ def _select(run: Run, only: str | None, through: str | None) -> list[str]:
         return [
             i
             for i in ids[: ids.index(through) + 1]
-            if (i in needed or not run.stage(i).get("explicit")) and _in_scheme(run, i)
+            if (i in needed or not run.stage(i).get("explicit")) and _applies(run, i)
         ]
-    return [i for i in ids if not run.stage(i).get("explicit") and _in_scheme(run, i)]
+    return [i for i in ids if not run.stage(i).get("explicit") and _applies(run, i)]
 
 
 def check_run(run: Run, selected: Sequence[str]) -> list[str]:

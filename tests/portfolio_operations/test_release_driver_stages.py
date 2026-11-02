@@ -747,7 +747,9 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
     assert [
         i
         for i in ids
-        if not _stage(i).get("explicit") and "only_scheme" not in _stage(i)
+        if not _stage(i).get("explicit")
+        and "only_scheme" not in _stage(i)
+        and _stage(i).get("only_ceremony", "full") == "full"
     ] == [
         "selected-inputs",
         *pass26,
@@ -1163,3 +1165,108 @@ def test_pack_exclusions_apply_to_nested_files(tmp_path: Path) -> None:
     (cycle / "production" / "plan.json.prev-1").write_text("old", encoding="utf-8")
     chosen = pack.select(cycle, ["production"], ["production/state/*", "*.prev-*"])
     assert [p.name for p in chosen] == ["plan.json"]
+
+
+# -- replica-only ceremony: no write to the real roots -----------------------------------
+
+
+def _ceremony_plan(capsys: pytest.CaptureFixture[str], **extra: Any) -> list[str]:
+    config = json.loads((FIXTURES / "pass26-run.json").read_text(encoding="utf-8"))
+    config.update(
+        ceremony="replica-only",
+        identity_scheme="git-tree-v2",
+        candidate_commit="c" * 40,
+        base_ref="origin/main",
+        **extra,
+    )
+    path = FIXTURES / "replica-only.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    ids = json.loads((FIXTURES / "pass26-ids.json").read_text(encoding="utf-8"))
+    ids["coordination_rel"] = "dataPortfolio/releases-refresh-2026"
+    ids_path = FIXTURES / "replica-only-ids.json"
+    ids_path.write_text(json.dumps(ids), encoding="utf-8")
+    capsys.readouterr()
+    code = driver.main(
+        [
+            "plan",
+            "--offline",
+            "--config",
+            str(path),
+            "--ids",
+            str(ids_path),
+            "--through",
+            "pack-probe",
+        ]
+    )
+    assert code == 0
+    return capsys.readouterr().out.splitlines()
+
+
+def test_a_replica_only_run_plans_attest_and_ceremony_on_the_replica_and_never_the_real_lane(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    lines = _ceremony_plan(
+        capsys,
+        coordination_root="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio/releases-refresh-2026",
+    )
+    stages = [line.split(":")[0] for line in lines]
+    assert "ceremony" in stages and "replica-attest" in stages
+    assert "lanes" not in stages and "attest" not in stages
+    assert (
+        stages.index("replica-copy")
+        < stages.index("replica-attest")
+        < stages.index("replica-spec")
+        < stages.index("ceremony")
+    )
+    attest = next(line for line in lines if line.startswith("replica-attest:"))
+    # the attestation goes to the replica's coordination root, derived from the layout of the real one
+    assert attest.endswith(
+        "--coordination-root C:/Dev/scratch/qe-p26b/replica/_quant_engine/dataPortfolio/releases-refresh-2026"
+    )
+    ceremony = next(line for line in lines if line.startswith("ceremony:"))
+    assert "--out-dir C:/Dev/scratch/qe-p26b/c/laneout/replica" in ceremony
+    assert "--real-panel-dir" not in ceremony
+
+
+def test_a_replica_only_run_refuses_the_real_root_stages(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    stage = {"id": "real", "only_ceremony": "full", **CHAIN[0]}
+    graph = _graph(world, [stage])
+    assert _drive(world, graph) == 0
+    _config(world, ceremony="replica-only")
+    assert _drive(world, graph, "--only", "real", "--replace") == 2
+    assert (
+        driver.main(["plan", "--config", str(world["config"]), "--graph", str(graph)])
+        == 0
+    )
+    _config(world, ceremony="other")
+    assert _drive(world, graph, "--only", "real", "--replace") == 2
+
+
+def test_the_ceremony_reads_the_attestation_at_the_replica_root_not_the_real_one(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    v2 = _v2_world(world)
+    replica_root = world["tmp"] / "replica-coordination"
+    needing = {**v2["needs"], "needs_attestation": str(replica_root)}
+    graph = _graph(world, [needing])
+    # an attestation at the real coordination root does not satisfy a stage that reads the replica's
+    v2["coordination"].mkdir()
+    attestation = json.dumps({"tree": v2["tree"], "merged_commit": v2["commit"]})
+    (v2["coordination"] / "merge-attestation.json").write_text(
+        attestation, encoding="utf-8"
+    )
+    assert _drive(world, graph) == 2
+    replica_root.mkdir()
+    (replica_root / "merge-attestation.json").write_text(attestation, encoding="utf-8")
+    assert _drive(world, graph) == 0
+
+
+def test_the_shipped_replica_only_stages_are_data_declared() -> None:
+    ceremony, attest = _stage("ceremony"), _stage("replica-attest")
+    assert ceremony["only_ceremony"] == attest["only_ceremony"] == "replica-only"
+    assert ceremony["needs_attestation"] == "{replica_coordination_root}"
+    assert "--out-dir" in ceremony["argv"] and "{lane_replica}" in ceremony["argv"]
+    for stage_id in ("lanes", "attest", "commit", "pack-evidence"):
+        assert _stage(stage_id)["only_ceremony"] == "full"
