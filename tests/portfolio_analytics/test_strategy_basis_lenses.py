@@ -42,6 +42,7 @@ from test_strategy_basis_history import (  # noqa: F401
     _build,
     _facts,
     _restated,
+    plain_world,
     world,
 )
 
@@ -152,7 +153,7 @@ def test_the_plan_selects_the_sleeve_rows_and_carries_the_account_lane(
     assert {row["evidence_layer"] for row in lane["rows"]} == {"ACCOUNT_LIVE"}
     assert lane["basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
     assert lane["label"] == (
-        "whole account synthetic-account-01 incl. the unallocated cash bucket"
+        "whole account synthetic-account-01 incl. the unallocated margin bucket"
     )
     assert lane["account_id"] == "synthetic-account-01"
     assert "account" in lane["label"] and "synthetic-account-01" in lane["label"]

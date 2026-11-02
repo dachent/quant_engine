@@ -81,6 +81,21 @@ def _facts(*, open_sleeve: bool = True) -> dict[str, Any]:
             "parent_ledger_generation_id": BOUND_GENERATION,
             "tag_map_sha256": _tag_map_digest(_tag_map()),
         },
+        # the unallocated cash and margin bucket the lens lane label reads (branch L)
+        "perimeter_account": {
+            "account_id": PARENT + "-unallocated",
+            "opening_nav": "0",
+            "days": [
+                {
+                    "day": day,
+                    "nav_end": "-20",
+                    "external_flow": "0",
+                    "internal_flow_net": "0",
+                    "residual_pnl": "0",
+                }
+                for day, _nav in days
+            ],
+        },
         "sleeves": [
             {
                 "sleeve_id": "s2",
