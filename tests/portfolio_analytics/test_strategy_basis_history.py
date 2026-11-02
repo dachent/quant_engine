@@ -215,15 +215,18 @@ def plain_world(
         inputs.pop(key)
     tag_map = tmp_path / "nested-strategy-tag-map.json"
     tag_map.write_bytes(_tag_map())
-    return holder | {
-        "fixture": fixture,
-        "inputs": inputs,
-        "receipt": receipt,
-        "declaration": declaration,
-        "facts": facts,
-        "tag_map": tag_map,
-        "tmp": tmp_path,
-    }
+    holder.update(
+        {
+            "fixture": fixture,
+            "inputs": inputs,
+            "receipt": receipt,
+            "declaration": declaration,
+            "facts": facts,
+            "tag_map": tag_map,
+            "tmp": tmp_path,
+        }
+    )
+    return holder
 
 
 @pytest.fixture
