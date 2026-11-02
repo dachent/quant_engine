@@ -199,7 +199,8 @@ def html_literals(file: str, source: str) -> list[Literal]:
         flags=re.S | re.I,
     )
     out: list[Literal] = []
-    for match in re.finditer(r"[^<>]+", body):
+    text_only = re.sub(r"<[^>]*>", lambda m: "\x00" * len(m.group(0)), body)
+    for match in re.finditer(r"[^\x00]+", text_only):
         chunk = match.group(0)
         if len(_WORDS.findall(chunk)) >= 5:
             out.append(Literal(file, chunk, tuple(range(match.start(), match.end()))))
@@ -251,14 +252,18 @@ def py_literals(file: str, source: str) -> list[Literal]:
             text = node.value
         elif isinstance(node, ast.JoinedStr):
             text = "".join(
-                part.value if isinstance(part, ast.Constant) else "{}"
+                str(part.value) if isinstance(part, ast.Constant) else "{}"
                 for part in node.values
             )
-        if text is None or node.end_lineno is None or node.end_col_offset is None:
-            continue
-        # a JoinedStr's inner constants are visited too; skip them
-        if isinstance(node, ast.JoinedStr):
+            # a JoinedStr's inner constants are visited too; skip them
             skip.update(id(part) for part in node.values)
+        if (
+            text is None
+            or not isinstance(node, (ast.Constant, ast.JoinedStr))
+            or node.end_lineno is None
+            or node.end_col_offset is None
+        ):
+            continue
         start = offset(node.lineno, node.col_offset)
         end = offset(node.end_lineno, node.end_col_offset)
         out.append(

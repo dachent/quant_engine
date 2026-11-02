@@ -5,8 +5,8 @@
 
 Prints one line per row (PASS / FAIL / SKIP / STALE) with evidence, then the
 sentences that carry a claim pattern and have neither a row nor an allowlist
-entry (UNCOVERED).  Exit status 1 when any row FAILs or is STALE, and, with
-``--strict-uncovered``, when any sentence is UNCOVERED.  Ids in the output are
+entry (UNCOVERED).  Exit status 1 when any row FAILs or is STALE or a claim sentence
+is UNCOVERED and not in the baseline of known debt (``claim_table_baseline.json``).  Ids in the output are
 masked to the last 8 hex digits.  Nothing is written.
 """
 
@@ -29,6 +29,7 @@ from claim_table import ROWS, Payload, Row, Verdict  # noqa: E402
 import claim_table_scan  # noqa: E402
 
 DEFAULT_ALLOWLIST = HERE / "claim_table_allowlist.json"
+DEFAULT_BASELINE = HERE / "claim_table_baseline.json"
 _HEX = re.compile(r"\b[0-9a-f]{16,}\b")
 
 
@@ -144,12 +145,41 @@ def uncovered_sentences(
     return left, unused
 
 
+def load_baseline(path: Path) -> set[str]:
+    """Keys (file::text) of claim sentences accepted as known debt at the last freeze."""
+
+    if not path.is_file():
+        return set()
+    entries = json.loads(path.read_bytes().decode("utf-8")).get("entries", [])
+    return {f"{e['file']}::{e['text']}" for e in entries}
+
+
+def write_baseline(path: Path, sentences: list[claim_table_scan.Sentence]) -> None:
+    entries = [
+        {"file": s.file, "kinds": list(s.kinds), "text": s.text}
+        for s in sorted(sentences, key=lambda s: (s.file, s.text))
+    ]
+    note = (
+        "Claim-pattern sentences that had no claim-table row and no allowlist entry "
+        "when this file was written. They are known debt, not judged non-claims: "
+        "the runner fails only on a sentence that is new or reworded. Remove an "
+        "entry when its sentence gets a row."
+    )
+    path.write_bytes(
+        (
+            json.dumps({"note": note, "entries": entries}, indent=1, ensure_ascii=False)
+            + "\n"
+        ).encode("utf-8")
+    )
+
+
 def run(
     payload: Payload,
     repo: Path,
     allowlist: list[dict[str, str]],
     rows: tuple[Row, ...] = ROWS,
     scan: bool = True,
+    baseline: set[str] | None = None,
 ) -> dict[str, Any]:
     texts: dict[str, str | None] = {}
     results: list[tuple[Row, Located, Verdict | str, str]] = []
@@ -176,9 +206,15 @@ def run(
         results.append((row, item, verdict, evidence))
     sentences = claim_table_scan.scan_repo(repo) if scan else []
     left, unused = uncovered_sentences(sentences, located, allowlist)
+    known = baseline or set()
+    new = [s for s in left if s.key not in known]
+    stale_baseline = len(known - {s.key for s in left}) if known else 0
     return {
         "results": results,
-        "uncovered": left,
+        "uncovered": new,
+        "baselined": [s for s in left if s.key in known],
+        "stale_baseline": stale_baseline,
+        "all_uncovered": left,
         "unused_allow": unused,
         "scanned": len(sentences),
     }
@@ -206,7 +242,10 @@ def render(outcome: dict[str, Any], limit: int) -> tuple[str, bool, int]:
     )
     uncovered = outcome["uncovered"]
     out.append(
-        f"scanned claim-pattern sentences: {outcome['scanned']}; UNCOVERED: {len(uncovered)}"
+        f"scanned claim-pattern sentences: {outcome['scanned']}; "
+        f"UNCOVERED (new, not in the baseline): {len(uncovered)}; "
+        f"baselined debt: {len(outcome['baselined'])}; "
+        f"baseline entries no longer present: {outcome['stale_baseline']}"
     )
     for sentence in uncovered[:limit]:
         out.append(
@@ -222,31 +261,50 @@ def render(outcome: dict[str, Any], limit: int) -> tuple[str, bool, int]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--panel", type=Path, help="panel candidate directory")
+    parser.add_argument("--report", type=Path, help="report candidate directory")
     parser.add_argument(
-        "--panel", type=Path, required=True, help="panel candidate directory"
-    )
-    parser.add_argument(
-        "--report", type=Path, required=True, help="report candidate directory"
+        "--scan-only",
+        action="store_true",
+        help="no payload: only locate sentences and list UNCOVERED ones",
     )
     parser.add_argument(
         "--repo", type=Path, default=HERE.parents[1], help="repository root"
     )
     parser.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST)
+    parser.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     parser.add_argument(
-        "--strict-uncovered",
+        "--no-baseline",
         action="store_true",
-        help="exit 1 on any UNCOVERED sentence",
+        help="treat every sentence without a row or allowlist entry as UNCOVERED",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        type=Path,
+        help="write the current uncovered sentences to this baseline file and exit",
     )
     parser.add_argument(
         "--limit", type=int, default=400, help="UNCOVERED sentences to print"
     )
     args = parser.parse_args(argv)
-    payload = load_payload(args.panel, args.report)
-    outcome = run(payload, args.repo, load_allowlist(args.allowlist))
+    if args.scan_only:
+        payload = Payload(panel={}, report={})
+    elif args.panel and args.report:
+        payload = load_payload(args.panel, args.report)
+    else:
+        parser.error("--panel and --report are required unless --scan-only")
+    baseline = None if args.no_baseline else load_baseline(args.baseline)
+    outcome = run(payload, args.repo, load_allowlist(args.allowlist), baseline=baseline)
+    if args.write_baseline:
+        write_baseline(args.write_baseline, outcome["all_uncovered"])
+        print(
+            f"wrote {len(outcome['all_uncovered'])} entries to {args.write_baseline.name}"
+        )
+        return 0
     text, failed, uncovered = render(outcome, args.limit)
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
     print(text)
-    return 1 if failed or (args.strict_uncovered and uncovered) else 0
+    return 1 if failed or uncovered else 0
 
 
 if __name__ == "__main__":

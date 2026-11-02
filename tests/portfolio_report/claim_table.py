@@ -880,6 +880,107 @@ def b_chart_lines(payload: Payload) -> None:
     payload.panel["performance_tab"]["modes"]["LIVE_PLUS_BACKTEST"]["lines"] = lines
 
 
+def p_hwm_nav_coverage(payload: Payload) -> Result:
+    coverage = dec(get(payload.panel, "hwm_summary", "nav_coverage"))
+    if coverage is None:
+        return skip("no hwm_summary.nav_coverage")
+    if coverage != 1:
+        return bad(f"HWM NAV coverage is {coverage}, not complete")
+    return ok("HWM NAV coverage is 1 (complete)")
+
+
+def b_hwm_nav_coverage(payload: Payload) -> None:
+    payload.panel["hwm_summary"]["nav_coverage"] = "0.5"
+
+
+def p_equal_weight_start(payload: Payload) -> Result:
+    lines = _mode_lines(payload, "LIVE_PLUS_BACKTEST")
+    strategies = [ln for ln in lines if ln.get("kind") == "STRATEGY"]
+    head = next(
+        (ln for ln in lines if ln.get("series_id") == "portfolio:equal_weight"), None
+    )
+    if not strategies or head is None:
+        return skip("no strategy lines or equal-weight line")
+    starts = [ln.get("first_index") for ln in strategies]
+    if not all(isinstance(s, int) for s in starts) or not isinstance(
+        head.get("first_index"), int
+    ):
+        return skip("first_index absent")
+    latest = max(s for s in starts if isinstance(s, int))
+    if head["first_index"] != latest:
+        return bad(
+            f"equal-weight line starts at index {head['first_index']} but the last "
+            f"strategy line starts at {latest}"
+        )
+    return ok(
+        f"equal-weight line starts at index {latest}, where every strategy has data"
+    )
+
+
+def b_equal_weight_start(payload: Payload) -> None:
+    for line in _mode_lines(payload, "LIVE_PLUS_BACKTEST"):
+        if line.get("series_id") == "strategy:A":
+            line["first_index"] = 5
+
+
+def p_weeks_are_mondays(payload: Payload) -> Result:
+    found = 0
+    off: list[str] = []
+    for mode, block in (get(payload.panel, "performance_tab", "modes") or {}).items():
+        for text in get(block, "dates", default=[]) or []:
+            try:
+                day = date.fromisoformat(str(text))
+            except ValueError:
+                off.append(f"{mode}:{text}")
+                continue
+            found += 1
+            if day.weekday() != 0:
+                off.append(f"{mode}:{text}")
+    if not found:
+        return skip("no weekly dates")
+    if off:
+        return bad(f"{len(off)} weekly dates are not Mondays: {names(off, 3)}")
+    return ok(f"all {found} weekly dates are Mondays")
+
+
+def b_weeks_are_mondays(payload: Payload) -> None:
+    payload.panel["performance_tab"]["modes"]["LIVE_ONLY"]["dates"][0] = "2026-09-09"
+
+
+_INFERENCE_KEY = re.compile(
+    r"^(p_values?|pvalues?|confidence_intervals?|ci_(low|high|lower|upper)\w*)$"
+)
+
+
+def p_no_inference_keys(payload: Payload) -> Result:
+    root = payload.panel.get("decomposition_lenses")
+    if root is None:
+        return skip("no decomposition_lenses")
+    stack: list[Json] = [root]
+    seen = 0
+    bad_paths: list[str] = []
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                seen += 1
+                if _INFERENCE_KEY.match(str(key)):
+                    bad_paths.append(str(key))
+                if isinstance(value, (dict, list)):
+                    stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(v for v in node if isinstance(v, (dict, list)))
+    if bad_paths:
+        return bad(
+            f"{len(bad_paths)} p-value / confidence-interval keys: {names(set(bad_paths))}"
+        )
+    return ok(f"no p-value or confidence-interval key among {seen} keys")
+
+
+def b_no_inference_keys(payload: Payload) -> None:
+    payload.panel["decomposition_lenses"]["lenses"]["x"]["p_value"] = 0.04
+
+
 # --- sentences the payload cannot decide -----------------------------------
 
 
@@ -1197,6 +1298,68 @@ ROWS: tuple[Row, ...] = (
         "allocation and execution effect are NONE on every underwriting row",
         p_underwriting_none,
         b_underwriting_none,
+    ),
+    Row(
+        "T13b",
+        "universal",
+        "Command",
+        PANEL_PY,
+        (r"Every included HWM-perimeter strategy is qualified",),
+        "no HWM-perimeter strategy is uncovered or excluded",
+        p_hwm_perimeter,
+        b_hwm_perimeter,
+    ),
+    Row(
+        "T13c",
+        "universal",
+        "Report methodology",
+        REPORT_PY,
+        (r"Every included HWM-perimeter strategy is qualified",),
+        "no HWM-perimeter strategy is uncovered or excluded",
+        p_hwm_perimeter,
+        b_hwm_perimeter,
+    ),
+    Row(
+        "T13d",
+        "coverage",
+        "Command",
+        PANEL_PY,
+        (r"Governed systematic HWM has complete qualified NAV coverage",),
+        "HWM NAV coverage is complete",
+        p_hwm_nav_coverage,
+        b_hwm_nav_coverage,
+    ),
+    Row(
+        "T21",
+        "universal",
+        "Attribution",
+        PANEL_HTML,
+        (r"never post-selection p-values or confidence intervals",),
+        "no decomposition lens carries a p-value or confidence-interval field",
+        p_no_inference_keys,
+        b_no_inference_keys,
+    ),
+    Row(
+        "T24",
+        "epoch",
+        "Weekly returns",
+        PANEL_HTML,
+        (r"compounded Monday through Sunday",),
+        "every weekly date is a Monday",
+        p_weeks_are_mondays,
+        b_weeks_are_mondays,
+    ),
+    Row(
+        "T25",
+        "epoch",
+        "Performance charts",
+        "tools/portfolio_performance_tab.py",
+        (
+            r"the headline equal-weight line starts only where every \"\s*\"strategy has data",
+        ),
+        "the headline equal-weight line starts where the last strategy line starts",
+        p_equal_weight_start,
+        b_equal_weight_start,
     ),
     Row(
         "U02",

@@ -236,3 +236,43 @@ def test_claim_table_over_the_real_candidate_payloads() -> None:
     outcome = claim_table_runner.run(payload, REPO, allow)
     text, failed, _uncovered = claim_table_runner.render(outcome, 400)
     assert not failed, text
+
+
+def test_baseline_ratchet_flags_only_new_or_reworded_sentences(tmp_path: Path) -> None:
+    old = 'const a = "No row is hidden from the user in this table.";\n'
+    repo = _repo(tmp_path / "a", old)
+    sentences = claim_table_scan.scan_repo(repo)
+    path = tmp_path / "baseline.json"
+    claim_table_runner.write_baseline(path, sentences)
+    baseline = claim_table_runner.load_baseline(path)
+    payload = Payload(panel={}, report={})
+    same = claim_table_runner.run(payload, repo, [], rows=(), baseline=baseline)
+    assert same["uncovered"] == [] and len(same["baselined"]) == 1
+    reworded = old.replace("No row", "Any row")
+    again = claim_table_runner.run(
+        payload, _repo(tmp_path / "b", reworded), [], rows=(), baseline=baseline
+    )
+    assert [s.text for s in again["uncovered"]] == [
+        "Any row is hidden from the user in this table."
+    ]
+    assert again["stale_baseline"] == 1
+    text, failed, new = claim_table_runner.render(again, 10)
+    assert new == 1 and "UNCOVERED apps/portfolio-control-panel/app.js" in text
+    assert not failed
+
+
+def test_shipped_baseline_has_no_sentence_with_a_row() -> None:
+    # Debt is only sentences without a row: a sentence that gained a row must leave the baseline.
+    baseline = claim_table_runner.load_baseline(claim_table_runner.DEFAULT_BASELINE)
+    outcome = claim_table_runner.run(
+        Payload(panel={}, report={}),
+        REPO,
+        claim_table_runner.load_allowlist(claim_table_runner.DEFAULT_ALLOWLIST),
+        baseline=baseline,
+    )
+    assert outcome["uncovered"] == [], (
+        "new claim sentence without a row or allowlist entry"
+    )
+    assert outcome["stale_baseline"] == 0, (
+        "baseline entry for a sentence that is gone or covered"
+    )

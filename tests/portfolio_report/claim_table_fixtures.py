@@ -56,19 +56,21 @@ def base_payload() -> Payload:
         "performance_tab": {
             "modes": {
                 "LIVE_ONLY": {
+                    "dates": ["2026-09-07", "2026-09-14"],
                     "lines": [
                         _line("strategy:A", "STRATEGY", [[2, 9, "LIVE"]], 2),
                         _line("strategy:B", "STRATEGY", [[4, 9, "LIVE"]], 4),
-                    ]
+                    ],
                 },
                 "LIVE_PLUS_BACKTEST": {
+                    "dates": ["2026-09-07", "2026-09-14"],
                     "lines": [
                         _line("strategy:A", "STRATEGY", live),
                         _line("strategy:B", "STRATEGY", live),
                         _line("portfolio:equal_weight", "PORTFOLIO", live),
                         _line("market:SPY", "BENCHMARK", None),
                         _line("market:SPXL", "BENCHMARK", None),
-                    ]
+                    ],
                 },
             }
         },
@@ -196,7 +198,9 @@ def base_payload() -> Payload:
                 }
             ]
         },
+        "decomposition_lenses": {"lenses": {"x": {"coefficients": {"estimate": 1}}}},
         "hwm_summary": {
+            "nav_coverage": "1",
             "uncovered_strategies": [],
             "excluded_strategies": [],
             "uncovered_value_usd": "0",
