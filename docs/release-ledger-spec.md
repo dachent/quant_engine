@@ -46,6 +46,11 @@ Refusal codes: `RESOLVED_VERSION`, `OUT_ROOT`, `PROVIDER_SET`, `PREDECESSOR_SPEC
 `FINALITY_BEYOND_COVERAGE`, `FINALITY_EVIDENCE_MISSING`, `FINALITY_NOT_MANIFEST`,
 `FINALITY_NOT_SELECTED_ARTIFACT`, `OUTPUT_EXISTS`, `SELF_CHECK`; cycle-manifest codes pass through.
 
+Tests: `tests/portfolio_operations/test_release_ledger_spec_e2e.py` derives a cycle manifest from the
+synthetic native-format generations that `tests/provider_ledger/test_admit_or_declare.py` builds, and the
+builder's default self-check (the real validator, nothing patched) accepts all seven providers; a finality
+claim the validator rejects leaves both files as `*.rejected`.
+
 ## B2: `provider_sources: "from_ledger"` in the release driver
 
 See `docs/release-driver.md` (Run configuration). The `provider-generations` stage derives each
