@@ -431,3 +431,17 @@ def test_a_restated_rows_implementation_detail_is_named_not_copied() -> None:
         "implementation_reconciliation"
     ]["detail"]
     assert kept["return_attribution"] == {"bridge": {"gap_pp": 1.0}}
+
+
+def test_the_verifier_resolves_a_named_detail_from_the_strategies_row() -> None:
+    lanes = panel._restated_account_lanes([_strategy()], [_account_row()])
+    strategy = _strategy()
+    strategy["implementation_return_attribution"] = {"bridge": {"gap_pp": 1.0}}
+    strategy["implementation_reconciliation"] = {"return_reconciliation": {"x": 1}}
+    row = _underwriting(strategy, lanes)
+    detail = row["evidence_layers"]["implementation_reconciliation"]["detail"]
+    resolved = panel._resolved_implementation_detail(detail, [strategy])  # noqa: SLF001
+    assert resolved["return_attribution"] == {"bridge": {"gap_pp": 1.0}}
+    assert resolved["return_reconciliation"] == {"x": 1}
+    with pytest.raises(panel.ControlPanelValidationError, match="absent"):
+        panel._resolved_implementation_detail(detail, [])  # noqa: SLF001

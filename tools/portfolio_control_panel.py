@@ -13535,8 +13535,37 @@ def _replication_disposition_counts(
     }
 
 
+def _resolved_implementation_detail(
+    detail: Mapping[str, Any], strategies: Sequence[Mapping[str, Any]]
+) -> Mapping[str, Any]:
+    """The detail a ``strategy_row_ref`` names: the strategies row's own contracts."""
+
+    reference = detail.get("strategy_row_ref")
+    if reference is None:
+        return detail
+    ref = _object(reference, "underwriting detail reference")
+    row = next(
+        (
+            item
+            for item in strategies
+            if item.get("strategy_id") == ref.get("strategy_id")
+        ),
+        None,
+    )
+    if row is None or ref.get("block") != "strategies":
+        raise ControlPanelValidationError(
+            "underwriting detail names a strategies row that is absent"
+        )
+    resolved = dict(_object(row.get(ref.get("reconciliation")), "reconciliation"))
+    resolved["return_attribution"] = _object(
+        row.get(ref.get("return_attribution")), "return attribution"
+    )
+    return resolved
+
+
 def _check_implementation_layers(
     underwriting_rows: Sequence[Mapping[str, Any]],
+    strategies: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Recompute the underwriting gap and implementation layers from their rows.
 
@@ -13589,7 +13618,12 @@ def _check_implementation_layers(
             if comparison_status == STALE_IMPLEMENTATION_STATUS:
                 stale_shapes_valid = False
             continue
-        detail = _object(detail_value, "underwriting implementation detail")
+        detail = _object(
+            _resolved_implementation_detail(
+                _object(detail_value, "underwriting implementation detail"), strategies
+            ),
+            "underwriting implementation detail",
+        )
         stale_present = False
         for stale_key, kind, stale_ids, live_key in (
             (
@@ -14433,7 +14467,9 @@ def verify_candidate(
         "account_live",
         "implementation_reconciliation",
     }
-    implementation_findings = _check_implementation_layers(underwriting_rows)
+    implementation_findings = _check_implementation_layers(
+        underwriting_rows, _objects(data.get("strategies"), "strategies")
+    )
     causal_contract_present = any(
         row.get("artifact") == "strategy-implementation-return-attribution"
         for row in _objects(data.get("provenance"), "panel provenance")
