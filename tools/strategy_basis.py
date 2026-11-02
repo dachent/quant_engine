@@ -511,7 +511,11 @@ def restatement_from_sleeve_facts(
     parent = str(document.get("parent_account_id") or "")
     account_id = str(sleeve.get("account_id") or "")
     provider = provider_id or str(document.get("provider_id") or "")
-    if not parent or account_id != f"{parent}-{sleeve.get('sleeve_id')}" or not provider:
+    if (
+        not parent
+        or account_id != f"{parent}-{sleeve.get('sleeve_id')}"
+        or not provider
+    ):
         raise StrategyBasisError("sleeve facts identity is incomplete")
     after_key = "nav_end_after_alloc"
     navs: dict[str, Decimal] = {}
@@ -530,7 +534,9 @@ def restatement_from_sleeve_facts(
                 continue
             flow_class = leg.get("class")
             if flow_class not in {"INTERNAL_IN", "INTERNAL_OUT"}:
-                raise StrategyBasisError("sleeve facts flow class is not INTERNAL_IN/OUT")
+                raise StrategyBasisError(
+                    "sleeve facts flow class is not INTERNAL_IN/OUT"
+                )
             event_day = manifest._sleeve_day(leg.get("event_date"), "flow event_date")  # noqa: SLF001
             recognition = manifest._sleeve_day(  # noqa: SLF001
                 leg.get("nav_recognition_date"), "flow nav_recognition_date"

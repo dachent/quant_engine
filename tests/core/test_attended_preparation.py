@@ -2169,11 +2169,19 @@ def test_preparation_checkpoint_never_accepts_partially_rewritten_output(
             "attended_preparation": {},
             "layered_history_repository_dependencies": {},
             "target_series": {},
+            "strategy_basis": {},
+            "account_strategy_manifest": {},
         },
         "policy": {},
     }
+    sleeve_checkpoint = root / "preparation" / "checkpoints" / "sleeve-facts.json"
+    sleeve_checkpoint.parent.mkdir(parents=True)
+    sleeve_checkpoint.write_bytes(b"{}")
     identity = preparation._stage_identity(
-        "selected-history-normalization", run_identity, full_identity, {}
+        "selected-history-normalization",
+        run_identity,
+        full_identity,
+        {"sleeve-facts": {"path": sleeve_checkpoint}},
     )
 
     assert (
@@ -2226,6 +2234,9 @@ def test_preparation_checkpoint_rejects_missing_declared_output(
     output = root / "preparation" / "history"
     output.mkdir(parents=True)
     (output / "selected.json").write_text('{"selected":"verified"}', encoding="utf-8")
+    sleeve_checkpoint = root / "preparation" / "checkpoints" / "sleeve-facts.json"
+    sleeve_checkpoint.parent.mkdir(parents=True)
+    sleeve_checkpoint.write_bytes(b"{}")
     identity = preparation._stage_identity(
         "selected-history-normalization",
         {"schema_version": 1},
@@ -2234,15 +2245,16 @@ def test_preparation_checkpoint_rejects_missing_declared_output(
                 "attended_preparation": {},
                 "layered_history_repository_dependencies": {},
                 "target_series": {},
+                "strategy_basis": {},
+                "account_strategy_manifest": {},
             },
             "policy": {},
         },
-        {},
+        {"sleeve-facts": {"path": sleeve_checkpoint}},
     )
     checkpoint = (
         root / "preparation" / "checkpoints" / "selected-history-normalization.json"
     )
-    checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(
         preparation.canonical_json_bytes(
             {
@@ -2777,6 +2789,7 @@ def _preparation_function_fixture(
                 "sleeve_inputs",
                 "sleeve_ledger",
                 "sleeve_nav",
+                "strategy_basis",
             )
         },
         "financial_data_cutoff": "2026-09-17",
@@ -4704,10 +4717,23 @@ def test_sleeve_facts_are_built_staged_replayed_and_checkpointed(
     )
     assert staged["paths"] == expected
     assert replayed == [expected, expected]
-    # the staged ledger generation is the one the build reads its rows from
-    assert Path(str(built["provider_ledger_generation_dir"])).parent == (
-        output / "stages" / "ledger" / "generations"
+    # the facts are built before the history from the selected provider-ledger
+    # generation the staged ledger is a copy of (#624: they feed the history step)
+    assert Path(str(built["provider_ledger_generation_dir"])) == (
+        tmp_path / "ledger-source"
+    ).resolve()
+    sleeve_checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "sleeve-facts.json",
+        "sleeve facts checkpoint",
     )
+    assert sleeve_checkpoint["result"]["sleeve_facts"] == [
+        preparation._definition(path) for path in expected
+    ]
+    history_checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "selected-history-normalization.json",
+        "history checkpoint",
+    )
+    assert "sleeve-facts" in history_checkpoint["input_identity"]["predecessors"]
     assert built["ibkr_generation_root"] == (tmp_path / "ibkr-root").resolve()
     assert built["quantbase_source_dir"] == (tmp_path / "quantbase-sources").resolve()
     checkpoint = preparation._read(
