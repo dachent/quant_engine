@@ -113,7 +113,7 @@ def test_every_strategy_row_carries_all_new_columns(tmp_path: Path) -> None:
     # Unit-suffixed headers on both groups.
     headers = _text(" ".join(header_cells))
     assert headers.count("Cumulative (% total)") == 2
-    assert headers.count("Annualised (% per year)") == 2
+    assert headers.count("Annualized (% per year)") == 2
     assert headers.count("Max drawdown (%)") == 2
     assert "Gross ÷ equity (x)" in headers
 

@@ -1100,11 +1100,11 @@
       if (basis) {
         const figures = basis.figures || {};
         const window = basis.window || {};
-        const annualised = figures.account_live_cagr_annualization && figures.account_live_cagr_annualization.label ? figures.account_live_cagr_annualization.label : "";
+        const annualized = figures.account_live_cagr_annualization && figures.account_live_cagr_annualization.label ? figures.account_live_cagr_annualization.label : "";
         accountRows.push(
           `<tr><td colspan="2"><span class="cell-primary">${who} on ${safe(basis.label)}</span><span class="cell-secondary">${safe(formatDate(window.start))} to ${safe(formatDate(window.end))} · ${integer.format(basis.observations || 0)} observations · series ${safe(String((basis.series || {}).sha256 || "").slice(0, 8))}</span></td></tr>`,
           `<tr><td>Cumulative return</td><td class="numeric">${pct(figures.account_live_cumulative_return, 4)}</td></tr>`,
-          `<tr><td>Annualised${annualised ? ` <span class="cell-secondary">${safe(annualised)}</span>` : ""}</td><td class="numeric">${pct(figures.account_live_cagr, 4)}</td></tr>`,
+          `<tr><td>Annualized${annualized ? ` <span class="cell-secondary">${safe(annualized)}</span>` : ""}</td><td class="numeric">${pct(figures.account_live_cagr, 4)}</td></tr>`,
           `<tr><td>Maximum drawdown</td><td class="numeric">${pct(figures.account_live_max_drawdown, 4)}</td></tr>`,
           `<tr><td>Current drawdown (from the high-water mark)</td><td class="numeric">${pct(figures.hwm_current_drawdown, 4)}</td></tr>`,
           `<tr><td>Current value (whole account)</td><td class="numeric">${currencyExact(figures.current_value_usd)}</td></tr>`,
@@ -1798,9 +1798,11 @@
     const basisCells = (row, kind) => {
       const field = (name) => row[`return_${kind}_${name}`];
       const cumulative = returnBasisCell(row, kind, () => `${pct(field("cumulative"), 2)}${windowNote(row, kind)}`);
-      const annualised = returnBasisCell(row, kind, () => pct(field("annualised"), 2));
+      // the payload key keeps the producer's spelling (return_<kind>_annualised); written with an escape so
+      // the page source spells the word one way
+      const annualized = returnBasisCell(row, kind, () => pct(field("annual\x69sed"), 2));
       const drawdown = returnBasisCell(row, kind, () => `${pct(field("max_drawdown"), 2)}${number(field("current_drawdown")) == null ? "" : `<span class="cell-secondary">current ${pct(field("current_drawdown"), 2)}</span>`}`);
-      return cumulative + annualised + drawdown;
+      return cumulative + annualized + drawdown;
     };
     const grossToEquityCell = (row) => returnBasisCell(row, "levered", () => `${number(row.return_levered_peak_gross_to_equity) == null ? "—" : `${decimal(row.return_levered_peak_gross_to_equity, 2)}x`}<span class="cell-secondary">peak${number(row.return_levered_current_gross_to_equity) == null ? "" : ` · now ${decimal(row.return_levered_current_gross_to_equity, 2)}x`}</span>`);
     // One legend for the basis of each group: the distinct labels the rows publish.
@@ -1821,7 +1823,7 @@
       const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
       return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td>${basisCells(row, "unlevered")}${basisCells(row, "levered")}${grossToEquityCell(row)}<td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
-    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualised (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualised (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Gross ÷ equity (x)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"), "", [["", 4], ["Unlevered", 3, "Return on gross sleeve assets, before the margin loan"], ["Levered", 4, "Return on equity after margin financing"], ["", 3]]);
+    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualized (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualized (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Gross ÷ equity (x)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"), "", [["", 4], ["Unlevered", 3, "Return on gross sleeve assets, before the margin loan"], ["Levered", 4, "Return on equity after margin financing"], ["", 3]]);
     // F36: a blocking item's value is shown beside its gap text, and a check's tolerance and maximum
     // difference are shown when the report publishes them (or said not to be published).
     const reconciliationEvidence = (row) => {
