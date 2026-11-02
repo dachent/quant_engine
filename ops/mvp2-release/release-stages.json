@@ -808,7 +808,7 @@
         "attest"
       ],
       "outputs": [
-        "{replica_workspace}"
+        "{replica_workspace}/.replica-root.json"
       ],
       "argv": [
         "{python}",
@@ -822,6 +822,9 @@
         "{replica_workspace}",
         "--allow-state-root",
         "{retained_cache_root}"
+      ],
+      "must_not_exist": [
+        "{replica_workspace}"
       ]
     },
     {
