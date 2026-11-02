@@ -171,6 +171,8 @@ class World:
                         row["provider_id"], "CYCLE_MANIFEST_NATIVE"
                     ),
                     "finality_evidence": None,
+                    "qualification": "PUBLISHED_COMPLETE",
+                    "finalized_through": None,
                 }
                 for row in rows
             },

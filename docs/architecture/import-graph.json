@@ -564,6 +564,16 @@
       1
     ],
     [
+      "release_ledger_spec",
+      "provider_ledger",
+      1
+    ],
+    [
+      "release_ledger_spec",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "schwab_capture_ingest",
       "schwab_capture_driver",
       1
