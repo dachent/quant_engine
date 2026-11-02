@@ -79,9 +79,27 @@ def _dumps(value: Any) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _file_facts(path: Path, what: str) -> tuple[bytes, str, int]:
-    if not path.is_file() or path.is_symlink():
+def _file_facts(
+    path: Path, what: str, root: Path | None = None
+) -> tuple[bytes, str, int]:
+    if not path.is_file() or release_cycle_manifest.link_like(path):
         raise LedgerSpecError("MISSING", f"{what}: not a regular file")
+    if root is not None:
+        # the file lies inside the generation directory it is read from, with no link on the way,
+        # the directory itself included
+        try:
+            if release_cycle_manifest.link_like(root):
+                raise release_cycle_manifest.CycleManifestError(
+                    "PATH_ESCAPES_ROOT",
+                    f"{what}: its generation directory is a symlink or junction",
+                )
+            parts = path.resolve().relative_to(root.resolve()).parts
+            release_cycle_manifest.refuse_links(root, parts, what)
+        except (ValueError, release_cycle_manifest.CycleManifestError) as error:
+            raise LedgerSpecError(
+                "PATH_ESCAPES_ROOT",
+                f"{what}: leaves its generation directory ({error})",
+            ) from error
     data = path.read_bytes()
     return data, _sha256(data), len(data)
 
@@ -96,7 +114,9 @@ def _provider_entry(
 
     del cutoff  # the cutoff binds the observation as a whole, not a generation
     manifest_bytes, manifest_sha, _ = _file_facts(
-        Path(row["manifest_path"]), f"{provider_id} generation manifest"
+        Path(row["manifest_path"]),
+        f"{provider_id} generation manifest",
+        Path(row["generation_dir"]),
     )
     if manifest_sha != row["manifest_sha256"]:
         raise LedgerSpecError(
@@ -120,7 +140,9 @@ def _provider_entry(
             f"{provider_id}: manifest content id differs from its resolved id",
         )
     _, catalog_sha, catalog_size = _file_facts(
-        Path(row["generation_dir"]) / catalog_name, f"{provider_id} catalog"
+        Path(row["generation_dir"]) / catalog_name,
+        f"{provider_id} catalog",
+        Path(row["generation_dir"]),
     )
     if not any(
         a.sha256 == catalog_sha and a.size_bytes == catalog_size

@@ -1614,6 +1614,59 @@ def test_replica_only_still_refuses_to_execute_a_spec_bound_to_a_real_root(
         assert _stage(stage_id)["only_ceremony"] == "full"
 
 
+# -- per-stage bindings and rerecord -----------------------------------------------------
+
+
+def _started(world: dict[str, Any]) -> dict[str, str]:  # noqa: F811
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    return {k: v["started_at"] for k, v in state["stages"].items()}
+
+
+def test_a_change_to_a_later_stage_keeps_the_earlier_stages_and_an_upstream_change_does_not(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph, "--through", "one") == 0
+    before = _started(world)
+    # `two` is added after `one` ran (as the replica stages were added to the shipped graph)
+    assert _drive(world, _graph(world, CHAIN)) == 0
+    assert _started(world)["one"] == before["one"]
+    # `one` itself is redefined: it and everything that requires it are no longer what ran
+    changed = [
+        {**CHAIN[0], "argv": _write_stage("{cycle}/one.txt", "changed")},
+        CHAIN[1],
+    ]
+    assert _drive(world, _graph(world, changed)) == 2
+
+
+def test_rerecord_rebinds_only_stages_whose_bytes_still_hash_and_needs_confirmation(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    state_path = world["cycle"] / driver.STATE_NAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    for record in state["stages"].values():
+        record["binding"] = "recorded-under-an-older-graph"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = _started(world)
+    assert _drive(world, graph) == 2  # the recorded binding is not the current one
+    args = ["rerecord", "--config", str(world["config"]), "--graph", str(graph)]
+    assert driver.main(args) == 2  # without confirmation nothing is re-bound
+    (world["cycle"] / "two.txt").write_text("edited", encoding="utf-8")
+    assert (
+        driver.main([*args, "--confirm-same-config"]) == 2
+    )  # a changed output is refused, and none re-bound
+    assert (
+        json.loads(state_path.read_text(encoding="utf-8"))["stages"]["one"]["binding"]
+        == "recorded-under-an-older-graph"
+    )
+    (world["cycle"] / "two.txt").write_text("2", encoding="utf-8")
+    assert driver.main([*args, "--confirm-same-config"]) == 0
+    assert _drive(world, graph) == 0  # kept, not rerun
+    assert _started(world) == before
+
+
 def test_later_stages_may_change_the_replica_tree_the_copy_stage_only_binds_its_marker(
     world: dict[str, Any],  # noqa: F811
 ) -> None:
@@ -1716,3 +1769,93 @@ def test_the_replica_must_still_be_its_inventoried_copy_before_the_next_stage_us
     shipped = _stage("replica-spec")["verify_inventory"]
     assert shipped["file"] == "{cycle}/replica-inventory.json"
     assert shipped["except"] == ["{replica_coordination_root}/merge-attestation.json"]
+
+
+def test_a_link_like_provider_source_directory_is_recognised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "gen"
+    plain.mkdir()
+    assert driver._link_like(plain) is False
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "gen")
+    assert driver._link_like(plain) is True
+
+
+def test_a_link_anywhere_in_the_provider_root_chain_is_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "workspace-link" / "generations" / "G1"
+    source.mkdir(parents=True)
+    chain = (source, source.parent, source.parent.parent)
+    assert not any(driver._link_like(part) for part in chain)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "workspace-link")
+    assert any(driver._link_like(part) for part in chain)
+
+
+def test_rerecord_binds_a_newly_declared_output(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    assert _drive(world, _graph(world, CHAIN)) == 0
+    extra = world["cycle"] / "extra.txt"
+    extra.write_text("new", encoding="utf-8")
+    # `one` now also declares `extra.txt` (a graph change after it ran)
+    stages = [
+        {**CHAIN[0], "outputs": ["{cycle}/one.txt", "{cycle}/extra.txt"]},
+        CHAIN[1],
+    ]
+    changed = _graph(world, stages)
+    args = [
+        "rerecord",
+        "--config",
+        str(world["config"]),
+        "--graph",
+        str(changed),
+        "--confirm-same-config",
+    ]
+    assert driver.main(args) == 0
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert str(extra) in state["stages"]["one"]["outputs"]  # bound from now on
+    assert _drive(world, changed) == 0
+    extra.unlink()
+    assert _drive(world, changed) == 2  # deleting it is no longer invisible
+    extra.write_text("new", encoding="utf-8")
+    (world["cycle"] / "two.txt").unlink()
+    extra.unlink()
+    assert (
+        driver.main(args) == 2
+    )  # a declared artifact that does not exist: nothing is re-recorded
+
+
+def test_rerecord_refuses_while_a_stage_of_the_run_is_live(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    state_path = world["cycle"] / driver.STATE_NAME
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"])
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        before = json.dumps(state, sort_keys=True)
+        state["stages"]["two"]["status"] = "running"
+        state["stages"]["two"]["pid"] = sleeper.pid
+        state["stages"]["two"]["process_started"] = process_started(sleeper.pid)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        args = [
+            "rerecord",
+            "--config",
+            str(world["config"]),
+            "--graph",
+            str(graph),
+            "--confirm-same-config",
+        ]
+        assert driver.main(args) == 2
+        assert (
+            json.loads(state_path.read_text(encoding="utf-8"))["stages"]["two"][
+                "status"
+            ]
+            == "running"
+        )
+        assert before  # nothing was saved over the running record
+    finally:
+        sleeper.kill()
+        sleeper.wait()
