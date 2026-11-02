@@ -283,7 +283,7 @@
       .filter(Boolean)
       .map((path) => String(path.observed_end || "").slice(0, 10)));
     const allThroughCutoff = ends.length > 0 && ends.every((end) => end !== "" && end >= cutoffDate);
-    const head = `Post-cutoff capture: ${integer.format(late.length)} of ${integer.format(strategies.length)} provider captures are dated after the ${formatDate(cutoffDate)} cutoff`;
+    const head = `Post-cutoff ledger: ${integer.format(late.length)} of ${integer.format(strategies.length)} provider-ledger generations are dated after the ${formatDate(cutoffDate)} cutoff`;
     return allThroughCutoff
       ? `${head}; the observed intervals they carry run through the cutoff.`
       : `${head}; observed intervals end on their own dates, shown per row.`;
@@ -767,14 +767,23 @@
   const positionPageSize = 50;
   // N65: a dated snapshot's weight is its value over the snapshot's own recorded systematic
   // perimeter (not the current seven), and the row says which denominator that is.
-  const allocationPerimeterNote = (row) => {
+  const allocationPerimeterNote = (row, shownRows) => {
     if (row.weight_perimeter !== "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER" || row.systematic_weight == null) return "";
     const components = number(row.weight_perimeter_component_count);
     const detail = [
       components == null ? null : `${integer.format(components)} components`,
       number(row.weight_denominator_usd) == null ? null : currency(row.weight_denominator_usd),
     ].filter(Boolean).join(", ");
-    return `<span class="cell-secondary">Weight is the share of the snapshot's recorded systematic perimeter${detail ? ` (${detail})` : ""}</span>`;
+    // P28-A2: the listed rows of that perimeter may not be all of its components; the first row of the group says
+    // how many are listed, what they total and how much of the perimeter is in components this table does not list.
+    const group = (Array.isArray(shownRows) ? shownRows : []).filter((item) => item.weight_perimeter === row.weight_perimeter
+      && item.weight_denominator_usd === row.weight_denominator_usd && item.systematic_weight != null);
+    const listedTotal = group.reduce((sum, item) => sum + (Number(item.current_value_usd) || 0), 0);
+    const unlisted = components == null ? 0 : components - group.length;
+    const unlistedNote = group[0] === row && unlisted > 0 && number(row.weight_denominator_usd) != null
+      ? `<span class="cell-secondary">${integer.format(group.length)} of the ${integer.format(components)} components are listed in the rows shown, totalling ${currency(listedTotal)}; the other ${integer.format(unlisted)} (${currency(Number(row.weight_denominator_usd) - listedTotal)} of the perimeter) are not in the rows shown</span>`
+      : "";
+    return `<span class="cell-secondary">Weight is the share of the perimeter recorded at ${row.as_of_date ? formatDate(row.as_of_date) : "the snapshot date"}${detail ? ` (${detail})` : ""}, not of the current systematic perimeter</span>${unlistedNote}`;
   };
 
   // F06/F22: the reserve at the cutoff.  The custody current-capital block is read when the
@@ -831,7 +840,7 @@
       const current = currents[index];
       const currentValue = current.value != null ? `${currency(current.value)}${row.scope === "RESERVE" ? reserveBasisNote() : aggregateBasisNote([row.strategy_id])}` : current.status ? statusText(current.status) : "—";
       const identity = "Reserve classification";
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row, accepted)}</td></tr>`;
     });
     // F20: a total only for the additive columns, from the rows shown.  A current value that is
     // not ready is left out of its total and the footer says how many.
@@ -1157,8 +1166,8 @@
     const classes = [...new Set(rows.map((row) => row.data_class))].sort();
     renderKpis("#leverage-kpis", [
       ["Observations", integer.format(rows.length), `${classes.length} data class${classes.length === 1 ? "" : "es"} declared`],
-      ["Observed measures", integer.format(observed.length), "Source-observed, never completed by inference", observed.length ? "positive" : "warning"],
-      ["Unavailable measures", integer.format(unavailable.length), "Carried with the source reason rather than zero", unavailable.length ? "warning" : "positive"],
+      ["Observed measures", integer.format(observed.length), `Observed-only coverage: ${integer.format(observed.filter((row) => row.amount && row.amount.value != null).length)} with an amount, ${integer.format(observed.filter((row) => !(row.amount && row.amount.value != null)).length)} without; never completed by inference`, observed.length ? "positive" : "warning"],
+      ["Unavailable measures", integer.format(unavailable.length), `By coverage status (${integer.format(rows.filter((row) => !(row.amount && row.amount.value != null)).length)} rows in all have no amount); never filled with zero`, unavailable.length ? "warning" : "positive"],
     ]);
     const coverage = new Map();
     for (const row of rows) {
@@ -1347,7 +1356,7 @@
     const governedProofCallout = governedProof ? `<div class="callout callout-neutral"><strong>GOVERNED REAL DATA — ${safe(humanStatus(governedProof.financial_acceptance || hwmCandidate?.financial_acceptance || "UNSPECIFIED").toUpperCase())}</strong><br>${hwmCandidate ? `${safe(hwmNotAccepted)}. Candidate result` : `Governed ${safe(governedProof.policy_id || "HWM")} result (${safe(humanStatus(governedProof.financial_acceptance || "UNSPECIFIED"))})`}: ${hwmPathSummary(governedProof)}; index ${decimal(governedProof.current_index, 2)}, HWM ${decimal(governedProof.current_hwm, 2)}, current drawdown ${pct(governedProof.current_drawdown)}, maximum drawdown ${pct(governedProof.maximum_drawdown)}. Complete data through ${formatDateHtml(governedProof.complete_through)}, evaluated ${formatDateHtml(governedProof.evaluated_on)} (${hwmAgeText(governedProof)}; ${statusText(governedProof.age_status)}). Basis ${safe(humanStatus(governedProof.return_basis || "UNAVAILABLE"))}. ${safe(hwmPolicyText(governedProof, hwmCandidate))} ${safe(perimeterStartText(governedProof))} Receipt ${safe(String(governedProof.receipt_sha256 || "").slice(0, 12))}….</div>` : "";
     $("#hwm-status").innerHTML = performanceLineageMismatch
       ? `<div class="validation-card"><div><strong>Report performance withheld</strong><span>— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span></div><div class="validation-score">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH</div></div><div class="callout callout-neutral">Report-derived return, MWR, observation-count, return-path, and HWM qualification evidence is withheld until the source-lineage identity matches.</div>`
-      : `${governedProofCallout}${portableProofCallout}<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(hwmExclusionNote())}.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)}: ${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}, with ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered and ${currencyExact(data.hwm_summary.excluded_value_usd)} visibly excluded. ${unavailableHwm.length ? (hwmCandidate ? "The numerical full-systematic HWM is not accepted while any included sleeve is unqualified." : "The numerical full-systematic HWM is not calculated while any included sleeve is unqualified.") : "The governed perimeter is fully qualified."} ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
+      : `${governedProofCallout}${portableProofCallout}<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(hwmExclusionNote())}.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)}: ${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}, with ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered and ${currencyExact(data.hwm_summary.excluded_value_usd)} visibly excluded. ${unavailableHwm.length ? (hwmCandidate ? "The numerical full-systematic HWM is not accepted while any included sleeve is unqualified." : "The numerical full-systematic HWM is not calculated while any included sleeve is unqualified.") : "The governed perimeter is fully qualified."} ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated; a missing day the producer fills is shown labelled with its origin.</div>`;
     renderPerformanceComparison();
     const contextualPerformance = data.performance.filter(matchesContext);
     const mappedPerformance = contextualPerformance.filter((row) => row.strategy_name);
@@ -1366,7 +1375,7 @@
       const rate = number(row.mwr_xirr);
       if (!(days > 0 && days < 365) || rate == null) return "";
       const windowEquivalent = Math.pow(1 + Number(rate), days / 365) - 1;
-      return `<span class="cell-secondary">annualised from ${integer.format(days)} days · ${pct(windowEquivalent)} over the window (derived)</span>`;
+      return `<span class="cell-secondary">annualized from ${integer.format(days)} days · ${pct(windowEquivalent)} over the window (derived)</span>`;
     };
     const rows = mappedPerformance.map((row) => {
       if (performanceLineageMismatch) {
@@ -1388,7 +1397,7 @@
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
       : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Epoch return (TWR, cumulative)", "numeric", "Time-weighted return over the observed interval. Cumulative, not annualised. Labelled “Accepted return” before this release."], ["Return status"], ["MWR (annualised)", "numeric", "Money-weighted return (annualised internal rate of return on the cash flows). Annualised even for windows under one year."], ["MWR status"]];
     const performanceFooter = !performanceLineageMismatch && mappedPerformance.length
-      ? `<tr class="total-row"><th scope="row" colspan="3">All ${mappedPerformance.length} epochs · ${new Set(mappedPerformance.map((row) => row.strategy_name)).size} strategies</th><td colspan="5" class="cell-note"><span class="cell-secondary">Portfolio-level TWR and MWR are not published in this snapshot. Each row is one account × strategy epoch; epoch returns are not added.</span></td></tr>`
+      ? `<tr class="total-row"><th scope="row" colspan="3">All ${mappedPerformance.length} epochs · ${new Set(mappedPerformance.map((row) => row.strategy_name)).size} strategies</th><td colspan="5" class="cell-note"><span class="cell-secondary">${data.portfolio_mwr_annualised?.status === "AVAILABLE" ? "" : "Portfolio-level MWR is not published in this snapshot. "}${data.portfolio_twr_cumulative?.status === "AVAILABLE" ? "The portfolio TWR is the governed index candidate shown on Performance &amp; HWM, with the acceptance state stated there. " : "Portfolio-level TWR is not published in this snapshot. "}Each row is one account × strategy epoch; epoch returns are not added.</span></td></tr>`
       : "";
     $("#performance-table").innerHTML = tableMarkup(performanceHeaders, rows, null, performanceFooter);
     $("#historical-gap-badge").textContent = `${historicalGaps.length} unresolved intervals`;
@@ -1500,7 +1509,7 @@
     const totals = manifestTotals(rows, data.account_manifest?.calculation_cutoff_date);
     const money = (value) => (value == null ? "—" : manifestMoney(manifestUnscaled(value)));
     const totalRow = totals.count
-      ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Gain: all epochs · Current: ${totals.open} open at the cutoff · Net capital = Current − Gain</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
+      ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Gain: all epochs · Current: ${totals.open} with a window ending at the cutoff · Net capital = Current − Gain</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
       : "";
     const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric cell-left" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
     return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. Closed epochs hand their closing value to the successor epoch, so the totals count Current only for epochs open at the cutoff and Gain for every epoch; the governed invested-capital aggregate can still differ.</span></td></tr>`;
@@ -2417,7 +2426,7 @@
     const componentLosses = corrOne.components.map((row) => number(row.loss_contribution)).filter((value) => value != null);
     const componentFooter = componentRows.length ? `<tr><th scope="row">Total</th><td class="numeric">${componentWeights.length ? pct(sumOf(componentWeights)) : "—"}</td><td class="numeric"></td><td class="numeric">${componentLosses.length ? pct(sumOf(componentLosses)) : "—"}</td></tr>` : "";
     $("#correlation-one-table").innerHTML = tableMarkup([["Strategy"], ["Weight", "numeric"], ["Conservative loss", "numeric"], ["Contribution", "numeric"]], componentRows.length ? componentRows : [emptyRow(4, "No component detail in this accepted fixture")], null, componentFooter);
-    $("#economic-cluster-summary").innerHTML = `<strong>${statusText(clusterBudget.status)}</strong> · ${safe(humanStatus(clusterBudget.budget_rule))}. The frozen audit reference was ${pct(clusterBudget.historical_audit_reference.full_systematic_loss)} and ${pct(clusterBudget.historical_audit_reference.after_rejected_sleeves_loss)} after rejected sleeves; the operative control above is recomputed from current accepted components.`;
+    $("#economic-cluster-summary").innerHTML = `<strong>${statusText(clusterBudget.status)}</strong> · ${safe(humanStatus(clusterBudget.budget_rule))}. The frozen audit reference was ${pct(clusterBudget.historical_audit_reference.full_systematic_loss)} and ${pct(clusterBudget.historical_audit_reference.after_rejected_sleeves_loss)} after rejected sleeves; the operative control above is recomputed from the accepted components at the correlation specification's governed allocation weights, which may differ from the latest NAV weights shown on Capital.`;
     const clusterRows = clusterBudget.clusters.map((cluster) => `<tr><td><span class="cell-primary">${safe(cluster.label)}</span><span class="cell-secondary">${safe(cluster.cluster_id)}</span></td><td>${safe(cluster.members.map(shortSeries).join(" · "))}</td><td class="numeric">${pct(cluster.allocation_weight)}</td><td class="numeric">${pct(cluster.loss_contribution)}</td><td>${cluster.observed_pair_correlation_minimum == null ? "—" : `${decimal(cluster.observed_pair_correlation_minimum)}–${decimal(cluster.observed_pair_correlation_maximum)}`}</td><td>${statusText(cluster.budget_status)}<span class="cell-secondary">${safe(cluster.rationale)}</span></td></tr>`);
     const clusterWeights = clusterBudget.clusters.map((cluster) => number(cluster.allocation_weight)).filter((value) => value != null);
     const clusterLosses = clusterBudget.clusters.map((cluster) => number(cluster.loss_contribution)).filter((value) => value != null);
@@ -2648,9 +2657,9 @@
       outsideByAccount.set(key, [...(outsideByAccount.get(key) || []), `${row.fact_type} ${integer.format(Number(row.record_count) || 0)}`]);
     });
     const outsideNote = outsideByAccount.size
-      ? ` Not in this matrix (not in the current perimeter), but counted in the coverage totals: ${[...outsideByAccount].map(([key, counts]) => `${key} (${counts.join(", ")})`).join("; ")}.`
+      ? ` Not in this matrix, but counted in the coverage totals: ${[...outsideByAccount].map(([key, counts]) => `${key} (${counts.join(", ")})`).join("; ")}.`
       : "";
-    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} declared fact paths</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}`;
+    $("#fact-matrix-summary").innerHTML = `<strong>${integer.format(factMatrix.length)} account-by-fact rows</strong> · <span class="status-text danger">${integer.format(noPathRows.length)} NO_ACCEPTED_FACT_PATH</span>. No-path means the system has no admitted source for that account/fact boundary; it is not a zero balance, zero activity, or proof the fact does not exist. Showing ${integer.format(visible.length)} row(s).${safe(outsideNote)}`;
     const intervalText = (row) => {
       if (Array.isArray(row.missing_intervals) && row.missing_intervals.length) return row.missing_intervals.map((item) => typeof item === "object" ? `${item.start || item.missing_interval_start || "?"}–${item.end || item.missing_interval_end || "?"}: ${item.reason || item.missing_interval_reason || "reason not recorded"}` : String(item)).join(" · ");
       if (row.missing_interval_start || row.missing_interval_end) return `${row.missing_interval_start || "?"}–${row.missing_interval_end || "?"}: ${row.missing_interval_reason || "reason not recorded"}`;
@@ -2719,7 +2728,7 @@
     const summary = $("#coverage-summary");
     if (summary) {
       const clear = rows.length - attention.length;
-      summary.innerHTML = `<span><strong>${integer.format(attention.length)}</strong> need attention · ${integer.format(clear)} complete, fresh or observed-only</span><span class="segmented" aria-label="Coverage filter"><button type="button" class="segment ${coverageFilter === "attention" ? "is-active" : ""}" data-coverage-filter="attention" aria-pressed="${coverageFilter === "attention"}">Needs attention (${integer.format(attention.length)})</button><button type="button" class="segment ${coverageFilter === "all" ? "is-active" : ""}" data-coverage-filter="all" aria-pressed="${coverageFilter === "all"}">All (${integer.format(rows.length)})</button></span>`;
+      summary.innerHTML = `<span><strong>${integer.format(attention.length)}</strong> need attention · ${integer.format(clear)} other rows (complete, fresh, observed-only, retained or with no reported record)</span><span class="segmented" aria-label="Coverage filter"><button type="button" class="segment ${coverageFilter === "attention" ? "is-active" : ""}" data-coverage-filter="attention" aria-pressed="${coverageFilter === "attention"}">Needs attention (${integer.format(attention.length)})</button><button type="button" class="segment ${coverageFilter === "all" ? "is-active" : ""}" data-coverage-filter="all" aria-pressed="${coverageFilter === "all"}">All (${integer.format(rows.length)})</button></span>`;
       summary.querySelectorAll("[data-coverage-filter]").forEach((button) => {
         button.onclick = () => { coverageFilter = button.dataset.coverageFilter; applyCoverageFilter(); };
       });
@@ -2757,7 +2766,7 @@
     renderKpis("#data-kpis", [
       ["Report generation", data.meta.report_generation_id.slice(0, 12), "Accepted local authority"],
       ["Baseline generation", data.meta.baseline_generation_id.slice(0, 12), "Hash-linked input"],
-      ["Fact status", `${cleanFacts}/${factRows.length} clean`, `${factRows.length - cleanFacts} carry an explicit retained disposition`, cleanFacts === factRows.length ? "positive" : "warning"],
+      ["Fact status", `${cleanFacts}/${factRows.length} clean`, `${factRows.length - cleanFacts} are not complete within the declared boundary`, cleanFacts === factRows.length ? "positive" : "warning"],
       ["External connections", "0", "Policy statement: direct-file local operation; not counted from the payload", "reserve"],
     ]);
     const coverageRows = data.coverage.map((row) => `<tr id="coverage-${domToken(row.item)}" data-coverage-item="${safe(row.item)}" tabindex="-1"><th scope="row"><span class="cell-primary">${safe(row.item)}</span><span class="cell-secondary">${safe(row.category)}</span></th><td>${statusText(row.status)}${row.escalation_required ? '<span class="cell-secondary">Escalation required</span>' : ""}</td><td>${safe(observedWindow(row))}</td><td>${safe(freshnessPolicy(row))}</td><td>${safe(row.evidence_authority || "Evidence authority not assigned")}<span class="cell-secondary">${safe(row.resolution_authority || "Resolution authority not assigned")}</span></td><td>${safe(coverageValueText(row))}</td><td>${safe(dispositionText(row.disposition))}</td><td>${safe(row.known_gap ? operatorText(row.known_gap) : "No known gap within the declared boundary")}</td></tr>`);
