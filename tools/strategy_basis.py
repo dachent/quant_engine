@@ -33,18 +33,36 @@ _RETURN_PRECISION: Final = 28
 _NAV_PRECISION: Final = 100
 _WEIGHT_PRECISION: Final = 34
 
-# What stays on the parent account basis when a row is restated: these come from other
-# hash-bound artifacts (attribution, dependence, decomposition) that this switch does not
-# rebuild, so the row names them instead of letting them pass for sleeve figures.
+# What stays on the parent account basis when a row is restated: MEASUREMENTS that come
+# from other hash-bound artifacts this switch does not rebuild, so the row names them
+# instead of letting them pass for sleeve figures.  (The dependence and correlation
+# measurements follow the restated history and are not listed.)
 NOT_RESTATED: Final = (
     "benchmark_comparison",
     "provider_comparison",
     "implementation_return_attribution",
-    "dependence_and_correlation",
     "decomposition_lenses",
     "hwm_numerical_envelope",
     "allocation_history",
 )
+# Owner-approved policy inputs (PORT-DEPENDENCE-1) are static owner inputs, not
+# measurements: the dependence allocation weight and the conservative loss fractions of
+# the stress bound.  They are never restated; the dependence payload carries a data
+# derived sensitivity beside them.
+POLICY_CONSTANTS: Final = (
+    "dependence_policy_weight",
+    "dependence_conservative_loss_bound",
+)
+_NAMES: Final = {
+    "benchmark_comparison": "benchmark comparisons",
+    "provider_comparison": "provider comparisons",
+    "implementation_return_attribution": "the implementation bridge",
+    "decomposition_lenses": "the decomposition lenses",
+    "hwm_numerical_envelope": "the HWM numerical envelope",
+    "allocation_history": "the allocation history",
+    "dependence_policy_weight": "the dependence policy weight",
+    "dependence_conservative_loss_bound": "the dependence conservative loss bound",
+}
 
 
 class StrategyBasisError(ValueError):
@@ -391,6 +409,7 @@ def return_scope(
         "mwr_and_governed_capital_basis": BASIS_SLEEVE_EPOCH,
         "sleeve_epoch_accounts": [restatement.account_id],
         "not_restated": list(NOT_RESTATED),
+        "policy_constants": list(POLICY_CONSTANTS),
     }
 
 
@@ -405,9 +424,10 @@ def return_scope_label(restatement: SleeveRestatement) -> str:
         f"{restatement.parent_account_id}, from {restatement.opening_date} "
         f"(sleeve NAV with the sleeve's transfers external; the parent's unallocated "
         f"cash and margin and its other sleeves are excluded). MWR and governed "
-        f"capital: the same sleeve. Benchmark and provider comparisons, the "
-        f"implementation bridge, dependence and the decomposition lenses stay on the "
-        f"parent account series."
+        f"capital: the same sleeve. Measurements still on the parent account "
+        f"basis: {', '.join(_NAMES[name] for name in NOT_RESTATED)}. Owner-approved "
+        f"policy constants, not restated: "
+        f"{', '.join(_NAMES[name] for name in POLICY_CONSTANTS)}."
     )
 
 

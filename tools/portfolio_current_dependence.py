@@ -316,6 +316,133 @@ def _return_identity(rows: Sequence[Mapping[str, str]]) -> dict[str, object]:
     }
 
 
+STRATEGY_BASIS_BLOCK: Final = "strategy_basis_restatement"
+
+
+def _strategy_basis_module() -> Any:
+    try:
+        import strategy_basis
+    except ImportError as exc:
+        raise CurrentDependenceError("strategy basis module is unavailable") from exc
+    return strategy_basis
+
+
+def _history_restatement(manifest: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """``{strategy_id: identity}`` of the strategies the history generation restated.
+
+    Empty when the generation carries no ``strategy_basis_restatement`` block, which is
+    every generation built without a strategy-basis declaration.  The block itself was
+    proven by the history verifier (it re-derives the series from the embedded facts);
+    here only its shape is read.
+    """
+
+    block = manifest.get(STRATEGY_BASIS_BLOCK)
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        raise CurrentDependenceError("history strategy basis restatement differs")
+    identities: dict[str, dict[str, Any]] = {}
+    for entry in _objects(block.get("strategies"), "history restated strategies"):
+        strategy_id = _text(entry.get("strategy_id"), "restated strategy_id")
+        if strategy_id in identities:
+            raise CurrentDependenceError("history restates a strategy twice")
+        identities[strategy_id] = dict(entry)
+    return identities
+
+
+def _restated_receipt(
+    manifest: Mapping[str, Any],
+    live_by_strategy: Mapping[str, Sequence[Mapping[str, str]]],
+) -> dict[str, Any] | None:
+    """The restatement identity the dependence receipt carries, bound to its own rows.
+
+    Each restated strategy's projected live rows must hash to the series the history
+    sealed for it, so the dependence source, the history block and the report's
+    ``return_path_series_sha256`` name one series.  ``None`` (no key in the receipt)
+    when nothing was restated.
+    """
+
+    identities = _history_restatement(manifest)
+    if not identities:
+        return None
+    block = _object(manifest.get(STRATEGY_BASIS_BLOCK), "history restatement")
+    basis = _strategy_basis_module()
+    strategies: list[dict[str, Any]] = []
+    for strategy_id in sorted(identities):
+        identity = identities[strategy_id]
+        rows = live_by_strategy.get(strategy_id)
+        if not rows:
+            raise CurrentDependenceError(
+                f"restated strategy is not a dependence strategy: {strategy_id}"
+            )
+        if basis.series_sha256(rows) != identity.get("series_sha256"):
+            raise CurrentDependenceError(
+                f"restated live segment differs from the history block: {strategy_id}"
+            )
+        strategies.append(
+            {
+                key: identity[key]
+                for key in (
+                    "account_id",
+                    "observed_end",
+                    "observed_start",
+                    "opening_date",
+                    "return_observations",
+                    "series_id",
+                    "series_sha256",
+                    "strategy_id",
+                )
+            }
+        )
+    return {
+        "declaration_sha256": _hash(
+            block.get("declaration_sha256"), "history declaration_sha256"
+        ),
+        "sleeve_facts_sha256": _hash(
+            block.get("sleeve_facts_sha256"), "history sleeve_facts_sha256"
+        ),
+        "strategies": strategies,
+    }
+
+
+def _live_version_ref(
+    contract: Mapping[str, Any],
+    strategy_id: str,
+    segment_identities: Sequence[Mapping[str, Any]],
+    restated: Mapping[str, Any],
+) -> str:
+    """The live implementation reference the evidence-mode spec carries.
+
+    Unrestated: the product contract's own reference (unchanged).  A restated strategy's
+    live path is no longer the parent account's rows that reference names, so it is the
+    contract's own formula (``account-live-segment:<segment sha256>``) over the segment
+    the restated generation actually carries.
+    """
+
+    if strategy_id in restated:
+        live = [
+            row
+            for row in segment_identities
+            if row.get("strategy_id") == strategy_id
+            and row.get("mode_admission") == "INCLUDE_SELECTED_LIVE"
+        ]
+        if len(live) != 1:
+            raise CurrentDependenceError(
+                f"restated strategy lacks one selected live segment: {strategy_id}"
+            )
+        return "account-live-segment:" + _hash(
+            live[0].get("sha256"), "restated live segment sha256"
+        )
+    return _text(
+        next(
+            row["live_implementation_identity"]["version_ref"]
+            for row in contract["strategies"]
+            if row["strategy_id"] == strategy_id
+        ),
+        "live implementation version",
+    )
+
+
 def _verified_history(
     generation_root: Path,
     policy: Mapping[str, Any],
@@ -346,6 +473,10 @@ def _verified_history(
     manifest = _json_bytes(manifest_content, "layered history receipt")
     if canonical_json_bytes(manifest) != manifest_content:
         raise CurrentDependenceError("layered history receipt is not canonical")
+    if history_authority is None and STRATEGY_BASIS_BLOCK in manifest:
+        raise CurrentDependenceError(
+            "a restated layered history is consumed only through the selected inputs"
+        )
     generation_id = _hash(manifest.get("generation_id"), "history generation_id")
     if generation_id != authority.get("generation_id") or generation_id != root.name:
         raise CurrentDependenceError("layered history generation identity differs")
@@ -1320,6 +1451,13 @@ def build_source(
         )
     policy_series = _objects(policy.get("series"), "dependence policy series")
     required_ids = [str(row["strategy_id"]) for row in policy_series]
+    restatement = _history_restatement(history_manifest)
+    unknown_restated = sorted(set(restatement) - set(required_ids))
+    if unknown_restated:
+        raise CurrentDependenceError(
+            "history restates a strategy outside the dependence perimeter: "
+            + unknown_restated[0]
+        )
     allocation_args = (
         {"selected_input_authority": selected_authority}
         if selected_authority is not None
@@ -1413,13 +1551,11 @@ def build_source(
         "evidence_mode_series": [
             {
                 "live_evidence_layer": "ACCOUNT_LIVE",
-                "live_version_ref": _text(
-                    next(
-                        row["live_implementation_identity"]["version_ref"]
-                        for row in contract["strategies"]
-                        if row["strategy_id"] == policy_row["strategy_id"]
-                    ),
-                    "live implementation version",
+                "live_version_ref": _live_version_ref(
+                    contract,
+                    str(policy_row["strategy_id"]),
+                    segment_identities,
+                    restatement,
                 ),
                 "series_id": str(policy_row["series_id"]),
                 "strategy_version": _text(
@@ -1550,6 +1686,20 @@ def build_source(
     }
     if selected_authority is not None:
         source_identity["selected_input_authority"] = selected_authority
+    restated_receipt = _restated_receipt(
+        history_manifest,
+        {
+            strategy_id: [
+                row
+                for row in selected_segments
+                if row["strategy_id"] == strategy_id
+                and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+            ]
+            for strategy_id in restatement
+        },
+    )
+    if restated_receipt is not None:
+        source_identity[STRATEGY_BASIS_BLOCK] = restated_receipt
     bundle_id = _sha256(canonical_json_bytes(source_identity))
     receipt = {"bundle_id": bundle_id, **source_identity}
     return {
