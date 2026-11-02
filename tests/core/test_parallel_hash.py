@@ -39,7 +39,7 @@ def test_hash_files_raises_the_first_failure_in_input_order(
     paths = _tree(tmp_path)
     paths[5] = tmp_path / "missing-5"
     paths[20] = tmp_path / "missing-20"
-    with pytest.raises(FileNotFoundError, match="missing-5"):
+    with pytest.raises(parallel_hash.IrregularFileError, match="missing-5"):
         parallel_hash.hash_files(paths)
 
 
@@ -67,3 +67,19 @@ def test_inventories_are_identical_for_serial_and_parallel_hashing(
         )
     assert results[0] == results[1]
     assert len(results[0][0]) == 40
+
+
+def test_a_member_swapped_for_a_link_after_the_walk_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"secret")
+    victim = _tree(tmp_path / "g")[3]
+    victim.unlink()
+    try:
+        victim.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setenv(parallel_hash.WORKERS_ENV, "4")
+    with pytest.raises(parallel_hash.IrregularFileError):
+        parallel_hash.hash_files([victim] * 10)

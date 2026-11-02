@@ -20,6 +20,10 @@ _MAX_WORKERS = 16
 _MIN_PARALLEL_FILES = 8
 
 
+class IrregularFileError(ValueError):
+    """A member was missing, linked or irregular when its turn to be hashed came."""
+
+
 def hash_worker_count() -> int:
     raw = os.environ.get(WORKERS_ENV)
     if raw is None:
@@ -34,6 +38,10 @@ def hash_worker_count() -> int:
 
 
 def hash_file(path: Path) -> tuple[str, int]:
+    # Re-checked per file, immediately before the open, as the serial loops did,
+    # so a member swapped for a link after the walk still fails closed.
+    if path.is_symlink() or not path.is_file():
+        raise IrregularFileError(f"expected regular file is missing or linked: {path}")
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as handle:

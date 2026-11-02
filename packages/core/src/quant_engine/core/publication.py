@@ -1581,7 +1581,11 @@ def generation_inventory_sha256(root: Path, generation_id: str) -> str:
                     _inventory_file_refusal(path, directory, name)
                 )
             members.append(path)
-    for path, (digest, size) in zip(members, parallel_hash.hash_files(members)):
+    try:
+        hashed = parallel_hash.hash_files(members)
+    except parallel_hash.IrregularFileError as exc:
+        raise GenerationConflictError(str(exc)) from exc
+    for path, (digest, size) in zip(members, hashed):
         files.append(
             {
                 "relative_path": path.relative_to(generation_dir).as_posix(),

@@ -3241,7 +3241,11 @@ def _path_evidence(path: Path) -> dict[str, object]:
             members.append(item)
     files: list[dict[str, object]] = []
     total_size = 0
-    for item, (digest, size) in zip(members, parallel_hash.hash_files(members)):
+    try:
+        hashed = parallel_hash.hash_files(members)
+    except parallel_hash.IrregularFileError as exc:
+        raise PipelineValidationError(str(exc)) from exc
+    for item, (digest, size) in zip(members, hashed):
         total_size += size
         files.append(
             {
@@ -3342,9 +3346,13 @@ def _inventory(path: Path) -> tuple[FileExpectation, ...]:
             raise PipelineValidationError("generation inventory contains a link")
         if item.is_file():
             files.append(item)
+    try:
+        hashed = parallel_hash.hash_files(files)
+    except parallel_hash.IrregularFileError as exc:
+        raise PipelineValidationError(str(exc)) from exc
     return tuple(
         FileExpectation(item.relative_to(path).as_posix(), digest, size)
-        for item, (digest, size) in zip(files, parallel_hash.hash_files(files))
+        for item, (digest, size) in zip(files, hashed)
     )
 
 
