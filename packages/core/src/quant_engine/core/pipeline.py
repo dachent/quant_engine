@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
 
-from quant_engine.core import stage_timing
+from quant_engine.core import parallel_hash, stage_timing
 from quant_engine.core.authority import FreshnessPolicy
 from quant_engine.core.code_identity import (
     COMMIT_SCHEME,
@@ -3231,23 +3231,29 @@ def _path_evidence(path: Path) -> dict[str, object]:
         raise PipelineValidationError(
             f"declared command path is not a regular file or directory: {path}"
         )
-    files: list[dict[str, object]] = []
-    total_size = 0
+    members: list[Path] = []
     for item in sorted(path.rglob("*")):
         if item.is_symlink():
             raise PipelineValidationError(
                 f"declared command directory contains a link: {item}"
             )
         if item.is_file():
-            digest, size = _file_hash(item)
-            total_size += size
-            files.append(
-                {
-                    "relative_path": item.relative_to(path).as_posix(),
-                    "sha256": digest,
-                    "size_bytes": size,
-                }
-            )
+            members.append(item)
+    files: list[dict[str, object]] = []
+    total_size = 0
+    try:
+        hashed = parallel_hash.hash_files(members)
+    except parallel_hash.IrregularFileError as exc:
+        raise PipelineValidationError(str(exc)) from exc
+    for item, (digest, size) in zip(members, hashed):
+        total_size += size
+        files.append(
+            {
+                "relative_path": item.relative_to(path).as_posix(),
+                "sha256": digest,
+                "size_bytes": size,
+            }
+        )
     inventory = canonical_json_bytes({"files": files})
     return {
         **base,
@@ -3334,16 +3340,20 @@ def _completed_command_outputs_match(
 def _inventory(path: Path) -> tuple[FileExpectation, ...]:
     if path.is_symlink() or not path.is_dir():
         raise PipelineValidationError(f"generation directory is missing: {path}")
-    rows: list[FileExpectation] = []
+    files: list[Path] = []
     for item in sorted(path.rglob("*")):
         if item.is_symlink():
             raise PipelineValidationError("generation inventory contains a link")
         if item.is_file():
-            digest, size = _file_hash(item)
-            rows.append(
-                FileExpectation(item.relative_to(path).as_posix(), digest, size)
-            )
-    return tuple(rows)
+            files.append(item)
+    try:
+        hashed = parallel_hash.hash_files(files)
+    except parallel_hash.IrregularFileError as exc:
+        raise PipelineValidationError(str(exc)) from exc
+    return tuple(
+        FileExpectation(item.relative_to(path).as_posix(), digest, size)
+        for item, (digest, size) in zip(files, hashed)
+    )
 
 
 def inventory_generation(path: Path) -> dict[str, object]:
