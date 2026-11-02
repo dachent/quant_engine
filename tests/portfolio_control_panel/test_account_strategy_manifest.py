@@ -4639,13 +4639,13 @@ def _real_quantbase_ledger_anchors(
     )
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
-        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,\n"
-        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z\n"
-        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z\n"
-        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,\n"
-        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z\n"
-        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z\n",
+        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at,fund_title\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,,Volatis Strategy\n"
+        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z,\n"
+        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z,\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,,Volatis Strategy\n"
+        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z,\n"
+        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z,\n",
         encoding="utf-8-sig",
     )
     manifest = GenerationManifest.build(

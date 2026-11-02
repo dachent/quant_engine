@@ -7,9 +7,9 @@ production code: it is derived from admitted data or configuration instead.
 Two kinds of check, neither of which contains an id:
 
 * structural: shapes that only a real id or a user-profile path can have;
-* hashed: every id-shaped token found in production code is hashed and refused
+* hashed: every id-shaped candidate found in production code is hashed and refused
   when it is one of the ids that were known to be real when this guard was
-  written (SHA-256 of the token text; the ids themselves are not stored here).
+  written (SHA-256 of the candidate text; the ids themselves are not stored here).
 
 Data pins (contracts, acceptance baselines, retained release inputs, schemas)
 and archived scripts are data, not production code, and are not scanned here.
@@ -38,7 +38,7 @@ NOT_PRODUCTION_PREFIXES = (
 )
 # Opaque ids: account/transaction ids minted by provenance and the provider
 # ledger, long provider numeric ids, and 16-hex labels.
-ID_TOKEN = re.compile(
+ID_SHAPE = re.compile(
     r"account-[0-9a-f]{16}|txn-[0-9a-f]{24}|(?<![\w.-])\d{15,}(?![\w.])"
     r"|(?<![\w])[0-9a-f]{16}(?![\w])"
 )
@@ -141,7 +141,7 @@ KNOWN_REAL_ID_SHA256 = frozenset(
         "fb2cf5ae3b2d22b16f1b72117a879eef073df0944694d81422ddf2e42c8722d9",
     }
 )
-# (path, sha256 of token): a hashed non-managed TWS account label that an
+# (path, sha256 of candidate): a hashed non-managed TWS account label that an
 # owner ruling excludes from the IBKR read boundary.  The owner declares it per
 # generation, so it can only move into the IBKR spec together with the frozen
 # R2.1 spec; until then it is the one exempt literal.
@@ -173,8 +173,8 @@ def _relative(path: Path) -> str:
     return path.relative_to(REPOSITORY_ROOT).as_posix()
 
 
-def _hash(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+def _hash(candidate: str) -> str:
+    return hashlib.sha256(candidate.encode("utf-8")).hexdigest()
 
 
 def test_the_scan_covers_production_code() -> None:
@@ -199,12 +199,12 @@ def test_no_known_real_id_in_production_code() -> None:
     for path in production_files():
         relative = _relative(path)
         text = path.read_text(encoding="utf-8", errors="replace")
-        for match in ID_TOKEN.finditer(text):
-            token = match.group(0)
-            digests = {_hash(token), _hash(token.split("-", 1)[-1])}
+        for match in ID_SHAPE.finditer(text):
+            candidate = match.group(0)
+            digests = {_hash(candidate), _hash(candidate.split("-", 1)[-1])}
             if (
                 digests & KNOWN_REAL_ID_SHA256
-                and (relative, _hash(token)) not in EXEMPT
+                and (relative, _hash(candidate)) not in EXEMPT
             ):
                 line = text.count("\n", 0, match.start()) + 1
                 found.append(f"{relative}:{line}")
@@ -216,5 +216,5 @@ def test_the_guard_detects_what_it_guards_against() -> None:
     assert STRUCTURAL["account id"].search(sample)
     assert STRUCTURAL["user profile path"].search("C:/Users/" + "someone/x")
     assert not STRUCTURAL["user profile path"].search("C:/Users/Public/x")
-    assert ID_TOKEN.search("order " + "1" * 19)
+    assert ID_SHAPE.search("order " + "1" * 19)
     assert not KNOWN_REAL_ID_SHA256 & {_hash(sample), _hash("1" * 19)}
