@@ -106,6 +106,7 @@ from portfolio_invested_capital import (
     verify_governed_capital_result,
 )
 from portfolio_totals import PortfolioTotalsError, build_portfolio_totals
+import portfolio_implementation_sleeve_basis as implementation_sleeve_basis
 import sleeve_disclosures
 import strategy_basis
 from portfolio_totals_verify import (
@@ -9594,6 +9595,63 @@ def _provider_return_policy_window(
         return None
 
 
+def _apply_implementation_sleeve_basis(
+    path: Path,
+    restatements: Mapping[str, strategy_basis.SleeveRestatement],
+    reconciliation_contract: dict[str, dict[str, Any]] | None,
+    reconciliation_ref: Mapping[str, Any] | None,
+    attribution_contract: dict[str, dict[str, Any]] | None,
+    attribution_ref: Mapping[str, Any] | None,
+) -> tuple[
+    dict[str, dict[str, Any]] | None, dict[str, dict[str, Any]] | None, list[str]
+]:
+    """Stand the model comparison of a restated strategy on its sleeve (#624).
+
+    The retained contracts were validated against the unrestated catalog before this
+    runs and stay untouched.  The sleeve-basis contract is checked against the
+    report's own restated rows and bound to the retained contracts by digest; the
+    retained account-basis rows are kept verbatim in an ``account_basis`` sub-block.
+    """
+
+    if not restatements:
+        raise ReportValidationError(
+            "an implementation sleeve basis requires a strategy basis declaration"
+        )
+    try:
+        payload = json.loads(_regular_file_bytes(path, "implementation sleeve basis"))
+        blocks = implementation_sleeve_basis.validate_payload(
+            payload,
+            restatements,
+            retained_attribution_sha256=(
+                None if attribution_ref is None else str(attribution_ref["sha256"])
+            ),
+            retained_reconciliation_sha256=(
+                None
+                if reconciliation_ref is None
+                else str(reconciliation_ref["sha256"])
+            ),
+        )
+        reconciliation_rows = dict(reconciliation_contract or {})
+        attribution_rows = dict(attribution_contract or {})
+        for strategy_id, block in blocks.items():
+            attribution, reconciled = implementation_sleeve_basis.apply_to_rows(
+                block,
+                attribution_rows.get(strategy_id),
+                reconciliation_rows.get(strategy_id),
+            )
+            if attribution is not None:
+                attribution_rows[strategy_id] = attribution
+            if reconciled is not None:
+                reconciliation_rows[strategy_id] = reconciled
+    except (implementation_sleeve_basis.SleeveBasisError, json.JSONDecodeError) as exc:
+        raise ReportValidationError(str(exc)) from exc
+    return (
+        reconciliation_rows if reconciliation_contract is not None else None,
+        attribution_rows if attribution_contract is not None else None,
+        sorted(blocks),
+    )
+
+
 def _implementation_contracts(
     catalog: Mapping[str, Any],
     baseline_root: Path,
@@ -9704,6 +9762,7 @@ def build_report_data(
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
+    implementation_sleeve_basis_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -9974,6 +10033,20 @@ def build_report_data(
         implementation_reconciliation_path,
         implementation_return_attribution_path,
     )
+    sleeve_basis_strategies: list[str] = []
+    if implementation_sleeve_basis_path is not None:
+        (
+            implementation_contract,
+            implementation_return_attribution_contract,
+            sleeve_basis_strategies,
+        ) = _apply_implementation_sleeve_basis(
+            implementation_sleeve_basis_path,
+            basis_restatements,
+            implementation_contract,
+            implementation_contract_ref,
+            implementation_return_attribution_contract,
+            implementation_return_attribution_ref,
+        )
     opening_catalog = _with_ledger_opening_anchors(
         series_catalog, performance, baseline_root, provider_ledger_root
     )
@@ -10677,6 +10750,20 @@ def build_report_data(
                     ).hexdigest(),
                 },
             ]
+        if implementation_sleeve_basis_path is not None:
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "implementation-sleeve-basis",
+                    "schema": implementation_sleeve_basis.SCHEMA,
+                    "sha256": hashlib.sha256(
+                        _regular_file_bytes(
+                            implementation_sleeve_basis_path,
+                            "implementation sleeve basis",
+                        )
+                    ).hexdigest(),
+                },
+            ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
         )
@@ -10796,6 +10883,7 @@ def build_report_data(
             derived_product,
             basis_restatements,
         )
+        _mark_implementation_sleeve_basis(report, sleeve_basis_strategies)
         if basis_restatements:
             report["methodology"].append(
                 {
@@ -12914,6 +13002,28 @@ def _apply_return_scope(
             f"unallocated cash and margin). MWR and governed capital: sleeve "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
         )
+
+
+def _mark_implementation_sleeve_basis(
+    report: dict[str, Any], strategy_ids: Sequence[str]
+) -> None:
+    """A restated strategy whose model comparison is on the sleeve stops listing it as parent basis."""
+
+    for item in report.get("strategy_summary", []):
+        if not isinstance(item, dict) or item.get("strategy_id") not in strategy_ids:
+            continue
+        scope = item.get("return_scope")
+        if isinstance(scope, dict) and "not_restated" in scope:
+            scope["not_restated"] = [
+                name
+                for name in scope["not_restated"]
+                if name != "implementation_return_attribution"
+            ]
+        label = item.get("return_scope_label")
+        if isinstance(label, str):
+            item["return_scope_label"] = label.replace(
+                "the implementation bridge, ", ""
+            )
 
 
 def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
