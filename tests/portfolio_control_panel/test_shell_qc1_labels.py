@@ -781,8 +781,10 @@ def test_snapshot_weight_names_the_recorded_perimeter_it_divides_by(
         "Weight is the share of the perimeter recorded at Aug 16, 2026 "
         "(9 components, $446,546), not of the current systematic perimeter"
     ) in table
-    assert "1 of the 9 components are listed in this table, totalling $56,833" in table
-    assert "the other 8 ($389,714 of the perimeter) are not listed here" in table
+    assert (
+        "1 of the 9 components are listed in the rows shown, totalling $56,833" in table
+    )
+    assert "the other 8 ($389,714 of the perimeter) are not in the rows shown" in table
     # The reserve row carries no weight and no perimeter note.
     assert table.count("perimeter recorded at") == 1
 
@@ -1209,3 +1211,33 @@ def test_not_ready_statuses_never_render_as_success() -> None:
     warning = [line for line in tone[0].splitlines() if '"warning"' in line]
     assert len(warning) == 1
     assert "NOT_READY" in warning[0]
+
+
+def test_snapshot_perimeter_listing_note_is_built_from_the_rows_shown_once(
+    tmp_path: Path,
+) -> None:
+    """Review finding: the note counts only the rows rendered, once, on the first of them."""
+
+    payload = _positions_payload()
+
+    def row(name: str, value: str, **fields: Any) -> dict[str, Any]:
+        return {
+            "as_of_date": "2030-03-01",
+            "current_value_usd": value,
+            "scope": "SYSTEMATIC",
+            "strategy_id": name.lower(),
+            "strategy_name": name,
+            "systematic_weight": "0.25",
+            "weight_basis": "HISTORICAL_SNAPSHOT_2030_03_01",
+            "weight_denominator_usd": "1000",
+            "weight_perimeter": "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER",
+            "weight_perimeter_component_count": 4,
+            **fields,
+        }
+
+    payload["allocations"] = [row("Alpha", "250"), row("Beta", "250")]
+    table = _flat(_run(tmp_path, payload, "renderAllocationTable"), "#allocation-table")
+
+    assert table.count("components are listed in the rows shown") == 1
+    assert "2 of the 4 components are listed in the rows shown, totalling $500" in table
+    assert "the other 2 ($500 of the perimeter) are not in the rows shown" in table

@@ -767,7 +767,7 @@
   const positionPageSize = 50;
   // N65: a dated snapshot's weight is its value over the snapshot's own recorded systematic
   // perimeter (not the current seven), and the row says which denominator that is.
-  const allocationPerimeterNote = (row) => {
+  const allocationPerimeterNote = (row, shownRows) => {
     if (row.weight_perimeter !== "SNAPSHOT_RECORDED_SYSTEMATIC_PERIMETER" || row.systematic_weight == null) return "";
     const components = number(row.weight_perimeter_component_count);
     const detail = [
@@ -776,12 +776,12 @@
     ].filter(Boolean).join(", ");
     // P28-A2: the listed rows of that perimeter may not be all of its components; the first row of the group says
     // how many are listed, what they total and how much of the perimeter is in components this table does not list.
-    const group = (Array.isArray(data.allocations) ? data.allocations : []).filter((item) => item.weight_perimeter === row.weight_perimeter
+    const group = (Array.isArray(shownRows) ? shownRows : []).filter((item) => item.weight_perimeter === row.weight_perimeter
       && item.weight_denominator_usd === row.weight_denominator_usd && item.systematic_weight != null);
     const listedTotal = group.reduce((sum, item) => sum + (Number(item.current_value_usd) || 0), 0);
     const unlisted = components == null ? 0 : components - group.length;
     const unlistedNote = group[0] === row && unlisted > 0 && number(row.weight_denominator_usd) != null
-      ? `<span class="cell-secondary">${integer.format(group.length)} of the ${integer.format(components)} components are listed in this table, totalling ${currency(listedTotal)}; the other ${integer.format(unlisted)} (${currency(Number(row.weight_denominator_usd) - listedTotal)} of the perimeter) are not listed here</span>`
+      ? `<span class="cell-secondary">${integer.format(group.length)} of the ${integer.format(components)} components are listed in the rows shown, totalling ${currency(listedTotal)}; the other ${integer.format(unlisted)} (${currency(Number(row.weight_denominator_usd) - listedTotal)} of the perimeter) are not in the rows shown</span>`
       : "";
     return `<span class="cell-secondary">Weight is the share of the perimeter recorded at ${row.as_of_date ? formatDate(row.as_of_date) : "the snapshot date"}${detail ? ` (${detail})` : ""}, not of the current systematic perimeter</span>${unlistedNote}`;
   };
@@ -840,7 +840,7 @@
       const current = currents[index];
       const currentValue = current.value != null ? `${currency(current.value)}${row.scope === "RESERVE" ? reserveBasisNote() : aggregateBasisNote([row.strategy_id])}` : current.status ? statusText(current.status) : "—";
       const identity = "Reserve classification";
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row)}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span>${row.strategy_id ? "" : `<span class="cell-secondary">${safe(identity)}</span>`}${accountCashNote(row.strategy_id)}</td><td>${statusText(row.scope)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td class="numeric">${currentValue}</td><td class="numeric">${pct(current.weight)}</td><td class="numeric">${pct(target.target)}</td><td class="numeric">${pct(target.drift)}</td><td>${statusText(target.status)}</td><td>${formatDateHtml(row.as_of_date)}${staleSuffix(row.as_of_date)}<span class="cell-secondary">${safe(weightBasisText(row.weight_basis))}</span>${allocationPerimeterNote(row, accepted)}</td></tr>`;
     });
     // F20: a total only for the additive columns, from the rows shown.  A current value that is
     // not ready is left out of its total and the footer says how many.
