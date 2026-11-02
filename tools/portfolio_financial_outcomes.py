@@ -1458,11 +1458,18 @@ def _verify_decomposition_consumers(
     dashboard: Mapping[str, Any],
     plan_bindings: Mapping[tuple[str, str, str], Mapping[str, Any]],
     plan: Mapping[str, Any],
+    projected: dict[tuple[str, Path], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Compare actual consumer cells with the existing numerical projection."""
+    """Compare actual consumer cells with the existing numerical projection.
+
+    ``projected`` memoizes the factor analysis of each replayed decomposition;
+    it is a pure function of the replay, so the dashboard and report passes of
+    one verification can share it.
+    """
     import portfolio_control_panel as producer
 
-    projected: dict[tuple[str, Path], Mapping[str, Any]] = {}
+    if projected is None:
+        projected = {}
     checked = {}
     modes = dashboard.get("decomposition_lenses", {}).get("modes", {})
     for node_id, key in required_outcome_roles(contract, plan=plan).items():
@@ -2091,6 +2098,7 @@ def _verify_consumers(
         "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
         "panel_report_sha256": hashlib.sha256(downloadable_report).hexdigest(),
     }
+    projected: dict[tuple[str, Path], Mapping[str, Any]] = {}
     correlation_node = nodes["financial-outcome-dependence-live-only"]
     correlation_generation = _generation(spec, correlation_node)
     correlation = replays[("DEPENDENCE", correlation_node.path.resolve())]
@@ -2137,10 +2145,26 @@ def _verify_consumers(
         "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
         "report_panel_parity": report_panel_parity,
         "decomposition_cells": _verify_decomposition_consumers(
-            spec, contract, nodes, replays, series, dashboard, plan_bindings, plan
+            spec,
+            contract,
+            nodes,
+            replays,
+            series,
+            dashboard,
+            plan_bindings,
+            plan,
+            projected,
         ),
         "report_decomposition_cells": _verify_decomposition_consumers(
-            spec, contract, nodes, replays, series, report, plan_bindings, plan
+            spec,
+            contract,
+            nodes,
+            replays,
+            series,
+            report,
+            plan_bindings,
+            plan,
+            projected,
         ),
     }
 
