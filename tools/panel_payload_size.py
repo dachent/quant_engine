@@ -108,7 +108,7 @@ def raise_budgets(
     the file is reproducible from ``--before`` and ``generation`` alone.
     """
 
-    result = json.loads(json.dumps(budget))
+    result: dict[str, Any] = json.loads(json.dumps(budget))
     entries = result.setdefault("history", [])
     record: dict[str, Any] = {
         "generation": generation,
