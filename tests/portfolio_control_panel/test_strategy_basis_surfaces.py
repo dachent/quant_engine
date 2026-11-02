@@ -226,3 +226,116 @@ def test_real_r2_account_figures_are_the_lane_of_the_restated_underwriting_row()
         lane["systematic_weight"]
         == r2_layer["portfolio_fit"]["strategy_systematic_weight"]
     )
+
+
+def _canonical_inputs() -> dict[str, Any]:
+    """Minimal hand-built inputs for the real canonical-series parity function."""
+
+    returns = [
+        {
+            "strategy_id": SID,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "date": day,
+            "return": value,
+        }
+        for day, value in (("2026-02-02", "0.01"), ("2026-02-03", "-0.005"))
+    ]
+    window = panel._report_return_window(
+        returns,
+        strategy_id=SID,
+        evidence_layer="ACCOUNT_LIVE",
+        observed_start="2026-02-02",
+        observed_end="2026-02-03",
+    )
+    sha = window["canonical_live_series_sha256"]
+    name = "Strategy X"
+    coverage = {
+        "canonical_live_series_sha256": sha,
+        "target_observed_start": "2026-02-02",
+        "target_observed_end": "2026-02-03",
+        "target_observations": 2,
+    }
+    return {
+        "evidence_by_strategy": {
+            SID: {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": "g" * 64,
+                "strategy_version": "v1",
+                "account": {
+                    "return_observations": 2,
+                    "observed_start": "2026-02-02",
+                    "observed_end": "2026-02-03",
+                },
+            }
+        },
+        "strategy_names": {SID: name},
+        "factor_analysis": {"series": [{"series_id": name, "coverage": coverage}]},
+        "dependence_analysis": {
+            "series_composition": {
+                name: {
+                    "strategy_version": "v1",
+                    "live_version_ref": "live:1",
+                    "observed_start": "2026-02-02",
+                    "observed_end": "2026-02-03",
+                    "live_observations": 2,
+                    "canonical_live_series_sha256": sha,
+                    "live_evidence_layer": "ACCOUNT_LIVE",
+                }
+            }
+        },
+        "weekly_returns": {
+            "generation_id": "w",
+            "series": [
+                {
+                    "display_name": name,
+                    "primary_group": "STRATEGY",
+                    "mode_coverage": {
+                        "LIVE_ONLY": {
+                            "canonical_live_series_sha256": sha,
+                            "strategy_version": "v1",
+                        }
+                    },
+                    "observation_meta_by_mode": {
+                        "LIVE_ONLY": {"w1": [0, "2026-02-02", "2026-02-03"]}
+                    },
+                }
+            ],
+        },
+        "report_strategy_returns": returns,
+    }
+
+
+def _canonical(lanes: dict[str, dict[str, Any]] | None) -> list[dict[str, Any]]:
+    inputs = _canonical_inputs()
+    return panel._canonical_strategy_series_contracts(
+        inputs["evidence_by_strategy"],
+        inputs["strategy_names"],
+        inputs["factor_analysis"],
+        inputs["dependence_analysis"],
+        inputs["weekly_returns"],
+        inputs["report_strategy_returns"],
+        account_lanes=lanes,
+    )
+
+
+def test_the_canonical_series_row_carries_the_labelled_account_series() -> None:
+    lanes = panel._restated_account_lanes([_strategy()], [_account_row()])
+    (row,) = _canonical(lanes)
+    assert row["strategy_id"] == SID and row["return_observations"] == 2
+    assert row["account_basis"] == {
+        "label": lanes[SID]["label"],
+        "account_id": "acct",
+        "observed_start": "2026-01-22",
+        "observed_end": "2026-09-17",
+        "observations": 171,
+        "series_sha256": SHA,
+    }
+    # the primary series hash is the restated path's, not the account's
+    assert row["canonical_live_series_sha256"] != SHA
+
+
+def test_switched_off_the_canonical_series_row_has_no_account_block() -> None:
+    (plain,) = _canonical(None)
+    (empty,) = _canonical({})
+    assert "account_basis" not in plain
+    assert json.dumps(plain, sort_keys=True) == json.dumps(empty, sort_keys=True)

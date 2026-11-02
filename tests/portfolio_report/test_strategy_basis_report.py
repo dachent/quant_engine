@@ -189,3 +189,57 @@ def test_account_basis_returns_are_read_from_the_account_block_only() -> None:
     }
     assert portfolio_report._account_basis_returns(report) == {"s": Decimal("0.0245")}
     assert portfolio_report._account_basis_returns({}) == {}
+
+
+def test_apply_return_scope_states_the_cost_rate_basis_of_a_restated_row() -> None:
+    import portfolio_report
+    import strategy_basis
+
+    links = [
+        {
+            "start_date": "2026-07-02",
+            "end_date": "2026-07-03",
+            "factor": "1.02",
+            "ending_nav": "102",
+        }
+    ]
+    restatement = strategy_basis.sleeve_restatement(
+        strategy_id="s",
+        account_id="acct-s2",
+        parent_account_id="acct",
+        provider_id="p",
+        links=links,
+    )
+
+    def item(**extra: Any) -> dict[str, Any]:
+        return {
+            "strategy_id": "s",
+            "annual_external_cost_usd": "6",
+            "cost_rate_denominator_usd": "102",
+            "annual_external_cost_rate_pre_tax": "0.0588",
+            "cost_rate_reason": None,
+            **extra,
+        }
+
+    rows = [{"account_id": "acct-s2", "strategy_id": "s", "effective_end": None}]
+    report = {"strategy_summary": [item()]}
+    portfolio_report._apply_return_scope(
+        report,
+        rows,
+        {"acct-s2": "acct"},
+        ["s"],
+        {"s": restatement},
+        account_basis_values={"s": Decimal("60")},
+    )
+    reason = report["strategy_summary"][0]["cost_rate_reason"]
+    assert "gross sleeve value 102.00" in reason
+    assert "60.00 the same amount is 10.0000%" in reason
+    # switched off, or without a published rate, the reason is untouched
+    off = {"strategy_summary": [item()]}
+    portfolio_report._apply_return_scope(off, rows, {"acct-s2": "acct"}, ["s"])
+    assert off["strategy_summary"][0]["cost_rate_reason"] is None
+    none = {"strategy_summary": [item(annual_external_cost_rate_pre_tax=None)]}
+    portfolio_report._apply_return_scope(
+        none, rows, {"acct-s2": "acct"}, ["s"], {"s": restatement}
+    )
+    assert none["strategy_summary"][0]["cost_rate_reason"] is None

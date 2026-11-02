@@ -397,6 +397,38 @@ def label_recorded_allocations(
     return result
 
 
+def cost_rate_basis_note(
+    row: Mapping[str, Any], account_value: Decimal | None
+) -> str | None:
+    """What a restated row's cost rate stands on, or None when it publishes no rate.
+
+    The cost amount is carried per strategy (one annual figure for the strategy family,
+    keyed by strategy id), never per account or per sleeve, so the numerator is the same
+    on the sleeve and on the whole-account basis; only the denominator changes with the
+    basis.  The row's denominator is its own (gross sleeve) value.  The same amount over
+    the whole-account value is named beside it, so the two rates are never mixed.
+    """
+
+    amount_text = row.get("annual_external_cost_usd")
+    value_text = row.get("cost_rate_denominator_usd")
+    rate_text = row.get("annual_external_cost_rate_pre_tax")
+    if amount_text is None or value_text is None or rate_text is None:
+        return None
+    amount = _decimal(amount_text, "annual cost")
+    value = _decimal(value_text, "cost rate denominator")
+    note = (
+        f"annual cost {amount:,.2f} USD is carried per strategy (the same on the sleeve "
+        f"and on the whole-account basis); the rate {_decimal(rate_text, 'rate'):.4%} "
+        f"is over the gross sleeve value {value:,.2f}"
+    )
+    if account_value is not None and account_value > 0:
+        note += (
+            f"; over the whole-account value {account_value:,.2f} the same amount "
+            f"is {amount / account_value:.4%}"
+        )
+    return note
+
+
 def return_scope(
     restatement: SleeveRestatement, retained_sleeve_accounts: Sequence[str]
 ) -> dict[str, Any]:

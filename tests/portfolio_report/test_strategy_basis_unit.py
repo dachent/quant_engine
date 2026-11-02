@@ -303,3 +303,39 @@ def test_recorded_allocations_are_labelled_not_rewritten() -> None:
     assert "value_basis" not in labelled[1]
     # the input rows are not mutated
     assert "value_basis" not in rows[0]
+
+
+def _cost_row(**override: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "annual_external_cost_usd": "6000",
+        "cost_rate_denominator_usd": "77258.13",
+        "annual_external_cost_rate_pre_tax": "0.0776594",
+    }
+    row.update(override)
+    return row
+
+
+def test_the_cost_rate_note_names_both_denominators_for_one_numerator() -> None:
+    note = strategy_basis.cost_rate_basis_note(_cost_row(), Decimal("57200.88"))
+    assert note is not None
+    assert "carried per strategy" in note
+    assert "gross sleeve value 77,258.13" in note and "7.7659%" in note
+    # the same amount over the account value, computed not typed
+    assert "57,200.88 the same amount is 10.4893%" in note
+
+
+def test_the_cost_rate_note_is_absent_without_a_published_rate() -> None:
+    assert (
+        strategy_basis.cost_rate_basis_note(
+            _cost_row(annual_external_cost_usd=None), None
+        )
+        is None
+    )
+    assert (
+        strategy_basis.cost_rate_basis_note(
+            _cost_row(annual_external_cost_rate_pre_tax=None), None
+        )
+        is None
+    )
+    only_sleeve = strategy_basis.cost_rate_basis_note(_cost_row(), None)
+    assert only_sleeve is not None and "whole-account value" not in only_sleeve
