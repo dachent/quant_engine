@@ -108,6 +108,7 @@ from portfolio_invested_capital import (
 from portfolio_totals import PortfolioTotalsError, build_portfolio_totals
 import sleeve_disclosures
 import strategy_basis
+import strategy_basis_disclosure
 from portfolio_totals_verify import (
     PortfolioTotalsVerificationError,
     verify_portfolio_totals,
@@ -151,6 +152,12 @@ CURRENT_STRATEGY_CONTROL_IDS: Final = (
 CURRENT_PRODUCT_EPOCH_COUNT: Final = 13
 CURRENT_EPOCH_CROSSWALK_AS_OF_DATE: Final = "2026-08-16"
 CURRENT_EPOCH_CROSSWALK_CUTOFF_DATE: Final = "2026-08-13"
+SLEEVE_FACTS_SCHEMA: Final = (
+    Path(__file__).resolve().parents[1]
+    / "schemas"
+    / "portfolio"
+    / "sleeve-account-facts.schema.json"
+)
 EPOCH_VERIFICATION_SCHEMA: Final = (
     Path(__file__).resolve().parents[1]
     / "schemas"
@@ -275,6 +282,9 @@ EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk
 NESTED_TAG_MAP_EVIDENCE_NAME: Final = "nested-strategy-tag-map.json"
 SLEEVE_DISCLOSURE_EVIDENCE_NAME: Final = "sleeve-disclosure-sources.json"
 STRATEGY_BASIS_EVIDENCE_NAME: Final = "strategy-basis-declaration.json"
+# The sleeve facts a restated candidate was built with (#624): the margin liability line and
+# the two bridges are computed from them, so verification rebuilds from the same bytes.
+SLEEVE_FACTS_EVIDENCE_NAME: Final = "sleeve-account-facts.json"
 FLOW_CLASSIFICATION_POLICY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -9704,6 +9714,7 @@ def build_report_data(
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
+    sleeve_facts_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -9941,6 +9952,17 @@ def build_report_data(
             strategy_product_controls,
         )
         series_catalog = _restated_catalog(catalog, basis_restatements)
+    sleeve_facts: strategy_basis_disclosure.SleeveFacts | None = None
+    if strategy_basis_path is not None:
+        if sleeve_facts_path is None:
+            raise ReportValidationError(
+                "a strategy basis declaration requires the sleeve facts"
+            )
+        sleeve_facts = _load_sleeve_facts(sleeve_facts_path)
+    elif sleeve_facts_path is not None:
+        raise ReportValidationError(
+            "sleeve facts are read only with a strategy basis declaration"
+        )
     strategy_provider_evidence = _strategy_provider_evidence(
         series_catalog,
         strategy_product_controls,
@@ -10023,73 +10045,120 @@ def build_report_data(
             baseline_ref,
             attribution_generation_id=attribution_generation_id,
         )
-        cutoff_basis = _uses_cutoff_basis(catalog)
-        if cutoff_basis:
+        if _uses_cutoff_basis(catalog):
             # Version 4 publishes the benchmark assignment the source contract
             # decides where the retained spec still says there is none (N55).
             attribution_catalog = _with_contract_benchmark_assignments(
                 attribution_catalog, _contract_benchmark_assignments()
             )
-        strategy_summary = _merge_attribution(
-            strategy_summary,
-            attribution_catalog,
-            cost_rate_at_cutoff=(
-                {
-                    "calculation_cutoff_date": (
-                        calculation_cutoff_date
-                        or _current_capital(catalog).get("valuation_date")
-                    ),
-                    "cost_schedule_as_of_date": _cost_schedule_as_of_date(catalog),
-                }
-                if cutoff_basis
-                else None
-            ),
-        )
-    if _uses_cutoff_basis(catalog):
-        strategy_summary = [
-            {
-                **row,
-                **_account_annualization_labels(
-                    row,
-                    _row_opening_nav_date(row, opening_catalog, performance),
-                ),
-            }
-            for row in strategy_summary
-        ]
+
     # Version 5 (manifest schema 10): every epoch row carries its period returns.
     period_returns_enabled = _uses_cutoff_basis(catalog) and any(
         "annualisation_basis" in item for item in performance
     )
-    if period_returns_enabled:
-        live_pieces = _account_live_return_series(
-            series_catalog,
+
+    def finish_strategy_rows(
+        rows: Sequence[Mapping[str, Any]],
+        lane_series_catalog: Mapping[str, Any],
+        lane_opening_catalog: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Attribution, annualisation labels and period fields of one return lane.
+
+        The published rows and, when a strategy is restated (#624), the same rows over
+        the unrestated parent series go through exactly this code.
+        """
+
+        finished = [dict(row) for row in rows]
+        if attribution_catalog is not None:
+            cutoff_basis = _uses_cutoff_basis(catalog)
+            finished = _merge_attribution(
+                finished,
+                attribution_catalog,
+                cost_rate_at_cutoff=(
+                    {
+                        "calculation_cutoff_date": (
+                            calculation_cutoff_date
+                            or _current_capital(catalog).get("valuation_date")
+                        ),
+                        "cost_schedule_as_of_date": _cost_schedule_as_of_date(catalog),
+                    }
+                    if cutoff_basis
+                    else None
+                ),
+            )
+        if _uses_cutoff_basis(catalog):
+            finished = [
+                {
+                    **row,
+                    **_account_annualization_labels(
+                        row,
+                        _row_opening_nav_date(row, lane_opening_catalog, performance),
+                    ),
+                }
+                for row in finished
+            ]
+        if period_returns_enabled:
+            live_pieces = _account_live_return_series(
+                lane_series_catalog,
+                strategy_product_controls,
+                calculation_cutoff_date=calculation_cutoff_date,
+                value_basis_bounds=value_basis_bounds,
+                period_pieces=True,
+            )
+            finished = [
+                {
+                    **row,
+                    **_strategy_period_fields(
+                        row,
+                        live_pieces.get(str(row.get("strategy_id")), {}).get(
+                            "period_pieces"
+                        )
+                        if row.get("account_live_return_authority")
+                        == "CANONICAL_STRATEGY_RETURNS"
+                        else None,
+                        _row_opening_nav_date(row, lane_opening_catalog, performance),
+                    ),
+                    "benchmark_comparison_window": _label_window(
+                        row.get("benchmark_annualization")
+                    ),
+                    "provider_comparison_window": _label_window(
+                        row.get("provider_annualization")
+                    ),
+                }
+                for row in finished
+            ]
+        return finished
+
+    strategy_summary = finish_strategy_rows(
+        strategy_summary, series_catalog, opening_catalog
+    )
+    # The same engine over the UNRESTATED parent series: the figures a restated row used to
+    # carry stay published, as the account basis of the parent account row (#624).
+    account_lane_rows: dict[str, dict[str, Any]] = {}
+    if basis_restatements:
+        lane_evidence = _strategy_provider_evidence(
+            catalog,
             strategy_product_controls,
             calculation_cutoff_date=calculation_cutoff_date,
             value_basis_bounds=value_basis_bounds,
-            period_pieces=True,
         )
-        strategy_summary = [
-            {
-                **row,
-                **_strategy_period_fields(
-                    row,
-                    live_pieces.get(str(row.get("strategy_id")), {}).get(
-                        "period_pieces"
-                    )
-                    if row.get("account_live_return_authority")
-                    == "CANONICAL_STRATEGY_RETURNS"
-                    else None,
-                    _row_opening_nav_date(row, opening_catalog, performance),
-                ),
-                "benchmark_comparison_window": _label_window(
-                    row.get("benchmark_annualization")
-                ),
-                "provider_comparison_window": _label_window(
-                    row.get("provider_annualization")
-                ),
-            }
-            for row in strategy_summary
-        ]
+        lane_opening = _with_ledger_opening_anchors(
+            catalog, performance, baseline_root, provider_ledger_root
+        )
+        lane_rows = _strategies(
+            lane_opening,
+            performance,
+            history_contract,
+            implementation_contract,
+            implementation_return_attribution_contract,
+            strategy_product_controls,
+            lane_evidence,
+        )
+        account_lane_rows = {
+            str(row["strategy_id"]): row
+            for row in finish_strategy_rows(lane_rows, catalog, lane_opening)
+            if row.get("strategy_id") in basis_restatements
+        }
     # The dated snapshot, as recorded and labeled.  It no longer feeds
     # `strategy_summary`: the weights there are the current cutoff weights that
     # `_strategies` took from `current_capital`.
@@ -10677,6 +10746,16 @@ def build_report_data(
                     ).hexdigest(),
                 },
             ]
+        if sleeve_facts is not None:
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": strategy_basis_disclosure.FACTS_ARTIFACT_ID,
+                    "schema": f"{strategy_basis_disclosure.FACTS_ARTIFACT_ID}/"
+                    f"{strategy_basis_disclosure.FACTS_SCHEMA_VERSION}",
+                    "sha256": sleeve_facts.sha256,
+                },
+            ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
         )
@@ -10808,9 +10887,44 @@ def build_report_data(
                             for strategy_id, item in sorted(basis_restatements.items())
                         )
                         + ". Return, drawdown, value, weight, the weekly series and "
-                        "the governed perimeter are the sleeve's; "
-                        + ", ".join(strategy_basis.NOT_RESTATED)
-                        + " stay on the parent account basis."
+                        "the governed perimeter are the sleeve's. Measurements still on "
+                        "the parent account basis: "
+                        + strategy_basis.scope_names(strategy_basis.NOT_RESTATED)
+                        + ". Owner-approved policy constants, not restated: "
+                        + strategy_basis.scope_names(strategy_basis.POLICY_CONSTANTS)
+                        + "."
+                    ),
+                }
+            )
+            assert sleeve_facts is not None
+            report["strategy_basis_disclosure"] = _apply_strategy_basis_disclosure(
+                report,
+                basis_restatements,
+                sleeve_facts,
+                account_lane_rows,
+                current_capital=_current_capital(series_catalog),
+                unrestated_capital=_current_capital(catalog),
+                perimeter=epoch_perimeter,
+                details=epoch_verified_details,
+                ledger_generation_id=_facts_ledger_generation_id(
+                    catalog,
+                    baseline_root,
+                    provider_ledger_root,
+                    sleeve_facts.provider_id,
+                ),
+            )
+            report["methodology"].append(
+                {
+                    "item": "Strategy basis disclosure",
+                    "value": (
+                        "The parent-account figures a restated row used to carry are "
+                        "published in account_summary.account_basis from the unrestated "
+                        "parent series; strategy_basis_disclosure holds the margin "
+                        "liability line (gross sleeve NAV, the unallocated cash and "
+                        "margin bucket, the net equivalent), the bridge from the "
+                        "account basis to the sleeve basis and the three-step bridge "
+                        "from the audit's convention to the panel's, all computed from "
+                        "the sleeve facts and the sleeve trace."
                     ),
                 }
             )
@@ -11726,6 +11840,7 @@ def build_candidate(
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
+    sleeve_facts_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -11760,6 +11875,7 @@ def build_candidate(
         nested_tag_map_path=nested_tag_map_path,
         sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
         strategy_basis_path=strategy_basis_path,
+        sleeve_facts_path=sleeve_facts_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -11777,6 +11893,11 @@ def build_candidate(
         _write_exact(
             candidate / STRATEGY_BASIS_EVIDENCE_NAME,
             _regular_file_bytes(strategy_basis_path, "strategy basis declaration"),
+        )
+    if sleeve_facts_path is not None:
+        _write_exact(
+            candidate / SLEEVE_FACTS_EVIDENCE_NAME,
+            _regular_file_bytes(sleeve_facts_path, "sleeve facts"),
         )
     if sleeve_disclosure_sources_path is not None:
         _write_exact(
@@ -12916,10 +13037,266 @@ def _apply_return_scope(
         )
 
 
+def _load_sleeve_facts(path: Path) -> strategy_basis_disclosure.SleeveFacts:
+    """The sleeve facts a restated report discloses from, checked against their schema."""
+
+    raw = _regular_file_bytes(path, "sleeve facts")
+    try:
+        schema = json.loads(SLEEVE_FACTS_SCHEMA.read_text(encoding="utf-8"))
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(
+            json.loads(raw)
+        )
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        JsonSchemaValidationError,
+    ) as exc:
+        raise ReportValidationError("sleeve facts schema differs") from exc
+    try:
+        return strategy_basis_disclosure.parse_facts(raw)
+    except strategy_basis_disclosure.DisclosureError as exc:
+        raise ReportValidationError(str(exc)) from exc
+
+
+def _facts_ledger_generation_id(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    provider_id: str,
+) -> str | None:
+    """The source generation the selected provider ledger records for the facts' provider.
+
+    None when the baseline binds no provider-ledger catalog; the caller refuses then.
+    """
+
+    if not any(
+        item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+        for item in _objects(catalog.get("source_artifacts", []), "source_artifacts")
+    ):
+        return None
+    _reference, provider_catalog, _generation, _sha = _selected_provider_ledger_catalog(
+        catalog, baseline_root, provider_ledger_root
+    )
+    matches = [
+        _text(item.get("generation_id"), "provider generation id")
+        for item in _objects(
+            provider_catalog.get("provider_generations", []),
+            "provider-ledger provider_generations",
+        )
+        if str(item.get("provider_id")).casefold() == provider_id.casefold()
+    ]
+    if len(matches) != 1:
+        raise ReportValidationError(
+            f"the selected provider ledger does not record one {provider_id} generation"
+        )
+    return matches[0]
+
+
+def _apply_strategy_basis_disclosure(
+    report: dict[str, Any],
+    restatements: Mapping[str, strategy_basis.SleeveRestatement],
+    facts: strategy_basis_disclosure.SleeveFacts,
+    account_lane_rows: Mapping[str, Mapping[str, Any]],
+    *,
+    current_capital: Mapping[str, Any],
+    unrestated_capital: Mapping[str, Any],
+    perimeter: derived_epoch_perimeter.EffectivePerimeter | None,
+    details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    ledger_generation_id: str | None,
+) -> dict[str, Any]:
+    """Publish what a restated row stands on beside it (#624).
+
+    Puts the parent-account figures, computed by the same engine from the unrestated
+    series, on the parent account's row as ``account_basis`` (and points to them from the
+    row's ``return_scope``), and returns the ``strategy_basis_disclosure`` block: the
+    margin liability line and the two bridges, from the sleeve facts and the trace.
+    Anything that does not close raises: nothing is disclosed from a broken derivation.
+    """
+
+    disclosure = strategy_basis_disclosure
+    if perimeter is None or len(restatements) != 1:
+        raise ReportValidationError(
+            "the strategy basis disclosure covers exactly one restated strategy: "
+            "the sleeve facts are those of one parent account"
+        )
+    ((strategy_id, restated),) = restatements.items()
+    accounts = {
+        str(row["account_id"]): row
+        for row in _objects(report.get("account_summary"), "account_summary")
+    }
+    parent_row = accounts.get(restated.parent_account_id)
+    summary_row = next(
+        (
+            row
+            for row in _objects(report.get("strategy_summary"), "strategy_summary")
+            if row.get("strategy_id") == strategy_id
+        ),
+        None,
+    )
+    lane = account_lane_rows.get(strategy_id)
+    if parent_row is None or summary_row is None or lane is None:
+        raise ReportValidationError(
+            f"the restated strategy {strategy_id} has no parent account row to disclose on"
+        )
+    if facts.provider_id.casefold() != restated.provider_id.casefold():
+        raise ReportValidationError("sleeve facts are of another provider")
+    epoch_keys = [
+        key
+        for key in perimeter.derived
+        if key[0] == restated.account_id and key[3] is None
+    ]
+    if len(epoch_keys) != 1:
+        raise ReportValidationError(
+            f"the restated sleeve has no single open epoch: {restated.account_id}"
+        )
+    tag_map_sha256 = details[epoch_keys[0]].get("derived_tag_map_sha256")
+    cutoff = restated.as_of_date
+    try:
+        checked = disclosure.verify_bindings(
+            facts,
+            parent_account_id=restated.parent_account_id,
+            tag_map_sha256=None if tag_map_sha256 is None else str(tag_map_sha256),
+            ledger_generation_id=ledger_generation_id,
+        )
+        ledger_value = Decimal(str(parent_row["latest_value_usd"]))
+        sleeve_return = disclosure.sleeve_cumulative_return(restated)
+        published = Decimal(str(summary_row["account_live_cumulative_return"]))
+        if abs(published - sleeve_return) > disclosure.RESIDUAL_TOLERANCE:
+            raise disclosure.DisclosureError(
+                "the restated row's cumulative return differs from its own series"
+            )
+        bucket = disclosure.unallocated_bucket(facts, cutoff)
+        others = disclosure.retired_sleeves(
+            facts, sleeve_account_id=restated.account_id, cutoff=cutoff
+        )
+        label = disclosure.account_basis_label(
+            account_name=str(
+                parent_row.get("last_four") or parent_row["account_label"]
+            ),
+            retired_sleeves=sum(1 for item in others if not item["live_at_cutoff"]),
+            bucket=bucket,
+        )
+        basis = disclosure.account_basis_block(
+            lane,
+            strategy_id=strategy_id,
+            account_id=restated.parent_account_id,
+            label=label,
+        )
+        systematic = [
+            row
+            for row in _objects(current_capital.get("strategies"), "current capital")
+            if row.get("scope") == "SYSTEMATIC"
+        ]
+        margin = disclosure.margin_liability(
+            facts,
+            sleeve_account_id=restated.account_id,
+            cutoff=cutoff,
+            sleeve_value=restated.value,
+            ledger_account_value=ledger_value,
+            leverage_pointer=disclosure.leverage_pointer(
+                _objects(report.get("leverage_disclosures"), "leverage_disclosures"),
+                account_id=restated.parent_account_id,
+                strategy_id=strategy_id,
+            ),
+            other_strategy_rows=len(
+                [row for row in systematic if row.get("strategy_id") != strategy_id]
+            ),
+            strategy_name=str(summary_row.get("strategy_name") or strategy_id),
+            account_label=str(parent_row["account_label"]),
+        )
+        bridges = {
+            "account_to_sleeve": disclosure.account_to_sleeve_bridge(
+                facts,
+                account_basis=basis,
+                sleeve_account_id=restated.account_id,
+                sleeve_value=restated.value,
+                sleeve_return=sleeve_return,
+                sleeve_opening_date=restated.opening_date,
+                cutoff=cutoff,
+                ledger_account_value=ledger_value,
+            ),
+            "sleeve_to_audit": disclosure.sleeve_to_audit_bridge(
+                facts,
+                sleeve_account_id=restated.account_id,
+                opening_date=restated.opening_date,
+                cutoff=cutoff,
+                sleeve_return=sleeve_return,
+            ),
+        }
+        sleeve_name = disclosure.sleeve_id(facts, restated.account_id)
+        weights = disclosure.weight_restatement(
+            unrestated_capital, current_capital, restated_strategy_id=strategy_id
+        )
+    except (disclosure.DisclosureError, ArithmeticError) as exc:
+        raise ReportValidationError(str(exc)) from exc
+    parent_row["account_basis"] = basis
+    methodology = report.get("methodology")
+    if isinstance(methodology, list):
+        methodology.append(
+            {"item": "Weight restatement", "value": weights["statement"]}
+        )
+    scope = summary_row.get("return_scope")
+    if not isinstance(scope, dict):
+        raise ReportValidationError("the restated row has no return scope to reference")
+    scope["account_basis_ref"] = disclosure.account_basis_ref(
+        account_id=restated.parent_account_id,
+        series_sha256=basis["series"]["sha256"],
+        label=label,
+    )
+    return {
+        "schema": disclosure.DISCLOSURE_SCHEMA,
+        "sleeve_facts": {
+            "artifact": disclosure.FACTS_ARTIFACT_ID,
+            "sha256": facts.sha256,
+            "parent_account_id": facts.parent_account_id,
+            "provider_id": facts.provider_id,
+            "bindings": {
+                key: facts.bindings[key]
+                for key in (
+                    "tag_map_sha256",
+                    "parent_ledger_generation_id",
+                    "declared_inputs_sha256",
+                    "account_rows_sha256",
+                )
+            },
+            "bindings_verified": checked,
+            "bindings_proved_upstream": [
+                "account_rows_sha256",
+                "declared_inputs_sha256",
+                "builder_code",
+            ],
+        },
+        "strategies": [
+            {
+                "strategy_id": strategy_id,
+                "strategy_name": summary_row.get("strategy_name"),
+                "sleeve_account_id": restated.account_id,
+                "sleeve_id": sleeve_name,
+                "parent_account_id": restated.parent_account_id,
+                "opening_date": restated.opening_date,
+                "cutoff_date": cutoff,
+                "account_basis_ref": scope["account_basis_ref"],
+                "margin_liability": margin,
+                "weight_restatement": weights,
+                "bridges": bridges,
+            }
+        ],
+    }
+
+
 def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
     """The basis declaration a candidate was built with, when it carries one (#624)."""
 
     path = candidate_dir / STRATEGY_BASIS_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
+
+
+def _candidate_sleeve_facts(candidate_dir: Path) -> Path | None:
+    """The sleeve facts a restated candidate was built with, when it carries them (#624)."""
+
+    path = candidate_dir / SLEEVE_FACTS_EVIDENCE_NAME
     return path if path.is_file() and not path.is_symlink() else None
 
 
@@ -15215,6 +15592,7 @@ def verify_candidate(
             candidate_dir
         ),
         strategy_basis_path=_candidate_strategy_basis(candidate_dir),
+        sleeve_facts_path=_candidate_sleeve_facts(candidate_dir),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -16295,6 +16673,7 @@ def publish_report(
             candidate_dir
         ),
         strategy_basis_path=_candidate_strategy_basis(candidate_dir),
+        sleeve_facts_path=_candidate_sleeve_facts(candidate_dir),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -16343,6 +16722,17 @@ def publish_report(
                 "strategy-basis-declaration",
                 # the version the declaration schema name carries, not a literal here
                 strategy_basis.DECLARATION_SCHEMA.rsplit("/", 1)[-1],
+            )
+        )
+    sleeve_facts_evidence = candidate_dir / SLEEVE_FACTS_EVIDENCE_NAME
+    if sleeve_facts_evidence.is_file() and not sleeve_facts_evidence.is_symlink():
+        # the exact bytes the margin liability line and the bridges were computed from
+        artifact_specs.append(
+            (
+                sleeve_facts_evidence,
+                "input/sleeve-account-facts.json",
+                strategy_basis_disclosure.FACTS_ARTIFACT_ID,
+                str(strategy_basis_disclosure.FACTS_SCHEMA_VERSION),
             )
         )
     disclosure_sources = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
@@ -16749,6 +17139,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--nested-tag-map", type=Path)
     build.add_argument("--sleeve-disclosure-sources", type=Path)
     build.add_argument("--strategy-basis", type=Path)
+    build.add_argument("--sleeve-facts", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -16908,6 +17299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 nested_tag_map_path=args.nested_tag_map,
                 sleeve_disclosure_sources_path=args.sleeve_disclosure_sources,
                 strategy_basis_path=args.strategy_basis,
+                sleeve_facts_path=args.sleeve_facts,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )

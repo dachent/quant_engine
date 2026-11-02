@@ -279,6 +279,11 @@
       1
     ],
     [
+      "portfolio_current_dependence",
+      "strategy_basis",
+      1
+    ],
+    [
       "portfolio_driver_map",
       "portfolio_diligence_rubric",
       1
@@ -545,12 +550,22 @@
     ],
     [
       "portfolio_report",
+      "strategy_basis_disclosure",
+      1
+    ],
+    [
+      "portfolio_report",
       "verify_holdings_identity",
       1
     ],
     [
       "portfolio_strategy_history",
       "portfolio_strategy_backtests",
+      1
+    ],
+    [
+      "portfolio_target_series",
+      "strategy_basis",
       1
     ],
     [
@@ -566,6 +581,16 @@
     [
       "sleeve_nav",
       "sleeve_ledger",
+      1
+    ],
+    [
+      "strategy_basis",
+      "account_strategy_manifest",
+      1
+    ],
+    [
+      "strategy_basis_disclosure",
+      "strategy_basis",
       1
     ],
     [

@@ -137,7 +137,15 @@
         }
       }
     },
-    "account_summary": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "account_summary": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {"account_basis": {"$ref": "#/$defs/account_basis"}}
+      }
+    },
+    "strategy_basis_disclosure": {"$ref": "#/$defs/strategy_basis_disclosure"},
     "lifecycle_schema_version": {"const": 1},
     "retained_strategies": {
       "type": "array",
@@ -566,6 +574,958 @@
     }
   },
   "$defs": {
+    "weight_restatement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "perimeter_before_usd",
+        "perimeter_after_usd",
+        "difference_usd",
+        "common_factor",
+        "weights_sum_after",
+        "statement",
+        "rows"
+      ],
+      "properties": {
+        "perimeter_before_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "perimeter_after_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "difference_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "common_factor": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "weights_sum_after": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "restated",
+              "value_before_usd",
+              "value_after_usd",
+              "weight_before",
+              "weight_after"
+            ],
+            "properties": {
+              "strategy_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "restated": {
+                "type": "boolean"
+              },
+              "value_before_usd": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "value_after_usd": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "weight_before": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "weight_after": {
+                "$ref": "#/$defs/basis_decimal"
+              }
+            }
+          }
+        }
+      }
+    },
+    "basis_decimal": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "account_basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "strategy_id",
+        "account_id",
+        "window",
+        "observations",
+        "series",
+        "figures"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "start",
+            "end",
+            "days"
+          ],
+          "properties": {
+            "start": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            },
+            "end": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            },
+            "days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "series": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "sha256"
+          ],
+          "properties": {
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "figures": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "account_live_cumulative_return",
+            "account_live_max_drawdown",
+            "current_value_usd",
+            "systematic_weight",
+            "account_live_return_series_sha256"
+          ],
+          "properties": {
+            "account_live_cumulative_return": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_cumulative_return_label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_cagr": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_cagr_annualization": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_cagr_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_max_drawdown": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "hwm_max_drawdown": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "hwm_current_drawdown": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ytd_twr": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "calendar_year_twr": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "current_value_usd": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost_rate_denominator_usd": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "systematic_weight": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_return_series_schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_return_series_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_return_observations": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "account_live_observed_start": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_observed_end": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_path_metrics_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "hwm_path_metrics_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "strategy_basis_disclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "sleeve_facts",
+        "strategies"
+      ],
+      "properties": {
+        "schema": {
+          "const": "strategy-basis-disclosure/1"
+        },
+        "sleeve_facts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact",
+            "sha256",
+            "parent_account_id",
+            "provider_id",
+            "bindings",
+            "bindings_verified",
+            "bindings_proved_upstream"
+          ],
+          "properties": {
+            "artifact": {
+              "const": "sleeve-account-facts"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "parent_account_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provider_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "bindings": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tag_map_sha256",
+                "parent_ledger_generation_id",
+                "declared_inputs_sha256",
+                "account_rows_sha256"
+              ],
+              "properties": {
+                "tag_map_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "parent_ledger_generation_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "declared_inputs_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "account_rows_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            },
+            "bindings_verified": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "parent_account_id",
+                  "tag_map_sha256",
+                  "parent_ledger_generation_id"
+                ]
+              }
+            },
+            "bindings_proved_upstream": {
+              "type": "array",
+              "items": {
+                "enum": ["account_rows_sha256", "declared_inputs_sha256", "builder_code"]
+              }
+            }
+          }
+        },
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "strategy_name",
+              "sleeve_account_id",
+              "sleeve_id",
+              "parent_account_id",
+              "opening_date",
+              "cutoff_date",
+              "account_basis_ref",
+              "margin_liability",
+ "weight_restatement",
+              "bridges"
+            ],
+            "properties": {
+              "strategy_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "strategy_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sleeve_account_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sleeve_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parent_account_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "opening_date": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "cutoff_date": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "account_basis_ref": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "block",
+                  "account_id",
+                  "series_sha256",
+                  "label",
+                  "disclosure_block"
+                ],
+                "properties": {
+                  "block": {
+                    "const": "account_summary.account_basis"
+                  },
+                  "account_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "series_sha256": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "disclosure_block": {
+                    "const": "strategy_basis_disclosure"
+                  }
+                }
+              },
+              "weight_restatement": {"$ref": "#/$defs/weight_restatement"},
+ "margin_liability": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cutoff_date",
+                  "gross_sleeve_nav_usd",
+                  "liability_line",
+                  "net_equivalent_usd",
+                  "identity",
+                  "leverage_disclosure",
+                  "other_strategy_rows",
+                  "gross_by_definition",
+                  "statement"
+                ],
+                "properties": {
+                  "cutoff_date": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                  },
+                  "gross_sleeve_nav_usd": {
+                    "$ref": "#/$defs/basis_decimal"
+                  },
+                  "liability_line": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "label",
+                      "kind",
+                      "account_id",
+                      "value_usd"
+                    ],
+                    "properties": {
+                      "label": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "kind": {
+                        "enum": [
+                          "MARGIN_DEBIT",
+                          "UNALLOCATED_CASH_CREDIT"
+                        ]
+                      },
+                      "account_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "value_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      }
+                    }
+                  },
+                  "net_equivalent_usd": {
+                    "$ref": "#/$defs/basis_decimal"
+                  },
+                  "identity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "sleeve_navs_usd",
+                      "unallocated_bucket_usd",
+                      "account_nav_usd",
+                      "difference_usd",
+                      "tolerance_usd",
+                      "status"
+                    ],
+                    "properties": {
+                      "sleeve_navs_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "unallocated_bucket_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "account_nav_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "difference_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "tolerance_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "status": {
+                        "const": "HOLDS"
+                      }
+                    }
+                  },
+                  "leverage_disclosure": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "table",
+                      "account_id",
+                      "strategy_id",
+                      "row_counts_by_data_class"
+                    ],
+                    "properties": {
+                      "table": {
+                        "const": "leverage_disclosures"
+                      },
+                      "account_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "strategy_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "row_counts_by_data_class": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
+                    }
+                  },
+                  "other_strategy_rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "gross_by_definition": {
+                    "const": true
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "bridges": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "account_to_sleeve",
+                  "sleeve_to_audit"
+                ],
+                "properties": {
+                  "account_to_sleeve": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "value",
+                      "return",
+                      "account_series_also_holds"
+                    ],
+                    "properties": {
+                      "value": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "account_value_usd",
+                          "unallocated_bucket_usd",
+                          "other_live_sleeves_usd",
+                          "sleeve_value_usd",
+                          "relation"
+                        ],
+                        "properties": {
+                          "account_value_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "unallocated_bucket_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "other_live_sleeves_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "sleeve_value_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "relation": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "return": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "account_cumulative_return",
+                          "sleeve_cumulative_return",
+                          "difference",
+                          "account_window",
+                          "sleeve_window",
+                          "window_start_difference_days"
+                        ],
+                        "properties": {
+                          "account_cumulative_return": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "sleeve_cumulative_return": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "difference": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "account_window": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "start",
+                              "end"
+                            ],
+                            "properties": {
+                              "start": {
+                                "type": "string",
+                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                              },
+                              "end": {
+                                "type": "string",
+                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                              }
+                            }
+                          },
+                          "sleeve_window": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "start",
+                              "end"
+                            ],
+                            "properties": {
+                              "start": {
+                                "type": "string",
+                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                              },
+                              "end": {
+                                "type": "string",
+                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                              }
+                            }
+                          },
+                          "window_start_difference_days": {
+                            "type": "integer"
+                          }
+                        }
+                      },
+                      "account_series_also_holds": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "sleeve_id",
+                            "strategy_id",
+                            "account_id",
+                            "first_day",
+                            "last_day",
+                            "live_at_cutoff"
+                          ],
+                          "properties": {
+                            "sleeve_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "strategy_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "account_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "first_day": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                            },
+                            "last_day": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                            },
+                            "live_at_cutoff": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "sleeve_to_audit": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "direction",
+                      "window",
+                      "audit_convention_return",
+                      "steps",
+                      "panel_return",
+                      "recomputed_panel_return",
+                      "residual",
+                      "residual_tolerance",
+                      "closure_status"
+                    ],
+                    "properties": {
+                      "direction": {
+                        "const": "AUDIT_TO_PANEL"
+                      },
+                      "window": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "start",
+                          "end"
+                        ],
+                        "properties": {
+                          "start": {
+                            "type": "string",
+                            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                          },
+                          "end": {
+                            "type": "string",
+                            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                          }
+                        }
+                      },
+                      "audit_convention_return": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "steps": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "step",
+                            "description",
+                            "effect"
+                          ],
+                          "properties": {
+                            "step": {
+                              "enum": [
+                                "ALLOCATED_COSTS",
+                                "ENTRY_DAY_EXCLUSION",
+                                "END_OF_DAY_FLOW_CONVENTION"
+                              ]
+                            },
+                            "description": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "effect": {
+                              "$ref": "#/$defs/basis_decimal"
+                            },
+                            "allocated_cost_usd": {
+                              "$ref": "#/$defs/basis_decimal"
+                            },
+                            "entry_day": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                            },
+                            "entry_day_return": {
+                              "$ref": "#/$defs/basis_decimal"
+                            },
+                            "flow_days": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "date",
+                                  "net_flow_usd"
+                                ],
+                                "properties": {
+                                  "date": {
+                                    "type": "string",
+                                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                                  },
+                                  "net_flow_usd": {
+                                    "$ref": "#/$defs/basis_decimal"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "panel_return": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "recomputed_panel_return": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "residual": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "residual_tolerance": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "closure_status": {
+                        "const": "CLOSED"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "holdings_identity_v1": {
       "type": "object",
       "additionalProperties": false,
