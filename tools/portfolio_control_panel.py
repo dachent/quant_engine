@@ -3872,6 +3872,8 @@ def _suppress_unmatched_strategy_performance(
             "declared",
             "corroboration",
             "execution_cost",
+            "fee_rates",
+            "cost_rate_disclosure",
             "systematic_weight",
         ):
             row[field] = None

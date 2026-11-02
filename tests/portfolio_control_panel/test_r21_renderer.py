@@ -53,7 +53,7 @@ def test_cost_label_is_the_status_and_the_amount_over_its_period(
     tmp_path: Path,
 ) -> None:
     known = _cost_strategy(
-        annual_external_cost_usd="3590", cost_status="known_gold_api"
+        annual_external_cost_usd="2822.458", cost_status="known_gold_api"
     )
     unknown = _cost_strategy(
         strategy_id="eu",
@@ -66,7 +66,7 @@ def test_cost_label_is_the_status_and_the_amount_over_its_period(
         "#strategy-table",
     )
 
-    assert "Known (gold API) · $3,590.00 per year" in table
+    assert "Known (gold API) · $2,822.46 per year" in table
     assert "Unknown model subscription cost · annual amount not published" in table
 
 

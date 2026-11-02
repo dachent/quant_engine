@@ -6408,3 +6408,25 @@ def test_layered_history_cli_builds_verifies_and_requires_modes(
     )
     assert target_series.main() == 2
     assert "required history mode is not ready" in capsys.readouterr().err
+
+
+def test_layered_history_accepts_the_executing_tree_as_repository_identity(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    tree = target_series._trusted_layered_history_tree_identity()
+    commit = target_series._trusted_layered_history_code_identity()[0]
+    assert tree != commit
+    artifacts, manifest_content = build_layered_history_generation(
+        repository_sha=tree, **fixture
+    )
+    assert json.loads(manifest_content)["repository_sha"] == tree
+    _commit_artifacts, commit_manifest = _build(fixture)
+    assert manifest_content != commit_manifest
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_content,
+        contract_path=fixture["contract_path"],
+    )
+    assert result["verification"] == "VALID"

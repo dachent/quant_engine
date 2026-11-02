@@ -4,7 +4,7 @@
     [
       "alpaca",
       "core",
-      2
+      5
     ],
     [
       "alpaca",
@@ -19,7 +19,7 @@
     [
       "fidelity",
       "core",
-      2
+      3
     ],
     [
       "fidelity",
@@ -29,7 +29,7 @@
     [
       "ibkr",
       "core",
-      2
+      3
     ],
     [
       "ibkr",
@@ -39,11 +39,16 @@
     [
       "matrixport",
       "core",
-      2
+      3
     ],
     [
       "portfolio123",
       "core",
+      4
+    ],
+    [
+      "portfolio123",
+      "web_contracts",
       2
     ],
     [
@@ -116,6 +121,11 @@
     [
       "build_sleeve_facts_release",
       "sleeve_nav",
+      1
+    ],
+    [
+      "gate_profile",
+      "verify_release_restore",
       1
     ],
     [
@@ -296,7 +306,7 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_correlation",
-      1
+      2
     ],
     [
       "portfolio_financial_outcomes",
@@ -306,7 +316,7 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_decomposition",
-      1
+      2
     ],
     [
       "portfolio_financial_outcomes",
@@ -549,6 +559,16 @@
       1
     ],
     [
+      "quantbase_har_to_csv",
+      "capture_quantbase_har",
+      1
+    ],
+    [
+      "schwab_capture_ingest",
+      "schwab_capture_driver",
+      1
+    ],
+    [
       "sleeve_inputs",
       "nested_strategy_tag_map",
       1
@@ -561,6 +581,16 @@
     [
       "sleeve_nav",
       "sleeve_ledger",
+      1
+    ],
+    [
+      "tt_source_manifest_builder",
+      "portfolio_implementation_reconciliation",
+      1
+    ],
+    [
+      "tt_source_manifest_builder",
+      "portfolio_implementation_return_attribution",
       1
     ],
     [

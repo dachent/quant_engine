@@ -104,6 +104,13 @@ _PATH_STAGES = {
     # Verifies a promoted retained-cache base before the runner links an overlay to it; it
     # can refuse any stage's run, like run_storage.
     "packages/core/src/quant_engine/core/retained_cache_base.py": list(_STAGE_ORDER),
+    # The release code-identity scheme (commit vs tree) and the mandatory merge attestation
+    # the runtime gate checks before execute/commit: it can refuse any stage's release and
+    # decides what every generation id binds, like release.py.
+    "packages/core/src/quant_engine/core/code_identity.py": list(_STAGE_ORDER),
+    # Observational stage timings written to stderr and a log file; nothing here is hashed
+    # into any delivery artifact, so it affects no stage.
+    "packages/core/src/quant_engine/core/stage_timing.py": [],
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
@@ -122,6 +129,11 @@ _PATH_STAGES = {
     # a replica release, never a real one (real roots carry no marker).
     "packages/core/src/quant_engine/core/replica_marker.py": [],
     "tools/release_replica.py": [],
+    # Default-off gate profile: it only decides whether the replica receipt check may be
+    # replaced and writes a decision/receipt record; no delivery artifact.
+    "packages/core/src/quant_engine/core/gate_profile.py": [],
+    "packages/core/src/quant_engine/core/release_diff.py": [],
+    "tools/gate_profile.py": [],
     "tools/release_cache_base.py": [],
     "tools/release_measurements.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
@@ -162,10 +174,15 @@ _PATH_STAGES = {
     # #540 payload budget: reads a published generation and the budget file, imports no
     # producer and writes no delivery artifact.
     "tools/panel_payload_size.py": [],
+    "tools/tt_source_manifest_builder.py": [],
+    "tools/tt_order_planner.py": [],
     "tools/check_architecture.py": [],
     "tools/check_data_roots.py": [],
     "tools/check_fact_admission.py": [],
     "tools/verify_release_restore.py": [],
+    "tools/release_driver.py": [],
+    "tools/release_restore_world.py": [],
+    "tools/release_evidence_pack.py": [],
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
@@ -177,9 +194,20 @@ _PATH_STAGES = {
     # Stages an unpublished derived-return candidate from retained bytes; the weekly
     # builder reads only the pinned generation it is handed, never this tool.
     "tools/portfolio_grizzly_signal_replay.py": [],
+    # Passive CDP listener for one attended Portfolio123 sitting; writes a
+    # create-only run directory and a draft catalog diff, no stage reads it.
+    "tools/p123_cdp_recorder.py": [],
+    # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
+    # create-only run directory; no stage reads it, only a pinned run it is handed.
+    "tools/grizzlybulls_capture.py": [],
+    # Offline signal-vs-fill comparison report; informational, never a stage input.
+    "tools/grizzlybulls_schwab_crosscheck.py": [],
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],
+    # Stages an unpublished public Yahoo price/FX fetch from a config; consumers read
+    # only the artifacts and manifests they are handed, never this tool.
+    "tools/yahoo_fetch_driver.py": [],
     # Assembles the pinned attribution return-source CSV; the attribution stage reads
     # only the file and manifest the spec pins, never this tool.
     "tools/portfolio_attribution_returns.py": [],
@@ -234,11 +262,16 @@ _PATH_STAGES = {
     "tools/build_sleeve_facts_release.py": ["report", "panel"],
     "tools/sleeve_inputs.py": ["report", "panel"],
     "tools/verify_sleeve_ledger.py": [],
+    "tools/schwab_capture_driver.py": [],
+    "tools/schwab_capture_ingest.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": [],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
     # source bytes only, and the release step runs it beside the IBKR builder.
     "tools/build_quantbase_fund_facts.py": ["report", "panel"],
+    "tools/capture_quantbase_har.py": [],
+    "tools/quantbase_har_to_csv.py": [],
+    "tools/quantbase_cdp_har_recorder.py": [],
     "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
@@ -247,6 +280,7 @@ _PATH_STAGES = {
     # Provider capability protocols and registry, re-exported by the package root:
     # a contract no producer imports yet, so no stage impact.
     "packages/core/src/quant_engine/core/providers.py": [],
+    "packages/core/src/quant_engine/core/credentials.py": [],
     "packages/core/src/quant_engine/core/__init__.py": [],
     # WS4 T1.4 (corrective program) scope note: this file is outside that
     # brief's literal write scope, but this one-line declaration for each new
@@ -262,11 +296,13 @@ _PATH_STAGES = {
     "tools/check_release_closure.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
+    "tools/capture_fidelity_intake.py": [],
     "tools/merge_readiness.py": [],
     # Acceptance runner entrypoint (corrective program WS5). Its checks live in
     # top-level `acceptance/validate/`; it reads published outputs and imports no
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
+    "tools/alpaca_generation.py": [],
     # Derived release-findings producer (ruling B / C1): binds every non-panel
     # release target to the panel's own findings. Its checks live in
     # `acceptance/validate/release_targets.py`; it reads a prepared release.json

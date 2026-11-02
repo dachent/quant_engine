@@ -2394,3 +2394,43 @@ def test_factor_blank_on_a_target_non_session_day_inside_scope_stops_the_model(
         match=f"factor anchor {days[hole].isoformat()} has incomplete selected components",
     ):
         decomposition.build_decomposition(spec_path, source)
+
+
+def test_concurrent_training_cache_writes_of_one_identity_agree(
+    tmp_path: Path,
+) -> None:
+    """Concurrent lens builds may derive one training identity at the same time."""
+    import threading
+
+    identity = "c" * 64
+    value = {"folds": [1.0, 2.0], "padding": "x" * 200_000}
+    errors: list[BaseException] = []
+    start = threading.Barrier(8)
+
+    def write() -> None:
+        try:
+            start.wait()
+            decomposition._write_training_cache(tmp_path, identity, value)
+        except BaseException as error:  # noqa: BLE001 - the test reports it
+            errors.append(error)
+
+    threads = [threading.Thread(target=write) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert decomposition._read_training_cache(tmp_path, identity) is not None
+    cache = decomposition._training_cache_path(tmp_path, identity)
+    assert sorted(path.name for path in cache.parent.iterdir()) == [cache.name]
+    evidence = decomposition._training_evidence_path(tmp_path, identity)
+    assert sorted(path.name for path in evidence.parent.iterdir()) == [evidence.name]
+
+
+def test_atomic_write_keeps_a_different_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "entry.json"
+    assert decomposition._write_new_atomic(path, b"first") is True
+    assert decomposition._write_new_atomic(path, b"first") is True
+    assert decomposition._write_new_atomic(path, b"second") is False
+    assert path.read_bytes() == b"first"
+    assert [item.name for item in tmp_path.iterdir()] == ["entry.json"]

@@ -406,6 +406,7 @@ def _staged_observation(
     *,
     cutoff: date = DAY,
     schwab_point_capture: str | None = None,
+    schwab_valuation_cutoff: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Small synthetic sources using native formats, no asserted finality flag."""
     from datetime import datetime, timedelta, timezone
@@ -680,7 +681,14 @@ def _staged_observation(
                     positions=document["positions"],
                     current_transport="WEB_CONTRACT",
                     current_position_account_count=1,
-                    position_snapshot_as_of={"observed_at": schwab_point_capture},
+                    position_snapshot_as_of={
+                        "observed_at": schwab_point_capture,
+                        **(
+                            {"valuation_cutoff": schwab_valuation_cutoff}
+                            if schwab_valuation_cutoff is not None
+                            else {}
+                        ),
+                    },
                     source_artifacts=[point_artifact.to_dict()],
                 )
                 bind(
@@ -824,6 +832,7 @@ def _source_bound_stage(
     source_cutoff: date = DAY,
     schwab_point_capture: str | None = None,
     requested_as_of: date = date(2026, 9, 17),
+    schwab_valuation_cutoff: str | None = None,
 ) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
@@ -834,6 +843,7 @@ def _source_bound_stage(
         catalogs,
         cutoff=source_cutoff,
         schwab_point_capture=schwab_point_capture,
+        schwab_valuation_cutoff=schwab_valuation_cutoff,
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"

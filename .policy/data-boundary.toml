@@ -147,6 +147,14 @@ never_allow_extensions = [
   ".xlsb",
   ".log",
 ]
+# Governed secrets of the synthetic-fixture generator (issue 696): they live in the data
+# root only; the salt inverts the synthetic mapping and the spec lists the real values.
+forbidden_basenames = [
+  "salt.txt",
+  "spec.json",
+  "fixture-salt.txt",
+  "fixture-spec.json",
+]
 
 [content]
 text_scan_limit_bytes = 5242880
@@ -198,7 +206,7 @@ required_fields = [
   "approval_requirement",
 ]
 allowed_optional_fields = ["name", "id", "credential_source"]
-allowed_credential_classes = ["NONE", "OS_CREDENTIAL_REFERENCE"]
+allowed_credential_classes = ["NONE", "OS_CREDENTIAL_REFERENCE", "SECRET_MANAGER_REFERENCE"]
 forbidden_credential_classes = [
   "LITERAL",
   "EMBEDDED",

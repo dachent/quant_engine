@@ -350,7 +350,9 @@ _REQUIRED_PATTERN_DIGESTS = frozenset(
     }
 )
 _ENDPOINT_ALLOWED_OPTIONAL_FIELDS = frozenset({"name", "id", "credential_source"})
-_ENDPOINT_ALLOWED_CREDENTIAL_CLASSES = frozenset({"NONE", "OS_CREDENTIAL_REFERENCE"})
+_ENDPOINT_ALLOWED_CREDENTIAL_CLASSES = frozenset(
+    {"NONE", "OS_CREDENTIAL_REFERENCE", "SECRET_MANAGER_REFERENCE"}
+)
 _ENDPOINT_ALLOWED_APPROVAL_REQUIREMENTS = frozenset({"GOVERNING_ISSUE"})
 _ENDPOINT_REQUIRED_FORBIDDEN_CREDENTIAL_CLASSES = frozenset(
     {"LITERAL", "EMBEDDED", "PLAINTEXT", "CAPTURED_SESSION", "UNKNOWN"}
@@ -427,6 +429,8 @@ class RepositoryPolicy:
     forbidden_path_segments: frozenset[str]
     forbidden_extensions: frozenset[str]
     never_allow_extensions: frozenset[str]
+    # exact (case-folded) file names that must never be tracked, at any depth
+    forbidden_basenames: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,6 +734,7 @@ def load_policy(
             "forbidden_path_segments",
             "forbidden_extensions",
             "never_allow_extensions",
+            "forbidden_basenames",
         },
         "repository",
     )
@@ -774,6 +779,16 @@ def load_policy(
         never_allow_extensions=_extension_set(
             _string_list(repository_table, "repository", "never_allow_extensions"),
             "repository.never_allow_extensions",
+        ),
+        forbidden_basenames=(
+            frozenset(
+                value.casefold()
+                for value in _string_list(
+                    repository_table, "repository", "forbidden_basenames"
+                )
+            )
+            if "forbidden_basenames" in repository_table
+            else frozenset()
         ),
     )
 
@@ -1141,7 +1156,7 @@ def load_policy(
         raise PolicyLoadError(
             "POLICY_ENDPOINT_CREDENTIAL_INVALID",
             "endpoint_policy.allowed_credential_classes",
-            "must equal NONE and OS_CREDENTIAL_REFERENCE",
+            "must equal NONE, OS_CREDENTIAL_REFERENCE and SECRET_MANAGER_REFERENCE",
         )
     if not _ENDPOINT_REQUIRED_FORBIDDEN_CREDENTIAL_CLASSES.issubset(
         endpoint.forbidden_credential_classes
@@ -1295,6 +1310,14 @@ def _path_policy_findings(path: str, policy: RepositoryPolicy) -> list[Finding]:
     if any(part in policy.forbidden_path_segments for part in parts):
         findings.append(
             Finding("PATH_FORBIDDEN_SEGMENT", path, "path contains a denied segment")
+        )
+    if parts[-1] in policy.forbidden_basenames:
+        findings.append(
+            Finding(
+                "PATH_FORBIDDEN_BASENAME",
+                path,
+                "file name is a governed secret and must stay in the data root",
+            )
         )
     if _SENSITIVE_LOCATOR.search(path):
         findings.append(

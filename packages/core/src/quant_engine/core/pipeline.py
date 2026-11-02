@@ -20,7 +20,15 @@ import threading
 import time
 from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
 
+from quant_engine.core import stage_timing
 from quant_engine.core.authority import FreshnessPolicy
+from quant_engine.core.code_identity import (
+    COMMIT_SCHEME,
+    CodeIdentityError,
+    validate_scheme,
+    verify_candidate_identity,
+    verify_promotion_identity,
+)
 from quant_engine.core.contracts import (
     CoverageStatus,
     GenerationManifest,
@@ -240,6 +248,7 @@ def _file_hash(path: Path) -> tuple[str, int]:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
             size += len(block)
+    stage_timing.note_hash(size)
     return digest.hexdigest(), size
 
 
@@ -443,6 +452,9 @@ class PipelineSpec:
     gates: tuple[PipelineGate, ...]
     companions: tuple[PipelineCompanion, ...]
     schema_version: int = _SCHEMA_VERSION
+    # Absent (legacy) means git-commit-v1; only git-tree-v2 is ever serialized, so
+    # every committed spec keeps the identical bytes and spec_sha256.
+    code_identity_scheme: str = COMMIT_SCHEME
 
     @property
     def spec_sha256(self) -> str:
@@ -477,6 +489,12 @@ class PipelineSpec:
         }
 
     def to_dict(self) -> dict[str, object]:
+        value = self._legacy_dict()
+        if self.code_identity_scheme != COMMIT_SCHEME:
+            value["code_identity_scheme"] = self.code_identity_scheme
+        return value
+
+    def _legacy_dict(self) -> dict[str, object]:
         return {
             "as_of_date": self.as_of_date.isoformat(),
             "code_commit": self.code_commit,
@@ -498,23 +516,28 @@ class PipelineSpec:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise PipelineValidationError("pipeline spec is not JSON") from exc
         raw = _object(decoded, "pipeline spec")
-        _strict(
-            raw,
-            {
-                "as_of_date",
-                "code_commit",
-                "companions",
-                "coordination_root",
-                "created_at",
-                "gates",
-                "nodes",
-                "pipeline_id",
-                "roots",
-                "schema_version",
-                "state_root",
-            },
-            "pipeline spec",
-        )
+        spec_keys = {
+            "as_of_date",
+            "code_commit",
+            "companions",
+            "coordination_root",
+            "created_at",
+            "gates",
+            "nodes",
+            "pipeline_id",
+            "roots",
+            "schema_version",
+            "state_root",
+        }
+        if "code_identity_scheme" in raw:
+            spec_keys.add("code_identity_scheme")
+        _strict(raw, spec_keys, "pipeline spec")
+        try:
+            scheme = validate_scheme(raw.get("code_identity_scheme", COMMIT_SCHEME))
+        except CodeIdentityError as exc:
+            raise PipelineValidationError(str(exc)) from exc
+        if scheme == COMMIT_SCHEME and "code_identity_scheme" in raw:
+            raise PipelineValidationError("legacy code identity must be unmarked")
         if raw["schema_version"] != _SCHEMA_VERSION:
             raise PipelineValidationError("pipeline schema version is unsupported")
         try:
@@ -573,6 +596,7 @@ class PipelineSpec:
             nodes=nodes,
             gates=gates,
             companions=companions,
+            code_identity_scheme=scheme,
         )
         spec.ordered_nodes
         return spec
@@ -1816,6 +1840,7 @@ def _expected_hwm_input_authority(
     }
 
 
+@stage_timing.timed("product_authority")
 def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | None:
     product_matches = [
         item for item in spec.gates if item.gate_id == _FINANCIAL_MVP_PRODUCT_GATE
@@ -2655,8 +2680,27 @@ def _node_ancestors(spec: PipelineSpec) -> dict[str, frozenset[str]]:
     return result
 
 
+_RUNTIME_ENVIRONMENT_CACHE: dict[str, str] = {}
+
+
 def runtime_environment_sha256(executable: Path) -> str:
-    """Hash the installed distribution inventory of one Python runtime."""
+    """Hash the installed distribution inventory of one Python runtime.
+
+    One ceremony process asks for the same runtime up to six times, and each ask
+    starts an interpreter to list every installed distribution. The inventory
+    cannot change while this process is running its release, so the first answer
+    stands for the rest.
+    """
+    key = str(executable)
+    cached = _RUNTIME_ENVIRONMENT_CACHE.get(key)
+    if cached is None:
+        with stage_timing.stage("runtime_environment_sha256"):
+            cached = _runtime_environment_sha256(executable)
+        _RUNTIME_ENVIRONMENT_CACHE[key] = cached
+    return cached
+
+
+def _runtime_environment_sha256(executable: Path) -> str:
 
     script = (
         "import hashlib,importlib.metadata,json;"
@@ -2695,7 +2739,10 @@ def _git_output(repo_root: Path, *args: str) -> str:
     return completed.stdout.decode("utf-8", errors="strict").strip()
 
 
-def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -> None:
+@stage_timing.timed("verify_portfolio_runtime")
+def _verify_portfolio_runtime(
+    contract: Mapping[str, Any], spec: PipelineSpec, *, promote: bool = False
+) -> None:
     runtime = _object(contract["runtime"], "portfolio runtime")
     executable = runtime["executable_path"]
     lock = runtime["lock_path"]
@@ -2710,21 +2757,45 @@ def _verify_portfolio_runtime(contract: Mapping[str, Any], spec: PipelineSpec) -
     repo_root = runtime["repo_root"]
     if not isinstance(repo_root, Path) or not repo_root.is_dir():
         raise PipelineValidationError("portfolio repository root is invalid")
-    head = _git_output(repo_root, "rev-parse", "HEAD")
-    if head != spec.code_commit or head != contract["release_commit"]:
+    if spec.code_identity_scheme == COMMIT_SCHEME:
+        # Legacy git-commit-v1: byte-for-byte the original check.
+        head = _git_output(repo_root, "rev-parse", "HEAD")
+        if head != spec.code_commit or head != contract["release_commit"]:
+            raise PipelineValidationError("portfolio repository HEAD differs")
+    elif spec.code_commit != contract["release_commit"]:
         raise PipelineValidationError("portfolio repository HEAD differs")
+    else:
+        # git-tree-v2. Plan/build run at the candidate checkout, before any merge
+        # commit exists, so they bind the tree only; the mandatory merge attestation
+        # is checked where the release is promoted (`execute --commit`).
+        try:
+            if promote:
+                verify_promotion_identity(
+                    repo_root,
+                    spec.code_commit,
+                    spec.code_identity_scheme,
+                    coordination_root=spec.coordination_root,
+                    lock_path=lock,
+                )
+            else:
+                verify_candidate_identity(
+                    repo_root, spec.code_commit, spec.code_identity_scheme
+                )
+        except CodeIdentityError as exc:
+            raise PipelineValidationError(f"portfolio repository {exc}") from exc
     if _git_output(repo_root, "status", "--porcelain=v1", "--untracked-files=all"):
         raise PipelineValidationError("portfolio repository is not clean")
 
 
+@stage_timing.timed("validate_portfolio_orchestration")
 def _validate_portfolio_orchestration(
-    spec: PipelineSpec, *, verify_runtime: bool
+    spec: PipelineSpec, *, verify_runtime: bool, promote: bool = False
 ) -> dict[str, Any] | None:
     contract = _portfolio_contract(spec)
     if contract is None:
         return None
     if verify_runtime:
-        _verify_portfolio_runtime(contract, spec)
+        _verify_portfolio_runtime(contract, spec, promote=promote)
     by_id = {item.node_id: item for item in spec.nodes}
     ancestors = _node_ancestors(spec)
     runtime = _object(contract["runtime"], "portfolio runtime")
@@ -3291,6 +3362,7 @@ def inventory_generation(path: Path) -> dict[str, object]:
     }
 
 
+@stage_timing.timed("verify_generation")
 def _verify_generation(
     spec: PipelineSpec, node: GenerationNode, *, materialize: bool
 ) -> str:
@@ -4557,6 +4629,7 @@ def _verify_recovered_pointer_evidence(spec: PipelineSpec, release_id: str) -> N
                 )
 
 
+@stage_timing.timed("verify_gates")
 def _verify_gates(
     spec: PipelineSpec,
     evaluation_date: date,
@@ -4583,6 +4656,7 @@ def _verify_gates(
     return tuple(result)
 
 
+@stage_timing.timed("pipeline_evidence")
 def _pipeline_evidence(spec: PipelineSpec) -> tuple[Path, str]:
     receipts = []
     for node in spec.ordered_nodes:
@@ -4627,6 +4701,7 @@ def _read_prepared(spec: PipelineSpec) -> str | None:
     return _hash(prepared.get("release_id"), "prepared.release_id")
 
 
+@stage_timing.timed("require_executable_product")
 def _require_executable_product(spec: PipelineSpec) -> dict[str, object] | None:
     product_authority = _financial_mvp_product_authority(spec)
     if (_requires_current_product(spec) and product_authority is None) or (
@@ -4709,12 +4784,15 @@ def execute_pipeline(
         _, existing_journal = read_release(spec.coordination_root, existing_release)
         existing_state = existing_journal.state
     for node in spec.ordered_nodes:
-        _execute_node(
-            spec,
-            node,
-            allow_external_read=allow_external_read,
-            command_runner=command_runner,
-        )
+        with stage_timing.stage(
+            "execute_node", node_id=node.node_id, kind=type(node).__name__
+        ):
+            _execute_node(
+                spec,
+                node,
+                allow_external_read=allow_external_read,
+                command_runner=command_runner,
+            )
     operational_date = evaluation_date or datetime.now().astimezone().date()
     gate_evidence = _verify_gates(
         spec,
@@ -4740,21 +4818,27 @@ def execute_pipeline(
             )
         )
     if existing_release is None:
-        manifest = prepare_release(
-            coordination_root=spec.coordination_root,
-            roots={key: spec.roots[key] for key in spec.release_generations},
-            proposed_generations=spec.release_generations,
-            code_commit=spec.code_commit,
-            created_at=spec.created_at,
-            gates=(*gate_evidence, GateEvidence("pipeline-evidence", evidence_hash)),
-            companions=tuple(companions),
-            allow_invalid_previous_artifact_inventory=any(
-                item.gate_id == _PREDECESSOR_REPAIR_GATE for item in gate_evidence
-            ),
-            allow_unusable_predecessor_pointers=any(
-                item.gate_id == _POINTER_RECOVERY_GATE for item in gate_evidence
-            ),
-        )
+        with stage_timing.stage("prepare_release"):
+            manifest = prepare_release(
+                coordination_root=spec.coordination_root,
+                roots={key: spec.roots[key] for key in spec.release_generations},
+                proposed_generations=spec.release_generations,
+                code_commit=spec.code_commit,
+                code_identity_scheme=spec.code_identity_scheme,
+                created_at=spec.created_at,
+                gates=(
+                    *gate_evidence,
+                    GateEvidence("pipeline-evidence", evidence_hash),
+                ),
+                companions=tuple(companions),
+                allow_invalid_previous_artifact_inventory=any(
+                    item.gate_id == _PREDECESSOR_REPAIR_GATE for item in gate_evidence
+                ),
+                allow_unusable_predecessor_pointers=any(
+                    item.gate_id == _POINTER_RECOVERY_GATE for item in gate_evidence
+                ),
+            )
+
         _create_exact(
             _prepared_path(spec),
             canonical_json_bytes(
@@ -4765,7 +4849,10 @@ def execute_pipeline(
     else:
         release_id = existing_release
         manifest, _ = read_release(spec.coordination_root, release_id)
-        if manifest.code_commit != spec.code_commit:
+        if (
+            manifest.code_commit != spec.code_commit
+            or manifest.code_identity_scheme != spec.code_identity_scheme
+        ):
             raise PipelineValidationError("prepared release code commit differs")
     _, existing_journal = read_release(spec.coordination_root, release_id)
     state = existing_journal.state
@@ -4775,18 +4862,20 @@ def execute_pipeline(
         companion_contents = {
             item.companion_id: item.source_path.read_bytes() for item in spec.companions
         }
-        _validate_portfolio_orchestration(spec, verify_runtime=True)
+        _validate_portfolio_orchestration(spec, verify_runtime=True, promote=True)
         _require_executable_product(spec)
         _validate_commit_authorization(commit_authorization, spec)
-        journal = commit_release(
-            coordination_root=spec.coordination_root,
-            release_id=release_id,
-            roots={key: spec.roots[key] for key in spec.release_generations},
-            companion_contents=companion_contents,
-            fault_hook=fault_hook,
-            skip_release_validation=skip_release_validation,
-            release_validation_findings=release_validation_findings,
-        )
+        with stage_timing.stage("commit_release"):
+            journal = commit_release(
+                coordination_root=spec.coordination_root,
+                release_id=release_id,
+                roots={key: spec.roots[key] for key in spec.release_generations},
+                companion_contents=companion_contents,
+                fault_hook=fault_hook,
+                skip_release_validation=skip_release_validation,
+                release_validation_findings=release_validation_findings,
+            )
+
         state = journal.state
         for root_id, generation_id in spec.release_generations.items():
             if read_current(spec.roots[root_id]).generation_id != generation_id:
