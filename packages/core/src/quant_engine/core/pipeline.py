@@ -25,8 +25,10 @@ from quant_engine.core.authority import FreshnessPolicy
 from quant_engine.core.code_identity import (
     COMMIT_SCHEME,
     CodeIdentityError,
+    executing_code_files,
     validate_scheme,
     verify_candidate_identity,
+    verify_executing_code,
     verify_promotion_identity,
 )
 from quant_engine.core.contracts import (
@@ -2777,6 +2779,13 @@ def _verify_portfolio_runtime(
                     coordination_root=spec.coordination_root,
                     lock_path=lock,
                 )
+                # The gate above verifies the checkout the spec names; this verifies
+                # the code that is actually running (a second checkout of the same
+                # tree is accepted, a different/dirty/non-git one is refused).
+                try:
+                    verify_executing_code(spec.code_commit, executing_code_files())
+                except CodeIdentityError as exc:
+                    raise PipelineValidationError(f"portfolio {exc}") from exc
             else:
                 verify_candidate_identity(
                     repo_root, spec.code_commit, spec.code_identity_scheme
