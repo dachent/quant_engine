@@ -142,9 +142,19 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         help="raise this block's budget to the measured size plus --margin "
-        "(rewrites the budget file; needs --before)",
+        "(rewrites the budget file)",
     )
-    parser.add_argument("--before", type=Path, help="generation measured as 'before'")
+    parser.add_argument(
+        "--raise-all",
+        action="store_true",
+        help="give every measured block a budget of measured plus --margin, rounded up "
+        "to 1000 B (rewrites the budget file)",
+    )
+    parser.add_argument(
+        "--before",
+        type=Path,
+        help="generation measured as 'before'; default: the budget's committed_bytes",
+    )
     parser.add_argument("--margin", type=float, default=0.01)
     args = parser.parse_args(argv)
     data = json.loads((args.generation / "data" / "dashboard_data.json").read_bytes())
@@ -155,14 +165,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_check:
         findings = check(blocks, sizes, json.loads(args.budget.read_bytes()))
         report["findings"] = findings
+    if args.raise_all:
+        args.raise_block = sorted(set(args.raise_block) | set(blocks))
     if args.raise_block:
-        if args.before is None:
-            parser.error("--raise-block needs --before")
-        before = block_sizes(
-            json.loads((args.before / "data" / "dashboard_data.json").read_bytes())
+        current = json.loads(args.budget.read_bytes())
+        before = (
+            block_sizes(
+                json.loads((args.before / "data" / "dashboard_data.json").read_bytes())
+            )
+            if args.before is not None
+            else dict(current["committed_bytes"]["blocks"])
         )
         raised = raise_budgets(
-            json.loads(args.budget.read_bytes()),
+            current,
             args.raise_block,
             before,
             blocks,
