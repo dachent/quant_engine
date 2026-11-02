@@ -417,14 +417,14 @@ def _derive_sleeve(
                 "NAV observation of the sleeve",
             )
         flows[day] = flows.get(day, Decimal(0)) + amount
-    for day in days:
-        carried = flows.get(day, Decimal(0))
-        if abs(row_transfer[day] - carried) > LEG_TOLERANCE:
-            raise Refusal(
-                LEG_ROW_MISMATCH,
-                f"{account} {day}: the NAV row carries transfers of "
-                f"{row_transfer[day]} but the transfer legs sum to {carried}",
-            )
+    mismatches = [
+        f"{day}: the NAV row carries transfers of {row_transfer[day]} but the "
+        f"transfer legs sum to {flows.get(day, Decimal(0))}"
+        for day in days
+        if abs(row_transfer[day] - flows.get(day, Decimal(0))) > LEG_TOLERANCE
+    ]
+    if mismatches:
+        raise Refusal(LEG_ROW_MISMATCH, f"{account} " + "; ".join(mismatches))
     index = Decimal(1)
     peak = Decimal(1)
     drawdown = Decimal(0)
