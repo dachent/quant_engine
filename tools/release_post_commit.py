@@ -46,9 +46,7 @@ import subprocess
 import sys
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import release_driver  # noqa: E402
+import release_driver
 
 RESOLVED_SCHEMA = "qe-release-resolved-cycle/1"
 RECEIPT_SCHEMA = "qe-post-commit-verify/1"

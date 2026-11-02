@@ -574,6 +574,11 @@
       1
     ],
     [
+      "release_post_commit",
+      "release_driver",
+      1
+    ],
+    [
       "schwab_capture_ingest",
       "schwab_capture_driver",
       1
