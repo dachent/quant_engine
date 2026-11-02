@@ -273,3 +273,21 @@ def test_absent_fields_with_only_reasons_print_the_reasons(tmp_path: Path) -> No
     assert "Synthetic unlevered reason" in cells[4]
     assert "Synthetic levered reason" in cells[7]
     assert "Not published" not in table
+
+
+def test_dense_cell_columns_follow_the_long_text_columns() -> None:
+    # Evidence, then provider/model comparison, cost and version: the columns that carry long text.
+    table = re.search(r'"implementation-table": \[([\d, ]+)\]', APP)
+    assert table
+    configured = [int(part) for part in table.group(1).split(",")]
+    headers = re.search(
+        r'\["Strategy"\], \["Evidence availability"\].*?\["Version"\]\]', APP, re.S
+    )
+    assert headers
+    names = re.findall(r'\["([^"]+)"', headers.group(0))
+    assert [names[i] for i in configured] == [
+        "Evidence availability",
+        "Provider/model comparison",
+        "Cost status",
+        "Version",
+    ]

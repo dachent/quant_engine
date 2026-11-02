@@ -3341,7 +3341,7 @@
   // After a render, every cell of those columns keeps its first two parts visible and moves the rest into a
   // closed disclosure.  Nothing is removed or reworded: the text stays in the cell (and in textContent).
   const DENSE_CELL_COLUMNS = {
-    "implementation-table": [1, 4, 5, 6],
+    "implementation-table": [1, 11, 12, 13],
     "underwriting-table": [1, 2, 3, 4, 5, 6],
     "factor-model-table": [1, 6, 7, 11],
     "observation-windows-table": [4, 5],
