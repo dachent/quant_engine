@@ -146,6 +146,8 @@ class FlexTrade:
     order_reference: str
     commission: Decimal
     quantity: Decimal
+    symbol: str = ""
+    price: Decimal | None = None
 
 
 def _iso(text: str) -> date:
@@ -176,6 +178,10 @@ def read_flex_trades(handles: Iterable[BinaryIO], account: str) -> list[FlexTrad
                         order_reference=attrs.get("orderReference", ""),
                         commission=Decimal(attrs["ibCommission"]),
                         quantity=Decimal(attrs["quantity"]),
+                        symbol=attrs.get("symbol", ""),
+                        price=Decimal(attrs["tradePrice"])
+                        if attrs.get("tradePrice")
+                        else None,
                     )
                 except (KeyError, ArithmeticError) as exc:
                     raise Refusal(FLEX_INVALID, "a Trade row is incomplete") from exc

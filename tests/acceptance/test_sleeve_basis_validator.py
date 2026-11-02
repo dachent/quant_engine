@@ -412,6 +412,13 @@ def _context(
     expected: list[dict[str, Any]] | None = None,
 ) -> checks.Context:
     gen = SimpleNamespace(panel=panel, report=report or {})
+    if facts is not None and "bindings" not in facts:
+        # the synthetic facts are bound to the synthetic ledger run's own sources
+        facts = {
+            **facts,
+            "provider_id": "ibkr",
+            "bindings": synth.bound_facts()["bindings"],
+        }
     return checks.Context(
         gen=gen,  # type: ignore[arg-type]
         cutoff=date(2026, 2, 6),
@@ -419,6 +426,7 @@ def _context(
         expected=expected,
         strategy_basis=declaration,
         sleeve_facts=facts,
+        facts_sources=synth.sources() if facts is not None else None,
     )
 
 

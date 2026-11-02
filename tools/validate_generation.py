@@ -41,9 +41,11 @@ from acceptance.validate.checks import (  # noqa: E402
     CLASSES,
     Context,
     Finding,
+    FactsSources,
     StrategyBasisRefusal,
     expected_exclusions,
     findings_document,
+    load_facts_sources,
     parse_strategy_basis,
     rollup,
     run_checks,
@@ -229,6 +231,17 @@ def _parser() -> argparse.ArgumentParser:
         help="sleeve-account-facts the declared sleeve rows are derived from",
     )
     parser.add_argument(
+        "--ibkr-root",
+        type=Path,
+        help="the dataIBKR root: the facts are bound to the catalog of the generation "
+        "the provider ledger records",
+    )
+    parser.add_argument(
+        "--tag-map",
+        type=Path,
+        help="the nested-strategy tag map the facts' tag_map_sha256 must equal",
+    )
+    parser.add_argument(
         "--independent-no-oracle",
         action="store_true",
         help="validate against no expected baseline (requires --cutoff, forbids "
@@ -309,6 +322,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not isinstance(facts, dict):
                 raise ContractError("--sleeve-facts is not an object")
             sleeve_facts = facts
+        facts_sources: FactsSources | None = None
+        if sleeve_facts is not None and provider_ledger is not None:
+            try:
+                facts_sources = load_facts_sources(
+                    provider_ledger, sleeve_facts, args.ibkr_root, args.tag_map
+                )
+            except StrategyBasisRefusal as exc:
+                raise ContractError(f"the sleeve facts cannot be bound: {exc}") from exc
         generation = load_generation(
             args.generation_dir,
             discover=not args.no_discover,
@@ -354,6 +375,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider_ledger=provider_ledger,
         strategy_basis=strategy_basis,
         sleeve_facts=sleeve_facts,
+        facts_sources=facts_sources,
     )
     findings = run_checks(context)
     document = findings_document(

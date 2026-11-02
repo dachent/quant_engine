@@ -31,7 +31,7 @@ from pathlib import Path
 import re
 from typing import Any, cast
 
-from . import shell, sleeve_basis
+from . import facts_bindings, shell, sleeve_basis
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -215,6 +215,9 @@ class Context:
     # every strategy is on its parent-account basis and nothing below changes.
     strategy_basis: Mapping[str, str] | None = None
     sleeve_facts: Mapping[str, Any] | None = None
+    # the ledger run's own sources the facts are bound against (provider ledger, the IBKR
+    # catalog of its generation, the tag map); refused when absent
+    facts_sources: facts_bindings.FactsSources | None = None
 
     @property
     def report(self) -> dict[str, Any]:
@@ -4426,6 +4429,18 @@ def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
 
 
 StrategyBasisRefusal = sleeve_basis.Refusal
+FactsSources = facts_bindings.FactsSources
+
+
+def load_facts_sources(
+    ledger: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    ibkr_root: Path | None,
+    tag_map_path: Path | None,
+) -> facts_bindings.FactsSources:
+    """The sources a facts file is bound against (the CLI's reader)."""
+
+    return facts_bindings.load_sources(ledger, facts, ibkr_root, tag_map_path)
 
 
 def parse_strategy_basis(raw: bytes) -> dict[str, str]:
@@ -4538,6 +4553,21 @@ def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
             (),
             "a declaration is in force but no sleeve facts were supplied: the sleeve "
             "basis cannot be verified independently",
+        )
+        return
+    try:
+        facts_bindings.check_bindings(ctx.sleeve_facts, ctx.facts_sources)
+    except sleeve_basis.Refusal as exc:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_AUTHORITY,
+            "sleeve-facts",
+            exc.code,
+            "sleeve facts bound to this run's provider ledger, catalog and tag map",
+            "(sleeve facts)",
+            "bindings",
+            (),
+            str(exc),
         )
         return
     figures = []

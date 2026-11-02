@@ -395,3 +395,124 @@ def panel_restated(*, home: bool = True, label: bool = True) -> dict[str, Any]:
     if home:
         before["account_summary"][0]["account_basis"] = account_basis
     return before
+
+
+# ------------------------------------------------------------ facts bindings (sources)
+
+LEDGER_GENERATION = "gen-synthetic-ibkr"
+TAG_MAP = {"schema_version": 1, "parents": [{"parent_account_id": PARENT}]}
+
+
+def catalog() -> dict[str, Any]:
+    """An IBKR catalog: rows of the parent inside and outside the window, and another's."""
+
+    return {
+        "provider_id": "ibkr",
+        "catalog_schema_version": 7,
+        "accounts": [{"account_id": PARENT}, {"account_id": "acct-other"}],
+        "transactions": [
+            {
+                "account_id": PARENT,
+                "kind": "TRADE:BUY",
+                "event_date": "2026-02-03",
+                "n": 1,
+            },
+            {
+                "account_id": PARENT,
+                "kind": "TRADE:SELL",
+                "event_date": "2026-03-01",
+                "n": 2,
+            },
+            {
+                "account_id": "acct-other",
+                "kind": "TRADE:BUY",
+                "event_date": "2026-02-03",
+            },
+            {
+                "account_id": PARENT,
+                "kind": "CASH_ACTIVITY:DIVIDEND",
+                "event_date": "2026-01-30",
+                "nav_recognition_date": "2026-02-04",
+                "n": 3,
+            },
+        ],
+        "positions": [
+            {"account_id": PARENT, "as_of_date": "2026-02-04", "quantity": "5"},
+            {"account_id": PARENT, "as_of_date": "2026-01-01", "quantity": "9"},
+        ],
+        "change_in_nav_observations": [
+            {"account_id": PARENT, "accounting_date": "2026-02-06", "n": 4}
+        ],
+    }
+
+
+def window_rows(document: dict[str, Any]) -> dict[str, list[Any]]:
+    """The parent's rows inside FIRST..LAST, selected here with its own simple rules."""
+
+    def inside(day: str) -> bool:
+        return FIRST <= day[:10] <= LAST
+
+    return {
+        "transactions": [
+            row
+            for row in document["transactions"]
+            if row["account_id"] == PARENT
+            and inside(
+                (row.get("nav_recognition_date") or row["event_date"])
+                if row["kind"].startswith("CASH_ACTIVITY:")
+                else row["event_date"]
+            )
+        ],
+        "positions": [
+            row
+            for row in document["positions"]
+            if row["account_id"] == PARENT and inside(row["as_of_date"])
+        ],
+        "change_in_nav_observations": [
+            row
+            for row in document["change_in_nav_observations"]
+            if row["account_id"] == PARENT and inside(row["accounting_date"])
+        ],
+    }
+
+
+def bound_facts() -> dict[str, Any]:
+    """The synthetic sleeve facts with bindings that match ``sources()``."""
+
+    import hashlib
+    import json
+
+    document = facts()
+    document["provider_id"] = "ibkr"
+    rows = window_rows(catalog())
+    document["bindings"] = {
+        "parent_ledger_generation_id": LEDGER_GENERATION,
+        "account_rows_sha256": hashlib.sha256(
+            json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("ascii")
+        ).hexdigest(),
+        "tag_map_sha256": hashlib.sha256(
+            json.dumps(TAG_MAP, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    return document
+
+
+def ledger() -> dict[str, Any]:
+    return {
+        "provider_generations": [
+            {"provider_id": "ibkr", "generation_id": LEDGER_GENERATION},
+            {"provider_id": "quantbase", "generation_id": "gen-synthetic-qb"},
+        ]
+    }
+
+
+def sources() -> Any:
+    import json
+
+    from acceptance.validate import facts_bindings
+
+    return facts_bindings.FactsSources(
+        ledger=ledger(),
+        catalog_raw=json.dumps(catalog()).encode(),
+        tag_map_raw=json.dumps(TAG_MAP, indent=2).encode(),
+    )

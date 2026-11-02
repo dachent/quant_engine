@@ -8,7 +8,7 @@ never enters the repository):
 * ``QE_AI624_R2_IBKR_ROOT``       the ``dataIBKR`` root (saved Flex statements)
 * ``QE_AI624_R2_IBKR_STAGING_ZIP`` optional, ``codex-2026-09-source-staging.zip`` (2026-03..09)
 * ``QE_AI624_R2_IBKR_ACCOUNT``    optional, default ``U22596907``
-* ``QE_AI624_R2_TAG_MAP``         the nested-strategy tag map
+* ``QE_AI624_R2_TAG_MAP``         the committed nested-strategy tag map (ops/mvp2-release/inputs/sleeves)
 * ``QE_AI624_R2_BRIDGE_CONTRACT`` optional, the producer's ``implementation-sleeve-basis/1``
 
 The derivation reads none of the producer's output; the contract is read only after.
