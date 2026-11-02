@@ -208,6 +208,171 @@ def _leg_series(
     return [dict(row) for row in restatement.rows if first <= str(row["date"]) <= last]
 
 
+# (price + dividend, commission, allocated cost, start-of-day capital, prior NAV)
+Part = tuple[Decimal, Decimal, Decimal, Decimal, Decimal]
+PLAN_ORDER: Final = ("G", "C", "L", "T")
+_STEP_NAMES: Final = {
+    "G": CAT_EXECUTION,
+    "C": CAT_COMMISSIONS,
+    "L": CAT_ALLOCATED,
+    "T": CAT_TIMING,
+}
+_NAMED_ORDERS: Final = (
+    ("PLAN_ORDER_GROSS_THEN_COSTS_THEN_TIMING", ("G", "C", "L", "T")),
+    ("COMMISSIONS_FIRST", ("C", "G", "L", "T")),
+    ("ALLOCATED_COSTS_FIRST", ("L", "C", "G", "T")),
+    ("COSTS_REVERSED", ("G", "L", "C", "T")),
+    ("TIMING_AFTER_GROSS", ("G", "T", "C", "L")),
+    ("TIMING_FIRST", ("T", "G", "C", "L")),
+)
+ORDER_REASON: Final = (
+    "The bridge follows the order in which the sleeve result is produced: the gross "
+    "result of its holdings, then the costs charged against it (commissions, then the "
+    "account-level allocations), and last the measurement convention (end-of-day flow "
+    "timing), so that the convention effect is measured on the final net series, as in "
+    "the three-convention bridge to the audit figure. Each stage is a daily series "
+    "chained over the common dates, so the terms telescope to the gap for any order; "
+    "the split between terms depends on the order only through compounding."
+)
+
+
+def _state_series(
+    steps: frozenset[str], timing_applied: bool, parts: Sequence[Part]
+) -> list[Decimal]:
+    result = []
+    for gross, commission, allocation, start_of_day, end_of_day in parts:
+        numerator = Decimal(0)
+        if "G" in steps:
+            numerator += gross
+        if "C" in steps:
+            numerator += commission
+        if "L" in steps:
+            numerator += allocation
+        result.append(numerator / (end_of_day if timing_applied else start_of_day))
+    return result
+
+
+def _ordered_effects(
+    order: Sequence[str], model_cumulative: Decimal, parts: Sequence[Part]
+) -> tuple[dict[str, Decimal], Decimal]:
+    steps: set[str] = set()
+    timing = False
+    previous = model_cumulative
+    effects: dict[str, Decimal] = {}
+    for step in order:
+        if step == "T":
+            timing = True
+        else:
+            steps.add(step)
+        if not steps:
+            effects[step] = Decimal(0)
+            continue
+        current = _chain(_state_series(frozenset(steps), timing, parts))
+        effects[step] = current - previous
+        previous = current
+    return effects, previous
+
+
+def _order_sensitivity(
+    model_path: Sequence[Decimal], parts: Sequence[Part], sleeve_cumulative: Decimal
+) -> dict[str, Any]:
+    """The bridge terms under several orders and the spread over all 24 orders."""
+
+    from itertools import permutations
+
+    model_cumulative = _chain(model_path)
+
+    def row(order: Sequence[str]) -> dict[str, Any]:
+        effects, final = _ordered_effects(order, model_cumulative, parts)
+        residual = sleeve_cumulative - final
+        if abs(residual) > Decimal("1e-20"):
+            raise SleeveBasisError("an ordering does not end at the sleeve return")
+        return {
+            "effects_pp": {
+                _STEP_NAMES[step]: float(effects[step] * 100) for step in order
+            },
+            "order": [_STEP_NAMES[step] for step in order],
+            "residual_pp": float(residual * 100),
+        }
+
+    named = [{"name": name, **row(order)} for name, order in _NAMED_ORDERS]
+    names = [_STEP_NAMES[step] for step in "GCLT"]
+
+    def spread(orders: Sequence[Sequence[str]]) -> dict[str, Any]:
+        every = [row(order)["effects_pp"] for order in orders]
+        return {
+            "count": len(every),
+            "max_pp": {name: max(item[name] for item in every) for name in names},
+            "mean_pp": {
+                name: math.fsum(item[name] for item in every) / len(every)
+                for name in names
+            },
+            "min_pp": {name: min(item[name] for item in every) for name in names},
+        }
+
+    every_order = list(permutations("GCLT"))
+    # a cost-only series is not a counterpart of the model return, so a comparison
+    # is meaningful only when the gross result enters before any cost
+    admissible = [
+        order
+        for order in every_order
+        if order.index("G") < order.index("C") and order.index("G") < order.index("L")
+    ]
+    return {
+        "admissible_orderings": {
+            **spread(admissible),
+            "rule": "the gross result enters before commissions and allocated costs",
+        },
+        "all_orderings": spread(every_order),
+        "named_orderings": named,
+        "plan_order": [_STEP_NAMES[step] for step in PLAN_ORDER],
+        "reason": ORDER_REASON,
+    }
+
+
+def _commission_weighting(
+    parts: Sequence[Part], governed: Sequence[Decimal], *, window_days: Sequence[str]
+) -> dict[str, Any]:
+    """What a commission figure in pp means over a sleeve whose capital grew several-fold.
+
+    Each day commission is a rate on that day start-of-day capital; the bridge term
+    chains them.  A dollar total over one capital figure is not that rate, so the
+    daily rates are shown summed, chained, linked into the governed return (each
+    daily contribution carried to the end by the later days growth), beside the
+    capital the dollars were charged against.
+    """
+
+    suffix = Decimal(1)
+    multipliers: list[Decimal] = []
+    for value in reversed(governed):
+        multipliers.append(suffix)
+        suffix *= 1 + value
+    multipliers.reverse()
+    rates = [commission / start for _, commission, _, start, _ in parts]
+    usd = sum((commission for _, commission, _, _, _ in parts), Decimal(0))
+    linked = sum(
+        (rate * weight for rate, weight in zip(rates, multipliers, strict=True)),
+        Decimal(0),
+    )
+    capital = [start for _, _, _, start, _ in parts]
+    mean_capital = sum(capital, Decimal(0)) / len(capital)
+    return {
+        "capital_first": float(capital[0]),
+        "capital_last": float(capital[-1]),
+        "capital_mean": float(mean_capital),
+        "commissions_usd": float(usd),
+        "daily_rate_chained_pp": float(_chain(rates) * 100),
+        "daily_rate_linked_into_return_pp": float(linked * 100),
+        "daily_rate_summed_pp": float(sum(rates, Decimal(0)) * 100),
+        "observations": len(window_days),
+        "usd_over_mean_capital_pp": float(usd / mean_capital * 100),
+        "weighting": (
+            "each day commission over that day start-of-day sleeve capital (prior "
+            "NAV after allocated costs plus same-day inflows), then chained"
+        ),
+    }
+
+
 def strategy_block(
     facts: bytes,
     strategy_id: str,
@@ -249,6 +414,7 @@ def strategy_block(
         after_allocation: list[Decimal] = []
         governed: list[Decimal] = []
         model_path: list[Decimal] = []
+        parts: list[Part] = []
         commissions_usd = Decimal(0)
         allocated_usd = Decimal(0)
         window = set(dates)
@@ -278,6 +444,7 @@ def strategy_block(
             full_net_start_of_day.append(result / base)
             if day not in window:
                 continue
+            parts.append((price + dividend, commission, allocation, base, opening))
             gross.append((price + dividend) / base)
             after_commission.append((price + dividend + commission) / base)
             after_allocation.append(result / base)
@@ -327,6 +494,8 @@ def strategy_block(
             (_chain(full_governed) - _chain(full_net_start_of_day)) * 100
         )
         total_pp = math.fsum(float(item["effect_pp"]) for item in categories)
+        sensitivity = _order_sensitivity(model_path, parts, cumulative["sleeve"])
+        weighting = _commission_weighting(parts, governed, window_days=dates)
     if not math.isclose(total_pp, gap_pp, abs_tol=CLOSURE_TOLERANCE_PP):
         raise SleeveBasisError("the sleeve bridge does not close to the gap")
 
@@ -394,6 +563,8 @@ def strategy_block(
             ),
             "status": _STATUSES[CAT_COMPOSITION],
         },
+        "commission_weighting": weighting,
+        "order_sensitivity": sensitivity,
         "cost_usd": {
             "allocated_interest_fees_and_dividend_accrual": float(allocated_usd),
             "commissions": float(commissions_usd),
@@ -470,6 +641,63 @@ _STATUSES: Final = {
 }
 
 
+ADMISSION_RULING: Final = (
+    "accepted as the model source for the sleeve comparison by the product owner "
+    "ruling on issue 624 option B; the label is kept"
+)
+
+
+def exclusion_disclosure(receipt: bytes, model_source_sha256: str) -> dict[str, Any]:
+    """Why the model comparison reads a pinned capture: the ledger exclusion, from the receipt.
+
+    The selected provider-ledger admission receipt carries the explicit zero-admission
+    disposition of the Portfolio123 live-return data class; its policy id, effective
+    start, owner, reason and authority are read from it, not typed here.
+    """
+
+    try:
+        document = json.loads(receipt)
+        rows = [
+            row
+            for row in document["dispositions"]
+            if isinstance(row, dict)
+            and row.get("provider_id") == "portfolio123"
+            and row.get("item_kind") == "PRODUCT_DATA_CLASS"
+            and row.get("data_class") == "PROVIDER_LIVE_RETURN"
+        ]
+        if len(rows) != 1 or rows[0].get("action") != "EXCLUDE":
+            raise SleeveBasisError("the receipt has no one P123 live-return exclusion")
+        row = rows[0]
+        fields = {
+            "action": str(row["action"]),
+            "authority_ref": str(row["authority_ref"]),
+            "data_class": str(row["data_class"]),
+            "materialized_record_count": row["materialized_record_count"],
+            "policy_effective_start": date.fromisoformat(
+                str(row["policy_effective_start"])
+            ).isoformat(),
+            "policy_id": str(row["policy_id"]),
+            "policy_owner": str(row["policy_owner"]),
+            "reason": str(row["reason"]),
+        }
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise SleeveBasisError("the provider admission receipt is unreadable") from exc
+    return {
+        **fields,
+        "receipt_sha256": _sha256(receipt),
+        "statement": (
+            f"The governed provider ledger excludes Portfolio123 live returns "
+            f"(disposition {fields['action']} of {fields['data_class']}, policy "
+            f"{fields['policy_id']} version of {fields['policy_owner']}, effective from "
+            f"{fields['policy_effective_start']}, reason {fields['reason']}, authority "
+            f"{fields['authority_ref']}). This model comparison therefore reads the "
+            f"pinned performance export of the model book (sha256 "
+            f"{model_source_sha256[:12]}), which is not ledger admitted; it is "
+            f"{ADMISSION_RULING}."
+        ),
+    }
+
+
 def _retained_rows(
     raw: bytes, name: str, comparison_key: str
 ) -> tuple[dict[str, Any], dict[str, Mapping[str, Any]]]:
@@ -504,6 +732,7 @@ def build_contract(
     model_book_perf: bytes,
     retained_attribution: bytes,
     retained_reconciliation: bytes,
+    provider_admission_receipt: bytes,
     filenames: Mapping[str, str],
 ) -> bytes:
     """The canonical ``implementation-sleeve-basis/1`` bytes."""
@@ -521,6 +750,9 @@ def build_contract(
         strategy_id,
         model,
         model_source_sha256=_sha256(model_book_perf),
+    )
+    block["model_leg"]["admission_disclosure"] = exclusion_disclosure(
+        provider_admission_receipt, _sha256(model_book_perf)
     )
     attribution_payload, attribution_rows = _retained_rows(
         retained_attribution, "attribution", "bridge"
@@ -575,6 +807,11 @@ def build_contract(
                 "retained-implementation-reconciliation",
                 filenames["retained_reconciliation"],
                 retained_reconciliation,
+            ),
+            _source(
+                "provider-admission-receipt",
+                filenames["provider_admission_receipt"],
+                provider_admission_receipt,
             ),
         ],
         "strategies": [block],
@@ -655,6 +892,13 @@ def validate_payload(
             raise SleeveBasisError(
                 f"sleeve leg differs from the restated sleeve series: {strategy_id}"
             )
+        disclosure = (block.get("model_leg") or {}).get("admission_disclosure")
+        if (
+            not isinstance(disclosure, Mapping)
+            or disclosure.get("action") != "EXCLUDE"
+            or not str(disclosure.get("statement") or "").strip()
+        ):
+            raise SleeveBasisError("the model leg does not disclose its admission")
         reference = block.get("account_basis_ref")
         if not isinstance(reference, Mapping) or (
             retained_attribution_sha256 is None
@@ -708,9 +952,11 @@ def apply_to_rows(
             },
             "bridge": block["bridge"],
             "composition": block["composition"],
+            "commission_weighting": block["commission_weighting"],
             "cost_usd": block["cost_usd"],
             "observed_end": block["observed_end"],
             "observed_start": block["observed_start"],
+            "order_sensitivity": block["order_sensitivity"],
             "sleeve_window_extension": block["sleeve_window_extension"],
             "verification": attribution_row.get("verification"),
         }
@@ -744,6 +990,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-book-perf", type=Path, required=True)
     parser.add_argument("--retained-attribution", type=Path, required=True)
     parser.add_argument("--retained-reconciliation", type=Path, required=True)
+    parser.add_argument("--provider-admission-receipt", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -756,6 +1003,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "model_book_perf": args.model_book_perf,
         "retained_attribution": args.retained_attribution,
         "retained_reconciliation": args.retained_reconciliation,
+        "provider_admission_receipt": args.provider_admission_receipt,
     }
     content = build_contract(
         declaration=args.declaration.read_bytes(),
@@ -763,6 +1011,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_book_perf=args.model_book_perf.read_bytes(),
         retained_attribution=args.retained_attribution.read_bytes(),
         retained_reconciliation=args.retained_reconciliation.read_bytes(),
+        provider_admission_receipt=args.provider_admission_receipt.read_bytes(),
         filenames={key: path.name for key, path in paths.items()},
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

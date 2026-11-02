@@ -33,6 +33,26 @@ DECLARATION = json.dumps(
 ).encode()
 
 
+RECEIPT = json.dumps(
+    {
+        "dispositions": [
+            {
+                "action": "EXCLUDE",
+                "authority_ref": "contract:abc#segment;issue:303",
+                "data_class": "PROVIDER_LIVE_RETURN",
+                "item_kind": "PRODUCT_DATA_CLASS",
+                "materialized_record_count": 0,
+                "policy_effective_start": "2026-08-14",
+                "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
+                "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
+                "provider_id": "portfolio123",
+                "reason": "NO_CURRENT_PRODUCT_CONSUMER",
+            }
+        ]
+    }
+).encode()
+
+
 def _weekdays(start: date, count: int) -> list[str]:
     days: list[str] = []
     current = start
@@ -185,6 +205,7 @@ def _contract(
         "retained_reconciliation": _retained(
             "reconciliation", "return_reconciliation", -0.0446, 0.150, None
         ),
+        "provider_admission_receipt": RECEIPT,
     }
     content = sbm.build_contract(
         **sources,
@@ -327,6 +348,7 @@ def test_a_flow_free_costless_sleeve_that_equals_the_model_has_only_zero_terms()
         "retained_reconciliation": _retained(
             "reconciliation", "return_reconciliation", 0.0, 0.0, None
         ),
+        "provider_admission_receipt": RECEIPT,
     }
     block = _block(
         sbm.build_contract(**sources, filenames={key: key for key in sources})
@@ -377,6 +399,7 @@ def test_a_model_without_a_sleeve_date_is_refused() -> None:
         "retained_reconciliation": _retained(
             "reconciliation", "return_reconciliation", 0.0, 0.0, None
         ),
+        "provider_admission_receipt": RECEIPT,
     }
     with pytest.raises(sbm.SleeveBasisError, match="model has no return"):
         sbm.build_contract(**sources, filenames={key: key for key in sources})
@@ -536,7 +559,9 @@ def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(
         {STRATEGY: dict(attribution_row)},
         refs["attribution"],
     )
-    assert ids == [STRATEGY]
+    assert list(ids) == [STRATEGY]
+    assert "PROVIDER_ADMIT_OR_DECLARE_V1" in ids[STRATEGY]
+    assert "2026-08-14" in ids[STRATEGY]
     assert attribution is not None and reconciliation is not None
     assert attribution[STRATEGY]["bridge"]["status"] == sbm.BRIDGE_STATUS
     assert "account_basis" in attribution[STRATEGY]
@@ -566,7 +591,12 @@ def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(
             }
         ]
     }
-    reporter._mark_implementation_sleeve_basis(report, [STRATEGY])
+    report["methodology"] = []
+    reporter._mark_implementation_sleeve_basis(report, ids)
+    assert report["methodology"][0]["item"] == (
+        "Implementation bridge on the sleeve basis"
+    )
+    assert "NO_CURRENT_PRODUCT_CONSUMER" in report["methodology"][0]["value"]
     row = report["strategy_summary"][0]
     assert row["return_scope"]["not_restated"] == ["benchmark_comparison"]
     assert "implementation bridge" not in row["return_scope_label"]
@@ -583,14 +613,16 @@ R2_FACTS = os.environ.get("QE_AI624_R2_FACTS")
 R2_MODEL = os.environ.get("QE_AI624_R2_MODEL_PERF")
 R2_ATTRIBUTION = os.environ.get("QE_AI624_R2_RETAINED_ATTRIBUTION")
 R2_RECONCILIATION = os.environ.get("QE_AI624_R2_RETAINED_RECONCILIATION")
+R2_RECEIPT = os.environ.get("QE_AI624_R2_ADMISSION_RECEIPT")
+R2_FLEX_ROWS = os.environ.get("QE_AI624_R2_FLEX_TRADE_ROWS")
 
 
 @pytest.mark.skipif(
-    not (R2_FACTS and R2_MODEL and R2_ATTRIBUTION and R2_RECONCILIATION),
-    reason="real R2 bytes are named by QE_AI624_R2_FACTS, _MODEL_PERF, _RETAINED_ATTRIBUTION and _RETAINED_RECONCILIATION",
+    not (R2_FACTS and R2_MODEL and R2_ATTRIBUTION and R2_RECONCILIATION and R2_RECEIPT),
+    reason="real R2 bytes are named by QE_AI624_R2_FACTS, _MODEL_PERF, _RETAINED_ATTRIBUTION, _RETAINED_RECONCILIATION and _ADMISSION_RECEIPT",
 )
 def test_real_r2_sleeve_bridge() -> None:
-    assert R2_FACTS and R2_MODEL and R2_ATTRIBUTION and R2_RECONCILIATION
+    assert R2_FACTS and R2_MODEL and R2_ATTRIBUTION and R2_RECONCILIATION and R2_RECEIPT
     facts = Path(R2_FACTS).read_bytes()
     model = Path(R2_MODEL).read_bytes()
     attribution = Path(R2_ATTRIBUTION).read_bytes()
@@ -607,7 +639,9 @@ def test_real_r2_sleeve_bridge() -> None:
         model_book_perf=model,
         retained_attribution=attribution,
         retained_reconciliation=reconciliation,
+        provider_admission_receipt=Path(R2_RECEIPT).read_bytes(),
         filenames={
+            "provider_admission_receipt": "x",
             "declaration": "d",
             "sleeve_facts": "f",
             "model_book_perf": "m",
@@ -661,3 +695,145 @@ def _decimal_chain(values: list[Decimal]) -> Decimal:
     for value in values:
         wealth *= 1 + value
     return wealth - 1
+
+
+# --- order dependence, commission weighting, exclusion disclosure -------------------
+
+
+def test_the_bridge_names_why_the_ledger_excludes_the_model_returns() -> None:
+    document, days = _facts()
+    block = _block(_contract(document, days)[0])
+    disclosure = block["model_leg"]["admission_disclosure"]
+    assert block["model_leg"]["admission"] == sbm.MODEL_ADMISSION
+    assert disclosure["policy_id"] == "PROVIDER_ADMIT_OR_DECLARE_V1"
+    assert disclosure["policy_effective_start"] == "2026-08-14"
+    assert disclosure["authority_ref"].endswith("issue:303")
+    assert disclosure["receipt_sha256"] == hashlib.sha256(RECEIPT).hexdigest()
+    assert "not ledger admitted" in disclosure["statement"]
+    assert "ruling" in disclosure["statement"]
+    # an absent exclusion is refused rather than papered over
+    with pytest.raises(sbm.SleeveBasisError):
+        sbm.exclusion_disclosure(b'{"dispositions": []}', "0" * 64)
+
+
+def test_every_ordering_ends_at_the_sleeve_return_and_the_split_depends_on_order() -> (
+    None
+):
+    document, days = _facts()
+    sensitivity = _block(_contract(document, days)[0])["order_sensitivity"]
+    named = {item["name"]: item for item in sensitivity["named_orderings"]}
+    plan = named["PLAN_ORDER_GROSS_THEN_COSTS_THEN_TIMING"]
+    block = _block(_contract(document, days)[0])
+    found = {
+        item["category"]: item["effect_pp"] for item in block["bridge"]["categories"]
+    }
+    # the plan order is the bridge itself
+    for category, value in plan["effects_pp"].items():
+        assert found[category] == pytest.approx(value, abs=1e-12)
+    gap = block["bridge"]["gap_pp"]
+    for item in sensitivity["named_orderings"]:
+        # any order telescopes to the same gap, the residual is zero
+        assert item["residual_pp"] == pytest.approx(0.0, abs=1e-12)
+        assert sum(item["effects_pp"].values()) == pytest.approx(gap, abs=1e-9)
+    # the split is order dependent: commissions and timing move with where timing sits
+    first = named["TIMING_FIRST"]["effects_pp"]
+    assert first[sbm.CAT_TIMING] == 0.0
+    spread = sensitivity["admissible_orderings"]
+    assert spread["count"] == 8
+    assert spread["min_pp"][sbm.CAT_TIMING] < spread["max_pp"][sbm.CAT_TIMING]
+    # a cost-only series is not a counterpart of the model: that order is not admissible
+    assert sensitivity["all_orderings"]["count"] == 24
+    assert named["COMMISSIONS_FIRST"]["effects_pp"][sbm.CAT_EXECUTION] != pytest.approx(
+        plan["effects_pp"][sbm.CAT_EXECUTION], abs=1e-3
+    )
+
+
+def test_the_commission_term_is_a_rate_on_the_capital_path_not_dollars_over_one_capital() -> (
+    None
+):
+    document, days = _facts()
+    block = _block(_contract(document, days)[0])
+    weighting = block["commission_weighting"]
+    commissions = [float(row[1]) for row in _DAILY]
+    after = [float(_OPENING)]
+    inflows = [float(row[4]) for row in _DAILY]
+    for price, commission, dividend, allocation, inflow in _DAILY:
+        after.append(
+            after[-1]
+            + float(price)
+            + float(commission)
+            + float(dividend)
+            + float(inflow)
+        )
+    rates = []
+    capital = []
+    cum = 0.0
+    nav = [float(_OPENING)]
+    for index, row in enumerate(_DAILY, 1):
+        cum += float(row[3])
+        nav.append(after[index] + cum)
+    for index, commission in enumerate(commissions, 1):
+        base = nav[index - 1] + inflows[index - 1]
+        capital.append(base)
+        rates.append(commission / base)
+    assert weighting["commissions_usd"] == pytest.approx(sum(commissions))
+    assert weighting["daily_rate_summed_pp"] == pytest.approx(sum(rates) * 100)
+    assert weighting["daily_rate_chained_pp"] == pytest.approx(_chain(rates) * 100)
+    assert weighting["capital_mean"] == pytest.approx(sum(capital) / len(capital))
+    # dollars over one capital figure is a different number from the chained rate
+    assert weighting["usd_over_mean_capital_pp"] != pytest.approx(
+        weighting["daily_rate_chained_pp"], abs=1e-3
+    )
+
+
+@pytest.mark.skipif(
+    not (R2_FACTS and R2_FLEX_ROWS and R2_MODEL),
+    reason="needs QE_AI624_R2_FACTS, _FLEX_TRADE_ROWS (read-only extract of the Flex Trade rows) and _MODEL_PERF",
+)
+def test_real_flex_trade_rows_reproduce_the_sleeve_commissions_and_fills() -> None:
+    """Independent derivation from IBKR Flex Trade rows: commissions counted once.
+
+    The sleeve tag is the one whose first-day executions are the sleeve's entry
+    (count and net purchases equal to the facts' entry flow).
+    """
+
+    assert R2_FACTS and R2_FLEX_ROWS and R2_MODEL
+    facts = json.loads(Path(R2_FACTS).read_bytes())
+    extract = json.loads(Path(R2_FLEX_ROWS).read_text())
+    sleeve = next(x for x in facts["sleeves"] if x["strategy_id"] == "p123-ai-factor")
+    by_day = {d["day"]: d for d in sleeve["days"]}
+    entry = by_day[sleeve["first_day"]]
+    entry_flow = Decimal(entry["flow_in"])
+    tag = next(
+        key
+        for key, (count, net) in extract["day1_tags"].items()
+        if abs(Decimal(net) - entry_flow) < Decimal("0.01")
+    )
+    import re
+
+    lead = re.compile(r"^[0-9]+-?")
+    commission: dict[str, Decimal] = {}
+    for row in extract["rows"]:
+        if lead.sub("", row["orderReference"]) != tag:
+            continue
+        day = f"{row['tradeDate'][:4]}-{row['tradeDate'][4:6]}-{row['tradeDate'][6:]}"
+        commission[day] = commission.get(day, Decimal(0)) + Decimal(row["ibCommission"])
+        # the fill price carries no commission: proceeds are quantity times price
+        assert abs(
+            abs(Decimal(row["proceeds"]))
+            - abs(Decimal(row["quantity"])) * Decimal(row["tradePrice"])
+        ) <= Decimal("0.01")
+    # (a) the facts commission is the Flex ibCommission, day by day, so the NAV the
+    # returns come from holds each commission dollar once
+    worst = Decimal(0)
+    for day, item in by_day.items():
+        worst = max(
+            worst,
+            abs(Decimal(item["commission"]) - commission.get(day, Decimal(0))),
+        )
+    assert worst <= Decimal("0.01"), worst
+    window_total = sum(
+        (Decimal(item["commission"]) for day, item in by_day.items()),
+        Decimal(0),
+    )
+    assert abs(window_total - sum(commission.values())) <= Decimal("0.05")

@@ -9603,7 +9603,9 @@ def _apply_implementation_sleeve_basis(
     attribution_contract: dict[str, dict[str, Any]] | None,
     attribution_ref: Mapping[str, Any] | None,
 ) -> tuple[
-    dict[str, dict[str, Any]] | None, dict[str, dict[str, Any]] | None, list[str]
+    dict[str, dict[str, Any]] | None,
+    dict[str, dict[str, Any]] | None,
+    dict[str, str],
 ]:
     """Stand the model comparison of a restated strategy on its sleeve (#624).
 
@@ -9648,7 +9650,10 @@ def _apply_implementation_sleeve_basis(
     return (
         reconciliation_rows if reconciliation_contract is not None else None,
         attribution_rows if attribution_contract is not None else None,
-        sorted(blocks),
+        {
+            strategy_id: str(block["model_leg"]["admission_disclosure"]["statement"])
+            for strategy_id, block in sorted(blocks.items())
+        },
     )
 
 
@@ -10033,7 +10038,7 @@ def build_report_data(
         implementation_reconciliation_path,
         implementation_return_attribution_path,
     )
-    sleeve_basis_strategies: list[str] = []
+    sleeve_basis_strategies: dict[str, str] = {}
     if implementation_sleeve_basis_path is not None:
         (
             implementation_contract,
@@ -13005,12 +13010,12 @@ def _apply_return_scope(
 
 
 def _mark_implementation_sleeve_basis(
-    report: dict[str, Any], strategy_ids: Sequence[str]
+    report: dict[str, Any], statements: Mapping[str, str]
 ) -> None:
     """A restated strategy whose model comparison is on the sleeve stops listing it as parent basis."""
 
     for item in report.get("strategy_summary", []):
-        if not isinstance(item, dict) or item.get("strategy_id") not in strategy_ids:
+        if not isinstance(item, dict) or item.get("strategy_id") not in statements:
             continue
         scope = item.get("return_scope")
         if isinstance(scope, dict) and "not_restated" in scope:
@@ -13024,6 +13029,16 @@ def _mark_implementation_sleeve_basis(
             item["return_scope_label"] = label.replace(
                 "the implementation bridge, ", ""
             )
+    if statements and isinstance(report.get("methodology"), list):
+        report["methodology"].append(
+            {
+                "item": "Implementation bridge on the sleeve basis",
+                "value": " ".join(
+                    f"{strategy_id}: {text}"
+                    for strategy_id, text in sorted(statements.items())
+                ),
+            }
+        )
 
 
 def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
