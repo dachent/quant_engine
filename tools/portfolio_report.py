@@ -2067,8 +2067,14 @@ def _comparison_annualization(
     )
 
 
-def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
-    """The CAGR and MWR labels of one strategy summary row (version 4)."""
+def _account_annualization_labels(
+    row: Mapping[str, Any], opening_date: str | None = None
+) -> dict[str, Any]:
+    """The CAGR and MWR labels of one strategy summary row (version 4).
+
+    ``opening_date`` is the opening NAV date of a canonical path (version 5); the
+    CAGR window opens there rather than at the first return date.
+    """
 
     cagr = None
     if row.get("account_live_cagr") is not None:
@@ -2081,7 +2087,7 @@ def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
                 if derived
                 else ANNUALIZATION_BASIS_SOURCE_REPORTED
             ),
-            start=row.get("account_live_observed_start"),
+            start=opening_date or row.get("account_live_observed_start"),
             end=row.get("account_live_observed_end"),
             observations=row.get("account_live_return_observations"),
             frequency="DAILY",
@@ -2217,15 +2223,19 @@ def _window_equivalent(rate: object, start: object, end: object) -> str | None:
 
 
 def _strategy_period_fields(
-    row: Mapping[str, Any], pieces: Mapping[str, Any] | None
+    row: Mapping[str, Any],
+    pieces: Mapping[str, Any] | None,
+    opening_date: str | None = None,
 ) -> dict[str, Any]:
     """Window, annualisation basis, YTD and calendar-year returns of one strategy.
 
     ``twr_annualised`` exists only from 365 days; the accepted cumulative return,
     CAGR and pooled MWR are never changed, each is named with its basis.
+    ``opening_date`` is the opening NAV date of a canonical path: the window opens
+    there, the close before its first return, like the manifest's window.
     """
 
-    start = row.get("account_live_observed_start")
+    start = opening_date or row.get("account_live_observed_start")
     end = row.get("account_live_observed_end")
     cumulative = row.get("account_live_cumulative_return")
     days: int | None = None
@@ -2259,6 +2269,24 @@ def _strategy_period_fields(
 
     calendar = {} if pieces is None else dict(pieces["calendar_year_twr"])
     windows = {} if pieces is None else dict(pieces["calendar_year_windows"])
+    first_return = row.get("account_live_observed_start")
+    if (
+        opening_date is not None
+        and isinstance(end, str)
+        and isinstance(first_return, str)
+        and windows
+    ):
+        # the first year's window opens at the first return; it opens at the
+        # opening NAV date like the whole window it belongs to
+        first_year = min(windows)
+        if windows[first_year]["start"] == first_return:
+            opened = _date(opening_date, "opening NAV date")
+            windows[first_year] = {
+                **windows[first_year],
+                "start": opening_date,
+                "days": (_date(windows[first_year]["end"], "window end") - opened).days,
+                "covers_period": opened.year < int(first_year),
+            }
     ytd_key = end[:4] if isinstance(end, str) else None
     ytd_key = ytd_key if ytd_key in calendar else None
     return {
@@ -4872,6 +4900,129 @@ def _cagr(cumulative_return: str, observed_start: str, observed_end: str) -> str
     return decimal_text(annualized)
 
 
+def _period_returns_era(
+    catalog: Mapping[str, Any], performance: Sequence[Mapping[str, Any]]
+) -> bool:
+    """True when the epoch rows carry schema-10 period fields (report version 5)."""
+
+    return _uses_cutoff_basis(catalog) and any(
+        "annualisation_basis" in item for item in performance
+    )
+
+
+def _opening_nav_date(
+    strategy_id: str,
+    first_return: str,
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The opening NAV date of a canonical strategy path, from governed dated facts.
+
+    A return belongs to its end date and is measured from the prior close, so the
+    window of a path whose first return is dated ``first_return`` opens at the
+    close before it (ADR 0002; the manifest's ``return_window_start``).  The
+    closest governed date strictly before the first return is taken from the
+    strategy's epoch rows (``return_window_start``) and from its opening capital
+    anchors (``nav_recognition_date``); it is never the day before the first
+    return, which is wrong for a trading-day series that opens after a weekend.
+    """
+
+    first = _date(first_return, "account-live first return date")
+    candidates: list[date] = []
+    for row in performance:
+        start = row.get("return_window_start")
+        if row.get("strategy_id") == strategy_id and isinstance(start, str):
+            parsed = _date(start, "performance.return_window_start")
+            if parsed < first:
+                candidates.append(parsed)
+    anchors = catalog.get("capital_anchors")
+    for anchor in anchors if isinstance(anchors, list) else []:
+        if (
+            isinstance(anchor, Mapping)
+            and anchor.get("strategy_id") == strategy_id
+            and anchor.get("evidence_layer") == "ACCOUNT_LIVE"
+            and anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR"
+            and isinstance(anchor.get("nav_recognition_date"), str)
+        ):
+            parsed = _date(anchor["nav_recognition_date"], "capital anchor date")
+            if parsed < first:
+                candidates.append(parsed)
+    return max(candidates).isoformat() if candidates else None
+
+
+def _with_ledger_opening_anchors(
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+) -> Mapping[str, Any]:
+    """The catalog with the provider ledger's capital anchors, for opening NAV dates.
+
+    The baseline catalog does not carry ``capital_anchors``; they are read from the
+    provider-ledger generation the baseline is bound to (the hash-bound catalog
+    ``_selected_provider_ledger_catalog`` selects), so a strategy whose opening anchor
+    predates its only epoch row (a sleeve) still opens at the ledger anchor. Outside
+    the version-5 era, or with no readable ledger, the catalog is returned as given and
+    ``_canonical_opening_nav_date`` fails closed where an opening date is needed.
+    """
+
+    if "capital_anchors" in catalog or not _period_returns_era(catalog, performance):
+        return catalog
+    try:
+        provider_catalog = _selected_provider_ledger_catalog(
+            catalog, baseline_root, provider_ledger_root
+        )[1]
+    except ReportValidationError:
+        return catalog
+    anchors = provider_catalog.get("capital_anchors")
+    return {
+        **catalog,
+        "capital_anchors": list(anchors) if isinstance(anchors, list) else [],
+    }
+
+
+def _canonical_opening_nav_date(
+    strategy_id: str,
+    first_return: object,
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The opening NAV date a version-5 canonical strategy window starts at.
+
+    None outside that era (earlier reports keep their first-return-date window);
+    inside it a canonical path with no governed opening date fails closed.
+    """
+
+    if not isinstance(first_return, str) or not _period_returns_era(
+        catalog, performance
+    ):
+        return None
+    opening = _opening_nav_date(strategy_id, first_return, catalog, performance)
+    if opening is None:
+        raise ReportValidationError(
+            f"{strategy_id} has no opening NAV date before its first return "
+            f"{first_return}"
+        )
+    return opening
+
+
+def _row_opening_nav_date(
+    row: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The opening NAV date of a strategy summary row's canonical window, if any."""
+
+    if row.get("account_live_return_authority") != "CANONICAL_STRATEGY_RETURNS":
+        return None
+    return _canonical_opening_nav_date(
+        str(row.get("strategy_id")),
+        row.get("account_live_observed_start"),
+        catalog,
+        performance,
+    )
+
+
 def _report_product_controls(
     catalog: Mapping[str, Any],
     path: Path | None = None,
@@ -6765,8 +6916,16 @@ def _strategies(
             "last_date"
         )
         cumulative_return = account_metrics.get("cumulative_return")
+        # the window opens at the opening NAV date (the close before the first return)
+        window_open = (
+            _canonical_opening_nav_date(
+                strategy_id, observed_start, catalog, performance
+            )
+            if canonical_account
+            else None
+        )
         account_cagr = (
-            _cagr(cumulative_return, observed_start, observed_end)
+            _cagr(cumulative_return, window_open or observed_start, observed_end)
             if canonical_account
             and cumulative_return is not None
             and observed_start is not None
@@ -9796,8 +9955,11 @@ def build_report_data(
         implementation_reconciliation_path,
         implementation_return_attribution_path,
     )
+    opening_catalog = _with_ledger_opening_anchors(
+        catalog, performance, baseline_root, provider_ledger_root
+    )
     strategy_summary = _strategies(
-        catalog,
+        opening_catalog,
         performance,
         history_contract,
         implementation_contract,
@@ -9866,7 +10028,14 @@ def build_report_data(
         )
     if _uses_cutoff_basis(catalog):
         strategy_summary = [
-            {**row, **_account_annualization_labels(row)} for row in strategy_summary
+            {
+                **row,
+                **_account_annualization_labels(
+                    row,
+                    _row_opening_nav_date(row, opening_catalog, performance),
+                ),
+            }
+            for row in strategy_summary
         ]
     # Version 5 (manifest schema 10): every epoch row carries its period returns.
     period_returns_enabled = _uses_cutoff_basis(catalog) and any(
@@ -9891,6 +10060,7 @@ def build_report_data(
                     if row.get("account_live_return_authority")
                     == "CANONICAL_STRATEGY_RETURNS"
                     else None,
+                    _row_opening_nav_date(row, opening_catalog, performance),
                 ),
                 "benchmark_comparison_window": _label_window(
                     row.get("benchmark_annualization")
