@@ -19,7 +19,7 @@ import re
 from typing import Any, cast
 
 import derived_epoch_perimeter
-from quant_engine.core import stage_timing
+from quant_engine.core import timed_stage
 from quant_engine.core.pipeline import ArtifactNode, GenerationNode
 from quant_engine.core import GenerationManifest, VerificationStatus
 from quant_engine.core.contracts import canonical_json_bytes
@@ -1962,7 +1962,7 @@ def validate_financial_outcomes(
     """
     with (
         _verification_ledger(spec, caller) as (work_counters, calls),
-        stage_timing.stage("financial_outcomes", caller=caller) as timing,
+        timed_stage("financial_outcomes", caller=caller) as timing,
     ):
         try:
             return _validate_financial_outcomes(
@@ -2008,7 +2008,7 @@ def validate_financial_outcomes_with_deferred_ledger(
         _write_verification_ledger(final_spec, caller, work_counters, calls)
 
     try:
-        with stage_timing.stage("financial_outcomes", caller=caller) as timing:
+        with timed_stage("financial_outcomes", caller=caller) as timing:
             try:
                 proof = _validate_financial_outcomes(
                     spec, allow_synthetic, work_counters, calls

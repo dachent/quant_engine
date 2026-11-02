@@ -104,6 +104,9 @@ _PATH_STAGES = {
     # Verifies a promoted retained-cache base before the runner links an overlay to it; it
     # can refuse any stage's run, like run_storage.
     "packages/core/src/quant_engine/core/retained_cache_base.py": list(_STAGE_ORDER),
+    # Observational stage timings written to stderr and a log file; nothing here is hashed
+    # into any delivery artifact, so it affects no stage.
+    "packages/core/src/quant_engine/core/stage_timing.py": [],
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via

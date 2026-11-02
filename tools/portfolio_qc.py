@@ -12,7 +12,7 @@ import sys
 import tempfile
 from typing import Any, Mapping, Sequence, cast
 
-from quant_engine.core import stage_timing
+from quant_engine.core import timed_call
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = REPOSITORY_ROOT / "tools"
@@ -668,7 +668,7 @@ def _fact_admission(spec: Any) -> dict[str, Any]:
     return {"providers": dict(sorted(providers.items())), "status": "PASS"}
 
 
-@stage_timing.timed("release_preflight")
+@timed_call("release_preflight")
 def _release_preflight(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")
@@ -748,7 +748,7 @@ def _verify_committed_manifest(spec: Any, manifest: Any) -> dict[str, object]:
     }
 
 
-@stage_timing.timed("post_release_verify")
+@timed_call("post_release_verify")
 def _post_release(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")

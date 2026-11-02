@@ -4771,21 +4771,26 @@ def execute_pipeline(
             )
         )
     if existing_release is None:
-        manifest = stage_timing.timed("prepare_release")(prepare_release)(
-            coordination_root=spec.coordination_root,
-            roots={key: spec.roots[key] for key in spec.release_generations},
-            proposed_generations=spec.release_generations,
-            code_commit=spec.code_commit,
-            created_at=spec.created_at,
-            gates=(*gate_evidence, GateEvidence("pipeline-evidence", evidence_hash)),
-            companions=tuple(companions),
-            allow_invalid_previous_artifact_inventory=any(
-                item.gate_id == _PREDECESSOR_REPAIR_GATE for item in gate_evidence
-            ),
-            allow_unusable_predecessor_pointers=any(
-                item.gate_id == _POINTER_RECOVERY_GATE for item in gate_evidence
-            ),
-        )
+        with stage_timing.stage("prepare_release"):
+            manifest = prepare_release(
+                coordination_root=spec.coordination_root,
+                roots={key: spec.roots[key] for key in spec.release_generations},
+                proposed_generations=spec.release_generations,
+                code_commit=spec.code_commit,
+                created_at=spec.created_at,
+                gates=(
+                    *gate_evidence,
+                    GateEvidence("pipeline-evidence", evidence_hash),
+                ),
+                companions=tuple(companions),
+                allow_invalid_previous_artifact_inventory=any(
+                    item.gate_id == _PREDECESSOR_REPAIR_GATE for item in gate_evidence
+                ),
+                allow_unusable_predecessor_pointers=any(
+                    item.gate_id == _POINTER_RECOVERY_GATE for item in gate_evidence
+                ),
+            )
+
         _create_exact(
             _prepared_path(spec),
             canonical_json_bytes(
@@ -4809,15 +4814,17 @@ def execute_pipeline(
         _validate_portfolio_orchestration(spec, verify_runtime=True)
         _require_executable_product(spec)
         _validate_commit_authorization(commit_authorization, spec)
-        journal = stage_timing.timed("commit_release")(commit_release)(
-            coordination_root=spec.coordination_root,
-            release_id=release_id,
-            roots={key: spec.roots[key] for key in spec.release_generations},
-            companion_contents=companion_contents,
-            fault_hook=fault_hook,
-            skip_release_validation=skip_release_validation,
-            release_validation_findings=release_validation_findings,
-        )
+        with stage_timing.stage("commit_release"):
+            journal = commit_release(
+                coordination_root=spec.coordination_root,
+                release_id=release_id,
+                roots={key: spec.roots[key] for key in spec.release_generations},
+                companion_contents=companion_contents,
+                fault_hook=fault_hook,
+                skip_release_validation=skip_release_validation,
+                release_validation_findings=release_validation_findings,
+            )
+
         state = journal.state
         for root_id, generation_id in spec.release_generations.items():
             if read_current(spec.roots[root_id]).generation_id != generation_id:
