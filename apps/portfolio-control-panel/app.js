@@ -985,6 +985,7 @@
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Provider/model comparison"]], rows, evidenceCaption("Current strategy evidence"));
     renderLifecycleTable();
     renderStrategyBasisDisclosure();
+    renderPolicyConstantSensitivity();
     renderPositionTable();
     renderLeverageDisclosures();
   }
@@ -1085,6 +1086,39 @@
     $("#strategy-basis-weights-note").innerHTML = weightNotes.join("");
     $("#strategy-basis-weights-table").innerHTML = tableMarkup([["Strategy"], ["Weight before (account perimeter)", "numeric"], ["Weight after (restated perimeter)", "numeric"], ["Value before", "numeric"], ["Value after", "numeric"]], weightRows.length ? weightRows : [emptyRow(5, "No weight restatement")], "Systematic weights before and after the restatement");
     $("#strategy-basis-audit-bridge-table").innerHTML = tableMarkup([["Audit convention to panel convention"], ["Figure", "numeric"]], auditBridge, "Bridge from the audit's convention to the panel's sleeve return");
+  }
+
+  // #624: the dependence allocation weights and conservative loss fractions are owner-approved policy constants and are
+  // never restated.  When a strategy stands on its sleeve each dependence mode carries `policy_constant_sensitivity`: the
+  // central-case and conservative-bound losses under the policy weights and, beside them, under the restated weights.
+  // Printed as the payload states it, once per mode; a payload without the block shows nothing.
+  function renderPolicyConstantSensitivity() {
+    const host = $("#policy-constant-sensitivity");
+    if (!host) return;
+    const modes = data.dependence_modes && typeof data.dependence_modes === "object" ? Object.entries(data.dependence_modes) : [];
+    const shown = modes.filter(([, mode]) => mode && typeof mode === "object" && mode.policy_constant_sensitivity && typeof mode.policy_constant_sensitivity === "object");
+    if (!shown.length) {
+      host.hidden = true;
+      return;
+    }
+    host.hidden = false;
+    const notes = [];
+    const rows = [];
+    for (const [modeName, mode] of shown) {
+      const block = mode.policy_constant_sensitivity;
+      const policy = block.policy || {};
+      const restated = block.sensitivity || {};
+      notes.push(`<p><strong>${safe(humanStatus(modeName))}</strong> · ${statusText(block.classification)} · ${safe(block.policy_id)} · restated: ${safe((block.restated_strategies || []).join(", "))}. ${safe(block.statement)}</p>`);
+      for (const name of Object.keys(policy.allocation_weight || {})) {
+        rows.push(`<tr><td>${safe(humanStatus(modeName))}</td><td>${safe(name)} weight</td><td class="numeric">${pct(policy.allocation_weight[name], 4)}</td><td class="numeric">${pct((restated.allocation_weight || {})[name], 4)}</td><td class="numeric">—</td></tr>`);
+      }
+      rows.push(
+        `<tr><td>${safe(humanStatus(modeName))}</td><td>Central-case loss</td><td class="numeric">${pct(policy.central_case_loss, 4)}</td><td class="numeric">${pct(restated.central_case_loss, 4)}</td><td class="numeric">${pct(restated.central_case_loss_difference, 4)}</td></tr>`,
+        `<tr><td>${safe(humanStatus(modeName))}</td><td>Conservative-bound (correlation one) loss</td><td class="numeric">${pct(policy.correlation_one_loss, 4)}</td><td class="numeric">${pct(restated.correlation_one_loss, 4)}</td><td class="numeric">${pct(restated.correlation_one_loss_difference, 4)}</td></tr>`,
+      );
+    }
+    $("#policy-constant-note").innerHTML = notes.join("");
+    $("#policy-constant-table").innerHTML = tableMarkup([["Dependence mode"], ["Figure"], ["Policy constant", "numeric"], ["Restated weights", "numeric"], ["Difference", "numeric"]], rows, "Policy-constant sensitivity: losses with the owner-approved weights and with the restated weights");
   }
 
   // One line per strategy over the verified daily history, labelled at the line end (no legend to decode).

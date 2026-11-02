@@ -260,8 +260,8 @@ def test_facts_that_break_a_gate_are_refused(
     cases = {
         # the bucket does not close the account: a different account NAV
         "do not equal the ledger": _facts(account_value=Decimal(11)),
-        # facts built from another tag map than the epoch's
-        "tag map": _facts(tag_map_sha256="9" * 64),
+        # facts built from another tag map than the epoch's: THIS check's message
+        "other than the sleeve epoch's": _facts(tag_map_sha256="9" * 64),
     }
     for index, (match, facts) in enumerate(cases.items()):
         directory = tmp_path / f"case-{index}"
@@ -356,12 +356,21 @@ def test_a_baseline_without_a_provider_ledger_binding_is_refused(
         _on(full, tmp_path, monkeypatch, facts_ledger_generation=None)
 
 
-def test_a_sleeve_epoch_without_a_tag_map_digest_is_refused(
+def test_a_sleeve_epoch_without_a_tag_map_digest_is_refused_by_the_binding_check(
     full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # the digest is read where the binding check reads it; the earlier tag-map gate
+    # compares the map file with the epoch digest and is bypassed here, so the only
+    # refusal that can fire is the missing side of the facts binding
     def drop(details: dict[Any, Any]) -> None:
         for detail in details.values():
             detail["derived_tag_map_sha256"] = None
 
-    with pytest.raises(Exception, match="tag map digest|differs from the one"):
+    monkeypatch.setattr(
+        full.reporter, "_bind_derived_epochs_to_tag_map", lambda *a, **k: None
+    )
+    with pytest.raises(
+        full.reporter.ReportValidationError, match="carries no tag map digest"
+    ) as raised:
         _on(full, tmp_path, monkeypatch, details_edit=drop)
+    assert "other than" not in str(raised.value)

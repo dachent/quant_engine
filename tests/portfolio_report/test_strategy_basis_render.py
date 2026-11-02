@@ -33,16 +33,19 @@ SELECTORS = (
 )
 
 
-def _render(tmp_path: Path, payload: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+def _render(
+    tmp_path: Path,
+    payload: dict[str, Any],
+    function: str = "renderStrategyBasisDisclosure",
+    host: str = "#strategy-basis-disclosure",
+) -> tuple[dict[str, Any], Any]:
     """The recorded DOM and whether the block's host ended up hidden."""
 
     path = tmp_path / "payload.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     calls = tmp_path / "calls.json"
     calls.write_text(
-        json.dumps(
-            [{"eval": "document.querySelector('#strategy-basis-disclosure').hidden"}]
-        ),
+        json.dumps([{"eval": f"document.querySelector('{host}').hidden"}]),
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -51,7 +54,7 @@ def _render(tmp_path: Path, payload: dict[str, Any]) -> tuple[dict[str, Any], An
             str(HARNESS),
             str(APP),
             str(path),
-            "renderStrategyBasisDisclosure",
+            function,
             str(calls),
         ],
         capture_output=True,
@@ -115,3 +118,64 @@ def test_a_payload_without_the_block_shows_nothing(tmp_path: Path) -> None:
     assert hidden is True
     for selector in SELECTORS[1:]:
         assert not dom.get(selector, {}).get("innerHTML")
+
+
+def _sensitivity() -> dict[str, Any]:
+    return {
+        "classification": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED",
+        "constants": ["allocation_weight", "conservative_loss_fraction"],
+        "policy_id": "PORT-DEPENDENCE-1",
+        "restated_strategies": ["Strategy One"],
+        "policy": {
+            "allocation_weight": {"Strategy One": "0.3", "Strategy Two": "0.7"},
+            "central_case_loss": "0.12",
+            "correlation_one_loss": "0.2",
+        },
+        "sensitivity": {
+            "basis": "RESTATED_CURRENT_CAPITAL_WEIGHT_NORMALIZED_WITHIN_DEPENDENCE_PERIMETER",
+            "allocation_weight": {"Strategy One": "0.4", "Strategy Two": "0.6"},
+            "central_case_loss": "0.13",
+            "correlation_one_loss": "0.22",
+            "central_case_loss_difference": "0.01",
+            "correlation_one_loss_difference": "0.02",
+        },
+        "statement": "owner-approved policy constants (PORT-DEPENDENCE-1), not restated.",
+    }
+
+
+def test_the_policy_constant_sensitivity_is_printed_for_each_mode(
+    tmp_path: Path,
+) -> None:
+    payload = {
+        "dependence_modes": {
+            "LIVE_ONLY": {"policy_constant_sensitivity": _sensitivity()},
+            "LIVE_PLUS_BACKTEST": {"policy_constant_sensitivity": _sensitivity()},
+        }
+    }
+    dom, hidden = _render(
+        tmp_path,
+        payload,
+        "renderPolicyConstantSensitivity",
+        "#policy-constant-sensitivity",
+    )
+    assert hidden is False
+    note = dom["#policy-constant-note"]["innerHTML"]
+    assert "not restated" in note and "PORT-DEPENDENCE-1" in note
+    assert "Owner approved policy constant not restated" in note
+    table = dom["#policy-constant-table"]["innerHTML"]
+    for mode in ("Live only", "Live plus backtest"):
+        assert mode in table
+    assert "Central-case loss" in table and "Conservative-bound" in table
+    assert "12.0000%" in table and "13.0000%" in table and "1.0000%" in table
+    assert "Strategy One weight" in table
+
+
+def test_a_payload_without_the_sensitivity_hides_it(tmp_path: Path) -> None:
+    for payload in ({}, {"dependence_modes": {"LIVE_ONLY": {}}}):
+        _dom, hidden = _render(
+            tmp_path,
+            payload,
+            "renderPolicyConstantSensitivity",
+            "#policy-constant-sensitivity",
+        )
+        assert hidden is True
