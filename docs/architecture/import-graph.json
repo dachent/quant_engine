@@ -584,6 +584,11 @@
       1
     ],
     [
+      "release_post_commit",
+      "release_driver",
+      1
+    ],
+    [
       "release_public_bundles",
       "portfolio_public_decomposition_sources",
       1

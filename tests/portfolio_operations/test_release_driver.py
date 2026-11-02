@@ -540,6 +540,7 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "expected_baseline_sha256",
         "calendar_authority",
         "calendar_authority_sha256",
+        "resolved_cycle",
     }
     for tool in re.findall(r"\{(?:tools|mvp2)\}/([\w.]+)", json.dumps(graph)):
         base = (
@@ -955,7 +956,9 @@ def test_the_final_pack_follows_the_commit_and_the_probe_pack_never_does() -> No
     by_id = {stage["id"]: stage for stage in graph["stages"]}
     assert ids.index("pack-evidence") > ids.index("commit")
     assert (
-        by_id["pack-evidence"]["requires"] == ["commit"]
+        by_id["pack-evidence"]["requires"] == ["post-commit-verify"]
+        and by_id["post-commit-verify"]["requires"] == ["commit"]
+        and ids.index("post-commit-verify") > ids.index("commit")
         and by_id["pack-evidence"]["only_mode"] == "release"
     )
     assert (

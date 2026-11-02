@@ -756,7 +756,7 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         "replica-inventory",
         *pass26[pass26.index("replica-copy") + 1 :],
     ]
-    assert ids[-2:] == ["commit", "pack-evidence"]
+    assert ids[-3:] == ["commit", "post-commit-verify", "pack-evidence"]
 
 
 def _stage(stage_id: str) -> dict[str, Any]:
