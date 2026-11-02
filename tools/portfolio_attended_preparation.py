@@ -780,6 +780,26 @@ def _rebuild_layered_history(
     return rebuilt
 
 
+def selected_history_authorities(files: Mapping[str, object]) -> _HistoryAuthorities:
+    """Public entry for the release driver's pre-chain stage (release_pre_chain.py)."""
+
+    return _selected_history_authorities(files)
+
+
+def rebuild_layered_history(
+    selection: Mapping[str, object],
+    output_root: Path,
+    release_commit: str,
+    contract_path: Path,
+    authorities: _HistoryAuthorities,
+) -> Path:
+    """Public entry for the release driver's pre-chain stage (release_pre_chain.py)."""
+
+    return _rebuild_layered_history(
+        selection, output_root, release_commit, contract_path, authorities
+    )
+
+
 def _validate_hwm_authority_inputs(config: Mapping[str, Any]) -> None:
     """Admit existing HWM policy/calendar bindings before preparation has effects."""
     import portfolio_invested_capital as capital

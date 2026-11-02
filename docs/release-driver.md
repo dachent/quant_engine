@@ -123,7 +123,7 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 | group | stages |
 |---|---|
 | inputs | `selected-inputs` (the hand-built selected-inputs and attribution spec must exist and are hash-bound) |
-| pre-chain | `pre-chain` (`ops/mvp2-release/scripts/pre_chain.py`: layered history, dependence, attribution) |
+| pre-chain | `pre-chain` (`tools/release_pre_chain.py`: layered history, dependence, attribution; reads the resolved cycle) |
 | attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
 | tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
 | replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
@@ -154,7 +154,7 @@ generations (`bound_ids`).
 A stage whose process was killed is recorded `running` with the PID and start token the driver
 launched; the next `run` marks it `interrupted` when that process is gone (a live one blocks the
 run) and restarts only that stage: `resume.same_argv` reruns the same command over its partial
-output (the tool checkpoints itself, as `pre_chain.py` and the attended `--resume` do);
+output (the tool checkpoints itself, as `release_pre_chain.py` and the attended `--resume` do);
 `resume.argv` runs a different command; a stage without `resume` has its outputs moved aside and
 reruns alone. Completed stages are verified, not rerun. `stop` (and Ctrl-C) kills the process tree
 of recorded PIDs only, and only while the recorded start token still matches, so a reused PID is
