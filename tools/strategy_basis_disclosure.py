@@ -414,7 +414,9 @@ def account_basis_block(
     }
 
 
-def account_basis_ref(*, account_id: str, series_sha256: object, label: str) -> dict:
+def account_basis_ref(
+    *, account_id: str, series_sha256: object, label: str
+) -> dict[str, Any]:
     """The pointer a restated row's ``return_scope`` carries to its account-basis block."""
 
     return {
