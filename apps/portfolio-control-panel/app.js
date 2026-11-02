@@ -1504,7 +1504,8 @@
     const ronc = net != null && gain != null && net !== 0n ? Number(gain) / Number(net) : null;
     const closedOpen = open.filter((row) => row.lifecycle_state === "CLOSED");
     const closedValue = sum(closedOpen, "current_value");
-    return { count: counted.length, open: open.length, closedOpen: closedOpen.length, closedValue, of: rows.length, net, gain, current, ronc };
+    const states = [...open.reduce((map, row) => map.set(row.lifecycle_state || "UNKNOWN", (map.get(row.lifecycle_state || "UNKNOWN") || 0) + 1), new Map())];
+    return { count: counted.length, open: open.length, closedOpen: closedOpen.length, closedValue, states, of: rows.length, net, gain, current, ronc };
   };
   const manifestFooter = (rows = []) => {
     const aggregate = data.invested_capital?.current_aggregate_usd;
@@ -1514,7 +1515,7 @@
       ? `<tr class="total-row"><th scope="row" colspan="3">Total · ${totals.count} of ${totals.of} epochs<span class="cell-secondary">Gain: all epochs · Current: ${totals.open} with a window ending at the cutoff · Net capital = Current − Gain</span></th><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">—<span class="cell-secondary">not additive</span></td><td class="numeric">${money(totals.net)}</td><td class="numeric">${money(totals.current)}</td><td class="numeric">${money(totals.gain)}</td><td class="numeric">${totals.ronc == null ? "—" : `${(totals.ronc * 100).toFixed(2)}%`}</td><td colspan="5"></td></tr>`
       : "";
     const total = number(aggregate) == null ? "" : `<tr><th scope="row" colspan="3">Net invested (consolidated)</th><td class="numeric cell-left" colspan="10">${currencyExact(aggregate)}<span class="cell-secondary">Governed invested-capital aggregate through ${formatDateHtml(data.invested_capital.complete_through)}</span></td></tr>`;
-    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. A retired epoch with a successor hands its closing value to the successor; the totals count Current for the ${totals.open} epochs whose window ends at the cutoff (${totals.open - totals.closedOpen} active${totals.closedOpen ? ` and ${totals.closedOpen} closed holding ${money(totals.closedValue)}` : ""}) and Gain for every epoch; the governed invested-capital aggregate can still differ.</span></td></tr>`;
+    return `${totalRow}${total}<tr><td colspan="13" class="cell-note"><span class="cell-secondary">Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled. A retired epoch with a successor hands its closing value to the successor; the totals count Current for the ${totals.open} epochs whose window ends at the cutoff (${totals.states.map(([state, count]) => (state === "CLOSED" ? `${count} closed holding ${money(totals.closedValue)}` : `${count} ${humanStatus(state).toLowerCase()}`)).join(" and ")}) and Gain for every epoch; the governed invested-capital aggregate can still differ.</span></td></tr>`;
   };
 
   function renderAccountManifest() {

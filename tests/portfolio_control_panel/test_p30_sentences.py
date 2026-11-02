@@ -67,6 +67,20 @@ def test_B2_the_totals_note_counts_active_and_closed_epochs_from_the_rows(
     assert "3.81" in note and "and Gain for every epoch" in note
     assert "Closed epochs hand their closing value" not in note
 
+    states = _flat(
+        call(
+            tmp_path,
+            payload,
+            "manifestFooter",
+            [
+                _epoch(lifecycle_state="INACTIVE"),
+                _epoch(),
+                _epoch(lifecycle_state="INACTIVE"),
+            ],
+        )
+    )
+    assert "(2 inactive and 1 active)" in states
+
     no_closed = _flat(call(tmp_path, payload, "manifestFooter", [_epoch(), _epoch()]))
     assert (
         "the 2 epochs whose window ends at the cutoff (2 active) and Gain" in no_closed
@@ -77,8 +91,7 @@ def test_B3_the_weekly_boundary_describes_a_mixed_week_by_its_contents() -> None
     html = _html()
     assert "the week containing inception is labelled mixed" not in html
     assert (
-        "a week containing both pre-live history and live observations is labelled MIXED; "
-        "otherwise its origin is shown as published."
+        "a week containing both pre-live history and live observations is labelled MIXED."
     ) in html
 
 
