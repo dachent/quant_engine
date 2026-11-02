@@ -71,6 +71,23 @@ def restore_repo_modules(before: dict[str, ModuleType]) -> list[str]:
     return restored
 
 
+def pin_test_module_bindings(item: pytest.Item) -> None:
+    """Register the repo modules a test file bound itself under their own names.
+
+    A test file that loads a tool by path and patches that object expects the code under
+    test to resolve the same object by name. With first-registration-wins collection that
+    would otherwise depend on which file registered first, so each test sees its own file's
+    bindings for the duration of the test; the registry is restored afterwards.
+    """
+    module = getattr(item, "module", None)
+    if module is None:
+        return
+    for value in list(vars(module).values()):
+        if isinstance(value, ModuleType) and _repo_owned(value):
+            if sys.modules.get(value.__name__) is not value:
+                sys.modules[value.__name__] = value
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_make_collect_report(collector: pytest.Collector) -> Iterator[None]:
     if not isinstance(collector, pytest.Module):
@@ -88,6 +105,7 @@ def pytest_runtest_protocol(
     item: pytest.Item, nextitem: pytest.Item | None
 ) -> Iterator[None]:
     before = snapshot_repo_modules()
+    pin_test_module_bindings(item)
     try:
         yield
     finally:

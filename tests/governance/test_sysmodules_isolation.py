@@ -30,6 +30,11 @@ SWAPPER = (
     "    assert FRESH.VALUE == 1\n"
 )
 
+SWAPPER_PINNED = SWAPPER + (
+    "def test_registry_holds_my_own_binding():\n"
+    "    assert sys.modules['hazmod'] is FRESH\n"
+)
+
 FIRST_IMPORTER = (
     "import hazmod\n"
     "ORIGINAL = hazmod\n"
@@ -122,5 +127,19 @@ def test_swap_inside_a_test_body_is_undone_before_the_next_test(tmp_path: Path) 
 
 def test_entries_the_repository_does_not_own_are_not_touched(tmp_path: Path) -> None:
     files = {"test_a_add.py": UNRELATED, "test_b_check.py": UNRELATED_CHECK}
+    guarded = _run(_project(tmp_path / "guarded", files, with_conftest=True))
+    assert guarded.returncode == 0, guarded.stdout + guarded.stderr
+
+
+def test_each_test_sees_the_modules_its_own_file_bound(tmp_path: Path) -> None:
+    files = {
+        "test_a_first.py": FIRST_IMPORTER,
+        "test_b_swap.py": SWAPPER_PINNED,
+        "test_c_swap.py": SWAPPER_PINNED,
+    }
+    control = _run(_project(tmp_path / "control", files, with_conftest=False))
+    assert control.returncode != 0, control.stdout
+    assert "test_b_swap.py::test_registry_holds_my_own_binding" in control.stdout
+
     guarded = _run(_project(tmp_path / "guarded", files, with_conftest=True))
     assert guarded.returncode == 0, guarded.stdout + guarded.stderr
