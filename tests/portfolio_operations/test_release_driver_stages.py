@@ -1716,3 +1716,24 @@ def test_the_replica_must_still_be_its_inventoried_copy_before_the_next_stage_us
     shipped = _stage("replica-spec")["verify_inventory"]
     assert shipped["file"] == "{cycle}/replica-inventory.json"
     assert shipped["except"] == ["{replica_coordination_root}/merge-attestation.json"]
+
+
+def test_a_link_like_provider_source_directory_is_recognised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "gen"
+    plain.mkdir()
+    assert driver._link_like(plain) is False
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "gen")
+    assert driver._link_like(plain) is True
+
+
+def test_a_link_anywhere_in_the_provider_root_chain_is_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "workspace-link" / "generations" / "G1"
+    source.mkdir(parents=True)
+    chain = (source, source.parent, source.parent.parent)
+    assert not any(driver._link_like(part) for part in chain)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "workspace-link")
+    assert any(driver._link_like(part) for part in chain)

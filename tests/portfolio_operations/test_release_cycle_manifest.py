@@ -378,3 +378,40 @@ def test_roots_must_be_existing_absolute_directories(tmp_path: Path) -> None:
     with pytest.raises(tool.CycleManifestError) as info:
         tool.parse_roots([f"data={tmp_path}", f"data={tmp_path / 'x'}"], None)
     assert info.value.code == "ROOTS"
+
+
+def test_a_link_like_generation_directory_is_refused_by_resolution_even_without_symlink_privilege(
+    cycle: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generation = next(iter(cycle["manifest"]["providers"].values()))
+    name = next(
+        p.name
+        for root in cycle["roots"].values()
+        for p in root.rglob("generations/*")
+        if p.is_dir()
+    )
+    real = tool.link_like
+    monkeypatch.setattr(tool, "link_like", lambda path: path.name == name or real(path))
+    _refused(cycle, "PATH_ESCAPES_ROOT")
+    assert generation
+
+
+def test_link_like_recognises_symlink_and_junction_reparse_tags_but_not_cloud_placeholders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "plain.txt"
+    plain.write_text("x", encoding="utf-8")
+    assert not tool.link_like(plain)
+
+    class Stat:
+        def __init__(self, tag: int) -> None:
+            self.st_reparse_tag = tag
+
+    for tag, expected in (
+        (0xA000000C, True),
+        (0xA0000003, True),
+        (0x9000001A, False),
+        (0, False),
+    ):
+        monkeypatch.setattr(Path, "lstat", lambda self, tag=tag: Stat(tag))
+        assert tool._is_link_tag(plain) is expected, hex(tag)
