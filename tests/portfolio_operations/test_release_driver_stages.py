@@ -1434,3 +1434,64 @@ def test_check_and_run_print_which_ceremony_they_are_in(
     assert "ceremony: replica-only" in capsys.readouterr().out
     assert _drive(world, graph) == 0
     assert "ceremony: replica-only" in capsys.readouterr().out
+
+
+def test_a_tree_run_passes_the_identity_scheme_to_attended_and_resume_only_under_v2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def plan(**extra: Any) -> str:
+        config = json.loads((FIXTURES / "pass26-run.json").read_text(encoding="utf-8"))
+        config.update(extra)
+        path = FIXTURES / "scheme.json"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        capsys.readouterr()
+        code = driver.main(
+            [
+                "plan",
+                "--offline",
+                "--config",
+                str(path),
+                "--ids",
+                str(FIXTURES / "pass26-ids.json"),
+                "--through",
+                "resume",
+            ]
+        )
+        assert code == 0
+        return capsys.readouterr().out
+
+    v1 = plan()
+    assert "--code-identity-scheme" not in v1
+    v2 = plan(
+        identity_scheme="git-tree-v2",
+        coordination_root="C:/x/dataPortfolio/releases",
+        candidate_commit="c" * 40,
+        base_ref="origin/main",
+    )
+    attended = next(line for line in v2.splitlines() if line.startswith("attended:"))
+    resume = next(line for line in v2.splitlines() if line.startswith("resume:"))
+    assert "--code-identity-scheme git-tree-v2" in attended
+    assert "--code-identity-scheme git-tree-v2" in resume
+
+
+def test_the_prepared_recipe_must_carry_the_runs_code_identity(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    code = "import json,sys;open(sys.argv[1],'w').write(json.dumps({'release_commit': sys.argv[2]}))"
+    stage = {
+        "id": "attended",
+        "outputs": ["{cycle}/recipe.json"],
+        "checks": [
+            {
+                "json": "{cycle}/recipe.json",
+                "path": "release_commit",
+                "equals": "{code_commit}",
+            }
+        ],
+        "argv": ["{python}", "-c", code, "{cycle}/recipe.json", "{code_commit}"],
+    }
+    assert _drive(world, _graph(world, [stage])) == 0
+    stage["argv"][-1] = (
+        "0" * 40
+    )  # the stage ran as the other scheme: its recipe names another identity
+    assert _drive(world, _graph(world, [stage]), "--replace") == 1

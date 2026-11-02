@@ -46,7 +46,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["if", "args"],
-          "properties": {"if": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}
+          "properties": {"if": {"type": "string"}, "equals": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}
         }
       ]
     },

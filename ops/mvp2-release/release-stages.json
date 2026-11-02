@@ -197,6 +197,14 @@
           "{python}",
           "--workspace-root",
           "{workspace_root}",
+          {
+            "if": "identity_scheme",
+            "equals": "git-tree-v2",
+            "args": [
+              "--code-identity-scheme",
+              "{identity_scheme}"
+            ]
+          },
           "--output-root",
           "{run}",
           "--retained-cache-root",
@@ -222,6 +230,14 @@
         "{python}",
         "--workspace-root",
         "{workspace_root}",
+        {
+          "if": "identity_scheme",
+          "equals": "git-tree-v2",
+          "args": [
+            "--code-identity-scheme",
+            "{identity_scheme}"
+          ]
+        },
         "--output-root",
         "{run}",
         {
@@ -253,6 +269,11 @@
             "FAILED",
             "PASSED"
           ]
+        },
+        {
+          "json": "{run}/preparation/release-recipe.json",
+          "path": "release_commit",
+          "equals": "{code_commit}"
         }
       ],
       "pinned_inputs": [
@@ -348,6 +369,14 @@
         "{python}",
         "--workspace-root",
         "{workspace_root}",
+        {
+          "if": "identity_scheme",
+          "equals": "git-tree-v2",
+          "args": [
+            "--code-identity-scheme",
+            "{identity_scheme}"
+          ]
+        },
         "--output-root",
         "{run}",
         "--retained-cache-root",
@@ -368,6 +397,11 @@
           "json": "{run}/attended-run-state.json",
           "path": "state",
           "equals": "PASSED"
+        },
+        {
+          "json": "{run}/preparation/release-recipe.json",
+          "path": "release_commit",
+          "equals": "{code_commit}"
         }
       ]
     },

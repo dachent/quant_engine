@@ -391,7 +391,9 @@ def stage_argv(
     for item in stage["argv"] if items is None else items:
         if isinstance(item, str):
             argv.append(run.expand(item))
-        elif item["if"] in run.values:
+        elif item["if"] in run.values and (
+            "equals" not in item or run.values[item["if"]] == item["equals"]
+        ):
             argv.extend(run.expand(arg) for arg in item["args"])
     return argv
 
@@ -881,10 +883,14 @@ def run_checks(run: Run, stage: Mapping[str, Any]) -> list[str]:
                 failures.append(
                     f"{file}: {check['path']} is {actual!r}, expected one of {check['one_of']!r}"
                 )
-        elif actual != check["equals"]:
-            failures.append(
-                f"{file}: {check['path']} is {actual!r}, expected {check['equals']!r}"
-            )
+        else:
+            expected = check["equals"]
+            if isinstance(expected, str):
+                expected = run.expand(expected)
+            if actual != expected:
+                failures.append(
+                    f"{file}: {check['path']} is {actual!r}, expected {expected!r}"
+                )
     return failures
 
 
