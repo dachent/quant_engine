@@ -46,7 +46,9 @@ import io
 import json
 import math
 from pathlib import Path
+import re
 from typing import Any, Final
+from xml.etree import ElementTree
 
 from quant_engine.core import canonical_json_bytes
 
@@ -55,7 +57,7 @@ import strategy_basis
 
 SCHEMA: Final = "implementation-sleeve-basis/1"
 BUILDER: Final = "portfolio-implementation-sleeve-basis"
-BUILDER_VERSION: Final = "1.0.0"
+BUILDER_VERSION: Final = "1.1.0"
 BASIS: Final = strategy_basis.BASIS_SLEEVE_EPOCH
 ACCOUNT_BASIS: Final = reconciliation.ACCOUNT_LEG_BASIS
 MODEL_BASIS: Final = "P123_BOOK_TOTAL_EQUITY_NET_OF_CASH_ADDED"
@@ -210,21 +212,13 @@ def _leg_series(
 
 # (price + dividend, commission, allocated cost, start-of-day capital, prior NAV)
 Part = tuple[Decimal, Decimal, Decimal, Decimal, Decimal]
-PLAN_ORDER: Final = ("G", "C", "L", "T")
+PLAN_ORDER: Final = "GCLT"
 _STEP_NAMES: Final = {
     "G": CAT_EXECUTION,
     "C": CAT_COMMISSIONS,
     "L": CAT_ALLOCATED,
     "T": CAT_TIMING,
 }
-_NAMED_ORDERS: Final = (
-    ("PLAN_ORDER_GROSS_THEN_COSTS_THEN_TIMING", ("G", "C", "L", "T")),
-    ("COMMISSIONS_FIRST", ("C", "G", "L", "T")),
-    ("ALLOCATED_COSTS_FIRST", ("L", "C", "G", "T")),
-    ("COSTS_REVERSED", ("G", "L", "C", "T")),
-    ("TIMING_AFTER_GROSS", ("G", "T", "C", "L")),
-    ("TIMING_FIRST", ("T", "G", "C", "L")),
-)
 ORDER_REASON: Final = (
     "The bridge follows the order in which the sleeve result is produced: the gross "
     "result of its holdings, then the costs charged against it (commissions, then the "
@@ -234,6 +228,27 @@ ORDER_REASON: Final = (
     "chained over the common dates, so the terms telescope to the gap for any order; "
     "the split between terms depends on the order only through compounding."
 )
+ORDER_RULE: Final = "the gross result enters before commissions and allocated costs"
+
+
+def admissible_orderings() -> list[str]:
+    """The meaningful orders: a cost-only series is no counterpart of the model return."""
+
+    from itertools import permutations
+
+    return [
+        "".join(order)
+        for order in permutations("GCLT")
+        if order.index("G") < order.index("C") and order.index("G") < order.index("L")
+    ]
+
+
+def parse_ordering(text: str) -> tuple[str, ...]:
+    if text not in admissible_orderings():
+        raise SleeveBasisError(
+            f"the bridge ordering is not one of the meaningful orders: {text!r}"
+        )
+    return tuple(text)
 
 
 def _state_series(
@@ -252,82 +267,107 @@ def _state_series(
     return result
 
 
-def _ordered_effects(
+def _ordered_path(
     order: Sequence[str], model_cumulative: Decimal, parts: Sequence[Part]
-) -> tuple[dict[str, Decimal], Decimal]:
+) -> list[tuple[str, Decimal, Decimal]]:
+    """``(step, effect, ending return)`` per step of one ordering."""
+
     steps: set[str] = set()
     timing = False
     previous = model_cumulative
-    effects: dict[str, Decimal] = {}
+    path: list[tuple[str, Decimal, Decimal]] = []
     for step in order:
         if step == "T":
             timing = True
         else:
             steps.add(step)
         if not steps:
-            effects[step] = Decimal(0)
+            path.append((step, Decimal(0), previous))
             continue
         current = _chain(_state_series(frozenset(steps), timing, parts))
-        effects[step] = current - previous
+        path.append((step, current - previous, current))
         previous = current
-    return effects, previous
+    return path
 
 
-def _order_sensitivity(
-    model_path: Sequence[Decimal], parts: Sequence[Part], sleeve_cumulative: Decimal
+def ordering_sentence(block: Mapping[str, Any], gap_pp: float) -> str:
+    """The sentence the payload states about order dependence, from its own numbers."""
+
+    terms = "; ".join(
+        f"{name} {values['min_pp']:+.2f} to {values['max_pp']:+.2f} pp"
+        for name, values in sorted(block["per_term"].items())
+    )
+    return (
+        "The split of the sleeve-to-model gap between its terms depends on the order "
+        f"in which they are taken; the order used is {' > '.join(block['ordering_used'])}. "
+        f"Over the {block['orderings_count']} orderings in which the gross result "
+        f"enters before any cost the terms range: {terms}. The total gap "
+        f"({gap_pp:+.4f} pp) and the residual (largest {block['residual_max_abs_pp']:.1e} "
+        "pp) do not depend on the order (largest difference between an ordering's terms "
+        f"and the gap {block['total_max_abs_difference_pp']:.1e} pp). The order is one "
+        f"build parameter ({block['ordering_parameter']}) and is open to owner review."
+    )
+
+
+def _ordering_sensitivity(
+    ordering: Sequence[str],
+    model_path: Sequence[Decimal],
+    parts: Sequence[Part],
+    sleeve_cumulative: Decimal,
+    gap_pp: float,
 ) -> dict[str, Any]:
-    """The bridge terms under several orders and the spread over all 24 orders."""
-
-    from itertools import permutations
-
     model_cumulative = _chain(model_path)
-
-    def row(order: Sequence[str]) -> dict[str, Any]:
-        effects, final = _ordered_effects(order, model_cumulative, parts)
-        residual = sleeve_cumulative - final
+    names = [_STEP_NAMES[step] for step in "GCLT"]
+    rows: list[dict[str, Any]] = []
+    for text in admissible_orderings():
+        path = _ordered_path(text, model_cumulative, parts)
+        residual = sleeve_cumulative - path[-1][2]
         if abs(residual) > Decimal("1e-20"):
             raise SleeveBasisError("an ordering does not end at the sleeve return")
-        return {
-            "effects_pp": {
-                _STEP_NAMES[step]: float(effects[step] * 100) for step in order
-            },
-            "order": [_STEP_NAMES[step] for step in order],
-            "residual_pp": float(residual * 100),
-        }
+        rows.append(
+            {
+                "effects_pp": {
+                    _STEP_NAMES[step]: float(effect * 100) for step, effect, _ in path
+                },
+                "order": [_STEP_NAMES[step] for step in text],
+                "residual_pp": float(residual * 100),
+            }
+        )
+    block = _summarise_orderings(
+        rows, names, "".join(ordering), [_STEP_NAMES[step] for step in ordering], gap_pp
+    )
+    return block
 
-    named = [{"name": name, **row(order)} for name, order in _NAMED_ORDERS]
-    names = [_STEP_NAMES[step] for step in "GCLT"]
 
-    def spread(orders: Sequence[Sequence[str]]) -> dict[str, Any]:
-        every = [row(order)["effects_pp"] for order in orders]
-        return {
-            "count": len(every),
-            "max_pp": {name: max(item[name] for item in every) for name in names},
-            "mean_pp": {
-                name: math.fsum(item[name] for item in every) / len(every)
-                for name in names
-            },
-            "min_pp": {name: min(item[name] for item in every) for name in names},
-        }
-
-    every_order = list(permutations("GCLT"))
-    # a cost-only series is not a counterpart of the model return, so a comparison
-    # is meaningful only when the gross result enters before any cost
-    admissible = [
-        order
-        for order in every_order
-        if order.index("G") < order.index("C") and order.index("G") < order.index("L")
-    ]
-    return {
-        "admissible_orderings": {
-            **spread(admissible),
-            "rule": "the gross result enters before commissions and allocated costs",
+def _summarise_orderings(
+    rows: Sequence[Mapping[str, Any]],
+    names: Sequence[str],
+    parameter: str,
+    used: Sequence[str],
+    gap_pp: float,
+) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "ordering_parameter": parameter,
+        "ordering_used": list(used),
+        "orderings": [dict(row) for row in rows],
+        "orderings_count": len(rows),
+        "orderings_total": 24,
+        "per_term": {
+            name: {
+                "max_pp": max(row["effects_pp"][name] for row in rows),
+                "min_pp": min(row["effects_pp"][name] for row in rows),
+            }
+            for name in names
         },
-        "all_orderings": spread(every_order),
-        "named_orderings": named,
-        "plan_order": [_STEP_NAMES[step] for step in PLAN_ORDER],
         "reason": ORDER_REASON,
+        "residual_max_abs_pp": max(abs(row["residual_pp"]) for row in rows),
+        "rule": ORDER_RULE,
+        "total_max_abs_difference_pp": max(
+            abs(math.fsum(row["effects_pp"].values()) - gap_pp) for row in rows
+        ),
     }
+    block["sentence"] = ordering_sentence(block, gap_pp)
+    return block
 
 
 def _commission_weighting(
@@ -373,12 +413,215 @@ def _commission_weighting(
     }
 
 
+_LEADING_REFERENCE: Final = re.compile(r"^[0-9]+-?")
+_FLEX_FIELDS: Final = (
+    "tradeID",
+    "ibExecID",
+    "tradeDate",
+    "symbol",
+    "quantity",
+    "tradePrice",
+    "proceeds",
+    "ibCommission",
+    "orderReference",
+)
+COST_SCALE_NOT_COMPUTED: Final = "NOT_COMPUTED_NO_FLEX_ROWS_OR_MODEL_TRANSACTIONS"
+
+
+def _file_source(source_id: str, path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return {
+        "filename": path.name,
+        "sha256": digest.hexdigest(),
+        "size_bytes": size,
+        "source_id": source_id,
+    }
+
+
+def _flex_trades(paths: Sequence[Path], account: str) -> list[dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    for path in paths:
+        for _, element in ElementTree.iterparse(path, events=("end",)):
+            if (
+                element.tag.rsplit("}", 1)[-1] == "Trade"
+                and element.attrib.get("accountId") == account
+                and element.attrib.get("assetCategory") == "STK"
+            ):
+                row = {name: element.attrib.get(name, "") for name in _FLEX_FIELDS}
+                key = row["tradeID"] or row["ibExecID"]
+                if key in rows and rows[key] != row:
+                    raise SleeveBasisError(f"Flex trade rows conflict: {key}")
+                rows[key] = row
+            element.clear()
+    return list(rows.values())
+
+
+def _iso_flex(text: str) -> str:
+    return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+
+
+def cost_scale_line(block: Mapping[str, Any]) -> str:
+    """The one line the payload states about the scale of the sleeve costs."""
+
+    if block.get("status") != "COMPUTED":
+        return (
+            "Cost scale not computed: the Flex trade rows and the model book "
+            "transactions were not build inputs."
+        )
+    direction = (
+        "better" if block["matched_fills_better_than_model_bps"] >= 0 else "worse"
+    )
+    return (
+        f"Cost scale over {block['window_start']}..{block['window_end']}: the sleeve "
+        f"paid {block['sleeve_commission_bps_of_notional']:.1f} bps of traded notional "
+        f"in commissions ({block['commission_usd']:,.2f} USD on "
+        f"{block['traded_notional_usd']:,.0f} USD, {block['sleeve_fill_events']} fill "
+        f"events from {block['sleeve_executions']} executions) against "
+        f"{block['model_fee_bps_of_notional']:.1f} bps of fees in the model book "
+        f"({block['model_events']} model trade events); on "
+        f"{block['matched_same_day_events']} same-day matched events the sleeve "
+        f"filled {abs(block['matched_fills_better_than_model_bps']):.1f} bps "
+        f"{direction} than the model prices."
+    )
+
+
+def cost_scale_block(
+    document: Mapping[str, Any],
+    strategy_id: str,
+    *,
+    first: str,
+    last: str,
+    flex_paths: Sequence[Path],
+    broker_account_id: str | None,
+    model_transactions: bytes | None,
+) -> dict[str, Any]:
+    """Sleeve commissions and fills against the model book, from the Flex rows.
+
+    ``NOT_COMPUTED`` when the rows are not a build input; numbers are never typed.
+    """
+
+    if not flex_paths or model_transactions is None or not broker_account_id:
+        block: dict[str, Any] = {"status": COST_SCALE_NOT_COMPUTED}
+        block["line"] = cost_scale_line(block)
+        return block
+    sleeve = strategy_basis.open_sleeve_for_strategy(document, strategy_id)
+    entry = min(sleeve["days"], key=lambda item: str(item["day"]))
+    account_id = f"{document.get('parent_account_id')}-{sleeve.get('sleeve_id')}"
+    entry_flow = sum(
+        (
+            _decimal(leg["amount"], "flow amount")
+            for leg in document.get("flows") or ()
+            if isinstance(leg, Mapping)
+            and leg.get("account_id") == account_id
+            and leg.get("class") == "INTERNAL_IN"
+            and leg.get("nav_recognition_date") == entry["day"]
+        ),
+        Decimal(0),
+    )
+    rows = _flex_trades(flex_paths, broker_account_id)
+    entry_day = str(entry["day"])
+    tags: dict[str, list[Decimal]] = {}
+    for row in rows:
+        if _iso_flex(row["tradeDate"]) == entry_day:
+            item = tags.setdefault(
+                _LEADING_REFERENCE.sub("", row["orderReference"]),
+                [Decimal(0), Decimal(0)],
+            )
+            item[0] += 1
+            item[1] += -_decimal(row["proceeds"], "proceeds")
+    candidates = [
+        tag for tag, (_, net) in tags.items() if abs(net - entry_flow) < Decimal("0.01")
+    ]
+    if len(candidates) != 1:
+        raise SleeveBasisError(
+            "the sleeve order tag is not identified by its entry day"
+        )
+    tag = candidates[0]
+    fills: dict[tuple[str, str, str], list[Decimal]] = {}
+    executions = 0
+    for row in rows:
+        day = _iso_flex(row["tradeDate"])
+        if _LEADING_REFERENCE.sub("", row["orderReference"]) != tag:
+            continue
+        if not first <= day <= last:
+            continue
+        quantity = _decimal(row["quantity"], "quantity")
+        key = (day, row["symbol"], "BUY" if quantity > 0 else "SELL")
+        item = fills.setdefault(key, [Decimal(0), Decimal(0), Decimal(0)])
+        item[0] += abs(quantity)
+        item[1] += abs(quantity) * _decimal(row["tradePrice"], "tradePrice")
+        item[2] += -_decimal(row["ibCommission"], "ibCommission")
+        executions += 1
+    model: dict[tuple[str, str, str], list[Decimal]] = {}
+    for row in csv.DictReader(io.StringIO(model_transactions.decode("utf-8-sig"))):
+        if row.get("Type") not in ("BUY", "SELL") or not first <= row["Date"] <= last:
+            continue
+        quantity = abs(_decimal(row["Shares"], "Shares"))
+        item = model.setdefault(
+            (row["Date"], row["Symbol"], str(row["Type"])),
+            [Decimal(0), Decimal(0), Decimal(0)],
+        )
+        item[0] += quantity
+        item[1] += quantity * _decimal(row["Price"], "Price")
+        if row.get("TotFees"):
+            item[2] += abs(_decimal(row["TotFees"], "TotFees"))
+    if not fills or not model:
+        raise SleeveBasisError("no sleeve fills or model trades in the bridge window")
+    commission = sum((v[2] for v in fills.values()), Decimal(0))
+    notional = sum((v[1] for v in fills.values()), Decimal(0))
+    model_fees = sum((v[2] for v in model.values()), Decimal(0))
+    model_notional = sum((v[1] for v in model.values()), Decimal(0))
+    matched = [key for key in model if key in fills]
+    worse = Decimal(0)
+    matched_notional = Decimal(0)
+    for key in matched:
+        sign = 1 if key[2] == "BUY" else -1
+        fill_quantity, fill_notional, _ = fills[key]
+        worse += (
+            sign
+            * (fill_notional / fill_quantity - model[key][1] / model[key][0])
+            * fill_quantity
+        )
+        matched_notional += fill_notional
+    block = {
+        "commission_usd": float(commission),
+        "flex_sources": [
+            _file_source("ibkr-activity-flex", path)["sha256"] for path in flex_paths
+        ],
+        "matched_fill_notional_usd": float(matched_notional),
+        "matched_fills_better_than_model_bps": (
+            float(-worse / matched_notional * 10000) if matched_notional else 0.0
+        ),
+        "matched_same_day_events": len(matched),
+        "model_events": len(model),
+        "model_fee_bps_of_notional": float(model_fees / model_notional * 10000),
+        "model_fees_usd": float(model_fees),
+        "model_notional_usd": float(model_notional),
+        "sleeve_commission_bps_of_notional": float(commission / notional * 10000),
+        "sleeve_executions": executions,
+        "sleeve_fill_events": len(fills),
+        "sleeve_order_tag": tag,
+        "status": "COMPUTED",
+        "traded_notional_usd": float(notional),
+        "window_end": last,
+        "window_start": first,
+    }
+    block["line"] = cost_scale_line(block)
+    return block
+
+
 def strategy_block(
     facts: bytes,
     strategy_id: str,
     model_rows: Sequence[tuple[str, Decimal]],
     *,
     model_source_sha256: str,
+    ordering: str = PLAN_ORDER,
 ) -> dict[str, Any]:
     """The sleeve bridge and reconciliation of one declared strategy."""
 
@@ -459,27 +702,30 @@ def strategy_block(
             "after_allocation": _chain(after_allocation),
             "sleeve": _chain(governed),
         }
-        stages = (
-            (CAT_COMPOSITION, cumulative["model"]),
-            (CAT_EXECUTION, cumulative["gross"]),
-            (CAT_COMMISSIONS, cumulative["after_commission"]),
-            (CAT_ALLOCATED, cumulative["after_allocation"]),
-            (CAT_TIMING, cumulative["sleeve"]),
-        )
-        previous_return = cumulative["model"]
-        categories: list[dict[str, Any]] = []
-        for category, ending in stages:
+        steps = parse_ordering(ordering)
+        path = _ordered_path(steps, cumulative["model"], parts)
+        categories: list[dict[str, Any]] = [
+            {
+                "category": CAT_COMPOSITION,
+                "effect_pp": 0.0,
+                "ending_return": float(cumulative["model"]),
+                "method": _METHODS[CAT_COMPOSITION],
+                "status": _STATUSES[CAT_COMPOSITION],
+            }
+        ]
+        for step, effect, ending in path:
             categories.append(
                 {
-                    "category": category,
-                    "effect_pp": float((ending - previous_return) * 100),
+                    "category": _STEP_NAMES[step],
+                    "effect_pp": float(effect * 100),
                     "ending_return": float(ending),
-                    "method": _METHODS[category],
-                    "status": _STATUSES[category],
+                    "method": _METHODS[_STEP_NAMES[step]],
+                    "status": _STATUSES[_STEP_NAMES[step]],
                 }
             )
-            previous_return = ending
-        residual = cumulative["sleeve"] - previous_return
+        residual = cumulative["sleeve"] - path[-1][2]
+        if abs(residual) > Decimal("1e-20"):
+            raise SleeveBasisError("the ordering does not end at the sleeve return")
         categories.append(
             {
                 "category": CAT_RESIDUAL,
@@ -494,7 +740,9 @@ def strategy_block(
             (_chain(full_governed) - _chain(full_net_start_of_day)) * 100
         )
         total_pp = math.fsum(float(item["effect_pp"]) for item in categories)
-        sensitivity = _order_sensitivity(model_path, parts, cumulative["sleeve"])
+        sensitivity = _ordering_sensitivity(
+            steps, model_path, parts, cumulative["sleeve"], gap_pp
+        )
         weighting = _commission_weighting(parts, governed, window_days=dates)
     if not math.isclose(total_pp, gap_pp, abs_tol=CLOSURE_TOLERANCE_PP):
         raise SleeveBasisError("the sleeve bridge does not close to the gap")
@@ -564,7 +812,7 @@ def strategy_block(
             "status": _STATUSES[CAT_COMPOSITION],
         },
         "commission_weighting": weighting,
-        "order_sensitivity": sensitivity,
+        "ordering_sensitivity": sensitivity,
         "cost_usd": {
             "allocated_interest_fees_and_dividend_accrual": float(allocated_usd),
             "commissions": float(commissions_usd),
@@ -628,8 +876,8 @@ _METHODS: Final = {
         "Chained daily allocated interest, fees and dividend accrual over the same capital."
     ),
     CAT_TIMING: (
-        "Governed sleeve series (date-only flows at end of day, ADR 0002) less the "
-        "same net series with inflows at the start of the day."
+        "Switch from inflows at the start of the day to date-only flows at the end of "
+        "the day (ADR 0002), taken at this point of the ordering."
     ),
 }
 _STATUSES: Final = {
@@ -737,6 +985,10 @@ def build_contract(
     provider_admission_receipt: bytes,
     model_provider_id: str,
     filenames: Mapping[str, str],
+    ordering: str = PLAN_ORDER,
+    flex_activity_paths: Sequence[Path] = (),
+    broker_account_id: str | None = None,
+    model_transactions: bytes | None = None,
 ) -> bytes:
     """The canonical ``implementation-sleeve-basis/1`` bytes."""
 
@@ -753,6 +1005,16 @@ def build_contract(
         strategy_id,
         model,
         model_source_sha256=_sha256(model_book_perf),
+        ordering=ordering,
+    )
+    block["cost_scale"] = cost_scale_block(
+        json.loads(sleeve_facts),
+        strategy_id,
+        first=block["observed_start"],
+        last=block["observed_end"],
+        flex_paths=flex_activity_paths,
+        broker_account_id=broker_account_id,
+        model_transactions=model_transactions,
     )
     block["model_leg"]["admission_disclosure"] = exclusion_disclosure(
         provider_admission_receipt, _sha256(model_book_perf), model_provider_id
@@ -816,6 +1078,18 @@ def build_contract(
                 filenames["provider_admission_receipt"],
                 provider_admission_receipt,
             ),
+            *(
+                [
+                    _source(
+                        "model-book-transactions",
+                        filenames["model_transactions"],
+                        model_transactions,
+                    )
+                ]
+                if model_transactions is not None
+                else []
+            ),
+            *(_file_source("ibkr-activity-flex", path) for path in flex_activity_paths),
         ],
         "strategies": [block],
         "verification": "VERIFIED_SLEEVE_BASIS_EXACT_COMMON_DATES",
@@ -831,6 +1105,46 @@ def verify_contract(contract: bytes, **sources: Any) -> dict[str, Any]:
     if rebuilt != contract:
         raise SleeveBasisError("the sleeve basis contract differs from its sources")
     return json.loads(contract)  # type: ignore[no-any-return]
+
+
+def _check_ordering_block(
+    block: Mapping[str, Any], categories: Sequence[Mapping[str, Any]], gap_pp: float
+) -> None:
+    """Recompute the ordering block from its own rows; it must equal what is stored."""
+
+    rows = block.get("orderings")
+    names = [_STEP_NAMES[step] for step in "GCLT"]
+    parameter = str(block.get("ordering_parameter"))
+    if (
+        not isinstance(rows, list)
+        or [
+            "".join(
+                next(step for step, name in _STEP_NAMES.items() if name == term)
+                for term in row.get("order", ())
+            )
+            for row in rows
+        ]
+        != admissible_orderings()
+        or parameter not in admissible_orderings()
+    ):
+        raise SleeveBasisError("the ordering sensitivity rows differ")
+    recomputed = _summarise_orderings(
+        rows, names, parameter, [_STEP_NAMES[step] for step in parameter], gap_pp
+    )
+    if dict(block) != recomputed:
+        raise SleeveBasisError("the ordering sensitivity block differs from its rows")
+    used = next(row for row in rows if row["order"] == block["ordering_used"])[
+        "effects_pp"
+    ]
+    for item in categories:
+        if (
+            item["category"] in used
+            and abs(float(item["effect_pp"]) - float(used[item["category"]])) > 1e-12
+        ):
+            raise SleeveBasisError("the bridge is not the ordering it names")
+    for row in rows:
+        if abs(math.fsum(row["effects_pp"].values()) - gap_pp) > CLOSURE_TOLERANCE_PP:
+            raise SleeveBasisError("an ordering does not close to the gap")
 
 
 def validate_payload(
@@ -870,9 +1184,15 @@ def validate_payload(
         if not isinstance(bridge, Mapping) or not isinstance(leg, Mapping):
             raise SleeveBasisError("sleeve basis block is incomplete")
         categories = bridge.get("categories")
-        if not isinstance(categories, list) or [
-            item.get("category") for item in categories
-        ] != list(CATEGORY_ORDER):
+        sensitivity = block.get("ordering_sensitivity")
+        if not isinstance(categories, list) or not isinstance(sensitivity, Mapping):
+            raise SleeveBasisError("sleeve bridge categories differ")
+        used = sensitivity.get("ordering_used")
+        if [item.get("category") for item in categories] != [
+            CAT_COMPOSITION,
+            *(used if isinstance(used, list) else ()),
+            CAT_RESIDUAL,
+        ]:
             raise SleeveBasisError("sleeve bridge categories differ")
         total = math.fsum(float(item["effect_pp"]) for item in categories)
         gap_pp = (float(bridge["account_return"]) - float(bridge["model_return"])) * 100
@@ -880,6 +1200,14 @@ def validate_payload(
             math.isclose(float(bridge["gap_pp"]), gap_pp, abs_tol=1e-10)
         ):
             raise SleeveBasisError("sleeve bridge does not close to the gap")
+        _check_ordering_block(sensitivity, categories, float(bridge["gap_pp"]))
+        scale = block.get("cost_scale")
+        if (
+            not isinstance(scale, Mapping)
+            or scale.get("line") != cost_scale_line(scale)
+            or scale.get("status") not in {"COMPUTED", COST_SCALE_NOT_COMPUTED}
+        ):
+            raise SleeveBasisError("the cost scale line differs from its numbers")
         first, last = str(leg["window_start"]), str(leg["window_end"])
         rebuilt_rows = _leg_series(restatement, first, last)
         wealth = _chain([Decimal(str(row["return"])) for row in rebuilt_rows])
@@ -916,6 +1244,18 @@ def validate_payload(
             )
         result[strategy_id] = dict(block)
     return result
+
+
+def methodology_statement(block: Mapping[str, Any]) -> str:
+    """The disclosure text: model admission, ordering dependence, cost scale."""
+
+    return " ".join(
+        [
+            str(block["model_leg"]["admission_disclosure"]["statement"]),
+            str(block["ordering_sensitivity"]["sentence"]),
+            str(block["cost_scale"]["line"]),
+        ]
+    )
 
 
 def _account_label(reference: Mapping[str, Any], kind: str) -> dict[str, Any]:
@@ -956,10 +1296,11 @@ def apply_to_rows(
             "bridge": block["bridge"],
             "composition": block["composition"],
             "commission_weighting": block["commission_weighting"],
+            "cost_scale": block["cost_scale"],
             "cost_usd": block["cost_usd"],
             "observed_end": block["observed_end"],
             "observed_start": block["observed_start"],
-            "order_sensitivity": block["order_sensitivity"],
+            "ordering_sensitivity": block["ordering_sensitivity"],
             "sleeve_window_extension": block["sleeve_window_extension"],
             "verification": attribution_row.get("verification"),
         }
@@ -995,6 +1336,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--retained-reconciliation", type=Path, required=True)
     parser.add_argument("--provider-admission-receipt", type=Path, required=True)
     parser.add_argument("--model-provider-id", required=True)
+    parser.add_argument("--ordering", default=PLAN_ORDER)
+    parser.add_argument("--flex-activity", type=Path, action="append", default=[])
+    parser.add_argument("--broker-account-id")
+    parser.add_argument("--model-transactions", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -1009,6 +1354,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "retained_reconciliation": args.retained_reconciliation,
         "provider_admission_receipt": args.provider_admission_receipt,
     }
+    if args.model_transactions is not None:
+        paths["model_transactions"] = args.model_transactions
     content = build_contract(
         declaration=args.declaration.read_bytes(),
         sleeve_facts=args.sleeve_facts.read_bytes(),
@@ -1018,6 +1365,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         provider_admission_receipt=args.provider_admission_receipt.read_bytes(),
         model_provider_id=args.model_provider_id,
         filenames={key: path.name for key, path in paths.items()},
+        ordering=args.ordering,
+        flex_activity_paths=args.flex_activity,
+        broker_account_id=args.broker_account_id,
+        model_transactions=(
+            None
+            if args.model_transactions is None
+            else args.model_transactions.read_bytes()
+        ),
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(content)

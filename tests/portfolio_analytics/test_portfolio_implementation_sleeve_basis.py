@@ -617,7 +617,7 @@ R2_MODEL = os.environ.get("QE_AI624_R2_MODEL_PERF")
 R2_ATTRIBUTION = os.environ.get("QE_AI624_R2_RETAINED_ATTRIBUTION")
 R2_RECONCILIATION = os.environ.get("QE_AI624_R2_RETAINED_RECONCILIATION")
 R2_RECEIPT = os.environ.get("QE_AI624_R2_ADMISSION_RECEIPT")
-R2_FLEX_ROWS = os.environ.get("QE_AI624_R2_FLEX_TRADE_ROWS")
+R2_FLEX_XML = os.environ.get("QE_AI624_R2_FLEX_XML")
 
 
 @pytest.mark.skipif(
@@ -720,36 +720,241 @@ def test_the_bridge_names_why_the_ledger_excludes_the_model_returns() -> None:
         sbm.exclusion_disclosure(b'{"dispositions": []}', "0" * 64, "portfolio123")
 
 
-def test_every_ordering_ends_at_the_sleeve_return_and_the_split_depends_on_order() -> (
+def test_the_payload_states_that_the_split_depends_on_the_order() -> None:
+    document, days = _facts()
+    block = _block(_contract(document, days)[0])
+    sensitivity = block["ordering_sensitivity"]
+    gap = block["bridge"]["gap_pp"]
+    assert sensitivity["ordering_parameter"] == "GCLT"
+    assert sensitivity["ordering_used"] == [
+        sbm.CAT_EXECUTION,
+        sbm.CAT_COMMISSIONS,
+        sbm.CAT_ALLOCATED,
+        sbm.CAT_TIMING,
+    ]
+    assert sensitivity["orderings_count"] == 8
+    assert sensitivity["orderings_total"] == 24
+    # the bridge is the ordering it names
+    found = {i["category"]: i["effect_pp"] for i in block["bridge"]["categories"]}
+    plan = next(
+        r
+        for r in sensitivity["orderings"]
+        if r["order"] == sensitivity["ordering_used"]
+    )
+    for category, value in plan["effects_pp"].items():
+        assert found[category] == pytest.approx(value, abs=1e-12)
+    # total and residual do not depend on the order, the split does
+    for row in sensitivity["orderings"]:
+        assert row["residual_pp"] == pytest.approx(0.0, abs=1e-12)
+        assert sum(row["effects_pp"].values()) == pytest.approx(gap, abs=1e-9)
+    assert sensitivity["residual_max_abs_pp"] < 1e-12
+    assert sensitivity["total_max_abs_difference_pp"] < 1e-9
+    spans = [v["max_pp"] - v["min_pp"] for v in sensitivity["per_term"].values()]
+    assert max(spans) > 0
+    for name, values in sensitivity["per_term"].items():
+        every = [row["effects_pp"][name] for row in sensitivity["orderings"]]
+        assert values == {"max_pp": max(every), "min_pp": min(every)}
+    # the sentence is generated from the block and names the order and the ranges
+    assert sensitivity["sentence"] == sbm.ordering_sentence(sensitivity, gap)
+    assert "depends on the order" in sensitivity["sentence"]
+    assert "do not depend on the order" in sensitivity["sentence"]
+    assert sbm.CAT_COMMISSIONS in sensitivity["sentence"]
+    assert sensitivity["sentence"] in sbm.methodology_statement(block)
+
+
+def test_the_ordering_is_one_parameter_and_must_be_a_meaningful_order() -> None:
+    document, days = _facts()
+    _, sources = _contract(document, days)
+    names = {k: f"{k}.bin" for k in sources}
+    content = sbm.build_contract(**sources, filenames=names, ordering="GTCL")
+    block = _block(content)
+    assert [c["category"] for c in block["bridge"]["categories"]] == [
+        sbm.CAT_COMPOSITION,
+        sbm.CAT_EXECUTION,
+        sbm.CAT_TIMING,
+        sbm.CAT_COMMISSIONS,
+        sbm.CAT_ALLOCATED,
+        sbm.CAT_RESIDUAL,
+    ]
+    assert block["ordering_sensitivity"]["ordering_parameter"] == "GTCL"
+    assert block["bridge"]["closure"]["difference_pp"] == pytest.approx(0, abs=1e-8)
+    # the same total whichever order, a different split
+    other = _block(_contract(document, days)[0])
+    assert block["bridge"]["gap_pp"] == pytest.approx(
+        other["bridge"]["gap_pp"], abs=1e-12
+    )
+    assert (
+        block["ordering_sensitivity"]["per_term"]
+        == other["ordering_sensitivity"]["per_term"]
+    )
+    with pytest.raises(sbm.SleeveBasisError, match="meaningful"):
+        sbm.build_contract(**sources, filenames=names, ordering="CGLT")
+
+
+def test_a_tampered_ordering_block_is_refused_by_the_report_side_check_and_the_rebuild() -> (
     None
 ):
     document, days = _facts()
-    sensitivity = _block(_contract(document, days)[0])["order_sensitivity"]
-    named = {item["name"]: item for item in sensitivity["named_orderings"]}
-    plan = named["PLAN_ORDER_GROSS_THEN_COSTS_THEN_TIMING"]
-    block = _block(_contract(document, days)[0])
-    found = {
-        item["category"]: item["effect_pp"] for item in block["bridge"]["categories"]
+    content, sources = _contract(document, days)
+    restatements = {STRATEGY: _restatement(document)}
+    shas = {
+        "retained_attribution_sha256": hashlib.sha256(
+            sources["retained_attribution"]
+        ).hexdigest(),
+        "retained_reconciliation_sha256": hashlib.sha256(
+            sources["retained_reconciliation"]
+        ).hexdigest(),
     }
-    # the plan order is the bridge itself
-    for category, value in plan["effects_pp"].items():
-        assert found[category] == pytest.approx(value, abs=1e-12)
-    gap = block["bridge"]["gap_pp"]
-    for item in sensitivity["named_orderings"]:
-        # any order telescopes to the same gap, the residual is zero
-        assert item["residual_pp"] == pytest.approx(0.0, abs=1e-12)
-        assert sum(item["effects_pp"].values()) == pytest.approx(gap, abs=1e-9)
-    # the split is order dependent: commissions and timing move with where timing sits
-    first = named["TIMING_FIRST"]["effects_pp"]
-    assert first[sbm.CAT_TIMING] == 0.0
-    spread = sensitivity["admissible_orderings"]
-    assert spread["count"] == 8
-    assert spread["min_pp"][sbm.CAT_TIMING] < spread["max_pp"][sbm.CAT_TIMING]
-    # a cost-only series is not a counterpart of the model: that order is not admissible
-    assert sensitivity["all_orderings"]["count"] == 24
-    assert named["COMMISSIONS_FIRST"]["effects_pp"][sbm.CAT_EXECUTION] != pytest.approx(
-        plan["effects_pp"][sbm.CAT_EXECUTION], abs=1e-3
+    for edit in (
+        lambda b: b["per_term"][sbm.CAT_COMMISSIONS].update(min_pp=-99.0),
+        lambda b: b.update(orderings_count=9),
+        lambda b: b.update(residual_max_abs_pp=1.0),
+        lambda b: b["orderings"][0]["effects_pp"].update({sbm.CAT_EXECUTION: 5.0}),
+        lambda b: b.update(sentence="no dependence"),
+    ):
+        payload = json.loads(content)
+        edit(payload["strategies"][0]["ordering_sensitivity"])
+        with pytest.raises(sbm.SleeveBasisError):
+            sbm.validate_payload(payload, restatements, **shas)
+        with pytest.raises(sbm.SleeveBasisError, match="differs from its sources"):
+            sbm.verify_contract(
+                json.dumps(payload).encode(),
+                **sources,
+                filenames={k: f"{k}.bin" for k in sources},
+            )
+    payload = json.loads(content)
+    payload["strategies"][0]["cost_scale"]["line"] = "x"
+    with pytest.raises(sbm.SleeveBasisError, match="cost scale"):
+        sbm.validate_payload(payload, restatements, **shas)
+
+
+def _flex_xml(path: Path, account: str, rows: list[dict[str, str]]) -> Path:
+    body = "".join(
+        '<Trade assetCategory="STK" accountId="%s" %s />'
+        % (account, " ".join(f'{k}="{v}"' for k, v in row.items()))
+        for row in rows
     )
+    path.write_text(f"<FlexQueryResponse><Trades>{body}</Trades></FlexQueryResponse>")
+    return path
+
+
+def test_the_cost_scale_line_is_computed_from_flex_rows_and_model_transactions(
+    tmp_path: Path,
+) -> None:
+    document, days = _facts()
+    _, sources = _contract(document, days)
+    names = {k: f"{k}.bin" for k in sources}
+    stamp = days[0].replace("-", "")
+    window_day = days[2].replace("-", "")
+    flex = _flex_xml(
+        tmp_path / "flex.xml",
+        "UX",
+        [
+            # the entry day of the sleeve tag: net purchases equal the entry flow
+            dict(
+                tradeID="1",
+                tradeDate=stamp,
+                symbol="AAA",
+                quantity="10",
+                tradePrice="100",
+                proceeds="-1000",
+                ibCommission="-1",
+                orderReference="12-TagX",
+            ),
+            # another sleeve on the same day
+            dict(
+                tradeID="2",
+                tradeDate=stamp,
+                symbol="ZZZ",
+                quantity="3",
+                tradePrice="50",
+                proceeds="-150",
+                ibCommission="-1",
+                orderReference="13-Other",
+            ),
+            dict(
+                tradeID="3",
+                tradeDate=window_day,
+                symbol="AAA",
+                quantity="-5",
+                tradePrice="102",
+                proceeds="510",
+                ibCommission="-1",
+                orderReference="14-TagX",
+            ),
+            dict(
+                tradeID="4",
+                tradeDate=window_day,
+                symbol="AAA",
+                quantity="-1",
+                tradePrice="102",
+                proceeds="102",
+                ibCommission="-1",
+                orderReference="14-Other",
+            ),
+        ],
+    )
+    model_csv = (
+        "Date,Symbol,Type,Shares,Price,Amount,TotFees\n"
+        f'{days[2]},AAA,SELL,50,102.5,"5,125.00",-0.5\n'
+        f"{days[2]},BBB,BUY,10,10,-100,-0.1\n"
+    ).encode()
+    content = sbm.build_contract(
+        **sources,
+        filenames={**names, "model_transactions": "m.csv"},
+        flex_activity_paths=[flex],
+        broker_account_id="UX",
+        model_transactions=model_csv,
+    )
+    scale = _block(content)["cost_scale"]
+    assert scale["status"] == "COMPUTED"
+    assert scale["sleeve_executions"] == 1
+    assert scale["sleeve_fill_events"] == 1
+    assert scale["model_events"] == 2
+    assert scale["matched_same_day_events"] == 1
+    assert scale["sleeve_commission_bps_of_notional"] == pytest.approx(1 / 510 * 1e4)
+    assert scale["model_fee_bps_of_notional"] == pytest.approx(0.6 / (5125 + 100) * 1e4)
+    # a sell filled at 102 against the model's 102.5 is worse by 0.5 a share
+    assert scale["matched_fills_better_than_model_bps"] == pytest.approx(
+        -2.5 / 510 * 1e4
+    )
+    assert "worse than the model prices" in scale["line"]
+    # the Flex files and the model transactions are pinned sources
+    pinned = {a["source_id"] for a in json.loads(content)["source_artifacts"]}
+    assert {"ibkr-activity-flex", "model-book-transactions"} <= pinned
+    # a tag that the entry day does not identify is refused
+    bad = _flex_xml(
+        tmp_path / "bad.xml",
+        "UX",
+        [
+            dict(
+                tradeID="9",
+                tradeDate=stamp,
+                symbol="AAA",
+                quantity="1",
+                tradePrice="1",
+                proceeds="-1",
+                ibCommission="-1",
+                orderReference="1-Q",
+            )
+        ],
+    )
+    with pytest.raises(sbm.SleeveBasisError, match="order tag"):
+        sbm.build_contract(
+            **sources,
+            filenames={**names, "model_transactions": "m.csv"},
+            flex_activity_paths=[bad],
+            broker_account_id="UX",
+            model_transactions=model_csv,
+        )
+
+
+def test_without_flex_rows_the_cost_scale_is_not_computed_and_says_so() -> None:
+    document, days = _facts()
+    scale = _block(_contract(document, days)[0])["cost_scale"]
+    assert scale["status"] == sbm.COST_SCALE_NOT_COMPUTED
+    assert scale["line"].startswith("Cost scale not computed")
+    assert set(scale) == {"status", "line"}
 
 
 def test_the_commission_term_is_a_rate_on_the_capital_path_not_dollars_over_one_capital() -> (
@@ -791,130 +996,18 @@ def test_the_commission_term_is_a_rate_on_the_capital_path_not_dollars_over_one_
 
 
 @pytest.mark.skipif(
-    not (R2_FACTS and R2_FLEX_ROWS and R2_MODEL),
-    reason="needs QE_AI624_R2_FACTS, _FLEX_TRADE_ROWS (read-only extract of the Flex Trade rows) and _MODEL_PERF",
+    not (R2_FACTS and R2_FLEX_XML and R2_MODEL and R2_ATTRIBUTION and R2_RECEIPT),
+    reason="needs the R2 facts, QE_AI624_R2_FLEX_XML (Flex activity files, os.pathsep separated), the model perf export, the retained contract and the receipt",
 )
-def test_real_flex_trade_rows_reproduce_the_sleeve_commissions_and_fills() -> None:
-    """Independent derivation from IBKR Flex Trade rows: commissions counted once.
+def test_real_flex_trade_rows_give_the_cost_scale_and_reproduce_the_commissions() -> (
+    None
+):
+    """(a)-(c) on real bytes, with the Flex rows as build inputs of the contract."""
 
-    The sleeve tag is the one whose first-day executions are the sleeve's entry
-    (count and net purchases equal to the facts' entry flow).
-    """
-
-    assert R2_FACTS and R2_FLEX_ROWS and R2_MODEL
-    facts = json.loads(Path(R2_FACTS).read_bytes())
-    extract = json.loads(Path(R2_FLEX_ROWS).read_text())
-    sleeve = next(x for x in facts["sleeves"] if x["strategy_id"] == "p123-ai-factor")
-    by_day = {d["day"]: d for d in sleeve["days"]}
-    entry = by_day[sleeve["first_day"]]
-    entry_flow = Decimal(entry["flow_in"])
-    tag = next(
-        key
-        for key, (count, net) in extract["day1_tags"].items()
-        if abs(Decimal(net) - entry_flow) < Decimal("0.01")
-    )
-    import re
-
-    lead = re.compile(r"^[0-9]+-?")
-    commission: dict[str, Decimal] = {}
-    for row in extract["rows"]:
-        if lead.sub("", row["orderReference"]) != tag:
-            continue
-        day = f"{row['tradeDate'][:4]}-{row['tradeDate'][4:6]}-{row['tradeDate'][6:]}"
-        commission[day] = commission.get(day, Decimal(0)) + Decimal(row["ibCommission"])
-        # the fill price carries no commission: proceeds are quantity times price
-        assert abs(
-            abs(Decimal(row["proceeds"]))
-            - abs(Decimal(row["quantity"])) * Decimal(row["tradePrice"])
-        ) <= Decimal("0.01")
-    # (a) the facts commission is the Flex ibCommission, day by day, so the NAV the
-    # returns come from holds each commission dollar once; the only days that differ
-    # are the days of the facts' declared manual assignments that touch this sleeve
-    manual = {
-        item["day"]
-        for item in facts["disclosures"]["manual_assignments"]
-        if "s2" in str(item["sleeves"]).split(",")
-    }
-    differing = {
-        day: Decimal(item["commission"]) - commission.get(day, Decimal(0))
-        for day, item in by_day.items()
-        if abs(Decimal(item["commission"]) - commission.get(day, Decimal(0)))
-        > Decimal("0.0001")
-    }
-    assert set(differing) <= manual, sorted(set(differing) - manual)
-    assert all(abs(value) < Decimal("0.1") for value in differing.values())
-    window_total = sum(
-        (Decimal(item["commission"]) for item in by_day.values()), Decimal(0)
-    )
-    assert abs(window_total - sum(commission.values())) <= Decimal("0.2")
-
-
-@pytest.mark.skipif(
-    not (R2_FACTS and R2_FLEX_ROWS and R2_MODEL and R2_ATTRIBUTION),
-    reason="needs the R2 facts, the Flex trade-row extract, the model perf export and the retained contract",
-)
-def test_real_cost_scale_explains_the_commission_and_gross_terms() -> None:
-    """(a)-(c) on real bytes: the offsetting pair is a real cost against a model's smaller one."""
-
-    import csv
-    import re
-    from collections import defaultdict
-
-    assert R2_FACTS and R2_FLEX_ROWS and R2_MODEL
-    extract = json.loads(Path(R2_FLEX_ROWS).read_text())
-    transactions = Path(R2_MODEL).with_name("strategy_1853536_transactions.csv")
-    lead = re.compile(r"^[0-9]+-?")
-    tag = max(extract["day1_tags"], key=lambda key: extract["day1_tags"][key][0])
-    start, end = "2026-02-02", "2026-09-11"
-
-    def iso(text: str) -> str:
-        return f"{text[:4]}-{text[4:6]}-{text[6:]}"
-
-    fills: dict[tuple[str, str, str], list[Decimal]] = defaultdict(
-        lambda: [Decimal(0)] * 3
-    )
-    for row in extract["rows"]:
-        day = iso(row["tradeDate"])
-        if lead.sub("", row["orderReference"]) != tag or not start <= day <= end:
-            continue
-        quantity = abs(Decimal(row["quantity"]))
-        key = (day, row["symbol"], "BUY" if Decimal(row["quantity"]) > 0 else "SELL")
-        fills[key][0] += quantity
-        fills[key][1] += quantity * Decimal(row["tradePrice"])
-        fills[key][2] += -Decimal(row["ibCommission"])
-    model: dict[tuple[str, str, str], list[Decimal]] = defaultdict(
-        lambda: [Decimal(0)] * 3
-    )
-    with transactions.open(encoding="utf-8") as handle:
-        for row in csv.DictReader(handle):
-            if row["Type"] not in ("BUY", "SELL") or not start <= row["Date"] <= end:
-                continue
-            quantity = abs(Decimal(row["Shares"].replace(",", "")))
-            key = (row["Date"], row["Symbol"], row["Type"])
-            model[key][0] += quantity
-            model[key][1] += quantity * Decimal(row["Price"].replace(",", ""))
-            if row["TotFees"]:
-                model[key][2] += abs(Decimal(row["TotFees"].replace(",", "")))
-    fee_bps_actual = sum(v[2] for v in fills.values()) / sum(
-        v[1] for v in fills.values()
-    )
-    fee_bps_model = sum(v[2] for v in model.values()) / sum(
-        v[1] for v in model.values()
-    )
-    # a sleeve of tens of thousands pays per-ticket commissions on small orders; the model
-    # book is charged a fraction of that
-    assert fee_bps_actual > 2 * fee_bps_model
-    # on same-day matched fills the sleeve filled at better prices than the model assumed
-    worse = Decimal(0)
-    for key, (mq, mn, _) in model.items():
-        if key not in fills:
-            continue
-        fq, fn, _ = fills[key]
-        sign = 1 if key[2] == "BUY" else -1
-        worse += sign * (fn / fq - mn / mq) * fq
-    assert worse < 0
-    # (c) the commission term is a rate on the capital path, not dollars over one capital
+    assert R2_FACTS and R2_FLEX_XML and R2_MODEL and R2_ATTRIBUTION and R2_RECEIPT
     facts = Path(R2_FACTS).read_bytes()
+    transactions = Path(R2_MODEL).with_name("strategy_1853536_transactions.csv")
+    flex = [Path(x) for x in R2_FLEX_XML.split(os.pathsep) if x]
     content = sbm.build_contract(
         declaration=json.dumps(
             {
@@ -928,7 +1021,7 @@ def test_real_cost_scale_explains_the_commission_and_gross_terms() -> None:
         model_book_perf=Path(R2_MODEL).read_bytes(),
         retained_attribution=Path(R2_ATTRIBUTION).read_bytes(),
         retained_reconciliation=Path(R2_RECONCILIATION or "").read_bytes(),
-        provider_admission_receipt=Path(R2_RECEIPT or "").read_bytes(),
+        provider_admission_receipt=Path(R2_RECEIPT).read_bytes(),
         model_provider_id="portfolio123",
         filenames={
             "declaration": "d",
@@ -937,24 +1030,87 @@ def test_real_cost_scale_explains_the_commission_and_gross_terms() -> None:
             "retained_attribution": "a",
             "retained_reconciliation": "r",
             "provider_admission_receipt": "x",
+            "model_transactions": "t",
         },
+        flex_activity_paths=flex,
+        broker_account_id=os.environ.get("QE_AI624_R2_BROKER_ACCOUNT", "U22596907"),
+        model_transactions=transactions.read_bytes(),
     )
     block = _block(content)
-    weighting = block["commission_weighting"]
-    found = {item["category"]: item for item in block["bridge"]["categories"]}
-    # the same commissions the Flex rows carry, on the facts' window
-    assert weighting["commissions_usd"] == pytest.approx(
-        -float(sum(v[2] for v in fills.values())), abs=0.2
+    scale = block["cost_scale"]
+    assert scale["status"] == "COMPUTED"
+    assert scale["sleeve_order_tag"]
+    # (a) the commissions the contract takes from the facts are the Flex ibCommission
+    assert block["cost_usd"]["commissions"] == pytest.approx(
+        -scale["commission_usd"], abs=0.2
     )
-    # the term is the chained daily rate scaled by the growth the gross result gave the
-    # capital it was charged against (the lost dollars would have grown too)
+    # the cost scale the line states
+    assert (
+        scale["sleeve_commission_bps_of_notional"]
+        > 2 * scale["model_fee_bps_of_notional"]
+    )
+    assert scale["matched_fills_better_than_model_bps"] > 0
+    assert scale["matched_same_day_events"] > 100
+    # (c) the commission term is the chained daily rate scaled by the gross growth
+    weighting = block["commission_weighting"]
+    found = {i["category"]: i for i in block["bridge"]["categories"]}
     growth = 1.0 + found[sbm.CAT_EXECUTION]["ending_return"]
     assert found[sbm.CAT_COMMISSIONS]["effect_pp"] == pytest.approx(
         weighting["daily_rate_chained_pp"] * growth, abs=0.02
     )
-    # dollars over the mean capital is a smaller number because the dollars were
-    # spent when the sleeve was small
     assert abs(weighting["usd_over_mean_capital_pp"]) < abs(
         weighting["daily_rate_chained_pp"]
     )
-    assert weighting["capital_last"] > 5 * weighting["capital_first"]
+    # the ordering block on real data: eight meaningful orders, total independent of order
+    sensitivity = block["ordering_sensitivity"]
+    assert sensitivity["orderings_count"] == 8
+    assert sensitivity["residual_max_abs_pp"] < 1e-12
+    assert sensitivity["total_max_abs_difference_pp"] < 1e-8
+    # the facts commission equals the Flex ibCommission day by day except on the days of
+    # the facts' declared manual assignments (day-level proof, independent parse)
+    import re
+    from xml.etree import ElementTree
+
+    document = json.loads(facts)
+    sleeve = next(
+        x for x in document["sleeves"] if x["strategy_id"] == "p123-ai-factor"
+    )
+    by_day = {d["day"]: d for d in sleeve["days"]}
+    lead = re.compile(r"^[0-9]+-?")
+    commission: dict[str, Decimal] = {}
+    seen: set[str] = set()
+    for path in flex:
+        for _, element in ElementTree.iterparse(path, events=("end",)):
+            a = element.attrib
+            if (
+                element.tag.rsplit("}", 1)[-1] == "Trade"
+                and a.get("accountId")
+                == os.environ.get("QE_AI624_R2_BROKER_ACCOUNT", "U22596907")
+                and a.get("assetCategory") == "STK"
+                and lead.sub("", a.get("orderReference", ""))
+                == scale["sleeve_order_tag"]
+                and a.get("tradeID") not in seen
+            ):
+                seen.add(a["tradeID"])
+                day = f"{a['tradeDate'][:4]}-{a['tradeDate'][4:6]}-{a['tradeDate'][6:]}"
+                commission[day] = commission.get(day, Decimal(0)) + Decimal(
+                    a["ibCommission"]
+                )
+                # fill prices carry no commission: proceeds are quantity times price
+                assert abs(
+                    abs(Decimal(a["proceeds"]))
+                    - abs(Decimal(a["quantity"])) * Decimal(a["tradePrice"])
+                ) <= Decimal("0.01")
+            element.clear()
+    manual = {
+        m["day"]
+        for m in document["disclosures"]["manual_assignments"]
+        if "s2" in str(m["sleeves"]).split(",")
+    }
+    differing = {
+        day
+        for day, item in by_day.items()
+        if abs(Decimal(item["commission"]) - commission.get(day, Decimal(0)))
+        > Decimal("0.0001")
+    }
+    assert differing <= manual, sorted(differing - manual)

@@ -9651,7 +9651,7 @@ def _apply_implementation_sleeve_basis(
         reconciliation_rows if reconciliation_contract is not None else None,
         attribution_rows if attribution_contract is not None else None,
         {
-            strategy_id: str(block["model_leg"]["admission_disclosure"]["statement"])
+            strategy_id: implementation_sleeve_basis.methodology_statement(block)
             for strategy_id, block in sorted(blocks.items())
         },
     )
