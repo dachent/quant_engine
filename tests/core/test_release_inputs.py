@@ -277,6 +277,7 @@ def _run_config(tmp_path: Path, repo: Path, **extra: str) -> dict[str, Any]:
         "run": str(tmp_path / "run"),
         "code_commit": "c" * 40,
         "mode": "release",
+        "ceremony": "full",
         "requested_as_of": CUTOFF,
         **extra,
     }
