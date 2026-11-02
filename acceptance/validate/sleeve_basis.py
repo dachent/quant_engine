@@ -27,7 +27,7 @@ Every refusal carries a stable ``code`` so a tamper test (and an operator) can t
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, localcontext
@@ -1074,17 +1074,20 @@ LABEL_KEYS = ("basis", "basis_label", "label")
 class Figure:
     path: str
     value: Any
+    steps: tuple[str | int, ...] = ()
 
 
-def _leaves(value: Any, path: str) -> Iterable[Figure]:
+def _leaves(
+    value: Any, path: str, steps: tuple[str | int, ...] = ()
+) -> Iterable[Figure]:
     if isinstance(value, Mapping):
         for key in value:
-            yield from _leaves(value[key], f"{path}.{key}")
+            yield from _leaves(value[key], f"{path}.{key}", (*steps, str(key)))
     elif isinstance(value, list):
         for position, item in enumerate(value):
-            yield from _leaves(item, f"{path}[{position}]")
+            yield from _leaves(item, f"{path}[{position}]", (*steps, position))
     elif value is not None and not isinstance(value, bool):
-        yield Figure(path, value)
+        yield Figure(path, value, steps)
 
 
 def _same(left: Any, right: Any) -> bool:
@@ -1097,41 +1100,139 @@ def _same(left: Any, right: Any) -> bool:
     return a.is_finite() and b.is_finite() and abs(a - b) <= Decimal("1e-12")
 
 
-def account_basis_figures(panel: Mapping[str, Any], strategy_id: str) -> list[Figure]:
-    """The account-basis figure set a strategy row states, by path and value."""
+_HEX64 = frozenset("0123456789abcdef")
 
-    row = _row(panel.get("strategies"), strategy_id)
-    if row is None:
+
+def _anchor(value: Any) -> Decimal | str | None:
+    """A figure worth searching the whole panel for: a fraction/amount or a sha."""
+
+    if isinstance(value, str) and len(value) == 64 and set(value.lower()) <= _HEX64:
+        return value
+    if isinstance(value, str) and "." in value:
+        try:
+            number = Decimal(value)
+        except ArithmeticError:
+            return None
+        if number.is_finite() and abs(number) >= Decimal("0.001"):
+            return number
+    return None
+
+
+def _scan(
+    root: Any, wanted: Callable[[str], bool], skip: tuple[str | int, ...]
+) -> list[tuple[tuple[str | int, ...], str]]:
+    """Every string leaf of ``root`` ``wanted`` accepts, with its steps.
+
+    One in-place walk (the panel is hundreds of megabytes: no tuple per node, steps are
+    built only for a hit); the subtree at ``skip`` is not entered.
+    """
+
+    hits: list[tuple[tuple[str | int, ...], str]] = []
+    steps: list[str | int] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                steps.append(key)
+                visit(item)
+                steps.pop()
+        elif isinstance(value, list):
+            for position, item in enumerate(value):
+                steps.append(position)
+                if not (len(steps) == len(skip) and tuple(steps) == skip):
+                    visit(item)
+                steps.pop()
+        elif isinstance(value, str) and wanted(value):
+            hits.append((tuple(steps), value))
+
+    visit(root)
+    return hits
+
+
+def _path(steps: Sequence[str | int]) -> str:
+    return "$" + "".join(
+        f"[{step}]" if isinstance(step, int) else f".{step}" for step in steps
+    )
+
+
+def account_basis_figures(
+    panel: Mapping[str, Any], strategy_id: str, *, everywhere: bool = True
+) -> list[Figure]:
+    """The account-basis figure set of a strategy, by path and value.
+
+    The strategy row's own figures (return, drawdowns, value, weight, series sha, window)
+    and, with ``everywhere``, every other leaf of the panel that states one of those
+    figures (the custody capital row, the capital reconciliation, underwriting, lens and
+    dependence coverage, ...): found by value, so a new copy elsewhere is covered too.
+    """
+
+    strategies = panel.get("strategies")
+    if not isinstance(strategies, list):
         return []
-    base = f"$.strategies[{strategy_id}]"
+    position = next(
+        (
+            index
+            for index, row in enumerate(strategies)
+            if isinstance(row, Mapping) and row.get("strategy_id") == strategy_id
+        ),
+        None,
+    )
+    if position is None:
+        return []
+    row = strategies[position]
+    base = ("strategies", position)
     found: list[Figure] = []
     for name in FIGURE_FIELDS:
         if name in row:
-            found.extend(_leaves(row[name], f"{base}.{name}"))
+            found.extend(_leaves(row[name], _path((*base, name)), (*base, name)))
     evidence = row.get("provider_evidence")
     account = evidence.get("account") if isinstance(evidence, Mapping) else None
     if isinstance(account, Mapping):
         for name in EVIDENCE_FIELDS:
             if name in account:
-                found.extend(
-                    _leaves(account[name], f"{base}.provider_evidence.account.{name}")
-                )
+                steps = (*base, "provider_evidence", "account", name)
+                found.extend(_leaves(account[name], _path(steps), steps))
+    if not everywhere:
+        return found
+    anchors = [a for a in (_anchor(f.value) for f in found) if a is not None]
+    shas = {a for a in anchors if isinstance(a, str)}
+    exact = [a for a in anchors if isinstance(a, Decimal)]
+    numbers = [float(a) for a in exact]
+
+    def wanted(value: str) -> bool:
+        if len(value) == 64:
+            return value in shas
+        if "." not in value or value[:1] not in "-0123456789":
+            return False
+        try:
+            approx = float(value)
+        except ValueError:
+            return False
+        if not any(abs(approx - n) <= 1e-9 * max(1.0, abs(n)) for n in numbers):
+            return False
+        return any(_same(value, e) for e in exact)
+
+    seen = {figure.steps for figure in found}
+    for hit_steps, value in _scan(panel, wanted, base):
+        if hit_steps in seen or HOME_KEY in hit_steps:
+            continue
+        found.append(Figure(_path(hit_steps), value, hit_steps))
     return found
 
 
-def _resolve(panel: Mapping[str, Any], path: str) -> Any:
-    """The value at a ``$.strategies[id].a.b`` path (a missing step is ``None``)."""
+def _resolve(panel: Mapping[str, Any], steps: Sequence[str | int]) -> Any:
+    """The value at a path's steps (a missing step is ``None``)."""
 
-    head = "$.strategies["
-    if not path.startswith(head):
-        return None
-    close = path.index("]")
-    strategy_id = path[len(head) : close]
-    node: Any = _row(panel.get("strategies"), strategy_id)
-    for step in path[close + 2 :].split("."):
-        if not isinstance(node, Mapping):
-            return None
-        node = node.get(step)
+    node: Any = panel
+    for step in steps:
+        if isinstance(step, int):
+            if not isinstance(node, list) or step >= len(node):
+                return None
+            node = node[step]
+        else:
+            if not isinstance(node, Mapping):
+                return None
+            node = node.get(step)
     return node
 
 
@@ -1153,6 +1254,8 @@ def check_non_diminish(
     before: Mapping[str, Any],
     after: Mapping[str, Any],
     declared: Mapping[str, str],
+    *,
+    figures_by_strategy: Mapping[str, Sequence[Figure]] | None = None,
 ) -> list[Finding]:
     """No account-basis figure of a declared strategy may be absent after B.
 
@@ -1164,7 +1267,11 @@ def check_non_diminish(
 
     found: list[Finding] = []
     for strategy_id in sorted(declared):
-        figures = account_basis_figures(before, strategy_id)
+        figures = (
+            list(figures_by_strategy[strategy_id])
+            if figures_by_strategy is not None and strategy_id in figures_by_strategy
+            else account_basis_figures(before, strategy_id)
+        )
         if not figures:
             found.append(
                 Finding(
@@ -1186,7 +1293,7 @@ def check_non_diminish(
         homes = _home(after, parents)
         home_values = [leaf for block in homes for leaf in _leaves(block, "")]
         for figure in figures:
-            if _same(_resolve(after, figure.path), figure.value):
+            if _same(_resolve(after, figure.steps), figure.value):
                 continue
             if any(_same(leaf.value, figure.value) for leaf in home_values):
                 continue
@@ -1195,7 +1302,7 @@ def check_non_diminish(
                     "ACCOUNT_BASIS_FIGURE_ABSENT",
                     figure.path,
                     figure.value,
-                    _resolve(after, figure.path),
+                    _resolve(after, figure.steps),
                     "the figure is neither at its path nor in "
                     f"account_summary[...].{HOME_KEY}",
                 )

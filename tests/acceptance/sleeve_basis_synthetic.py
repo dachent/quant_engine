@@ -255,8 +255,8 @@ def panel_before() -> dict[str, Any]:
         "account_live_max_drawdown": "-0.2",
         "hwm_max_drawdown": "-0.2",
         "hwm_current_drawdown": "-0.05",
-        "current_value_usd": "175",
-        "cost_rate_denominator_usd": "175",
+        "current_value_usd": "175.0125",
+        "cost_rate_denominator_usd": "175.0125",
         "systematic_weight": "0.0214",
         "account_live_return_series_sha256": "ab" * 32,
         "account_live_observed_start": "2026-01-20",
@@ -289,9 +289,39 @@ def panel_before() -> dict[str, Any]:
             {"strategy_id": "synthetic-beta", "current_value_usd": "3000"},
         ],
         "account_summary": [
-            {"account_id": PARENT, "latest_value_usd": "175", "as_of_date": LAST}
+            {"account_id": PARENT, "latest_value_usd": "175.0125", "as_of_date": LAST}
         ],
         "capital": {"systematic": "8175"},
+        # copies of the account-basis figures elsewhere in the panel
+        "custody_current_capital": {
+            "strategies": [
+                {
+                    "strategy_id": DECLARED,
+                    "current_value": {"value": "175.0125"},
+                    "current_weight": "0.0214",
+                }
+            ]
+        },
+        "capital_reconciliation": {
+            "memo": {
+                "perimeter_remainder": {
+                    "lines": [{"perimeter_value_usd": "175.0125"}],
+                }
+            }
+        },
+        "strategy_underwriting": {
+            "rows": [
+                {
+                    "strategy_id": DECLARED,
+                    "evidence_layers": {
+                        "account_live": {
+                            "cumulative_return": "0.05",
+                            "max_drawdown": "-0.2",
+                        }
+                    },
+                }
+            ]
+        },
     }
 
 
@@ -331,6 +361,16 @@ def panel_restated(*, home: bool = True, label: bool = True) -> dict[str, Any]:
         "account_live_return_observations": 5,
     }
     row.update(sleeve)
+    before["custody_current_capital"]["strategies"][0].update(
+        {"current_value": {"value": "1575.0"}, "current_weight": "0.1645"}
+    )
+    before["capital_reconciliation"]["memo"]["perimeter_remainder"]["lines"][0][
+        "perimeter_value_usd"
+    ] = "1575.0"
+    before["strategy_underwriting"]["rows"][0]["evidence_layers"]["account_live"] = {
+        "cumulative_return": "0.088",
+        "max_drawdown": "-0.1",
+    }
     row["provider_evidence"] = {
         "account": {
             "cumulative_return": "0.088",

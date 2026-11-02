@@ -259,29 +259,41 @@ def test_the_real_r2_panel_states_a_figure_set_and_each_one_has_a_home_after_b()
         ".account_live_observed_start",
     ):
         assert needed in paths
-    assert sleeve_basis.check_non_diminish(before, before, declared) == []
+    known = {strategy: figures}
+    assert (
+        sleeve_basis.check_non_diminish(
+            before, before, declared, figures_by_strategy=known
+        )
+        == []
+    )
 
-    # B restates the row and, with it, drops the account figures from the row:
+    # B restates the row and every copy of its figures; the account's own NAV stays
     restated = deepcopy(before)
     row = next(r for r in restated["strategies"] if r["strategy_id"] == strategy)
     parent_ids = row["return_scope"]["parent_account_ids"]
-    home = {"basis": "WHOLE_ACCOUNT"}
-    for field in sleeve_basis.FIGURE_FIELDS:
-        if field in row:
-            home[field] = deepcopy(row[field])
-            row[field] = None
-    for field in sleeve_basis.EVIDENCE_FIELDS:
-        account = row["provider_evidence"]["account"]
-        if field in account:
-            home["evidence_" + field] = account[field]
-            account[field] = None
+    movable = [f for f in figures if f.steps[0] != "account_summary"]
+    assert len(movable) > len(figures) // 2
+    home: dict[str, Any] = {"basis": "WHOLE_ACCOUNT"}
+    for number, figure in enumerate(movable):
+        home[f"figure_{number}"] = figure.value
+        node: Any = restated
+        for step in figure.steps[:-1]:
+            node = node[step]
+        node[figure.steps[-1]] = None
     row["return_scope"]["basis"] = "SLEEVE_EPOCH"
-    lost = sleeve_basis.check_non_diminish(before, restated, declared)
+    lost = sleeve_basis.check_non_diminish(
+        before, restated, declared, figures_by_strategy=known
+    )
     assert {f.code for f in lost} == {"ACCOUNT_BASIS_FIGURE_ABSENT"}
-    assert len(lost) == len(figures)
+    assert len(lost) == len(movable)
 
     for summary in restated["account_summary"]:
         if summary["account_id"] in parent_ids:
             summary["account_basis"] = home
     row["return_scope"]["account_basis_ref"] = "account_summary[...].account_basis"
-    assert sleeve_basis.check_non_diminish(before, restated, declared) == []
+    assert (
+        sleeve_basis.check_non_diminish(
+            before, restated, declared, figures_by_strategy=known
+        )
+        == []
+    )

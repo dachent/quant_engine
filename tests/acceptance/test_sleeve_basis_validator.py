@@ -792,6 +792,22 @@ def test_the_figure_set_is_read_from_the_panel_by_path_and_value() -> None:
         ".calendar_year_twr.2026",
         ".provider_evidence.account.max_drawdown",
     } <= paths
+    # and the copies of those figures elsewhere in the panel, found by value
+    everywhere = {f.path for f in figures}
+    assert "$.custody_current_capital.strategies[0].current_value.value" in everywhere
+    assert "$.custody_current_capital.strategies[0].current_weight" in everywhere
+    assert (
+        "$.capital_reconciliation.memo.perimeter_remainder.lines[0].perimeter_value_usd"
+        in everywhere
+    )
+    assert (
+        "$.strategy_underwriting.rows[0].evidence_layers.account_live.max_drawdown"
+        in everywhere
+    )
+    own = sleeve_basis.account_basis_figures(
+        _fixture(), synth.DECLARED, everywhere=False
+    )
+    assert len(own) < len(figures)
     assert sleeve_basis.account_basis_figures(_fixture(), "synthetic-unknown") == []
 
 
@@ -816,6 +832,9 @@ def test_restating_without_a_home_loses_every_changed_figure() -> None:
     assert ".systematic_weight" in lost
     assert ".account_live_return_series_sha256" in lost
     assert ".account_live_observed_start" in lost
+    assert ".current_value.value" in lost  # the custody row's copy is not diminished
+    assert ".perimeter_value_usd" in lost
+    assert ".evidence_layers.account_live.cumulative_return" in lost
     # the end date is unchanged by B, so it is not lost
     assert ".account_live_observed_end" not in lost
 
@@ -825,8 +844,12 @@ def test_a_figure_dropped_from_the_home_is_found_alone() -> None:
     home = panel["account_summary"][0]["account_basis"]
     del home["weight"]
     found = sleeve_basis.check_non_diminish(_fixture(), panel, _declared())
-    assert [f.where.split("]")[1] for f in found] == [".systematic_weight"]
-    assert found[0].derived == "0.0214"
+    # the weight appears in the row and in the custody capital row: both are lost
+    assert sorted(f.where for f in found) == [
+        "$.custody_current_capital.strategies[0].current_weight",
+        "$.strategies[0].systematic_weight",
+    ]
+    assert {f.derived for f in found} == {"0.0214"}
 
 
 def test_a_home_without_a_label_or_a_reference_is_found() -> None:
