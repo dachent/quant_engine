@@ -462,3 +462,66 @@ def test_a_ledger_without_the_strategys_anchor_fails_closed_naming_it(
     row = _row("p123-ai-factor", "2026-01-22", "2026-01-30")
     with pytest.raises(reporter.ReportValidationError, match="p123-ai-factor"):
         reporter._row_opening_nav_date(row, opening_catalog, performance)
+
+
+def test_a_restated_sleeve_opens_at_its_own_opening_anchor_not_its_first_return(
+    reporter: Any, era: None
+) -> None:
+    """The restated sleeve row's window is the sleeve epoch's opening NAV date (#624).
+
+    The sleeve's first return is dated 2026-02-02 (the Monday after its 2026-01-30
+    opening NAV); the parent account's earlier opening anchor (2026-01-21) is a
+    candidate too, but only the closest date before the first return counts.
+    ``account_live_observed_start`` stays the first return date, as on every row; the
+    window fields (``return_window_start``, ``window_days``, the annualisation and the
+    first calendar-year window) open at the opening NAV date.
+    """
+
+    first, opening = "2026-02-02", "2026-01-30"
+    catalog = {
+        "capital_anchors": [
+            {
+                "strategy_id": "p123-ai-factor",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "capital_type": "OPENING_CAPITAL_ANCHOR",
+                "nav_recognition_date": "2026-01-21",
+            }
+        ]
+    }
+    performance = [
+        {
+            "strategy_id": "p123-ai-factor",
+            "return_window_start": opening,
+            "annualisation_basis": {},
+        }
+    ]
+    row = _row("p123-ai-factor", first, opening)
+    resolved = reporter._row_opening_nav_date(row, catalog, performance)
+    assert resolved == opening
+    fields = reporter._strategy_period_fields(
+        row, reporter._daily_period_pieces(_series(first, END), []), resolved
+    )
+    assert fields["return_window_start"] == opening
+    assert fields["window_days"] == 230
+    assert row["account_live_observed_start"] == first
+    label = reporter._account_annualization_labels(row, resolved)[
+        "account_live_cagr_annualization"
+    ]
+    assert (label["window_start"], label["window_days"]) == (opening, 230)
+    # the annualised figure follows the 230-day exponent (R2.1 facts: 25.5790%)
+    annualised = Decimal(reporter._cagr("0.154333371068028", opening, END))
+    assert (annualised * 100).quantize(Decimal("0.0001")) == Decimal("25.5790")
+    first_year = min(fields["calendar_year_windows"])
+    assert fields["calendar_year_windows"][first_year]["start"] == opening
+
+
+def test_a_restated_sleeve_without_a_governed_opening_date_fails_closed(
+    reporter: Any, era: None
+) -> None:
+    row = _row("p123-ai-factor", "2026-02-02", "2026-01-30")
+    with pytest.raises(reporter.ReportValidationError, match="no opening NAV date"):
+        reporter._row_opening_nav_date(
+            row,
+            {"capital_anchors": []},
+            [{"strategy_id": "p123-ai-factor", "annualisation_basis": {}}],
+        )
