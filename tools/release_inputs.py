@@ -23,6 +23,7 @@ from quant_engine.core import (
     RELEASE_INPUTS_CODE_BOUND as CODE_BOUND,
     RELEASE_INPUTS_KIND as RELEASE_INPUT,
     RELEASE_INPUTS_POLICY as POLICY,
+    ReleaseInputs,
     ReleaseInputsError,
     build_release_inputs_manifest as build_manifest,
     classify_release_input as classify,
@@ -81,8 +82,17 @@ def _extract(args: argparse.Namespace) -> int:
     return 0
 
 
-def _verify(args: argparse.Namespace) -> int:
+def _load(args: argparse.Namespace) -> ReleaseInputs:
     loaded = load_release_inputs(args.root, args.manifest_sha256)
+    if args.cutoff is not None and loaded.cutoff != args.cutoff:
+        raise ReleaseInputsError(
+            f"release inputs are for cutoff {loaded.cutoff}, not {args.cutoff}"
+        )
+    return loaded
+
+
+def _verify(args: argparse.Namespace) -> int:
+    loaded = _load(args)
     print(
         json.dumps(
             {
@@ -96,7 +106,7 @@ def _verify(args: argparse.Namespace) -> int:
 
 
 def _path(args: argparse.Namespace) -> int:
-    loaded = load_release_inputs(args.root, args.manifest_sha256)
+    loaded = _load(args)
     print(loaded.path(args.logical))
     return 0
 
@@ -115,6 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = commands.add_parser(name)
         command.add_argument("--root", type=Path, required=True)
         command.add_argument("--manifest-sha256", required=True)
+        command.add_argument("--cutoff", help="refuse a set built for another cutoff")
     commands.choices["path"].add_argument("--logical", required=True)
     args = parser.parse_args(argv)
     handlers = {

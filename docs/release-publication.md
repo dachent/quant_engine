@@ -180,7 +180,7 @@ resolves them from a **release-inputs root outside the repository** instead.
   (path, sha256, size per file, and the cutoff). The sha256 of the manifest file is the **pin**; the
   run config carries it (`release_inputs_manifest_sha256`), so the release identity names the bytes.
 * `release_inputs_root` and the pin come from the run config (`release_driver.py`) or from
-  `RELEASE_INPUTS_ROOT` / `RELEASE_INPUTS_MANIFEST_SHA256` (`build_vertical.sh`). Nothing is hardcoded.
+  `RELEASE_INPUTS_ROOT` / `RELEASE_INPUTS_MANIFEST_SHA256` / `RELEASE_INPUTS_CUTOFF` (`build_vertical.sh`; a set built for another cutoff refuses). Nothing is hardcoded.
   With neither set, the repo copies are used and nothing changes.
 * The loader fails closed and verifies **every** entry at load: a missing root, manifest or file, a
   pin mismatch, a changed or resized file, an unsafe path, a symlink, a duplicate entry, a path the
@@ -189,7 +189,7 @@ resolves them from a **release-inputs root outside the repository** instead.
   repo copy once a root is configured.
 * `tools/release_inputs.py`: `census` (tracked files by disposition), `extract` (copy a commit's
   release-input blobs into a new root outside the repo and write the manifest; prints the pin),
-  `verify`, `path`.
+  `verify`, `path` (both take `--cutoff` and refuse a set for another one). The driver re-hashes the pinned baseline at every stage start and every kept-stage check; `stop`/`status` never load the root.
 * The registry (`REGISTRY` in `release_inputs.py`) classifies tracked paths: `release-input` (leaves
   Git), `code-bound` (embeds the cutoff but is read by code from a fixed repo path; moving it needs a
   code change, so it still moves the tool identity), `policy` (stays).

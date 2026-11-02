@@ -52,6 +52,7 @@ from typing import Any
 
 from quant_engine.core import (
     ReleaseInputsError,
+    ReleaseInputs,
     load_release_inputs,
     process_alive,
     process_started,
@@ -64,6 +65,9 @@ SCHEMA_DEFAULT = GRAPH_DEFAULT.with_name("release-stages.schema.json")
 STATE_NAME = "release-driver-state.json"
 TIMING_NAME = "release-driver-timing.log"
 BASELINE_INPUT = "acceptance/expected-baseline.json"
+COMMIT_SCHEME = "git-commit-v1"
+TREE_SCHEME = "git-tree-v2"
+ATTESTATION_FILENAME = "merge-attestation.json"
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -125,8 +129,10 @@ class Run:
         graph: Mapping[str, Any],
         *,
         offline: bool = False,
+        bind_inputs: bool = True,
     ) -> None:
         self.offline = offline
+        self.release_inputs: ReleaseInputs | None = None
         self.graph = graph
         self.values: dict[str, str] = {
             key: str(value)
@@ -135,6 +141,18 @@ class Run:
         }
         self.config = config
         self.values.setdefault("node", "node")
+        self.values.setdefault("identity_scheme", COMMIT_SCHEME)
+        if self.values["identity_scheme"] not in (COMMIT_SCHEME, TREE_SCHEME):
+            raise Refusal(
+                f"run config identity_scheme must be {COMMIT_SCHEME} or {TREE_SCHEME}"
+            )
+        if self.values["identity_scheme"] == TREE_SCHEME and not all(
+            key in self.values
+            for key in ("coordination_root", "candidate_commit", "base_ref")
+        ):
+            raise Refusal(
+                "a git-tree-v2 run needs coordination_root, candidate_commit and base_ref in its config"
+            )
         for key in ("repo_root", "python", "cycle", "run", "code_commit", "mode"):
             if key not in self.values:
                 raise Refusal(f"run config lacks {key!r}")
@@ -142,7 +160,8 @@ class Run:
             raise Refusal("run config mode must be 'probe' or 'release'")
         self.repo = Path(self.values["repo_root"])
         self.cycle = Path(self.values["cycle"])
-        self._bind_release_inputs()
+        if bind_inputs:
+            self._bind_release_inputs()
         self.state_path = self.cycle / STATE_NAME
         self.state: dict[str, Any] = (
             _read_json(self.state_path)
@@ -169,7 +188,7 @@ class Run:
         if pin is None:
             raise Refusal("release_inputs_root needs release_inputs_manifest_sha256")
         try:
-            inputs = load_release_inputs(root, pin)
+            inputs = self.release_inputs = load_release_inputs(root, pin)
             baseline = inputs.path(BASELINE_INPUT)
         except ReleaseInputsError as exc:
             raise Refusal(f"release inputs: {exc}") from exc
@@ -187,6 +206,16 @@ class Run:
             )
         self.values["expected_baseline"] = str(baseline)
         self.values["expected_baseline_arg"] = str(baseline)
+
+    def recheck_release_inputs(self) -> None:
+        """Re-hash the baseline the run was bound to: the root may change between stages."""
+
+        if self.release_inputs is None:
+            return
+        try:
+            self.release_inputs.path(BASELINE_INPUT)
+        except ReleaseInputsError as exc:
+            raise Refusal(f"release inputs: {exc}") from exc
 
     # -- templates -------------------------------------------------------------------
     def expand(self, template: str) -> str:
@@ -268,9 +297,16 @@ class Run:
             raise Refusal(f"git {' '.join(args)} failed: {done.stderr.strip()}")
         return done.stdout.strip()
 
+    @property
+    def scheme(self) -> str:
+        return self.values["identity_scheme"]
+
     def repo_identity(self) -> dict[str, Any]:
+        # the identity value under the run's scheme: the commit (v1) or the tree (v2)
+        revision = "HEAD^{tree}" if self.scheme == TREE_SCHEME else "HEAD"
         return {
-            "head": self._git("rev-parse", "HEAD"),
+            "head": self._git("rev-parse", revision),
+            "commit": self._git("rev-parse", "HEAD"),
             "dirty": len(self._git("status", "--porcelain").splitlines()),
         }
 
@@ -375,6 +411,26 @@ def check_script_in_repo(
         raise Refusal(
             f"{stage['id']}: script {script} is outside the run's repository {run.repo}"
         )
+
+
+def check_scheme(run: Run, stage: Mapping[str, Any]) -> None:
+    """A stage that exists for one identity scheme refuses the other; a tree-bound release needs its attestation."""
+
+    only = stage.get("only_scheme")
+    if only is not None and only != run.scheme:
+        raise Refusal(f"{stage['id']} runs only under {only}, this run is {run.scheme}")
+    if run.scheme != TREE_SCHEME or not stage.get("needs_attestation"):
+        return
+    path = Path(run.values["coordination_root"]) / ATTESTATION_FILENAME
+    if not path.is_file():
+        raise Refusal(
+            f"{stage['id']}: merge attestation is mandatory for a tree-bound release ({path} is missing)"
+        )
+    attestation = _read_json(path)
+    if attestation.get("tree") != run.values["code_commit"]:
+        raise Refusal(f"{stage['id']}: merge attestation names another tree")
+    if attestation.get("merged_commit") != run.repo_identity()["commit"]:
+        raise Refusal(f"{stage['id']}: merge attestation names another merged commit")
 
 
 def check_pinned_inputs(run: Run, stage: Mapping[str, Any]) -> None:
@@ -634,6 +690,8 @@ def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None
         if required in seen:
             continue
         seen.add(required)
+        if run.stage(required).get("only_scheme", run.scheme) != run.scheme:
+            continue
         record = state.get(required)
         if not record or record.get("status") != "ok":
             raise Refusal(f"{stage['id']} requires {required}, which has not completed")
@@ -673,6 +731,8 @@ def check_ready(
                 f"{stage['id']} would collide with {path}, left by {where}; rerun with --replace"
             )
     check_bound_ids(run, stage)
+    check_scheme(run, stage)
+    run.recheck_release_inputs()
     check_pinned_inputs(run, stage)
     check_predecessor(run, stage)
     check_expected_baseline(run, stage)
@@ -819,6 +879,12 @@ def verify_kept(run: Run, stage: Mapping[str, Any], record: Mapping[str, Any]) -
             raise Refusal(
                 f"{stage['id']}: {path} changed or vanished since the stage recorded it"
             )
+    # the guarded inputs of the stage are rechecked too, not only the paths it recorded
+    check_bound_ids(run, stage)
+    run.recheck_release_inputs()
+    check_pinned_inputs(run, stage)
+    check_predecessor(run, stage)
+    check_expected_baseline(run, stage)
 
 
 def replica_provider_generations(run: Run, target: Path) -> dict[str, Any]:
@@ -997,6 +1063,18 @@ def execute_stage(
     outputs = _outputs(run, stage)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     previous = run.state["stages"].get(stage["id"], {})
+    if "state_snapshot_to" in stage:
+        # the state as it is before this stage: a stage that archives it must not archive itself as running
+        _write_json(
+            Path(run.expand(stage["state_snapshot_to"])),
+            {
+                "stages": {
+                    key: value
+                    for key, value in run.state["stages"].items()
+                    if key != stage["id"]
+                }
+            },
+        )
     if not resuming:
         for path in _claimed_outputs(run, stage):
             if path.exists():
@@ -1134,13 +1212,21 @@ def validate_graph(graph: Mapping[str, Any]) -> None:
 
 
 def load_run(
-    config_path: Path, graph_path: Path | None, *, offline: bool = False
+    config_path: Path,
+    graph_path: Path | None,
+    *,
+    offline: bool = False,
+    bind_inputs: bool = True,
 ) -> Run:
     config = _read_json(config_path)
     graph = _read_json(graph_path or Path(config.get("stage_graph") or GRAPH_DEFAULT))
     validate_graph(graph)
-    run = Run(config, graph, offline=offline)
+    run = Run(config, graph, offline=offline, bind_inputs=bind_inputs)
     return run
+
+
+def _in_scheme(run: Run, stage_id: str) -> bool:
+    return bool(run.stage(stage_id).get("only_scheme", run.scheme) == run.scheme)
 
 
 def _select(run: Run, only: str | None, through: str | None) -> list[str]:
@@ -1159,9 +1245,9 @@ def _select(run: Run, only: str | None, through: str | None) -> list[str]:
         return [
             i
             for i in ids[: ids.index(through) + 1]
-            if i in needed or not run.stage(i).get("explicit")
+            if (i in needed or not run.stage(i).get("explicit")) and _in_scheme(run, i)
         ]
-    return [i for i in ids if not run.stage(i).get("explicit")]
+    return [i for i in ids if not run.stage(i).get("explicit") and _in_scheme(run, i)]
 
 
 def check_run(run: Run, selected: Sequence[str]) -> list[str]:
@@ -1317,7 +1403,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        run = load_run(args.config, args.graph, offline=args.offline)
+        # stop and status never consume release inputs: an unmounted root must not block the kill path
+        run = load_run(
+            args.config,
+            args.graph,
+            offline=args.offline,
+            bind_inputs=args.command not in ("stop", "status"),
+        )
         run.confirmed_release_id = args.confirm_release_id
         selected = _select(run, args.only, args.through)
         if args.command == "plan":

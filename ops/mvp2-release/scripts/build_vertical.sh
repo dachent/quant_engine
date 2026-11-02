@@ -225,7 +225,7 @@ POLICY_MANIFEST=ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json
 if [ -n "${RELEASE_INPUTS_ROOT:-}" ]; then
   : "${RELEASE_INPUTS_MANIFEST_SHA256:?the release-inputs manifest sha256 pin is required}"
   POLICY_MANIFEST=$("$PY" tools/release_inputs.py path --root "$RELEASE_INPUTS_ROOT" \
-    --manifest-sha256 "$RELEASE_INPUTS_MANIFEST_SHA256" --logical "$POLICY_MANIFEST")
+    --manifest-sha256 "$RELEASE_INPUTS_MANIFEST_SHA256" \n    --cutoff "${RELEASE_INPUTS_CUTOFF:?the cutoff this run is for is required with RELEASE_INPUTS_ROOT}" \n    --logical "$POLICY_MANIFEST")
 fi
 rm -rf "$SLEEVE_DIR"
 "$PY" tools/build_sleeve_facts_release.py \

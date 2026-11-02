@@ -472,3 +472,77 @@ def test_default_expansion_is_byte_identical_to_the_legacy_graph(
         new_run.expand("{expected_baseline_arg}") == "acceptance/expected-baseline.json"
     )
     assert "release_inputs_root" not in new_run.values
+
+
+# -- review findings -----------------------------------------------------------------------
+def _bound(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> tuple[Path, str, Path]:
+    repo = _tracked_repo(tmp_path)
+    out = tmp_path / "release-inputs"
+    cli.main(
+        [
+            "extract",
+            "--repo-root",
+            str(repo),
+            "--out-root",
+            str(out),
+            "--cutoff",
+            CUTOFF,
+        ]
+    )
+    return out, json.loads(capsys.readouterr().out)["manifest_sha256"], repo
+
+
+def test_baseline_rechecked_after_binding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out, pin, repo = _bound(tmp_path, capsys)
+    graph = json.loads(driver.GRAPH_DEFAULT.read_bytes())
+    config = _run_config(
+        tmp_path, repo, release_inputs_root=str(out), release_inputs_manifest_sha256=pin
+    )
+    run = driver.Run(config, graph, offline=True)
+    run.recheck_release_inputs()
+    (out / BASELINE).write_bytes(b'{"cutoff": "2000-01-07", "synthetic": "moved"}')
+    with pytest.raises(driver.Refusal, match="changed after it was verified"):
+        run.recheck_release_inputs()
+
+
+def test_stop_and_status_do_not_load_the_inputs_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out, pin, repo = _bound(tmp_path, capsys)
+    config = _run_config(
+        tmp_path, repo, release_inputs_root=str(out), release_inputs_manifest_sha256=pin
+    )
+    (out / BASELINE).unlink()  # the root is damaged or unmounted mid-run
+    graph = json.loads(driver.GRAPH_DEFAULT.read_bytes())
+    with pytest.raises(driver.Refusal):
+        driver.Run(config, graph, offline=True)
+    driver.Run(
+        config, graph, offline=True, bind_inputs=False
+    )  # the kill path still loads
+
+
+def test_cli_refuses_another_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out, pin, _ = _bound(tmp_path, capsys)
+    args = ["--root", str(out), "--manifest-sha256", pin, "--logical", POLICY_FILE]
+    assert cli.main(["path", *args, "--cutoff", CUTOFF]) == 0
+    assert cli.main(["path", *args, "--cutoff", "2000-01-14"]) == 1
+    assert (
+        cli.main(
+            [
+                "verify",
+                "--root",
+                str(out),
+                "--manifest-sha256",
+                pin,
+                "--cutoff",
+                "2000-01-14",
+            ]
+        )
+        == 1
+    )
