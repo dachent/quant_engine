@@ -152,6 +152,18 @@ def _cycle(tmp: Path, *, baselines: tuple[str, ...] = (BASELINE,)) -> dict[str, 
                 "scratch": str(cycle),
                 "evaluated_on": "2026-10-27",
                 "cycle_manifest_sha256": CYCLE_SHA,
+                # the B1+B2 provider rows (qualification, finalized_through) are not read here
+                "providers": {
+                    "schwab": {
+                        "qualification": "STAGED_COMPLETE",
+                        "finalized_through": "2026-10-27",
+                        "finality_source": "CYCLE_MANIFEST_NATIVE",
+                    },
+                    "alpaca": {
+                        "qualification": "PUBLISHED_COMPLETE",
+                        "finalized_through": None,
+                    },
+                },
             }
         ),
         encoding="utf-8",
