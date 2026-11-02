@@ -133,12 +133,13 @@ def verify_bindings(
     tag_map_sha256: str | None,
     ledger_generation_id: str | None,
 ) -> list[str]:
-    """Check every binding of the facts the report holds the other side of.
+    """Check the three bindings of the facts the report holds the other side of.
 
-    The names of the bindings that were checked are returned, so the disclosure can say
-    exactly which ones it proved.  A binding whose other side the report does not hold
-    (``account_rows_sha256``, ``declared_inputs_sha256``, ``builder_code``) is proved by the
-    epoch manifest stage that derived the facts, not here.
+    ``parent_ledger_generation_id`` is the provider (source) generation id the selected
+    provider ledger records for the facts' provider.  Each side must be present: a missing
+    other side refuses, it never skips.  ``account_rows_sha256``, ``declared_inputs_sha256``
+    and ``builder_code`` have no other side in the report; the epoch manifest stage that
+    derived the facts proves them.
     """
 
     checked: list[str] = []
@@ -148,19 +149,26 @@ def verify_bindings(
             f"the restated sleeve's parent is {parent_account_id}"
         )
     checked.append("parent_account_id")
-    if tag_map_sha256 is not None:
-        if facts.bindings.get("tag_map_sha256") != tag_map_sha256:
-            raise DisclosureError(
-                "sleeve facts bind a tag map other than the sleeve epoch's"
-            )
-        checked.append("tag_map_sha256")
-    if ledger_generation_id is not None:
-        if facts.bindings.get("parent_ledger_generation_id") != ledger_generation_id:
-            raise DisclosureError(
-                "sleeve facts bind a provider ledger generation other than the "
-                "selected ledger's"
-            )
-        checked.append("parent_ledger_generation_id")
+    if tag_map_sha256 is None:
+        raise DisclosureError(
+            "the sleeve epoch carries no tag map digest to compare bindings.tag_map_sha256 with"
+        )
+    if facts.bindings.get("tag_map_sha256") != tag_map_sha256:
+        raise DisclosureError(
+            "sleeve facts bind a tag map other than the sleeve epoch's"
+        )
+    checked.append("tag_map_sha256")
+    if ledger_generation_id is None:
+        raise DisclosureError(
+            "the baseline binds no provider ledger generation to compare "
+            "bindings.parent_ledger_generation_id with"
+        )
+    if facts.bindings.get("parent_ledger_generation_id") != ledger_generation_id:
+        raise DisclosureError(
+            "sleeve facts bind a provider generation other than the one the selected "
+            "provider ledger records"
+        )
+    checked.append("parent_ledger_generation_id")
     return checked
 
 

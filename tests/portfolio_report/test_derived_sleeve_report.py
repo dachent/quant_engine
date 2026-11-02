@@ -132,6 +132,7 @@ def _build(
     disclosure_sources: dict[str, Any] | None = None,
     strategy_basis: dict[str, Any] | None = None,
     sleeve_facts: dict[str, Any] | None = None,
+    facts_ledger_generation: str | None = "a" * 64,
     parent_returns: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[str, Any]:
     current = _epoch(date(2026, 7, 2), "104")
@@ -232,6 +233,14 @@ def _build(
     if strategy_basis is not None:
         basis_path = tmp_path / "strategy-basis-declaration.json"
         basis_path.write_bytes(json.dumps(strategy_basis).encode("utf-8"))
+    if facts_ledger_generation is not None:
+        # the synthetic baseline binds no provider-ledger catalog: stand in for the
+        # generation id the selected ledger records for the facts' provider
+        monkeypatch.setattr(
+            full.reporter,
+            "_facts_ledger_generation_id",
+            lambda *_args, **_kwargs: facts_ledger_generation,
+        )
     facts_path = None
     if sleeve_facts is not None:
         facts_path = tmp_path / "sleeve-account-facts.json"

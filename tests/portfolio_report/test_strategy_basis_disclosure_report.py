@@ -187,7 +187,16 @@ def test_the_margin_line_and_the_bridges_come_from_the_facts_and_the_trace(
     ) == Decimal("0.04")
     # the facts are named by hash and the bindings the report holds were proved
     facts = block["sleeve_facts"]
-    assert {"parent_account_id", "tag_map_sha256"} <= set(facts["bindings_verified"])
+    assert facts["bindings_verified"] == [
+        "parent_account_id",
+        "tag_map_sha256",
+        "parent_ledger_generation_id",
+    ]
+    assert set(facts["bindings_proved_upstream"]) == {
+        "account_rows_sha256",
+        "declared_inputs_sha256",
+        "builder_code",
+    }
     assert {
         "artifact": "sleeve-account-facts",
         "schema": "sleeve-account-facts/1",
@@ -326,3 +335,33 @@ def test_the_weights_before_and_after_are_disclosed_from_the_two_capital_blocks(
         )
         == []
     )
+
+
+def test_a_ledger_generation_that_differs_is_refused(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(
+        full.reporter.ReportValidationError, match="provider generation"
+    ):
+        _on(full, tmp_path, monkeypatch, facts_ledger_generation="b" * 64)
+
+
+def test_a_baseline_without_a_provider_ledger_binding_is_refused(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # nothing is substituted: the synthetic baseline binds no provider-ledger catalog
+    with pytest.raises(
+        full.reporter.ReportValidationError, match="binds no provider ledger"
+    ):
+        _on(full, tmp_path, monkeypatch, facts_ledger_generation=None)
+
+
+def test_a_sleeve_epoch_without_a_tag_map_digest_is_refused(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def drop(details: dict[Any, Any]) -> None:
+        for detail in details.values():
+            detail["derived_tag_map_sha256"] = None
+
+    with pytest.raises(Exception, match="tag map digest|differs from the one"):
+        _on(full, tmp_path, monkeypatch, details_edit=drop)

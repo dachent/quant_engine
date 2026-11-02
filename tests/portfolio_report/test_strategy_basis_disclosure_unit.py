@@ -208,14 +208,27 @@ def test_bindings_are_checked_against_what_the_report_holds() -> None:
         tag_map_sha256=TAG_SHA,
         ledger_generation_id="a" * 64,
     ) == ["parent_account_id", "tag_map_sha256", "parent_ledger_generation_id"]
-    # a side the report does not hold is not claimed as checked
-    assert disclosure.verify_bindings(
-        facts, parent_account_id=PARENT, tag_map_sha256=None, ledger_generation_id=None
-    ) == ["parent_account_id"]
+    # a missing other side refuses by name, it is never skipped
+    with pytest.raises(disclosure.DisclosureError, match="no tag map digest"):
+        disclosure.verify_bindings(
+            facts,
+            parent_account_id=PARENT,
+            tag_map_sha256=None,
+            ledger_generation_id="a" * 64,
+        )
+    with pytest.raises(
+        disclosure.DisclosureError, match="no provider ledger generation"
+    ):
+        disclosure.verify_bindings(
+            facts,
+            parent_account_id=PARENT,
+            tag_map_sha256=TAG_SHA,
+            ledger_generation_id=None,
+        )
     for kwargs, match in (
         ({"parent_account_id": "account-z"}, "parent"),
         ({"tag_map_sha256": "d" * 64}, "tag map"),
-        ({"ledger_generation_id": "b" * 64}, "ledger generation"),
+        ({"ledger_generation_id": "b" * 64}, "provider generation"),
     ):
         values: dict[str, Any] = {
             "parent_account_id": PARENT,

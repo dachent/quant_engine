@@ -13064,8 +13064,7 @@ def _facts_ledger_generation_id(
 ) -> str | None:
     """The source generation the selected provider ledger records for the facts' provider.
 
-    None when the baseline binds no provider-ledger catalog (a report built without one has
-    nothing to compare the facts' ledger binding with).
+    None when the baseline binds no provider-ledger catalog; the caller refuses then.
     """
 
     if not any(
@@ -13243,10 +13242,6 @@ def _apply_strategy_basis_disclosure(
         series_sha256=basis["series"]["sha256"],
         label=label,
     )
-    unverified = sorted(
-        {"parent_account_id", "tag_map_sha256", "parent_ledger_generation_id"}
-        - set(checked)
-    )
     return {
         "schema": disclosure.DISCLOSURE_SCHEMA,
         "sleeve_facts": {
@@ -13264,7 +13259,11 @@ def _apply_strategy_basis_disclosure(
                 )
             },
             "bindings_verified": checked,
-            "bindings_not_comparable_here": unverified,
+            "bindings_proved_upstream": [
+                "account_rows_sha256",
+                "declared_inputs_sha256",
+                "builder_code",
+            ],
         },
         "strategies": [
             {

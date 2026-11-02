@@ -1508,7 +1508,7 @@
             "provider_id",
             "bindings",
             "bindings_verified",
-            "bindings_not_comparable_here"
+            "bindings_proved_upstream"
           ],
           "properties": {
             "artifact": {
@@ -1564,14 +1564,10 @@
                 ]
               }
             },
-            "bindings_not_comparable_here": {
+            "bindings_proved_upstream": {
               "type": "array",
               "items": {
-                "enum": [
-                  "parent_account_id",
-                  "tag_map_sha256",
-                  "parent_ledger_generation_id"
-                ]
+                "enum": ["account_rows_sha256", "declared_inputs_sha256", "builder_code"]
               }
             }
           }
