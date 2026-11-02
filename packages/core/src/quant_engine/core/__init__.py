@@ -1,5 +1,7 @@
 """Minimal provenance and generation envelope for quant_engine."""
 
+from quant_engine.core.stage_timing import stage as timed_stage, timed as timed_call
+
 from quant_engine.core.authority import (
     AdmissionDecision,
     AuthorityCatalog,
@@ -45,6 +47,17 @@ from quant_engine.core.replica_gate import (
     is_replica_spec,
     replica_anchor,
     verify_receipt as verify_replica_receipt,
+)
+from quant_engine.core.gate_profile import (
+    APPROVAL_KIND as GATE_PROFILE_APPROVAL_KIND,
+    PROFILE_ID as GATE_PROFILE_ID,
+    SCHEMA_VERSION as GATE_PROFILE_SCHEMA_VERSION,
+    GateProfileError,
+    issue_reuse_receipt as issue_gate_profile_reuse_receipt,
+    load_approval as load_gate_profile_approval,
+    seal as seal_gate_profile_record,
+    select_profile as select_gate_profile,
+    tool_identity as gate_profile_tool_identity,
 )
 from quant_engine.core.contracts import (
     canonical_json_bytes,
@@ -172,6 +185,8 @@ __all__ = [
     "sources_from_config",
     "CODE_IDENTITY_COMMIT_SCHEME",
     "CODE_IDENTITY_TREE_SCHEME",
+    "timed_call",
+    "timed_stage",
     "release_directory_identity",
     "CacheBaseError",
     "iter_cache_files",
@@ -184,6 +199,15 @@ __all__ = [
     "REPLICA_MARKER_KIND",
     "REPLICA_MARKER_NAME",
     "ReplicaGateError",
+    "GATE_PROFILE_APPROVAL_KIND",
+    "GATE_PROFILE_ID",
+    "GATE_PROFILE_SCHEMA_VERSION",
+    "GateProfileError",
+    "gate_profile_tool_identity",
+    "issue_gate_profile_reuse_receipt",
+    "load_gate_profile_approval",
+    "seal_gate_profile_record",
+    "select_gate_profile",
     "build_replica_receipt",
     "canonical_json_bytes",
     "is_replica_spec",

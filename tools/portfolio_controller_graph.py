@@ -108,6 +108,9 @@ _PATH_STAGES = {
     # the runtime gate checks before execute/commit: it can refuse any stage's release and
     # decides what every generation id binds, like release.py.
     "packages/core/src/quant_engine/core/code_identity.py": list(_STAGE_ORDER),
+    # Observational stage timings written to stderr and a log file; nothing here is hashed
+    # into any delivery artifact, so it affects no stage.
+    "packages/core/src/quant_engine/core/stage_timing.py": [],
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
@@ -126,6 +129,11 @@ _PATH_STAGES = {
     # a replica release, never a real one (real roots carry no marker).
     "packages/core/src/quant_engine/core/replica_marker.py": [],
     "tools/release_replica.py": [],
+    # Default-off gate profile: it only decides whether the replica receipt check may be
+    # replaced and writes a decision/receipt record; no delivery artifact.
+    "packages/core/src/quant_engine/core/gate_profile.py": [],
+    "packages/core/src/quant_engine/core/release_diff.py": [],
+    "tools/gate_profile.py": [],
     "tools/release_cache_base.py": [],
     "tools/release_measurements.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
