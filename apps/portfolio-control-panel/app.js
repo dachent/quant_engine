@@ -229,7 +229,9 @@
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
   const emptyRow = (columns, message = "No matching rows") => `<tr><td colspan="${columns}" class="cell-secondary">${safe(message)}</td></tr>`;
   // F20/F12: `footer` is the markup of a <tfoot> body (total rows computed from the rows shown).
-  const tableMarkup = (headers, rows, caption = null, footer = "") => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead><tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>${footer ? `<tfoot>${footer}</tfoot>` : ""}`;
+  // `groups` is an optional spanning header row: [[label, span, title], ...] (a null label is an empty cell).
+  const groupRowMarkup = (groups) => (groups ? `<tr class="group-row">${groups.map(([label, span, title = ""]) => `<th scope="colgroup" colspan="${span}" class="${label ? "group-head" : ""}"${title ? ` title="${safe(title)}"` : ""}>${safe(label || "")}</th>`).join("")}</tr>` : "");
+  const tableMarkup = (headers, rows, caption = null, footer = "", groups = null) => `${caption ? `<caption>${safe(caption)}</caption>` : ""}<thead>${groupRowMarkup(groups)}<tr>${headers.map(([label, cls = "", title = ""]) => `<th scope="col" class="${cls}"${title ? ` title="${safe(title)}"` : ""}>${safe(label)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody>${footer ? `<tfoot>${footer}</tfoot>` : ""}`;
   const strategyByName = (name) => data.strategies.find((row) => row.strategy_name === name);
   // Q5: a retained-history record is lifecycle evidence of a closed or immaterial strategy, not a current strategy.
   // ONE marker and ONE helper decide which strategy rows the register, comparison, provider and count surfaces show;
@@ -1574,6 +1576,37 @@
     // account-cumulative cell rather than being silently dropped.
     // F19: each strategy's account-live window starts on its own date; the header cannot, so the cell does.
     const accountWindowStart = (row) => row.provider_evidence?.account?.observed_start || null;
+    // Levered / unlevered return columns: every figure, label and reason is the strategy row's own
+    // return_<kind>_* field; a strategy without a derived leverage record carries null values and a
+    // reason from the producer, which is what the cell prints.  Nothing is derived or defaulted here.
+    const returnBasisCell = (row, kind, render) => {
+      if (performanceLineageMismatch) return `<td class="numeric basis-cell">${withheldCell()}</td>`;
+      const value = number(row[`return_${kind}_cumulative`]);
+      if (value == null) {
+        const published = `return_${kind}_na_reason` in row;
+        const reason = row[`return_${kind}_na_reason`];
+        return `<td class="numeric basis-cell is-na">—<span class="cell-secondary">${safe(reason ? humanStatus(reason) : published ? "No reason published" : "Not published in this payload")}</span></td>`;
+      }
+      return `<td class="numeric basis-cell">${render(row)}</td>`;
+    };
+    const withheldCell = () => `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
+    const windowNote = (row, kind) => (number(row[`return_${kind}_window_days`]) == null ? "" : `<span class="cell-secondary">${integer.format(row[`return_${kind}_window_days`])} day window</span>`);
+    const basisCells = (row, kind) => {
+      const field = (name) => row[`return_${kind}_${name}`];
+      const cumulative = returnBasisCell(row, kind, () => `${pct(field("cumulative"), 2)}${windowNote(row, kind)}`);
+      const annualised = returnBasisCell(row, kind, () => pct(field("annualised"), 2));
+      const drawdown = returnBasisCell(row, kind, () => `${pct(field("max_drawdown"), 2)}${number(field("current_drawdown")) == null ? "" : `<span class="cell-secondary">current ${pct(field("current_drawdown"), 2)}</span>`}`);
+      return cumulative + annualised + drawdown;
+    };
+    const grossToEquityCell = (row) => returnBasisCell(row, "levered", () => `${number(row.return_levered_peak_gross_to_equity) == null ? "—" : `${decimal(row.return_levered_peak_gross_to_equity, 2)}x`}<span class="cell-secondary">peak${number(row.return_levered_current_gross_to_equity) == null ? "" : ` · now ${decimal(row.return_levered_current_gross_to_equity, 2)}x`}</span>`);
+    // One legend for the basis of each group: the distinct labels the rows publish.
+    const basisLegendText = (kind) => [...new Set(currentStrategies().map((row) => row[`return_${kind}_basis_label`]).filter((label) => typeof label === "string" && label))].join(" · ");
+    const basisLegend = $("#return-basis-legend");
+    if (basisLegend) {
+      const parts = [["Unlevered", basisLegendText("unlevered")], ["Levered", basisLegendText("levered")]].filter(([, text]) => text);
+      basisLegend.hidden = !parts.length;
+      basisLegend.innerHTML = parts.map(([name, text]) => `<span><strong>${name}</strong> ${safe(text)}</span>`).join("");
+    }
     const implementationRows = currentStrategies().map((row) => {
       const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
       const cagrLabel = row.account_live_cagr_annualization?.label;
@@ -1582,9 +1615,9 @@
         ? withheld
         : `${pct(row.account_live_cumulative_return)}${accountWindowStart(row) ? `<span class="cell-secondary">since ${formatDateHtml(accountWindowStart(row))}</span>` : ""}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${annualizationSuffix(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${annualizationSuffix(mwrLabel)}</span>` : ""}`;
       const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
-      return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td>${basisCells(row, "unlevered")}${basisCells(row, "levered")}${grossToEquityCell(row)}<td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
-    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"));
+    $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative (since observed start)", "numeric"], ["Account max drawdown (same window)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualised (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Cumulative (% total)", "numeric"], ["Annualised (% per year)", "numeric"], ["Max drawdown (%)", "numeric"], ["Gross ÷ equity (x)", "numeric"], ["Provider/model comparison"], ["Cost status"], ["Version"]], implementationRows, evidenceCaption("Strategy implementation gaps and costs"), "", [["", 4], ["Unlevered", 3, "Return on gross sleeve assets, before the margin loan"], ["Levered", 4, "Return on equity after margin financing"], ["", 3]]);
     // F36: a blocking item's value is shown beside its gap text, and a check's tolerance and maximum
     // difference are shown when the report publishes them (or said not to be published).
     const reconciliationEvidence = (row) => {
