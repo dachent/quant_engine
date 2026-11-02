@@ -2518,6 +2518,57 @@ def _account_basis_block(
     return block
 
 
+def _window_limit(
+    lane: Mapping[str, Any], cutoff_date: str, noun: str
+) -> dict[str, Any] | None:
+    """How far a sleeve comparison window reaches against the calculation cutoff.
+
+    Everything is read from the lane's own metrics and closure: the window is the one
+    the catalog's reference series and spec gave, never a date fixed here.  A window
+    that ends before the cutoff says so, with the days short, the sleeve dates it does
+    not cover and the reference series whose refresh would close it.
+    """
+
+    metrics, closure = lane.get("metrics"), lane.get("closure")
+    if not isinstance(metrics, Mapping) or not isinstance(closure, Mapping):
+        return None
+    end = _date(metrics.get("observed_end"), "sleeve comparison window end")
+    cutoff = _date(cutoff_date, "sleeve comparison cutoff")
+    short = max((cutoff - end).days, 0)
+    first, last = (
+        closure.get("sleeve_dates_after_window_first"),
+        closure.get("sleeve_dates_after_window_last"),
+    )
+    count = int(closure.get("sleeve_dates_after_window_count", 0))
+    series_id = str(closure["reference_series_id"])
+    start = str(closure["window_open_date"])
+    if short == 0:
+        sentence = (
+            f"The {noun} comparison window {start}..{end.isoformat()} reaches the "
+            f"calculation cutoff {cutoff.isoformat()}."
+        )
+    else:
+        sentence = (
+            f"The {noun} comparison window {start}..{end.isoformat()} ends {short} "
+            f"days before the calculation cutoff {cutoff.isoformat()}: reference "
+            f"series {series_id} is stored to {closure['reference_stored_end']} "
+            f"(or the spec ends the window there), so {count} sleeve observations "
+            f"({first}..{last}) are not compared. A refresh of {series_id} covering "
+            f"them is an input of the next release (R3), not an owner decision."
+        )
+    return {
+        "calculation_cutoff_date": cutoff.isoformat(),
+        "days_short": short,
+        "reference_series_id": series_id,
+        "reference_stored_end": closure["reference_stored_end"],
+        "sentence": sentence,
+        "status": "AT_CUTOFF" if short == 0 else "SHORT_OF_CUTOFF",
+        "uncovered_sleeve_dates": {"count": count, "first": first, "last": last},
+        "window_end": end.isoformat(),
+        "window_start": start,
+    }
+
+
 def _merge_attribution(
     strategies: Sequence[Mapping[str, Any]],
     attribution: Mapping[str, Any],
@@ -2608,6 +2659,10 @@ def _merge_attribution(
                 comparison.get("sleeve_basis"), "provider sleeve lane"
             )
             parent = str(benchmark_lane["parent_account_id"])
+            limit_cutoff = str(
+                (cost_rate_at_cutoff or {}).get("calculation_cutoff_date")
+                or attribution.get("as_of_date")
+            )
             policy_excluded = (
                 comparison.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED"
             )
@@ -2633,6 +2688,9 @@ def _merge_attribution(
                 "comparison_basis": {
                     "basis": strategy_basis.BASIS_SLEEVE_EPOCH,
                     "benchmark_closure": benchmark_lane.get("closure"),
+                    "benchmark_window_limit": _window_limit(
+                        benchmark_lane, limit_cutoff, "benchmark"
+                    ),
                     "label": (
                         f"Sleeve basis: sleeve {benchmark_lane['sleeve_account_id']} "
                         f"of parent account {parent}, from "
@@ -2643,6 +2701,11 @@ def _merge_attribution(
                     "parent_account_id": parent,
                     "provider_closure": (
                         None if policy_excluded else provider_lane.get("closure")
+                    ),
+                    "provider_window_limit": (
+                        None
+                        if policy_excluded
+                        else _window_limit(provider_lane, limit_cutoff, "provider")
                     ),
                     "sleeve_account_id": benchmark_lane["sleeve_account_id"],
                     "sleeve_series_sha256": benchmark_lane["sleeve_series_sha256"],

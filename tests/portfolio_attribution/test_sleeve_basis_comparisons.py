@@ -104,7 +104,9 @@ def _declaration(tmp_path: Path, strategy: str = STRATEGY) -> Path:
     return path
 
 
-def _world(tmp_path: Path, *, parent: str = PARENT) -> dict[str, Path]:
+def _world(
+    tmp_path: Path, *, parent: str = PARENT, window_end: str = "2026-01-02"
+) -> dict[str, Path]:
     """A baseline, an attribution spec and return source, the sleeve facts, a declaration."""
 
     baseline = _baseline(
@@ -141,7 +143,7 @@ def _world(tmp_path: Path, *, parent: str = PARENT) -> dict[str, Path]:
         for row in document[key]:
             if row["strategy_id"] == STRATEGY:
                 row["observed_start"] = "2025-12-29"
-                row["observed_end"] = "2026-01-02"
+                row["observed_end"] = window_end
                 row["expected_legacy_cumulative_gap"] = None
     spec.write_text(json.dumps(document), encoding="utf-8")
     facts = tmp_path / "sleeve-account-facts.json"
@@ -726,3 +728,100 @@ def test_real_r2_sleeve_comparisons_close_and_equal_an_independent_computation()
         assert Decimal(metrics["account_cumulative_return"]) == pytest.approx(
             window_wealth - 1, rel=Decimal("1e-20")
         )
+
+
+# --- the windows follow the catalog's own reference windows -------------------------
+
+
+@pytest.mark.parametrize("window_end", ["2026-01-01", "2026-01-02"])
+def test_the_sleeve_windows_equal_the_catalogs_own_reference_windows(
+    tmp_path: Path, window_end: str
+) -> None:
+    world = _world(tmp_path, window_end=window_end)
+    catalog, _, _ = _build(world)
+    spec = json.loads(world["spec"].read_text(encoding="utf-8"))
+    sleeve_dates = {row["date"] for row in _sleeve_rows()}
+    for key, reference in (
+        ("benchmark_comparisons", BENCHMARK),
+        ("comparisons", PROVIDER),
+    ):
+        row = next(r for r in spec[key] if r["strategy_id"] == STRATEGY)
+        # the catalog's own reference window, from the spec and the stored series
+        window = sorted(
+            d
+            for d in reference
+            if row["observed_start"] <= d <= row["observed_end"] and d in sleeve_dates
+        )
+        lane = _row(catalog, key)["sleeve_basis"]
+        assert lane["metrics"]["observed_start"] == window[0]
+        assert lane["metrics"]["observed_end"] == window[-1]
+        assert lane["metrics"]["observations"] == len(window)
+        assert lane["closure"]["common_observations"] == len(window)
+
+
+def test_the_window_limit_is_derived_from_the_window_and_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    cutoff = "2026-01-03"
+    limits = {}
+    for window_end in ("2026-01-01", "2026-01-02"):
+        sub = tmp_path / window_end
+        sub.mkdir()
+        catalog, _, _ = _build(_world(sub, window_end=window_end))
+        row = _merged(
+            catalog,
+            {STRATEGY: _restatement()},
+        )
+        limits[window_end] = row["comparison_basis"]["benchmark_window_limit"]
+        # the window labels the payload carries are the lane's own start and end
+        merged = report._merge_attribution(  # noqa: SLF001
+            _strategies(),
+            catalog,
+            cost_rate_at_cutoff={
+                "calculation_cutoff_date": cutoff,
+                "cost_schedule_as_of_date": cutoff,
+            },
+            basis_restatements={STRATEGY: _restatement()},
+        )
+        labelled = next(r for r in merged if r["strategy_id"] == STRATEGY)
+        window = report._label_window(labelled["benchmark_annualization"])  # noqa: SLF001
+        limit = labelled["comparison_basis"]["benchmark_window_limit"]
+        assert window["start"] == limit["window_start"] == OPENING
+        assert window["end"] == limit["window_end"] == window_end
+        assert window["observations"] == labelled["benchmark_comparison_observations"]
+        provider_window = report._label_window(  # noqa: SLF001
+            labelled["provider_annualization"]
+        )
+        assert provider_window["end"] == window_end
+    short, full = limits["2026-01-01"], limits["2026-01-02"]
+    assert short["status"] == "SHORT_OF_CUTOFF" and short["days_short"] == 2
+    assert short["uncovered_sleeve_dates"] == {
+        "count": 1,
+        "first": "2026-01-02",
+        "last": "2026-01-02",
+    }
+    assert "2 days before the calculation cutoff 2026-01-03" in short["sentence"]
+    assert (
+        "R3" in short["sentence"] and short["reference_series_id"] in short["sentence"]
+    )
+    assert full["status"] == "SHORT_OF_CUTOFF" and full["days_short"] == 1
+    assert full["uncovered_sleeve_dates"]["count"] == 0
+    # a window that reaches the cutoff says so
+    reaching = report._window_limit(  # noqa: SLF001
+        {
+            "metrics": {"observed_end": cutoff},
+            "closure": {
+                "reference_series_id": "benchmark",
+                "reference_stored_end": cutoff,
+                "sleeve_dates_after_window_count": 0,
+                "sleeve_dates_after_window_first": None,
+                "sleeve_dates_after_window_last": None,
+                "window_open_date": OPENING,
+            },
+        },
+        cutoff,
+        "benchmark",
+    )
+    assert reaching is not None
+    assert reaching["status"] == "AT_CUTOFF" and reaching["days_short"] == 0
+    assert report._window_limit({"metrics": None, "closure": None}, cutoff, "x") is None  # noqa: SLF001

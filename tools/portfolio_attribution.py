@@ -1144,6 +1144,9 @@ def _closure(
     position = sleeve_dates.index(first_row) if first_row in sleeve.series else 0
     window_open = sleeve.opening_date if position == 0 else sleeve_dates[position - 1]
     unpaired_sleeve = [day for day in sleeve_window if day not in window_reference]
+    # sleeve observations after the last common date: the part of the sleeve's life
+    # the comparison window does not cover (a reference series that ends earlier)
+    uncovered = [day for day in sleeve_dates if day > common[-1]]
     if daily:
         unpaired_reference = [
             day
@@ -1168,6 +1171,13 @@ def _closure(
         "reference_subset_sha256": hashlib.sha256(
             canonical_json_bytes(subset)
         ).hexdigest(),
+        "sleeve_dates_after_window_count": len(uncovered),
+        "sleeve_dates_after_window_first": (
+            uncovered[0].isoformat() if uncovered else None
+        ),
+        "sleeve_dates_after_window_last": (
+            uncovered[-1].isoformat() if uncovered else None
+        ),
         "sleeve_dates_without_reference": [day.isoformat() for day in unpaired_sleeve],
         "sleeve_observations_in_window": len(sleeve_window),
         "window_open_date": window_open.isoformat(),

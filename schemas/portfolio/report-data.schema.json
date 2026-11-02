@@ -844,6 +844,9 @@
         "reference_stored_end",
         "reference_stored_start",
         "reference_subset_sha256",
+        "sleeve_dates_after_window_count",
+        "sleeve_dates_after_window_first",
+        "sleeve_dates_after_window_last",
         "sleeve_dates_without_reference",
         "sleeve_observations_in_window",
         "window_open_date"
@@ -883,6 +886,105 @@
         "window_open_date": {
           "type": "string",
           "format": "date"
+        },
+        "sleeve_dates_after_window_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sleeve_dates_after_window_first": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "sleeve_dates_after_window_last": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        }
+      }
+    },
+    "comparison_window_limit": {
+      "$comment": "How far the comparison window of a restated strategy reaches against the calculation cutoff, derived from the data (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calculation_cutoff_date",
+        "days_short",
+        "reference_series_id",
+        "reference_stored_end",
+        "sentence",
+        "status",
+        "uncovered_sleeve_dates",
+        "window_end",
+        "window_start"
+      ],
+      "properties": {
+        "calculation_cutoff_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "days_short": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reference_series_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_stored_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "sentence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "AT_CUTOFF",
+            "SHORT_OF_CUTOFF"
+          ]
+        },
+        "uncovered_sleeve_dates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "count",
+            "first",
+            "last"
+          ],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "first": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            },
+            "last": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            }
+          }
+        },
+        "window_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "window_start": {
+          "type": "string",
+          "format": "date"
         }
       }
     },
@@ -893,10 +995,12 @@
       "required": [
         "basis",
         "benchmark_closure",
+        "benchmark_window_limit",
         "label",
         "opening_date",
         "parent_account_id",
         "provider_closure",
+        "provider_window_limit",
         "sleeve_account_id",
         "sleeve_series_sha256"
       ],
@@ -929,6 +1033,26 @@
         "sleeve_series_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "benchmark_window_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/comparison_window_limit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_window_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/comparison_window_limit"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
