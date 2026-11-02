@@ -29068,7 +29068,13 @@ def test_owner_correction_retains_closed_echo_baseline_without_assignment_overla
     }
     assert not hasattr(perimeter_module, "load_assignment_authority")
 
-    data_root = REPOSITORY_ROOT.parent / "dataPortfolio"
+    configured_root = os.environ.get("QE_RETAINED_DATA_PORTFOLIO", "").strip()
+    if not configured_root:
+        pytest.skip(
+            "QE_RETAINED_DATA_PORTFOLIO does not name the retained dataPortfolio "
+            "root (explicit opt-in; no sibling-folder probing)"
+        )
+    data_root = Path(configured_root)
     ledger_generation_id = (
         "4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36"
     )
