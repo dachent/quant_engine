@@ -318,6 +318,14 @@ def build(
 
     cost_dir, cost_sources = _cost_sources(resolved, declared, cost_root_id)
     sources.update(cost_sources)
+    for what, path in (
+        ("provenance generation", provenance_generation),
+        ("ledger generation", ledger_generation),
+        ("repo root", repo_root),
+    ):
+        _existing_dir(
+            str(path), what
+        )  # the spec binds absolute paths the consumer requires
     prov_root, prov_gid, _ = _generation(provenance_generation, "provenance generation")
     prov_catalog = provenance_generation / "portfolio-provenance.json"
     if not prov_catalog.is_file():

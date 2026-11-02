@@ -447,3 +447,11 @@ def test_tool_names_no_workstation_path_and_no_real_id() -> None:
     )
     assert not re.search(r"[A-Za-z]:\\\\|[A-Za-z]:\\|/Users/|\bC:/", source)
     assert not re.search(r"\b[0-9a-f]{32,}\b", source)
+
+
+def test_relative_generation_and_repo_paths_refuse(world: World) -> None:
+    _refuses(
+        world, "ROOT_MISSING", provenance_generation=Path("generations") / ("a" * 64)
+    )
+    _refuses(world, "ROOT_MISSING", ledger_generation=Path("rel") / "x")
+    _refuses(world, "ROOT_MISSING", repo_root=Path("."))
