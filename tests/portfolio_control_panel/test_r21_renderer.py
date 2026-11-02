@@ -254,7 +254,7 @@ def test_alpha_tile_with_a_standard_error_prints_the_t_statistic(
         _run(tmp_path, _alpha_payload(row), "renderFactorDetail"), "#factor-detail"
     )
 
-    assert "t 8.99 (annualised SE 9.0%)" in tile
+    assert "t 8.99 (annualized SE 9.0%)" in tile
     assert "alpha-basis-badge" not in tile
 
 
@@ -561,7 +561,7 @@ def test_the_fact_matrix_names_the_coverage_accounts_it_does_not_contain(
         _run(tmp_path, payload, "renderFactScopeTables"), "#fact-matrix-summary"
     )
 
-    assert "not in the current perimeter" in text
+    assert "Not in this matrix, but counted in the coverage totals" in text
     assert "…bbbb (flows 3, nav 11)" in text
     assert "acct-in00aaaa" not in text and "…aaaa" not in text
     payload["coverage"] = payload["coverage"][:1]

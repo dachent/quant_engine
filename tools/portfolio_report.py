@@ -6506,7 +6506,8 @@ def _stale_implementation_row(
             f"ledger is {governed_ledger[:12]}. Its account return over "
             f"{start}..{end} differs from the governed account-live series by "
             f"{(figure - governed_figure) * 100.0:+.4f} pp. No model return, gap, "
-            "risk statistic or causal waterfall is published from it."
+            "risk statistic or causal waterfall is published from it; any figure the Model "
+            "vs actual view shows for this strategy is audit-derived, not governed."
         ),
         "repair_ref": _STALE_REPAIR_REF,
     }
@@ -8086,6 +8087,37 @@ def _allocations(
     return rows
 
 
+# The baseline's clause says the account fact matrix names every provider without an admitted path; the matrix
+# is the current-perimeter one, so a provider whose accounts are all outside it is named in the note under it.
+_MATRIX_CLAUSE: Final = "remain explicit in the account fact matrix"
+_MATRIX_CLAUSE_SCOPED: Final = (
+    "are explicit in the account fact matrix when the account is in it; accounts not "
+    "in it are named in the note under the matrix"
+)
+_MWR_EFFECT: Final = (
+    "MWR remains unavailable outside accounts and intervals with complete admitted "
+    "external-flow evidence."
+)
+_POSITIONS_EFFECT: Final = (
+    "Only accepted current position rows are reported; accounts without reported rows "
+    "remain unavailable."
+)
+_POSITIONS_EFFECT_SCOPED: Final = (
+    "Accepted position rows, current and historical snapshots, are reported; an "
+    "account with no reported row has none shown."
+)
+_MWR_EFFECT_SCOPED: Final = (
+    "MWR is shown only where admitted flows are complete for that epoch; the flows "
+    "fact overall remains partial."
+)
+
+
+def _matrix_scope_clause(text: str) -> str:
+    """The baseline's matrix clause, scoped to the matrix the page prints."""
+
+    return text.replace(_MATRIX_CLAUSE, _MATRIX_CLAUSE_SCOPED)
+
+
 def _scoped_known_gap(
     gap: object, provider_coverage: Sequence[Mapping[str, Any]]
 ) -> str:
@@ -8141,14 +8173,27 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "category": "FACT_COVERAGE",
                 "item": claim.get("fact_type"),
                 "known_gap": "; ".join(
-                    _scoped_known_gap(item, provider_coverage)
+                    _matrix_scope_clause(_scoped_known_gap(item, provider_coverage))
                     for item in claim.get("known_gaps", [])
                 ),
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
                 **(
                     {
-                        "disposition": claim.get("disposition"),
+                        "disposition": {
+                            **claim["disposition"],
+                            **(
+                                {
+                                    "effect": claim["disposition"]["effect"]
+                                    .replace(_MWR_EFFECT, _MWR_EFFECT_SCOPED)
+                                    .replace(
+                                        _POSITIONS_EFFECT, _POSITIONS_EFFECT_SCOPED
+                                    )
+                                }
+                                if isinstance(claim["disposition"].get("effect"), str)
+                                else {}
+                            ),
+                        },
                         "evidence_authority": claim.get("disposition", {}).get(
                             "authority"
                         ),
@@ -11008,7 +11053,7 @@ def build_report_data(
             },
             {
                 "item": "Evidence layers",
-                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate.",
+                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate, except that the LIVE_PLUS_BACKTEST mode joins version-matched backtest history before live inception to the live line and labels the joined line by origin.",
             },
             {
                 "item": "Account-live return authority",
@@ -11016,7 +11061,7 @@ def build_report_data(
             },
             {
                 "item": "Missing data",
-                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; no interpolation.",
+                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; a missing NAV is not interpolated, and a day the HWM candidate fills is labelled with its origin.",
             },
             {
                 "item": "Reserve",
@@ -13512,7 +13557,9 @@ MIXED_BASIS_SCHEDULED_RELEASE: Final = "R2.2"
 MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 / #624"
 
 
-def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+def _mixed_basis_disclosure(
+    item: Mapping[str, Any], parent_label: str = "the parent account"
+) -> tuple[dict[str, Any], str]:
     """The structured disclosure and its sentence, from the row's own windows and the fixed bridge."""
 
     def span(start: Any, end: Any, days: Any) -> str:
@@ -13541,8 +13588,9 @@ def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], st
         "MIXED BASIS: this row mixes account and sleeve bases. On the strategy row, "
         "return, drawdown, current value, weight and weekly series are the parent "
         f"account's ({parent_window}); MWR and governed capital are the sleeve epoch's "
-        f"({sleeve_window}). Epoch rows and the dollar-value chart show the sleeve's own "
-        "values. The owner ruled that this row be restated to the sleeve basis; the "
+        f"({sleeve_window}). Account-by-strategy epoch rows (Performance & HWM) and the "
+        "dollar-value chart show the sleeve's own values; model-vs-actual audit epochs "
+        f"are on the parent account ({parent_label}). The owner ruled that this row be restated to the sleeve basis; the "
         f"restatement is scheduled as release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from "
         f"the audit figure {MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, "
         f"in percentage points: {terms} (net {net:+}) [source: {MIXED_BASIS_BRIDGE_SOURCE}]."
@@ -13632,7 +13680,19 @@ def _apply_return_scope(
             "mwr_and_governed_capital_basis": "SLEEVE_EPOCH",
             "sleeve_epoch_accounts": sleeves,
         }
-        disclosure, disclosure_text = _mixed_basis_disclosure(item)
+        parent_names = sorted(
+            {
+                f"{row['provider']} {row['last_four']}"
+                for row in rows
+                if str(row.get("account_id")) in sleeve_accounts
+                and sleeve_accounts[str(row["account_id"])] in parents
+                and row.get("provider")
+                and row.get("last_four")
+            }
+        )
+        disclosure, disclosure_text = _mixed_basis_disclosure(
+            item, parent_names[0] if len(parent_names) == 1 else "the parent account"
+        )
         item["return_scope"]["mixed_basis_disclosure"] = disclosure
         item["return_scope_label"] = (
             f"Return (cumulative, year-to-date, calendar-year, annualised), drawdowns "

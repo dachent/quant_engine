@@ -984,7 +984,7 @@ def test_F12_the_manifest_footer_shows_the_consolidated_net_invested_and_never_s
         "Rows are not additive in Capital in and Withdrawn: internal transfers appear in both"
         in plain
     )
-    assert "Total" in plain and "open at the cutoff" in plain
+    assert "Total" in plain and "whose window ends at the cutoff" in plain
     without = _manifest_payload()
     without["invested_capital"] = None
     bare = html(
@@ -1456,8 +1456,11 @@ def test_F26_the_post_cutoff_caveat_is_one_note_not_one_per_row(tmp_path: Path) 
     strategies = [strategy(f"S{index}", **late) for index in range(7)]
     payload = base(strategies=strategies)
     note = call(tmp_path, payload, "postCutoffCaptureNote")
-    assert note.count("Post-cutoff capture") == 1
-    assert "7 of 7 provider captures are dated after the Sep 17, 2026 cutoff" in note
+    assert note.count("Post-cutoff ledger") == 1
+    assert (
+        "7 of 7 provider-ledger generations are dated after the Sep 17, 2026 cutoff"
+        in note
+    )
     cell = call(tmp_path, payload, "evidenceCoverage", strategies[0])
     assert "post-cutoff" not in cell
     assert (
