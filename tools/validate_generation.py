@@ -51,6 +51,10 @@ from acceptance.validate.generation import (  # noqa: E402
     is_placeholder,
     load_generation,
 )
+from acceptance.validate.sleeve_basis import (  # noqa: E402
+    Refusal,
+    parse_declaration,
+)
 
 EXIT_OK = 0
 EXIT_BLOCKERS = 1
@@ -215,6 +219,17 @@ def _parser() -> argparse.ArgumentParser:
         "of each strategy's opening capital anchor for the CAGR window check",
     )
     parser.add_argument(
+        "--strategy-basis",
+        type=Path,
+        help="strategy-basis-declaration/1 the generation was built with (#624): the "
+        "named strategies' rows are validated against an independent sleeve derivation",
+    )
+    parser.add_argument(
+        "--sleeve-facts",
+        type=Path,
+        help="sleeve-account-facts the declared sleeve rows are derived from",
+    )
+    parser.add_argument(
         "--independent-no-oracle",
         action="store_true",
         help="validate against no expected baseline (requires --cutoff, forbids "
@@ -280,6 +295,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise ContractError("--provider-ledger carries no capital_anchors list")
             provider_ledger = loaded
+        strategy_basis: dict[str, str] | None = None
+        if args.strategy_basis is not None:
+            try:
+                strategy_basis = parse_declaration(args.strategy_basis.read_bytes())
+            except (OSError, Refusal) as exc:
+                raise ContractError(f"--strategy-basis is unusable: {exc}") from exc
+        sleeve_facts: dict[str, Any] | None = None
+        if args.sleeve_facts is not None:
+            try:
+                facts = json.loads(args.sleeve_facts.read_bytes())
+            except (OSError, ValueError) as exc:
+                raise ContractError(f"--sleeve-facts is unreadable: {exc}") from exc
+            if not isinstance(facts, dict):
+                raise ContractError("--sleeve-facts is not an object")
+            sleeve_facts = facts
         generation = load_generation(
             args.generation_dir,
             discover=not args.no_discover,
@@ -323,6 +353,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_not_derivable=not_derivable,
         corrections=corrections,
         provider_ledger=provider_ledger,
+        strategy_basis=strategy_basis,
+        sleeve_facts=sleeve_facts,
     )
     findings = run_checks(context)
     document = findings_document(
