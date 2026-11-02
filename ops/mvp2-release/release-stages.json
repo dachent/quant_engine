@@ -891,18 +891,20 @@
         "--include",
         "production",
         "logs",
-        "release-driver-state.json",
+        "release-driver-state-at-pack.json",
         "pipeline-recipe.json",
         "provider-generations.json",
         "laneout",
         "replica-production",
         "--exclude",
+        "logs/pack-probe.*",
         "production/state/*",
         "*.prev-*"
       ],
       "outputs": [
         "{evidence_dest}/manifest.json"
-      ]
+      ],
+      "state_snapshot_to": "{cycle}/release-driver-state-at-pack.json"
     },
     {
       "id": "commit",
@@ -967,18 +969,20 @@
         "--include",
         "production",
         "logs",
-        "release-driver-state.json",
+        "release-driver-state-at-pack.json",
         "pipeline-recipe.json",
         "provider-generations.json",
         "laneout",
         "replica-production",
         "--exclude",
+        "logs/pack-evidence.*",
         "production/state/*",
         "*.prev-*"
       ],
       "outputs": [
         "{evidence_dest}/manifest.json"
-      ]
+      ],
+      "state_snapshot_to": "{cycle}/release-driver-state-at-pack.json"
     }
   ],
   "config_paths": {

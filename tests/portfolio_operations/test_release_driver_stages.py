@@ -1099,3 +1099,67 @@ def test_the_attest_stage_runs_only_under_the_tree_scheme(
     assert _drive(world, graph) == 0  # v1: attest skipped, its dependents still run
     assert (world["cycle"] / "two.txt").is_file()
     assert _drive(world, graph, "--only", "attest", "--replace") == 2
+
+
+def test_a_kept_stage_rechecks_its_guarded_inputs_on_resume(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    early = _early_world(world)
+    assert _drive(world, early["graph"]) == 0
+    assert _drive(world, early["graph"]) == 0  # unchanged: kept
+    early["calendar"].write_text("carried over from another pass", encoding="utf-8")
+    assert _drive(world, early["graph"]) == 2
+    early["calendar"].write_text(
+        '{"authority_evidence_sha256": "d26c6d5c"}', encoding="utf-8"
+    )
+    (early["coordination"] / "CURRENT_RELEASE.json").write_text(
+        json.dumps({"release_id": "ff" * 32, "state": "COMMITTED"}), encoding="utf-8"
+    )
+    assert (
+        _drive(world, early["graph"]) == 2
+    )  # the predecessor is no longer the committed release
+
+
+def test_a_stage_that_archives_the_state_gets_it_without_itself_running(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    code = (
+        "import json,sys;s=json.load(open(sys.argv[1]))['stages'];"
+        "open(sys.argv[2],'w').write(','.join(sorted(s)))"
+    )
+    stages = [
+        dict(CHAIN[0]),
+        {
+            "id": "pack",
+            "requires": ["one"],
+            "state_snapshot_to": "{cycle}/state-at-pack.json",
+            "outputs": ["{cycle}/pack.txt"],
+            "argv": [
+                "{python}",
+                "-c",
+                code,
+                "{cycle}/state-at-pack.json",
+                "{cycle}/pack.txt",
+            ],
+        },
+    ]
+    assert _drive(world, _graph(world, stages)) == 0
+    assert (world["cycle"] / "pack.txt").read_text(encoding="utf-8") == "one"
+    for stage in ("pack-evidence", "pack-probe"):
+        argv = _stage(stage)["argv"]
+        assert "release-driver-state.json" not in argv
+        assert "release-driver-state-at-pack.json" in argv and f"logs/{stage}.*" in argv
+
+
+def test_pack_exclusions_apply_to_nested_files(tmp_path: Path) -> None:
+    import release_evidence_pack as pack
+
+    cycle = tmp_path / "cycle"
+    (cycle / "production" / "state" / "cache").mkdir(parents=True)
+    (cycle / "production" / "state" / "cache" / "receipt.json").write_text(
+        "x", encoding="utf-8"
+    )
+    (cycle / "production" / "plan.json").write_text("p", encoding="utf-8")
+    (cycle / "production" / "plan.json.prev-1").write_text("old", encoding="utf-8")
+    chosen = pack.select(cycle, ["production"], ["production/state/*", "*.prev-*"])
+    assert [p.name for p in chosen] == ["plan.json"]

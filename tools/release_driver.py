@@ -824,6 +824,11 @@ def verify_kept(run: Run, stage: Mapping[str, Any], record: Mapping[str, Any]) -
             raise Refusal(
                 f"{stage['id']}: {path} changed or vanished since the stage recorded it"
             )
+    # the guarded inputs of the stage are rechecked too, not only the paths it recorded
+    check_bound_ids(run, stage)
+    check_pinned_inputs(run, stage)
+    check_predecessor(run, stage)
+    check_expected_baseline(run, stage)
 
 
 def replica_provider_generations(run: Run, target: Path) -> dict[str, Any]:
@@ -1002,6 +1007,18 @@ def execute_stage(
     outputs = _outputs(run, stage)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     previous = run.state["stages"].get(stage["id"], {})
+    if "state_snapshot_to" in stage:
+        # the state as it is before this stage: a stage that archives it must not archive itself as running
+        _write_json(
+            Path(run.expand(stage["state_snapshot_to"])),
+            {
+                "stages": {
+                    key: value
+                    for key, value in run.state["stages"].items()
+                    if key != stage["id"]
+                }
+            },
+        )
     if not resuming:
         for path in _claimed_outputs(run, stage):
             if path.exists():
