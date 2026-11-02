@@ -4320,11 +4320,87 @@ def _noun(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
 
 
+def _derived_aggregate_text(
+    account_summary: Sequence[Mapping[str, Any]], capital: Mapping[str, Any] | None
+) -> str:
+    """The aggregates and totals that are sums over labelled account values, from the payload.
+
+    A strategy's current value is derived when one of its member accounts carries a
+    ``value_basis`` on the member's own date; a capital total is derived when it is ready
+    and one of its components is. Returns "" when nothing is derived or no capital block
+    is given.
+    """
+
+    if not isinstance(capital, Mapping):
+        return ""
+    labelled = {
+        (str(row.get("account_id")), row.get("as_of_date"))
+        for row in account_summary
+        if isinstance(row.get("value_basis"), Mapping)
+    }
+
+    def member_derived(members: object) -> bool:
+        return any(
+            isinstance(member, Mapping)
+            and (str(member.get("account_id")), member.get("as_of_date")) in labelled
+            for member in (members if isinstance(members, Sequence) else [])
+        )
+
+    strategies = [
+        str(row.get("strategy_id"))
+        for row in capital.get("strategies", [])
+        if isinstance(row, Mapping)
+        and row.get("status") == "AVAILABLE"
+        and member_derived(row.get("members"))
+    ]
+    totals: list[str] = []
+    derived_blocks: set[str] = set()
+    for key, label in (
+        ("reserve", "reserve"),
+        ("retained_excluded", "retained excluded capital"),
+        ("systematic", "systematic capital"),
+        ("total_liquid", "total liquid"),
+    ):
+        block = capital.get(key)
+        if not isinstance(block, Mapping) or block.get("status") != "AVAILABLE":
+            continue
+        components = block.get("components") or []
+        if key == "reserve":
+            hit = member_derived(block.get("members"))
+        elif key == "total_liquid":
+            hit = any(str(part) in derived_blocks for part in components)
+        else:
+            hit = any(str(part) in strategies for part in components)
+        if hit:
+            derived_blocks.add(key)
+            totals.append(label)
+    parts: list[str] = []
+    if strategies:
+        parts.append(
+            f"{len(strategies)} strategy current "
+            f"{'value' if len(strategies) == 1 else 'values'} ({_join_words(strategies)})"
+        )
+    if totals:
+        parts.append(f"the totals {_join_words(totals)}")
+    if not parts:
+        return ""
+    return (
+        f"aggregates computed from those values are derived too: {' and '.join(parts)}"
+    )
+
+
+def _join_words(items: Sequence[str]) -> str:
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + f" and {items[-1]}"
+
+
 def _restate_value_authority(
     coverage: Sequence[Mapping[str, Any]],
     account_summary: Sequence[Mapping[str, Any]],
     positions: Sequence[Mapping[str, Any]],
     cutoff: str,
+    capital: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Re-word the baseline's "provider-reported USD authority" clause from the value labels.
 
@@ -4359,6 +4435,9 @@ def _restate_value_authority(
         for label, pair in sorted(counts.items())
     )
     replacement = f"remain USD authority and are provider-reported except {labelled}"
+    aggregates = _derived_aggregate_text(account_summary, capital)
+    if aggregates:
+        replacement += f"; {aggregates}"
     restated: list[dict[str, Any]] = []
     for row in coverage:
         item = dict(row)
@@ -10231,6 +10310,7 @@ def build_report_data(
             account_summary,
             position_rows,
             str(calculation_cutoff_date or catalog.get("as_of_date")),
+            verified_capital,
         ),
         "dependence_analysis": dependence_analysis,
         "dependence_rows": dependence_rows,
