@@ -226,6 +226,9 @@ _PATH_STAGES = {
     "tools/derived_epoch_perimeter.py": ["report", "panel"],
     # #624: the opt-in strategy-basis restatement the report reads when a declaration is given.
     "tools/strategy_basis.py": ["report", "panel"],
+    # #624: the disclosure of a restated row (account basis, margin liability line, the two
+    # bridges), computed from the sleeve facts the report is then given.
+    "tools/strategy_basis_disclosure.py": ["report", "panel"],
     # #567 stage 5: the post-ledger sleeve-facts builders and the release step that
     # runs them.  Attended preparation builds the facts, the epoch manifest selects
     # them and the HWM replay re-supplies them, so a change to any of them moves the
@@ -237,7 +240,7 @@ _PATH_STAGES = {
     "tools/sleeve_inputs.py": ["report", "panel"],
     "tools/verify_sleeve_ledger.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
-    "schemas/portfolio/sleeve-account-facts.schema.json": [],
+    "schemas/portfolio/sleeve-account-facts.schema.json": ["report", "panel"],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
     # source bytes only, and the release step runs it beside the IBKR builder.
     "tools/build_quantbase_fund_facts.py": ["report", "panel"],

@@ -131,6 +131,8 @@ def _build(
     tag_map_sha256: str | None = None,
     disclosure_sources: dict[str, Any] | None = None,
     strategy_basis: dict[str, Any] | None = None,
+    sleeve_facts: dict[str, Any] | None = None,
+    parent_returns: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[str, Any]:
     current = _epoch(date(2026, 7, 2), "104")
     retained = _epoch(date(2026, 7, 1), "104")
@@ -172,7 +174,8 @@ def _build(
                 "return": value,
                 "strategy_id": "strategy-1",
             }
-            for day, value in (("2026-07-01", "0"), ("2026-07-30", twr))
+            for day, value in parent_returns
+            or (("2026-07-01", "0"), ("2026-07-30", twr))
         ],
     }
     # the facts were built from the very map the report is given, unless a test says not
@@ -229,6 +232,10 @@ def _build(
     if strategy_basis is not None:
         basis_path = tmp_path / "strategy-basis-declaration.json"
         basis_path.write_bytes(json.dumps(strategy_basis).encode("utf-8"))
+    facts_path = None
+    if sleeve_facts is not None:
+        facts_path = tmp_path / "sleeve-account-facts.json"
+        facts_path.write_bytes(json.dumps(sleeve_facts).encode("utf-8"))
     report, _content, _path = full.reporter.build_report_data(
         baseline_root,
         epoch_manifest_path=tmp_path / "synthetic-manifest.json",
@@ -238,6 +245,7 @@ def _build(
         nested_tag_map_path=tag_map_path,
         sleeve_disclosure_sources_path=sources_path,
         strategy_basis_path=basis_path,
+        sleeve_facts_path=facts_path,
     )
     LAST_BYTES["content"] = _content
     result: dict[str, Any] = report

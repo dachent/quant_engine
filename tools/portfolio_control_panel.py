@@ -11097,6 +11097,10 @@ def _panel_data(
         "leverage_disclosures": list(report["leverage_disclosures"]),
         "weekly_returns": accepted_weekly_returns,
     }
+    if report.get("strategy_basis_disclosure") is not None:
+        # #624: the margin liability line and the bridges of a restated strategy row,
+        # and (inside account_summary) the parent-account figures it used to carry
+        panel_data["strategy_basis_disclosure"] = report["strategy_basis_disclosure"]
     if report.get("lifecycle_schema_version") == 1:
         # Lifecycle fields (#592): the current strategy rows already carry them
         # from the report; the retained history-only records follow them.  A
