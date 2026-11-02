@@ -1,0 +1,2012 @@
+{
+ "note": "Claim-pattern sentences that had no claim-table row and no allowlist entry when this file was written. They are known debt, not judged non-claims: the runner fails only on a sentence that is new or reworded. Remove an entry when its sentence gets a row.",
+ "entries": [
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": ": the first week every strategy line has data (set by {})."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "A first-funded-day flow is used as opening basis only when predecessor continuity proves it;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "A negative share or cross term is printed as published, never clamped or folded into the residual."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Accepted {} flow coverage is partial;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Account NAV coverage is partial"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Account label unavailable — manifest validation required"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "basis"
+   ],
+   "text": "Account-live source remains separate from model acceptance"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Adjudicate historical General intervals before complete account-by-strategy performance"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "All covered strategies ({}, capital coverage {})"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "All-in cost unavailable without a modeled notional"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Arithmetic difference over the same completed weeks"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "At each accepted daily observation, use only the prior model state to set dynamic weights on {};"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Benchmark dollar series unavailable: the producer published no slices.benchmarks in this snapshot."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Boundary not declared / no accepted observation"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Calculation cutoff unavailable — manifest validation required."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Candidate rows never enter current strategy totals."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Clean-room filtered least squares with train-only smoothness selection and causal walk-forward holdout updates."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Coefficient SE unavailable for fitted method"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Conditioned on both wealth indices below their prior running HWM"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Correlation · both strategies in drawdown"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Current = last funded NAV in the epoch."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Current pool-only intervals need strategy attribution"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Daily NAV evidence is present but its freshness assessment is unavailable"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Dates with no weight, named and not filled: {}."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Default lag {} · no p-values or confidence intervals"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Diagnostic contribution and residual summary unavailable: no dated model contributions are supplied."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Each dated path value is the beta available in that estimation state;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Each input was read from its stage's current pointer and refused unless its generation was verified and complete."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Economic rationale and train-only disposition"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Epoch manifest authority profile at build: {}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Epoch manifest by account and strategy — monetary values {}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Epoch manifest producer readiness at build: not supplied."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Epoch manifest producer readiness at build: {};"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Epoch manifest self-declared readiness at build: {};"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Epoch manifest verification at build: {};"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Every line is rebased to 1.00 at the start of"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Excluded from this view (live only): {}."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Exploratory hybrid view: only version-matched backtest observations before live inception are included."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Frozen {} audit appendix · source {}… · no refresh or capital authority."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "HWM remains blocked until the boundaries agree"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Historical pool-only intervals remain unresolved"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "History only · no current assignment"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "It implements only the openly described methodology and does not claim proprietary MPI production output."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "count"
+   ],
+   "text": "Ledger as-of: {}.{} Provider capture date not recorded in this manifest."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Lenses remain separate and are never concatenated."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Live-only evidence is the authoritative default for readiness, allocation, and risk controls."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "Max view, log axis: each line is rebased to 1.00 at the start of its own first week{};"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Measured · compatible exact-date evidence only"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Mixed modes, separate from raw factor betas"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Mode IDs are mixed orthogonal coordinates, not raw factor betas."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Model comparison unavailable under the current source policy"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No automatic add, drop, or allocation"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No backtest-history claim is made.{}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No beta or alpha is inferred."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No gap or cause is inferred."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No holdings inference is made."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No inferred exposures or alpha · {}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No-path means the system has no admitted source for that account/fact boundary;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Not in this matrix, but counted in the coverage totals: {}."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Obtain accepted position snapshots for the providers the coverage row names"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Obtain complete daily account NAV for the accounts the coverage row names"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Only accepted live observations enter this result;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Partial: causal attribution ready, reconciliation not ready"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Partial: reconciliation ready, causal attribution not ready"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Perimeter start: only {} is funded from {} until {}, when {} is first funded;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Policy statement: read-only advisory surface;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Portfolio facts {} · freshness assessed {} (not a current-day claim) · Report {}… · read-only local artifact."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "epoch",
+    "coverage"
+   ],
+   "text": "Regime underwriting admits complete accepted-calendar weeks only;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Report-derived strategy coverage and HWM qualification are withheld."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Research diagnostic only, with no readiness, allocation, HWM, execution, or order authority."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Residual against systematic capital unavailable: {}."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Resolve the declared coverage exception in its producing generation"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Rows are not additive in Capital in and Withdrawn: internal transfers appear in both capital in and withdrawn, so those columns are not totalled."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Selected with training-only time-series CV"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "Sleeve allocation basis for rows opened from a provider capital anchor"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "Sleeve allocation basis: the amount that entered the strategy sleeve from its provider capital anchor, not the deposits into the provider cash or wallet account."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "Sleeve allocation basis: the gross amount allocated to the fund from its provider capital anchor;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Snapshot dates are not classified in this payload, so every accepted row is listed."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "The Max view spans the full history and always uses a log axis"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "The computed alpha, betas, contributions, and residuals remain visible for forensic review, but the sealed-holdout gate excludes them from portfolio-manager conclusions."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "The frozen audit reference was {} and {} after rejected sleeves;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "The governed financial HWM remains independently available;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "The governed financial HWM remains unavailable;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "The per-epoch rows are still available under By epoch."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "These are the epoch manifest's authority fields, not the release state;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "This epoch row is sleeve {} throughout{};"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "This panel was sealed before release and records no release state."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Trailing accepted weekday observations · no holiday inference"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch",
+    "coverage"
+   ],
+   "text": "Unavailable for this evidence mode: {}."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "a line draws nothing before its own first week.{}{}{} {}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "a model-gap waterfall is unavailable."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "absent cells are unavailable, not zero"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "count"
+   ],
+   "text": "annualized RONC is simple under 365 days and geometric at 365 days or more (the PORT annualization kernel), with the span counted from the opening-capital date."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "any one-industry match is labeled similarity rather than attribution."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "current mapped positions remain valid"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "dollars, each strategy over its own window"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "each line rebased at its own first week, log axis"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "epoch returns are not added."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "full disposition remains in Data health."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "holdout recalibration is NONE under the governed policy (payload: {})."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "implementation fidelity uses account-live exact-common-date evidence."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "live + backtest uses only compatible pre-live history."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "live observations remain authoritative from inception forward."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "no numeric HWM is calculated while unavailable"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no row declares an execution effect"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "other current General intervals remain valid at the systematic-pool layer only."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch",
+    "coverage"
+   ],
+   "text": "partial first, last, and current weeks are excluded."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "provider-boundary exceptions remain in Data health."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "the coverage table above counts every one."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "the index path before {} describes one sleeve, not the {}-sleeve perimeter."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "the sealed holdout is evaluation evidence, never refit input."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "the strategy row elsewhere mixes bases, see MIXED BASIS on the strategy row."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "this result therefore equals the live-only history and is not described as a long-history result."
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "count"
+   ],
+   "text": "{} factor {} excluded from this fit ({});"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "{} of sleeve value (denominator date not published by this report schema)"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "basis"
+   ],
+   "text": "{} of sleeve value at {} · cost schedule as of {}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "count"
+   ],
+   "text": "{} provider-live book: {}–{} · {} returns · governed provider-ledger classification, not brokerage-account authority"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "{} · {} coverage-qualified TWR segments · systematic weight {}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal",
+    "count"
+   ],
+   "text": "{} · {} · every {} day(s) · grace {} · stale after {} · reconciled {}"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
+   "text": "· evidence layers are never silently concatenated."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Accepted generations, source hashes, gaps, and reconciliations remain visible."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "All twelve columns, one row per strategy"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Closing capital opens a successor only when the admission policy explicitly proves continuity."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Coverage and lineage are part of every result"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Dated candidate evidence remains separate from current strategies and capital."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Every strategy row and every component line carries an evidence tag;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Every unavailable fact stays unavailable"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Fama–French economic rows are excess or long-short factor returns and are never relabeled as total returns."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Gross alpha stays unavailable until cost coverage is complete."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "HWM automation can be blocked even when source NAV exists: provider-custodied NAV qualifies only while its governed freshness and evidence gates pass."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "If no accepted target is present, target and drift display as unavailable."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "It never upgrades source evidence."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "It remains unavailable when required daily NAV evidence is stale, missing, or outside the accepted boundary."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "basis"
+   ],
+   "text": "Leave-one-out evidence for the four tactical sleeves"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Live + backtest changes strategy rows only and uses version-matched backtest history strictly before live inception by date;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Live-only evidence is the authoritative default for readiness, allocation, and risk controls."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Missing data never becomes a silent estimate."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Missing evidence stays unavailable and cannot become a silent zero or inferred pass."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Narrowing evidence, never transaction authority"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No brokerage connection, order path, or trade authorization."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No live market feed, optimizer, or automated drift service is implied."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Partial, inferred, diagnostic, not validated, or not ready;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Performance comparisons never concatenate incompatible evidence layers."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Reserve remains outside strategy risk"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Source returns, model computation, PM validation, and the forward-only tracker are separate states."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Static lenses remain distinct from the clean-room dynamic FLS path;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Target and drift remain unavailable unless a target decision has been admitted—never reverse-engineered from current weights."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "epoch",
+    "coverage"
+   ],
+   "text": "The current cutoff week is shown by default and marked partial through its source-derived data-through date."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "These intervals block complete historical account-by-strategy attribution;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Unavailable, blocked, failed, or incomplete;"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Value is the sum of each strategy's account NAV on each day (deposits and withdrawals move it)."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "What the producer does not publish is named as unavailable with its reason, never filled in."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Whether an estimator was computed, validated, diagnostic-only, rejected, or unavailable."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "flow dates are date-only, treated as end of day"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "includes a disposition that observes a fact without proving it complete."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "terms the producer cannot yet publish are named with their reason, and a replacing pull is shown only where the audit input names one."
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "kinds": [
+    "universal"
+   ],
+   "text": "the portfolio gap and the residual are totals computed from them and carry none;"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "coverage"
+   ],
+   "text": "Automated HWM remains unavailable for every included sleeve without qualified fresh daily NAV evidence."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Current pool-only intervals remain unassigned;"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Every historical systematic interval has an accepted strategy assignment."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "coverage"
+   ],
+   "text": "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Historical pool-only intervals remain visible and are excluded from strategy attribution."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Independent non-USD transaction/flow recomputation is unavailable;"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Only accepted current position rows are reported;"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "absence is never converted to zero activity."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "account NAV, current positions, allocations, and HWM current values remain provider-reported USD authority"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "dates through {} after it carry no FX rate"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no accepted independent FX observation source exists;"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no holding-based strategy inference is permitted."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no independent FX series covers the unconverted records in the admitted generation {};"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "observed records establish observations, not complete intervals"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "providers without an admitted flow path remain explicit in the account fact matrix"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "providers without an admitted transaction path remain explicit in the account fact matrix"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "several current strategy costs remain unknown or conditional"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "unconverted records and dates outside the generation stay unavailable."
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "{} non-USD transaction/flow records ({}) are FX-affected, including {} with unavailable accepted USD amounts"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Every current strategy has an accepted, version-bound history path for economic inference;"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "count"
+   ],
+   "text": "Governed PORT-HWM-4 candidate, pending owner acceptance"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "epoch",
+    "coverage"
+   ],
+   "text": "Governed systematic HWM is unavailable because the report/baseline provider-ledger lineage differs from the verified epoch manifest."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "coverage"
+   ],
+   "text": "Governed systematic HWM remains unavailable for explicitly named included-perimeter sleeves that are not HWM-qualified: {}."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "LIVE_PLUS_BACKTEST is enabled independently for {} strategy history path(s);"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "epoch",
+    "coverage"
+   ],
+   "text": "LIVE_PLUS_BACKTEST is unavailable because {} current strategy history path(s) are not accepted for economic inference."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "MWR is annualized ACTUAL_365 and remains unavailable unless its declared valuation perimeter and complete dated source-bound flows are present."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Positions and FX records are not complete;"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "epoch",
+    "coverage"
+   ],
+   "text": "Report-derived performance is unavailable because its provider-ledger lineage differs from the verified epoch manifest."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH: no report or baseline performance, HWM, or readiness conclusion is accepted."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "explicit de-minimis exclusions remain reported:"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no provider, broker, order, or deployment connection exists."
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "weekly returns by strategy, factor, style, sector, industry, and benchmark"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "{} strategy history path(s) remain unavailable and live-only."
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "A row names the pull that replaces it only where the audit input names one."
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "A strategy window or term the audit analysis cannot supply is listed under unavailable with its reason ({});"
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Arithmetic on governed inputs only."
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "otherwise component pp times the window capital base named on each row (ESTIMATED)."
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "sub-components and memo rows carry no pull field."
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "the {} that name none have no pull named in the audit input."
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "universal",
+    "count"
+   ],
+   "text": "{} In this block {} of {} AUDIT_DERIVED bridge rows name a replacing pull and {} name none;"
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "count",
+    "coverage"
+   ],
+   "text": "{} In this block {} of {} UNAVAILABLE items name a replacing pull;"
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "{} have an empty pull field and {} carry no pull field."
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "{} of the {} unavailable entries name the pull that closes it."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "A closed epoch contributes 0 after its last link end_date;"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch",
+    "coverage"
+   ],
+   "text": "A week missing for any strategy makes the mode UNAVAILABLE;"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "B(t) = sum over flow days d <= t of F(d) * TRI(t) / TRI(d): every dollar the slices received on day d is invested in the benchmark at TRI(d) and held."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "DISCLOSED DIFFERENCE, not explained by the manifest rows: the report's gain of all epochs minus the sum of the manifest rows' gains."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "DISCLOSED DIFFERENCE: more than whole-cent rounding remains after the named components."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "Each epoch contributes its observation-trace ending_nav on every calendar day from its first link start (its base_nav) to its last link end, carrying the prior ending NAV through any day without a link."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "Each epoch's P&L from the NAV trace (final value - opening NAV - flows) against the ledger gain on the manifest row: epochs that open from the last observation before the start (or from a first positive observation) carry a NAV-trace opening that differs from the governed ledger opening capital."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Equal-weight, strategies available that week"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "F(d) = the money that crossed the boundary of the plotted slices on day d: the observation links' net_flow recognised on d, plus the opening NAV of an epoch (on its first day, or on its first link end when it inherits a predecessor of the same account), minus the closing NAV of an epoch on the day after its last link end."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "In LIVE_PLUS_BACKTEST a strategy with no admitted backtest history contributes its live weeks and the line is labelled by origin (MIXED where components differ)."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "It has no live or backtest origin."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "The amount is the report's unrounded gain of the outside epochs rounded once;"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "The opening-day base_nav is not counted when another epoch of the same account ends on that day (the predecessor's closing NAV already carries it)."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "The report totals use its own epoch set (see report_epoch_count against manifest_row_count), which includes the four closed sleeve rows and chained hand-offs differently;"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "The report's current value of the epochs open at the cutoff carries the value of a closed epoch (post-liquidation) that no plotted slice holds."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "The report's totals use only the governed epochs (invested_capital.required_epochs);"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "The residual against systematic capital is not a flow: it is the parent account's value outside the plotted epochs (unallocated cash, margin debit, other sleeves) and is excluded from the matching."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "The strategy returns enter this line as weekly returns, so the rebalance is weekly."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "Transfers between two plotted epochs appear with both signs and cancel in the sum;"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Whole-cent rounding of per-epoch and per-day figures."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "and in the unallocated cash of a residual parent account"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "cash left in the account after liquidation is not in any slice and shows in the residual."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "compounded from 1.0 immediately before this line's own first week (its first_week)"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "gain of outside report epochs"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "it is never filled with zero."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "lines name each such epoch with its ledger gain, each rounded to the cent independently."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "net_flow of the epoch's observation links recognised on the date, in cents."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "epoch"
+   ],
+   "text": "retired epochs that the slices still plot (closed sleeves of a parent account, retired provider funds) carry gains that are not in the report's gain of all epochs."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "the value at index i is the index at the end of week dates[i]."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "{} (cash left in a liquidated epoch"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "{} In this mode the weeks {} are not that live series."
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "epoch"
+   ],
+   "text": "{}: residual {} = capital_reconciliation.memo.perimeter_remainder {} (the residual parent account's value outside the product sleeve: unallocated cash, margin debit and any other sleeve's remainder) {} cash left in liquidated epochs"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "count"
+   ],
+   "text": ", {} days exclusive (end minus start)"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "Account-by-strategy epoch rows (Performance & HWM) and the dollar-value chart show the sleeve's own values;"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "epoch"
+   ],
+   "text": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate, except that the LIVE_PLUS_BACKTEST mode joins version-matched backtest history before live inception to the live line and labels the joined line by origin."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "Both LIVE_ONLY and LIVE_PLUS_BACKTEST modes retain exact pairwise observations, horizons, rolling/downside/drawdown/tail evidence, conservative bounds, and provider-lane-only implementation concentration;"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "MIXED BASIS: this row mixes account and sleeve bases."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "MWR and governed capital are the sleeve epoch's ({})."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "MWR and governed capital: sleeve {}."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal",
+    "epoch",
+    "coverage"
+   ],
+   "text": "MWR is shown only where admitted flows are complete for that epoch;"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED;"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "No exact-date benchmark-relative comparison is admitted."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Provider/model comparisons use exact common dates only."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "Return (cumulative, year-to-date, calendar-year, annualised), drawdowns (account-live and HWM), current value, weight, cost-rate denominator and weekly series: parent account {} (includes retired sleeves {} and its unallocated cash and margin)."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "Source-bound MWR is calculated only when complete eligible flows, signs, and terminal NAV are proven;"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "The owner ruled that this row be restated to the sleeve basis;"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "Version-matched prehistory is admitted by verified history coverage;"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "any figure the Model vs actual view shows for this strategy is audit-derived, not governed."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "benchmark, cash-drag, fee, or after-tax gaps stay unavailable rather than becoming zero."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "date-only flows use end-of-day timing and are labeled INFERRED_TIMING."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "dependence retains its account-live projection."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "coverage"
+   ],
+   "text": "governed HWM complete date is not the value-basis bound"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "instrument and venue dimensions remain explicitly unassessed."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "legacy audit metrics are used only as one internally consistent fallback when no provider-ledger evidence exists."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "live implementation reconciliation remains a separate control."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "basis",
+    "epoch"
+   ],
+   "text": "model-vs-actual audit epochs are on the parent account ({})."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no benchmark-relative comparison is computed against the owner-selected benchmark."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal",
+    "coverage"
+   ],
+   "text": "otherwise it remains unavailable with the row's status and reason."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "remain USD authority and are provider-reported except {}"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "remain explicit in the account fact matrix"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "the hybrid mode is the exact live-only path."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "count"
+   ],
+   "text": "{} days exclusive (end minus start)"
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "A consumer that plots every manifest row differs from the report's gain of all epochs by the gain of the outside rows."
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "Account NAV at the first funded date versus the governed contributed capital of the same sleeve (opening NAV, deposits and internal-in against the governed opening basis, contributions and transfers)"
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "universal",
+    "epoch"
+   ],
+   "text": "Closing value of a closed epoch that no successor epoch on the same account opens from"
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Epoch opening basis other than first available NAV or provider capital anchor, versus the governed contributed capital"
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "epoch"
+   ],
+   "text": "Governed perimeter value (the custody systematic total) minus the current value of the epochs open at the cutoff: for a strategy whose product epoch is a derived sleeve, the parent account's value outside that sleeve (unallocated cash, margin debit and any other sleeve's remainder) is in the perimeter but in no open epoch."
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "Post-liquidation income sits inside both Current and Gain, so it does not enter the difference."
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "basis"
+   ],
+   "text": "Provider capital anchor: sleeve-allocation basis versus the governed contributed capital"
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "Successor epoch opening NAV minus the predecessor epoch closing NAV on the same account (the derived total counts the successor's opening, the governed result carries the paired transition)"
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "closed_epoch_count of them closed their capital inside the epoch (lifecycle CLOSED) and are included at their value."
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "current_of_open_epochs_usd sums the epochs whose window ends at the cutoff;"
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "universal",
+    "basis",
+    "epoch"
+   ],
+   "text": "outside_report_epochs are the remaining epoch-manifest rows (closed sleeves of a parent account, retired provider funds) whose gain is in no report total."
+  },
+  {
+   "file": "tools/portfolio_totals.py",
+   "kinds": [
+    "epoch"
+   ],
+   "text": "report_epochs are the governed epochs the report's totals use;"
+  }
+ ]
+}

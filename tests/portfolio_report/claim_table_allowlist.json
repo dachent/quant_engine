@@ -1,0 +1,60 @@
+{
+ "note": "Sentences judged not to be payload claims. Each entry matches the normalised sentence text with re.search; the justification applies to every sentence it matches. A sentence that makes a quantified claim belongs in the claim table, not here.",
+ "entries": [
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^(No diversification credit: observations missing|No exclusion reason recorded|No daily NAV evidence is present|No lens or surface publishes|No lifecycle intervals match|No leverage disclosure was produced|No unresolved historical assignment intervals|No account-manifest evidence was supplied|No epoch-manifest artifact was bound|No governed replication disposition exists|No accepted version-matched backtest observations exist|No accepted version-compatible backtest decomposition|No component detail in this accepted fixture|No rows match the current fact-path filter|No line has data at the rebase week|No bridge components were published|No aligned window within the cutoff|No per-epoch rows were published|No attribution cell was published|No accepted model/provider path can be compared|The producer published no|The producer carries no dollar-weighted bridge|The producer.s orthogonal risk attribution is not in this snapshot|This accepted correlation generation has no backtest mode|This accepted weekly generation has no requested mode|no evidence mode is published|no slice block is published|no slice carries a value|the producer published no performance block)",
+   "justification": "empty-state or reason notice rendered only on the branch where the data it names is absent; true by the branch condition, nothing to test in a payload that has the data"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^(older than cutoff by|Post-cutoff ledger|[{][}] position rows are current at the|[{][}] rows from a latest snapshot dated|[{][}] rows dated after the cutoff|PM-validated on|Ticker symbols are not yet resolved|Snapshot value and weight are dated|annualized from|Coverage is [{][}]:|[{][}] are not complete within the declared boundary)",
+   "justification": "count or date computed in the renderer from the same array or field it prints; consistent by construction, no static universal"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "pattern": "^(Observation coverage by data class|Coverage-aware performance and the governed HWM perimeter|Account . strategy epochs|Epoch manifest by account and strategy|Source-bound epoch evidence and explicit blockers|Current strategy source and factor-model coverage|All accepted accounts and strategies)",
+   "justification": "section heading or filter label naming content; makes no quantified claim about the payload"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "pattern": "^(Required with --report-candidate|Account x strategy epoch manifest JSON|Require a v5 epoch manifest|build and verify only)",
+   "justification": "command-line help text, not panel or report prose"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "pattern": "^(Browser captures have no|Every capture (starts|resolves)|Stable-launcher captures|Epoch manifest DOM matches|All nine operator views|No network or trade execution code|Decomposition lenses remain separate and complete|Dynamic replication is governed|Canonical strategy series agree|Privacy-safe account dimension|Layered strategy underwriting is governed|Dependence evidence modes preserve|Interaction evidence binds|Provider evidence remains explicit|Candidate driver map is complete|QA evidence carries no absolute locator)",
+   "justification": "QA check name; the verdict is recorded by the QA block that carries it, the prose asserts nothing on its own"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "pattern": "^(weekly observation_meta_by_mode|dependence_modes[.]|account manifest flow coverage identity)",
+   "justification": "internal validation label naming a payload path; not shown as prose"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^(epoch receipt authority|epoch calculation ledger|current epoch crosswalk|dependence_analysis[.]mode_summaries|implementation account leg differs)",
+   "justification": "internal validation label naming a payload path; not shown as prose"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "pattern": "^(governed HWM qualification and account NAV coverage)",
+   "justification": "internal validation label; not shown as prose"
+  },
+  {
+   "file": "tools/portfolio_baseline.py",
+   "pattern": "^(no required strategy is registered|no account is assigned to the reserve pool|no MAPPED account assignment is|no accepted position source exists|no admitted provider/account path|no admitted USD NAV on or before)",
+   "justification": "empty-state or reason notice rendered only on the branch where the data it names is absent; true by the branch condition, nothing to test in a payload that has the data"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^(No accepted strategy history is routed|No compatible backtest prehistory is admitted|No version-matched backtest prehistory is admitted|no annual cost amount is evidenced|the strategy has no sleeve value at the cutoff|the sleeve value at the cutoff is not positive|the sleeve value is dated|Legacy provenance has no effective-dated strategy version row|Compatibility is unavailable without an effective-dated registry row)",
+   "justification": "empty-state or reason notice rendered only on the branch where the data it names is absent; true by the branch condition, nothing to test in a payload that has the data"
+  },
+  {
+   "file": "tools/portfolio_control_panel.py",
+   "pattern": "^(No accepted strategy history is recorded|No effective-dated compatibility evidence is recorded)",
+   "justification": "empty-state or reason notice rendered only on the branch where the data it names is absent; true by the branch condition, nothing to test in a payload that has the data"
+  }
+ ]
+}
