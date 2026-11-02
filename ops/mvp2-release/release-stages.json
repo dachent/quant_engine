@@ -38,7 +38,8 @@
     "replica_provgens": "{cycle}/replica-provider-generations.json",
     "replica_rehearsal": "{cycle}/replica-rehearsal",
     "clean_room": "{cycle}/clean-room",
-    "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json"
+    "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
+    "replica_coordination_root": "{replica_workspace}/{coordination_rel}"
   },
   "derive": {
     "ledger_id": {
@@ -91,6 +92,12 @@
       "json_field": [
         "{production}/execute-stage.json",
         "release_id"
+      ]
+    },
+    "coordination_rel": {
+      "relative_to": [
+        "{coordination_root}",
+        "{source_workspace}"
       ]
     }
   },
@@ -190,6 +197,14 @@
           "{python}",
           "--workspace-root",
           "{workspace_root}",
+          {
+            "if": "identity_scheme",
+            "equals": "git-tree-v2",
+            "args": [
+              "--code-identity-scheme",
+              "git-tree-v2"
+            ]
+          },
           "--output-root",
           "{run}",
           "--retained-cache-root",
@@ -215,6 +230,14 @@
         "{python}",
         "--workspace-root",
         "{workspace_root}",
+        {
+          "if": "identity_scheme",
+          "equals": "git-tree-v2",
+          "args": [
+            "--code-identity-scheme",
+            "git-tree-v2"
+          ]
+        },
         "--output-root",
         "{run}",
         {
@@ -246,6 +269,11 @@
             "FAILED",
             "PASSED"
           ]
+        },
+        {
+          "json": "{run}/preparation/release-recipe.json",
+          "path": "release_commit",
+          "equals": "{code_commit}"
         }
       ],
       "pinned_inputs": [
@@ -341,6 +369,14 @@
         "{python}",
         "--workspace-root",
         "{workspace_root}",
+        {
+          "if": "identity_scheme",
+          "equals": "git-tree-v2",
+          "args": [
+            "--code-identity-scheme",
+            "git-tree-v2"
+          ]
+        },
         "--output-root",
         "{run}",
         "--retained-cache-root",
@@ -361,6 +397,11 @@
           "json": "{run}/attended-run-state.json",
           "path": "state",
           "equals": "PASSED"
+        },
+        {
+          "json": "{run}/preparation/release-recipe.json",
+          "path": "release_commit",
+          "equals": "{code_commit}"
         }
       ]
     },
@@ -751,7 +792,8 @@
         "{base_ref}",
         "--coordination-root",
         "{coordination_root}"
-      ]
+      ],
+      "only_ceremony": "full"
     },
     {
       "id": "replica-copy",
@@ -774,8 +816,7 @@
         "{replica_workspace}",
         "--allow-state-root",
         "{retained_cache_root}"
-      ],
-      "needs_attestation": true
+      ]
     },
     {
       "id": "replica-provider-generations",
@@ -788,9 +829,45 @@
       ]
     },
     {
-      "id": "replica-spec",
+      "id": "replica-clear-attestation",
+      "only_scheme": "git-tree-v2",
+      "only_ceremony": "replica-only",
       "requires": [
         "replica-provider-generations"
+      ],
+      "builtin": "remove_replica_attestation"
+    },
+    {
+      "id": "replica-attest",
+      "only_scheme": "git-tree-v2",
+      "only_ceremony": "replica-only",
+      "requires": [
+        "replica-provider-generations",
+        "replica-clear-attestation"
+      ],
+      "outputs": [
+        "{replica_coordination_root}/merge-attestation.json"
+      ],
+      "argv": [
+        "{python}",
+        "-m",
+        "quant_engine.core.code_identity",
+        "attest",
+        "--repo",
+        "{repo_root}",
+        "--candidate-commit",
+        "{candidate_commit}",
+        "--base-ref",
+        "{base_ref}",
+        "--coordination-root",
+        "{replica_coordination_root}"
+      ]
+    },
+    {
+      "id": "replica-spec",
+      "requires": [
+        "replica-provider-generations",
+        "replica-attest"
       ],
       "outputs": [
         "{replica_spec}"
@@ -874,13 +951,58 @@
         "--clean-room",
         "{clean_room}"
       ],
-      "needs_attestation": true
+      "needs_attestation": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "ceremony",
+      "only_ceremony": "replica-only",
+      "requires": [
+        "replica-spec"
+      ],
+      "needs_attestation": "{replica_coordination_root}",
+      "outputs": [
+        "{lane_replica}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_replica.py",
+        "ceremony",
+        "--real-spec",
+        "{prod_spec}",
+        "--replica-spec",
+        "{replica_spec}",
+        "--out-dir",
+        "{lane_replica}",
+        "--replica-panel-dir",
+        "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{crosswalk}",
+        "--harness-code-commit",
+        "{code_commit}",
+        "--rehearsal-root",
+        "{replica_rehearsal}",
+        "--clean-room",
+        "{clean_room}"
+      ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "replica_spec_guard": "{replica_spec}"
     },
     {
       "id": "pack-probe",
       "explicit": true,
       "requires": [
-        "lanes"
+        "lanes",
+        "ceremony"
       ],
       "only_mode": "probe",
       "argv": [
@@ -952,7 +1074,8 @@
           "equals": "COMMITTED"
         }
       ],
-      "needs_attestation": true
+      "needs_attestation": true,
+      "only_ceremony": "full"
     },
     {
       "id": "pack-evidence",
@@ -984,7 +1107,8 @@
       "outputs": [
         "{evidence_dest}/manifest.json"
       ],
-      "state_snapshot_to": "{cycle}/release-driver-state-at-pack.json"
+      "state_snapshot_to": "{cycle}/release-driver-state-at-pack.json",
+      "only_ceremony": "full"
     }
   ],
   "config_paths": {

@@ -27,6 +27,7 @@
         "maxProperties": 1,
         "properties": {
           "single_dir": {"type": "string"},
+          "relative_to": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
           "json_field": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
           "spec_root": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
           "spec_node_field": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}, {"type": "string"}], "minItems": 3, "maxItems": 3}
@@ -45,7 +46,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["if", "args"],
-          "properties": {"if": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}
+          "properties": {"if": {"type": "string"}, "equals": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}
         }
       ]
     },
@@ -78,7 +79,9 @@
         "outputs": {"$ref": "#/$defs/strings"},
         "must_not_exist": {"$ref": "#/$defs/strings"},
         "only_scheme": {"enum": ["git-commit-v1", "git-tree-v2"]},
-        "needs_attestation": {"type": "boolean"},
+        "replica_spec_guard": {"type": "string"},
+        "only_ceremony": {"enum": ["full", "replica-only"]},
+        "needs_attestation": {"type": ["boolean", "string"]},
         "state_snapshot_to": {"type": "string"},
         "pinned_inputs": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
         "predecessor_check": {"type": "object", "additionalProperties": false, "required": ["inputs", "current_release", "panel_current", "workspace"], "properties": {"inputs": {"type": "string"}, "current_release": {"type": "string"}, "panel_current": {"type": "string"}, "workspace": {"type": "string"}}},
@@ -88,7 +91,7 @@
         "bound_ids": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
         "assert_equal": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},
         "argv": {"$ref": "#/$defs/argv"},
-        "builtin": {"enum": ["inputs_only", "provider_generations", "replica_provider_generations"]},
+        "builtin": {"enum": ["inputs_only", "provider_generations", "replica_provider_generations", "remove_replica_attestation"]},
         "env": {"type": "object", "additionalProperties": {"type": "string"}},
         "expect_rc": {"type": "integer", "minimum": 0},
         "stdout_to": {"type": "string"},
