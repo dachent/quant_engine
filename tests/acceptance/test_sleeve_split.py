@@ -68,7 +68,10 @@ def tag_map() -> dict[str, Any]:
 
     return {
         "parents": [
-            {"sleeves": [sleeve("s1", "AlphaModel"), sleeve("s2", "BetaModel")]}
+            {
+                "parent_account_id": PARENT,
+                "sleeves": [sleeve("s1", "AlphaModel"), sleeve("s2", "BetaModel")],
+            }
         ]
     }
 
@@ -136,6 +139,7 @@ def catalog(*, whole: str = "43", action: bool = True) -> dict[str, Any]:
             {
                 "account_id": PARENT,
                 "security_id": NEW,
+                "symbol": "XYZ",
                 "as_of_date": day,
                 "mark_price": mark,
                 "quantity": whole,
@@ -182,7 +186,7 @@ def test_only_each_sleeves_own_fractional_entitlement_closes_the_whole_shares() 
             assert not candidate.closes, name
 
 
-def test_the_builders_pro_rata_split_leaves_the_residue_the_facts_disclose() -> None:
+def test_the_old_builders_pro_rata_split_leaves_the_residue_its_facts_disclosed() -> None:
     evidence = _evaluate()
     pro_rata = evidence.candidates[sp.SPLIT_PRO_RATA_QUANTITY]
     assert _near(pro_rata.residual_shares["s1"], Fraction(1, 35))
@@ -245,6 +249,157 @@ def test_data_that_does_not_support_the_split_is_refused(
     assert caught.value.code == code
 
 
+# ------------------------------------------ the rule, derived independently of the facts
+
+
+def own_fraction_facts() -> dict[str, Any]:
+    """Facts as the builder writes them once the corporate-action rule is applied."""
+
+    document = facts(residue=False)
+    document["perimeter_account"] = {
+        "days": [{"day": day} for day in sorted({*MARKS, "2026-02-05", "2026-02-04"})]
+    }
+    document["disclosures"]["manual_assignments"][0]["how"] = (
+        "corporate_action_fraction"
+    )
+    document["disclosures"]["corporate_action_fractions"] = [
+        {
+            "day": "2026-02-06",
+            "security_id": NEW,
+            "old_security_id": OLD,
+            "rule": "OWN_FRACTIONAL_ENTITLEMENT",
+            "action": {
+                "event_date": "2026-02-05",
+                "kind": "RS",
+                "old_quantity": "350",
+                "new_quantity": "43.75",
+                "ratio": "0.125",
+            },
+            "execution": {"quantity": "-0.75", "price": "4.7", "commission": "-0.036"},
+            "closure": {
+                "account_position": "43",
+                "entitled_total": "43.75",
+                "whole_total": "43",
+                "fraction_total": "0.75",
+                "sold_quantity": "0.75",
+            },
+            "sleeves": [
+                {
+                    "sleeve_id": "s1",
+                    "held_quantity": "220",
+                    "entitlement": "27.5",
+                    "whole_shares": "27",
+                    "fraction": "0.5",
+                    "charged_quantity": "-0.5",
+                    "cash_credited": "2.35",
+                    "commission": "-0.024",
+                },
+                {
+                    "sleeve_id": "s2",
+                    "held_quantity": "130",
+                    "entitlement": "16.25",
+                    "whole_shares": "16",
+                    "fraction": "0.25",
+                    "charged_quantity": "-0.25",
+                    "cash_credited": "1.175",
+                    "commission": "-0.012",
+                },
+            ],
+        }
+    ]
+    return document
+
+
+def _check(document: dict[str, Any]) -> list[sleeve_basis.Finding]:
+    return sp.check_corporate_action_fractions(document, trades(), tag_map(), catalog())
+
+
+def _codes(findings: list[sleeve_basis.Finding]) -> set[str]:
+    return {f.code for f in findings}
+
+
+def test_the_rule_is_derived_from_the_data_alone() -> None:
+    (found,) = sp.derive_fractions(own_fraction_facts(), trades(), tag_map(), catalog())
+    assert (found.day, found.symbol, found.security_id) == (DAY, "XYZ", NEW)
+    assert (found.old_quantity, found.new_quantity) == (350, D("43.75"))
+    by_sleeve = {s.sleeve_id: s for s in found.sleeves}
+    assert by_sleeve["s1"].entitlement == D("27.5") and by_sleeve["s1"].whole == 27
+    assert by_sleeve["s2"].entitlement == D("16.25") and by_sleeve["s2"].whole == 16
+    assert by_sleeve["s1"].charged == D("-0.5") and by_sleeve["s2"].charged == D(
+        "-0.25"
+    )
+    assert by_sleeve["s1"].cash == D("2.35") and by_sleeve["s2"].cash == D("1.175")
+    assert by_sleeve["s1"].commission + by_sleeve["s2"].commission == D("-0.036")
+
+
+def test_facts_that_apply_the_rule_have_no_finding() -> None:
+    assert _check(own_fraction_facts()) == []
+
+
+def test_facts_that_split_the_fraction_pro_rata_are_refused() -> None:
+    document = own_fraction_facts()
+    document["disclosures"]["manual_assignments"][0]["how"] = "split"
+    del document["disclosures"]["corporate_action_fractions"]
+    document["disclosures"]["offsetting_residues"] = [
+        {"day": "2026-02-10", "security_id": NEW, "quantities": []}
+    ]
+    assert _codes(_check(document)) == {
+        sp.CA_PRO_RATA_USED,
+        sp.CA_NOT_DISCLOSED,
+        sp.CA_RESIDUE_LEFT,
+    }
+
+
+def test_a_disclosed_fraction_that_differs_from_the_derivation_is_refused() -> None:
+    document = own_fraction_facts()
+    row = document["disclosures"]["corporate_action_fractions"][0]["sleeves"][1]
+    row["fraction"] = "0.2786"  # the pro rata share, not the sleeve's own
+    row["charged_quantity"] = "-0.2786"
+    findings = _check(document)
+    assert _codes(findings) == {sp.CA_DISCLOSURE_DIFFERS}
+    assert {f.where.rsplit(".", 1)[-1] for f in findings} == {
+        "fraction",
+        "charged_quantity",
+    }
+    assert all("sleeves[s2]" in f.where for f in findings)
+
+
+def test_every_published_number_of_the_block_is_compared() -> None:
+    document = own_fraction_facts()
+    block = document["disclosures"]["corporate_action_fractions"][0]
+    block["closure"]["whole_total"] = "42"
+    block["action"]["new_quantity"] = "44"
+    block["execution"]["price"] = "4.8"
+    block["sleeves"][0]["cash_credited"] = "9"
+    block["sleeves"][0]["entitlement"] = "28"
+    names = {f.where.split("]", 1)[1] for f in _check(document)}
+    assert {
+        ".closure.whole_total",
+        ".action.new_quantity",
+        ".execution.price",
+        ".sleeves[s1].cash_credited",
+        ".sleeves[s1].entitlement",
+    } <= names
+
+
+def test_a_fraction_the_data_do_not_support_is_refused() -> None:
+    document = own_fraction_facts()
+    unsupported = json.loads(
+        json.dumps(document["disclosures"]["corporate_action_fractions"][0])
+    )
+    unsupported["day"] = "2026-02-09"
+    document["disclosures"]["corporate_action_fractions"].append(unsupported)
+    assert _codes(_check(document)) == {sp.CA_DISCLOSURE_UNSUPPORTED}
+
+
+def test_an_ordinary_untagged_sale_is_not_a_corporate_action_fraction() -> None:
+    other = [*trades()[:2], _trade(3, "2026-02-06", "", "-0.5", "4.7", "-0.036")]
+    assert sp.derive_fractions(own_fraction_facts(), other, tag_map(), catalog()) == []
+
+
+def test_the_data_that_break_the_closure_stop_the_derivation() -> None: with pytest.raises(sleeve_basis.Refusal) as caught: sp.derive_fractions( own_fraction_facts(), trades(), tag_map(), catalog(whole="44") ) assert caught.value.code == sp.SPLIT_WHOLE_CLOSURE # the sleeves hold more than the surrendered quantity: the pre-split closure fails extra = [*trades(), _trade(9, "2026-01-27", "9-AlphaModel", "10", "0.7", "0")] with pytest.raises(sleeve_basis.Refusal) as caught: sp.derive_fractions(own_fraction_facts(), extra, tag_map(), catalog()) assert caught.value.code == sp.SPLIT_PRE_QUANTITY # with no corporate action in the catalog there is nothing to apply the rule to assert ( sp.derive_fractions( own_fraction_facts(), trades(), tag_map(), catalog(action=False) ) == [] )
+
+
 # ------------------------------------------------------------------------ real bytes
 
 FACTS = os.environ.get("QE_AI624_R2_FACTS")
@@ -256,6 +411,42 @@ real = pytest.mark.skipif(
     not all(p and Path(p).exists() for p in (FACTS, TAGS, CATALOG, ROOT)),
     reason="the R2 facts, tag map, R2.1 catalog and IBKR root are not all set",
 )
+
+
+R22 = os.environ.get("QE_AI624_R22_FACTS")
+R21 = os.environ.get("QE_AI624_R21_FACTS")
+
+
+@real
+def test_the_rebuilt_facts_apply_the_rule_and_the_pro_rata_facts_do_not() -> None:
+    assert FACTS and TAGS and CATALOG and ROOT
+    if not (R22 and R21 and Path(R22).exists() and Path(R21).exists()):
+        pytest.skip("QE_AI624_R22_FACTS and QE_AI624_R21_FACTS are not set")
+    tag_map_ = json.loads(Path(TAGS).read_bytes())
+    catalog_ = json.loads(Path(CATALOG).read_bytes())
+    with ExitStack() as stack:
+        paths = sorted(
+            Path(ROOT).glob(
+                "cutover-recovery/legacy-original-*/AllAccounts_Accounting_XML_2026*.xml"
+            )
+        ) + sorted(Path(ROOT).glob("source-runs/flex-*/statement.xml"))
+        handles = [stack.enter_context(p.open("rb")) for p in paths]
+        executions = sleeve_bridge.read_flex_trades(handles, ACCOUNT)
+    own = json.loads(Path(R22).read_bytes())
+    assert (
+        sp.check_corporate_action_fractions(own, executions, tag_map_, catalog_) == []
+    )
+    derived = sp.derive_fractions(own, executions, tag_map_, catalog_)
+    assert [(f.day, f.symbol) for f in derived] == [(date(2026, 2, 6), "RLYB")]
+    for path in (R21, FACTS):
+        old = json.loads(Path(path).read_bytes())
+        codes = {
+            f.code
+            for f in sp.check_corporate_action_fractions(
+                old, executions, tag_map_, catalog_
+            )
+        }
+        assert codes == {sp.CA_PRO_RATA_USED, sp.CA_NOT_DISCLOSED, sp.CA_RESIDUE_LEFT}
 
 
 @real

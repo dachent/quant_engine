@@ -32,7 +32,7 @@ from decimal import ROUND_FLOOR, Decimal, localcontext
 from typing import Any
 
 from . import sleeve_bridge
-from .sleeve_basis import Refusal
+from .sleeve_basis import Finding, Refusal
 from .sleeve_bridge import FlexTrade
 
 PRECISION = 50
@@ -334,3 +334,407 @@ def _trade_price(trade: FlexTrade) -> Decimal:
     if trade.price is None:
         raise Refusal(SPLIT_TRADE_ABSENT, "the execution carries no price")
     return trade.price
+
+
+# ------------------------------------------------------------------------------------
+# The corporate-action cash-in-lieu rule, derived independently of the facts builder
+#
+# An untagged SELL of the security a corporate action delivered, within five ledger days
+# of the action, that several sleeves hold and that is the fractional part of the
+# account's aggregate entitlement, is charged to each sleeve by the fraction of its own
+# entitlement (held x new / old, less its whole shares).  ``derive_fractions`` finds every
+# such execution from the Flex executions, the tag map and the catalog's corporate-action
+# rows alone; ``check_corporate_action_fractions`` compares that with what the facts say.
+
+CA_NOT_DISCLOSED = "CA_FRACTION_NOT_DISCLOSED"
+CA_PRO_RATA_USED = "CA_PRO_RATA_USED"
+CA_DISCLOSURE_DIFFERS = "CA_DISCLOSURE_DIFFERS"
+CA_DISCLOSURE_UNSUPPORTED = "CA_DISCLOSURE_UNSUPPORTED"
+CA_RESIDUE_LEFT = "CA_RESIDUE_LEFT"
+CA_WINDOW_LEDGER_DAYS = 5
+CA_RULE = "OWN_FRACTIONAL_ENTITLEMENT"
+
+
+@dataclass(frozen=True)
+class DerivedSleeve:
+    sleeve_id: str
+    held: Decimal
+    entitlement: Decimal
+    whole: Decimal
+    fraction: Decimal
+    charged: Decimal  # signed, like the sale
+    cash: Decimal  # positive credit
+    commission: Decimal
+
+
+@dataclass(frozen=True)
+class DerivedFraction:
+    day: date
+    security_id: str
+    old_security_id: str
+    symbol: str
+    action_day: date
+    kind: str
+    old_quantity: Decimal
+    new_quantity: Decimal
+    sold: Decimal  # signed
+    price: Decimal
+    commission: Decimal
+    account_position: Decimal
+    sleeves: tuple[DerivedSleeve, ...]
+
+
+def _unique_actions(catalog: Mapping[str, Any], parent: str) -> list[Mapping[str, Any]]:
+    """The account's corporate-action rows, one per distinct date, kind, security, quantity."""
+
+    seen: set[tuple[str, str, str, Decimal]] = set()
+    rows: list[Mapping[str, Any]] = []
+    for row in catalog.get("corporate_actions", ()):
+        if not isinstance(row, Mapping) or row.get("account_id") != parent:
+            continue
+        key = (
+            str(row.get("event_date")),
+            str(row.get("kind")),
+            str(row.get("security_id")),
+            _dec(row.get("quantity"), "corporate action quantity"),
+        )
+        if key not in seen:
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def derive_fractions(
+    facts: Mapping[str, Any],
+    trades: Sequence[FlexTrade],
+    tag_map: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+) -> list[DerivedFraction]:
+    """Every cash-in-lieu execution the rule applies to, from the data alone."""
+
+    with localcontext() as context:
+        context.prec = PRECISION
+        return _derive_fractions(facts, trades, tag_map, catalog)
+
+
+def _derive_fractions(
+    facts: Mapping[str, Any],
+    trades: Sequence[FlexTrade],
+    tag_map: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+) -> list[DerivedFraction]:
+    parent = str(facts.get("parent_account_id"))
+    ledger_days = sorted(
+        str(item["day"])
+        for item in (facts.get("perimeter_account") or {}).get("days", ())
+        if isinstance(item, Mapping)
+    )
+    sleeve_ids = [
+        str(sleeve["sleeve_id"])
+        for entry in tag_map.get("parents", ())
+        if isinstance(entry, Mapping) and entry.get("parent_account_id") == parent
+        for sleeve in entry.get("sleeves", ())
+    ]
+    rules = {name: sleeve_bridge.sleeve_tag_rules(tag_map, name) for name in sleeve_ids}
+    actions = _unique_actions(catalog, parent)
+    symbols = {
+        str(row.get("security_id")): str(row.get("symbol"))
+        for row in catalog.get("positions", ())
+        if isinstance(row, Mapping) and row.get("symbol")
+    }
+    found: list[DerivedFraction] = []
+    for sale in trades:
+        if sale.quantity >= 0 or sleeve_bridge._TAG_STRIP.sub("", sale.order_reference):
+            continue
+        day = sale.day.isoformat()
+        for row in actions:
+            security = str(row.get("security_id"))
+            new_total = _dec(row.get("quantity"), "corporate action quantity")
+            if (
+                new_total <= 0
+                or symbols.get(security) != sale.symbol
+                or not str(row.get("event_date")) < day
+                or sum(1 for d in ledger_days if str(row.get("event_date")) < d <= day)
+                > CA_WINDOW_LEDGER_DAYS
+            ):
+                continue
+            fraction_sold = new_total - new_total.to_integral_value(
+                rounding=ROUND_FLOOR
+            )
+            if fraction_sold == 0 or abs(-sale.quantity - fraction_sold) > Decimal(
+                "1e-9"
+            ):
+                continue
+            pre: dict[str, Decimal] = {}
+            for name in sleeve_ids:
+                total = Decimal(0)
+                for item in trades:
+                    tag = sleeve_bridge._TAG_STRIP.sub("", item.order_reference)
+                    if (
+                        item.symbol == sale.symbol
+                        and tag
+                        and item.day < sale.day
+                        and any(
+                            sleeve_bridge._matches(tag, r) for r in rules[name]["tags"]
+                        )
+                    ):
+                        total += item.quantity
+                if total > 0:
+                    pre[name] = total
+            if len(pre) < 2:
+                continue
+            old_rows = [
+                other
+                for other in actions
+                if other.get("event_date") == row.get("event_date")
+                and other.get("kind") == row.get("kind")
+                and str(other.get("security_id")) != security
+                and _dec(other.get("quantity"), "corporate action quantity") < 0
+            ]
+            if len(old_rows) != 1:
+                raise Refusal(
+                    SPLIT_CORPORATE_ACTION,
+                    f"the action of {row.get('event_date')} names {len(old_rows)} "
+                    "surrendered securities",
+                )
+            old_total = -_dec(old_rows[0].get("quantity"), "corporate action quantity")
+            if sum(pre.values(), Decimal(0)) != old_total:
+                raise Refusal(
+                    SPLIT_PRE_QUANTITY,
+                    f"the sleeves' {sale.symbol} quantities {dict(pre)} do not sum to "
+                    f"the surrendered {old_total}",
+                )
+            ratio = new_total / old_total
+            entitled = {n: pre[n] * ratio for n in pre}
+            whole = {
+                n: entitled[n].to_integral_value(rounding=ROUND_FLOOR) for n in pre
+            }
+            own = {n: entitled[n] - whole[n] for n in pre}
+            if abs(sum(own.values(), Decimal(0)) - fraction_sold) > Decimal("1e-6"):
+                raise Refusal(
+                    SPLIT_ENTITLEMENT,
+                    f"the sleeves' fractions {sum(own.values(), Decimal(0))} do not add "
+                    f"to the {fraction_sold} sold",
+                )
+            position = [
+                _dec(p["quantity"], "position")
+                for p in catalog.get("positions", ())
+                if isinstance(p, Mapping)
+                and p.get("account_id") == parent
+                and p.get("security_id") == security
+                and p.get("as_of_date") == day
+            ]
+            if len(position) != 1 or sum(whole.values(), Decimal(0)) != position[0]:
+                raise Refusal(
+                    SPLIT_WHOLE_CLOSURE,
+                    f"whole shares {sum(whole.values(), Decimal(0))} are not the "
+                    f"account position {position}",
+                )
+            total_fraction = sum(own.values(), Decimal(0))
+            if sale.price is None:
+                raise Refusal(SPLIT_TRADE_ABSENT, "the execution carries no price")
+            found.append(
+                DerivedFraction(
+                    day=sale.day,
+                    security_id=security,
+                    old_security_id=str(old_rows[0].get("security_id")),
+                    symbol=sale.symbol,
+                    action_day=date.fromisoformat(str(row.get("event_date"))),
+                    kind=str(row.get("kind")),
+                    old_quantity=old_total,
+                    new_quantity=new_total,
+                    sold=sale.quantity,
+                    price=sale.price,
+                    commission=sale.commission,
+                    account_position=position[0],
+                    sleeves=tuple(
+                        DerivedSleeve(
+                            sleeve_id=n,
+                            held=pre[n],
+                            entitlement=entitled[n],
+                            whole=whole[n],
+                            fraction=own[n],
+                            charged=sale.quantity * own[n] / total_fraction,
+                            cash=-sale.quantity * own[n] / total_fraction * sale.price,
+                            commission=sale.commission * own[n] / total_fraction,
+                        )
+                        for n in sorted(pre)
+                        if own[n] != 0
+                    ),
+                )
+            )
+    return found
+
+
+def _same_number(left: Any, right: Decimal) -> bool:
+    try:
+        return abs(Decimal(str(left)) - right) <= Decimal("1e-9")
+    except ArithmeticError:
+        return False
+
+
+def check_corporate_action_fractions(
+    facts: Mapping[str, Any],
+    trades: Sequence[FlexTrade],
+    tag_map: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+) -> list[Finding]:
+    """Findings where the facts do not apply the rule as this derivation does."""
+
+    derived = derive_fractions(facts, trades, tag_map, catalog)
+    disclosures = facts.get("disclosures") or {}
+    found: list[Finding] = []
+    stated = {
+        (str(item.get("day")), str(item.get("security_id"))): item
+        for item in disclosures.get("corporate_action_fractions", ())
+        if isinstance(item, Mapping)
+    }
+    pro_rata = {
+        (str(item.get("day")), str(item.get("security_id")))
+        for item in disclosures.get("manual_assignments", ())
+        if isinstance(item, Mapping) and item.get("how") == "split"
+    }
+    residues = {
+        str(item.get("security_id"))
+        for item in disclosures.get("offsetting_residues", ())
+        if isinstance(item, Mapping)
+    }
+    keys = set()
+    for item in derived:
+        key = (item.day.isoformat(), item.security_id)
+        keys.add(key)
+        where = f"disclosures.corporate_action_fractions[{key[0]}|{key[1]}]"
+        if key in pro_rata:
+            found.append(
+                Finding(
+                    CA_PRO_RATA_USED,
+                    "disclosures.manual_assignments",
+                    CA_RULE,
+                    "split",
+                    "the facts split a corporate-action fraction pro rata by held "
+                    "quantity; each sleeve is charged its own fraction",
+                )
+            )
+        if item.security_id in residues:
+            found.append(
+                Finding(
+                    CA_RESIDUE_LEFT,
+                    "disclosures.offsetting_residues",
+                    None,
+                    item.security_id,
+                    "the corporate-action security leaves an offsetting residue: the "
+                    "sleeves do not hold whole shares",
+                )
+            )
+        entry = stated.get(key)
+        if entry is None:
+            found.append(
+                Finding(
+                    CA_NOT_DISCLOSED,
+                    where,
+                    CA_RULE,
+                    None,
+                    "the data hold a corporate-action fraction the facts do not "
+                    "disclose",
+                )
+            )
+            continue
+        action = entry.get("action") or {}
+        execution = entry.get("execution") or {}
+        closure = entry.get("closure") or {}
+        for name, derived_text, published_text in (
+            ("rule", CA_RULE, entry.get("rule")),
+            (
+                "action.event_date",
+                item.action_day.isoformat(),
+                action.get("event_date"),
+            ),
+            ("old_security_id", item.old_security_id, entry.get("old_security_id")),
+        ):
+            if derived_text != published_text:
+                found.append(
+                    Finding(
+                        CA_DISCLOSURE_DIFFERS,
+                        f"{where}.{name}",
+                        derived_text,
+                        published_text,
+                        f"{name} differs",
+                    )
+                )
+        total_whole = sum((s.whole for s in item.sleeves), Decimal(0))
+        total_fraction = sum((s.fraction for s in item.sleeves), Decimal(0))
+        for name, number, published in (
+            ("action.old_quantity", item.old_quantity, action.get("old_quantity")),
+            ("action.new_quantity", item.new_quantity, action.get("new_quantity")),
+            ("execution.quantity", item.sold, execution.get("quantity")),
+            ("execution.price", item.price, execution.get("price")),
+            ("execution.commission", item.commission, execution.get("commission")),
+            (
+                "closure.account_position",
+                item.account_position,
+                closure.get("account_position"),
+            ),
+            ("closure.whole_total", total_whole, closure.get("whole_total")),
+            ("closure.fraction_total", total_fraction, closure.get("fraction_total")),
+            ("closure.sold_quantity", -item.sold, closure.get("sold_quantity")),
+        ):
+            if not _same_number(published, number):
+                found.append(
+                    Finding(
+                        CA_DISCLOSURE_DIFFERS,
+                        f"{where}.{name}",
+                        number,
+                        published,
+                        f"{name} differs",
+                    )
+                )
+        published_sleeves = {
+            str(s.get("sleeve_id")): s
+            for s in entry.get("sleeves", ())
+            if isinstance(s, Mapping)
+        }
+        if set(published_sleeves) != {s.sleeve_id for s in item.sleeves}:
+            found.append(
+                Finding(
+                    CA_DISCLOSURE_DIFFERS,
+                    f"{where}.sleeves",
+                    sorted(s.sleeve_id for s in item.sleeves),
+                    sorted(published_sleeves),
+                    "the charged sleeves differ",
+                )
+            )
+        for sleeve in item.sleeves:
+            row = published_sleeves.get(sleeve.sleeve_id)
+            if row is None:
+                continue
+            for name, number, published in (
+                ("held_quantity", sleeve.held, row.get("held_quantity")),
+                ("entitlement", sleeve.entitlement, row.get("entitlement")),
+                ("whole_shares", sleeve.whole, row.get("whole_shares")),
+                ("fraction", sleeve.fraction, row.get("fraction")),
+                ("charged_quantity", sleeve.charged, row.get("charged_quantity")),
+                ("cash_credited", sleeve.cash, row.get("cash_credited")),
+                ("commission", sleeve.commission, row.get("commission")),
+            ):
+                if not _same_number(published, number):
+                    found.append(
+                        Finding(
+                            CA_DISCLOSURE_DIFFERS,
+                            f"{where}.sleeves[{sleeve.sleeve_id}].{name}",
+                            number,
+                            published,
+                            f"the sleeve's {name} differs from its own-fraction "
+                            "derivation",
+                        )
+                    )
+    for key in sorted(set(stated) - keys):
+        found.append(
+            Finding(
+                CA_DISCLOSURE_UNSUPPORTED,
+                f"disclosures.corporate_action_fractions[{key[0]}|{key[1]}]",
+                None,
+                CA_RULE,
+                "the facts disclose a corporate-action fraction the data do not support",
+            )
+        )
+    return found

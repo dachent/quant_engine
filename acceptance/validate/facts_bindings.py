@@ -38,6 +38,8 @@ BINDING_CATALOG = "BINDING_CATALOG"
 BINDING_PARENT_ACCOUNT = "BINDING_PARENT_ACCOUNT"
 BINDING_ACCOUNT_ROWS = "BINDING_ACCOUNT_ROWS"
 BINDING_TAG_MAP = "BINDING_TAG_MAP"
+BINDING_CORPORATE_ACTIONS = "BINDING_CORPORATE_ACTIONS"
+BINDING_OLD_SCHEMA = "BINDING_OLD_SCHEMA"
 MIN_CATALOG_SCHEMA = 7
 CATALOG_NAME = "ibkr-catalog.json"
 CATALOG_ARTIFACT = "normalized/ibkr-catalog.json"
@@ -172,8 +174,45 @@ def account_rows_sha256(
     return hashlib.sha256(canonical).hexdigest()
 
 
-def check_bindings(facts: Mapping[str, Any], sources: FactsSources | None) -> None:
-    """Refuse a facts file whose bindings are not those of the consumer's sources."""
+def corporate_actions_sha256(
+    catalog: Mapping[str, Any], parent: str, first_day: str, last_day: str
+) -> str:
+    """SHA-256 over the parent's corporate-action rows dated inside the window.
+
+    Every row of the account (a catalog repeats an action under two provider-account
+    scopes; both stay), in catalog order, ``first_day <= event_date <= last_day``,
+    serialised as canonical JSON (sorted keys, compact, ASCII).
+    """
+
+    rows = catalog.get("corporate_actions")
+    if not isinstance(rows, list):
+        raise Refusal(BINDING_CORPORATE_ACTIONS, "the catalog has no corporate_actions")
+    chosen = [
+        row
+        for row in rows
+        if isinstance(row, Mapping)
+        and row.get("account_id") == parent
+        and first_day <= _day(row.get("event_date"), "corporate action day") <= last_day
+    ]
+    return hashlib.sha256(
+        json.dumps(
+            chosen, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("ascii")
+    ).hexdigest()
+
+
+def check_bindings(
+    facts: Mapping[str, Any],
+    sources: FactsSources | None,
+    *,
+    regression_reference: bool = False,
+) -> None:
+    """Refuse a facts file whose bindings are not those of the consumer's sources.
+
+    A facts file without ``corporate_actions_sha256`` predates the corporate-action rule
+    (its fraction was split pro rata): it is refused as an old-schema file unless the
+    caller names it a regression reference.
+    """
 
     if sources is None:
         raise Refusal(
@@ -239,6 +278,23 @@ def check_bindings(facts: Mapping[str, Any], sources: FactsSources | None) -> No
             f"the facts bind account rows {bindings.get('account_rows_sha256')}; the "
             f"catalog's rows hash to {computed}",
         )
+    if "corporate_actions_sha256" not in bindings:
+        if not regression_reference:
+            raise Refusal(
+                BINDING_OLD_SCHEMA,
+                "the facts carry no corporate_actions_sha256: an old-schema facts file "
+                "that splits a corporate-action fraction pro rata (a regression "
+                "reference only)",
+            )
+    else:
+        actions = corporate_actions_sha256(catalog, parent, first, last)
+        if bindings.get("corporate_actions_sha256") != actions:
+            raise Refusal(
+                BINDING_CORPORATE_ACTIONS,
+                f"the facts bind corporate actions "
+                f"{bindings.get('corporate_actions_sha256')}; the catalog's rows hash "
+                f"to {actions}",
+            )
     if sources.tag_map_raw is None:
         raise Refusal(
             BINDING_MISSING_SIDE, "no tag map to bind the sleeve facts against"

@@ -4,7 +4,8 @@ SYNTHETIC cases (invented ledger, catalog, tag map); the real R2 / R2.1 files ar
 env-gated tests at the end:
 
 * ``QE_AI624_R2_FACTS``       the R2 oracle facts (binds scratch generation f65c8ddb)
-* ``QE_AI624_R21_FACTS``      the R2.1 rebuild from catalog 48e7db0e (facts sha 94973dc4)
+* ``QE_AI624_R22_FACTS``      branch S's rebuild (own fraction), the applicable facts
+* ``QE_AI624_R21_FACTS``      branch M's pro rata rebuild (facts sha 94973dc4), a regression reference
 * ``QE_AI624_R2_LEDGER``      provider-ledger.json of the R2 ledger (058f471a)
 * ``QE_AI624_R21_LEDGER``     provider-ledger.json of the R2.1 ledger (8c20b436)
 * ``QE_AI624_R2_IBKR_ROOT``   the dataIBKR root
@@ -185,6 +186,56 @@ def test_a_generation_directory_is_read_only_when_it_is_what_the_ledger_says(
     assert "differs from its generation manifest" in caught.value.message
 
 
+def test_the_corporate_action_rows_are_bound_by_their_own_digest() -> None:
+    expected = synth.bound_facts()["bindings"]["corporate_actions_sha256"]
+    assert (
+        fb.corporate_actions_sha256(
+            synth.catalog(), synth.PARENT, synth.FIRST, synth.LAST
+        )
+        == expected
+    )
+    # one changed row, or a row moved into the window, changes the digest
+    changed = synth.catalog()
+    changed["corporate_actions"][0]["kind"] = "SD"
+    error = _refused(
+        synth.bound_facts(), _sources(catalog_raw=json.dumps(changed).encode())
+    )
+    assert error.code == fb.BINDING_CORPORATE_ACTIONS
+    moved = synth.catalog()
+    moved["corporate_actions"][1]["event_date"] = "2026-02-04"
+    assert (
+        _refused(
+            synth.bound_facts(), _sources(catalog_raw=json.dumps(moved).encode())
+        ).code
+        == fb.BINDING_CORPORATE_ACTIONS
+    )
+
+
+def test_a_facts_file_without_the_corporate_action_binding_is_an_old_schema_file() -> (
+    None
+):
+    facts = synth.bound_facts()
+    del facts["bindings"]["corporate_actions_sha256"]
+    error = _refused(facts, synth.sources())
+    assert error.code == fb.BINDING_OLD_SCHEMA
+    assert "pro rata" in error.message
+    # unless it is explicitly treated as a regression reference
+    fb.check_bindings(facts, synth.sources(), regression_reference=True)
+    # a regression reference is still bound to everything else
+    facts["bindings"]["tag_map_sha256"] = "0" * 64
+    with pytest.raises(sleeve_basis.Refusal) as caught:
+        fb.check_bindings(facts, synth.sources(), regression_reference=True)
+    assert caught.value.code == fb.BINDING_TAG_MAP
+
+
+def test_the_check_names_the_old_schema_file() -> None:
+    facts = synth.bound_facts()
+    del facts["bindings"]["corporate_actions_sha256"]
+    findings = list(checks.check_sleeve_basis(_context(facts, synth.sources())))
+    assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
+    assert fb.BINDING_OLD_SCHEMA in findings[0].message
+
+
 # ----------------------------------------------------------- through the validator check
 
 
@@ -233,6 +284,7 @@ def _env(name: str) -> Path | None:
 
 
 R2_FACTS, R21_FACTS = _env("QE_AI624_R2_FACTS"), _env("QE_AI624_R21_FACTS")
+R22_FACTS = _env("QE_AI624_R22_FACTS")
 R2_LEDGER, R21_LEDGER = _env("QE_AI624_R2_LEDGER"), _env("QE_AI624_R21_LEDGER")
 IBKR_ROOT, R2_TAG_MAP = _env("QE_AI624_R2_IBKR_ROOT"), _env("QE_AI624_R2_TAG_MAP")
 real = pytest.mark.skipif(
@@ -243,17 +295,34 @@ real = pytest.mark.skipif(
 )
 
 
-def _bind(facts_path: Path, ledger_path: Path, tag_map: Path) -> None:
+def _bind(
+    facts_path: Path, ledger_path: Path, tag_map: Path, *, reference: bool = False
+) -> None:
     facts = json.loads(facts_path.read_bytes())
     ledger = json.loads(ledger_path.read_bytes())
     sources = fb.load_sources(ledger, facts, IBKR_ROOT, tag_map)
-    fb.check_bindings(facts, sources)
+    fb.check_bindings(facts, sources, regression_reference=reference)
 
 
 @real
-def test_the_r21_rebuild_binds_to_the_r21_ledger() -> None:
+def test_the_own_fraction_rebuild_binds_to_the_r21_ledger() -> None:
+    """Branch S's facts: all six bindings, the corporate-action digest recomputed here."""
+
+    assert R22_FACTS and R21_LEDGER
+    _bind(R22_FACTS, R21_LEDGER, REPO_TAG_MAP)
+    facts = json.loads(R22_FACTS.read_bytes())
+    assert facts["bindings"]["corporate_actions_sha256"].startswith("07de8075")
+
+
+@real
+def test_the_pro_rata_rebuild_is_an_old_schema_file_unless_a_regression_reference() -> (
+    None
+):
     assert R21_FACTS and R21_LEDGER
-    _bind(R21_FACTS, R21_LEDGER, REPO_TAG_MAP)
+    with pytest.raises(sleeve_basis.Refusal) as caught:
+        _bind(R21_FACTS, R21_LEDGER, REPO_TAG_MAP)
+    assert caught.value.code == fb.BINDING_OLD_SCHEMA
+    _bind(R21_FACTS, R21_LEDGER, REPO_TAG_MAP, reference=True)
 
 
 @real
@@ -267,15 +336,15 @@ def test_the_r2_oracle_file_is_refused_against_both_ledgers() -> None:
 
 
 @real
-def test_the_r21_rebuild_is_refused_against_the_r2_ledger_and_the_oracle_tag_map() -> (
+def test_the_own_fraction_rebuild_is_refused_against_the_r2_ledger_and_the_oracle_tag_map() -> (
     None
 ):
-    assert R21_FACTS and R2_LEDGER and R21_LEDGER and R2_TAG_MAP
+    assert R22_FACTS and R2_LEDGER and R21_LEDGER and R2_TAG_MAP
     with pytest.raises(sleeve_basis.Refusal) as caught:
-        _bind(R21_FACTS, R2_LEDGER, REPO_TAG_MAP)
+        _bind(R22_FACTS, R2_LEDGER, REPO_TAG_MAP)
     assert caught.value.code == fb.BINDING_LEDGER_GENERATION
     with pytest.raises(sleeve_basis.Refusal) as caught:
-        _bind(R21_FACTS, R21_LEDGER, R2_TAG_MAP)
+        _bind(R22_FACTS, R21_LEDGER, R2_TAG_MAP)
     assert caught.value.code == fb.BINDING_TAG_MAP
 
 
@@ -307,3 +376,23 @@ def test_the_committed_tag_map_is_the_one_map_of_the_r21_lineage() -> None:
     raw = REPO_TAG_MAP.read_bytes()
     assert hashlib.sha256(raw).hexdigest().startswith("10befe29")
     assert fb.tag_map_sha256(raw).startswith("b1cfa8e8")
+
+
+@real
+def test_the_r2_oracle_is_an_old_schema_file_even_when_its_generation_is_corrected() -> (
+    None
+):
+    """Content-equal to the R2 ledger's catalog, yet it lacks the corporate-action binding."""
+
+    assert R2_FACTS and R2_LEDGER and R2_TAG_MAP
+    facts = json.loads(R2_FACTS.read_bytes())
+    ledger = json.loads(R2_LEDGER.read_bytes())
+    facts["bindings"]["parent_ledger_generation_id"] = fb.ledger_provider_generation(
+        ledger, "ibkr"
+    )
+    sources = fb.load_sources(ledger, facts, IBKR_ROOT, R2_TAG_MAP)
+    with pytest.raises(sleeve_basis.Refusal) as caught:
+        fb.check_bindings(facts, sources)
+    assert caught.value.code == fb.BINDING_OLD_SCHEMA
+    # explicitly a regression reference (with its own draft tag map), it binds
+    fb.check_bindings(facts, sources, regression_reference=True)
