@@ -305,3 +305,160 @@ def test_strategy_rows_open_where_their_manifest_rows_open(
             assert row["twr_annualised"] == row["account_live_cagr"]
         checked += 1
     assert checked
+
+
+@pytest.mark.parametrize(
+    ("days", "annualised", "basis", "short"),
+    [
+        (364, False, "ANNUALISED_FROM_DAYS", True),
+        (365, True, "ANNUALISED", False),
+        (366, True, "ANNUALISED", False),
+    ],
+)
+def test_the_window_boundary_is_measured_from_the_opening_nav_date(
+    reporter: Any, days: int, annualised: bool, basis: str, short: bool
+) -> None:
+    """364 days is short, 365 and 366 are not: counted from the opening NAV, not the first return."""
+
+    end = date(2026, 9, 17)
+    opening = end - timedelta(days=days)
+    first_return = opening + timedelta(days=1)  # one day later: 363 / 364 / 365 days
+    row = {
+        "strategy_id": "alpha",
+        "account_live_observed_start": first_return.isoformat(),
+        "account_live_observed_end": end.isoformat(),
+        "account_live_cumulative_return": "0.2",
+        "account_live_cagr": "0.2",
+        "account_live_return_observations": 100,
+    }
+    fields = reporter._strategy_period_fields(row, None, opening.isoformat())
+    assert fields["window_days"] == days
+    assert fields["return_window_start"] == opening.isoformat()
+    assert (fields["twr_annualised"] is not None) is annualised
+    assert fields["annualisation_basis"]["account_live_cagr"]["reported_basis"] == basis
+    assert fields["annualisation_basis"]["twr"]["window_days"] == days
+    label = reporter._account_annualization_labels(row, opening.isoformat())[
+        "account_live_cagr_annualization"
+    ]
+    assert label["window_days"] == days
+    assert label["short_window"] is short
+
+
+def test_a_weekend_gap_opening_date_is_taken_as_given_not_first_return_minus_one(
+    reporter: Any,
+) -> None:
+    friday, monday = date(2025, 9, 19), date(2025, 9, 22)
+    assert friday.weekday() == 4 and monday.weekday() == 0
+    end = date(2026, 9, 18)
+    row = {
+        "strategy_id": "alpha",
+        "account_live_observed_start": monday.isoformat(),
+        "account_live_observed_end": end.isoformat(),
+        "account_live_cumulative_return": "0.2",
+    }
+    fields = reporter._strategy_period_fields(row, None, friday.isoformat())
+    assert fields["return_window_start"] == "2025-09-19"
+    assert fields["window_days"] == (end - friday).days == 364
+    # the proxy "first return minus one day" would say Sunday and 362 days
+    assert (end - (monday - timedelta(days=1))).days == 362
+
+
+def _ledger_world(
+    tmp_path: Path, anchors: list[dict[str, Any]]
+) -> tuple[dict[str, Any], Path]:
+    """A baseline-shaped catalog (no capital_anchors) bound to a provider ledger on disk."""
+
+    import hashlib
+    import json
+
+    ledger_root = tmp_path / "provider-ledger"
+    generation = ledger_root / "generations" / ("a" * 64)
+    generation.mkdir(parents=True)
+    raw = json.dumps({"capital_anchors": anchors}).encode("utf-8")
+    (generation / "provider-ledger.json").write_bytes(raw)
+    catalog = {
+        "source_artifacts": [
+            {
+                "source_key": "provider-ledger-generation",
+                "schema_name": "provider-ledger-catalog",
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        ]
+    }
+    return catalog, ledger_root
+
+
+def _anchor(strategy: str, recognised: str) -> dict[str, Any]:
+    return {
+        "strategy_id": strategy,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "nav_recognition_date": recognised,
+    }
+
+
+def _sleeve_only_performance(
+    strategy: str, sleeve_opening: str
+) -> list[dict[str, Any]]:
+    # the only epoch row of the strategy is a sleeve that opens AFTER the path's first return
+    return [
+        {
+            "strategy_id": strategy,
+            "return_window_start": sleeve_opening,
+            "annualisation_basis": {},
+        }
+    ]
+
+
+def test_a_sleeve_only_strategy_opens_at_the_ledger_anchor_in_the_real_shape(
+    reporter: Any, era: None, tmp_path: Path
+) -> None:
+    """Real shape: the baseline catalog has no capital_anchors; the bound ledger does."""
+
+    catalog, ledger_root = _ledger_world(
+        tmp_path,
+        [_anchor("p123-ai-factor", "2026-01-21"), _anchor("other", "2020-01-01")],
+    )
+    assert "capital_anchors" not in catalog
+    performance = _sleeve_only_performance("p123-ai-factor", "2026-01-30")
+    opening_catalog = reporter._with_ledger_opening_anchors(
+        catalog, performance, tmp_path, ledger_root
+    )
+    row = _row("p123-ai-factor", "2026-01-22", "2026-01-30")
+    assert (
+        reporter._row_opening_nav_date(row, opening_catalog, performance)
+        == "2026-01-21"
+    )
+    fields = reporter._strategy_period_fields(row, None, "2026-01-21")
+    assert fields["window_days"] == (date(2026, 9, 17) - date(2026, 1, 21)).days == 239
+    # the sleeve's own MWR window keeps the sleeve opening
+    assert (date(2026, 9, 17) - date.fromisoformat(row["mwr_opening_date"])).days == 230
+
+
+def test_without_the_ledger_a_sleeve_only_strategy_fails_closed_naming_it(
+    reporter: Any, era: None, tmp_path: Path
+) -> None:
+    performance = _sleeve_only_performance("p123-ai-factor", "2026-01-30")
+    # a catalog bound to no readable ledger: nothing governs an earlier opening
+    opening_catalog = reporter._with_ledger_opening_anchors(
+        {}, performance, tmp_path, tmp_path / "missing"
+    )
+    row = _row("p123-ai-factor", "2026-01-22", "2026-01-30")
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="p123-ai-factor has no opening NAV date before its first return 2026-01-22",
+    ):
+        reporter._row_opening_nav_date(row, opening_catalog, performance)
+
+
+def test_a_ledger_without_the_strategys_anchor_fails_closed_naming_it(
+    reporter: Any, era: None, tmp_path: Path
+) -> None:
+    catalog, ledger_root = _ledger_world(tmp_path, [_anchor("other", "2020-01-01")])
+    performance = _sleeve_only_performance("p123-ai-factor", "2026-01-30")
+    opening_catalog = reporter._with_ledger_opening_anchors(
+        catalog, performance, tmp_path, ledger_root
+    )
+    row = _row("p123-ai-factor", "2026-01-22", "2026-01-30")
+    with pytest.raises(reporter.ReportValidationError, match="p123-ai-factor"):
+        reporter._row_opening_nav_date(row, opening_catalog, performance)

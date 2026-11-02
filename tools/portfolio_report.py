@@ -4950,6 +4950,37 @@ def _opening_nav_date(
     return max(candidates).isoformat() if candidates else None
 
 
+def _with_ledger_opening_anchors(
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+) -> Mapping[str, Any]:
+    """The catalog with the provider ledger's capital anchors, for opening NAV dates.
+
+    The baseline catalog does not carry ``capital_anchors``; they are read from the
+    provider-ledger generation the baseline is bound to (the hash-bound catalog
+    ``_selected_provider_ledger_catalog`` selects), so a strategy whose opening anchor
+    predates its only epoch row (a sleeve) still opens at the ledger anchor. Outside
+    the version-5 era, or with no readable ledger, the catalog is returned as given and
+    ``_canonical_opening_nav_date`` fails closed where an opening date is needed.
+    """
+
+    if "capital_anchors" in catalog or not _period_returns_era(catalog, performance):
+        return catalog
+    try:
+        provider_catalog = _selected_provider_ledger_catalog(
+            catalog, baseline_root, provider_ledger_root
+        )[1]
+    except ReportValidationError:
+        return catalog
+    anchors = provider_catalog.get("capital_anchors")
+    return {
+        **catalog,
+        "capital_anchors": list(anchors) if isinstance(anchors, list) else [],
+    }
+
+
 def _canonical_opening_nav_date(
     strategy_id: str,
     first_return: object,
@@ -9924,8 +9955,11 @@ def build_report_data(
         implementation_reconciliation_path,
         implementation_return_attribution_path,
     )
+    opening_catalog = _with_ledger_opening_anchors(
+        catalog, performance, baseline_root, provider_ledger_root
+    )
     strategy_summary = _strategies(
-        catalog,
+        opening_catalog,
         performance,
         history_contract,
         implementation_contract,
@@ -9998,7 +10032,7 @@ def build_report_data(
                 **row,
                 **_account_annualization_labels(
                     row,
-                    _row_opening_nav_date(row, catalog, performance),
+                    _row_opening_nav_date(row, opening_catalog, performance),
                 ),
             }
             for row in strategy_summary
@@ -10026,7 +10060,7 @@ def build_report_data(
                     if row.get("account_live_return_authority")
                     == "CANONICAL_STRATEGY_RETURNS"
                     else None,
-                    _row_opening_nav_date(row, catalog, performance),
+                    _row_opening_nav_date(row, opening_catalog, performance),
                 ),
                 "benchmark_comparison_window": _label_window(
                     row.get("benchmark_annualization")
