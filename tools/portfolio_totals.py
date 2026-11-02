@@ -441,6 +441,69 @@ def perimeter_remainder(
         }
 
 
+PERIMETER_RESTATEMENT_LABEL: Final = (
+    "Strategies valued on their own sleeve (gross sleeve NAV) instead of the whole parent "
+    "account: the amount is the sleeve value minus the parent account value the strategy "
+    "carried before the restatement, i.e. the account's unallocated cash and margin that "
+    "the sleeve NAV does not include. It is not a remainder: the governed perimeter now "
+    "equals the open epochs."
+)
+
+
+def perimeter_restatement(
+    account_basis: Mapping[str, Any] | None,
+    restated: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The memo that keeps the parent-account perimeter value visible after a restatement.
+
+    ``account_basis`` and ``restated`` are two ``custody_current_capital`` blocks, the
+    one built from the unrestated catalog and the one the report publishes.  Each
+    strategy whose systematic value differs is a line; None when nothing differs.
+    """
+
+    if not isinstance(account_basis, Mapping) or not isinstance(restated, Mapping):
+        return None
+
+    def values(block: Mapping[str, Any]) -> dict[str, Decimal]:
+        found: dict[str, Decimal] = {}
+        for item in block.get("strategies") or []:
+            value = item.get("current_value") if isinstance(item, Mapping) else None
+            if (
+                isinstance(item, Mapping)
+                and item.get("scope") == "SYSTEMATIC"
+                and isinstance(value, Mapping)
+                and value.get("status") == "AVAILABLE"
+            ):
+                found[str(item.get("strategy_id"))] = _decimal(
+                    value.get("value"), "custody current value"
+                )
+        return found
+
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION
+        before, after = values(account_basis), values(restated)
+        lines = [
+            {
+                "strategy_id": strategy,
+                "account_basis_value_usd": _text(before[strategy]),
+                "sleeve_value_usd": _text(after[strategy]),
+                "difference_usd": _text(after[strategy] - before[strategy]),
+            }
+            for strategy in sorted(set(before) & set(after))
+            if abs(after[strategy] - before[strategy]) > PERIMETER_TOLERANCE
+        ]
+        if not lines:
+            return None
+        return {
+            "label": PERIMETER_RESTATEMENT_LABEL,
+            "lines": lines,
+            "difference_usd": _text(
+                sum((Decimal(line["difference_usd"]) for line in lines), Decimal(0))
+            ),
+            "in_difference_usd": False,
+        }
+
+
 EPOCH_SET_NOTE: Final = (
     "report_epochs are the governed epochs the report's totals use; "
     "outside_report_epochs are the remaining epoch-manifest rows (closed sleeves of "
@@ -512,6 +575,7 @@ def build_capital_reconciliation(
     cutoff: str,
     perimeter_remainder_memo: Mapping[str, Any] | None = None,
     manifest_rows: Sequence[Mapping[str, Any]] | None = None,
+    perimeter_restatement_memo: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Name every dollar between derived total net capital and governed capital."""
 
@@ -729,6 +793,11 @@ def build_capital_reconciliation(
                     if perimeter_remainder_memo is not None
                     else {}
                 ),
+                **(
+                    {"perimeter_restatement": dict(perimeter_restatement_memo)}
+                    if perimeter_restatement_memo is not None
+                    else {}
+                ),
                 "open_epoch_scope": {
                     "rule": "WINDOW_ENDS_AT_THE_CUTOFF",
                     "closed_epoch_count": len(closed_at_cutoff),
@@ -760,6 +829,7 @@ def build_portfolio_totals(
     calculation_cutoff_date: str | None,
     custody_current_capital: Mapping[str, Any] | None = None,
     manifest_rows: Sequence[Mapping[str, Any]] | None = None,
+    perimeter_restatement_memo: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The three report blocks, or nothing when no epoch manifest or capital exists."""
 
@@ -803,5 +873,6 @@ def build_portfolio_totals(
             calculation_cutoff_date,
             remainder,
             manifest_rows,
+            perimeter_restatement_memo,
         ),
     }

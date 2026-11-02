@@ -665,3 +665,94 @@ def test_the_verifier_agrees_with_the_named_gap_and_rejects_each_tampering() -> 
         mutate(broken)
         with pytest.raises(verify.PortfolioTotalsVerificationError):
             verify.verify_portfolio_totals(broken, manifest, crosswalk)
+
+
+def _custody(values: dict[str, Decimal]) -> dict[str, Any]:
+    return {
+        "strategies": [
+            {
+                "strategy_id": strategy,
+                "scope": "SYSTEMATIC",
+                "status": "AVAILABLE",
+                "current_value": {"status": "AVAILABLE", "value": str(value)},
+            }
+            for strategy, value in sorted(values.items())
+        ]
+    }
+
+
+def _restated_case() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """The mismatch case after S3 is restated onto its sleeve: perimeter equals the epochs."""
+
+    case = _case()
+    open_by_strategy: dict[str, Decimal] = {}
+    for row in case["rows"]:
+        if row["end"] == CUTOFF:
+            open_by_strategy[row["strategy_id"]] = open_by_strategy.get(
+                row["strategy_id"], Decimal(0)
+            ) + Decimal(row["current_value"])
+    account_basis = {**open_by_strategy, "S3": open_by_strategy["S3"] - Decimal(200)}
+    restated = _custody(open_by_strategy)
+    perimeter = sum(open_by_strategy.values(), Decimal(0))
+    memo = totals.perimeter_restatement(_custody(account_basis), restated)
+    published = totals.build_portfolio_totals(
+        rows=case["rows"],
+        invested_capital=case["capital"],
+        governed_hwm_proof=_proof(),
+        hwm_summary={"governed_perimeter_value_usd": str(perimeter)},
+        calculation_cutoff_date=CUTOFF,
+        custody_current_capital=restated,
+        manifest_rows=_manifest_rows(case),
+        perimeter_restatement_memo=memo,
+    )
+    report, manifest, crosswalk = _verification_inputs(case)
+    report.update(published)
+    report["hwm_summary"] = {"governed_perimeter_value_usd": str(perimeter)}
+    report["custody_current_capital"] = restated
+    return report, manifest, crosswalk
+
+
+def test_a_restated_perimeter_has_no_remainder_and_the_account_value_stays_in_the_memo() -> (
+    None
+):
+    report, manifest, crosswalk = _restated_case()
+    memo = report["capital_reconciliation"]["memo"]
+    assert "perimeter_remainder" not in memo
+    assert report["portfolio_mwr_annualised"]["status"] == "AVAILABLE"
+    line = memo["perimeter_restatement"]["lines"]
+    assert [item["strategy_id"] for item in line] == ["S3"]
+    assert Decimal(line[0]["difference_usd"]) == Decimal(200)
+    assert Decimal(line[0]["sleeve_value_usd"]) - Decimal(
+        line[0]["account_basis_value_usd"]
+    ) == Decimal(200)
+    assert memo["perimeter_restatement"]["in_difference_usd"] is False
+    assert report["capital_reconciliation"]["residual_usd"] == "0"
+    verify.verify_portfolio_totals(report, manifest, crosswalk)
+
+
+def test_no_restatement_memo_without_a_value_difference() -> None:
+    same = _custody({"S1": Decimal(5)})
+    assert totals.perimeter_restatement(same, same) is None
+    assert totals.perimeter_restatement(None, same) is None
+
+
+def test_the_verifier_rejects_a_forged_restatement_memo() -> None:
+    report, manifest, crosswalk = _restated_case()
+    for mutate in (
+        lambda r: r["capital_reconciliation"]["memo"]["perimeter_restatement"]["lines"][
+            0
+        ].update(sleeve_value_usd="1"),
+        lambda r: r["capital_reconciliation"]["memo"]["perimeter_restatement"]["lines"][
+            0
+        ].update(difference_usd="199"),
+        lambda r: r["capital_reconciliation"]["memo"]["perimeter_restatement"].update(
+            difference_usd="199"
+        ),
+        lambda r: r["capital_reconciliation"]["memo"]["perimeter_restatement"][
+            "lines"
+        ].clear(),
+    ):
+        broken = deepcopy(report)
+        mutate(broken)
+        with pytest.raises(verify.PortfolioTotalsVerificationError):
+            verify.verify_portfolio_totals(broken, manifest, crosswalk)

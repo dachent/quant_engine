@@ -6,13 +6,13 @@ parent account with the current sleeve s2 (strategy-1) and a retired sleeve s1.
 
 from __future__ import annotations
 
+from decimal import Decimal
 import hashlib
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from decimal import Decimal
 
 from nested_strategy_tag_map import validate_tag_map
 from sleeve_facts_fixture import build_facts
@@ -159,3 +159,103 @@ def test_a_malformed_declaration_is_refused(
             tag_map=_tag_map(),
             strategy_basis={"schema": "other/1", "strategies": []},
         )
+
+
+def test_the_recorded_allocation_rows_of_a_restated_strategy_are_labelled(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    off = _build(full, tmp_path, monkeypatch, tag_map=_tag_map())
+    on = _build(
+        full, tmp_path, monkeypatch, tag_map=_tag_map(), strategy_basis=DECLARATION
+    )
+    assert all("value_basis" not in row for row in off["allocation_history"])
+    mine = [r for r in on["allocation_history"] if r.get("strategy_id") == "strategy-1"]
+    assert mine and all(
+        r["value_basis"]["basis"] == "RECORDED_SNAPSHOT_PARENT_ACCOUNT"
+        and r["value_basis"]["recorded_in_account_id"] == "account-a"
+        for r in mine
+    )
+    others = [
+        r for r in on["allocation_history"] if r.get("strategy_id") != "strategy-1"
+    ]
+    assert all("value_basis" not in r for r in others)
+    # the recorded figures themselves are what the switch-off report publishes
+    by_key = {
+        (r["as_of_date"], r["allocation_id"]): r for r in off["allocation_history"]
+    }
+    for row in on["allocation_history"]:
+        before = by_key[(row["as_of_date"], row["allocation_id"])]
+        assert {k: v for k, v in row.items() if k != "value_basis"} == before
+
+
+def test_account_basis_returns_are_read_from_the_account_block_only() -> None:
+    import portfolio_report
+
+    report = {
+        "account_summary": [
+            {"account_id": "a"},
+            {
+                "account_id": "b",
+                "account_basis": {
+                    "strategy_id": "s",
+                    "figures": {"account_live_cumulative_return": "0.0245"},
+                },
+            },
+        ]
+    }
+    assert portfolio_report._account_basis_returns(report) == {"s": Decimal("0.0245")}
+    assert portfolio_report._account_basis_returns({}) == {}
+
+
+def test_apply_return_scope_states_the_cost_rate_basis_of_a_restated_row() -> None:
+    import portfolio_report
+    import strategy_basis
+
+    links = [
+        {
+            "start_date": "2026-07-02",
+            "end_date": "2026-07-03",
+            "factor": "1.02",
+            "ending_nav": "102",
+        }
+    ]
+    restatement = strategy_basis.sleeve_restatement(
+        strategy_id="s",
+        account_id="acct-s2",
+        parent_account_id="acct",
+        provider_id="p",
+        links=links,
+    )
+
+    def item(**extra: Any) -> dict[str, Any]:
+        return {
+            "strategy_id": "s",
+            "annual_external_cost_usd": "6",
+            "cost_rate_denominator_usd": "102",
+            "annual_external_cost_rate_pre_tax": "0.0588",
+            "cost_rate_reason": None,
+            **extra,
+        }
+
+    rows = [{"account_id": "acct-s2", "strategy_id": "s", "effective_end": None}]
+    report = {"strategy_summary": [item()]}
+    portfolio_report._apply_return_scope(
+        report,
+        rows,
+        {"acct-s2": "acct"},
+        ["s"],
+        {"s": restatement},
+        account_basis_values={"s": Decimal("60")},
+    )
+    reason = report["strategy_summary"][0]["cost_rate_reason"]
+    assert "gross sleeve value 102.00" in reason
+    assert "60.00 the same amount is 10.0000%" in reason
+    # switched off, or without a published rate, the reason is untouched
+    off = {"strategy_summary": [item()]}
+    portfolio_report._apply_return_scope(off, rows, {"acct-s2": "acct"}, ["s"])
+    assert off["strategy_summary"][0]["cost_rate_reason"] is None
+    none = {"strategy_summary": [item(annual_external_cost_rate_pre_tax=None)]}
+    portfolio_report._apply_return_scope(
+        none, rows, {"acct-s2": "acct"}, ["s"], {"s": restatement}
+    )
+    assert none["strategy_summary"][0]["cost_rate_reason"] is None

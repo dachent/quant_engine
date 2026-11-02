@@ -7933,6 +7933,69 @@ def _report_return_window(
     }
 
 
+def _restated_account_lanes(
+    strategies: Sequence[Mapping[str, Any]],
+    accounts: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """The labelled parent-account lane of every strategy row restated onto its sleeve.
+
+    A restated row carries ``return_scope.account_basis_ref`` (report side, #624): the
+    account and the series hash its account-basis figures stand on.  The figures
+    themselves are the account row's ``account_basis`` block.  A row that carries no
+    reference has no second lane (nothing is added for it); a reference the account rows
+    cannot resolve to the same series hash fails closed.
+    """
+
+    lanes: dict[str, dict[str, Any]] = {}
+    for strategy in strategies:
+        scope = strategy.get("return_scope")
+        reference = (
+            scope.get("account_basis_ref") if isinstance(scope, Mapping) else None
+        )
+        if not isinstance(reference, Mapping):
+            continue
+        strategy_id = _text(strategy.get("strategy_id"), "restated strategy_id")
+        block = next(
+            (
+                row.get("account_basis")
+                for row in accounts
+                if row.get("account_id") == reference.get("account_id")
+                and isinstance(row.get("account_basis"), Mapping)
+            ),
+            None,
+        )
+        if not isinstance(block, Mapping):
+            raise ControlPanelValidationError(
+                f"restated strategy has no account basis block: {strategy_id}"
+            )
+        series = _object(block.get("series"), "account basis series")
+        if (
+            series.get("sha256") != reference.get("series_sha256")
+            or block.get("strategy_id") != strategy_id
+        ):
+            raise ControlPanelValidationError(
+                f"restated strategy account basis differs from its reference: {strategy_id}"
+            )
+        figures = _object(block.get("figures"), "account basis figures")
+        window = _object(block.get("window"), "account basis window")
+        lanes[strategy_id] = {
+            "label": _text(block.get("label"), "account basis label"),
+            "basis": block.get("basis"),
+            "account_id": block.get("account_id"),
+            "observed_start": window.get("start"),
+            "observed_end": window.get("end"),
+            "observations": block.get("observations"),
+            "series_sha256": series.get("sha256"),
+            "cumulative_return": figures.get("account_live_cumulative_return"),
+            "max_drawdown": figures.get("account_live_max_drawdown"),
+            "current_drawdown": figures.get("hwm_current_drawdown"),
+            "current_value_usd": figures.get("current_value_usd"),
+            "systematic_weight": figures.get("systematic_weight"),
+            "block": reference.get("block"),
+        }
+    return lanes
+
+
 def _canonical_strategy_series_contracts(
     evidence_by_strategy: Mapping[str, Mapping[str, Any]],
     strategy_names: Mapping[str, str],
@@ -7941,6 +8004,7 @@ def _canonical_strategy_series_contracts(
     weekly_returns: Mapping[str, Any],
     report_strategy_returns: Sequence[Mapping[str, Any]],
     dependence_strategy_names: set[str] | None = None,
+    account_lanes: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Prove that every analytical view consumed the canonical live path."""
 
@@ -8191,6 +8255,24 @@ def _canonical_strategy_series_contracts(
                 "factor_window_observed_start": factor_observed_start,
                 "factor_window_return_observations": factor_observations,
                 "factor_window_series_sha256": factor_series_sha256,
+                # a restated strategy keeps its parent-account series visible, labelled
+                **(
+                    {
+                        "account_basis": {
+                            key: account_lanes[strategy_id][key]
+                            for key in (
+                                "label",
+                                "account_id",
+                                "observed_start",
+                                "observed_end",
+                                "observations",
+                                "series_sha256",
+                            )
+                        }
+                    }
+                    if account_lanes is not None and strategy_id in account_lanes
+                    else {}
+                ),
             }
         )
     return contracts
@@ -8906,6 +8988,7 @@ def _strategy_underwriting(
     *,
     performance_lineage_available: bool = True,
     implementation_contracts: Mapping[str, Mapping[str, Any] | None] | None = None,
+    account_lanes: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Compose an advisory evidence ledger without creating new fact authority."""
 
@@ -9110,6 +9193,18 @@ def _strategy_underwriting(
                 cluster.get("observed_pair_correlation_maximum") if cluster else None
             ),
             "strategy_systematic_weight": strategy.get("systematic_weight"),
+            **(
+                {
+                    "strategy_systematic_weight_account_basis": account_lanes[
+                        strategy_id
+                    ]["systematic_weight"],
+                    "strategy_weight_account_basis_label": account_lanes[strategy_id][
+                        "label"
+                    ],
+                }
+                if account_lanes is not None and strategy_id in account_lanes
+                else {}
+            ),
             # The two weights come from two sets: the strategy's current cutoff weight
             # and the policy weights behind the cluster budget.
             "strategy_weight_basis": strategy.get("weight_basis"),
@@ -9297,6 +9392,20 @@ def _strategy_underwriting(
                             "account_live_cumulative_return"
                         ),
                         "max_drawdown": strategy.get("account_live_max_drawdown"),
+                        # a restated row: the figures above are the sleeve's (the row's
+                        # own basis label says so); the parent-account lane stays beside
+                        **(
+                            {
+                                "basis": _object(
+                                    strategy.get("return_scope"), "return scope"
+                                ).get("basis"),
+                                "basis_label": strategy.get("return_scope_label"),
+                                "account_basis": dict(account_lanes[strategy_id]),
+                            }
+                            if account_lanes is not None
+                            and strategy_id in account_lanes
+                            else {}
+                        ),
                     },
                     "implementation_reconciliation": {
                         "status": strategy.get("implementation_reconciliation_status")
@@ -10428,6 +10537,7 @@ def _panel_data(
         )
         if sensitivity is not None:
             mode_payload["policy_constant_sensitivity"] = sensitivity
+    restated_account_lanes = _restated_account_lanes(strategies, accounts)
     canonical_strategy_series = _canonical_strategy_series_contracts(
         evidence_by_strategy,
         strategy_names,
@@ -10436,6 +10546,7 @@ def _panel_data(
         accepted_weekly_returns,
         _objects(report.get("strategy_returns", []), "report strategy returns"),
         dependence_strategy_names,
+        account_lanes=restated_account_lanes,
     )
     freshness_dates = {
         _text(item.get("evaluated_on"), "freshness evaluated_on")
@@ -10674,6 +10785,7 @@ def _panel_data(
             key: (report[key] if isinstance(report.get(key), Mapping) else None)
             for _kind, key in _IMPLEMENTATION_REFERENCE_KEYS
         },
+        account_lanes=restated_account_lanes,
     )
     admitted_nav_names = sorted(
         _text(row.get("strategy_name"), "provider NAV strategy_name")

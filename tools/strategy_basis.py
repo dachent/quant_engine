@@ -28,6 +28,7 @@ DECLARATION_SCHEMA: Final = "strategy-basis-declaration/1"
 BASIS_SLEEVE_EPOCH: Final = "SLEEVE_EPOCH"
 BASIS_PARENT_ACCOUNT: Final = "PARENT_ACCOUNT_LIVE_SERIES"
 _BASES: Final = frozenset({BASIS_SLEEVE_EPOCH})
+BASIS_RECORDED_SNAPSHOT: Final = "RECORDED_SNAPSHOT_PARENT_ACCOUNT"
 # the published sub-period return precision the report already seals trace paths with
 _RETURN_PRECISION: Final = 28
 _NAV_PRECISION: Final = 100
@@ -41,7 +42,6 @@ NOT_RESTATED: Final = (
     "implementation_return_attribution",
     "decomposition_lenses",
     "hwm_numerical_envelope",
-    "allocation_history",
 )
 # Owner-approved policy inputs (PORT-DEPENDENCE-1) are static owner inputs, not
 # measurements: the dependence allocation weight and the conservative loss fractions of
@@ -380,6 +380,69 @@ def restate_current_capital(
             "value": str(shifted),
         }
     return restated
+
+
+def label_recorded_allocations(
+    rows: Sequence[Mapping[str, Any]],
+    restatements: Mapping[str, SleeveRestatement],
+) -> list[dict[str, Any]]:
+    """The dated allocation snapshots, with a restated strategy's rows named for what they are.
+
+    A snapshot is the owner's record of one past date: the value it holds for a restated
+    strategy is the value that was recorded for that date, in the parent account, and it
+    is not rewritten onto the sleeve (the sleeve's value on that date is not what was
+    recorded).  The row says so, with the account it was recorded in, so that it is never
+    read next to the restated current value as the same basis.
+    """
+
+    result: list[dict[str, Any]] = []
+    for original in rows:
+        row = dict(original)
+        restatement = restatements.get(str(row.get("strategy_id")))
+        if restatement is not None:
+            row["value_basis"] = {
+                "basis": BASIS_RECORDED_SNAPSHOT,
+                "recorded_in_account_id": restatement.parent_account_id,
+                "label": (
+                    f"value as recorded in the allocation snapshot of {row.get('as_of_date')}, "
+                    f"in parent account {restatement.parent_account_id}; not restated onto "
+                    f"sleeve {restatement.account_id}"
+                ),
+            }
+        result.append(row)
+    return result
+
+
+def cost_rate_basis_note(
+    row: Mapping[str, Any], account_value: Decimal | None
+) -> str | None:
+    """What a restated row's cost rate stands on, or None when it publishes no rate.
+
+    The cost amount is carried per strategy (one annual figure for the strategy family,
+    keyed by strategy id), never per account or per sleeve, so the numerator is the same
+    on the sleeve and on the whole-account basis; only the denominator changes with the
+    basis.  The row's denominator is its own (gross sleeve) value.  The same amount over
+    the whole-account value is named beside it, so the two rates are never mixed.
+    """
+
+    amount_text = row.get("annual_external_cost_usd")
+    value_text = row.get("cost_rate_denominator_usd")
+    rate_text = row.get("annual_external_cost_rate_pre_tax")
+    if amount_text is None or value_text is None or rate_text is None:
+        return None
+    amount = _decimal(amount_text, "annual cost")
+    value = _decimal(value_text, "cost rate denominator")
+    note = (
+        f"annual cost {amount:,.2f} USD is carried per strategy (the same on the sleeve "
+        f"and on the whole-account basis); the rate {_decimal(rate_text, 'rate'):.4%} "
+        f"is over the gross sleeve value {value:,.2f}"
+    )
+    if account_value is not None and account_value > 0:
+        note += (
+            f"; over the whole-account value {account_value:,.2f} the same amount "
+            f"is {amount / account_value:.4%}"
+        )
+    return note
 
 
 def return_scope(
