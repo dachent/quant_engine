@@ -173,3 +173,14 @@ def test_the_matrix_clause_is_scoped_to_the_current_perimeter_matrix() -> None:
     assert "explicit in the account fact matrix when the account is in it" in scoped
     assert "accounts not in it are named in the note under the matrix" in scoped
     assert report_module._matrix_scope_clause("unrelated") == "unrelated"
+
+
+def test_the_positions_effect_clause_no_longer_says_only_current_rows_are_reported() -> (
+    None
+):
+    """Pass 30: the position record count includes dated historical snapshots."""
+
+    old = report_module._POSITIONS_EFFECT
+    new = report_module._POSITIONS_EFFECT_SCOPED
+    assert old.startswith("Only accepted current position rows")
+    assert "Only" not in new and "current and historical snapshots" in new
