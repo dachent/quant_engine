@@ -15,7 +15,7 @@ from acceptance.validate import checks
 
 
 def _context(report: dict[str, Any]) -> Any:
-    return SimpleNamespace(report=report, panel={}, _cache={})
+    return SimpleNamespace(report=report, panel={}, _cache={}, strategy_basis=None)
 
 
 def _mwr_row(**extra: Any) -> dict[str, Any]:
@@ -124,7 +124,11 @@ def _cagr_context(
 ) -> Any:
     report = {"report_schema_version": version, "strategy_summary": [row]}
     context = SimpleNamespace(
-        report=report, panel=panel or {}, expected=expected, _cache={}
+        report=report,
+        panel=panel or {},
+        expected=expected,
+        _cache={},
+        strategy_basis=None,
     )
     # the governed source of the opening date is the provider ledger's anchor: tests that name
     # the opening through ``_oracle`` give the context a ledger anchor with the same date
