@@ -6,6 +6,7 @@ parent account with the current sleeve s2 (strategy-1) and a retired sleeve s1.
 
 from __future__ import annotations
 
+from decimal import Decimal
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -169,3 +170,22 @@ def test_the_recorded_allocation_rows_of_a_restated_strategy_are_labelled(
     for row in on["allocation_history"]:
         before = by_key[(row["as_of_date"], row["allocation_id"])]
         assert {k: v for k, v in row.items() if k != "value_basis"} == before
+
+
+def test_account_basis_returns_are_read_from_the_account_block_only() -> None:
+    import portfolio_report
+
+    report = {
+        "account_summary": [
+            {"account_id": "a"},
+            {
+                "account_id": "b",
+                "account_basis": {
+                    "strategy_id": "s",
+                    "figures": {"account_live_cumulative_return": "0.0245"},
+                },
+            },
+        ]
+    }
+    assert portfolio_report._account_basis_returns(report) == {"s": Decimal("0.0245")}
+    assert portfolio_report._account_basis_returns({}) == {}

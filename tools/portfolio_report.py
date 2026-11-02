@@ -10861,6 +10861,7 @@ def build_report_data(
                         if isinstance(item, Mapping)
                         and item.get("account_live_cumulative_return") is not None
                     },
+                    account_basis_returns=_account_basis_returns(report),
                 )
             except sleeve_disclosures.DisclosureError as exc:
                 raise ReportValidationError(str(exc)) from exc
@@ -12929,6 +12930,28 @@ def _apply_return_scope(
             f"unallocated cash and margin). MWR and governed capital: sleeve "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
         )
+
+
+def _account_basis_returns(report: Mapping[str, Any]) -> dict[str, Decimal]:
+    """The parent-account cumulative return of every restated strategy, from the report.
+
+    Read from the ``account_basis`` block of the account row (its own figure under the
+    strategy row's own name); nothing is recomputed.  Empty without a restatement.
+    """
+
+    found: dict[str, Decimal] = {}
+    for row in report.get("account_summary", []):
+        block = row.get("account_basis") if isinstance(row, Mapping) else None
+        figures = block.get("figures") if isinstance(block, Mapping) else None
+        if (
+            isinstance(figures, Mapping)
+            and isinstance(block, Mapping)
+            and figures.get("account_live_cumulative_return") is not None
+        ):
+            found[str(block["strategy_id"])] = Decimal(
+                str(figures["account_live_cumulative_return"])
+            )
+    return found
 
 
 def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
