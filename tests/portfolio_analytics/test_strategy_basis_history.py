@@ -177,7 +177,12 @@ def _bind_ledger(world: dict[str, Any], rows: object) -> None:
     )
     _restore_retained_echo_correction(contract)
     _write_json(contract_path, contract)
-    _refresh_materialized_segment_identities(fixture)
+    with pytest.MonkeyPatch.context() as patch:
+        # the fixture refresh builds without an admission
+        patch.setattr(
+            target_series, "_current_source_admission_authority", lambda **_: None
+        )
+        _refresh_materialized_segment_identities(fixture)
     world["admission"] = _synthetic_current_admission(fixture)
 
 
@@ -226,7 +231,8 @@ def world(plain_world: dict[str, Any]) -> dict[str, Any]:
     """The same world with the selected ledger recording its provider generation."""
 
     _bind_ledger(
-        plain_world, [{"provider_id": PROVIDER.upper(), "generation_id": BOUND_GENERATION}]
+        plain_world,
+        [{"provider_id": PROVIDER.upper(), "generation_id": BOUND_GENERATION}],
     )
     return plain_world
 
@@ -473,9 +479,7 @@ def test_facts_bound_to_another_provider_generation_are_refused(
 def test_a_ledger_that_records_no_provider_generations_is_a_refusal(
     plain_world: dict[str, Any],
 ) -> None:
-    with pytest.raises(
-        target_series.TargetSeriesError, match="provider generations"
-    ):
+    with pytest.raises(target_series.TargetSeriesError, match="provider generations"):
         _restated(plain_world)
 
 
