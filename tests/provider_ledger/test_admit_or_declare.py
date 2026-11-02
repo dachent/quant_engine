@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -58,11 +59,27 @@ P123_RETURN_END = date(2026, 8, 13)
 P123_GENERATION_ROOT = (
     ROOT.parent / "dataPortfolio123" / "generations" / P123_GENERATION_ID
 )
+# The retained segment pins the admitted-item digest of a receipt whose managed
+# returns were read from the leading marker element (four distinct values, 1.00
+# total).  633abceb reads the Strategy level, which reproduces the provider's
+# reported total return, so the receipt content, and its digest, changed.
+P123_ADMITTED_ITEM_SET_SHA256_MARKER_RETURNS = (
+    "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643"
+)
+P123_ADMITTED_ITEM_SET_SHA256 = (
+    "cb402dd5bc1cf022a8a4eee66e4662aa79647225b18e2010c8c524f5ab92a19e"
+)
+P123_EU_ENTITY_ID = "1897754"
+P123_EU_REPORTED_TOTAL_RETURN_PERCENT = "30.46"
+P123_RETAINED_SOURCE_SEGMENT = (
+    Path(__file__).parent / "fixtures" / "p123_retained_10215d7b_source_segment.json"
+)
 P123_RETAINED_INPUTS = (
     P123_GENERATION_ROOT / "generation.json",
     P123_GENERATION_ROOT / "portfolio123-generation.json",
     P123_GENERATION_ROOT / "tables" / "har_managed_performance.parquet",
     P123_GENERATION_ROOT / "tables" / "har_equity_curve.parquet",
+    P123_GENERATION_ROOT / "tables" / "har_managed_metadata.parquet",
 )
 
 
@@ -82,11 +99,37 @@ def _retained_p123_admit_or_declare_fixture() -> tuple[
             encoding="utf-8"
         )
     )
-    source = next(
+    # The contract's current P123 segment was rebound to later generations
+    # (750c0a55, 94161522 and onward), so it no longer names this retained
+    # generation or carries its #303 dataset-disposition pins.  The retained
+    # receipt is evidence of that generation under the segment as the contract
+    # stated it before the rebind (fixture provenance names the commit); the
+    # current contract must still name the generation as governed evidence.
+    retained = json.loads(P123_RETAINED_SOURCE_SEGMENT.read_text(encoding="utf-8"))
+    source = retained["source_segment"]
+    assert source["source_id"] == "portfolio123-model-generation"
+    assert source["current_generation"] == {
+        "as_of": DAY.isoformat(),
+        "generation_id": P123_GENERATION_ID,
+        "sha256": P123_MANIFEST_SHA256,
+    }
+    correction = next(
         item
-        for item in contract["source_segments"]
-        if item["source_id"] == "portfolio123-model-generation"
+        for item in contract["history_corrections"]["corrections"]
+        if item["correction_id"] == "p123-eu-provider-live"
     )
+    assert correction["capture"] == {
+        "status": "CAPTURED_GOVERNED",
+        "capture_defect": None,
+        "generation_id": P123_GENERATION_ID,
+        "generation_sha256": P123_MANIFEST_SHA256,
+        "as_of": DAY.isoformat(),
+    }
+    policy = source["admission"]["dataset_disposition_policy"]
+    assert policy["admitted_item_set_sha256"] == (
+        P123_ADMITTED_ITEM_SET_SHA256_MARKER_RETURNS
+    )
+    policy["admitted_item_set_sha256"] = P123_ADMITTED_ITEM_SET_SHA256
     authority["sources"]["portfolio123-model-generation"] = source
     authority["contract_semantic_sha256"] = hashlib.sha256(
         canonical_json_bytes(contract)
@@ -1746,6 +1789,28 @@ def test_retained_p123_receipt_admits_managed_returns_only() -> None:
         provider_returns,
     )
 
+    # The admitted returns must follow the provider's own Strategy level: their
+    # compounded total equals the retTotal the provider reports for the entity,
+    # which the marker-element reading (four values, total 1.00) never did.
+    import pyarrow.parquet as pq
+
+    reported = {
+        str(item["retTotal"])
+        for item in pq.read_table(
+            P123_GENERATION_ROOT / "tables" / "har_managed_metadata.parquet",
+            columns=["portfolioUid", "retTotal"],
+        ).to_pylist()
+        if str(item["portfolioUid"]) == P123_EU_ENTITY_ID
+    }
+    assert reported == {P123_EU_REPORTED_TOTAL_RETURN_PERCENT}
+    wealth = Decimal(1)
+    for item in provider_returns:
+        wealth *= Decimal(1) + Decimal(str(item["return"]))
+    assert abs(
+        (wealth - 1) * 100 - Decimal(P123_EU_REPORTED_TOTAL_RETURN_PERCENT)
+    ) < Decimal("0.005")
+    assert len({str(item["return"]) for item in provider_returns}) > 100
+
     p123 = [
         row for row in receipt["dispositions"] if row["provider_id"] == "portfolio123"
     ]
@@ -1782,9 +1847,7 @@ def test_retained_p123_receipt_admits_managed_returns_only() -> None:
     assert equity["materialized_record_count"] == 0
     assert policy["admitted_item_count"] == 2
     assert sum(row["action"] == "ADMIT" for row in p123) == 2
-    assert policy["admitted_item_set_sha256"] == (
-        "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643"
-    )
+    assert policy["admitted_item_set_sha256"] == P123_ADMITTED_ITEM_SET_SHA256
     assert (
         policy["upstream_inventory_sha256"]
         == "3f0d3b5bd6239b6743f739226d97cde9979e6295291cdcbb694210d710b31e5f"
