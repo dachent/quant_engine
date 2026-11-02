@@ -226,6 +226,8 @@ _PATH_STAGES = {
     "tools/derived_epoch_perimeter.py": ["report", "panel"],
     # #624: the opt-in strategy-basis restatement the report reads when a declaration is given.
     "tools/strategy_basis.py": ["report", "panel"],
+    # #624: levered and unlevered sleeve returns from the sleeve facts (read by the report).
+    "tools/strategy_leverage.py": ["report", "panel"],
     # #567 stage 5: the post-ledger sleeve-facts builders and the release step that
     # runs them.  Attended preparation builds the facts, the epoch manifest selects
     # them and the HWM replay re-supplies them, so a change to any of them moves the
