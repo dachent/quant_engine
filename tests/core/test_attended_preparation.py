@@ -2169,11 +2169,19 @@ def test_preparation_checkpoint_never_accepts_partially_rewritten_output(
             "attended_preparation": {},
             "layered_history_repository_dependencies": {},
             "target_series": {},
+            "strategy_basis": {},
+            "account_strategy_manifest": {},
         },
         "policy": {},
     }
+    sleeve_checkpoint = root / "preparation" / "checkpoints" / "sleeve-facts.json"
+    sleeve_checkpoint.parent.mkdir(parents=True)
+    sleeve_checkpoint.write_bytes(b"{}")
     identity = preparation._stage_identity(
-        "selected-history-normalization", run_identity, full_identity, {}
+        "selected-history-normalization",
+        run_identity,
+        full_identity,
+        {"sleeve-facts": {"path": sleeve_checkpoint}},
     )
 
     assert (
@@ -2226,6 +2234,9 @@ def test_preparation_checkpoint_rejects_missing_declared_output(
     output = root / "preparation" / "history"
     output.mkdir(parents=True)
     (output / "selected.json").write_text('{"selected":"verified"}', encoding="utf-8")
+    sleeve_checkpoint = root / "preparation" / "checkpoints" / "sleeve-facts.json"
+    sleeve_checkpoint.parent.mkdir(parents=True)
+    sleeve_checkpoint.write_bytes(b"{}")
     identity = preparation._stage_identity(
         "selected-history-normalization",
         {"schema_version": 1},
@@ -2234,15 +2245,16 @@ def test_preparation_checkpoint_rejects_missing_declared_output(
                 "attended_preparation": {},
                 "layered_history_repository_dependencies": {},
                 "target_series": {},
+                "strategy_basis": {},
+                "account_strategy_manifest": {},
             },
             "policy": {},
         },
-        {},
+        {"sleeve-facts": {"path": sleeve_checkpoint}},
     )
     checkpoint = (
         root / "preparation" / "checkpoints" / "selected-history-normalization.json"
     )
-    checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(
         preparation.canonical_json_bytes(
             {
@@ -2777,6 +2789,7 @@ def _preparation_function_fixture(
                 "sleeve_inputs",
                 "sleeve_ledger",
                 "sleeve_nav",
+                "strategy_basis",
             )
         },
         "financial_data_cutoff": "2026-09-17",
@@ -4704,10 +4717,24 @@ def test_sleeve_facts_are_built_staged_replayed_and_checkpointed(
     )
     assert staged["paths"] == expected
     assert replayed == [expected, expected]
-    # the staged ledger generation is the one the build reads its rows from
-    assert Path(str(built["provider_ledger_generation_dir"])).parent == (
-        output / "stages" / "ledger" / "generations"
+    # the facts are built before the history from the selected provider-ledger
+    # generation the staged ledger is a copy of (#624: they feed the history step)
+    assert (
+        Path(str(built["provider_ledger_generation_dir"]))
+        == (tmp_path / "ledger-source").resolve()
     )
+    sleeve_checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "sleeve-facts.json",
+        "sleeve facts checkpoint",
+    )
+    assert sleeve_checkpoint["result"]["sleeve_facts"] == [
+        preparation._definition(path) for path in expected
+    ]
+    history_checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "selected-history-normalization.json",
+        "history checkpoint",
+    )
+    assert "sleeve-facts" in history_checkpoint["input_identity"]["predecessors"]
     assert built["ibkr_generation_root"] == (tmp_path / "ibkr-root").resolve()
     assert built["quantbase_source_dir"] == (tmp_path / "quantbase-sources").resolve()
     checkpoint = preparation._read(
@@ -5019,3 +5046,159 @@ def test_ledger_stage_identity_binds_the_vendor_gap_fills_pin() -> None:
         _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "2"}), "c" * 40
     )["ledger"]
     assert first["vendor_gap_fills"] != second["vendor_gap_fills"]
+
+
+# --- #624: the sleeve facts precede the history, a declaration restates it ------------
+
+
+def _facts_file(directory: Path, artifact_id: str, name: str) -> Path:
+    path = directory / name
+    path.write_bytes(canonical_json_bytes({"artifact_id": artifact_id, "bindings": {}}))
+    return path
+
+
+def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import build_sleeve_facts_release as sleeve_release
+
+    spec, calls, _identity = _preparation_function_fixture(
+        tmp_path, monkeypatch, history_rebuild_required=True
+    )
+    order: list[str] = []
+    section = _sleeve_section(tmp_path)
+    declaration = tmp_path / "strategy-basis-declaration.json"
+    declaration.write_bytes(b'{"schema":"strategy-basis-declaration/1"}')
+    original = preparation._validated_inputs
+
+    def with_declaration(*args: object) -> tuple[dict[str, object], object]:
+        config, plan = original(*args)
+        return {
+            **config,
+            "sleeve_facts": section,
+            "strategy_basis_declaration": preparation._definition(declaration),
+        }, plan
+
+    monkeypatch.setattr(preparation, "_validated_inputs", with_declaration)
+
+    def build(**kwargs: Any) -> dict[str, object]:
+        order.append("sleeve-facts")
+        destination = Path(kwargs["output_dir"])
+        _facts_file(destination, "sleeve-account-facts", "sleeve-account-facts.json")
+        _facts_file(destination, "quantbase-fund-facts", "quantbase-fund-facts.json")
+        return {
+            "files": [
+                {"path": "sleeve-account-facts.json"},
+                {"path": "quantbase-fund-facts.json"},
+            ]
+        }
+
+    monkeypatch.setattr(sleeve_release, "build_release_sleeve_facts", build)
+    received: dict[str, object] = {}
+
+    def rebuild(
+        _selection: object,
+        output: Path,
+        _release_commit: str,
+        _contract: Path,
+        _authorities: object,
+        *,
+        declaration_path: Path | None = None,
+        sleeve_facts_path: Path | None = None,
+    ) -> Path:
+        order.append("history")
+        calls["history"] += 1
+        received.update(
+            declaration_path=declaration_path, sleeve_facts_path=sleeve_facts_path
+        )
+        normalized = output / "normalized"
+        normalized.mkdir(parents=True)
+        (normalized / "generation.json").write_text("{}", encoding="utf-8")
+        return normalized
+
+    monkeypatch.setattr(preparation, "_rebuild_layered_history", rebuild)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    assert order == ["sleeve-facts", "history"]
+    assert received["declaration_path"] == declaration.resolve()
+    assert received["sleeve_facts_path"] == (
+        output / "preparation" / "sleeve-facts" / "sleeve-account-facts.json"
+    )
+    checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "selected-history-normalization.json",
+        "history checkpoint",
+    )
+    inputs = checkpoint["input_identity"]["inputs"]
+    assert inputs["strategy_basis_declaration"] == preparation._definition(declaration)
+    assert "sleeve-facts" in checkpoint["input_identity"]["predecessors"]
+
+
+def test_a_declaration_without_the_sleeve_configuration_is_refused(
+    tmp_path: Path,
+) -> None:
+    pin = {"path": str(tmp_path / "declaration.json")}
+    with pytest.raises(preparation.AttendedPreparationError, match="sleeve facts conf"):
+        preparation._strategy_basis_declaration_path(
+            {"strategy_basis_declaration": pin}
+        )
+    assert preparation._strategy_basis_declaration_path({}) is None
+
+
+def test_the_declaration_names_exactly_one_residual_parent_facts(
+    tmp_path: Path,
+) -> None:
+    declaration = tmp_path / "declaration.json"
+    residual = _facts_file(tmp_path, "sleeve-account-facts", "a.json")
+    other = _facts_file(tmp_path, "quantbase-fund-facts", "b.json")
+    assert preparation._strategy_basis_facts_path(None, [residual, other]) is None
+    assert (
+        preparation._strategy_basis_facts_path(declaration, [residual, other])
+        == residual
+    )
+    with pytest.raises(preparation.AttendedPreparationError, match="exactly one"):
+        preparation._strategy_basis_facts_path(declaration, [other])
+    twin = _facts_file(tmp_path, "sleeve-account-facts", "c.json")
+    with pytest.raises(preparation.AttendedPreparationError, match="exactly one"):
+        preparation._strategy_basis_facts_path(declaration, [residual, twin])
+
+
+def test_a_retained_history_is_current_only_for_its_own_declaration_and_facts(
+    tmp_path: Path,
+) -> None:
+    declaration = tmp_path / "declaration.json"
+    declaration.write_bytes(b"declaration")
+    facts = tmp_path / "facts.json"
+    facts.write_bytes(b"facts")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "generation.json").write_bytes(canonical_json_bytes({}))
+    restated = tmp_path / "restated"
+    restated.mkdir()
+    (restated / "generation.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "strategy_basis_restatement": {
+                    "declaration_sha256": hashlib.sha256(b"declaration").hexdigest(),
+                    "sleeve_facts_sha256": hashlib.sha256(b"facts").hexdigest(),
+                }
+            }
+        )
+    )
+    differs = preparation._history_basis_differs
+    # no declaration: only an unrestated history is current
+    assert differs(plain, None, None) is False
+    assert differs(restated, None, None) is True
+    # a declaration: only a history restated for it (and, once known, its facts)
+    assert differs(plain, declaration, facts) is True
+    assert differs(restated, declaration, None) is False
+    assert differs(restated, declaration, facts) is False
+    facts.write_bytes(b"other facts")
+    assert differs(restated, declaration, facts) is True
+    declaration.write_bytes(b"other declaration")
+    assert differs(restated, declaration, None) is True

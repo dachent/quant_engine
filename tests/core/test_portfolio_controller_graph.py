@@ -612,7 +612,13 @@ def test_graph_records_integrated_preparation_declaration() -> None:
     bindings = graph["contracts"]["preparation_stage_bindings"]
 
     assert declaration["status"] == "verified"
-    assert declaration["dependencies"]["selected-history-normalization"] == []
+    # the sleeve facts precede the history: a declared strategy's live segment is
+    # derived from them (#624)
+    assert declaration["dependencies"]["sleeve-facts"] == []
+    assert declaration["dependencies"]["selected-history-normalization"] == [
+        "sleeve-facts"
+    ]
+    assert "sleeve-facts" in declaration["dependencies"]["epoch"]
     assert bindings["status"] == "verified"
     assert bindings["code"]["baseline"] == [
         "tools/portfolio_attended_preparation.py",
