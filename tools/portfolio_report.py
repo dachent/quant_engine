@@ -107,6 +107,7 @@ from portfolio_invested_capital import (
 )
 from portfolio_totals import PortfolioTotalsError, build_portfolio_totals
 import sleeve_disclosures
+import strategy_basis
 from portfolio_totals_verify import (
     PortfolioTotalsVerificationError,
     verify_portfolio_totals,
@@ -273,6 +274,7 @@ EPOCH_CROSSWALK_WORKBOOK_NAME: Final = "account-strategy-current-epoch-crosswalk
 # report so verification and publication rebuild from the same bytes.
 NESTED_TAG_MAP_EVIDENCE_NAME: Final = "nested-strategy-tag-map.json"
 SLEEVE_DISCLOSURE_EVIDENCE_NAME: Final = "sleeve-disclosure-sources.json"
+STRATEGY_BASIS_EVIDENCE_NAME: Final = "strategy-basis-declaration.json"
 FLOW_CLASSIFICATION_POLICY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -9542,6 +9544,7 @@ def build_report_data(
     source_clock_path: Path | None = None,
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
+    strategy_basis_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -9763,8 +9766,24 @@ def build_report_data(
             current_product_catalog = _current_product_baseline_projection(
                 catalog, strategy_product_controls
             )
+    # Opt-in basis restatement (#624, option B).  Without a declaration `series_catalog`
+    # is `catalog` itself and nothing below differs from a report built without the
+    # option.  With one, the declared strategy's return series and current capital are
+    # the sleeve's; every consumer of them reads `series_catalog`, while the checks
+    # that prove the baseline against its sources keep reading the untouched `catalog`.
+    basis_restatements: dict[str, strategy_basis.SleeveRestatement] = {}
+    series_catalog: Mapping[str, Any] = catalog
+    if strategy_basis_path is not None:
+        basis_restatements = _strategy_basis_restatements(
+            strategy_basis_path,
+            catalog,
+            epoch_perimeter,
+            epoch_verified_details,
+            strategy_product_controls,
+        )
+        series_catalog = _restated_catalog(catalog, basis_restatements)
     strategy_provider_evidence = _strategy_provider_evidence(
-        catalog,
+        series_catalog,
         strategy_product_controls,
         calculation_cutoff_date=calculation_cutoff_date,
         value_basis_bounds=value_basis_bounds,
@@ -9797,7 +9816,7 @@ def build_report_data(
         implementation_return_attribution_path,
     )
     strategy_summary = _strategies(
-        catalog,
+        series_catalog,
         performance,
         history_contract,
         implementation_contract,
@@ -9874,7 +9893,7 @@ def build_report_data(
     )
     if period_returns_enabled:
         live_pieces = _account_live_return_series(
-            catalog,
+            series_catalog,
             strategy_product_controls,
             calculation_cutoff_date=calculation_cutoff_date,
             value_basis_bounds=value_basis_bounds,
@@ -10166,7 +10185,9 @@ def build_report_data(
     )
     strategy_returns = _current_product_fact_rows(
         _objects(
-            current_product_catalog.get("strategy_returns", []),
+            (series_catalog if basis_restatements else current_product_catalog).get(
+                "strategy_returns", []
+            ),
             "strategy_returns",
         ),
         strategy_product_controls,
@@ -10202,9 +10223,11 @@ def build_report_data(
     # B4: the report never compared a strategy value with its accounts.  The account
     # rows come from the NAV facts, the strategy values from the baseline block; a
     # stale block (or a stale snapshot) cannot publish.
-    verified_capital = _current_capital(catalog)
+    verified_capital = _current_capital(series_catalog)
     _verify_current_capital_perimeter(verified_capital, strategy_product_controls)
-    _verify_current_capital_accounts(verified_capital, account_summary)
+    # The accounts tie to the baseline block as published; a restated block stands on
+    # the sleeve trace instead, and its sleeve members are no account row.
+    _verify_current_capital_accounts(_current_capital(catalog), account_summary)
     product_account_ids = (
         current_account_ids
         if current_account_ids is not None
@@ -10283,7 +10306,7 @@ def build_report_data(
         ],
         "portfolio_summary": [
             *_portfolio_summary(
-                catalog,
+                series_catalog,
                 hwm_summary,
                 dependence_analysis,
                 strategy_product_controls,
@@ -10471,6 +10494,19 @@ def build_report_data(
                     ).hexdigest(),
                 },
             ]
+        if strategy_basis_path is not None:
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "strategy-basis-declaration",
+                    "schema": strategy_basis.DECLARATION_SCHEMA,
+                    "sha256": hashlib.sha256(
+                        _regular_file_bytes(
+                            strategy_basis_path, "strategy basis declaration"
+                        )
+                    ).hexdigest(),
+                },
+            ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
         )
@@ -10584,8 +10620,30 @@ def build_report_data(
             {key[1] for key in epoch_perimeter.derived & epoch_perimeter.product}
         )
         _apply_return_scope(
-            report, epoch_included_rows, sleeve_accounts, derived_product
+            report,
+            epoch_included_rows,
+            sleeve_accounts,
+            derived_product,
+            basis_restatements,
         )
+        if basis_restatements:
+            report["methodology"].append(
+                {
+                    "item": "Strategy basis restatement",
+                    "value": (
+                        "Opt-in declaration "
+                        + "; ".join(
+                            f"{strategy_id} on its sleeve {item.account_id} "
+                            f"(from {item.opening_date})"
+                            for strategy_id, item in sorted(basis_restatements.items())
+                        )
+                        + ". Return, drawdown, value, weight, the weekly series and "
+                        "the governed perimeter are the sleeve's; "
+                        + ", ".join(strategy_basis.NOT_RESTATED)
+                        + " stay on the parent account basis."
+                    ),
+                }
+            )
         if sleeve_sources is not None:
             try:
                 disclosed = sleeve_disclosures.compose(
@@ -11497,6 +11555,7 @@ def build_candidate(
     include_workbook: bool = False,
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
+    strategy_basis_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -11530,6 +11589,7 @@ def build_candidate(
         attribution_generation_id=attribution_generation_id,
         nested_tag_map_path=nested_tag_map_path,
         sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
+        strategy_basis_path=strategy_basis_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -11542,6 +11602,11 @@ def build_candidate(
         _write_exact(
             candidate / NESTED_TAG_MAP_EVIDENCE_NAME,
             _regular_file_bytes(nested_tag_map_path, "nested strategy tag map"),
+        )
+    if strategy_basis_path is not None:
+        _write_exact(
+            candidate / STRATEGY_BASIS_EVIDENCE_NAME,
+            _regular_file_bytes(strategy_basis_path, "strategy basis declaration"),
         )
     if sleeve_disclosure_sources_path is not None:
         _write_exact(
@@ -12517,11 +12582,103 @@ def _workbook_evidence_binding_from_snapshots(
     return binding
 
 
+def _strategy_basis_restatements(
+    declaration_path: Path,
+    catalog: Mapping[str, Any],
+    perimeter: derived_epoch_perimeter.EffectivePerimeter | None,
+    details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]],
+    controls: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, strategy_basis.SleeveRestatement]:
+    """The sleeve series and value of every strategy the declaration restates (#624).
+
+    A declared strategy must be a current product strategy whose one open product epoch
+    is a derived sleeve; its series is that epoch's verified observation trace.
+    """
+
+    try:
+        declared = strategy_basis.load_declaration(
+            _regular_file_bytes(declaration_path, "strategy basis declaration")
+        )
+    except strategy_basis.StrategyBasisError as exc:
+        raise ReportValidationError(str(exc)) from exc
+    if perimeter is None or not perimeter.has_derived:
+        raise ReportValidationError(
+            "a strategy basis declaration requires derived sleeve epochs"
+        )
+    providers: dict[str, set[str]] = defaultdict(set)
+    for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
+        if row.get("evidence_layer") == "ACCOUNT_LIVE":
+            providers[str(row.get("strategy_id"))].add(str(row.get("provider_id")))
+    result: dict[str, strategy_basis.SleeveRestatement] = {}
+    for strategy_id in sorted(declared):
+        if controls is not None and not _is_current_product_strategy(
+            strategy_id, controls
+        ):
+            raise ReportValidationError(
+                f"restated strategy is not a current product strategy: {strategy_id}"
+            )
+        keys = sorted(
+            key
+            for key in perimeter.derived & perimeter.product
+            if key[1] == strategy_id and key[3] is None
+        )
+        if len(keys) != 1 or len(providers.get(strategy_id, ())) != 1:
+            raise ReportValidationError(
+                f"restated strategy needs one open derived sleeve epoch: {strategy_id}"
+            )
+        key = keys[0]
+        try:
+            result[strategy_id] = strategy_basis.sleeve_restatement(
+                strategy_id=strategy_id,
+                account_id=key[0],
+                parent_account_id=perimeter.parents[key],
+                provider_id=next(iter(providers[strategy_id])),
+                links=_objects(
+                    details[key].get("own_path_links"), "sleeve own path links"
+                ),
+                effective_start=key[2],
+                effective_end=key[3],
+            )
+        except strategy_basis.StrategyBasisError as exc:
+            raise ReportValidationError(str(exc)) from exc
+    return result
+
+
+def _restated_catalog(
+    catalog: Mapping[str, Any],
+    restatements: Mapping[str, strategy_basis.SleeveRestatement],
+) -> dict[str, Any]:
+    """The catalog with the restated strategies' return rows and capital swapped."""
+
+    try:
+        return {
+            **catalog,
+            "strategy_returns": strategy_basis.restate_returns(
+                _objects(catalog.get("strategy_returns", []), "strategy_returns"),
+                restatements,
+            ),
+            "strategy_provider_evidence": strategy_basis.restate_provider_evidence(
+                _objects(
+                    catalog.get("strategy_provider_evidence", []),
+                    "strategy_provider_evidence",
+                ),
+                restatements,
+            ),
+            "current_capital": strategy_basis.restate_current_capital(
+                _object(catalog.get("current_capital"), "current_capital"),
+                restatements,
+            ),
+        }
+    except strategy_basis.StrategyBasisError as exc:
+        raise ReportValidationError(str(exc)) from exc
+
+
 def _apply_return_scope(
     report: dict[str, Any],
     rows: Sequence[Mapping[str, Any]],
     sleeve_accounts: Mapping[str, str],
     derived_product: Sequence[str],
+    restatements: Mapping[str, strategy_basis.SleeveRestatement] | None = None,
 ) -> None:
     """Name the basis of a strategy whose product epoch is a derived sleeve.
 
@@ -12550,6 +12707,14 @@ def _apply_return_scope(
             and sleeve_accounts[str(row["account_id"])] in parents
             and row.get("strategy_id") != strategy
         )
+        if restatements is not None and strategy in restatements:
+            item["return_scope"] = strategy_basis.return_scope(
+                restatements[strategy], retired
+            )
+            item["return_scope_label"] = strategy_basis.return_scope_label(
+                restatements[strategy]
+            )
+            continue
         item["return_scope"] = {
             "basis": "PARENT_ACCOUNT_LIVE_SERIES",
             "parent_account_ids": parents,
@@ -12579,6 +12744,13 @@ def _apply_return_scope(
             f"unallocated cash and margin). MWR and governed capital: sleeve "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
         )
+
+
+def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
+    """The basis declaration a candidate was built with, when it carries one (#624)."""
+
+    path = candidate_dir / STRATEGY_BASIS_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
 
 
 def _candidate_sleeve_disclosure_sources(candidate_dir: Path) -> Path | None:
@@ -14872,6 +15044,7 @@ def verify_candidate(
         sleeve_disclosure_sources_path=_candidate_sleeve_disclosure_sources(
             candidate_dir
         ),
+        strategy_basis_path=_candidate_strategy_basis(candidate_dir),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -15951,6 +16124,7 @@ def publish_report(
         sleeve_disclosure_sources_path=_candidate_sleeve_disclosure_sources(
             candidate_dir
         ),
+        strategy_basis_path=_candidate_strategy_basis(candidate_dir),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -15989,6 +16163,18 @@ def publish_report(
             str(report["report_schema_version"]),
         ),
     ]
+    basis_declaration = candidate_dir / STRATEGY_BASIS_EVIDENCE_NAME
+    if basis_declaration.is_file() and not basis_declaration.is_symlink():
+        # the exact bytes the restated report was rebuilt from (#624)
+        artifact_specs.append(
+            (
+                basis_declaration,
+                "input/strategy-basis-declaration.json",
+                "strategy-basis-declaration",
+                # the version the declaration schema name carries, not a literal here
+                strategy_basis.DECLARATION_SCHEMA.rsplit("/", 1)[-1],
+            )
+        )
     disclosure_sources = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
     if disclosure_sources.is_file() and not disclosure_sources.is_symlink():
         # the exact bytes the methodology disclosures were composed from
@@ -16392,6 +16578,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--epoch-manifest-generation-root", type=Path)
     build.add_argument("--nested-tag-map", type=Path)
     build.add_argument("--sleeve-disclosure-sources", type=Path)
+    build.add_argument("--strategy-basis", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -16550,6 +16737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_clock_path=args.source_clock,
                 nested_tag_map_path=args.nested_tag_map,
                 sleeve_disclosure_sources_path=args.sleeve_disclosure_sources,
+                strategy_basis_path=args.strategy_basis,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
