@@ -259,3 +259,17 @@ def test_leverage_table_renders_sleeve_financing_rows(tmp_path: Path) -> None:
     text = _flat(dom, "#leverage-table")
     assert "Sleeve financing liability" in text and "12,345" in text
     assert "Sleeve equity" in text and "67,890" in text
+
+
+def test_absent_fields_with_only_reasons_print_the_reasons(tmp_path: Path) -> None:
+    # Producer shape for a strategy without a leverage record: only the two reasons are emitted.
+    row = _cost_strategy(
+        strategy_name="Synthetic Reason Only",
+        return_unlevered_na_reason="SYNTHETIC_UNLEVERED_REASON",
+        return_levered_na_reason="SYNTHETIC_LEVERED_REASON",
+    )
+    table = _render(tmp_path, row)["#implementation-table"]["innerHTML"]
+    cells = [_text(cell) for cell in _cells(_rows(table)[0])]
+    assert "Synthetic unlevered reason" in cells[4]
+    assert "Synthetic levered reason" in cells[7]
+    assert "Not published" not in table
