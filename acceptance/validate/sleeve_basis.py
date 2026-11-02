@@ -1458,3 +1458,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def sleeve_legs(
+    facts: Mapping[str, Any],
+) -> tuple[dict[str, list[tuple[date, Decimal]]], list[Mapping[str, Any]]]:
+    """Every sleeve transfer leg by account (signed), after proving each pair balances."""
+
+    return _sleeve_legs(facts)
