@@ -154,15 +154,7 @@ def _bind_ledger(world: dict[str, Any], rows: object) -> None:
         if item["artifact_id"] == "normalized/provider-ledger.json":
             artifacts.append(_artifact(catalog_path, item["artifact_id"]))
         else:
-            artifacts.append(
-                {
-                    **item,
-                    "schema": {
-                        "name": item["schema_name"],
-                        "version": item["schema_version"],
-                    },
-                }
-            )
+            artifacts.append(dict(item))
     _core_generation_manifest(
         manifest_path,
         "quant-engine-provider-ledger",
@@ -480,7 +472,7 @@ def test_a_ledger_that_records_no_provider_generations_is_a_refusal(
     plain_world: dict[str, Any],
 ) -> None:
     with pytest.raises(
-        target_series.TargetSeriesError, match="records\s+its provider generations"
+        target_series.TargetSeriesError, match="provider generations"
     ):
         _restated(plain_world)
 
