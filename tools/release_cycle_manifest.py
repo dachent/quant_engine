@@ -131,6 +131,10 @@ def normalize_capture_timestamp(value: str, what: str) -> str:
             f"{what}: {value!r} is finer than a microsecond; the ledger cannot hold it",
         )
     micro = fraction[:6].ljust(6, "0")
+    if zone != "Z" and (int(zone[1:3]) > 23 or int(zone[4:6]) > 59):
+        raise CycleManifestError(
+            "DATE_INVALID", f"{what}: {value!r} has an impossible UTC offset"
+        )
     try:
         parsed = datetime.fromisoformat(
             f"{seconds}.{micro}{'+00:00' if zone == 'Z' else zone}"

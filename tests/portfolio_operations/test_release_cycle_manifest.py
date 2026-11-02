@@ -378,7 +378,13 @@ def test_capture_precision_finer_than_a_microsecond_is_refused_not_truncated(
 
 
 @pytest.mark.parametrize(
-    "value", ["2026-09-19T09:19:17.5+99:00", "2026-02-30T09:19:17.5Z"]
+    "value",
+    [
+        "2026-09-19T09:19:17.5+99:00",
+        "2026-09-19T09:19:17.5+01:60",
+        "2026-09-19T09:19:17.5-24:00",
+        "2026-02-30T09:19:17.5Z",
+    ],
 )
 def test_an_impossible_capture_timestamp_or_offset_is_refused(
     cycle: dict[str, Any], value: str
