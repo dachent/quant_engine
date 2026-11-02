@@ -443,6 +443,11 @@ def catalog() -> dict[str, Any]:
         "change_in_nav_observations": [
             {"account_id": PARENT, "accounting_date": "2026-02-06", "n": 4}
         ],
+        "corporate_actions": [
+            {"account_id": PARENT, "event_date": "2026-02-05", "kind": "RS", "n": 5},
+            {"account_id": PARENT, "event_date": "2026-03-05", "kind": "RS", "n": 6},
+            {"account_id": "acct-other", "event_date": "2026-02-05", "kind": "RS"},
+        ],
     }
 
 
@@ -489,6 +494,18 @@ def bound_facts() -> dict[str, Any]:
         "parent_ledger_generation_id": LEDGER_GENERATION,
         "account_rows_sha256": hashlib.sha256(
             json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("ascii")
+        ).hexdigest(),
+        "corporate_actions_sha256": hashlib.sha256(
+            json.dumps(
+                [
+                    row
+                    for row in catalog()["corporate_actions"]
+                    if row["account_id"] == PARENT
+                    and FIRST <= row["event_date"] <= LAST
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
         ).hexdigest(),
         "tag_map_sha256": hashlib.sha256(
             json.dumps(TAG_MAP, sort_keys=True, separators=(",", ":")).encode()

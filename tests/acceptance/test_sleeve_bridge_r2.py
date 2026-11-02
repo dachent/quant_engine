@@ -1,4 +1,4 @@
-"""The sleeve bridge recomputed on the real R2 bytes, then compared with the producer.
+"""R2 REGRESSION REFERENCE (pro rata facts): the sleeve bridge recomputed on the real R2 bytes, then compared with the producer.
 
 Runs only when the environment names the retained data (it is real portfolio data and
 never enters the repository):
@@ -120,7 +120,9 @@ def test_the_flex_table_is_the_account_s_executions(world: dict[str, Any]) -> No
 
 
 @needs
-def test_the_r2_terms_are_the_verified_ones(terms: sleeve_bridge.BridgeTerms) -> None:
+def test_the_r2_regression_reference_terms_are_the_verified_ones(
+    terms: sleeve_bridge.BridgeTerms,
+) -> None:
     pp = {name: f"{value:.4f}" for name, value in terms.terms_pp.items()}
     assert f"{terms.model_return * 100:.4f}" == "17.3551"
     assert f"{terms.sleeve_return * 100:.4f}" == "14.2369"
@@ -278,3 +280,95 @@ def test_tamper_swap_the_account_series_and_break_the_closure_on_the_real_contra
     broken["bridge"]["categories"][1]["effect_pp"] += 0.01
     codes = {f.code for f in sleeve_bridge.compare_contract(terms, broken)}
     assert {"PUBLISHED_TERMS_CLOSURE", "PUBLISHED_TERM_DIFFERS"} <= codes
+
+
+# ---- the applicable lineage: branch S's rebuild; the corporate-action share is derived here ----
+
+R22 = os.environ.get("QE_AI624_R22_FACTS")
+CATALOG = os.environ.get("QE_AI624_R21_CATALOG")
+needs_r22 = pytest.mark.skipif(
+    not (FACTS and MODEL and IBKR and TAGS and R22 and CATALOG),
+    reason="the R22 facts and R21 catalog are not set with the rest of the bridge inputs",
+)
+
+
+@pytest.fixture(scope="module")
+def r22(world: dict[str, Any]) -> dict[str, Any]:
+    from acceptance.validate import sleeve_split
+
+    assert R22 and CATALOG
+    facts = json.loads(Path(R22).read_bytes())
+    catalog = json.loads(Path(CATALOG).read_bytes())
+    fractions = sleeve_split.derive_fractions(
+        facts, world["trades"], world["tag_map"], catalog
+    )
+    strategy = world["strategy"]
+    sleeve = next(s for s in facts["sleeves"] if s["strategy_id"] == strategy)[
+        "sleeve_id"
+    ]
+    ca = {
+        item.day: sum(
+            (s.commission for s in item.sleeves if s.sleeve_id == sleeve), D(0)
+        )
+        for item in fractions
+    }
+    return {"facts": facts, "fractions": fractions, "ca": ca}
+
+
+@needs
+@needs_r22
+def test_the_applicable_bridge_terms_are_recomputed_on_the_rebuilt_facts(
+    world: dict[str, Any], r22: dict[str, Any]
+) -> None:
+    terms = _derive(world, facts=r22["facts"], ca_commission=r22["ca"] or None)
+    pp = {name: f"{value:.4f}" for name, value in terms.terms_pp.items()}
+    assert f"{terms.model_return * 100:.4f}" == "17.3551"
+    assert f"{terms.sleeve_return * 100:.4f}" == "14.2355"
+    assert f"{terms.gap_pp:.4f}" == "-3.1196"
+    assert pp[sleeve_bridge.CAT_EXECUTION] == "2.5186"
+    assert pp[sleeve_bridge.CAT_COMMISSIONS] == "-5.0943"
+    assert pp[sleeve_bridge.CAT_ALLOCATED] == "-0.2284"
+    assert pp[sleeve_bridge.CAT_TIMING] == "-0.3155"
+    assert abs(terms.residual_pp) < D("1e-40")
+    assert f"{terms.commissions_usd:.4f}" == "-1094.0299"
+    assert f"{terms.full_window_timing_pp:.4f}" == "-0.3188"
+    # the corporate-action share is re-derived: no day is taken from the facts unproven
+    assert terms.split_days == ()
+    check = terms.commission_check
+    assert check is not None and abs(check.flex_total - check.facts_total) < D("1e-9")
+
+
+@needs
+@needs_r22
+def test_the_pro_rata_split_day_needs_the_facts_value_but_the_rule_does_not(
+    world: dict[str, Any], r22: dict[str, Any]
+) -> None:
+    # without the derived share the corporate-action day cannot be proven from Flex
+    terms = _derive(world, facts=r22["facts"])
+    assert [d.isoformat() for d in terms.split_days] == ["2026-02-06"]
+
+
+@needs
+@needs_r22
+def test_branch_b_pre_s_numbers_differ_from_the_rebuild_by_the_fraction_only(
+    world: dict[str, Any], r22: dict[str, Any]
+) -> None:
+    if CONTRACT is None:
+        pytest.skip("QE_AI624_R2_BRIDGE_CONTRACT is not set")
+    entry = sleeve_bridge.load_contract_strategy(
+        CONTRACT.read_bytes(), world["strategy"]
+    )
+    terms = _derive(world, facts=r22["facts"], ca_commission=r22["ca"] or None)
+    findings = sleeve_bridge.compare_contract(terms, entry)
+    assert {f.code for f in findings} <= {
+        "PUBLISHED_SLEEVE_RETURN_DIFFERS",
+        "PUBLISHED_GAP_DIFFERS",
+        "PUBLISHED_TERM_DIFFERS",
+        "PUBLISHED_COST_DIFFERS",
+    }
+    published = {
+        c["category"]: D(str(c["effect_pp"])) for c in entry["bridge"]["categories"]
+    }
+    for name, value in terms.terms_pp.items():
+        assert abs(value - published[name]) < D("0.002"), name  # at most 0.0012 pp
+    assert abs(terms.gap_pp - D(str(entry["bridge"]["gap_pp"]))) < D("0.002")

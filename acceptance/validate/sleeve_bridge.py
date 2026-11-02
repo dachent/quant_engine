@@ -257,6 +257,7 @@ def check_commissions(
     sleeve_id: str,
     facts: Mapping[str, Any],
     facts_commission: Mapping[date, Decimal],
+    ca_commission: Mapping[date, Decimal] | None = None,
 ) -> CommissionCheck:
     """Prove the facts' daily sleeve commissions from the Flex executions.
 
@@ -265,7 +266,11 @@ def check_commissions(
     A trade with no reference is the sleeve's when the facts disclose a manual assignment
     to this sleeve alone on that day with that quantity.  A manual split between sleeves
     cannot be re-derived from Flex (the split is by holdings): that day takes the facts'
-    value and is named.  Anything else that differs is a refusal.
+    value and is named.  A corporate-action fraction (``how`` of
+    ``corporate_action_fraction``) is re-derived by ``sleeve_split`` and passed as
+    ``ca_commission``: the sleeve's own share of the execution's commission, added to
+    that day's tagged commissions and proven like any other day.  Anything else that
+    differs is a refusal.
     """
 
     rules = sleeve_tag_rules(tag_map, sleeve_id)
@@ -280,11 +285,20 @@ def check_commissions(
         for item in manual
         if str(item.get("sleeves")) == sleeve_id
     ]
+    ca_days = {
+        date.fromisoformat(str(item["day"]))
+        for item in manual
+        if item.get("how") == "corporate_action_fraction"
+        and str(item.get("sleeves")) != sleeve_id
+        and ca_commission is not None
+        and date.fromisoformat(str(item["day"])) in ca_commission
+    }
     split_days = tuple(
         sorted(
             date.fromisoformat(str(item["day"]))
             for item in manual
             if str(item.get("sleeves")) != sleeve_id
+            and date.fromisoformat(str(item["day"])) not in ca_days
         )
     )
     start = date.fromisoformat(rules["start"]) if rules["start"] else None
@@ -303,6 +317,9 @@ def check_commissions(
             mine = True
         if mine:
             flex[trade.day] = flex.get(trade.day, Decimal(0)) + trade.commission
+    for day in sorted(ca_days):
+        assert ca_commission is not None
+        flex[day] = flex.get(day, Decimal(0)) + ca_commission[day]
     differences: list[tuple[date, Decimal, Decimal]] = []
     for day in sorted(set(flex) | set(facts_commission)):
         if day in split_days:
@@ -429,6 +446,7 @@ def derive_bridge(
     tag_map: Mapping[str, Any] | None = None,
     model_raw: bytes | None = None,
     window_end: date | None = None,
+    ca_commission: Mapping[date, Decimal] | None = None,
 ) -> BridgeTerms:
     """The bridge terms of one declared strategy over the dates it shares with the model.
 
@@ -439,7 +457,14 @@ def derive_bridge(
     with localcontext() as context:
         context.prec = PRECISION
         return _derive_bridge(
-            facts, strategy_id, model, flex_trades, tag_map, model_raw, window_end
+            facts,
+            strategy_id,
+            model,
+            flex_trades,
+            tag_map,
+            model_raw,
+            window_end,
+            ca_commission,
         )
 
 
@@ -451,6 +476,7 @@ def _derive_bridge(
     tag_map: Mapping[str, Any] | None,
     model_raw: bytes | None,
     window_end: date | None,
+    ca_commission: Mapping[date, Decimal] | None,
 ) -> BridgeTerms:
     figures: SleeveFigures = sleeve_basis.derive_sleeve(facts, strategy_id)
     sleeve = sleeve_basis.select_sleeve(facts, strategy_id)
@@ -488,7 +514,7 @@ def _derive_bridge(
             raise Refusal(TAG_MAP_INVALID, "Flex trades need the tag map")
         sleeve_id = str(sleeve.get("sleeve_id"))
         check = check_commissions(
-            flex_trades, tag_map, sleeve_id, facts, facts_commission
+            flex_trades, tag_map, sleeve_id, facts, facts_commission, ca_commission
         )
         commission_used = {day: check.flex_by_day.get(day, Decimal(0)) for day in rows}
     ordered = sorted(rows)

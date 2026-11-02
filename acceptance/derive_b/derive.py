@@ -12,7 +12,13 @@ import types
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, DecimalException, ROUND_HALF_UP, getcontext
+from decimal import (
+    Decimal,
+    DecimalException,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+    getcontext,
+)
 from pathlib import Path, PurePath
 from typing import Callable, Iterable, cast
 
@@ -5226,6 +5232,112 @@ def _cut_ibkr_slice(
     }
 
 
+CA_LEDGER_DAYS = 5
+
+
+def cash_in_lieu_fraction(
+    day: str,
+    nav_days: list[str],
+    action_rows: list[dict[str, object]],
+    sec: str,
+    qty: Decimal,
+    holdings: dict[str, dict[str, Decimal]],
+    real: list[str],
+    everyone: list[str],
+    account_position: Decimal,
+) -> dict[str, object] | None:
+    """An untagged sale that is the fraction of a corporate action's aggregate entitlement.
+
+    The delivered security's action row gives the new quantity; the surrendered security
+    on the same date and kind gives the old one.  The sale is cash in lieu when it sells
+    exactly the new quantity's fractional part inside five ledger days of the action and
+    several sleeves hold the security.  Each sleeve then pays its own fraction (held x
+    new / old less its whole shares).  Otherwise ``None`` (pro rata stays).  A broken
+    closure stops the derivation (``_fail``), it is never papered over.
+    """
+    if qty >= 0:
+        return None
+    distinct: dict[tuple[object, object, object, Decimal], dict[str, object]] = {}
+    for row in action_rows:
+        distinct[
+            (
+                row["event_date"],
+                row["kind"],
+                row["security_id"],
+                Decimal(str(row["quantity"])),
+            )
+        ] = row
+    delivered = [
+        (key, row)
+        for key, row in distinct.items()
+        if key[2] == sec
+        and key[3] > 0
+        and str(key[0]) <= day
+        and len([x for x in nav_days if str(key[0]) < x <= day]) <= CA_LEDGER_DAYS
+    ]
+    if not delivered:
+        return None
+    (event_day, kind, _sec, new_qty), _row = delivered[-1]
+    fraction_sold = new_qty - new_qty.to_integral_value(rounding=ROUND_FLOOR)
+    if fraction_sold == 0 or abs(-qty - fraction_sold) > Decimal("1e-9"):
+        return None
+    holders = [h for h in real if holdings[h].get(sec, Decimal(0)) > 0]
+    if len(holders) < 2:
+        return None
+    surrendered = [
+        key[3]
+        for key in distinct
+        if key[0] == event_day and key[1] == kind and key[3] < 0 and key[2] != sec
+    ]
+    if len(surrendered) != 1:
+        _fail(
+            f"corporate action {event_day} delivers {sec} but names "
+            f"{len(surrendered)} surrendered securities"
+        )
+    old_qty = -surrendered[0]
+    others = [
+        h
+        for h in everyone
+        if h not in holders and abs(holdings[h].get(sec, Decimal(0))) > Decimal("1e-9")
+    ]
+    if others:
+        _fail(f"{day} {sec}: sleeves {others} carry the security but are not holders")
+    held = {h: holdings[h][sec] for h in holders}
+    held_sum = sum(held.values())
+    if abs(held_sum - old_qty) <= Decimal("1e-6"):
+        scale, unit = new_qty / old_qty, old_qty / new_qty
+    elif abs(held_sum - new_qty) <= Decimal("1e-6"):
+        scale, unit = Decimal(1), Decimal(1)
+    else:
+        _fail(
+            f"{day} {sec}: holdings {fmt(held_sum)} match neither the surrendered "
+            f"{fmt(old_qty)} nor the delivered {fmt(new_qty)} quantity"
+        )
+    entitlement = {h: held[h] * scale for h in holders}
+    whole = {h: entitlement[h].to_integral_value(rounding=ROUND_FLOOR) for h in holders}
+    own = {h: entitlement[h] - whole[h] for h in holders}
+    if abs(sum(own.values()) - fraction_sold) > Decimal("1e-6"):
+        _fail(
+            f"{day} {sec}: sleeve fractions {fmt(sum(own.values()))} do not add to "
+            f"the {fmt(fraction_sold)} sold"
+        )
+    if abs(sum(whole.values()) - account_position) > Decimal("1e-6"):
+        _fail(
+            f"{day} {sec}: whole shares {fmt(sum(whole.values()))} are not the "
+            f"account position {fmt(account_position)}"
+        )
+    total = sum(own.values())
+    return {
+        "share": {h: own[h] / total for h in holders if own[h] != 0},
+        "unit": unit,
+        "held": held,
+        "entitlement": entitlement,
+        "whole": whole,
+        "fraction": own,
+        "action_day": event_day,
+    }
+
+
 def _ibkr_facts(
     slc: dict[str, object],
     declared: dict[str, object],
@@ -5407,6 +5519,7 @@ def _ibkr_facts(
     # ---------------- ledger ----------------
     holdings: dict[str, dict[str, Decimal]] = {s: {} for s in ALL}
     manual_assignments = []
+    cash_in_lieu_blocks: list[dict[str, object]] = []
     recon_gaps = []
     recon_scalings = []
     offsetting_residues = []
@@ -5472,6 +5585,60 @@ def _ibkr_facts(
                 holdings[s][sec] = holdings[s].get(sec, Decimal(0)) + qty
                 net_trade[s] += qty * price
                 comm[s] += c
+                continue
+            lieu = cash_in_lieu_fraction(
+                d,
+                nav_days,
+                slc.get("corporate_actions", []),  # type: ignore[arg-type]
+                sec,
+                qty,
+                holdings,
+                REAL,
+                ALL,
+                book[d].get(sec, Decimal(0)),
+            )
+            if lieu is not None:
+                shares_by_sleeve = cast(dict[str, Decimal], lieu["share"])
+                unit = cast(Decimal, lieu["unit"])
+                for h in sorted(shares_by_sleeve):
+                    share = shares_by_sleeve[h]
+                    holdings[h][sec] += share * qty * unit
+                    net_trade[h] += share * qty * price
+                    comm[h] += share * c
+                manual_assignments.append(
+                    {
+                        "day": d,
+                        "security_id": sec,
+                        "quantity": fmt(qty),
+                        "how": "corporate_action_fraction",
+                        "sleeves": sorted(shares_by_sleeve),
+                    }
+                )
+                cash_in_lieu_blocks.append(
+                    {
+                        "day": d,
+                        "security_id": sec,
+                        "action_day": lieu["action_day"],
+                        "sold": fmt(qty),
+                        "sleeves": {
+                            h: {
+                                "held": fmt(cast(dict[str, Decimal], lieu["held"])[h]),
+                                "entitlement": fmt(
+                                    cast(dict[str, Decimal], lieu["entitlement"])[h]
+                                ),
+                                "whole": fmt(
+                                    cast(dict[str, Decimal], lieu["whole"])[h]
+                                ),
+                                "fraction": fmt(
+                                    cast(dict[str, Decimal], lieu["fraction"])[h]
+                                ),
+                                "cash": fmt(-qty * shares_by_sleeve[h] * price),
+                                "commission": fmt(shares_by_sleeve[h] * c),
+                            }
+                            for h in sorted(shares_by_sleeve)
+                        },
+                    }
+                )
                 continue
             holders = [h for h in REAL if holdings[h].get(sec, Decimal(0)) * qty < 0]
             if len(holders) == 1:
@@ -5975,6 +6142,11 @@ def _ibkr_facts(
             "reconciliation_scalings": recon_scalings,
             "offsetting_residues": offsetting_residues,
             "unallocated_dividends": unallocated_dividends,
+            **(
+                {"corporate_action_fractions": cash_in_lieu_blocks}
+                if cash_in_lieu_blocks
+                else {}
+            ),
         },
         "refusals": refusals,
         "assumptions": assumptions,

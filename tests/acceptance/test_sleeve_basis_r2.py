@@ -7,12 +7,6 @@ it): this module runs only when the environment names it.
 * ``QE_AI624_R2_FIXTURE``  the retained ``ai624_r2_s2_sleeve.json`` (the other strategies'
   current values and the governed events of the R2 panel, and what it published)
 * ``QE_AI624_R2_PANEL``    the R2 ``dashboard_data.json`` (the non-diminish test)
-* ``QE_AI624_R21_FACTS``   the rebuilt (R2.1 lineage, whole-share corporate-action rule)
-  ``ibkr-sleeve-facts.json``; its figures are derived in the test, never typed
-
-The tests keyed to ``QE_AI624_R2_FACTS`` are the R2 regression reference (pro rata
-split, oracle facts): they keep the figures the R2 panel published.  The R2.1 variant
-(``QE_AI624_R21_FACTS``) states the applicable figures from the rebuilt facts.
 
 The derivation reads the facts only.  The fixture supplies the other strategies' values
 and the governed events; its published figures are read only to be compared.
@@ -38,12 +32,6 @@ PANEL = os.environ.get("QE_AI624_R2_PANEL")
 def _present(path: str | None) -> bool:
     return bool(path) and Path(path or "").is_file()
 
-
-R21_FACTS = os.environ.get("QE_AI624_R21_FACTS")
-needs_r21 = pytest.mark.skipif(
-    not (_present(R21_FACTS) and _present(FIXTURE)),
-    reason="QE_AI624_R21_FACTS and QE_AI624_R2_FIXTURE are not set",
-)
 
 needs_facts = pytest.mark.skipif(
     not (_present(FACTS) and _present(FIXTURE)),
@@ -90,9 +78,9 @@ def evidence() -> dict[str, Any]:
 
 
 @needs_facts
-def test_the_r2_figures_are_the_verified_ones(evidence: dict[str, Any]) -> None:
-    """R2 regression reference (pro rata split, oracle facts)."""
-
+def test_the_r2_regression_reference_figures_are_the_verified_ones(
+    evidence: dict[str, Any],
+) -> None:
     figures = evidence["figures"]
     assert f"{figures.twr * 100:.4f}" == "15.4348"
     assert figures.annualised is not None
@@ -109,48 +97,6 @@ def test_the_r2_figures_are_the_verified_ones(evidence: dict[str, Any]) -> None:
     assert mwr.rate is not None
     assert f"{mwr.rate * 100:.4f}" == "18.1990"
     assert (mwr.window_days, mwr.flow_count) == (702, 33)
-
-
-@needs_r21
-def test_the_r21_figures_follow_the_rebuilt_facts() -> None:
-    """The applicable figures, derived from the rebuilt facts and checked against K."""
-
-    import strategy_basis
-
-    assert R21_FACTS is not None
-    raw = Path(R21_FACTS).read_bytes()
-    facts, fixture = json.loads(raw), _load(FIXTURE)
-    strategy = next(
-        sleeve["strategy_id"]
-        for sleeve in facts["sleeves"]
-        if sleeve["account_id"] == fixture["sleeve_account_id"]
-    )
-    equity = Decimal(fixture["published_row_before"]["current_value_usd"])
-    figures = sleeve_basis.derive_sleeve(facts, strategy, parent_equity=equity)
-    rows = strategy_basis.rows_from_sleeve_facts(raw, strategy)
-    wealth = Decimal(1)
-    for row in rows:
-        wealth *= 1 + Decimal(row["return"])
-    with localcontext() as context:
-        context.prec = 40
-        assert abs(figures.twr - (wealth - 1)) < Decimal("1e-25")
-    assert figures.nav_observations == len(rows) + 1
-    closing = {
-        day["day"]: Decimal(day["nav_end_after_alloc"])
-        for sleeve in facts["sleeves"]
-        if sleeve["strategy_id"] == strategy
-        for day in sleeve["days"]
-    }
-    assert figures.value == closing[figures.end_date.isoformat()]
-    # the rebuilt series is not the R2 one: the corporate-action fraction rule moved it
-    if _present(FACTS):
-        oracle = sleeve_basis.derive_sleeve(
-            _load(FACTS), strategy, parent_equity=equity
-        )
-        assert figures.twr != oracle.twr
-        assert strategy_basis.series_sha256(rows) != strategy_basis.series_sha256(
-            strategy_basis.rows_from_sleeve_facts(Path(FACTS).read_bytes(), strategy)
-        )
 
 
 @needs_facts
@@ -353,3 +299,56 @@ def test_the_real_r2_panel_states_a_figure_set_and_each_one_has_a_home_after_b()
         )
         == []
     )
+
+
+# ---- the applicable lineage: branch S's rebuild (each sleeve charged its own fraction) ----
+
+R22_FACTS = os.environ.get("QE_AI624_R22_FACTS")
+needs_r22 = pytest.mark.skipif(
+    not _present(R22_FACTS), reason="QE_AI624_R22_FACTS is not set to the rebuilt facts"
+)
+
+
+def _strategy_of(facts: dict[str, Any]) -> str:
+    """The strategy of the sleeve open on the facts' last day: no id in code."""
+
+    return next(
+        sleeve["strategy_id"]
+        for sleeve in facts["sleeves"]
+        if sleeve["last_day"] == facts["window"]["last_day"]
+    )
+
+
+@needs_r22
+def test_the_applicable_r21_figures_are_derived_from_the_rebuilt_facts() -> None:
+    facts = _load(R22_FACTS)
+    figures = sleeve_basis.derive_sleeve(facts, _strategy_of(facts))
+    assert f"{figures.twr * 100:.4f}" == "15.4333"
+    assert figures.annualised is not None
+    assert f"{figures.annualised * 100:.4f}" == "25.5790"
+    assert f"{figures.max_drawdown * 100:.4f}" == "-6.7364"
+    assert f"{figures.current_drawdown * 100:.4f}" == "-0.9176"
+    assert f"{figures.value:.2f}" == "77258.00"
+    assert f"{figures.liability_line:.2f}" == "-20057.13"
+    assert f"{figures.parent_equity:.4f}" == "57200.8755"
+    assert (figures.window_days, figures.nav_observations) == (230, 165)
+
+
+@needs_r22
+@needs_facts
+def test_the_rebuild_moves_the_sleeve_by_the_fraction_and_the_account_not_at_all() -> (
+    None
+):
+    """Against the R2 reference: the sleeve and the margin line move by equal amounts."""
+
+    own = _load(R22_FACTS)
+    old = _load(FACTS)
+    strategy = _strategy_of(own)
+    after = sleeve_basis.derive_sleeve(own, strategy)
+    before = sleeve_basis.derive_sleeve(old, strategy)
+    assert after.parent_equity == before.parent_equity
+    assert abs(
+        (after.value - before.value) + (after.liability_line - before.liability_line)
+    ) < Decimal("1e-20")
+    assert after.value < before.value
+    assert Decimal("-0.0000145") < after.twr - before.twr < Decimal("-0.0000142")

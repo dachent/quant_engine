@@ -218,6 +218,8 @@ class Context:
     # the ledger run's own sources the facts are bound against (provider ledger, the IBKR
     # catalog of its generation, the tag map); refused when absent
     facts_sources: facts_bindings.FactsSources | None = None
+    # a facts file named a regression reference may lack the corporate-action binding
+    facts_regression_reference: bool = False
 
     @property
     def report(self) -> dict[str, Any]:
@@ -4556,7 +4558,11 @@ def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
         )
         return
     try:
-        facts_bindings.check_bindings(ctx.sleeve_facts, ctx.facts_sources)
+        facts_bindings.check_bindings(
+            ctx.sleeve_facts,
+            ctx.facts_sources,
+            regression_reference=ctx.facts_regression_reference,
+        )
     except sleeve_basis.Refusal as exc:
         yield _finding(
             "returns.sleeve_basis",
