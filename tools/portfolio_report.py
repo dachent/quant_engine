@@ -289,6 +289,10 @@ SLEEVE_DISCLOSURE_EVIDENCE_NAME: Final = "sleeve-disclosure-sources.json"
 STRATEGY_BASIS_EVIDENCE_NAME: Final = "strategy-basis-declaration.json"
 PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH: Final = "input/strategy-basis-declaration.json"
 PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH: Final = "input/sleeve-account-facts.json"
+IMPLEMENTATION_SLEEVE_EVIDENCE_NAME: Final = "implementation-sleeve-basis.json"
+PUBLISHED_IMPLEMENTATION_SLEEVE_RELATIVE_PATH: Final = (
+    "input/implementation-sleeve-basis.json"
+)
 # The sleeve facts a restated candidate was built with (#624): the margin liability line and
 # the two bridges are computed from them, so verification rebuilds from the same bytes.
 SLEEVE_FACTS_EVIDENCE_NAME: Final = "sleeve-account-facts.json"
@@ -12275,6 +12279,7 @@ def build_candidate(
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    implementation_sleeve_basis_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -12310,6 +12315,7 @@ def build_candidate(
         sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
         strategy_basis_path=strategy_basis_path,
         sleeve_facts_path=sleeve_facts_path,
+        implementation_sleeve_basis_path=implementation_sleeve_basis_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -12332,6 +12338,13 @@ def build_candidate(
         _write_exact(
             candidate / SLEEVE_FACTS_EVIDENCE_NAME,
             _regular_file_bytes(sleeve_facts_path, "sleeve facts"),
+        )
+    if implementation_sleeve_basis_path is not None:
+        _write_exact(
+            candidate / IMPLEMENTATION_SLEEVE_EVIDENCE_NAME,
+            _regular_file_bytes(
+                implementation_sleeve_basis_path, "implementation sleeve basis"
+            ),
         )
     if sleeve_disclosure_sources_path is not None:
         _write_exact(
@@ -13800,6 +13813,13 @@ def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
     """The basis declaration a candidate was built with, when it carries one (#624)."""
 
     path = candidate_dir / STRATEGY_BASIS_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
+
+
+def _candidate_implementation_sleeve_basis(candidate_dir: Path) -> Path | None:
+    """The implementation sleeve bridge a candidate was built with, when it has one (#624)."""
+
+    path = candidate_dir / IMPLEMENTATION_SLEEVE_EVIDENCE_NAME
     return path if path.is_file() and not path.is_symlink() else None
 
 
@@ -16103,6 +16123,9 @@ def verify_candidate(
         ),
         strategy_basis_path=_candidate_strategy_basis(candidate_dir),
         sleeve_facts_path=_candidate_sleeve_facts(candidate_dir),
+        implementation_sleeve_basis_path=_candidate_implementation_sleeve_basis(
+            candidate_dir
+        ),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -17184,6 +17207,9 @@ def publish_report(
         ),
         strategy_basis_path=_candidate_strategy_basis(candidate_dir),
         sleeve_facts_path=_candidate_sleeve_facts(candidate_dir),
+        implementation_sleeve_basis_path=_candidate_implementation_sleeve_basis(
+            candidate_dir
+        ),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -17243,6 +17269,17 @@ def publish_report(
                 PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH,
                 strategy_basis_disclosure.FACTS_ARTIFACT_ID,
                 str(strategy_basis_disclosure.FACTS_SCHEMA_VERSION),
+            )
+        )
+    implementation_evidence = candidate_dir / IMPLEMENTATION_SLEEVE_EVIDENCE_NAME
+    if implementation_evidence.is_file() and not implementation_evidence.is_symlink():
+        # the exact bytes the sleeve-basis implementation bridge was rendered from
+        artifact_specs.append(
+            (
+                implementation_evidence,
+                PUBLISHED_IMPLEMENTATION_SLEEVE_RELATIVE_PATH,
+                "implementation-sleeve-basis",
+                implementation_sleeve_basis.SCHEMA.rsplit("/", 1)[-1],
             )
         )
     disclosure_sources = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
@@ -17566,6 +17603,10 @@ def publish_report(
     for evidence_name, published_relative in (
         (STRATEGY_BASIS_EVIDENCE_NAME, PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH),
         (SLEEVE_FACTS_EVIDENCE_NAME, PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH),
+        (
+            IMPLEMENTATION_SLEEVE_EVIDENCE_NAME,
+            PUBLISHED_IMPLEMENTATION_SLEEVE_RELATIVE_PATH,
+        ),
     ):
         evidence_source = candidate_dir / evidence_name
         if evidence_source.is_file() and not evidence_source.is_symlink():
@@ -17664,6 +17705,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--sleeve-disclosure-sources", type=Path)
     build.add_argument("--strategy-basis", type=Path)
     build.add_argument("--sleeve-facts", type=Path)
+    build.add_argument("--implementation-sleeve-basis", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -17824,6 +17866,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sleeve_disclosure_sources_path=args.sleeve_disclosure_sources,
                 strategy_basis_path=args.strategy_basis,
                 sleeve_facts_path=args.sleeve_facts,
+                implementation_sleeve_basis_path=args.implementation_sleeve_basis,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )

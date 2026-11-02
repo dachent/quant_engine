@@ -741,6 +741,25 @@ def _strategy_basis_declaration_path(config: Mapping[str, Any]) -> Path | None:
     return configured if configured is not None else policy
 
 
+def _implementation_sleeve_basis_path(config: Mapping[str, Any]) -> Path | None:
+    """The pinned ``implementation-sleeve-basis/1`` contract, if the release carries one.
+
+    It is built from the declaration, the sleeve facts, the model capture and the retained
+    implementation contracts (``portfolio_implementation_sleeve_basis``), so a release that
+    names it must also declare the restatement it belongs to.  Absent, the report keeps the
+    account-basis implementation bridge as it was.
+    """
+
+    pin = config.get("implementation_sleeve_basis")
+    if pin is None:
+        return None
+    if _strategy_basis_declaration_path(config) is None:
+        raise AttendedPreparationError(
+            "an implementation sleeve basis requires a strategy basis declaration"
+        )
+    return _pin(pin, "implementation sleeve basis")
+
+
 def _strategy_basis_facts_path(
     declaration_path: Path | None, facts_paths: Sequence[Path]
 ) -> Path | None:
@@ -1716,6 +1735,11 @@ def _preparation_stage_inputs(
                 else {}
             ),
             **_strategy_basis_stage_input(config.get("sleeve_facts")),
+            **(
+                {"implementation_sleeve_basis": config["implementation_sleeve_basis"]}
+                if config.get("implementation_sleeve_basis") is not None
+                else {}
+            ),
         },
         "hwm": {
             "calendar_authority": config["calendar_authority"],
@@ -2592,6 +2616,7 @@ def _prepare_attended_inputs(
             sleeve_facts_path=(
                 basis_facts_path if basis_declaration_path is not None else None
             ),
+            implementation_sleeve_basis_path=_implementation_sleeve_basis_path(config),
         )
         checkpoint(
             "epoch",

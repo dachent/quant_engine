@@ -43,7 +43,12 @@ def full() -> Any:
 
 
 def _publish(
-    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, restated: bool
+    full: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    restated: bool,
+    bridge: bool = False,
 ) -> dict[str, Any]:
     reporter = full.reporter
     current = _epoch(date(2026, 7, 2), "104")
@@ -148,6 +153,7 @@ def _publish(
             "1",
         ),
     )
+    seen_paths: list[list[Path]] = []
     tag_map = tmp_path / "tag-map.json"
     tag_map.write_bytes(_tag_map())
     kwargs: dict[str, Any] = {}
@@ -157,6 +163,19 @@ def _publish(
         facts = tmp_path / "facts-in.json"
         facts.write_bytes(json.dumps(_facts()).encode("utf-8"))
         kwargs = {"strategy_basis_path": declaration, "sleeve_facts_path": facts}
+    if bridge:
+        # the bridge contract itself is proven by its own tests; here only its plumbing
+        contract = tmp_path / "bridge-in.json"
+        contract.write_bytes(b'{"schema": "implementation-sleeve-basis/1"}')
+        kwargs["implementation_sleeve_basis_path"] = contract
+        seen: list[Path] = []
+
+        def apply(path: Path, _restatements: Any, *rest: Any) -> Any:
+            seen.append(path)
+            return rest[0], rest[2], {}
+
+        monkeypatch.setattr(reporter, "_apply_implementation_sleeve_basis", apply)
+        seen_paths.append(seen)
     (tmp_path / "m.json").write_bytes(canonical_json_bytes({"schema_version": 10}))
     (tmp_path / "s.json").write_bytes(canonical_json_bytes({"generation_id": "a" * 64}))
     (tmp_path / "c.json").write_bytes(canonical_json_bytes(crosswalk))
@@ -179,6 +198,7 @@ def _publish(
         "baseline_root": baseline_root,
         "candidate": candidate,
         "triplet": triplet,
+        "bridge_calls": seen_paths[0] if seen_paths else [],
     }
 
 
@@ -266,3 +286,40 @@ def test_a_report_without_a_declaration_publishes_no_restated_evidence(
     assert not (generation / "input/sleeve-account-facts.json").exists()
     report, _identity, report_path = panel._current_report(tmp_path / "published")
     assert panel._report_strategy_basis_declaration(report, report_path) is None
+
+
+def test_the_implementation_bridge_contract_travels_candidate_verify_publish(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    world = _publish(full, tmp_path, monkeypatch, restated=True, bridge=True)
+    reporter = world["reporter"]
+    candidate = world["candidate"]
+    assert (candidate / "implementation-sleeve-basis.json").read_bytes() == (
+        tmp_path / "bridge-in.json"
+    ).read_bytes()
+    triplet = _candidate_triplet(world)
+    reporter.verify_candidate(world["baseline_root"], candidate, None, **triplet)
+    published = reporter.publish_report(
+        world["baseline_root"],
+        candidate,
+        None,
+        None,
+        None,
+        tmp_path / "published",
+        **triplet,
+    )
+    generation = tmp_path / "published" / "generations" / published["generation_id"]
+    assert (generation / "input/implementation-sleeve-basis.json").read_bytes() == (
+        candidate / "implementation-sleeve-basis.json"
+    ).read_bytes()
+    # build, verify and publish each read the candidate's copy, never the caller's path
+    assert world["bridge_calls"][0] == tmp_path / "bridge-in.json"
+    assert world["bridge_calls"][1:] == [
+        candidate / "implementation-sleeve-basis.json"
+    ] * (len(world["bridge_calls"]) - 1)
+    assert len(world["bridge_calls"]) >= 3
+    report, _identity, _path = panel._current_report(tmp_path / "published")
+    assert any(
+        item.get("artifact") == "implementation-sleeve-basis"
+        for item in report["provenance"]
+    )

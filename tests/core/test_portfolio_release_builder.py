@@ -4916,6 +4916,7 @@ def test_build_report_routes_schema10_epoch_binding_to_data_only_publication(
         "sleeve_disclosure_sources_path": None,
         "strategy_basis_path": None,
         "sleeve_facts_path": None,
+        "implementation_sleeve_basis_path": None,
     }
     report_calls = calls["tool_calls"]
     assert [call[1] for call in report_calls] == ["verify", "publish"]
@@ -4967,6 +4968,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_p
             "sleeve_disclosure_sources_path": None,
             "strategy_basis_path": None,
             "sleeve_facts_path": None,
+            "implementation_sleeve_basis_path": None,
             "epoch_manifest_generation_root": epoch_root,
             "epoch_manifest_generation_id": "d" * 64,
         }
@@ -5940,6 +5942,11 @@ def test_expected_model_annualisation_comes_from_the_base_spec_not_a_literal() -
 _OPTIONAL_REPORT_INPUTS = (
     ("strategy_basis", "strategy_basis_path", "--strategy-basis"),
     ("sleeve_facts", "sleeve_facts_path", "--sleeve-facts"),
+    (
+        "implementation_sleeve_basis",
+        "implementation_sleeve_basis_path",
+        "--implementation-sleeve-basis",
+    ),
 )
 
 
@@ -6041,15 +6048,22 @@ def test_report_candidate_forwards_the_basis_flags_only_when_given(
         return calls[0]
 
     default = build()
-    assert "--strategy-basis" not in default and "--sleeve-facts" not in default
+    for _key, _param, flag in _OPTIONAL_REPORT_INPUTS:
+        assert flag not in default
     declaration = tmp_path / "declaration.json"
     facts = tmp_path / "facts.json"
-    given = build(strategy_basis_path=declaration, sleeve_facts_path=facts)
+    bridge = tmp_path / "implementation-sleeve-basis.json"
+    given = build(
+        strategy_basis_path=declaration,
+        sleeve_facts_path=facts,
+        implementation_sleeve_basis_path=bridge,
+    )
     assert given[given.index("--strategy-basis") + 1] == str(declaration)
     assert given[given.index("--sleeve-facts") + 1] == str(facts)
+    assert given[given.index("--implementation-sleeve-basis") + 1] == str(bridge)
     # absence is byte-identical to the arguments without the new parameters
     stripped = list(given)
-    for flag in ("--strategy-basis", "--sleeve-facts"):
+    for flag in ("--strategy-basis", "--sleeve-facts", "--implementation-sleeve-basis"):
         index = stripped.index(flag)
         del stripped[index : index + 2]
     assert tuple(stripped) == default

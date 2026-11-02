@@ -5162,6 +5162,8 @@ def test_a_declaration_hands_its_facts_to_the_final_release_recipe(
     section = _sleeve_section(tmp_path)
     declaration = tmp_path / "strategy-basis-declaration.json"
     declaration.write_bytes(b'{"schema":"strategy-basis-declaration/1"}')
+    bridge = tmp_path / "implementation-sleeve-basis.json"
+    bridge.write_bytes(b'{"schema":"implementation-sleeve-basis/1"}')
     original = preparation._validated_inputs
 
     def with_declaration(*args: object) -> tuple[dict[str, object], object]:
@@ -5170,6 +5172,7 @@ def test_a_declaration_hands_its_facts_to_the_final_release_recipe(
             **config,
             "sleeve_facts": section,
             "strategy_basis_declaration": preparation._definition(declaration),
+            "implementation_sleeve_basis": preparation._definition(bridge),
         }, plan
 
     monkeypatch.setattr(preparation, "_validated_inputs", with_declaration)
@@ -5215,6 +5218,20 @@ def test_a_declaration_hands_its_facts_to_the_final_release_recipe(
     assert final["sleeve_facts_path"] == (
         output / "preparation" / "sleeve-facts" / "sleeve-account-facts.json"
     )
+    # the pinned sleeve-basis implementation bridge rides the same recipe
+    assert final["implementation_sleeve_basis_path"] == bridge.resolve()
+
+
+def test_an_implementation_sleeve_basis_needs_the_declaration_it_belongs_to(
+    tmp_path: Path,
+) -> None:
+    bridge = tmp_path / "implementation-sleeve-basis.json"
+    bridge.write_bytes(b"{}")
+    assert preparation._implementation_sleeve_basis_path({}) is None
+    with pytest.raises(preparation.AttendedPreparationError, match="declaration"):
+        preparation._implementation_sleeve_basis_path(
+            {"implementation_sleeve_basis": preparation._definition(bridge)}
+        )
 
 
 def test_a_declaration_without_the_sleeve_configuration_is_refused(

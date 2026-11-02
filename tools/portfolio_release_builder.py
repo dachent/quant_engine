@@ -717,6 +717,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         - {
             "dependence_selected_inputs",
             "evaluated_on",
+            "implementation_sleeve_basis",
             "model_vs_actual_input",
             "nested_tag_map",
             "sleeve_disclosure_sources",
@@ -831,7 +832,11 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("sleeve_disclosure_sources identity differs")
-    for optional_file in ("strategy_basis", "sleeve_facts"):
+    for optional_file in (
+        "strategy_basis",
+        "sleeve_facts",
+        "implementation_sleeve_basis",
+    ):
         if optional_file in recipe:
             definition = recipe[optional_file]
             if not isinstance(definition, dict) or set(definition) != {
@@ -1021,6 +1026,7 @@ def create_recipe(
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    implementation_sleeve_basis_path: Path | None = None,
     weekly_gap_fill_spec_path: Path | None = None,
     vendor_gap_fills_path: Path | None = None,
     model_vs_actual_input_path: Path | None = None,
@@ -1153,6 +1159,10 @@ def create_recipe(
         payload["strategy_basis"] = _file_definition(strategy_basis_path.resolve())
     if sleeve_facts_path is not None:
         payload["sleeve_facts"] = _file_definition(sleeve_facts_path.resolve())
+    if implementation_sleeve_basis_path is not None:
+        payload["implementation_sleeve_basis"] = _file_definition(
+            implementation_sleeve_basis_path.resolve()
+        )
     if normalized_evaluated_on is not None:
         payload["evaluated_on"] = normalized_evaluated_on
     if provider_ledger_spec is not None:
@@ -4882,6 +4892,7 @@ def build_report_candidate(
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    implementation_sleeve_basis_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -4972,6 +4983,11 @@ def build_report_candidate(
             if sleeve_facts_path is not None
             else ()
         ),
+        *(
+            ("--implementation-sleeve-basis", str(implementation_sleeve_basis_path))
+            if implementation_sleeve_basis_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -5057,6 +5073,7 @@ def build_report(
     sleeve_disclosure_sources_path: Path | None = None,
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
+    implementation_sleeve_basis_path: Path | None = None,
 ) -> dict[str, Any]:
     if workbook_runtime_path is not None:
         raise VerticalBuildError(
@@ -5141,6 +5158,7 @@ def build_report(
         sleeve_disclosure_sources_path=sleeve_disclosure_sources_path,
         strategy_basis_path=strategy_basis_path,
         sleeve_facts_path=sleeve_facts_path,
+        implementation_sleeve_basis_path=implementation_sleeve_basis_path,
     )
     candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
     report_arguments = (
@@ -6565,7 +6583,7 @@ def build_stage(
     )
     optional_report_paths = {
         f"{key}_path": _path(recipe[key]["path"], f"{key}.path")
-        for key in ("strategy_basis", "sleeve_facts")
+        for key in ("strategy_basis", "sleeve_facts", "implementation_sleeve_basis")
         if isinstance(recipe.get(key), dict)
     }
     implementation_reconciliation = _path(
