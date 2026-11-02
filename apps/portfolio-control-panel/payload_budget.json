@@ -16,7 +16,7 @@
       "dependence_modes": 271278,
       "dependence_analysis": 134096,
       "coverage": 129325,
-      "strategies": 121117,
+      "strategies": 156861,
       "hwm_governed_proof": 112859,
       "performance_tab": 375785,
       "orthogonal_risk_attribution": 168346,
@@ -35,7 +35,7 @@
     "dependence_modes": 280000,
     "dependence_analysis": 139000,
     "coverage": 134000,
-    "strategies": 125000,
+    "strategies": 158000,
     "hwm_governed_proof": 117000,
     "performance_tab": 388000,
     "orthogonal_risk_attribution": 174000,
@@ -53,5 +53,57 @@
   "fixture": {
     "basis": "performance_tab built from the eight-week panel of tests/portfolio_control_panel/test_performance_tab.py measured 9549 B at R2 (schema 2) and 15898 B on r21-integration (schema 3: union grid, benchmark series); guards block shape in CI, where no real generation exists",
     "performance_tab_max_bytes": 16400
+  },
+  "r22_growth": {
+    "basis": "R2.2 (#624 option B), panel candidate built by the attended run on the pass-27 inputs; the only budgeted block raised. Measured with `python tools/panel_payload_size.py <candidate dir>` on the pass-27 candidate (6ac5939d) and on the R2.2 candidate; the figures below are those two measurements, not typed estimates. committed_bytes.blocks.strategies is the R2.2 measurement; the limit is that figure plus about 0.7 percent, rounded up to 1000.",
+    "blocks": {
+      "strategies": {
+        "pass27": 136732,
+        "r22": 156861,
+        "delta": 20129
+      },
+      "strategy_underwriting": {
+        "pass27": 77753,
+        "r22": 64219,
+        "delta": -13534
+      },
+      "dependence_modes": {
+        "pass27": 271276,
+        "r22": 274797,
+        "delta": 3521
+      },
+      "dependence_analysis": {
+        "pass27": 134079,
+        "r22": 136045,
+        "delta": 1966
+      },
+      "account_summary": {
+        "pass27": 5549,
+        "r22": 7505,
+        "delta": 1956
+      },
+      "canonical_strategy_series": {
+        "pass27": 6413,
+        "r22": 6716,
+        "delta": 303
+      },
+      "strategy_basis_disclosure": {
+        "pass27": 0,
+        "r22": 7573,
+        "delta": 7573
+      },
+      "model_vs_actual": {
+        "pass27": 138129,
+        "r22": 138128,
+        "delta": -1
+      },
+      "performance": {
+        "pass27": 54055,
+        "r22": 54052,
+        "delta": -3
+      }
+    },
+    "carried_once_before_budget": "underwriting names the account-basis block and the implementation detail by key (strategy_underwriting 77,753 -> 64,219 B, below pass 27); account lanes drop the window the annualization states; the window limit drops what the closure holds",
+    "remaining_strategies_growth": "implementation_return_attribution +11,568 and implementation_reconciliation +3,241 (the sleeve bridge, its order-sensitivity table and the model admission disclosure; the retained account bridge is kept beside it), comparison_basis +2,329, the two account lanes +3,392: data the owner asked to keep"
   }
 }
