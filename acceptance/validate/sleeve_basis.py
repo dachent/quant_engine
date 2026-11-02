@@ -49,6 +49,7 @@ FLOW_CLASSES = frozenset(
 CLOSURE_TOLERANCE = Decimal("1e-9")
 LEG_TOLERANCE = Decimal("1e-6")
 USD_TOLERANCE = Decimal("0.01")
+HALF_CENT = Decimal("0.005")
 RATE_TOLERANCE = Decimal("1e-15")
 
 # refusal codes
@@ -632,6 +633,7 @@ def compare_published(
     mwr: MwrFigures | None = None,
     other_weights: Mapping[str, Decimal] | None = None,
     other_values: Mapping[str, Decimal] | None = None,
+    oracle_capital: Mapping[str, Decimal] | None = None,
 ) -> list[Finding]:
     """Findings where the panel's row for a declared strategy is not the derived one.
 
@@ -707,11 +709,15 @@ def compare_published(
                     f"{name} differs from the independent sleeve derivation",
                 )
             )
+    first_return = figures.daily_returns[0][0] if figures.daily_returns else None
     for name, derived_day in (
-        ("account_live_observed_start", figures.opening_date),
+        ("return_window_start", figures.opening_date),
+        ("account_live_observed_start", first_return),
         ("account_live_observed_end", figures.end_date),
     ):
         published_day = row.get(name)
+        if derived_day is None:
+            continue
         if (
             published_day is not None
             and str(published_day)[:10] != derived_day.isoformat()
@@ -722,9 +728,23 @@ def compare_published(
                     f"{where}.{name}",
                     derived_day,
                     published_day,
-                    "the return window is not the sleeve's opening NAV date to the end",
+                    "the window opens at the sleeve's opening NAV date "
+                    "(return_window_start); the first return date is "
+                    "account_live_observed_start",
                 )
             )
+    if row.get("window_days") is not None and row.get("window_days") != (
+        figures.window_days
+    ):
+        found.append(
+            Finding(
+                "PUBLISHED_WINDOW_DIFFERS",
+                f"{where}.window_days",
+                figures.window_days,
+                row.get("window_days"),
+                "the window runs from the opening NAV date to the end date",
+            )
+        )
     systematic = (
         (panel.get("capital") or {}).get("systematic")
         if isinstance(panel.get("capital"), Mapping)
@@ -761,12 +781,16 @@ def compare_published(
                     "perimeter",
                 )
             )
-        capital = (other_values or {}).get(other)
+        oracle = (oracle_capital or {}).get(other)
+        capital = oracle if oracle is not None else (other_values or {}).get(other)
         published_value = other_row.get("current_value_usd")
+        # the oracle states capitals rounded to the cent (half up): a published exact
+        # value stands when it rounds to the oracle's, i.e. is within half a cent of it
+        limit = HALF_CENT + Decimal("1e-9") if oracle is not None else USD_TOLERANCE
         if (
             capital is not None
             and published_value is not None
-            and not _close(published_value, capital, USD_TOLERANCE)
+            and not _close(published_value, capital, limit)
         ):
             found.append(
                 Finding(
@@ -774,7 +798,12 @@ def compare_published(
                     f"{place}.current_value_usd",
                     capital,
                     published_value,
-                    "an undeclared strategy's capital must not move",
+                    "an undeclared strategy's capital must not move"
+                    + (
+                        " (beyond the half-cent rounding of the oracle's capital)"
+                        if oracle is not None
+                        else ""
+                    ),
                 )
             )
     if mwr is not None:
