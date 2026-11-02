@@ -26,6 +26,7 @@ PROVIDERS = (
     "schwab",
 )
 NATIVE = {"matrixport", "quantbase", "schwab"}
+QUALIFICATION = {"alpaca": "PUBLISHED_COMPLETE", "fidelity": "FINITE_STATIC"}
 SOURCE = {
     p: "CYCLE_MANIFEST_NATIVE"
     if p in NATIVE
@@ -74,8 +75,10 @@ def cycle(tmp_path: Path) -> dict[str, Any]:
             "generation": {"mode": "single"},
             "manifest_sha256": info["sha256"],
             "finality_source": SOURCE[provider_id],
+            "qualification": QUALIFICATION.get(provider_id, "STAGED_COMPLETE"),
         }
-        if provider_id in NATIVE:
+        if SOURCE[provider_id] != "GENERATION_MANIFEST":
+            entry["finalized_through"] = "2026-01-02"
             native = _put(
                 data / "native" / f"{provider_id}.json",
                 f"native {provider_id}".encode(),
@@ -128,7 +131,12 @@ def test_a_synthetic_cycle_resolves_to_the_documented_shape(
     assert resolved["providers"]["alpaca"]["finality_source"] == "GENERATION_MANIFEST"
     alpaca = resolved["providers"]["alpaca"]
     assert alpaca["finality_evidence"]["sha256"] == alpaca["manifest_sha256"]
-    assert resolved["providers"]["ibkr"]["finality_evidence"] is None
+    assert resolved["providers"]["ibkr"]["finality_evidence"]["path"].endswith(
+        "native/ibkr.json"
+    )
+    assert resolved["providers"]["alpaca"]["finalized_through"] is None
+    assert resolved["providers"]["schwab"]["finalized_through"] == "2026-01-02"
+    assert resolved["providers"]["fidelity"]["qualification"] == "FINITE_STATIC"
     assert resolved["providers"]["schwab"]["finality_evidence"]["path"].endswith(
         "native/schwab.json"
     )
@@ -212,6 +220,16 @@ def test_finite_provider_may_not_name_evidence_of_its_own(
         "strategy_evidence"
     ]
     _refused(cycle, "FINALITY_EVIDENCE_NOT_ALLOWED")
+
+
+def test_finalized_through_is_declared_for_native_providers_and_derived_for_finite_ones(
+    cycle: dict[str, Any],
+) -> None:
+    del cycle["manifest"]["providers"]["ibkr"]["finalized_through"]
+    _refused(cycle, "FINALIZED_THROUGH_REQUIRED")
+    cycle["manifest"]["providers"]["ibkr"]["finalized_through"] = "2026-01-02"
+    cycle["manifest"]["providers"]["alpaca"]["finalized_through"] = "2026-01-02"
+    _refused(cycle, "FINALIZED_THROUGH_NOT_ALLOWED")
 
 
 def test_a_finality_source_other_than_the_providers_own_is_a_schema_refusal(

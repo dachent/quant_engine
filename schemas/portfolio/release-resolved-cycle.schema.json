@@ -62,9 +62,13 @@
         "manifest_sha256",
         "manifest_size_bytes",
         "finality_source",
-        "finality_evidence"
+        "finality_evidence",
+        "qualification",
+        "finalized_through"
       ],
       "properties": {
+        "qualification": { "type": "string" },
+        "finalized_through": { "type": ["string", "null"] },
         "root": { "type": "string" },
         "generation_id": { "type": "string" },
         "generation_dir": { "type": "string" },

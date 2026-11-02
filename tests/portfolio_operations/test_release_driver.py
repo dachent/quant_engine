@@ -388,6 +388,99 @@ def test_provider_generations_is_generated_complete_and_refuses_gaps(
     assert _drive(world, graph, "--only", "provider-generations", "--replace") == 2
 
 
+def _ledger_world(world: dict[str, Any], catalog_id: str) -> Path:
+    """A ledger spec naming one provider generation, and the staged ledger catalog admitting it."""
+
+    root = world["tmp"] / "alpaca-root"
+    (root / "generations" / "G1").mkdir(parents=True)
+    spec = {"providers": {"alpaca": {"root": str(root), "generation_id": "G1"}}}
+    world["cycle"].mkdir(parents=True, exist_ok=True)
+    (world["cycle"] / "ledger-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    ledger = world["run"] / "stages" / "ledger" / "generations" / "L1"
+    (ledger / "provider-ledger.json").write_text(
+        json.dumps(
+            {
+                "provider_generations": [
+                    {"provider_id": "alpaca", "generation_id": catalog_id}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return _graph(
+        world,
+        [
+            {
+                "id": "provider-generations",
+                "builtin": "provider_generations",
+                "outputs": ["{cycle}/pg.json"],
+            }
+        ],
+        provider_roots=["provider-alpaca", "epoch-manifest"],
+        provider_run_sources={"epoch-manifest": "{run}/ep"},
+        paths={
+            "ledger_catalog": "{run}/stages/ledger/generations/{ledger_id}/provider-ledger.json"
+        },
+        derive={"ledger_id": {"single_dir": "{run}/stages/ledger/generations"}},
+    )
+
+
+def test_provider_sources_can_be_derived_from_the_ledger_spec(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    _config(world, provider_sources="from_ledger")
+    assert _drive(world, graph) == 0
+    rows = json.loads((world["cycle"] / "pg.json").read_text(encoding="utf-8"))
+    assert rows[0] == {
+        "root_id": "provider-alpaca",
+        "source_dir": str(world["tmp"] / "alpaca-root" / "generations" / "G1"),
+    }
+    assert rows[1]["root_id"] == "epoch-manifest"
+
+
+def test_derived_sources_refuse_when_the_ledger_catalog_admitted_another_generation(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "OTHER")
+    _config(world, provider_sources="from_ledger")
+    assert _drive(world, graph) == 2
+
+
+def test_derived_sources_accept_an_override_only_for_the_same_generation(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    copy_dir = world["tmp"] / "real" / "generations" / "G1"
+    copy_dir.mkdir(parents=True)
+    _config(
+        world,
+        provider_sources="from_ledger",
+        real_root_overrides={"provider-alpaca": str(copy_dir)},
+    )
+    assert _drive(world, graph) == 0
+    rows = json.loads((world["cycle"] / "pg.json").read_text(encoding="utf-8"))
+    assert rows[0]["source_dir"] == str(copy_dir)
+    wrong = world["tmp"] / "real" / "generations" / "G2"
+    wrong.mkdir()
+    _config(world, real_root_overrides={"provider-alpaca": str(wrong)})
+    assert _drive(world, graph, "--only", "provider-generations", "--replace") == 2
+    _config(world, real_root_overrides={"provider-nothing": str(copy_dir)})
+    assert _drive(world, graph, "--only", "provider-generations", "--replace") == 2
+
+
+def test_a_provider_sources_string_other_than_from_ledger_is_refused(
+    world: dict[str, Any],
+) -> None:
+    (world["run"] / "ep").mkdir()
+    graph = _ledger_world(world, "G1")
+    _config(world, provider_sources="typo")
+    assert _drive(world, graph) == 2
+
+
 def test_the_shipped_graph_is_self_consistent() -> None:
     graph = json.loads(
         (REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json").read_text(

@@ -105,8 +105,12 @@
     "provider": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["root", "generation", "manifest_sha256", "finality_source"],
+      "required": ["root", "generation", "manifest_sha256", "finality_source", "qualification"],
       "properties": {
+        "qualification": {
+          "enum": ["PUBLISHED_COMPLETE", "STAGED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]
+        },
+        "finalized_through": { "$ref": "#/$defs/date" },
         "finality_source": {
           "enum": ["GENERATION_MANIFEST", "SELECTED_SOURCE_ARTIFACT", "CYCLE_MANIFEST_NATIVE"]
         },
