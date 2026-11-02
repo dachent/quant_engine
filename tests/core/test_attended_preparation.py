@@ -5241,8 +5241,8 @@ def _pin_basis_declaration(
 
 def test_strategy_basis_declaration_is_absent_without_a_pin(tmp_path: Path) -> None:
     section = _sleeve_section(tmp_path)
-    assert preparation._strategy_basis_declaration_path(None) is None
-    assert preparation._strategy_basis_declaration_path(section) is None
+    assert preparation._policy_basis_declaration_path(None) is None
+    assert preparation._policy_basis_declaration_path(section) is None
     assert preparation._strategy_basis_stage_input(section) == {}
     assert preparation._strategy_basis_stage_input(None) == {}
 
@@ -5250,7 +5250,7 @@ def test_strategy_basis_declaration_is_absent_without_a_pin(tmp_path: Path) -> N
 def test_strategy_basis_declaration_is_returned_when_pinned(tmp_path: Path) -> None:
     section = _sleeve_section(tmp_path)
     _pin_basis_declaration(tmp_path, section, _BASIS_DECLARATION)
-    path = preparation._strategy_basis_declaration_path(section)
+    path = preparation._policy_basis_declaration_path(section)
     assert path == (tmp_path / "strategy-basis-declaration.json").resolve()
     assert preparation._strategy_basis_stage_input(section) == {
         "strategy_basis_declaration": preparation._definition(path)
@@ -5270,19 +5270,19 @@ def test_strategy_basis_declaration_tamper_is_refused(tmp_path: Path) -> None:
     with pytest.raises(
         preparation.AttendedPreparationError, match="differs from its pin"
     ):
-        preparation._strategy_basis_declaration_path(section)
+        preparation._policy_basis_declaration_path(section)
     # same size, different bytes
     target.write_bytes(raw.replace(b"SLEEVE_EPOCH", b"SLEEVE_EPOCI"))
     with pytest.raises(
         preparation.AttendedPreparationError, match="differs from its pin"
     ):
-        preparation._strategy_basis_declaration_path(section)
+        preparation._policy_basis_declaration_path(section)
     # missing file
     target.unlink()
     with pytest.raises(
         preparation.AttendedPreparationError, match="differs from its pin"
     ):
-        preparation._strategy_basis_declaration_path(section)
+        preparation._policy_basis_declaration_path(section)
     target.write_bytes(raw)
     # an extra key in the pin, and a path that leaves the policy directory
     manifest = json.loads(original)
@@ -5295,7 +5295,7 @@ def test_strategy_basis_declaration_tamper_is_refused(tmp_path: Path) -> None:
         manifest_path.write_bytes(canonical_json_bytes(manifest))
         section["policy_manifest"] = preparation._definition(manifest_path)
         with pytest.raises(preparation.AttendedPreparationError, match="declaration"):
-            preparation._strategy_basis_declaration_path(section)
+            preparation._policy_basis_declaration_path(section)
 
 
 def test_strategy_basis_declaration_that_is_not_valid_is_refused(
@@ -5308,7 +5308,7 @@ def test_strategy_basis_declaration_that_is_not_valid_is_refused(
         {**_BASIS_DECLARATION, "strategies": [{"strategy_id": "s", "basis": "NAV"}]},
     )
     with pytest.raises(preparation.AttendedPreparationError, match="is refused"):
-        preparation._strategy_basis_declaration_path(section)
+        preparation._policy_basis_declaration_path(section)
 
 
 def test_epoch_stage_identity_changes_with_the_basis_declaration(
@@ -5335,3 +5335,28 @@ def test_epoch_stage_identity_changes_with_the_basis_declaration(
     assert first["strategy_basis_declaration"] != second["strategy_basis_declaration"]
     # the code identity of the epoch stage binds the declaration loader
     assert "strategy_basis" in preparation._PREPARATION_STAGE_CODE["epoch"]
+
+
+def test_the_configured_and_the_policy_declaration_must_agree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = tmp_path / "configured.json"
+    policy = tmp_path / "policy.json"
+    configured.write_bytes(b"one")
+    policy.write_bytes(b"one")
+    monkeypatch.setattr(
+        preparation, "_pin", lambda _value, _label: configured, raising=True
+    )
+    monkeypatch.setattr(
+        preparation, "_policy_basis_declaration_path", lambda _section: policy
+    )
+    config = {
+        "strategy_basis_declaration": {"path": "x"},
+        "sleeve_facts": {"policy_manifest": {"path": "y"}},
+    }
+    assert preparation._strategy_basis_declaration_path(config) == configured
+    policy.write_bytes(b"two")
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="declarations differ"
+    ):
+        preparation._strategy_basis_declaration_path(config)

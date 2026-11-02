@@ -123,7 +123,6 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "sleeve_nav": "tools/sleeve_nav.py",
     "stage_current_epoch_manifest": "tools/stage_current_epoch_manifest.py",
     "static_snapshot_coverage_receipts": "tools/static_snapshot_coverage_receipts.py",
-    "strategy_basis": "tools/strategy_basis.py",
     "target_series": "tools/portfolio_target_series.py",
     "value_basis_bounds": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/value_basis_bounds.py",
     "verify_account_manifest_generation": "tools/verify_account_manifest_generation.py",
@@ -716,17 +715,30 @@ def _strategy_basis_declaration_path(config: Mapping[str, Any]) -> Path | None:
     """The pinned ``strategy-basis-declaration/1`` file, if the release declares one.
 
     The declaration is the single switch of the #624 sleeve-basis restatement: absent, no
-    stage reads anything about it and every output is what it was before.
+    stage reads anything about it and every output is what it was before.  It is pinned
+    either by the release configuration (``strategy_basis_declaration``) or by the sleeve
+    policy manifest (``strategy-basis-declaration``); a release that names both must name
+    the same bytes.
     """
 
     pin = config.get("strategy_basis_declaration")
-    if pin is None:
-        return None
-    if config.get("sleeve_facts") is None:
-        raise AttendedPreparationError(
-            "a strategy basis declaration requires the sleeve facts configuration"
-        )
-    return _pin(pin, "strategy basis declaration")
+    section = config.get("sleeve_facts")
+    configured: Path | None = None
+    if pin is not None:
+        if section is None:
+            raise AttendedPreparationError(
+                "a strategy basis declaration requires the sleeve facts configuration"
+            )
+        configured = _pin(pin, "strategy basis declaration")
+    policy: Path | None = None
+    if isinstance(section, Mapping) and "policy_manifest" in section:
+        policy = _policy_basis_declaration_path(section)
+    if configured is not None and policy is not None:
+        if configured.read_bytes() != policy.read_bytes():
+            raise AttendedPreparationError(
+                "the configured and the policy strategy basis declarations differ"
+            )
+    return configured if configured is not None else policy
 
 
 def _strategy_basis_facts_path(
@@ -1411,8 +1423,8 @@ def _sleeve_tag_map_path(section: object) -> Path | None:
     return policy.parent / str(pin["tag_map"]["path"])
 
 
-def _strategy_basis_declaration_path(section: object) -> Path | None:
-    """The pinned declaration of the strategies restated to their sleeve basis.
+def _policy_basis_declaration_path(section: object) -> Path | None:
+    """The declaration the sleeve policy manifest pins (branch P), restated to their sleeve basis.
 
     None when the policy manifest pins none: the release then keeps every
     strategy on its baseline basis, byte for byte.  A pinned declaration that
@@ -1620,7 +1632,7 @@ def _strategy_basis_stage_input(section: object) -> dict[str, Any]:
 
     if not isinstance(section, Mapping) or "policy_manifest" not in section:
         return {}
-    path = _strategy_basis_declaration_path(section)
+    path = _policy_basis_declaration_path(section)
     return {} if path is None else {"strategy_basis_declaration": _definition(path)}
 
 
@@ -1649,7 +1661,7 @@ def _preparation_stage_inputs(
             **(
                 {"strategy_basis_declaration": config["strategy_basis_declaration"]}
                 if config.get("strategy_basis_declaration") is not None
-                else {}
+                else _strategy_basis_stage_input(config.get("sleeve_facts"))
             ),
         },
         "dependence": {
@@ -2576,9 +2588,7 @@ def _prepare_attended_inputs(
             evaluated_on=evaluated_on,
             nested_tag_map_path=_sleeve_tag_map_path(config.get("sleeve_facts")),
             sleeve_disclosure_sources_path=disclosure_sources_path,
-            strategy_basis_path=_strategy_basis_declaration_path(
-                config.get("sleeve_facts")
-            ),
+            strategy_basis_path=_strategy_basis_declaration_path(config),
         )
         checkpoint(
             "epoch",
