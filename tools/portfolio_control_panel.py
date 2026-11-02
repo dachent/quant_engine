@@ -10324,7 +10324,23 @@ def _panel_data(
     # capital as the report carried it; the report's rows are reconciled with the
     # baseline here and with the panel's own strategy rows below.
     capital_parts = _capital_summary(summary)
-    _reconcile_capital_with_baseline(capital_parts, baseline_catalog)
+    _reconcile_capital_with_baseline(
+        capital_parts,
+        (
+            {
+                **baseline_catalog,
+                "current_capital": _strategy_basis_module().restate_current_capital(
+                    _object(
+                        baseline_catalog.get("current_capital"),
+                        "baseline current_capital",
+                    ),
+                    basis_restatements,
+                ),
+            }
+            if basis_restatements
+            else baseline_catalog
+        ),
+    )
     account_ids = [
         _text(row.get("account_id"), "account_summary.account_id") for row in accounts
     ]
