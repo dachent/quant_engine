@@ -45,8 +45,10 @@ from test_strategy_basis_history import (  # noqa: F401
 )
 
 SERIES = "AI Factor [P123]"
-PLAN_PATH = Path(__file__).resolve().parents[2] / "tools" / (
-    "portfolio_current_decomposition_plan.py"
+PLAN_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "tools"
+    / ("portfolio_current_decomposition_plan.py")
 )
 _PLAN_SPEC = importlib.util.spec_from_file_location(
     "portfolio_current_decomposition_plan_for_lenses", PLAN_PATH
@@ -181,9 +183,9 @@ def test_a_restated_history_moves_the_selected_targets_pin(
     assert on["identity"]["generation_id"] != off["identity"]["generation_id"]
     assert on["identity"]["segments_sha256"] != off["identity"]["segments_sha256"]
     # every other strategy's selected rows are unchanged
-    assert [
-        row for row in on["rows"] if row["series_id"] != SERIES
-    ] == [row for row in off["rows"] if row["series_id"] != SERIES]
+    assert [row for row in on["rows"] if row["series_id"] != SERIES] == [
+        row for row in off["rows"] if row["series_id"] != SERIES
+    ]
     # and the switch-off planner result carries no lane
     assert all("account_basis" not in value for value in off["composition"].values())
 
@@ -308,9 +310,9 @@ def test_the_hybrid_lane_keeps_the_backtest_prehistory_before_the_parent_start(
     assert all(r["date"] < parent[0]["date"] for r in lane_backtest)
     assert all(r["date"] < sleeve_start for r in primary_backtest)
     assert {r["date"] for r in lane_backtest} <= {r["date"] for r in primary_backtest}
-    assert [r["date"] for r in lane["rows"] if r["evidence_layer"] == "ACCOUNT_LIVE"] == [
-        r["date"] for r in parent
-    ]
+    assert [
+        r["date"] for r in lane["rows"] if r["evidence_layer"] == "ACCOUNT_LIVE"
+    ] == [r["date"] for r in parent]
 
 
 def _rows_csv(path: Path, rows: list[tuple[str, str]]) -> None:
@@ -365,15 +367,18 @@ def test_the_engine_lane_equals_the_engines_own_figures_on_the_parent_series(
     coverage = result["model_results"][0]["coverage"]
     account = coverage["account_basis"]
     # sleeve primary differs from the parent lane, the lane equals the parent's own run
-    assert coverage["target_cumulative_return"] != parent_coverage[
-        "target_cumulative_return"
-    ]
+    assert (
+        coverage["target_cumulative_return"]
+        != parent_coverage["target_cumulative_return"]
+    )
     assert account["figures"] == {
         "target_cumulative_return": parent_coverage["target_cumulative_return"],
         "target_current_drawdown": parent_coverage["target_current_drawdown"],
         "target_max_drawdown": parent_coverage["target_max_drawdown"],
     }
-    assert account["series"]["sha256"] == parent_coverage["canonical_live_series_sha256"]
+    assert (
+        account["series"]["sha256"] == parent_coverage["canonical_live_series_sha256"]
+    )
     assert account["observations"] == parent_coverage["canonical_live_observations"]
     assert account["window"] == {
         "start": parent_coverage["target_observed_start"],
@@ -395,7 +400,11 @@ def test_the_engine_lane_stops_at_the_models_own_target_window(tmp_path: Path) -
     cut = days[100]
     _rows_csv(
         target,
-        [(row["date"], row["return"]) for row in rows if row["date"] <= cut.isoformat()],
+        [
+            (row["date"], row["return"])
+            for row in rows
+            if row["date"] <= cut.isoformat()
+        ],
     )
     spec = json.loads(_spec(root, target, days).read_text("utf-8"))
     spec["series_composition"] = {
@@ -429,7 +438,9 @@ def test_without_a_lane_the_engine_output_is_unchanged(tmp_path: Path) -> None:
     first = decomposition.build_decomposition(_spec(root, target, days), root)[2]
     result, _, _ = decomposition.build_decomposition(_spec(root, target, days), root)
     assert "account_basis" not in json.dumps(result)
-    assert first == decomposition.build_decomposition(_spec(root, target, days), root)[2]
+    assert (
+        first == decomposition.build_decomposition(_spec(root, target, days), root)[2]
+    )
 
 
 def test_unused_imports_are_helpers() -> None:
