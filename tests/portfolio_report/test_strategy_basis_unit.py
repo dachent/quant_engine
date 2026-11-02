@@ -98,10 +98,9 @@ def _block() -> dict[str, Any]:
     }
 
 
-def test_the_series_is_an_opening_row_and_one_row_per_link() -> None:
+def test_the_series_is_one_row_per_link() -> None:
     restatement = _restatement()
     assert [(r["date"], r["return"]) for r in restatement.rows] == [
-        ("2026-07-02", "0"),
         ("2026-07-03", "0.02"),
         ("2026-07-06", "-0.01"),
     ]
@@ -133,7 +132,7 @@ def test_restate_returns_swaps_only_the_declared_live_rows() -> None:
     ]
     result = strategy_basis.restate_returns(rows, {SLEEVE_STRATEGY: restatement})
     assert [r["date"] for r in result[:2]] == ["y", "z"]
-    assert [r["date"] for r in result[2:]] == ["2026-07-02", "2026-07-03", "2026-07-06"]
+    assert [r["date"] for r in result[2:]] == ["2026-07-03", "2026-07-06"]
     assert rows[0]["date"] == "x"
 
 

@@ -117,14 +117,12 @@ def test_fixture_is_the_r2_row_before_and_the_sleeve_epoch_row() -> None:
 
 def test_the_sleeve_series_reproduces_the_published_sleeve_epoch() -> None:
     restatement = _restatement()
-    # one opening row (the epoch opens at the 2026-01-30 closing NAV) and 164 links
+    # one row per link: the manifest member's own path (164 links, 165 NAV observations)
     assert (
-        len(restatement.rows)
-        == 165
+        len(restatement.rows) + 1
         == FIXTURE["published_sleeve_epoch"]["nav_observations"]
     )
-    assert restatement.rows[0]["date"] == "2026-01-30"
-    assert restatement.rows[0]["return"] == "0"
+    assert restatement.rows[0]["date"] == "2026-02-02"
     assert restatement.rows[-1]["date"] == "2026-09-17"
     assert restatement.value == Decimal(
         FIXTURE["published_sleeve_epoch"]["current_value"]
@@ -154,8 +152,8 @@ def test_restated_row_figures_from_the_report_series_engine(
     published = Decimal(FIXTURE["published_sleeve_epoch"]["observation_linked_return"])
     assert abs(cumulative - published) < Decimal("1e-20")
     assert f"{cumulative * 100:.2f}" == "15.43"
-    assert series["observed_start"] == "2026-01-30"
-    assert series["return_observations"] == 165
+    assert series["observed_start"] == "2026-02-02"
+    assert series["return_observations"] == 164
     # drawdown follows the sleeve trace's own running drawdown (published negative)
     assert f"{Decimal(series['maximum_drawdown']) * 100:.2f}" == "-6.73"
     assert abs(
@@ -166,7 +164,7 @@ def test_restated_row_figures_from_the_report_series_engine(
     cagr = Decimal(
         reporter._cagr(
             series["cumulative_return"],
-            series["observed_start"],
+            FIXTURE["links"][0]["start_date"],  # the opening NAV date (736)
             series["observed_end"],
         )
     )

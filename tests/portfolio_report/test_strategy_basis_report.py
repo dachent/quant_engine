@@ -58,7 +58,8 @@ def test_with_the_switch_on_the_row_stands_on_the_sleeve(
     on = _row(on_report)
     assert hashlib.sha256(LAST_BYTES["content"]).hexdigest() != MAIN_OFF_DIGEST
     # the sleeve opens 2026-07-02 at 100 and closes 2026-07-30 at 104
-    assert on["account_live_observed_start"] == "2026-07-02"
+    # the first return is the link ending 07-30; the window opens at the sleeve's opening NAV
+    assert on["account_live_observed_start"] == "2026-07-30"
     assert on["account_live_cumulative_return"] == "0.04"
     assert on["current_value_usd"] == "104"
     assert off["current_value_usd"] == "10"
@@ -106,14 +107,11 @@ def test_with_the_switch_on_the_row_stands_on_the_sleeve(
         "schema": "strategy-basis-declaration/1",
         "sha256": digest,
     } in on_report["provenance"]
-    # the published return rows are the sleeve's: one opening row and the one link
+    # the published return rows are the sleeve's: the one link
     rows = [
         r for r in on_report["strategy_returns"] if r["strategy_id"] == "strategy-1"
     ]
-    assert [(r["date"], r["return"]) for r in rows] == [
-        ("2026-07-02", "0"),
-        ("2026-07-30", "0.04"),
-    ]
+    assert [(r["date"], r["return"]) for r in rows] == [("2026-07-30", "0.04")]
 
 
 def test_a_declaration_for_a_strategy_without_a_sleeve_is_refused(
