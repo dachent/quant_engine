@@ -2445,11 +2445,10 @@ def _sleeve_lane_checks(
             )
         for key in ("benchmark_comparisons", "comparisons"):
             for row in _objects(attribution.get(key, []), f"attribution.{key}"):
-                lane = row.get("sleeve_basis")
-                if (
-                    str(row.get("strategy_id")) == strategy_id
-                    and lane.get("sleeve_series_sha256") != item["series_sha256"]
-                ):
+                if str(row.get("strategy_id")) != strategy_id:
+                    continue
+                lane = _object(row.get("sleeve_basis"), "attribution sleeve lane")
+                if lane.get("sleeve_series_sha256") != item["series_sha256"]:
                     raise ReportValidationError(
                         "attribution sleeve lane is not on the sleeve path: "
                         + strategy_id
@@ -2599,7 +2598,8 @@ def _merge_attribution(
             )
         )
         basis_fields: dict[str, Any] = {}
-        benchmark_label_metrics, provider_label_metrics = benchmark_metrics, metrics
+        benchmark_label_metrics: Mapping[str, Any] = benchmark_metrics
+        provider_label_metrics: Mapping[str, Any] = metrics
         if strategy_id in sleeve_lanes:
             benchmark_lane = _object(
                 benchmark_comparison.get("sleeve_basis"), "benchmark sleeve lane"
