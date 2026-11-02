@@ -1494,4 +1494,4 @@ def test_the_prepared_recipe_must_carry_the_runs_code_identity(
     stage["argv"][-1] = (
         "0" * 40
     )  # the stage ran as the other scheme: its recipe names another identity
-    assert _drive(world, _graph(world, [stage]), "--replace") == 1
+    assert _drive(world, _graph(world, [stage]), "--only", "attended", "--replace") == 1

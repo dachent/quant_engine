@@ -202,7 +202,7 @@
             "equals": "git-tree-v2",
             "args": [
               "--code-identity-scheme",
-              "{identity_scheme}"
+              "git-tree-v2"
             ]
           },
           "--output-root",
@@ -235,7 +235,7 @@
           "equals": "git-tree-v2",
           "args": [
             "--code-identity-scheme",
-            "{identity_scheme}"
+            "git-tree-v2"
           ]
         },
         "--output-root",
@@ -374,7 +374,7 @@
           "equals": "git-tree-v2",
           "args": [
             "--code-identity-scheme",
-            "{identity_scheme}"
+            "git-tree-v2"
           ]
         },
         "--output-root",
