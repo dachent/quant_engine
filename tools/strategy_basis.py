@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
+import hashlib
 import json
 from typing import Any, Final
 
@@ -406,3 +407,187 @@ def return_scope_label(restatement: SleeveRestatement) -> str:
         f"implementation bridge, dependence and the decomposition lenses stay on the "
         f"parent account series."
     )
+
+
+# --- The restated series derived from the sleeve facts (the keystone, #624) ----------
+#
+# The report restates a declared strategy from the verified epoch manifest's own
+# observation trace.  Every other consumer of the strategy's history (dependence,
+# correlation, weekly returns, the decomposition plans and lenses) reads the layered
+# history, which is built from the provider ledger *before* that manifest exists.  They
+# need the same series without the manifest, so it is derived here a second way: from
+# the sleeve facts artifact through the very function the manifest runs on a derived
+# sleeve (``account_strategy_manifest.analyze_epoch``: NAV after allocated costs, first
+# NAV is the epoch opening, date-only flows at end of day, ``returns.link_epoch``).
+# Both routes end in the same trace links, so their series hash is one value.
+
+SLEEVE_FACTS_RESIDUAL_PARENT: Final = "sleeve-account-facts"
+_EXIT_EVENT: Final = "EXIT"
+
+
+def series_sha256(rows: Sequence[Mapping[str, Any]]) -> str:
+    """sha256 of the ``[{date, return}]`` path exactly as the report seals a trace path."""
+
+    series = [{"date": str(row["date"]), "return": str(row["return"])} for row in rows]
+    return hashlib.sha256(
+        (
+            json.dumps(series, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _facts_document(facts: bytes | Mapping[str, Any]) -> tuple[Mapping[str, Any], str]:
+    if isinstance(facts, bytes):
+        try:
+            document = json.loads(facts)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise StrategyBasisError("sleeve facts are not JSON") from exc
+        digest = hashlib.sha256(facts).hexdigest()
+    else:
+        document = facts
+        digest = hashlib.sha256(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    if not isinstance(document, Mapping):
+        raise StrategyBasisError("sleeve facts are not an object")
+    return document, digest
+
+
+def open_sleeve_for_strategy(
+    document: Mapping[str, Any], strategy_id: str, sleeve_id: str | None = None
+) -> Mapping[str, Any]:
+    """The one open derived sleeve of a strategy in an IBKR-style sleeve facts artifact.
+
+    Open means the sleeve never records an exit.  Anything else (none, several, a
+    Quantbase fund artifact whose funds all end at zero NAV) is refused, so a declaration
+    can never silently fall back to the parent account.
+    """
+
+    if document.get("artifact_id") != SLEEVE_FACTS_RESIDUAL_PARENT:
+        raise StrategyBasisError(
+            f"no open derived sleeve for the declared strategy: {strategy_id}"
+        )
+    sleeves = document.get("sleeves")
+    if not isinstance(sleeves, list):
+        raise StrategyBasisError("sleeve facts name no sleeves")
+    chosen = [
+        sleeve
+        for sleeve in sleeves
+        if isinstance(sleeve, Mapping)
+        and sleeve.get("strategy_id") == strategy_id
+        and (sleeve_id is None or sleeve.get("sleeve_id") == sleeve_id)
+        and isinstance(sleeve.get("days"), list)
+        and sleeve["days"]
+        and not any(
+            isinstance(day, Mapping) and day.get("event") == _EXIT_EVENT
+            for day in sleeve["days"]
+        )
+    ]
+    if len(chosen) != 1:
+        raise StrategyBasisError(
+            f"the declared strategy needs exactly one open derived sleeve: {strategy_id}"
+        )
+    return chosen[0]
+
+
+def restatement_from_sleeve_facts(
+    facts: bytes | Mapping[str, Any],
+    strategy_id: str,
+    *,
+    sleeve_id: str | None = None,
+    provider_id: str | None = None,
+) -> SleeveRestatement:
+    """The sleeve restatement derived from the sleeve facts, without the epoch manifest.
+
+    Equal, row for row and by series sha256, to ``sleeve_restatement`` over the epoch
+    manifest's own ``observation_trace.links`` for the same sleeve.
+    """
+
+    import account_strategy_manifest as manifest
+
+    document, digest = _facts_document(facts)
+    sleeve = open_sleeve_for_strategy(document, strategy_id, sleeve_id)
+    parent = str(document.get("parent_account_id") or "")
+    account_id = str(sleeve.get("account_id") or "")
+    provider = provider_id or str(document.get("provider_id") or "")
+    if not parent or account_id != f"{parent}-{sleeve.get('sleeve_id')}" or not provider:
+        raise StrategyBasisError("sleeve facts identity is incomplete")
+    after_key = "nav_end_after_alloc"
+    navs: dict[str, Decimal] = {}
+    try:
+        for raw_day in sleeve["days"]:
+            day = manifest._sleeve_day(raw_day.get("day"), f"{account_id} day")  # noqa: SLF001
+            navs[day] = manifest._sleeve_decimal(  # noqa: SLF001
+                raw_day.get(after_key), f"{account_id} {after_key}"
+            )
+        first_day = min(navs)
+        digest16 = digest[:16]
+        flows_in: dict[tuple[str, str, str], Decimal] = {}
+        flows_out: dict[tuple[str, str, str], Decimal] = {}
+        for leg in document.get("flows") or ():
+            if not isinstance(leg, Mapping) or leg.get("account_id") != account_id:
+                continue
+            flow_class = leg.get("class")
+            if flow_class not in {"INTERNAL_IN", "INTERNAL_OUT"}:
+                raise StrategyBasisError("sleeve facts flow class is not INTERNAL_IN/OUT")
+            event_day = manifest._sleeve_day(leg.get("event_date"), "flow event_date")  # noqa: SLF001
+            recognition = manifest._sleeve_day(  # noqa: SLF001
+                leg.get("nav_recognition_date"), "flow nav_recognition_date"
+            )
+            amount = manifest._sleeve_decimal(leg.get("amount"), "flow amount")  # noqa: SLF001
+            key = (
+                event_day,
+                recognition,
+                f"sleeve-flow:{digest16}:{leg.get('pair_id')}:{account_id}:{flow_class}",
+            )
+            target = flows_in if flow_class == "INTERNAL_IN" else flows_out
+            target[key] = target.get(key, Decimal(0)) + amount
+        stats = manifest.analyze_epoch(
+            navs,
+            {},
+            {},
+            flows_in,
+            flows_out,
+            None,
+            first_day,
+            None,
+            None,
+            derived_sleeve=True,
+        )
+    except manifest.ManifestError as exc:
+        raise StrategyBasisError(f"sleeve facts do not derive an epoch: {exc}") from exc
+    if (
+        stats is None
+        or stats.get("unavailable_status")
+        or stats.get("performance_status") != "AVAILABLE"
+    ):
+        raise StrategyBasisError(
+            f"sleeve epoch has no available return path: {strategy_id}"
+        )
+    return sleeve_restatement(
+        strategy_id=strategy_id,
+        account_id=account_id,
+        parent_account_id=parent,
+        provider_id=provider,
+        links=stats["observation_trace"]["links"],
+        effective_start=first_day,
+        effective_end=None,
+    )
+
+
+def rows_from_sleeve_facts(
+    facts: bytes | Mapping[str, Any],
+    strategy_id: str,
+    *,
+    sleeve_id: str | None = None,
+    provider_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """The restated ACCOUNT_LIVE ``strategy_returns`` rows of a declared strategy."""
+
+    return [
+        dict(row)
+        for row in restatement_from_sleeve_facts(
+            facts, strategy_id, sleeve_id=sleeve_id, provider_id=provider_id
+        ).rows
+    ]
