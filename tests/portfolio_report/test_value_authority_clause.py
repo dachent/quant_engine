@@ -260,3 +260,21 @@ def test_without_a_capital_block_or_derived_member_no_aggregate_sentence_is_adde
         _coverage(), accounts, positions, CUTOFF, capital
     )
     assert "aggregates computed" not in none[1]["known_gap"]
+
+
+def test_a_reserve_derived_total_is_disclosed_without_any_derived_strategy() -> None:
+    accounts, positions = _dated_accounts(1)
+    accounts[0]["account_id"] = "res0"
+    capital = _capital()
+    capital["reserve"] = {
+        "status": "AVAILABLE",
+        "members": [{"account_id": "res0", "as_of_date": CUTOFF}],
+    }
+    text = reporter._restate_value_authority(
+        _coverage(), accounts, positions, CUTOFF, capital
+    )[1]["known_gap"]
+    assert (
+        "aggregates computed from those values are derived too: the totals reserve "
+        "and total liquid"
+    ) in text
+    assert "strategy current" not in text

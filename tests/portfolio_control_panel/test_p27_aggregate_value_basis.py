@@ -158,3 +158,44 @@ def test_the_capital_totals_name_their_derived_components(tmp_path: Path) -> Non
         not in quiet["#capital-ring"]["innerHTML"].lower()
     )
     assert text  # shared helper import kept for parity with the allocation tests
+
+
+def test_the_allocation_total_ignores_members_of_rows_not_in_the_sum(
+    tmp_path: Path,
+) -> None:
+    """A derived member of a not-ready strategy must not label a total that excludes it."""
+
+    payload = _allocation_payload(
+        custody_current_capital=_custody(),
+        account_summary=_summaries(["eu0"]),  # the derived member belongs to EU
+    )
+    # EU has no current value (not ready): it is left out of the total
+    payload["strategies"] = [
+        row for row in payload["strategies"] if row["strategy_name"] != "EU"
+    ]
+    table = html(run(tmp_path, payload, "renderAllocationTable"), "#allocation-table")
+    total = next(row for row in _rows(table) if row.startswith("Total"))
+    assert "derived from official closes" not in total.lower()
+    assert "not ready" in total
+
+
+def test_every_capital_kpi_surface_carries_the_aggregate_label(tmp_path: Path) -> None:
+    payload = _command_payload(
+        systematic="55", reserve="35", retained="10", total="100"
+    )
+    payload["custody_current_capital"] = _custody()
+    payload["account_summary"] = _summaries(["tt0", "res0"])
+    label = "derived from official closes as of sep 17, 2026"
+    capital = _run(tmp_path, payload, "renderCapitalKpis")
+    assert (
+        label in re.sub(r"<[^>]+>", " ", capital["#capital-kpis"]["innerHTML"]).lower()
+    )
+    # the lineage-mismatch branch of the command view keeps the systematic label
+    mismatch = {**payload, "meta": {"performance_lineage": {"status": "MISMATCH"}}}
+    command = _run(tmp_path, mismatch, "renderCommand")
+    kpis = re.sub(r"<[^>]+>", " ", command["#command-kpis"]["innerHTML"]).lower()
+    assert kpis.count(label) >= 1
+    # the reserve KPI is labelled when every reserve member is derived
+    normal = _run(tmp_path, payload, "renderCommand")
+    reserve = re.sub(r"<[^>]+>", " ", normal["#command-kpis"]["innerHTML"]).lower()
+    assert "(1 of 1 account)" in reserve

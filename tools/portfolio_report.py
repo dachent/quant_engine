@@ -4353,8 +4353,6 @@ def _derived_aggregate_text(
         and row.get("status") == "AVAILABLE"
         and member_derived(row.get("members"))
     ]
-    if not strategies:
-        return ""
     totals: list[str] = []
     derived_blocks: set[str] = set()
     for key, label in (
@@ -4376,12 +4374,19 @@ def _derived_aggregate_text(
         if hit:
             derived_blocks.add(key)
             totals.append(label)
-    strategy_text = (
-        f"{len(strategies)} strategy current {'value' if len(strategies) == 1 else 'values'} "
-        f"({_join_words(strategies)})"
+    parts: list[str] = []
+    if strategies:
+        parts.append(
+            f"{len(strategies)} strategy current "
+            f"{'value' if len(strategies) == 1 else 'values'} ({_join_words(strategies)})"
+        )
+    if totals:
+        parts.append(f"the totals {_join_words(totals)}")
+    if not parts:
+        return ""
+    return (
+        f"aggregates computed from those values are derived too: {' and '.join(parts)}"
     )
-    total_text = f" and the totals {_join_words(totals)}" if totals else ""
-    return f"aggregates computed from those values are derived too: {strategy_text}{total_text}"
 
 
 def _join_words(items: Sequence[str]) -> str:

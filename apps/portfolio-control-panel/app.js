@@ -667,10 +667,10 @@
       ? `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`
       : data.advisory.reason;
     const liquidNote = capitalState("total_liquid").ready ? `Systematic plus reserve plus retained excluded${capitalAsOf("total_liquid")}${capitalAggregateSuffix("total_liquid")}` : capitalNotReadyNote();
-    const reserveNote = capitalState("reserve").ready ? `Zero strategy risk budget${capitalAsOf("reserve")}` : "Not ready at the cutoff · zero strategy risk budget";
+    const reserveNote = capitalState("reserve").ready ? `Zero strategy risk budget${capitalAsOf("reserve")}${capitalAggregateSuffix("reserve")}` : "Not ready at the cutoff · zero strategy risk budget";
     renderKpis("#command-kpis", performanceLineageMismatch ? [
       ["Total liquid", capitalAmount("total_liquid"), liquidNote],
-      ["Systematic capital", capitalAmount("systematic"), "Report-derived risk-control status withheld"],
+      ["Systematic capital", capitalAmount("systematic"), `Report-derived risk-control status withheld${capitalAggregateSuffix("systematic")}`],
       ["Reserve", capitalAmount("reserve"), reserveNote, "reserve"],
       ["Report coverage", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
     ] : [
@@ -829,7 +829,7 @@
     const currentWeights = currents.map((item) => item.weight).filter((value) => value != null);
     const notReady = accepted.length - currentValues.length;
     const footer = accepted.length
-      ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${snapshotValues.length ? currency(sumOf(snapshotValues)) : "—"}</td><td class="numeric">${snapshotWeights.length ? pct(sumOf(snapshotWeights)) : "—"}</td><td class="numeric">${currentValues.length ? currency(sumOf(currentValues)) : "—"}${currentValues.length ? aggregateBasisNote(accepted.filter((row) => row.scope !== "RESERVE").map((row) => row.strategy_id)) : ""}${notReady ? `<span class="cell-secondary">excludes ${integer.format(notReady)} not ready</span>` : ""}</td><td class="numeric">${currentWeights.length ? pct(sumOf(currentWeights)) : "—"}</td><td colspan="4"></td></tr>`
+      ? `<tr><th scope="row" colspan="2">Total</th><td class="numeric">${snapshotValues.length ? currency(sumOf(snapshotValues)) : "—"}</td><td class="numeric">${snapshotWeights.length ? pct(sumOf(snapshotWeights)) : "—"}</td><td class="numeric">${currentValues.length ? currency(sumOf(currentValues)) : "—"}${currentValues.length ? aggregateBasisNote(accepted.filter((row, index) => row.scope !== "RESERVE" && currents[index].value != null).map((row) => row.strategy_id), accepted.some((row, index) => row.scope === "RESERVE" && currents[index].value != null)) : ""}${notReady ? `<span class="cell-secondary">excludes ${integer.format(notReady)} not ready</span>` : ""}</td><td class="numeric">${currentWeights.length ? pct(sumOf(currentWeights)) : "—"}</td><td colspan="4"></td></tr>`
       : "";
     const table = $("#allocation-table");
     table.dataset.visibleRows = String(accepted.length);
@@ -918,8 +918,8 @@
     return `${stats.k === stats.n ? label : `Partly ${label.charAt(0).toLowerCase()}${label.slice(1)}`} (${integer.format(stats.k)} of ${integer.format(stats.n)} account${stats.n === 1 ? "" : "s"})`;
   };
   const strategyMembers = (ids) => (data.custody_current_capital?.strategies || []).filter((row) => ids.includes(row.strategy_id)).flatMap((row) => row.members || []);
-  const aggregateBasisNote = (ids) => {
-    const text = aggregateBasisText(aggregateBasisStats(strategyMembers(ids)));
+  const aggregateBasisNote = (ids, withReserve = false) => {
+    const text = aggregateBasisText(aggregateBasisStats([...strategyMembers(ids), ...(withReserve ? data.custody_current_capital?.reserve?.members || [] : [])]));
     return text ? `<span class="cell-secondary">${safe(text)}</span>` : "";
   };
   // The capital totals: systematic is the sum of its component strategies; total liquid adds the reserve and the retained
@@ -928,6 +928,7 @@
     const custody = data.custody_current_capital || {};
     const systematic = strategyMembers(custody.systematic?.components || []);
     const members = key === "systematic" ? systematic
+      : key === "reserve" ? custody.reserve?.members || []
       : key === "total_liquid" ? [...(custody.reserve?.members || []), ...strategyMembers(custody.retained_excluded?.components || []), ...systematic]
         : [];
     return aggregateBasisText(aggregateBasisStats(members));
@@ -997,7 +998,7 @@
 
   function renderCapitalKpis() {
     renderKpis("#capital-kpis", [
-      ["Liquid capital", capitalAmount("total_liquid"), capitalState("total_liquid").ready ? `Current at the cutoff${capitalAsOf("total_liquid")}` : capitalNotReadyNote()],
+      ["Liquid capital", capitalAmount("total_liquid"), capitalState("total_liquid").ready ? `Current at the cutoff${capitalAsOf("total_liquid")}${capitalAggregateSuffix("total_liquid")}` : capitalNotReadyNote()],
       ["Current strategies", String(data.counts.strategies), "Reserve is not a strategy"],
       ["Accounts", String(data.counts.accounts), "Stable internal identities"],
       ["Positions", humanStatus(data.fact_status.positions), data.counts.positions ? positionKpiNote() : "No accepted position source", data.counts.positions ? "warning" : "danger"],
@@ -1014,7 +1015,7 @@
     const rows = currentStrategies().map((row) => {
       const qualification = hwmQualification(row);
       const navStatus = performanceLineageMismatch ? "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" : row.nav_status;
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span>${scopeNote(row)}</td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(navStatus)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span>${scopeNote(row)}</td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}${aggregateBasisNote([row.strategy_id])}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(navStatus)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Provider/model comparison"]], rows, evidenceCaption("Current strategy evidence"));
     renderLifecycleTable();
