@@ -25,6 +25,7 @@ from test_portfolio_layered_history import (
     _artifact,
     _core_generation_manifest,
     _matrixport_fx_boundary_fixture,
+    _pointer,
     _refresh_materialized_segment_identities,
     _restore_retained_echo_correction,
     _synthetic_current_admission,
@@ -155,12 +156,13 @@ def _bind_ledger(world: dict[str, Any], rows: object) -> None:
             artifacts.append(_artifact(catalog_path, item["artifact_id"]))
         else:
             artifacts.append(dict(item))
-    _core_generation_manifest(
+    generation_id = _core_generation_manifest(
         manifest_path,
         "quant-engine-provider-ledger",
         fixture["as_of_date"],
         artifacts,
     )
+    _pointer(fixture["provider_ledger_pointer_path"], generation_id, manifest_path)
     contract_path = fixture["contract_path"]
     contract = json.loads(contract_path.read_bytes())
     _update_source_generation(
