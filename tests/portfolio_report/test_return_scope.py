@@ -170,6 +170,6 @@ def test_the_matrix_clause_is_scoped_to_the_current_perimeter_matrix() -> None:
     scoped = report_module._matrix_scope_clause(text)
     assert "remain explicit in the account fact matrix" not in scoped
     assert scoped.startswith("7 accepted flow records across SYNPROV; ")
-    assert "current-perimeter account fact matrix" in scoped
+    assert "explicit in the account fact matrix when the account is in it" in scoped
     assert "accounts not in it are named in the note under the matrix" in scoped
     assert report_module._matrix_scope_clause("unrelated") == "unrelated"

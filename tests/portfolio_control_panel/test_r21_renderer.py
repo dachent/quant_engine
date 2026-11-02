@@ -561,7 +561,7 @@ def test_the_fact_matrix_names_the_coverage_accounts_it_does_not_contain(
         _run(tmp_path, payload, "renderFactScopeTables"), "#fact-matrix-summary"
     )
 
-    assert "not in the current perimeter" in text
+    assert "Not in this matrix, but counted in the coverage totals" in text
     assert "…bbbb (flows 3, nav 11)" in text
     assert "acct-in00aaaa" not in text and "…aaaa" not in text
     payload["coverage"] = payload["coverage"][:1]

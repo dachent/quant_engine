@@ -6188,7 +6188,8 @@ def _stale_implementation_row(
             f"ledger is {governed_ledger[:12]}. Its account return over "
             f"{start}..{end} differs from the governed account-live series by "
             f"{(figure - governed_figure) * 100.0:+.4f} pp. No model return, gap, "
-            "risk statistic or causal waterfall is published from it."
+            "risk statistic or causal waterfall is published from it; any figure the Model "
+            "vs actual view shows for this strategy is audit-derived, not governed."
         ),
         "repair_ref": _STALE_REPAIR_REF,
     }
@@ -7772,8 +7773,16 @@ def _allocations(
 # is the current-perimeter one, so a provider whose accounts are all outside it is named in the note under it.
 _MATRIX_CLAUSE: Final = "remain explicit in the account fact matrix"
 _MATRIX_CLAUSE_SCOPED: Final = (
-    "are explicit in the current-perimeter account fact matrix; accounts not in it "
-    "are named in the note under the matrix"
+    "are explicit in the account fact matrix when the account is in it; accounts not "
+    "in it are named in the note under the matrix"
+)
+_MWR_EFFECT: Final = (
+    "MWR remains unavailable outside accounts and intervals with complete admitted "
+    "external-flow evidence."
+)
+_MWR_EFFECT_SCOPED: Final = (
+    "MWR is shown only where admitted flows are complete for that epoch; the flows "
+    "fact overall remains partial."
 )
 
 
@@ -7845,7 +7854,18 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "value": claim.get("record_count"),
                 **(
                     {
-                        "disposition": claim.get("disposition"),
+                        "disposition": {
+                            **claim["disposition"],
+                            **(
+                                {
+                                    "effect": claim["disposition"]["effect"].replace(
+                                        _MWR_EFFECT, _MWR_EFFECT_SCOPED
+                                    )
+                                }
+                                if isinstance(claim["disposition"].get("effect"), str)
+                                else {}
+                            ),
+                        },
                         "evidence_authority": claim.get("disposition", {}).get(
                             "authority"
                         ),
@@ -10530,7 +10550,7 @@ def build_report_data(
             },
             {
                 "item": "Evidence layers",
-                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate.",
+                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate, except that the LIVE_PLUS_BACKTEST mode joins version-matched backtest history before live inception to the live line and labels the joined line by origin.",
             },
             {
                 "item": "Account-live return authority",
@@ -10538,7 +10558,7 @@ def build_report_data(
             },
             {
                 "item": "Missing data",
-                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; no interpolation.",
+                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; a missing NAV is not interpolated, and a day the HWM candidate fills is labelled with its origin.",
             },
             {
                 "item": "Reserve",

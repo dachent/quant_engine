@@ -585,8 +585,8 @@ def test_strategy_evidence_says_provider_capture_not_accepted(tmp_path: Path) ->
     # F26: the row names its capture date; the post-cutoff caveat is one note per table.
     assert "Provider capture Sep 18, 2026" in matrix
     assert "Provider capture Sep 18, 2026 (post-cutoff capture" not in matrix
-    assert matrix.count("Post-cutoff capture:") == 1
-    assert "1 of 1 provider captures are dated after the Sep 17, 2026 cutoff" in matrix
+    assert matrix.count("Post-cutoff ledger:") == 1
+    assert "1 of 1 provider-ledger generations are dated after the Sep 17, 2026 cutoff" in matrix
     assert "Accepted Sep 18, 2026" not in matrix
 
 
