@@ -4,6 +4,7 @@ from decimal import Decimal
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -51,7 +52,13 @@ REQUIRED_STRATEGY_IDS = {
     "volatis-strategy",
 }
 EXCLUDED_STRATEGY_IDS = {"composer-holy-grail", "echotrade-growth-pivots"}
-REAL_BASELINE_ROOT = ROOT.parent / "dataPortfolio" / "baseline"
+RETAINED_PORTFOLIO_ROOT_ENV = "QE_RETAINED_DATA_PORTFOLIO"
+REAL_BASELINE_ROOT = (
+    Path(
+        os.environ.get(RETAINED_PORTFOLIO_ROOT_ENV, "").strip() or "unset-retained-root"
+    )
+    / "baseline"
+)
 ACCEPTED_EPOCH_GENERATION_ID = (
     "177353fc5a0e3dd2144b57495593228b204714e26d7e1db0b11ae0ebcf98ab11"
 )
@@ -63,11 +70,13 @@ ACCEPTED_EPOCH_BASELINE_GENERATION_ID = (
 def _require_retained_baseline() -> None:
     """Skip only tests whose fixture is retained outside a source checkout."""
 
-    pointer_path = REAL_BASELINE_ROOT / "CURRENT.json"
-    if not pointer_path.is_file():
+    if not os.environ.get(RETAINED_PORTFOLIO_ROOT_ENV, "").strip():
         pytest.skip(
-            f"requires retained baseline evidence outside the checkout: {pointer_path}"
+            f"{RETAINED_PORTFOLIO_ROOT_ENV} does not name the retained dataPortfolio "
+            "root (explicit opt-in; no sibling-folder probing)"
         )
+    pointer_path = REAL_BASELINE_ROOT / "CURRENT.json"
+    assert pointer_path.is_file(), pointer_path
     pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
     generation_id = pointer.get("generation_id")
     baseline_path = (

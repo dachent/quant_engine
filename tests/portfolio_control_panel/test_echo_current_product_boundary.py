@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -45,19 +46,25 @@ REQUIRED_STRATEGY_IDS = {
     "volatis-strategy",
 }
 EXCLUDED_STRATEGY_IDS = {"composer-holy-grail", "echotrade-growth-pivots"}
+RETAINED_PORTFOLIO_ROOT_ENV = "QE_RETAINED_DATA_PORTFOLIO"
 RETAINED_STRATEGY_MANIFEST_PATH = (
-    ROOT.parent / "dataPortfolio" / "manifests" / "strategy-manifest.json"
+    Path(os.environ[RETAINED_PORTFOLIO_ROOT_ENV])
+    / "manifests"
+    / "strategy-manifest.json"
+    if os.environ.get(RETAINED_PORTFOLIO_ROOT_ENV, "").strip()
+    else None
 )
 
 
 def _current_manifest_rows() -> list[dict[str, object]]:
     """Project the explicit seven-strategy account authority into 13 epochs."""
 
-    if not RETAINED_STRATEGY_MANIFEST_PATH.is_file():
+    if RETAINED_STRATEGY_MANIFEST_PATH is None:
         pytest.skip(
-            "requires retained strategy-manifest evidence outside the checkout: "
-            f"{RETAINED_STRATEGY_MANIFEST_PATH}"
+            f"{RETAINED_PORTFOLIO_ROOT_ENV} does not name the retained dataPortfolio "
+            "root (explicit opt-in; no sibling-folder probing)"
         )
+    assert RETAINED_STRATEGY_MANIFEST_PATH.is_file(), RETAINED_STRATEGY_MANIFEST_PATH
     manifest = json.loads(RETAINED_STRATEGY_MANIFEST_PATH.read_text(encoding="utf-8"))
     rows: list[dict[str, object]] = []
     for strategy in manifest["strategies"]:

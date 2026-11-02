@@ -56,9 +56,22 @@ P123_EQUITY_CURVE_SHA256 = (
 )
 P123_RETURN_START = date(2025, 11, 13)
 P123_RETURN_END = date(2026, 8, 13)
-P123_GENERATION_ROOT = (
-    ROOT.parent / "dataPortfolio123" / "generations" / P123_GENERATION_ID
-)
+# Opt-in only: the test runs when this variable names the retained
+# dataPortfolio123 root.  A folder that merely sits beside the worktree is never
+# probed (the gate would otherwise switch itself on by directory layout).
+P123_RETAINED_ROOT_ENV = "QE_RETAINED_DATA_PORTFOLIO123"
+
+
+def _p123_retained_root() -> Path:
+    configured = os.environ.get(P123_RETAINED_ROOT_ENV, "").strip()
+    assert configured, f"{P123_RETAINED_ROOT_ENV} is not set"
+    return Path(configured)
+
+
+def _p123_generation_root() -> Path:
+    return _p123_retained_root() / "generations" / P123_GENERATION_ID
+
+
 # The retained segment pins the admitted-item digest of a receipt whose managed
 # returns were read from the leading marker element (four distinct values, 1.00
 # total).  633abceb reads the Strategy level, which reproduces the provider's
@@ -190,12 +203,36 @@ P123_RETAINED_SOURCE_SEGMENT = json.loads(
 """
 )
 P123_RETAINED_INPUTS = (
-    P123_GENERATION_ROOT / "generation.json",
-    P123_GENERATION_ROOT / "portfolio123-generation.json",
-    P123_GENERATION_ROOT / "tables" / "har_managed_performance.parquet",
-    P123_GENERATION_ROOT / "tables" / "har_equity_curve.parquet",
-    P123_GENERATION_ROOT / "tables" / "har_managed_metadata.parquet",
+    "generation.json",
+    "portfolio123-generation.json",
+    "tables/har_managed_performance.parquet",
+    "tables/har_equity_curve.parquet",
+    "tables/har_managed_metadata.parquet",
 )
+
+
+def _bind_retained_vintage_authority(
+    authority: dict[str, Any],
+    contract: dict[str, Any],
+    segment: dict[str, Any],
+) -> None:
+    """Bind one P123 source segment, and the contract view containing it.
+
+    The receipt's authority_ref names the contract digest, so that digest is
+    taken over the contract view that really contains the bound segment: the
+    given contract with only the portfolio123-model-generation segment replaced.
+    """
+
+    source_id = "portfolio123-model-generation"
+    authority["sources"][source_id] = segment
+    view = copy.deepcopy(contract)
+    view["source_segments"] = [
+        segment if item["source_id"] == source_id else item
+        for item in view["source_segments"]
+    ]
+    authority["contract_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes(view)
+    ).hexdigest()
 
 
 def _retained_p123_admit_or_declare_fixture() -> tuple[
@@ -244,22 +281,19 @@ def _retained_p123_admit_or_declare_fixture() -> tuple[
         P123_ADMITTED_ITEM_SET_SHA256_MARKER_RETURNS
     )
     policy["admitted_item_set_sha256"] = P123_ADMITTED_ITEM_SET_SHA256
-    authority["sources"]["portfolio123-model-generation"] = source
-    # The receipt's authority_ref names the contract digest, so that digest is
-    # taken over the contract view that really contains the bound segment: the
-    # current contract with only this segment replaced by the retained one.
-    # The test is retained evidence of a past state, not of the current bytes.
-    retained_contract = copy.deepcopy(contract)
-    retained_contract["source_segments"] = [
-        source if item["source_id"] == "portfolio123-model-generation" else item
-        for item in retained_contract["source_segments"]
-    ]
-    authority["contract_semantic_sha256"] = hashlib.sha256(
-        canonical_json_bytes(retained_contract)
-    ).hexdigest()
+    # The test is retained evidence of a past state, not of the current bytes:
+    # the digest is taken over the current contract with only this segment
+    # replaced by the retained one.
+    _bind_retained_vintage_authority(authority, contract, source)
 
-    p123_root = ROOT.parent / "dataPortfolio123"
-    generation_root = p123_root / "generations" / P123_GENERATION_ID
+    p123_root = _p123_retained_root()
+    generation_root = _p123_generation_root()
+    absent = [
+        relative
+        for relative in P123_RETAINED_INPUTS
+        if not (generation_root / relative).is_file()
+    ]
+    assert not absent, f"{generation_root} lacks {absent}"
     manifest = GenerationManifest.from_json_bytes(
         (generation_root / "generation.json").read_bytes()
     )
@@ -1890,8 +1924,11 @@ def test_observed_receipt_keeps_each_provider_original_qualification(
 
 
 @pytest.mark.skipif(
-    not all(path.is_file() for path in P123_RETAINED_INPUTS),
-    reason="retained P123 EU provider evidence is not mounted",
+    not os.environ.get(P123_RETAINED_ROOT_ENV, "").strip(),
+    reason=(
+        f"{P123_RETAINED_ROOT_ENV} does not name the retained dataPortfolio123 "
+        "root (explicit opt-in; no sibling-folder probing)"
+    ),
 )
 def test_retained_p123_receipt_admits_managed_returns_only() -> None:
     (
@@ -1920,7 +1957,7 @@ def test_retained_p123_receipt_admits_managed_returns_only() -> None:
     reported = {
         str(item["retTotal"])
         for item in pq.read_table(
-            P123_GENERATION_ROOT / "tables" / "har_managed_metadata.parquet",
+            _p123_generation_root() / "tables" / "har_managed_metadata.parquet",
             columns=["portfolioUid", "retTotal"],
         ).to_pylist()
         if str(item["portfolioUid"]) == P123_EU_ENTITY_ID
@@ -2747,3 +2784,96 @@ def test_absent_readiness_map_keeps_the_scalar_impact() -> None:
         for row in receipt["dispositions"]
         if row["action"] == "EXCLUDE"
     } == {"REQUIRED_NOT_READY"}
+
+
+def test_rebound_segment_refuses_a_retained_generation_until_its_vintage_is_bound() -> (
+    None
+):
+    """CI guard for the retained-receipt staleness that skipped silently.
+
+    The contract's segment is rebound to later generations while a retained
+    receipt stays evidence of an earlier one: binding the rebound segment must
+    be refused, and the vintage binding must hash the contract view that
+    actually contains the bound segment (never the unmodified current bytes).
+    Synthetic data only.
+    """
+
+    source_id = "portfolio123-model-generation"
+    authority, identities, manifests, catalogs, provider_facts = _fixture()
+    vintage = copy.deepcopy(authority["sources"][source_id])
+    rebound = copy.deepcopy(vintage)
+    rebound["current_generation"] = {
+        "as_of": "2026-09-02",
+        "generation_id": "d" * 64,
+        "sha256": "e" * 64,
+    }
+    authority["sources"][source_id] = rebound
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio123 generation differs from financial MVP authority",
+    ):
+        ledger._admit_or_declare_receipt(
+            authority, identities, manifests, catalogs, provider_facts, ()
+        )
+
+    contract = {"source_segments": [rebound]}
+    _bind_retained_vintage_authority(authority, contract, vintage)
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority, identities, manifests, catalogs, provider_facts, ()
+    )
+
+    view_digest = hashlib.sha256(
+        canonical_json_bytes({"source_segments": [vintage]})
+    ).hexdigest()
+    current_digest = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+    assert view_digest != current_digest
+    assert receipt["contract_semantic_sha256"] == view_digest
+    rows = [
+        row for row in receipt["dispositions"] if row["provider_id"] == "portfolio123"
+    ]
+    assert rows
+    for row in rows:
+        assert row["authority_ref"].startswith(
+            f"contract:{view_digest}#source_segments/{source_id}"
+        )
+
+
+def test_p123_managed_returns_compound_to_the_reported_total_not_the_marker(
+    tmp_path: Path,
+) -> None:
+    """CI guard for the digest pinned from marker returns (633abceb).
+
+    Synthetic managed performance whose leading marker moves independently of
+    the Strategy level: the returns must compound to the level ratio (the
+    provider-reported total), never to the marker reading.
+    """
+
+    import test_provider_ledger as provider_ledger_tests
+
+    provider_ref, manifest, evidence = provider_ledger_tests._p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "50",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "150",
+                "Cash Added": "70",
+            },
+        ],
+        performance_data=[[0, 100, 50], [3, 125, 60], [1, 150, 70]],
+    )
+    returned = provider_ledger_tests.ledger._portfolio123_provider_returns(
+        provider_ref, manifest, evidence
+    )
+    wealth = Decimal(1)
+    for item in returned:
+        wealth *= Decimal(1) + Decimal(str(item["return"]))
+    assert wealth == Decimal(150) / Decimal(100)
+    marker_wealth = (Decimal(1) + Decimal(3) / 100) * (Decimal(1) + Decimal(1) / 100)
+    assert wealth != marker_wealth
