@@ -6098,7 +6098,18 @@ def test_build_stage_forwards_the_recipe_basis_inputs_to_the_report(
     monkeypatch.setattr(
         builder, "_history_contract_path", lambda _recipe: tmp_path / "history.json"
     )
+    checked: list[bool] = []
+    # the lens control check is proven by its own tests; here only that the report stage
+    # runs it, and only a declared recipe expects a control
+    monkeypatch.setattr(
+        builder,
+        "check_lens_control_stage",
+        lambda recipe_value, _analytics: checked.append(
+            "strategy_basis" in recipe_value
+        ),
+    )
     builder.build_stage(recipe, tmp_path / "out", "report")
+    assert checked == [pinned]
     for key, param, _flag in _OPTIONAL_REPORT_INPUTS:
         if pinned:
             assert captured[param] == artifacts[key].resolve()
