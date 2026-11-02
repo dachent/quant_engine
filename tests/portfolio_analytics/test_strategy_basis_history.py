@@ -20,6 +20,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 import pytest
 
+import nested_strategy_tag_map
 import strategy_basis
 from test_portfolio_layered_history import (
     _artifact,
@@ -78,7 +79,7 @@ def _facts(*, open_sleeve: bool = True) -> dict[str, Any]:
         "provider_id": PROVIDER,
         "bindings": {
             "parent_ledger_generation_id": BOUND_GENERATION,
-            "tag_map_sha256": hashlib.sha256(_tag_map()).hexdigest(),
+            "tag_map_sha256": _tag_map_digest(_tag_map()),
         },
         "sleeves": [
             {
@@ -106,6 +107,10 @@ def _facts(*, open_sleeve: bool = True) -> dict[str, Any]:
 
 def _bytes(document: dict[str, Any]) -> bytes:
     return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _tag_map_digest(raw: bytes) -> str:
+    return str(nested_strategy_tag_map.validate_tag_map(raw).sha256)
 
 
 def _tag_map(parent: str = PARENT) -> bytes:
@@ -515,7 +520,7 @@ def test_a_tag_map_that_does_not_name_the_facts_parent_is_refused(
 ) -> None:
     other = _tag_map("another-account")
     world["tag_map"].write_bytes(other)
-    _write_facts(world, tag_map_sha256=hashlib.sha256(other).hexdigest())
+    _write_facts(world, tag_map_sha256=_tag_map_digest(other))
     with pytest.raises(target_series.TargetSeriesError, match="tag map is refused"):
         _restated(world)
 
@@ -544,7 +549,7 @@ def test_the_manifest_records_the_bound_identities_and_the_verifier_checks_them(
     block = json.loads(manifest)["strategy_basis_restatement"]
     assert block["parent_ledger_generation_id"] == BOUND_GENERATION
     assert block["parent_account_id"] == PARENT
-    assert block["tag_map_sha256"] == hashlib.sha256(_tag_map()).hexdigest()
+    assert block["tag_map_sha256"] == _tag_map_digest(_tag_map())
 
     def other_generation(document: dict[str, Any]) -> None:
         document["strategy_basis_restatement"]["parent_ledger_generation_id"] = "9" * 64
