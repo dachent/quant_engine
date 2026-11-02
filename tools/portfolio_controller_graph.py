@@ -193,6 +193,8 @@ _PATH_STAGES = {
     "tools/release_ledger_spec.py": [],
     "schemas/portfolio/release-cycle-manifest.schema.json": [],
     "schemas/portfolio/release-resolved-cycle.schema.json": [],
+    "tools/release_baseline_spec.py": [],
+    "schemas/portfolio/baseline-declared-inputs.schema.json": [],
     "tools/release_restore_world.py": [],
     "tools/release_evidence_pack.py": [],
     "tools/check_gitleaks_suppressions.py": [],
