@@ -131,6 +131,13 @@ FEE_TIER_UNSETTLED: Final = "TIER_UNSETTLED"
 _FEE_PLACEMENTS: Final = frozenset(
     {"INSIDE_VEHICLE_NAV", "OUTSIDE_BILLED", "NOT_STATED_IN_DOCUMENTATION"}
 )
+# A derivation record settles a fee tier from posted fee journals: every posted fee,
+# recomputed as the tier's own documented annual rate over the billing periods times
+# the fund value it was billed on, must close to within one cent of currency rounding.
+FEE_DERIVATION_POSTED_CLOSURE: Final = "POSTED_FEE_CLOSURE"
+FEE_NONE_BILLED: Final = "NONE_BILLED"
+_CENT: Final = Decimal("0.01")
+_PERIODIC_RATE_QUANTUM: Final = Decimal("0.0000001")
 _COST_CORROBORATION_ROLE: Final = "CORROBORATING_OBSERVED_EVIDENCE"
 # Billing periods per year: a calendar definition, not a cost figure.
 _PERIODS_PER_YEAR: Final = {"MONTH": 12, "QUARTER": 4, "YEAR": 1}
@@ -2441,8 +2448,9 @@ def _fee_rates(value: object, name: str) -> dict[str, Any]:
     """
 
     rates = _object(value, name)
+    # ``derivation`` is optional: a row without one is carried exactly as before.
     _strict_keys(
-        rates,
+        {key: item for key, item in rates.items() if key != "derivation"},
         {
             "lock",
             "placement",
@@ -2537,13 +2545,134 @@ def _fee_rates(value: object, name: str) -> dict[str, Any]:
             "days": days,
             "source": _rate_source(item["source"], f"{name}.lock.source"),
         }
-    return {
+    carried: dict[str, Any] = {
         "lock": lock,
         "placement": placement,
         "placement_source": placement_source,
         "redemption": redemption,
         "tier": tier,
         "tier_table": table,
+    }
+    if "derivation" in rates:
+        carried["derivation"] = _fee_derivation(
+            rates["derivation"], f"{name}.derivation", table, tier
+        )
+    return carried
+
+
+def _fee_derivation(
+    value: object, name: str, table: Sequence[Mapping[str, Any]], tier: str
+) -> dict[str, Any]:
+    """Settle a fee tier from posted fee journals, or refuse.
+
+    The record carries the posted fees and the fund values they were billed on
+    (``closure``, bound by ``closure_sha256``).  Every row is recomputed here as the
+    selected tier's documented management rate over ``periods_per_year`` times the
+    fund value, rounded to the cent, and must agree with the posted fee to within
+    ``tolerance_usd`` (at most one cent).  No rate is read from the record: the rate
+    is the tier row's own, so a record cannot supply the number it proves.  A tier
+    that documents a performance rate cannot claim that none was billed.  The
+    published form drops the rows and keeps their count, dates, worst residual and
+    hash.
+    """
+
+    item = _object(value, name)
+    _strict_keys(
+        item,
+        {
+            "closure",
+            "closure_sha256",
+            "evidence",
+            "hwm",
+            "kind",
+            "performance_fee",
+            "periods_per_year",
+            "tier",
+            "tolerance_usd",
+        },
+        name,
+    )
+    if item["kind"] != FEE_DERIVATION_POSTED_CLOSURE:
+        raise BaselineValidationError(f"{name}.kind is not recognised")
+    if tier == FEE_TIER_UNSETTLED or item["tier"] != tier:
+        raise BaselineValidationError(f"{name} must settle the selected tier")
+    row = next(entry for entry in table if entry["tier"] == tier)
+    annual = row["management_rate"]
+    if annual is None:
+        raise BaselineValidationError(f"{name} needs a documented management rate")
+    for field in ("performance_fee", "hwm"):
+        if item[field] != FEE_NONE_BILLED:
+            raise BaselineValidationError(f"{name}.{field} must be {FEE_NONE_BILLED}")
+    if row["performance_rate"] is not None:
+        raise BaselineValidationError(
+            f"{name} claims no performance fee for a tier that documents one"
+        )
+    periods = item["periods_per_year"]
+    if (
+        not isinstance(periods, int)
+        or isinstance(periods, bool)
+        or periods not in set(_PERIODS_PER_YEAR.values())
+    ):
+        raise BaselineValidationError(
+            f"{name}.periods_per_year is not a billing period"
+        )
+    tolerance = _decimal(item["tolerance_usd"], f"{name}.tolerance_usd")
+    assert tolerance is not None
+    if tolerance < 0 or tolerance > _CENT:
+        raise BaselineValidationError(f"{name}.tolerance_usd must be within one cent")
+    evidence = [
+        _rate_source(entry, f"{name}.evidence[{n}]")
+        for n, entry in enumerate(_objects(item["evidence"], f"{name}.evidence"))
+    ]
+    if not evidence:
+        raise BaselineValidationError(f"{name} states a derivation without evidence")
+    closure = _objects(item["closure"], f"{name}.closure")
+    if not closure:
+        raise BaselineValidationError(f"{name}.closure has no posted fee")
+    if (
+        hashlib.sha256(canonical_json_bytes(closure)).hexdigest()
+        != item["closure_sha256"]
+    ):
+        raise BaselineValidationError(f"{name}.closure does not match closure_sha256")
+    periodic = (Decimal(annual) / periods).quantize(_PERIODIC_RATE_QUANTUM)
+    worst = Decimal(0)
+    days: list[date] = []
+    for position, entry in enumerate(closure):
+        label = f"{name}.closure[{position}]"
+        _strict_keys(entry, {"date", "fund_value", "posted_fee"}, label)
+        day = _date(entry["date"], f"{label}.date")
+        if days and day <= days[-1]:
+            raise BaselineValidationError(f"{label}.date is not increasing")
+        days.append(day)
+        fund_value = _decimal(entry["fund_value"], f"{label}.fund_value")
+        posted = _decimal(entry["posted_fee"], f"{label}.posted_fee")
+        assert fund_value is not None and posted is not None
+        if fund_value <= 0 or posted < 0:
+            raise BaselineValidationError(f"{label} has a non-positive amount")
+        expected = (Decimal(annual) / periods * fund_value).quantize(
+            _CENT, rounding=ROUND_HALF_EVEN
+        )
+        residual = abs(posted - expected)
+        if residual > tolerance:
+            raise BaselineValidationError(
+                f"{label} does not close: posted fee differs from the "
+                "documented rate over the fund value by more than the tolerance"
+            )
+        worst = max(worst, residual)
+    return {
+        "closure_sha256": item["closure_sha256"],
+        "evidence": evidence,
+        "first_date": days[0].isoformat(),
+        "hwm": FEE_NONE_BILLED,
+        "kind": FEE_DERIVATION_POSTED_CLOSURE,
+        "last_date": days[-1].isoformat(),
+        "max_abs_residual_usd": decimal_text(worst),
+        "performance_fee": FEE_NONE_BILLED,
+        "periodic_rate": decimal_text(periodic),
+        "periods_per_year": periods,
+        "rows": len(closure),
+        "tier": tier,
+        "tolerance_usd": decimal_text(tolerance),
     }
 
 

@@ -90,7 +90,7 @@ longer has, so the report ignores that quotient and the cost mirror under
   `cost_rate_disclosure`, one sentence built only from those fields (tier label, management
   and performance rate, high-water-mark text or "not stated", placement, redemption, lock,
   source pages); an unsettled tier publishes a sentence that claims no rate. The panel
-  prints the sentence verbatim.
+  prints the sentence verbatim. A tier settled by a derivation also states the billing (annual rate, periodic rate, none billed for performance and high-water mark) and the derivation window.
 
 ## Allocation snapshot weights
 

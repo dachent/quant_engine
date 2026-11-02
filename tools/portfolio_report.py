@@ -1731,6 +1731,8 @@ def _percent_text(rate: object) -> str:
     return f"{percent:f}%"
 
 
+_BILLING_WORDS: Final = {12: "monthly", 4: "quarterly", 1: "annually"}
+
 _PLACEMENT_WORDS: Final = {
     "INSIDE_VEHICLE_NAV": "inside the vehicle NAV",
     "OUTSIDE_BILLED": "billed outside the NAV",
@@ -1779,14 +1781,44 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
         else " (high-water mark and assessment period not stated in the documentation)"
     )
     performance_rate = tier.get("performance_rate")
-    pieces = [
-        part("management", tier.get("management_rate")),
-        part(
+    raw_derivation = rates.get("derivation")
+    derivation: Mapping[str, Any] = (
+        raw_derivation
+        if isinstance(raw_derivation, Mapping)
+        and raw_derivation.get("tier") == tier.get("tier")
+        else {}
+    )
+    settled = bool(derivation)
+    management = part("management", tier.get("management_rate"))
+    if settled and tier.get("management_rate") is not None:
+        count = derivation.get("periods_per_year")
+        periods = _BILLING_WORDS.get(count) if isinstance(count, int) else None
+        if periods is not None:
+            management += (
+                f" a year, billed {periods} at "
+                f"{_percent_text(derivation.get('periodic_rate'))} of fund value"
+            )
+    if settled and performance_rate is None:
+        performance = (
+            "performance fee none billed, no high-water mark billed"
+            if derivation.get("performance_fee") == "NONE_BILLED"
+            and derivation.get("hwm") == "NONE_BILLED"
+            else part("performance", None)
+        )
+    else:
+        performance = part(
             "performance",
             performance_rate,
             mechanism_text if performance_rate is not None else "",
-        ),
-    ]
+        )
+    pieces = [management, performance]
+    if settled:
+        pieces.append(
+            f"tier settled by {derivation.get('rows')} posted fees "
+            f"({derivation.get('first_date')} to {derivation.get('last_date')}) "
+            f"each within ${derivation.get('tolerance_usd')} of that rate over fund "
+            "value"
+        )
     placement = _PLACEMENT_WORDS.get(str(rates.get("placement")))
     sentence = (
         f"Documented rates, {tier.get('label')} ({tier.get('applies_to')}): "
@@ -1806,7 +1838,10 @@ def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
     pages = sorted(
         {
             f"{source.get('artifact')} p.{source.get('page')}"
-            for source in tier.get("sources") or []
+            for source in [
+                *(tier.get("sources") or []),
+                *((derivation.get("evidence") or []) if settled else []),
+            ]
             if isinstance(source, Mapping)
         }
     )
