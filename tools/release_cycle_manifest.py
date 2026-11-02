@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 import hashlib
 import json
 from pathlib import Path
@@ -91,13 +92,39 @@ def _relative_parts(relative: str, what: str) -> tuple[str, ...]:
     return tuple(relative.split("/"))
 
 
+def _day(value: str, what: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise CycleManifestError(
+            "DATE_INVALID", f"{what}: {value!r} is not a calendar date"
+        ) from exc
+
+
+def _utc(value: str, what: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise CycleManifestError(
+            "DATE_INVALID", f"{what}: {value!r} is not a UTC timestamp"
+        ) from exc
+
+
 def validate_static(manifest: Mapping[str, Any]) -> None:
     """Rules that need no filesystem: schema, dates, path syntax, finality evidence presence."""
 
     errors = schema_errors(manifest)
     if errors:
         raise CycleManifestError("SCHEMA", "; ".join(errors[:6]))
-    if manifest["cutoff"] > manifest["evaluated_on"]:
+    dates = {
+        "cutoff": _day(manifest["cutoff"], "cutoff"),
+        "evaluated_on": _day(manifest["evaluated_on"], "evaluated_on"),
+    }
+    _utc(manifest["captured_at_utc"], "captured_at_utc")
+    for provider_id, provider in manifest["providers"].items():
+        if "finalized_through" in provider:
+            _day(provider["finalized_through"], f"{provider_id}.finalized_through")
+    if dates["cutoff"] > dates["evaluated_on"]:
         raise CycleManifestError(
             "DATE_ORDER",
             f"cutoff {manifest['cutoff']} is after evaluated_on {manifest['evaluated_on']}",
@@ -259,6 +286,16 @@ def _generation(
             )
         generation_id = candidates[0]
         directory = generations / generation_id
+    # a generation directory or manifest that is a symlink or junction leaving the provider root
+    # is not under it, whatever its spelling says
+    if (
+        directory.resolve() != root / "generations" / generation_id
+        or (directory / "generation.json").resolve().parent != directory.resolve()
+    ):
+        raise CycleManifestError(
+            "PATH_ESCAPES_ROOT",
+            f"{what}: generation {generation_id[:12]} resolves outside its root",
+        )
     manifest = _file(
         directory / "generation.json",
         provider["manifest_sha256"],
