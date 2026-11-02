@@ -4159,6 +4159,96 @@ def _proxy_governance(
     }
 
 
+def _public_composition(value: Mapping[str, object]) -> dict[str, object]:
+    """A series composition as published: the account-lane rows stay in the spec."""
+
+    published = dict(value)
+    lane = published.get("account_basis")
+    if isinstance(lane, Mapping):
+        published["account_basis"] = {
+            key: item for key, item in lane.items() if key != "rows"
+        }
+    return published
+
+
+def _account_basis_coverage(
+    lane: Mapping[str, object], window_end: str | None, window_basis_available: bool
+) -> dict[str, object]:
+    """The strategy's own account-basis lane over one model's target window.
+
+    The plan declares the lane (``series_composition[*].account_basis``) beside a
+    restated primary series: the parent account's rows, and the backtest prehistory
+    that precedes them, for the same series.  Its figures are the primary coverage's
+    own, computed on the account's rows up to the model's last target date, so that a
+    restated panel keeps every account-basis number it showed before.
+    """
+
+    raw_rows = lane.get("rows")
+    if not isinstance(raw_rows, list) or not raw_rows:
+        raise DecompositionError("account-basis lane has no rows")
+    rows: list[TargetRow] = []
+    seen_days: set[date] = set()
+    for index, raw in enumerate(raw_rows):
+        if not isinstance(raw, Mapping):
+            raise DecompositionError(f"account-basis row {index} is invalid")
+        day = _day(raw.get("date"), f"account-basis row {index} date")
+        raw_return = str(raw.get("return", "")).strip()
+        layer = _text(raw.get("evidence_layer"), f"account-basis row {index} layer")
+        if layer not in EVIDENCE_LAYERS or day in seen_days:
+            raise DecompositionError("account-basis lane layers or dates differ")
+        seen_days.add(day)
+        rows.append(
+            TargetRow(
+                day,
+                _finite(raw_return, f"account-basis row {index} return"),
+                _canonical_decimal_text(raw_return, f"account-basis row {index}"),
+                layer,
+                "NET",
+                "TOTAL",
+                None,
+            )
+        )
+    rows.sort(key=lambda item: item.day)
+    if window_end is not None:
+        limit = _day(window_end, "account-basis window end")
+        rows = [row for row in rows if row.day <= limit]
+    live = [row for row in rows if row.evidence_layer != "BACKTEST"]
+    figures: dict[str, str | None] = {
+        "target_cumulative_return": None,
+        "target_current_drawdown": None,
+        "target_max_drawdown": None,
+    }
+    if rows and window_basis_available:
+        wealth = 1.0
+        peak = 1.0
+        maximum = 0.0
+        for row in rows:
+            wealth *= 1.0 + row.value
+            peak = max(peak, wealth)
+            maximum = max(maximum, 1.0 - wealth / peak)
+        figures = {
+            "target_cumulative_return": _number(wealth - 1.0),
+            "target_current_drawdown": _number(1.0 - wealth / peak),
+            "target_max_drawdown": _number(maximum),
+        }
+    return {
+        "account_id": lane.get("account_id"),
+        "basis": lane.get("basis"),
+        "figures": figures,
+        "label": lane.get("label"),
+        "observations": len(live),
+        "series": {
+            "sha256": _canonical_live_series_sha256(live) if live else None,
+            "target_observations": len(rows),
+        },
+        "strategy_id": lane.get("strategy_id"),
+        "window": {
+            "end": rows[-1].day.isoformat() if rows else None,
+            "start": rows[0].day.isoformat() if rows else None,
+        },
+    }
+
+
 def build_decomposition(
     spec_path: Path, source_root: Path, *, training_cache_root: Path | None = None
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
@@ -4194,9 +4284,19 @@ def build_decomposition(
                 for row in targets.get(str(model_result.get("series_id")), [])
             }
         )
-        model_result["series_composition"] = dict(
-            spec.series_composition.get(str(model_result.get("series_id")), {})
+        composition = spec.series_composition.get(
+            str(model_result.get("series_id")), {}
         )
+        model_result["series_composition"] = _public_composition(composition)
+        lane = composition.get("account_basis")
+        coverage = model_result.get("coverage")
+        if isinstance(lane, Mapping) and isinstance(coverage, dict):
+            end = coverage.get("target_observed_end")
+            coverage["account_basis"] = _account_basis_coverage(
+                lane,
+                end if isinstance(end, str) else None,
+                coverage.get("target_cumulative_return") is not None,
+            )
     selections = _select_models(results, spec.models)
     selected_model_ids = {str(item["model_id"]) for item in selections}
     for model_result in results:
@@ -4250,7 +4350,8 @@ def build_decomposition(
         "model_selections": selections,
         "proxy_governance": _proxy_governance(spec, results),
         "series_composition": {
-            key: dict(value) for key, value in sorted(spec.series_composition.items())
+            key: _public_composition(value)
+            for key, value in sorted(spec.series_composition.items())
         },
         "sources": source_summary,
     }

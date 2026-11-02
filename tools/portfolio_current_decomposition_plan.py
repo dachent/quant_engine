@@ -958,6 +958,14 @@ def _layered_history_targets(
                 series_id: source_labels
             }
         value["interval_association_status"] = "AVAILABLE_SOURCE_LABELLED"
+    for lane_series, lane in _account_basis_lanes(
+        manifest=manifest,
+        planned_series=planned_series,
+        selected_projection=selected_projection,
+        evidence_mode=evidence_mode,
+        provider_ledger_catalog_path=provider_ledger_catalog_path,
+    ).items():
+        composition[lane_series]["account_basis"] = lane
     target_content = _csv_bytes(
         TARGET_HEADERS,
         [[row[header] for header in TARGET_HEADERS] for row in target_rows],
@@ -1024,6 +1032,137 @@ def _layered_history_targets(
             },
         },
     }
+
+
+def _series_path_sha256(rows: Sequence[Mapping[str, object]]) -> str:
+    """sha256 of a ``[{date, return}]`` path, as ``strategy_basis.series_sha256`` seals it."""
+
+    series = [{"date": str(row["date"]), "return": str(row["return"])} for row in rows]
+    return hashlib.sha256(
+        (
+            json.dumps(series, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _account_basis_lanes(
+    *,
+    manifest: Mapping[str, Any],
+    planned_series: Mapping[str, str],
+    selected_projection: Sequence[Mapping[str, str]],
+    evidence_mode: str,
+    provider_ledger_catalog_path: Path | None,
+) -> dict[str, dict[str, object]]:
+    """The account-basis lane of every strategy whose history was restated (#624).
+
+    A history generation that carries a ``strategy_basis_restatement`` block holds that
+    strategy's sleeve path as its live segment, so the decomposition's primary series is
+    the sleeve basis.  The parent account's own series stays visible beside it: it is
+    read from the provider ledger catalog the generation was verified against, never
+    from the restated rows.  The restated rows the plan selected must be the very rows
+    the block seals, or the plan is refused (a lens built on other rows than the
+    restated history fails closed).  No declaration, no block, no lane.
+    """
+
+    block = manifest.get("strategy_basis_restatement")
+    if block is None:
+        return {}
+    block_value = _object(block, "strategy basis restatement")
+    try:
+        facts = json.loads(_text(block_value.get("sleeve_facts"), "sleeve facts"))
+    except json.JSONDecodeError as exc:
+        raise CurrentPlanError("restated history sleeve facts are unreadable") from exc
+    parent_account = _text(
+        _object(facts, "sleeve facts").get("parent_account_id"), "parent account"
+    )
+    identities = {
+        _text(item.get("series_id"), "restated series_id"): item
+        for item in _objects(block_value.get("strategies"), "restated strategies")
+    }
+    lanes: dict[str, dict[str, object]] = {}
+    catalog: dict[str, Any] | None = None
+    catalog_sha256 = ""
+    for series_id, identity in sorted(identities.items()):
+        if series_id not in planned_series:
+            continue
+        strategy_id = planned_series[series_id]
+        if _text(identity.get("strategy_id"), "restated strategy_id") != strategy_id:
+            raise CurrentPlanError("restated history strategy identity differs")
+        live = sorted(
+            (
+                row
+                for row in selected_projection
+                if row["series_id"] == series_id
+                and row["evidence_layer"] == "ACCOUNT_LIVE"
+            ),
+            key=lambda row: row["date"],
+        )
+        if _series_path_sha256(live) != identity.get("series_sha256"):
+            raise CurrentPlanError(
+                f"selected live rows differ from the restated history: {strategy_id}"
+            )
+        if provider_ledger_catalog_path is None:
+            raise CurrentPlanError(
+                "a restated history needs the provider ledger catalog for the "
+                f"account-basis lane: {strategy_id}"
+            )
+        if catalog is None:
+            catalog, catalog_content = _load_json(
+                provider_ledger_catalog_path, "provider ledger catalog"
+            )
+            catalog_sha256 = _sha256(catalog_content)
+        parent = sorted(
+            (
+                row
+                for row in _objects(catalog.get("strategy_returns"), "ledger returns")
+                if row.get("strategy_id") == strategy_id
+                and row.get("evidence_layer") == "ACCOUNT_LIVE"
+            ),
+            key=lambda row: str(row["date"]),
+        )
+        if not parent:
+            raise CurrentPlanError(
+                f"the ledger has no account-live series for {strategy_id}"
+            )
+        lane_rows: list[dict[str, str]] = []
+        if evidence_mode == "LIVE_PLUS_BACKTEST":
+            parent_start = str(parent[0]["date"])
+            lane_rows.extend(
+                {
+                    "date": row["date"],
+                    "return": row["return"],
+                    "evidence_layer": "BACKTEST",
+                }
+                for row in selected_projection
+                if row["series_id"] == series_id
+                and row["evidence_layer"] == "BACKTEST"
+                and row["date"] < parent_start
+            )
+        lane_rows.extend(
+            {
+                "date": str(row["date"]),
+                "return": str(row["return"]),
+                "evidence_layer": "ACCOUNT_LIVE",
+            }
+            for row in parent
+        )
+        lanes[series_id] = {
+            "account_id": parent_account,
+            "basis": "ACCOUNT",
+            "label": (
+                f"whole account {parent_account}, account basis: every sleeve of the "
+                "account and its unallocated cash and margin bucket"
+            ),
+            "ledger_catalog_sha256": catalog_sha256,
+            "parent_series_sha256": _series_path_sha256(parent),
+            "restated_series_sha256": identity["series_sha256"],
+            "rows": lane_rows,
+            "sleeve_account_id": identity.get("account_id"),
+            "sleeve_opening_date": identity.get("opening_date"),
+            "strategy_id": strategy_id,
+        }
+    return lanes
 
 
 def _catalog_universes(catalog: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
