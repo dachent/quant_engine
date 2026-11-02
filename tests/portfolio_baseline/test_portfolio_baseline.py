@@ -4085,7 +4085,7 @@ def test_current_reconciliation_rejects_false_availability_of_a_not_ready_compon
     audit_reserve["reserve"]["current_value"] = {
         "currency": "USD",
         "status": "AVAILABLE",
-        "value": "100043.62",
+        "value": "78654.294044",
     }
     assert (
         _cc_checks(audit_reserve, case)["capital-identity-at-cutoff"]["status"]
@@ -4232,10 +4232,10 @@ def test_allocations_stay_byte_identical_to_the_dated_audit_snapshot(
 def test_audit_snapshot_records_reserve_observation_dates_and_later_flows() -> None:
     case = _cc_case()
     replay = {
-        "reserve_total_usd": "100043.62",
+        "reserve_total_usd": "78654.294044",
         "status": "PASS",
-        "systematic_total_usd": "446546.09",
-        "total_liquid_usd": "546589.71",
+        "systematic_total_usd": "351074.535958",
+        "total_liquid_usd": "429728.830002",
     }
     flows = [
         {  # after r1's 2026-07-14 observation, inside the snapshot window
@@ -4278,8 +4278,8 @@ def test_audit_snapshot_records_reserve_observation_dates_and_later_flows() -> N
     snapshot = baseline._build_audit_snapshot(
         as_of_date=date(2026, 8, 16),
         replay=replay,
-        systematic_total=Decimal("446546.09"),
-        reserve_value=Decimal("100043.62"),
+        systematic_total=Decimal("351074.535958"),
+        reserve_value=Decimal("78654.294044"),
         reserve_source_date=date(2026, 8, 16),
         assignments=case["assignments"],
         nav=case["nav"],
@@ -4289,29 +4289,29 @@ def test_audit_snapshot_records_reserve_observation_dates_and_later_flows() -> N
     assert snapshot["status"] == "HISTORICAL_REFERENCE"
     assert snapshot["as_of_date"] == "2026-08-16"
     assert snapshot["replay"] == replay
-    assert snapshot["systematic_total_usd"] == "446546.09"
-    assert snapshot["total_liquid_usd"] == "546589.71"
+    assert snapshot["systematic_total_usd"] == "351074.535958"
+    assert snapshot["total_liquid_usd"] == "429728.830002"
     assert snapshot["checks"] == [
         {
             "check_id": "allocation-to-audit-systematic-total",
             "status": "PASS",
-            "value_usd": "446546.09",
+            "value_usd": "351074.535958",
         },
         {
             "check_id": "allocation-plus-reserve-to-liquid-total",
             "status": "PASS",
-            "value_usd": "546589.71",
+            "value_usd": "429728.830002",
         },
     ]
     reserve = snapshot["reserve"]
-    assert reserve["value_usd"] == "100043.62"
+    assert reserve["value_usd"] == "78654.294044"
     assert reserve["source_effective_date"] == "2026-08-16"
     assert reserve["account_observations"] == [
         {"account_id": "acct-r1", "as_of_date": "2026-07-14", "value_usd": "1000"}
     ]
     assert reserve["accounts_without_observation"] == ["acct-r2"]
     assert reserve["account_observations_total_usd"] == "1000"
-    assert reserve["unexplained_difference_usd"] == "99043.62"
+    assert reserve["unexplained_difference_usd"] == "77654.294044"
     assert [
         (row["record_id"], row["event_date"], row["amount"]["value"])
         for row in reserve["post_observation_flows"]
@@ -4373,7 +4373,7 @@ def test_catalog_schema_requires_and_closes_the_current_capital_blocks(
         validator.validate(mismatched)
 
     unknown = copy.deepcopy(catalog["current_capital"])
-    unknown["audit_reserve_usd"] = "100043.62"
+    unknown["audit_reserve_usd"] = "78654.294044"
     with pytest.raises(ValidationError, match="Additional properties"):
         validator.validate(unknown)
 

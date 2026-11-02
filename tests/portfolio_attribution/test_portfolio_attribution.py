@@ -315,7 +315,7 @@ def test_a_contract_cap_is_an_upper_bound_not_evidenced_fees(tmp_path: Path) -> 
     baseline = _baseline(
         tmp_path,
         cost_rows={
-            1: ("3590", "known_gold_api"),
+            1: ("2822.458", "known_gold_api"),
             2: ("798", "known_fixed"),
             3: ("664.57", "conservative_1pct_contract_cap"),
             4: (None, "unknown_model_subscription_cost"),

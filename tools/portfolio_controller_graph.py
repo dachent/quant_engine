@@ -166,6 +166,8 @@ _PATH_STAGES = {
     # #540 payload budget: reads a published generation and the budget file, imports no
     # producer and writes no delivery artifact.
     "tools/panel_payload_size.py": [],
+    "tools/tt_source_manifest_builder.py": [],
+    "tools/tt_order_planner.py": [],
     "tools/check_architecture.py": [],
     "tools/check_data_roots.py": [],
     "tools/check_fact_admission.py": [],
@@ -184,6 +186,11 @@ _PATH_STAGES = {
     # Passive CDP listener for one attended Portfolio123 sitting; writes a
     # create-only run directory and a draft catalog diff, no stage reads it.
     "tools/p123_cdp_recorder.py": [],
+    # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
+    # create-only run directory; no stage reads it, only a pinned run it is handed.
+    "tools/grizzlybulls_capture.py": [],
+    # Offline signal-vs-fill comparison report; informational, never a stage input.
+    "tools/grizzlybulls_schwab_crosscheck.py": [],
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
     # the pinned generation it is handed, never this tool.
     "tools/portfolio_fx_rates.py": [],

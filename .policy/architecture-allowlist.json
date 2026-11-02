@@ -248,6 +248,10 @@
     },
     "tools/schwab_generation.py": {
       "quant_engine.schwab.generation._crosswalk": 1
+    },
+    "tools/tt_source_manifest_builder.py": {
+      "tools:portfolio_implementation_reconciliation._read_tt_source_manifest": 1,
+      "tools:portfolio_implementation_return_attribution._read_tt_source_manifest": 1
     }
   },
   "PROVIDER_NAME": {

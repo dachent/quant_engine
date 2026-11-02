@@ -85,6 +85,57 @@ consumed approval cannot be resumed or retried; obtain a new review artifact
 instead. `auth-test`, `extract`, and `run` all require
 `--governance-evidence <operator-supplied.json>`.
 
+### Assembling and checking the evidence file
+
+`governance-evidence` assembles the evidence JSON so a live capture needs no
+hand-written file; `verify-evidence` re-checks one without consuming it. Neither
+approves anything: the reviewed authority must already exist in the governing
+issue, and the generator refuses a missing or malformed review URL.
+
+```powershell
+quant-engine-matrixport [--credentials-config PLAN.toml] governance-evidence `
+  --operation extract --mode full --cutoff 2026-09-17 `
+  --review-url https://github.com/dachent/quant_engine/issues/<n>#issuecomment-<id> `
+  --review-identity <reviewer> --issued-at <RFC3339> --expires-at <RFC3339> `
+  --max-requests <n> [--max-window-hours 24] --out C:\absolute\outside\repo\evidence.json
+quant-engine-matrixport verify-evidence C:\absolute\outside\repo\evidence.json
+```
+
+It computes the terms and catalog hashes and the scope (exactly the live-enabled
+catalog reads for `extract`/`run`, or the single Wallet balance read for
+`auth-test`). It refuses an expired authority, a window longer than
+`--max-window-hours`, a scope (`--scope-path`, optional assertion) that differs
+from the catalog, a request ceiling below one call per endpoint, a relative or
+in-repository output path, and any existing output (create-only). The gate's
+field set is exact, so the cutoff and the credential-source identity
+(`plan:<digest>` of the ordered references, never a name or value) go in a
+`<name>.provenance.json` sidecar. `verify-evidence` runs the gate's own
+validator (`validate_live_read_evidence`, which `authorize_live_read` calls), then
+re-derives hashes and scope, and reports a consumed receipt as a failure.
+
+### Cutoff binding
+
+`extract` and `run` require `--cutoff YYYY-MM-DD`, which must equal the cutoff in
+the evidence's `<name>.provenance.json` sidecar (the sidecar must name the same
+evidence bytes, operation and mode). The check runs before the evidence is
+consumed, so a refusal costs no approval. The run window then ends at the last
+millisecond of the cutoff day (UTC), capped at the clock, instead of the current
+time, so no windowed request extends past it. The cutoff is stored in the run
+metadata: `--resume` refuses a different or missing cutoff, and `verify
+[--cutoff D]` refuses a mismatched cutoff or a recorded window past its cutoff.
+Current-state requests take no time window, from the code: the catalog
+(`catalog.py`) allows no time or date parameter for `wallet/balance` (415-422),
+`wallet/currencies` (407-413) or `strategy/user/holding/volume` (181-188), and the
+holding snapshot allows only `is_cleared`, `is_holding` and `product_id` (172-179);
+`pipeline.py` calls them through `_single` (912-922) with no params (holding
+1153-1160, wallet 1661-1668) and `transport.py:207` rejects any parameter not in
+the allowlist. They therefore reflect the moment of the call. Each call's UTC
+capture time is recorded in the run metadata (`captures`). `verify` refuses a
+cutoff-bound run whose capture time is after the cutoff day's end (UTC), or that
+did not record capture times, unless the evidence provenance carries an explicit
+`captured_after_cutoff_label` (`governance-evidence --captured-after-cutoff-label
+TEXT`), which is then recorded in the run metadata.
+
 Receipt transitions are durable before a live request is permitted. On POSIX,
 the adapter fsyncs the receipt's containing directory after exclusive creation
 and after each atomic replacement. Windows does not support that POSIX

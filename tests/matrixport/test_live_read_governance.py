@@ -350,7 +350,14 @@ def test_run_reuses_the_exact_credentials_that_signed_live_requests(
 
     assert (
         cli.main(
-            ["run", "--full", "--governance-evidence", str(tmp_path / "grant.json")]
+            [
+                "run",
+                "--full",
+                "--governance-evidence",
+                str(tmp_path / "grant.json"),
+                "--cutoff",
+                "2026-09-17",
+            ]
         )
         == 0
     )

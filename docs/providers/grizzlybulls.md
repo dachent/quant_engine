@@ -51,3 +51,77 @@ reviewing terms would require a separately approved provider issue.
 Recovery is non-destructive: leave the rejected branch and private source
 artifacts unchanged and do not advance any provider, strategy, portfolio, or
 publication pointer.
+
+## VTMA capture (issue #705, reopens the route for these endpoints only)
+
+Issue #705 (`PROVIDER-GB-VTMA-CAPTURE-001`) is the separately approved provider
+issue that #195 required. It admits only the READ_ONLY GET routes in
+`quant_engine.web_contracts.grizzlybulls`: `/api/models`, the Next.js
+`models.json` and `<slug>.json` pages, `/api/modelTradeHistory?slug=&mode=`
+(`mode` is `blended` or `live`; the page's "Download CSV" menu) and
+`/api/modelsHistorical?slug=` (optional; it returned HTTP 500 on 2026-10-30).
+`/api/user`, `/api/login`, `/api/logout` and `/api/create-portal-link` are never
+routed, read, or recorded. The rejection manifest above is unchanged.
+
+Raw response bytes are the evidence. The parsed summary is a derived layer, and
+the contract does not use `extract._sanitize` for output because its token and
+name rules mask legitimate data; `sanitization_audit` lists every value it would
+have masked and fails the run if any data field would change.
+
+### Operator steps
+
+1. Start a dedicated Edge or Chrome profile with a debug port, for example
+   `msedge --user-data-dir=<scratch profile> --remote-debugging-port=9333`, open
+   `https://grizzlybulls.com/models/vix-ta-macro-advanced`, and sign in yourself.
+   No agent handles the password or token.
+2. Discovery (only if a route changes): run
+   `python tools/grizzlybulls_capture.py discover --cdp-url http://127.0.0.1:9333 --output-root <new dir> --click-menu`.
+   It records method, path, query key names, status, content type, request header
+   names, and a type skeleton of JSON bodies; never values, tokens, or cookies.
+3. Capture:
+   `python tools/grizzlybulls_capture.py capture --cdp-url http://127.0.0.1:9333 --output-root <new dir> --slug vix-ta-macro-advanced`
+   (capture always clicks the menu items). The driver loads the model page, clicks the
+   page's own menu items so the page makes its own authenticated requests, and
+   stores each routed body untouched under `raw/` with a SHA-256. The output root
+   must not exist and must be outside any Git worktree and outside a synced
+   scratch root; use the governed data root for retained evidence.
+4. Verify: `python tools/grizzlybulls_capture.py verify --run-root <dir>`.
+5. Compare with Schwab (offline, informational):
+   `python tools/grizzlybulls_schwab_crosscheck.py --signals-csv <raw live history body> --schwab-catalog <generation>/schwab-generation.json --account-id account-61092059d066f056`.
+   Signals are not fills: the report gives lag, unmatched events and daily
+   long/flat disagreement, and gates nothing.
+
+Success test: the manifest status is `COMPLETE` (catalog, model page, and both
+`blended` and `live` history for every requested slug), `failures` is empty,
+`verify` passes, both history bodies parse as the trade-history CSV with monotonic,
+alternating signals from the reviewed vocabulary (`Buy`, `Sell`, `Rebuy`,
+`Hypothetical Sell`), and the last signal date reaches the page's stated end date.
+`INCOMPLETE_MISSING_CAPABILITY` and `FAILED_REQUIRED_CAPABILITY` exit non-zero.
+
+### Observed 2026-10-31 and later
+
+- The history endpoints failed vendor-side on 2026-10-31 (HTTP 500 for every
+  slug and mode; `modelsHistorical` 500 even unauthenticated) and worked on a
+  later day. After the fix, `modelTradeHistory` returned CSVs byte-identical to
+  the owner's retained exports, and `modelsHistorical` returned exactly the 20
+  rows the page withholds.
+- The CSV arrives as a browser download (`content-disposition`), so the response
+  body is empty. The driver binds the browser's download event to its response;
+  a response whose download never arrives fails the run.
+- `modelsHistorical` also carries a `user` profile object (PII). The raw body
+  stays only in the governed root; the derived layer removes `user`, and the
+  sanitization audit fails the run if any other data field would change.
+
+### Observed 2026-10-30
+
+- Gated calls carry only `authorization` and `emailverified` headers; no global key.
+- `/api/modelTradeHistory` (both modes) answered HTTP 500
+  `Unable to generate model trade history export` for every slug while an invalid
+  mode answered 400 and an unauthenticated call answered 401; `/api/modelsHistorical`
+  answered 500 even unauthenticated. The failure is server-side, so capture reports
+  `FAILED_REQUIRED_CAPABILITY` until the vendor fixes it. `--passive` records a
+  manual click without driving one, to compare with the driver.
+- The signed-in page body (`models/<slug>.json`) and its rendered table hold the
+  first 462 events; the page withholds the last 20 rows. Its summary counts the full
+  log, so `compare_series` against a retained blended CSV reports the withheld tail
+  (match rate of the shared rows and the extra date range).
