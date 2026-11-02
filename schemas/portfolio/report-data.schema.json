@@ -185,7 +185,10 @@
         "properties": {
           "capital_as_of_date": {"type": "string", "format": "date"},
           "capital_status": {"const": "AVAILABLE"},
-          "weight_basis": {"const": "CURRENT_CUTOFF"}
+          "weight_basis": {"const": "CURRENT_CUTOFF"},
+          "benchmark_account_basis": {"$ref": "#/$defs/benchmark_account_basis"},
+          "comparison_basis": {"$ref": "#/$defs/comparison_sleeve_basis"},
+          "provider_account_basis": {"$ref": "#/$defs/provider_account_basis"}
         }
       }
     },
@@ -419,7 +422,8 @@
         "benchmark_comparisons": {"type": "array", "maxItems": 7},
         "comparisons": {"type": "array", "minItems": 7, "maxItems": 7},
         "costs": {"type": "array", "minItems": 7, "maxItems": 7},
-        "generation_id": {"$ref": "#/$defs/sha256"}
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "strategy_basis": {"$ref": "#/$defs/strategy_basis_attribution_block"}
       }
     },
     "provenance": {"type": "array", "minItems": 2, "items": {"type": "object"}},
@@ -1051,7 +1055,7 @@
               "cutoff_date",
               "account_basis_ref",
               "margin_liability",
- "weight_restatement",
+              "weight_restatement",
               "bridges"
             ],
             "properties": {
@@ -1124,7 +1128,7 @@
                 }
               },
               "weight_restatement": {"$ref": "#/$defs/weight_restatement"},
- "margin_liability": {
+              "margin_liability": {
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
@@ -1571,11 +1575,24 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "account_id", "as_of_date", "asset_category", "asset_category_status",
-              "asset_category_unavailable_reason", "currency", "identity",
-              "mapping_status", "provider", "quantity", "security_id",
-              "snapshot_status", "strategy_id", "symbol", "symbol_proof",
-              "symbol_source", "symbol_status", "symbol_unavailable_reason"
+              "account_id",
+              "as_of_date",
+              "asset_category",
+              "asset_category_status",
+              "asset_category_unavailable_reason",
+              "currency",
+              "identity",
+              "mapping_status",
+              "provider",
+              "quantity",
+              "security_id",
+              "snapshot_status",
+              "strategy_id",
+              "symbol",
+              "symbol_proof",
+              "symbol_source",
+              "symbol_status",
+              "symbol_unavailable_reason"
             ],
             "properties": {
               "account_id": {"type": "string"},
@@ -2613,7 +2630,10 @@
         "window_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
         "window_days": {"type": "integer", "minimum": 0},
         "flow_count": {"type": "integer", "minimum": 0},
-        "terminal_value_usd": {"$ref": "#/$defs/decimal"}, "governed_perimeter_value_usd": {"$ref": "#/$defs/decimal"}, "current_of_open_epochs_usd": {"$ref": "#/$defs/decimal"}, "difference_usd": {"$ref": "#/$defs/decimal"},
+        "terminal_value_usd": {"$ref": "#/$defs/decimal"},
+        "governed_perimeter_value_usd": {"$ref": "#/$defs/decimal"},
+        "current_of_open_epochs_usd": {"$ref": "#/$defs/decimal"},
+        "difference_usd": {"$ref": "#/$defs/decimal"},
         "value": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
         "annualisation_basis": {"type": ["string", "null"]},
         "window_equivalent_cumulative": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
@@ -2751,13 +2771,30 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema_version", "status", "financial_acceptance", "assurance_profile",
-        "policy_id", "policy_sha256", "policy_semantic_digest", "receipt_sha256",
-        "input_authority_class", "calendar_authority_status",
-        "input_generation_sha256", "input_sha256", "return_basis", "evaluated_on",
-        "complete_through", "calculation_age_days", "maximum_age_days", "age_status",
-        "warnings", "current_index", "current_hwm", "current_drawdown",
-        "maximum_drawdown", "index_path"
+        "schema_version",
+        "status",
+        "financial_acceptance",
+        "assurance_profile",
+        "policy_id",
+        "policy_sha256",
+        "policy_semantic_digest",
+        "receipt_sha256",
+        "input_authority_class",
+        "calendar_authority_status",
+        "input_generation_sha256",
+        "input_sha256",
+        "return_basis",
+        "evaluated_on",
+        "complete_through",
+        "calculation_age_days",
+        "maximum_age_days",
+        "age_status",
+        "warnings",
+        "current_index",
+        "current_hwm",
+        "current_drawdown",
+        "maximum_drawdown",
+        "index_path"
       ],
       "properties": {
         "schema_version": {"const": 1},
@@ -2779,7 +2816,8 @@
         "maximum_age_days": {"type": "integer", "minimum": 0},
         "age_status": {"enum": ["CURRENT", "COMPLETE_DATA_AGE_WARNING"]},
         "warnings": {
-          "type": "array", "uniqueItems": true,
+          "type": "array",
+          "uniqueItems": true,
           "items": {"const": "HWM_COMPLETE_DATA_AGE"}
         },
         "current_index": {"$ref": "#/$defs/decimal"},
@@ -2787,9 +2825,11 @@
         "current_drawdown": {"$ref": "#/$defs/decimal"},
         "maximum_drawdown": {"$ref": "#/$defs/decimal"},
         "index_path": {
-          "type": "array", "minItems": 2,
+          "type": "array",
+          "minItems": 2,
           "items": {
-            "type": "object", "additionalProperties": false,
+            "type": "object",
+            "additionalProperties": false,
             "required": ["as_of", "index", "hwm", "drawdown"],
             "properties": {
               "as_of": {"type": "string", "format": "date"},
@@ -2836,9 +2876,9 @@
         "twr_status": {
           "enum": [
             "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
-              "UNAVAILABLE",
-              "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT",
-              "UNMAPPED",
+            "UNAVAILABLE",
+            "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT",
+            "UNMAPPED",
             "UNAVAILABLE_INSUFFICIENT_NAV",
             "UNAVAILABLE_MISSING_NAV",
             "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV",
@@ -3051,6 +3091,523 @@
           }
         }
       ]
+    },
+    "benchmark_account_basis": {
+      "$comment": "The account-basis comparison of a strategy restated to its sleeve, under the strategy row's own field names (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "parent_account_id"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "benchmark_comparison_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_comparison_disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_comparison_observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "benchmark_comparison_observed_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "benchmark_comparison_observed_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "benchmark_annualization": {
+          "$ref": "#/$defs/annualization_label"
+        },
+        "benchmark_comparison_window": {
+          "$ref": "#/$defs/comparison_window"
+        },
+        "benchmark_account_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_reference_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_cumulative_gap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_active_return_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_tracking_error_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_information_ratio": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_beta": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_correlation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_upside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_downside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_relative_drawdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "provider_account_basis": {
+      "$comment": "The account-basis comparison of a strategy restated to its sleeve, under the strategy row's own field names (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "parent_account_id"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_comparison_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_comparison_disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_comparison_observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "provider_comparison_observed_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "provider_comparison_observed_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "provider_annualization": {
+          "$ref": "#/$defs/annualization_label"
+        },
+        "provider_comparison_window": {
+          "$ref": "#/$defs/comparison_window"
+        },
+        "provider_comparison_version_compatibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_account_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_reference_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_cumulative_gap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_active_return_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_tracking_error_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_information_ratio": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_beta": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_correlation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_upside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_downside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_relative_drawdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "comparison_sleeve_closure": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "common_observations",
+        "reference_series_id",
+        "reference_stored_end",
+        "reference_stored_start",
+        "reference_subset_sha256",
+        "sleeve_dates_after_window_count",
+        "sleeve_dates_after_window_first",
+        "sleeve_dates_after_window_last",
+        "sleeve_dates_without_reference",
+        "sleeve_observations_in_window",
+        "window_open_date"
+      ],
+      "properties": {
+        "common_observations": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "reference_series_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_stored_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "reference_stored_start": {
+          "type": "string",
+          "format": "date"
+        },
+        "reference_subset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sleeve_dates_without_reference": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date"
+          }
+        },
+        "sleeve_observations_in_window": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "window_open_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "sleeve_dates_after_window_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sleeve_dates_after_window_first": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "sleeve_dates_after_window_last": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        }
+      }
+    },
+    "comparison_window_limit": {
+      "$comment": "How far the comparison window of a restated strategy reaches against the calculation cutoff, derived from the data (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calculation_cutoff_date",
+        "days_short",
+        "reference_series_id",
+        "reference_stored_end",
+        "sentence",
+        "status",
+        "uncovered_sleeve_dates",
+        "window_end",
+        "window_start"
+      ],
+      "properties": {
+        "calculation_cutoff_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "days_short": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reference_series_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_stored_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "sentence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "AT_CUTOFF",
+            "SHORT_OF_CUTOFF"
+          ]
+        },
+        "uncovered_sleeve_dates": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "count",
+            "first",
+            "last"
+          ],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "first": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            },
+            "last": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date"
+            }
+          }
+        },
+        "window_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "window_start": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "comparison_sleeve_basis": {
+      "$comment": "The basis the comparison fields of a restated strategy row stand on, with the closure of each comparison's pairing (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "benchmark_closure",
+        "benchmark_window_limit",
+        "label",
+        "opening_date",
+        "parent_account_id",
+        "provider_closure",
+        "provider_window_limit",
+        "sleeve_account_id",
+        "sleeve_series_sha256"
+      ],
+      "properties": {
+        "basis": {
+          "const": "SLEEVE_EPOCH"
+        },
+        "benchmark_closure": {
+          "$ref": "#/$defs/comparison_sleeve_closure"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "opening_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_closure": {
+          "$ref": "#/$defs/comparison_sleeve_closure"
+        },
+        "sleeve_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sleeve_series_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "benchmark_window_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/comparison_window_limit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_window_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/comparison_window_limit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "strategy_basis_attribution_block": {
+      "$comment": "Present only when a strategy-basis declaration restated the comparisons.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "declaration_sha256",
+        "sleeve_facts_sha256",
+        "strategies"
+      ],
+      "properties": {
+        "basis": {
+          "const": "SLEEVE_EPOCH"
+        },
+        "declaration_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sleeve_facts_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          }
+        }
+      }
     }
   },
   "allOf": [

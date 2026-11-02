@@ -2372,11 +2372,219 @@ def _label_window(label: object) -> dict[str, Any] | None:
     }
 
 
+# --- Comparisons on the sleeve basis (#624, option B) -------------------------------
+#
+# A strategy the declaration restates carries, in the attribution catalog, its
+# comparisons twice: the unchanged account-basis fields and a `sleeve_basis` lane
+# computed on the sleeve path with the same engine.  The row's own comparison fields
+# become the lane's; the account-basis figures stay on the row, labelled, under
+# `benchmark_account_basis` and `provider_account_basis`, in the row's own field names.
+
+STRATEGY_BASIS_BLOCK: Final = "strategy_basis"
+_SLEEVE_LANE_META: Final = frozenset(
+    {
+        "basis",
+        "closure",
+        "opening_date",
+        "parent_account_id",
+        "sleeve_account_id",
+        "sleeve_series_sha256",
+    }
+)
+_ACCOUNT_BASIS_METRIC_FIELDS: Final = (
+    "account_cumulative_return",
+    "reference_cumulative_return",
+    "cumulative_gap",
+    "active_return_annualized",
+    "tracking_error_annualized",
+    "information_ratio",
+    "beta",
+    "correlation",
+    "upside_capture",
+    "downside_capture",
+    "relative_drawdown",
+)
+
+
+def _sleeve_lane_checks(
+    attribution: Mapping[str, Any],
+    restatements: Mapping[str, strategy_basis.SleeveRestatement],
+) -> set[str]:
+    """The strategies whose comparison lanes the catalog restated, bound to the report's.
+
+    The lanes must be exactly the strategies the report restates, each on the very sleeve
+    path (series hash, sleeve account, opening date) the report restated it to.
+    """
+
+    block = attribution.get(STRATEGY_BASIS_BLOCK)
+    lanes: set[str] = set()
+    for key in ("benchmark_comparisons", "comparisons"):
+        for row in _objects(attribution.get(key, []), f"attribution.{key}"):
+            if "sleeve_basis" in row:
+                lanes.add(str(row.get("strategy_id")))
+    if block is None:
+        if lanes:
+            raise ReportValidationError(
+                "attribution comparisons carry a sleeve lane without its basis block"
+            )
+        bound: dict[str, Mapping[str, Any]] = {}
+    else:
+        bound = {
+            str(item.get("strategy_id")): item
+            for item in _objects(
+                _object(block, "attribution.strategy_basis").get("strategies"),
+                "attribution.strategy_basis.strategies",
+            )
+        }
+    if set(bound) != set(restatements) or lanes != set(restatements):
+        raise ReportValidationError(
+            "attribution sleeve comparisons differ from the report's strategy basis "
+            "restatement"
+        )
+    for strategy_id, restated in restatements.items():
+        item = bound[strategy_id]
+        if (
+            item.get("series_sha256") != strategy_basis.series_sha256(restated.rows)
+            or item.get("sleeve_account_id") != restated.account_id
+            or item.get("opening_date") != restated.opening_date
+            or item.get("parent_account_id") != restated.parent_account_id
+        ):
+            raise ReportValidationError(
+                "attribution sleeve path differs from the report's restated series: "
+                + strategy_id
+            )
+        for key in ("benchmark_comparisons", "comparisons"):
+            for row in _objects(attribution.get(key, []), f"attribution.{key}"):
+                if str(row.get("strategy_id")) != strategy_id:
+                    continue
+                lane = _object(row.get("sleeve_basis"), "attribution sleeve lane")
+                if lane.get("sleeve_series_sha256") != item["series_sha256"]:
+                    raise ReportValidationError(
+                        "attribution sleeve lane is not on the sleeve path: "
+                        + strategy_id
+                    )
+    return lanes
+
+
+def _with_sleeve_lane(
+    comparison: Mapping[str, Any], lane: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The comparison as the sleeve lane states it (the account figures set aside)."""
+
+    return {
+        **{key: value for key, value in comparison.items() if key != "sleeve_basis"},
+        **{key: value for key, value in lane.items() if key not in _SLEEVE_LANE_META},
+    }
+
+
+def _lane_label_metrics(
+    metrics: Mapping[str, Any], lane: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """The metrics a sleeve lane's window label reads: it opens at the sleeve's own
+    opening observation (the epoch opens at the first NAV, ADR 0002), not at the first
+    paired date; observations and the end are the lane's own."""
+
+    closure = lane.get("closure")
+    if not metrics or not isinstance(closure, Mapping):
+        return metrics
+    return {**metrics, "observed_start": closure["window_open_date"]}
+
+
+def _account_basis_block(
+    prefix: str,
+    comparison: Mapping[str, Any],
+    metrics: Mapping[str, Any],
+    parent_account_id: str,
+    annualization: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """The account-basis comparison of a restated strategy, in the row's field names."""
+
+    start, end = metrics.get("observed_start"), metrics.get("observed_end")
+    block: dict[str, Any] = {
+        "basis": strategy_basis.BASIS_PARENT_ACCOUNT,
+        "label": (
+            f"Account basis: the whole live series of parent account "
+            f"{parent_account_id} (retired sleeves and the unallocated cash and margin "
+            "bucket included), "
+            + ("no comparison window" if start is None else f"{start}..{end}")
+            + "."
+        ),
+        "parent_account_id": parent_account_id,
+        f"{prefix}_comparison_status": comparison.get("status"),
+        f"{prefix}_comparison_disposition": comparison.get("disposition"),
+        f"{prefix}_comparison_observations": metrics.get("observations"),
+        f"{prefix}_comparison_observed_start": start,
+        f"{prefix}_comparison_observed_end": end,
+    }
+    if prefix == "provider":
+        block["provider_comparison_version_compatibility"] = comparison.get(
+            "version_compatibility_status"
+        )
+    for name in _ACCOUNT_BASIS_METRIC_FIELDS:
+        block[f"{prefix}_{name}"] = metrics.get(name)
+    if annualization is not None:
+        block[f"{prefix}_annualization"] = annualization
+        block[f"{prefix}_comparison_window"] = _label_window(annualization)
+    return block
+
+
+def _window_limit(
+    lane: Mapping[str, Any], cutoff_date: str, noun: str
+) -> dict[str, Any] | None:
+    """How far a sleeve comparison window reaches against the calculation cutoff.
+
+    Everything is read from the lane's own metrics and closure: the window is the one
+    the catalog's reference series and spec gave, never a date fixed here.  A window
+    that ends before the cutoff says so, with the days short, the sleeve dates it does
+    not cover and the reference series whose refresh would close it.
+    """
+
+    metrics, closure = lane.get("metrics"), lane.get("closure")
+    if not isinstance(metrics, Mapping) or not isinstance(closure, Mapping):
+        return None
+    end = _date(metrics.get("observed_end"), "sleeve comparison window end")
+    cutoff = _date(cutoff_date, "sleeve comparison cutoff")
+    short = max((cutoff - end).days, 0)
+    first, last = (
+        closure.get("sleeve_dates_after_window_first"),
+        closure.get("sleeve_dates_after_window_last"),
+    )
+    count = int(closure.get("sleeve_dates_after_window_count", 0))
+    series_id = str(closure["reference_series_id"])
+    start = str(closure["window_open_date"])
+    if short == 0:
+        sentence = (
+            f"The {noun} comparison window {start}..{end.isoformat()} reaches the "
+            f"calculation cutoff {cutoff.isoformat()}."
+        )
+    else:
+        sentence = (
+            f"The {noun} comparison window {start}..{end.isoformat()} ends {short} "
+            f"days before the calculation cutoff {cutoff.isoformat()}: reference "
+            f"series {series_id} is stored to {closure['reference_stored_end']} "
+            f"(or the spec ends the window there), so {count} sleeve observations "
+            f"({first}..{last}) are not compared. A refresh of {series_id} covering "
+            f"them is an input of the next release (R3), not an owner decision."
+        )
+    return {
+        "calculation_cutoff_date": cutoff.isoformat(),
+        "days_short": short,
+        "reference_series_id": series_id,
+        "reference_stored_end": closure["reference_stored_end"],
+        "sentence": sentence,
+        "status": "AT_CUTOFF" if short == 0 else "SHORT_OF_CUTOFF",
+        "uncovered_sleeve_dates": {"count": count, "first": first, "last": last},
+        "window_end": end.isoformat(),
+        "window_start": start,
+    }
+
+
 def _merge_attribution(
     strategies: Sequence[Mapping[str, Any]],
     attribution: Mapping[str, Any],
     *,
     cost_rate_at_cutoff: Mapping[str, Any] | None = None,
+    basis_restatements: Mapping[str, strategy_basis.SleeveRestatement] | None = None,
 ) -> list[dict[str, Any]]:
     benchmarks = {
         str(item.get("strategy_id")): item
@@ -2409,6 +2617,7 @@ def _merge_attribution(
         or (benchmark_comparisons and set(benchmark_comparisons) != strategy_ids)
     ):
         raise ReportValidationError("strategy attribution boundary differs")
+    sleeve_lanes = _sleeve_lane_checks(attribution, basis_restatements or {})
     result = []
     for item in strategies:
         strategy_id = str(item["strategy_id"])
@@ -2449,6 +2658,90 @@ def _merge_attribution(
                 "attribution.benchmark_comparison.metrics",
             )
         )
+        basis_fields: dict[str, Any] = {}
+        benchmark_label_metrics: Mapping[str, Any] = benchmark_metrics
+        provider_label_metrics: Mapping[str, Any] = metrics
+        if strategy_id in sleeve_lanes:
+            benchmark_lane = _object(
+                benchmark_comparison.get("sleeve_basis"), "benchmark sleeve lane"
+            )
+            provider_lane = _object(
+                comparison.get("sleeve_basis"), "provider sleeve lane"
+            )
+            parent = str(benchmark_lane["parent_account_id"])
+            limit_cutoff = str(
+                (cost_rate_at_cutoff or {}).get("calculation_cutoff_date")
+                or attribution.get("as_of_date")
+            )
+            policy_excluded = (
+                comparison.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+            )
+            account_labels = (
+                (
+                    _comparison_annualization(benchmark_comparison, benchmark_metrics),
+                    _comparison_annualization(comparison, metrics),
+                )
+                if cost_rate_at_cutoff is not None
+                else (None, None)
+            )
+            basis_fields = {
+                "benchmark_account_basis": _account_basis_block(
+                    "benchmark",
+                    benchmark_comparison,
+                    benchmark_metrics,
+                    parent,
+                    account_labels[0],
+                ),
+                "provider_account_basis": _account_basis_block(
+                    "provider", comparison, metrics, parent, account_labels[1]
+                ),
+                "comparison_basis": {
+                    "basis": strategy_basis.BASIS_SLEEVE_EPOCH,
+                    "benchmark_closure": benchmark_lane.get("closure"),
+                    "benchmark_window_limit": _window_limit(
+                        benchmark_lane, limit_cutoff, "benchmark"
+                    ),
+                    "label": (
+                        f"Sleeve basis: sleeve {benchmark_lane['sleeve_account_id']} "
+                        f"of parent account {parent}, from "
+                        f"{benchmark_lane['opening_date']}; the reference series are "
+                        "read on the exact dates they share with the sleeve path."
+                    ),
+                    "opening_date": benchmark_lane["opening_date"],
+                    "parent_account_id": parent,
+                    "provider_closure": (
+                        None if policy_excluded else provider_lane.get("closure")
+                    ),
+                    "provider_window_limit": (
+                        None
+                        if policy_excluded
+                        else _window_limit(provider_lane, limit_cutoff, "provider")
+                    ),
+                    "sleeve_account_id": benchmark_lane["sleeve_account_id"],
+                    "sleeve_series_sha256": benchmark_lane["sleeve_series_sha256"],
+                },
+            }
+            benchmark_comparison = _with_sleeve_lane(
+                benchmark_comparison, benchmark_lane
+            )
+            benchmark_metrics = (
+                {}
+                if benchmark_comparison.get("metrics") is None
+                else _object(
+                    benchmark_comparison["metrics"], "sleeve benchmark metrics"
+                )
+            )
+            benchmark_label_metrics = _lane_label_metrics(
+                benchmark_metrics, benchmark_lane
+            )
+            if not policy_excluded:
+                comparison = _with_sleeve_lane(comparison, provider_lane)
+                metrics = (
+                    {}
+                    if comparison.get("metrics") is None
+                    else _object(comparison["metrics"], "sleeve provider metrics")
+                )
+                provider_label_metrics = _lane_label_metrics(metrics, provider_lane)
         cost_evidence: dict[str, Any] = {
             key: cost[key] for key in COST_EVIDENCE_KEYS if key in cost
         }
@@ -2456,6 +2749,7 @@ def _merge_attribution(
         result.append(
             {
                 **item,
+                **basis_fields,
                 "benchmark_assignment_status": benchmark.get("status"),
                 "benchmark_id": benchmark.get("benchmark_id"),
                 "benchmark_effective_start": benchmark.get("effective_start"),
@@ -2549,7 +2843,7 @@ def _merge_attribution(
                         **_cutoff_cost_rate(item, cost, cost_rate_at_cutoff),
                         **_account_annualization_labels(item),
                         "benchmark_annualization": _comparison_annualization(
-                            benchmark_comparison, benchmark_metrics
+                            benchmark_comparison, benchmark_label_metrics
                         ),
                         "benchmark_assignment_authority": benchmark.get(
                             "assignment_authority", ASSIGNMENT_AUTHORITY_RETAINED_SPEC
@@ -2559,7 +2853,7 @@ def _merge_attribution(
                         )
                         or benchmark_comparison.get("not_ready_reason"),
                         "provider_annualization": _comparison_annualization(
-                            comparison, metrics
+                            comparison, provider_label_metrics
                         ),
                         "provider_comparison_reason": comparison.get("not_ready_detail")
                         or comparison.get("not_ready_reason"),
@@ -5488,6 +5782,11 @@ def _strategy_attribution_section(
         "comparisons": current("comparisons"),
         "costs": costs,
         "generation_id": attribution_ref["generation_id"],
+        **(
+            {STRATEGY_BASIS_BLOCK: attribution_catalog[STRATEGY_BASIS_BLOCK]}
+            if STRATEGY_BASIS_BLOCK in attribution_catalog
+            else {}
+        ),
     }
 
 
@@ -10085,6 +10384,7 @@ def build_report_data(
                     if cutoff_basis
                     else None
                 ),
+                basis_restatements=basis_restatements,
             )
         if _uses_cutoff_basis(catalog):
             finished = [

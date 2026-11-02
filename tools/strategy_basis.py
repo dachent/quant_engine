@@ -38,8 +38,6 @@ _WEIGHT_PRECISION: Final = 34
 # instead of letting them pass for sleeve figures.  (The dependence and correlation
 # measurements follow the restated history and are not listed.)
 NOT_RESTATED: Final = (
-    "benchmark_comparison",
-    "provider_comparison",
     "implementation_return_attribution",
     "decomposition_lenses",
     "hwm_numerical_envelope",
@@ -404,6 +402,8 @@ def return_scope(
             "ytd_twr",
             "calendar_year_twr",
             "account_live_cagr",
+            "benchmark_comparison",
+            "provider_comparison",
         ],
         "excludes_retired_sleeve_accounts": sorted(retained_sleeve_accounts),
         "mwr_and_governed_capital_basis": BASIS_SLEEVE_EPOCH,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
@@ -36,6 +37,7 @@ from quant_engine.portfolio_ledger.value_basis_bounds import (
     derive_value_basis_bounds,
     ValueBasisBoundError,
 )
+import strategy_basis
 from portfolio_report import (
     ReportValidationError,
     fees_status_for_cost,
@@ -967,6 +969,279 @@ def _accepted_comparison(
     }
 
 
+ACCOUNT_SOURCE_SLEEVE_FACTS: Final = "SLEEVE_FACTS_RESTATEMENT"
+SLEEVE_LANE_BASIS: Final = strategy_basis.BASIS_SLEEVE_EPOCH
+SLEEVE_BASIS_KEY: Final = "sleeve_basis"
+STRATEGY_BASIS_KEY: Final = "strategy_basis"
+_MISSING: Final = object()
+
+
+@dataclass(frozen=True)
+class _SleeveSeries:
+    """One declared strategy's sleeve return path, derived from the sleeve facts."""
+
+    strategy_id: str
+    account_id: str
+    parent_account_id: str
+    opening_date: date
+    series: dict[date, Decimal]
+    series_sha256: str
+
+
+def _sleeve_series(
+    declaration_path: Path,
+    facts_path: Path,
+    baseline: Mapping[str, Any],
+    epoch_receipts: Mapping[str, Any],
+) -> tuple[dict[str, _SleeveSeries], list[SourceArtifact], dict[str, str]]:
+    """The restated account side for every strategy the declaration names.
+
+    The baseline stays as staged: its ACCOUNT_LIVE rows keep feeding the account-basis
+    lane.  The sleeve lane reads the same strategy's series from the sleeve facts
+    through the keystone's derivation (the epoch manifest's own engine), never from a
+    baseline row, and is bound to the baseline by the parent account its rows name.
+    """
+
+    declaration_sha, declaration_size = _hash(declaration_path, "strategy declaration")
+    facts_sha, facts_size = _hash(facts_path, "sleeve facts")
+    declaration_bytes = declaration_path.read_bytes()
+    facts_bytes = facts_path.read_bytes()
+    if (
+        hashlib.sha256(declaration_bytes).hexdigest() != declaration_sha
+        or hashlib.sha256(facts_bytes).hexdigest() != facts_sha
+    ):
+        raise AttributionValidationError("strategy basis input changed while read")
+    try:
+        declared = strategy_basis.load_declaration(declaration_bytes)
+    except strategy_basis.StrategyBasisError as exc:
+        raise AttributionValidationError(str(exc)) from exc
+    known = {
+        str(item.get("strategy_id"))
+        for item in baseline.get("strategies", [])
+        if isinstance(item, dict)
+    }
+    components: dict[str, set[str]] = {}
+    for row in baseline.get("strategy_returns", []):
+        if isinstance(row, dict) and row.get("evidence_layer") == "ACCOUNT_LIVE":
+            components.setdefault(str(row.get("strategy_id")), set()).update(
+                str(item) for item in row.get("component_account_ids", [])
+            )
+    as_of = date.fromisoformat(str(baseline["as_of_date"]))
+    result: dict[str, _SleeveSeries] = {}
+    for strategy_id in sorted(declared):
+        if strategy_id not in known:
+            raise AttributionValidationError(
+                f"declared strategy is not a baseline strategy: {strategy_id}"
+            )
+        if strategy_id in epoch_receipts:
+            raise AttributionValidationError(
+                f"a receipt-bound strategy cannot be restated to a sleeve: {strategy_id}"
+            )
+        try:
+            restated = strategy_basis.restatement_from_sleeve_facts(
+                facts_bytes, strategy_id
+            )
+        except strategy_basis.StrategyBasisError as exc:
+            raise AttributionValidationError(str(exc)) from exc
+        if restated.parent_account_id not in components.get(strategy_id, set()):
+            raise AttributionValidationError(
+                "sleeve facts parent account is not an account of the baseline "
+                f"series of {strategy_id}"
+            )
+        values: dict[date, Decimal] = {}
+        for row in restated.rows:
+            day = date.fromisoformat(str(row["date"]))
+            value = _decimal(row["return"], "sleeve return")
+            if value <= -1 or day in values or day > as_of:
+                raise AttributionValidationError("sleeve series is invalid")
+            values[day] = value
+        result[strategy_id] = _SleeveSeries(
+            strategy_id=strategy_id,
+            account_id=restated.account_id,
+            parent_account_id=restated.parent_account_id,
+            opening_date=date.fromisoformat(restated.opening_date),
+            series=values,
+            series_sha256=strategy_basis.series_sha256(restated.rows),
+        )
+    artifacts = [
+        SourceArtifact(
+            artifact_id="input/strategy-basis-declaration.json",
+            sha256=declaration_sha,
+            size_bytes=declaration_size,
+            as_of_date=as_of,
+            schema_name="strategy-basis-declaration",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id="input/sleeve-account-facts.json",
+            sha256=facts_sha,
+            size_bytes=facts_size,
+            as_of_date=as_of,
+            schema_name="sleeve-account-facts",
+            schema_version="1",
+        ),
+    ]
+    return (
+        result,
+        artifacts,
+        {"declaration_sha256": declaration_sha, "sleeve_facts_sha256": facts_sha},
+    )
+
+
+def _closure(
+    comparison: Mapping[str, Any],
+    sleeve: _SleeveSeries,
+    reference: Mapping[date, Decimal],
+    metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prove the sleeve lane's pairing from the stored series, or refuse.
+
+    Recomputes the exact-common-date set from the sleeve path and the stored reference
+    series, requires it to be the very set the statistics ran on (count, first and last
+    date), that every common date is a stored reference date, and that no reference
+    trading date inside the window lacks a sleeve observation.  Seals the reference
+    values the statistics used by the hash of that subset.
+    """
+
+    start = comparison.get("observed_start")
+    end = comparison.get("observed_end")
+    first = date.fromisoformat(str(start)) if start else None
+    last = date.fromisoformat(str(end)) if end else None
+    window_reference = {
+        day: value
+        for day, value in reference.items()
+        if (first is None or day >= first) and (last is None or day <= last)
+    }
+    periods = int(comparison.get("periods_per_year", 0))
+    daily = periods >= DAILY_PERIODS_PER_YEAR
+    if daily:
+        paired: Mapping[date, Decimal] = {
+            day: value
+            for day, value in sleeve.series.items()
+            if (first is None or day >= first) and (last is None or day <= last)
+        }
+    else:
+        paired = _compound_to_reference_periods(
+            sleeve.series, reference, window_reference
+        )
+    sleeve_window = sorted(paired)
+    common = sorted(set(paired) & set(window_reference))
+    if (
+        not common
+        or len(common) != metrics["observations"]
+        or common[0].isoformat() != metrics["observed_start"]
+        or common[-1].isoformat() != metrics["observed_end"]
+    ):
+        raise AttributionValidationError(
+            "sleeve comparison closure: common dates differ from the statistics"
+        )
+    if any(day not in reference for day in common):
+        raise AttributionValidationError(
+            "sleeve comparison closure: a common date is outside the stored series"
+        )
+    sleeve_dates = sorted(sleeve.series)
+    first_row = sleeve_window[0]
+    position = sleeve_dates.index(first_row) if first_row in sleeve.series else 0
+    window_open = sleeve.opening_date if position == 0 else sleeve_dates[position - 1]
+    unpaired_sleeve = [day for day in sleeve_window if day not in window_reference]
+    # sleeve observations after the last common date: the part of the sleeve's life
+    # the comparison window does not cover (a reference series that ends earlier)
+    uncovered = [day for day in sleeve_dates if day > common[-1]]
+    if daily:
+        unpaired_reference = [
+            day
+            for day in sorted(window_reference)
+            if window_open < day <= common[-1] and day not in sleeve.series
+        ]
+        if unpaired_reference:
+            raise AttributionValidationError(
+                "sleeve comparison closure: reference dates without a sleeve "
+                "observation: "
+                + ", ".join(day.isoformat() for day in unpaired_reference)
+            )
+    subset = [
+        {"date": day.isoformat(), "return": _decimal_text(reference[day])}
+        for day in common
+    ]
+    return {
+        "common_observations": len(common),
+        "reference_series_id": comparison.get("reference_series_id"),
+        "reference_stored_end": max(reference).isoformat(),
+        "reference_stored_start": min(reference).isoformat(),
+        "reference_subset_sha256": hashlib.sha256(
+            canonical_json_bytes(subset)
+        ).hexdigest(),
+        "sleeve_dates_after_window_count": len(uncovered),
+        "sleeve_dates_after_window_first": (
+            uncovered[0].isoformat() if uncovered else None
+        ),
+        "sleeve_dates_after_window_last": (
+            uncovered[-1].isoformat() if uncovered else None
+        ),
+        "sleeve_dates_without_reference": [day.isoformat() for day in unpaired_sleeve],
+        "sleeve_observations_in_window": len(sleeve_window),
+        "window_open_date": window_open.isoformat(),
+    }
+
+
+def _sleeve_comparison(
+    comparison: Mapping[str, Any],
+    sleeve: _SleeveSeries,
+    reference_series: Mapping[str, Mapping[date, Decimal]],
+    reference_only_history: Mapping[str, str],
+    series_identities: Mapping[str, tuple[str, str, str]],
+) -> dict[str, Any]:
+    """The comparison recomputed on the sleeve path with the unchanged engine.
+
+    Only the account side differs: the sleeve path replaces the baseline account series
+    and the reference is read in the same spec interval, so the exact-common-date subset
+    is the part of it that falls inside the sleeve's own dates.
+    """
+
+    own = {**comparison, "expected_legacy_cumulative_gap": None}
+    accepted = _accepted_comparison(
+        own,
+        sleeve.strategy_id,
+        {sleeve.strategy_id: sleeve.series},
+        reference_series,
+        reference_only_history,
+        series_identities,
+        {},
+    )
+    lane: dict[str, Any] = {
+        key: value
+        for key, value in accepted.items()
+        if key == "status" or comparison.get(key, _MISSING) != value
+    }
+    lane.update(
+        {
+            "account_series_source": (
+                None
+                if accepted.get("account_series_source") is None
+                else ACCOUNT_SOURCE_SLEEVE_FACTS
+            ),
+            "basis": SLEEVE_LANE_BASIS,
+            "closure": None,
+            "legacy_baseline_delta": None,
+            "legacy_baseline_disposition": "NOT_APPLICABLE",
+            "metrics": accepted.get("metrics"),
+            "opening_date": sleeve.opening_date.isoformat(),
+            "parent_account_id": sleeve.parent_account_id,
+            "sleeve_account_id": sleeve.account_id,
+            "sleeve_series_sha256": sleeve.series_sha256,
+        }
+    )
+    metrics = accepted.get("metrics")
+    if metrics is not None:
+        lane["closure"] = _closure(
+            comparison,
+            sleeve,
+            reference_series[str(comparison["reference_series_id"])],
+            metrics,
+        )
+    return lane
+
+
 def build_catalog(
     baseline_root: Path,
     spec_path: Path,
@@ -974,7 +1249,13 @@ def build_catalog(
     baseline_generation_id: str | None = None,
     dependence_source_root: Path | None = None,
     dependence_selected_inputs: Path | None = None,
+    strategy_basis_declaration: Path | None = None,
+    sleeve_facts: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, list[SourceArtifact]]:
+    if (strategy_basis_declaration is None) != (sleeve_facts is None):
+        raise AttributionValidationError(
+            "strategy basis declaration and sleeve facts must be supplied together"
+        )
     spec = _load_json(spec_path, "attribution spec")
     if spec.get("schema_version") != SCHEMA_VERSION:
         raise AttributionValidationError("attribution spec schema is unsupported")
@@ -1025,6 +1306,13 @@ def build_catalog(
         baseline, baseline_path, dependence_source_root, dependence_selected_inputs
     )
     reference_only_history = _reference_only_account_history(baseline)
+    sleeve_lanes: dict[str, _SleeveSeries] = {}
+    basis_artifacts: list[SourceArtifact] = []
+    basis_inputs: dict[str, str] = {}
+    if strategy_basis_declaration is not None and sleeve_facts is not None:
+        sleeve_lanes, basis_artifacts, basis_inputs = _sleeve_series(
+            strategy_basis_declaration, sleeve_facts, baseline, epoch_receipts
+        )
     benchmark_rows = spec.get("benchmark_assignments")
     benchmark_comparison_rows = spec.get("benchmark_comparisons")
     comparison_rows = spec.get("comparisons")
@@ -1118,28 +1406,44 @@ def build_catalog(
             raise AttributionValidationError(
                 "unavailable benchmark assignment cannot produce metrics"
             )
-        accepted_benchmark_comparisons.append(
-            _accepted_comparison(
+        accepted_benchmark_comparison = _accepted_comparison(
+            benchmark_comparison,
+            strategy_id,
+            account_live_series,
+            series,
+            reference_only_history,
+            series_identities,
+            epoch_receipts,
+        )
+        accepted_provider_comparison = _accepted_comparison(
+            comparison_by_id[strategy_id],
+            strategy_id,
+            account_live_series,
+            series,
+            reference_only_history,
+            series_identities,
+            epoch_receipts,
+        )
+        sleeve = sleeve_lanes.get(strategy_id)
+        if sleeve is not None:
+            # The account-basis comparison above is kept as it was; the same
+            # comparison on the sleeve path rides beside it, never replaces it.
+            accepted_benchmark_comparison[SLEEVE_BASIS_KEY] = _sleeve_comparison(
                 benchmark_comparison,
-                strategy_id,
-                account_live_series,
+                sleeve,
                 series,
                 reference_only_history,
                 series_identities,
-                epoch_receipts,
             )
-        )
-        accepted_comparisons.append(
-            _accepted_comparison(
+            accepted_provider_comparison[SLEEVE_BASIS_KEY] = _sleeve_comparison(
                 comparison_by_id[strategy_id],
-                strategy_id,
-                account_live_series,
+                sleeve,
                 series,
                 reference_only_history,
                 series_identities,
-                epoch_receipts,
             )
-        )
+        accepted_benchmark_comparisons.append(accepted_benchmark_comparison)
+        accepted_comparisons.append(accepted_provider_comparison)
         allocation = allocations[strategy_id]
         current_value = _decimal(
             allocation["current_value"]["value"], "allocation.current_value"
@@ -1189,6 +1493,23 @@ def build_catalog(
         "source_manifest_sha256": manifest_hash,
         "source_returns_sha256": source_hash,
     }
+    if sleeve_lanes:
+        catalog[STRATEGY_BASIS_KEY] = {
+            **basis_inputs,
+            "basis": SLEEVE_LANE_BASIS,
+            "strategies": [
+                {
+                    "opening_date": item.opening_date.isoformat(),
+                    "parent_account_id": item.parent_account_id,
+                    "series_observations": len(item.series),
+                    "series_observed_end": max(item.series).isoformat(),
+                    "series_sha256": item.series_sha256,
+                    "sleeve_account_id": item.account_id,
+                    "strategy_id": item.strategy_id,
+                }
+                for item in (sleeve_lanes[key] for key in sorted(sleeve_lanes))
+            ],
+        }
     artifacts = [
         SourceArtifact.from_path(
             baseline_path,
@@ -1217,7 +1538,11 @@ def build_catalog(
             schema_version="1",
         ),
     ]
-    return catalog, canonical_json_bytes(catalog), artifacts + dependence_artifacts
+    return (
+        catalog,
+        canonical_json_bytes(catalog),
+        artifacts + dependence_artifacts + basis_artifacts,
+    )
 
 
 def stage_catalog(
@@ -1228,6 +1553,8 @@ def stage_catalog(
     baseline_generation_id: str | None = None,
     dependence_source_root: Path | None = None,
     dependence_selected_inputs: Path | None = None,
+    strategy_basis_declaration: Path | None = None,
+    sleeve_facts: Path | None = None,
 ) -> dict[str, Any]:
     catalog, catalog_bytes, artifacts = build_catalog(
         baseline_root,
@@ -1235,6 +1562,8 @@ def stage_catalog(
         baseline_generation_id=baseline_generation_id,
         dependence_source_root=dependence_source_root,
         dependence_selected_inputs=dependence_selected_inputs,
+        strategy_basis_declaration=strategy_basis_declaration,
+        sleeve_facts=sleeve_facts,
     )
     as_of = date.fromisoformat(catalog["as_of_date"])
     catalog_artifact = SourceArtifact(
@@ -1295,6 +1624,8 @@ def publish_catalog(
     baseline_generation_id: str | None = None,
     dependence_source_root: Path | None = None,
     dependence_selected_inputs: Path | None = None,
+    strategy_basis_declaration: Path | None = None,
+    sleeve_facts: Path | None = None,
 ) -> dict[str, Any]:
     staged = stage_catalog(
         baseline_root,
@@ -1303,6 +1634,8 @@ def publish_catalog(
         baseline_generation_id=baseline_generation_id,
         dependence_source_root=dependence_source_root,
         dependence_selected_inputs=dependence_selected_inputs,
+        strategy_basis_declaration=strategy_basis_declaration,
+        sleeve_facts=sleeve_facts,
     )
     if staged["generation_id"] != generation_id:
         raise AttributionValidationError("rebuilt generation differs")
@@ -1319,6 +1652,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--baseline-generation-id")
         command.add_argument("--dependence-source-root", type=Path)
         command.add_argument("--dependence-selected-inputs", type=Path)
+        command.add_argument("--strategy-basis", type=Path)
+        command.add_argument("--sleeve-facts", type=Path)
         command.add_argument("--spec", type=Path, required=True)
         command.add_argument("--output-root", type=Path, required=True)
         if name == "publish":
@@ -1337,6 +1672,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 baseline_generation_id=args.baseline_generation_id,
                 dependence_source_root=args.dependence_source_root,
                 dependence_selected_inputs=args.dependence_selected_inputs,
+                strategy_basis_declaration=args.strategy_basis,
+                sleeve_facts=args.sleeve_facts,
             )
         else:
             result = publish_catalog(
@@ -1347,6 +1684,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 baseline_generation_id=args.baseline_generation_id,
                 dependence_source_root=args.dependence_source_root,
                 dependence_selected_inputs=args.dependence_selected_inputs,
+                strategy_basis_declaration=args.strategy_basis,
+                sleeve_facts=args.sleeve_facts,
             )
     except (AttributionValidationError, OSError, ValueError) as exc:
         print(f"portfolio-attribution: FAIL: {exc}", file=sys.stderr)
