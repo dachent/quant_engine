@@ -4554,6 +4554,34 @@ def _control_spec_sources(
     return sources
 
 
+def _lens_stage_publish(
+    bundle: Path, spec: Path, root: Path, retained_cache_root: Path | None
+) -> tuple[Any, Any]:
+    """Stage, then publish, one decomposition lens: the producer's two returned results."""
+
+    results = []
+    for operation in ("stage", "publish"):
+        results.append(
+            _tool(
+                "portfolio_decomposition.py",
+                operation,
+                "--spec",
+                str(spec),
+                "--source-root",
+                str(bundle),
+                "--output-root",
+                str(root),
+                *(
+                    ("--retained-cache-root", str(retained_cache_root))
+                    if retained_cache_root is not None
+                    else ()
+                ),
+                timeout=7200,
+            )
+        )
+    return results[0], results[1]
+
+
 def _lens_worker_count(tasks: int, *, parallel: bool) -> int:
     """Pool size of the lens builds: one (the original sequential order) unless parallel."""
 
@@ -4613,35 +4641,7 @@ def _run_current_lens_builds(
         spec = bundle / _text(row.get("path"), "lens spec path")
         _note_progress(f"decomposition lens {kind} {root.name}/{spec.stem}")
         started = time.monotonic()
-        cache = (
-            ("--retained-cache-root", str(retained_cache_root))
-            if retained_cache_root is not None
-            else ()
-        )
-        staged = _tool(
-            "portfolio_decomposition.py",
-            "stage",
-            "--spec",
-            str(spec),
-            "--source-root",
-            str(bundle),
-            "--output-root",
-            str(root),
-            *cache,
-            timeout=7200,
-        )
-        published = _tool(
-            "portfolio_decomposition.py",
-            "publish",
-            "--spec",
-            str(spec),
-            "--source-root",
-            str(bundle),
-            "--output-root",
-            str(root),
-            *cache,
-            timeout=7200,
-        )
+        staged, published = _lens_stage_publish(bundle, spec, root, retained_cache_root)
         return staged, published, time.monotonic() - started
 
     workers = _lens_worker_count(len(tasks), parallel=bool(control_sources))
@@ -4973,21 +4973,8 @@ def build_analytics(
             staged, result = lens_results[lens_index]
         else:
             _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
-            staged = _tool(
-                "portfolio_decomposition.py",
-                "stage",
-                "--spec",
-                str(lens_spec),
-                "--source-root",
-                str(lens_bundle),
-                "--output-root",
-                str(lens_root),
-                *(
-                    ("--retained-cache-root", str(retained_cache_root))
-                    if retained_cache_root is not None
-                    else ()
-                ),
-                timeout=7200,
+            staged, result = _lens_stage_publish(
+                lens_bundle, lens_spec, lens_root, retained_cache_root
             )
         _record_numerical_producer_operation(
             producer_operations,
@@ -4998,23 +4985,6 @@ def build_analytics(
             output_root=lens_root,
             producer_result=staged,
         )
-        if not current_plan:
-            result = _tool(
-                "portfolio_decomposition.py",
-                "publish",
-                "--spec",
-                str(lens_spec),
-                "--source-root",
-                str(lens_bundle),
-                "--output-root",
-                str(lens_root),
-                *(
-                    ("--retained-cache-root", str(retained_cache_root))
-                    if retained_cache_root is not None
-                    else ()
-                ),
-                timeout=7200,
-            )
         _record_numerical_producer_operation(
             producer_operations,
             tool="portfolio_decomposition.py",
