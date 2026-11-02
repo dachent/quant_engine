@@ -4914,6 +4914,8 @@ def test_build_report_routes_schema10_epoch_binding_to_data_only_publication(
         "source_clock_path": None,
         "nested_tag_map_path": None,
         "sleeve_disclosure_sources_path": None,
+        "strategy_basis_path": None,
+        "sleeve_facts_path": None,
     }
     report_calls = calls["tool_calls"]
     assert [call[1] for call in report_calls] == ["verify", "publish"]
@@ -4963,6 +4965,8 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_p
             "source_clock_path": None,
             "nested_tag_map_path": None,
             "sleeve_disclosure_sources_path": None,
+            "strategy_basis_path": None,
+            "sleeve_facts_path": None,
             "epoch_manifest_generation_root": epoch_root,
             "epoch_manifest_generation_id": "d" * 64,
         }
@@ -5931,3 +5935,158 @@ def test_expected_model_annualisation_comes_from_the_base_spec_not_a_literal() -
     assert builder._declared_periods({"Strategy 0": 52}, "Strategy 0") == 52
     with pytest.raises(builder.VerticalBuildError, match="periods_per_year"):
         builder._declared_periods({"Strategy 0": 252}, "Strategy 1")
+
+
+_OPTIONAL_REPORT_INPUTS = (
+    ("strategy_basis", "strategy_basis_path", "--strategy-basis"),
+    ("sleeve_facts", "sleeve_facts_path", "--sleeve-facts"),
+)
+
+
+def _add_recipe_file(recipe: Path, key: str, content: bytes) -> Path:
+    artifact = recipe.parent / f"{key}.json"
+    artifact.write_bytes(content)
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    payload[key] = _file_definition(artifact)
+    recipe.write_text(json.dumps(payload), encoding="utf-8")
+    return artifact
+
+
+@pytest.mark.parametrize(("key", "_param", "_flag"), _OPTIONAL_REPORT_INPUTS)
+def test_recipe_accepts_a_pinned_optional_report_input(
+    tmp_path: Path, key: str, _param: str, _flag: str
+) -> None:
+    recipe = _recipe(tmp_path)
+    artifact = _add_recipe_file(recipe, key, b'{"declared": true}\n')
+    accepted = builder._recipe(recipe)
+    assert accepted[key]["path"] == str(artifact)
+
+
+@pytest.mark.parametrize(("key", "_param", "_flag"), _OPTIONAL_REPORT_INPUTS)
+def test_recipe_refuses_a_tampered_optional_report_input(
+    tmp_path: Path, key: str, _param: str, _flag: str
+) -> None:
+    recipe = _recipe(tmp_path)
+    artifact = _add_recipe_file(recipe, key, b'{"declared": true}\n')
+    original = artifact.read_bytes()
+    # same size, different bytes: the sha differs
+    artifact.write_bytes(original.replace(b"true", b"fals"))
+    with pytest.raises(builder.VerticalBuildError, match=f"{key} identity differs"):
+        builder._recipe(recipe)
+    # different size
+    artifact.write_bytes(original + b" ")
+    with pytest.raises(builder.VerticalBuildError, match=f"{key} identity differs"):
+        builder._recipe(recipe)
+    artifact.write_bytes(original)
+    builder._recipe(recipe)
+    # missing file
+    artifact.unlink()
+    with pytest.raises(builder.VerticalBuildError):
+        builder._recipe(recipe)
+    artifact.write_bytes(original)
+    payload = json.loads(recipe.read_text(encoding="utf-8"))
+    # an extra key in the file definition
+    tampered = copy.deepcopy(payload)
+    tampered[key]["note"] = "x"
+    recipe.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(builder.VerticalBuildError, match=f"{key} definition differs"):
+        builder._recipe(recipe)
+    # a path that is not the file
+    tampered = copy.deepcopy(payload)
+    tampered[key]["path"] = str(recipe.parent / "absent.json")
+    recipe.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(builder.VerticalBuildError):
+        builder._recipe(recipe)
+    # an unknown extra recipe key is still refused
+    tampered = copy.deepcopy(payload)
+    tampered["strategy_basis_extra"] = tampered[key]
+    recipe.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(builder.VerticalBuildError, match="recipe keys differ"):
+        builder._recipe(recipe)
+
+
+def test_create_recipe_takes_the_optional_report_inputs_as_none_by_default() -> None:
+    import inspect
+
+    parameters = inspect.signature(builder.create_recipe).parameters
+    for _key, param, _flag in _OPTIONAL_REPORT_INPUTS:
+        assert parameters[param].default is None
+
+
+def test_report_candidate_forwards_the_basis_flags_only_when_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_tool(*args: str, **_kwargs: object) -> dict[str, object]:
+        calls.append(tuple(args))
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+
+    def build(**extra: Path) -> tuple[str, ...]:
+        calls.clear()
+        builder.build_report_candidate(
+            tmp_path / "baseline",
+            tmp_path / "ledger",
+            tmp_path / "freshness.json",
+            tmp_path / "history.json",
+            tmp_path / "implementation.json",
+            tmp_path / "return-attribution.json",
+            None,
+            tmp_path / "report",
+            **extra,
+        )
+        assert len(calls) == 1
+        return calls[0]
+
+    default = build()
+    assert "--strategy-basis" not in default and "--sleeve-facts" not in default
+    declaration = tmp_path / "declaration.json"
+    facts = tmp_path / "facts.json"
+    given = build(strategy_basis_path=declaration, sleeve_facts_path=facts)
+    assert given[given.index("--strategy-basis") + 1] == str(declaration)
+    assert given[given.index("--sleeve-facts") + 1] == str(facts)
+    # absence is byte-identical to the arguments without the new parameters
+    stripped = list(given)
+    for flag in ("--strategy-basis", "--sleeve-facts"):
+        index = stripped.index(flag)
+        del stripped[index : index + 2]
+    assert tuple(stripped) == default
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_build_stage_forwards_the_recipe_basis_inputs_to_the_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pinned: bool
+) -> None:
+    recipe = _recipe(tmp_path)
+    artifacts = {}
+    if pinned:
+        for key, _param, _flag in _OPTIONAL_REPORT_INPUTS:
+            artifacts[key] = _add_recipe_file(recipe, key, b'{"declared": true}\n')
+    captured: dict[str, object] = {}
+
+    def fake_report(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"root": str(tmp_path / "report")}
+
+    monkeypatch.setattr(builder, "build_report", fake_report)
+    monkeypatch.setattr(
+        builder,
+        "_stage_result",
+        lambda *_a, **_k: {
+            "freshness_health": str(tmp_path / "freshness.json"),
+            "correlation_root": str(tmp_path / "correlation"),
+            "decomposition_lenses_root": str(tmp_path / "lenses"),
+        },
+    )
+    monkeypatch.setattr(builder, "_record_stage", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: tmp_path / "history.json"
+    )
+    builder.build_stage(recipe, tmp_path / "out", "report")
+    for key, param, _flag in _OPTIONAL_REPORT_INPUTS:
+        if pinned:
+            assert captured[param] == artifacts[key].resolve()
+        else:
+            assert param not in captured
