@@ -6,6 +6,7 @@ import argparse
 import base64
 import binascii
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 import copy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
@@ -22,6 +23,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 import zlib
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
@@ -1468,6 +1470,15 @@ def _panel_wire_form(data: Mapping[str, Any]) -> dict[str, Any]:
     return {**data, "decomposition_lenses": wire_lenses}
 
 
+def _note_stage(stage: str, started: float, size_bytes: int) -> None:
+    """Say how long one payload stage took and over how many bytes (stderr only)."""
+    print(
+        f"timing {stage} seconds={time.monotonic() - started:.2f} bytes={size_bytes}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _panel_data_parts(
     data: Mapping[str, Any], data_bytes: bytes
 ) -> list[tuple[str, bool, bytes]]:
@@ -1509,24 +1520,37 @@ def _panel_data_script(data: Mapping[str, Any], data_bytes: bytes) -> bytes:
             "panel data eager parts exceed the renderer string limit: "
             f"{eager_bytes} bytes > {_PANEL_PART_MAX_RAW_BYTES}"
         )
-    described = []
-    for part_id, lazy, raw in parts:
+    for part_id, _lazy, raw in parts:
         if len(raw) > _PANEL_PART_MAX_RAW_BYTES:
             raise ControlPanelValidationError(
                 f"panel data part {part_id} exceeds the renderer string limit: "
                 f"{len(raw)} bytes > {_PANEL_PART_MAX_RAW_BYTES}"
             )
-        described.append(
-            {
-                "id": part_id,
-                "lazy": lazy,
-                "raw_bytes": len(raw),
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "gzip_base64": base64.b64encode(
-                    gzip.compress(raw, compresslevel=_DOWNLOAD_GZIP_LEVEL, mtime=0)
-                ).decode("ascii"),
-            }
+
+    def encode(raw: bytes) -> tuple[str, str]:
+        return (
+            hashlib.sha256(raw).hexdigest(),
+            base64.b64encode(
+                gzip.compress(raw, compresslevel=_DOWNLOAD_GZIP_LEVEL, mtime=0)
+            ).decode("ascii"),
         )
+
+    # Each part is its own gzip member, so compressing them together changes no
+    # byte. zlib and hashlib release the GIL, so threads overlap the work.
+    with ThreadPoolExecutor(max_workers=len(parts)) as pool:
+        encoded = list(pool.map(encode, [raw for _part_id, _lazy, raw in parts]))
+    described = [
+        {
+            "id": part_id,
+            "lazy": lazy,
+            "raw_bytes": len(raw),
+            "sha256": digest,
+            "gzip_base64": gzip_base64,
+        }
+        for (part_id, lazy, raw), (digest, gzip_base64) in zip(
+            parts, encoded, strict=True
+        )
+    ]
     descriptor = {
         "encoding": "gzip",
         "lazy_pointer": list(_PANEL_LAZY_POINTER),
@@ -12473,7 +12497,9 @@ def _rendered_files(
         authority_snapshots[PANEL_DATA_SCHEMA][0],
         authority_snapshots[ACCOUNT_MANIFEST_SCHEMA][0],
     )
+    stage_started = time.monotonic()
     data_bytes = canonical_json_bytes(wire_data)
+    _note_stage("panel payload serialization", stage_started, len(data_bytes))
     legacy_data_path, _legacy_data_content, legacy_data_sha256 = legacy_snapshots[
         "legacy_data"
     ]
@@ -12486,9 +12512,14 @@ def _rendered_files(
         "analytics.css": template_files["analytics.css"],
         "app.js": template_files["app.js"],
         "data/dashboard_data.json": data_bytes,
-        "data/dashboard_data.js": _panel_data_script(wire_data, data_bytes),
+        "data/dashboard_data.js": b"",
         "data/freshness-health.json": freshness_content,
     }
+    # The data script and the download links compress different bytes and share
+    # nothing, so build the script beside them. It is awaited before use.
+    script_pool = ThreadPoolExecutor(max_workers=1)
+    script_started = time.monotonic()
+    script_future = script_pool.submit(_panel_data_script, wire_data, data_bytes)
     if candidate_driver_map_content is not None:
         files["data/candidate-driver-map.json"] = candidate_driver_map_content
     downloads, download_bindings = _report_downloads(
@@ -12499,6 +12530,7 @@ def _rendered_files(
     )
     if files["index.html"].count(_DOWNLOAD_PLACEHOLDER) != 1:
         raise ControlPanelValidationError("report download template location differs")
+    links_started = time.monotonic()
     links = [
         _report_download_link(relative, label, downloads[relative])
         for relative, label in (
@@ -12507,6 +12539,14 @@ def _rendered_files(
         )
         if relative in downloads
     ]
+    _note_stage(
+        "panel download embedding",
+        links_started,
+        sum(len(downloads[relative]) for relative in downloads),
+    )
+    files["data/dashboard_data.js"] = script_future.result()
+    script_pool.shutdown()
+    _note_stage("panel data script", script_started, len(data_bytes))
     files["index.html"] = files["index.html"].replace(
         _DOWNLOAD_PLACEHOLDER, " ".join(links).encode("utf-8")
     )
