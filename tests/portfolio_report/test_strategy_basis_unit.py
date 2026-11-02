@@ -154,6 +154,10 @@ def test_restated_capital_recomputes_value_weights_and_total() -> None:
         for key, row in rows.items():
             share = Decimal(row["current_value"]["value"]) / Decimal("1000.98")
             assert abs(weights[key] - share) < Decimal("1e-30")
+    # the member's identity is the sleeve epoch's, not the parent member's
+    member = rows[SLEEVE_STRATEGY]["members"][0]
+    assert member["assignment_ids"] == ["derived-sleeve:acct-s2:2026-07-02"]
+    assert (member["effective_start"], member["effective_end"]) == ("2026-07-02", None)
     # a restated row keeps the closed custody schema's exact key sets
     assert set(rows[SLEEVE_STRATEGY]) == set(block["strategies"][2])
     assert set(rows[SLEEVE_STRATEGY]["members"][0]) == set(
@@ -182,6 +186,9 @@ def test_a_restated_strategy_absent_from_capital_is_refused() -> None:
         value=Decimal(1),
         as_of_date="2026-09-17",
         opening_date="2026-01-30",
+        assignment_id="derived-sleeve:a-s2:2026-01-30",
+        effective_start="2026-01-30",
+        effective_end=None,
     )
     with pytest.raises(
         strategy_basis.StrategyBasisError, match="absent from current capital"
@@ -233,3 +240,39 @@ def test_a_declaration_is_strict() -> None:
     ):
         with pytest.raises(strategy_basis.StrategyBasisError):
             strategy_basis.load_declaration(bad)
+
+
+def test_provider_evidence_scopes_move_to_the_sleeve() -> None:
+    evidence = [
+        {
+            "strategy_id": SLEEVE_STRATEGY,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "account": {
+                "observed_start": "2026-01-22",
+                "account_scopes": [
+                    {
+                        "account_id": "acct",
+                        "observed_start": "2026-01-22",
+                        "observed_end": "2026-07-06",
+                    }
+                ],
+            },
+        },
+        {
+            "strategy_id": "strat-a",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "account": {"account_scopes": [{"account_id": "acct"}]},
+        },
+    ]
+    result = strategy_basis.restate_provider_evidence(
+        evidence, {SLEEVE_STRATEGY: _restatement()}
+    )
+    assert result[0]["account"]["account_scopes"] == [
+        {
+            "account_id": "acct-s2",
+            "observed_start": "2026-07-02",
+            "observed_end": "2026-07-06",
+        }
+    ]
+    assert result[1] == evidence[1]
+    assert evidence[0]["account"]["account_scopes"][0]["account_id"] == "acct"

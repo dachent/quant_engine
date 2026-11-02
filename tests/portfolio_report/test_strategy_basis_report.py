@@ -89,6 +89,23 @@ def test_with_the_switch_on_the_row_stands_on_the_sleeve(
         item["metric"]: item["value"] for item in on_report["portfolio_summary"]
     }["Systematic capital"]
     assert systematic == "164"
+    # the evidence binding names the sleeve, and the declaration is bound by hash
+    (evidence,) = [
+        e
+        for e in on_report["strategy_provider_evidence"]
+        if e["strategy_id"] == "strategy-1"
+    ]
+    assert [s["account_id"] for s in evidence["account"]["account_scopes"]] == [
+        "account-a-s2"
+    ]
+    digest = hashlib.sha256(
+        (tmp_path / "strategy-basis-declaration.json").read_bytes()
+    ).hexdigest()
+    assert {
+        "artifact": "strategy-basis-declaration",
+        "schema": "strategy-basis-declaration/1",
+        "sha256": digest,
+    } in on_report["provenance"]
     # the published return rows are the sleeve's: one opening row and the one link
     rows = [
         r for r in on_report["strategy_returns"] if r["strategy_id"] == "strategy-1"

@@ -10494,6 +10494,19 @@ def build_report_data(
                     ).hexdigest(),
                 },
             ]
+        if strategy_basis_path is not None:
+            report["provenance"] = [
+                *report["provenance"],
+                {
+                    "artifact": "strategy-basis-declaration",
+                    "schema": strategy_basis.DECLARATION_SCHEMA,
+                    "sha256": hashlib.sha256(
+                        _regular_file_bytes(
+                            strategy_basis_path, "strategy basis declaration"
+                        )
+                    ).hexdigest(),
+                },
+            ]
         sleeves_by_account, sleeves_by_strategy = _lifecycle_sleeves(
             tag_map, _objects(catalog.get("assignments"), "assignments")
         )
@@ -12623,6 +12636,8 @@ def _strategy_basis_restatements(
                 links=_objects(
                     details[key].get("own_path_links"), "sleeve own path links"
                 ),
+                effective_start=key[2],
+                effective_end=key[3],
             )
         except strategy_basis.StrategyBasisError as exc:
             raise ReportValidationError(str(exc)) from exc
@@ -12640,6 +12655,13 @@ def _restated_catalog(
             **catalog,
             "strategy_returns": strategy_basis.restate_returns(
                 _objects(catalog.get("strategy_returns", []), "strategy_returns"),
+                restatements,
+            ),
+            "strategy_provider_evidence": strategy_basis.restate_provider_evidence(
+                _objects(
+                    catalog.get("strategy_provider_evidence", []),
+                    "strategy_provider_evidence",
+                ),
                 restatements,
             ),
             "current_capital": strategy_basis.restate_current_capital(
@@ -16141,6 +16163,17 @@ def publish_report(
             str(report["report_schema_version"]),
         ),
     ]
+    basis_declaration = candidate_dir / STRATEGY_BASIS_EVIDENCE_NAME
+    if basis_declaration.is_file() and not basis_declaration.is_symlink():
+        # the exact bytes the restated report was rebuilt from (#624)
+        artifact_specs.append(
+            (
+                basis_declaration,
+                "input/strategy-basis-declaration.json",
+                "strategy-basis-declaration",
+                "1",
+            )
+        )
     disclosure_sources = candidate_dir / SLEEVE_DISCLOSURE_EVIDENCE_NAME
     if disclosure_sources.is_file() and not disclosure_sources.is_symlink():
         # the exact bytes the methodology disclosures were composed from

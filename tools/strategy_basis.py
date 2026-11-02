@@ -60,6 +60,9 @@ class SleeveRestatement:
     value: Decimal
     as_of_date: str
     opening_date: str
+    assignment_id: str
+    effective_start: str
+    effective_end: str | None
 
 
 def load_declaration(raw: bytes) -> dict[str, str]:
@@ -108,6 +111,8 @@ def sleeve_restatement(
     parent_account_id: str,
     provider_id: str,
     links: Sequence[Mapping[str, Any]],
+    effective_start: str | None = None,
+    effective_end: str | None = None,
 ) -> SleeveRestatement:
     """The sleeve's return rows and closing value from its verified trace links.
 
@@ -147,6 +152,9 @@ def sleeve_restatement(
         value=_decimal(last["ending_nav"], "closing sleeve NAV"),
         as_of_date=str(last["end_date"]),
         opening_date=opening,
+        assignment_id=f"derived-sleeve:{account_id}:{effective_start or opening}",
+        effective_start=effective_start or opening,
+        effective_end=effective_end,
     )
 
 
@@ -207,6 +215,43 @@ def restate_returns(
     return kept
 
 
+def restate_provider_evidence(
+    rows: Sequence[Mapping[str, Any]],
+    restatements: Mapping[str, SleeveRestatement],
+) -> list[dict[str, Any]]:
+    """Provider-evidence rows with a restated strategy's account scopes on its sleeve.
+
+    The return series, dates and hash of the evidence are the sleeve's, so the scope that
+    binds them names the sleeve account and the sleeve epoch's window, not the parent's.
+    """
+
+    result: list[dict[str, Any]] = []
+    for original in rows:
+        row = dict(original)
+        restatement = restatements.get(str(row.get("strategy_id")))
+        account = row.get("account")
+        if (
+            restatement is not None
+            and row.get("evidence_layer") == "ACCOUNT_LIVE"
+            and isinstance(account, Mapping)
+            and account.get("account_scopes")
+        ):
+            first = dict(account["account_scopes"][0])
+            row["account"] = {
+                **account,
+                "account_scopes": [
+                    {
+                        **first,
+                        "account_id": restatement.account_id,
+                        "observed_start": restatement.opening_date,
+                        "observed_end": restatement.as_of_date,
+                    }
+                ],
+            }
+        result.append(row)
+    return result
+
+
 def restate_current_capital(
     block: Mapping[str, Any],
     restatements: Mapping[str, SleeveRestatement],
@@ -256,7 +301,9 @@ def restate_current_capital(
             # the sleeve has no ledger NAV record: the report schema allows null here
             "nav_record_id": None,
             "source_key": None,
-            "effective_start": restatement.opening_date,
+            "assignment_ids": [restatement.assignment_id],
+            "effective_start": restatement.effective_start,
+            "effective_end": restatement.effective_end,
         }
         row["members"] = [member]
         row["as_of_date"] = restatement.as_of_date
