@@ -508,7 +508,7 @@ def test_two_generations_for_the_provider_are_a_refusal(
 
 
 def test_a_tag_map_other_than_the_one_the_facts_bind_is_refused(
-    world: dict[str, Any],
+    world["tag_map"].write_bytes(_tag_map().replace(b"T2", b"T3"))
 ) -> None:
     world["tag_map"].write_bytes(world["tag_map"].read_bytes() + b"\n")
     with pytest.raises(target_series.TargetSeriesError, match="tag_map_sha256 differs"):
