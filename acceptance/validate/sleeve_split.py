@@ -738,3 +738,45 @@ def check_corporate_action_fractions(
             )
         )
     return found
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``python -m acceptance.validate.sleeve_split FACTS --tag-map F --catalog F --flex X...``
+
+    Exit 0 when the facts apply the corporate-action rule as derived here, 1 with the
+    findings printed one JSON object per line, 2 when the inputs are refused.
+    """
+
+    import argparse
+    from contextlib import ExitStack
+    import json
+    from pathlib import Path
+    import sys
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("facts", type=Path)
+    parser.add_argument("--tag-map", type=Path, required=True)
+    parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument("--flex", type=Path, nargs="+", required=True)
+    parser.add_argument("--account", required=True)
+    args = parser.parse_args(argv)
+    try:
+        with ExitStack() as stack:
+            handles = [stack.enter_context(path.open("rb")) for path in args.flex]
+            trades = sleeve_bridge.read_flex_trades(handles, args.account)
+        findings = check_corporate_action_fractions(
+            json.loads(args.facts.read_bytes()),
+            trades,
+            json.loads(args.tag_map.read_bytes()),
+            json.loads(args.catalog.read_bytes()),
+        )
+    except (Refusal, OSError, ValueError) as exc:
+        print(f"sleeve_split: REFUSED {exc}", file=sys.stderr)
+        return 2
+    for finding in findings:
+        print(json.dumps(finding.as_dict()))
+    return 1 if findings else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

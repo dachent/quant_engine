@@ -78,7 +78,9 @@ def evidence() -> dict[str, Any]:
 
 
 @needs_facts
-def test_the_r2_figures_are_the_verified_ones(evidence: dict[str, Any]) -> None:
+def test_the_r2_regression_reference_figures_are_the_verified_ones(
+    evidence: dict[str, Any],
+) -> None:
     figures = evidence["figures"]
     assert f"{figures.twr * 100:.4f}" == "15.4348"
     assert figures.annualised is not None
@@ -297,3 +299,56 @@ def test_the_real_r2_panel_states_a_figure_set_and_each_one_has_a_home_after_b()
         )
         == []
     )
+
+
+# ---- the applicable lineage: branch S's rebuild (each sleeve charged its own fraction) ----
+
+R22_FACTS = os.environ.get("QE_AI624_R22_FACTS")
+needs_r22 = pytest.mark.skipif(
+    not _present(R22_FACTS), reason="QE_AI624_R22_FACTS is not set to the rebuilt facts"
+)
+
+
+def _strategy_of(facts: dict[str, Any]) -> str:
+    """The strategy of the sleeve open on the facts' last day: no id in code."""
+
+    return next(
+        sleeve["strategy_id"]
+        for sleeve in facts["sleeves"]
+        if sleeve["last_day"] == facts["window"]["last_day"]
+    )
+
+
+@needs_r22
+def test_the_applicable_r21_figures_are_derived_from_the_rebuilt_facts() -> None:
+    facts = _load(R22_FACTS)
+    figures = sleeve_basis.derive_sleeve(facts, _strategy_of(facts))
+    assert f"{figures.twr * 100:.4f}" == "15.4333"
+    assert figures.annualised is not None
+    assert f"{figures.annualised * 100:.4f}" == "25.5790"
+    assert f"{figures.max_drawdown * 100:.4f}" == "-6.7364"
+    assert f"{figures.current_drawdown * 100:.4f}" == "-0.9176"
+    assert f"{figures.value:.2f}" == "77258.00"
+    assert f"{figures.liability_line:.2f}" == "-20057.13"
+    assert f"{figures.parent_equity:.4f}" == "57200.8755"
+    assert (figures.window_days, figures.nav_observations) == (230, 165)
+
+
+@needs_r22
+@needs_facts
+def test_the_rebuild_moves_the_sleeve_by_the_fraction_and_the_account_not_at_all() -> (
+    None
+):
+    """Against the R2 reference: the sleeve and the margin line move by equal amounts."""
+
+    own = _load(R22_FACTS)
+    old = _load(FACTS)
+    strategy = _strategy_of(own)
+    after = sleeve_basis.derive_sleeve(own, strategy)
+    before = sleeve_basis.derive_sleeve(old, strategy)
+    assert after.parent_equity == before.parent_equity
+    assert abs(
+        (after.value - before.value) + (after.liability_line - before.liability_line)
+    ) < Decimal("1e-20")
+    assert after.value < before.value
+    assert Decimal("-0.0000145") < after.twr - before.twr < Decimal("-0.0000142")
