@@ -1,5 +1,7 @@
 """Minimal provenance and generation envelope for quant_engine."""
 
+from quant_engine.core.stage_timing import stage as timed_stage, timed as timed_call
+
 from quant_engine.core.authority import (
     AdmissionDecision,
     AuthorityCatalog,
@@ -143,6 +145,8 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "timed_call",
+    "timed_stage",
     "release_directory_identity",
     "CacheBaseError",
     "iter_cache_files",
