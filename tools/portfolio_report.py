@@ -12767,6 +12767,72 @@ def _workbook_evidence_binding_from_snapshots(
     return binding
 
 
+# T6 (owner ruling): a strategy whose row mixes the parent account's series with its sleeve epoch says so
+# plainly, names the owner's restatement ruling and its release, and shows the audit bridge.  The bridge terms
+# are fixed disclosure inputs, not payload fields: they come from ADR 0002 (entry day excluded, date-only
+# transfers at end of day) and issue #624 (allocated costs); no panel or report field carries them.
+MIXED_BASIS_AUDIT_FIGURE_PERCENT: Final = "14.348"
+MIXED_BASIS_BRIDGE_POINTS: Final[tuple[tuple[str, str], ...]] = (
+    ("allocated costs", "-0.256"),
+    ("entry-day exclusion", "+1.661"),
+    ("ADR 0002 end-of-day flow", "-0.319"),
+)
+MIXED_BASIS_SCHEDULED_RELEASE: Final = "R2.2"
+MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 and issue #624"
+
+
+def _mixed_basis_disclosure(item: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    """The structured disclosure and its sentence, from the row's own windows and the fixed bridge."""
+
+    def span(start: Any, end: Any, days: Any) -> str:
+        if not (isinstance(start, str) and isinstance(end, str)):
+            return "its own window"
+        tail = f", {days} days exclusive (end minus start)" if days is not None else ""
+        return f"{start} to {end}{tail}"
+
+    basis = item.get("annualisation_basis")
+    mwr_days = (
+        basis.get("mwr_xirr", {}).get("window_days")
+        if isinstance(basis, Mapping) and isinstance(basis.get("mwr_xirr"), Mapping)
+        else None
+    )
+    parent_window = span(
+        item.get("return_window_start"),
+        item.get("return_close_date"),
+        item.get("window_days"),
+    )
+    sleeve_window = span(
+        item.get("mwr_opening_date"), item.get("mwr_terminal_date"), mwr_days
+    )
+    net = sum((Decimal(value) for _, value in MIXED_BASIS_BRIDGE_POINTS), Decimal(0))
+    terms = ", ".join(f"{name} {value}" for name, value in MIXED_BASIS_BRIDGE_POINTS)
+    sentence = (
+        "MIXED BASIS: this row mixes account and sleeve bases (return, drawdown, current "
+        f"value, weight and weekly series over the parent account, {parent_window}; MWR "
+        f"and governed capital over the sleeve epoch, {sleeve_window}). The owner ruled "
+        "that this row be restated to the sleeve basis; the restatement is scheduled as "
+        f"release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from the audit figure "
+        f"{MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, in percentage "
+        f"points: {terms} (net {net:+}; source: {MIXED_BASIS_BRIDGE_SOURCE}; these terms "
+        "are fixed disclosure inputs, not payload fields)."
+    )
+    disclosure = {
+        "status": "MIXED_BASIS",
+        "restatement_basis": "SLEEVE_EPOCH",
+        "restatement_ruled_by": "OWNER",
+        "scheduled_release": MIXED_BASIS_SCHEDULED_RELEASE,
+        "parent_window": parent_window,
+        "sleeve_window": sleeve_window,
+        "audit_figure_percent": MIXED_BASIS_AUDIT_FIGURE_PERCENT,
+        "bridge_points": [
+            {"term": name, "points": value} for name, value in MIXED_BASIS_BRIDGE_POINTS
+        ],
+        "bridge_net_points": f"{net:+}",
+        "bridge_source": MIXED_BASIS_BRIDGE_SOURCE,
+    }
+    return disclosure, sentence
+
+
 def _apply_return_scope(
     report: dict[str, Any],
     rows: Sequence[Mapping[str, Any]],
@@ -12820,6 +12886,8 @@ def _apply_return_scope(
             "mwr_and_governed_capital_basis": "SLEEVE_EPOCH",
             "sleeve_epoch_accounts": sleeves,
         }
+        disclosure, disclosure_text = _mixed_basis_disclosure(item)
+        item["return_scope"]["mixed_basis_disclosure"] = disclosure
         item["return_scope_label"] = (
             f"Return (cumulative, year-to-date, calendar-year, annualised), drawdowns "
             f"(account-live and HWM), current value, weight, cost-rate denominator and "
@@ -12827,7 +12895,7 @@ def _apply_return_scope(
             f"{', '.join(parents)} (includes retired sleeves "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in retired) or 'none'} and its "
             f"unallocated cash and margin). MWR and governed capital: sleeve "
-            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
+            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}. {disclosure_text}"
         )
 
 
