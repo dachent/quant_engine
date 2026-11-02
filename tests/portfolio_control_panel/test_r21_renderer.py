@@ -98,12 +98,36 @@ def test_risk_kpi_shows_the_candidate_pending_acceptance_with_the_reason(
     )
     kpis = _flat(dom, "#risk-kpis")
 
-    assert "Systematic HWM 143.7000" in kpis
+    # F1: the big number is the current index and says so; the HWM keeps its own label
+    assert "Systematic index, current 143.7000" in kpis
+    assert "Systematic HWM 143.7000" not in kpis
     assert "pending owner acceptance" in kpis
-    assert "HWM 150.0000" in kpis and "drawdown -5.00%" in kpis
+    assert "HWM 150.0000 (pending owner acceptance)" in kpis and "drawdown -5.00%" in kpis
+    assert "150.0000" not in kpis.split("HWM 150.0000")[0]
     assert "703 daily points" in kpis
     assert "Missing daily points: Robuxio Jan 27, 2026" in kpis
     assert "Systematic HWM Unavailable" not in kpis
+
+
+def test_risk_kpi_title_follows_the_kpi_fields_not_a_fixed_number(
+    tmp_path: Path,
+) -> None:
+    """F1: swapping the synthetic index and HWM moves the numbers, never the labels."""
+
+    for index, hwm in (("101.2500", "120.5000"), ("88.0000", "99.0000")):
+        advisory = _risk_payload()["advisory"]
+        candidate = _hwm_candidate()
+        candidate["kpi"] = {"value": index, "hwm": hwm, "drawdown": "-0.1000"}
+        advisory["hwm_candidate"] = candidate
+        dom = _run(
+            tmp_path,
+            _risk_payload(advisory=advisory, hwm_governed_proof=_governed_proof()),
+            "renderRisk",
+        )
+        kpis = _flat(dom, "#risk-kpis")
+        assert f"Systematic index, current {index}" in kpis
+        assert f"HWM {hwm} (" in kpis
+        assert f"Systematic HWM {index}" not in kpis
 
 
 def test_risk_kpi_without_the_kpi_block_reads_the_candidate_fields(
@@ -118,7 +142,7 @@ def test_risk_kpi_without_the_kpi_block_reads_the_candidate_fields(
     )
 
     kpis = _flat(dom, "#risk-kpis")
-    assert "Systematic HWM " in kpis and "pending owner acceptance" in kpis
+    assert "Systematic index, current " in kpis and "pending owner acceptance" in kpis
 
 
 def _alpha_series(context: dict[str, Any] | None, net_status: str) -> dict[str, Any]:
