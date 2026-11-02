@@ -510,3 +510,135 @@ def test_real_r2_governed_index_carries_the_sleeve_path() -> None:
     assert [Decimal(p["beginning_capital_usd"]) for p in periods[-1:]] == [
         restated.base_navs[-1]
     ]
+
+
+# --- explicit convention: parent endpoint still runs; omitted arguments change nothing ---
+
+
+def _validate_with(
+    module: Any, catalog: dict[str, Any], envelope: dict[str, Any], **extra: Any
+) -> str:
+    roles = {
+        item["artifact_id"]: (item["schema_name"], item["sha256"])
+        for item in catalog["source_artifacts"]
+    }
+    try:
+        module.validate_hwm_inputs_envelope(
+            envelope,
+            as_of_date=AS_OF,
+            perimeter=[PLAIN, SLEEVE],
+            crosswalk=catalog["strategy_returns"],
+            artifact_roles=roles,
+            policy_exclusions={},
+            allocations=catalog["allocations"],
+            acceptance_record=catalog["hwm_acceptance_record"],
+            **extra,
+        )
+    except Exception as exc:  # noqa: BLE001 - the type and message are compared
+        return f"{type(exc).__name__}:{getattr(exc, 'code', '')}:{exc}"
+    return "PASSED"
+
+
+def test_the_parent_endpoint_check_still_runs_and_fails_on_a_tampered_allocation() -> (
+    None
+):
+    catalog = _catalog()
+    envelope = catalog["hwm_inputs"]
+    assert (
+        _validate_with(
+            __import__("quant_engine.portfolio_ledger", fromlist=["x"]),
+            catalog,
+            envelope,
+        )
+        == "PASSED"
+    )
+    import quant_engine.portfolio_ledger.hwm_inputs as live
+
+    for strategy in (SLEEVE, PLAIN):
+        forged = copy.deepcopy(catalog)
+        for item in forged["allocations"]:
+            if item["strategy_id"] == strategy:
+                item["current_value"]["value"] = "1"
+        # the parent-level (baseline, no declarations) path rejects it for either strategy
+        assert "ENDPOINT_NOT_RECONCILED" in _validate_with(
+            live, forged, forged["hwm_inputs"]
+        )
+    # on the restated path the exempt strategy is not re-proven, every other one still is
+    basis = strategy_basis.restate_hwm_catalog(catalog, {SLEEVE: _restatement()})
+    extra = {
+        "membership_starts": basis.membership_starts,
+        "endpoint_exempt": basis.endpoint_exempt,
+    }
+    forged = copy.deepcopy(basis.catalog)
+    for item in forged["allocations"]:
+        if item["strategy_id"] == PLAIN:
+            item["current_value"]["value"] = "1"
+    assert "ENDPOINT_NOT_RECONCILED" in _validate_with(
+        live, forged, forged["hwm_inputs"], **extra
+    )
+
+
+def test_omitted_arguments_are_identical_to_the_pre_change_function() -> None:
+    """Same inputs, same results and exceptions as the opt-in base's function (git show)."""
+
+    import subprocess
+    import types
+
+    import quant_engine.portfolio_ledger.hwm_inputs as live
+
+    source = subprocess.run(
+        [
+            "git",
+            "show",
+            "feat/ai624-sleeve-basis-opt-in:packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_inputs.py",
+        ],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if source.returncode != 0:
+        pytest.skip("the opt-in base branch is not available in this clone")
+    before = types.ModuleType("hwm_inputs_before")
+    exec(
+        compile(source.stdout.decode("utf-8"), "hwm_inputs_before", "exec"),
+        before.__dict__,
+    )  # noqa: S102
+    base = _catalog()
+    cases: list[dict[str, Any]] = [base]
+    for mutate in (
+        lambda c: c["allocations"][0]["current_value"].update(value="1"),
+        lambda c: c["hwm_inputs"]["periods"][3].update(beginning_capital_usd="999"),
+        lambda c: c["hwm_inputs"]["periods"].pop(),
+        lambda c: c["hwm_inputs"]["periods"][5].update(
+            return_source_record_id="0" * 64
+        ),
+        lambda c: c["hwm_inputs"]["periods"][2].update(lane="PROVIDER"),
+        lambda c: c["hwm_inputs"]["anchor"].update(anchor_date="2026-01-04"),
+        lambda c: c["hwm_inputs"]["reconciliation"]["allocation_endpoint_check"].update(
+            matched=False
+        ),
+        lambda c: c["hwm_inputs"]["periods"][1].update(disposition="UNAVAILABLE"),
+    ):
+        case = copy.deepcopy(base)
+        mutate(case)
+        cases.append(case)
+    outcomes = set()
+    for case in cases:
+        old = _validate_with(before, case, case["hwm_inputs"])
+        new = _validate_with(live, case, case["hwm_inputs"])
+        assert old == new
+        outcomes.add(old.split(":")[1] if ":" in old else old)
+    assert len(outcomes) >= 4  # the cases really exercise different outcomes
+
+
+def test_the_disclosure_is_generated_from_the_restatement() -> None:
+    basis = strategy_basis.restate_hwm_catalog(_catalog(), {SLEEVE: _restatement()})
+    text = strategy_basis.hwm_basis_disclosure(basis, {SLEEVE: _restatement()})
+    assert f"{SLEEVE} is a member from 2026-01-05" in text
+    assert "acct-1-s2" in text and "stays proven on the parent rows" in text
+    assert f"skipped for {SLEEVE} only" in text
+    bare = {k: v for k, v in _catalog().items() if k != "hwm_inputs"}
+    none = strategy_basis.restate_hwm_catalog(bare, {SLEEVE: _restatement()})
+    assert "no hwm_inputs envelope" in strategy_basis.hwm_basis_disclosure(
+        none, {SLEEVE: _restatement()}
+    )

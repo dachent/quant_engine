@@ -10827,6 +10827,14 @@ def build_report_data(
                     ),
                 }
             )
+            report["methodology"].append(
+                {
+                    "item": "Legacy HWM envelope basis",
+                    "value": strategy_basis.hwm_basis_disclosure(
+                        hwm_basis, basis_restatements
+                    ),
+                }
+            )
         if sleeve_sources is not None:
             try:
                 disclosed = sleeve_disclosures.compose(

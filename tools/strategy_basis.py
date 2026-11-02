@@ -780,3 +780,32 @@ def restate_hwm_catalog(
         starts,
         frozenset(restatements),
     )
+
+
+def hwm_basis_disclosure(
+    basis: HwmBasis, restatements: Mapping[str, SleeveRestatement]
+) -> str:
+    """The legacy HWM envelope convention, stated from the restatement itself."""
+
+    if basis.catalog.get("hwm_inputs") is None:
+        return (
+            "The baseline carries no hwm_inputs envelope, so there is nothing to restate: "
+            "the legacy numerical HWM state does not use "
+            + ", ".join(sorted(restatements))
+            + " on either basis."
+        )
+    members = "; ".join(
+        f"{strategy_id} is a member from {basis.membership_starts[strategy_id].isoformat()} "
+        f"(its first sleeve return; the sleeve {restatements[strategy_id].account_id} "
+        "did not exist before), with the sleeve's prior closing NAV as beginning capital "
+        "and a hash of the sleeve row as return reference"
+        for strategy_id in sorted(basis.membership_starts)
+    )
+    return (
+        f"Legacy PORT-HWM-3 envelope on the sleeve basis: {members}. The allocation "
+        "endpoint check is skipped for "
+        + ", ".join(sorted(basis.endpoint_exempt))
+        + " only: the owner allocation snapshot records the parent account, not the "
+        "sleeve, and that endpoint stays proven on the parent rows by the baseline at "
+        "admission; every other strategy's endpoint check runs unchanged."
+    )
