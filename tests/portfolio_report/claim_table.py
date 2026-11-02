@@ -1402,6 +1402,12 @@ ROWS: tuple[Row, ...] = (
     ),
 )
 
+# The rows of the sleeve restatement (#624); the module imports this one for Row, Payload and
+# the verdict helpers, so it is read after they are defined.
+from claim_table_sleeve import SLEEVE_ROWS  # noqa: E402
+
+ROWS = ROWS + SLEEVE_ROWS
+
 ROW_IDS = tuple(row.id for row in ROWS)
 assert len(set(ROW_IDS)) == len(ROW_IDS), "duplicate claim-table row ids"
 
