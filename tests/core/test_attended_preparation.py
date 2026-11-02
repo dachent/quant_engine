@@ -5105,11 +5105,14 @@ def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
         *,
         declaration_path: Path | None = None,
         sleeve_facts_path: Path | None = None,
+        tag_map_path: Path | None = None,
     ) -> Path:
         order.append("history")
         calls["history"] += 1
         received.update(
-            declaration_path=declaration_path, sleeve_facts_path=sleeve_facts_path
+            declaration_path=declaration_path,
+            sleeve_facts_path=sleeve_facts_path,
+            tag_map_path=tag_map_path,
         )
         normalized = output / "normalized"
         normalized.mkdir(parents=True)
@@ -5130,6 +5133,8 @@ def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
     assert received["sleeve_facts_path"] == (
         output / "preparation" / "sleeve-facts" / "sleeve-account-facts.json"
     )
+    # the tag map the sleeve policy manifest pins is the comparison side for the facts
+    assert received["tag_map_path"] == preparation._sleeve_tag_map_path(section)
     checkpoint = preparation._read(
         output / "preparation" / "checkpoints" / "selected-history-normalization.json",
         "history checkpoint",
