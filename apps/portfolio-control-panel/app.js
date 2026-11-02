@@ -1054,7 +1054,7 @@
           `<tr><td>Account return ${safe(formatDate(aw.start))} to ${safe(formatDate(aw.end))}</td><td class="numeric">${pct(ret.account_cumulative_return, 4)}</td></tr>`,
           `<tr><td>Sleeve return ${safe(formatDate(sw.start))} to ${safe(formatDate(sw.end))} (window opens ${integer.format(ret.window_start_difference_days || 0)} days later)</td><td class="numeric">${pct(ret.sleeve_cumulative_return, 4)}</td></tr>`,
           `<tr><td>Difference</td><td class="numeric">${pp(ret.difference)}</td></tr>`,
-          ...(toSleeve.account_series_also_holds || []).map((other) => `<tr><td colspan="2" class="cell-secondary">The account series also holds sleeve ${safe(other.sleeve_id)} (${safe(other.strategy_id)}), ${safe(formatDate(other.first_day))} to ${safe(formatDate(other.last_day))}, ${other.live_at_cutoff ? "live" : "retired"} at the cutoff</td></tr>`),
+          ...(toSleeve.account_series_also_holds || []).map((other) => `<tr><td colspan="2" class="cell-secondary">The account series also holds sleeve ${safe(other.sleeve_id)} (${safe(other.strategy_id)}), ${safe(formatDate(other.first_day))} to ${safe(formatDate(other.last_day))}, at the cutoff it ${other.live_at_cutoff ? "holds a NAV" : "holds no NAV"}</td></tr>`),
         );
       }
       const toAudit = (entry.bridges || {}).sleeve_to_audit;
