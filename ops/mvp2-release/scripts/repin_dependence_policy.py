@@ -17,6 +17,7 @@ The file is stored as the repository's canonical JSON, so it is rewritten with
 the same serializer rather than reformatted.
 """
 
+import os
 import glob
 import hashlib
 import json
@@ -28,12 +29,12 @@ from quant_engine.core.contracts import canonical_json_bytes  # noqa: E402
 
 POLICY = Path("contracts/portfolio-dependence-policy-v1.json")
 HISTORY = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio"
+    f"{os.environ['QUANT_ENGINE_DATA_ROOT']}/dataPortfolio"
     r"/rollforward/2026-09-10-mvp2-live-only/layered-history"
     r"/df04a9d654f195592e4ba10124a582d35bb393b9bd5b12efa0e95bca26e213cc"
 )
 ALLOCATION = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio"
+    f"{os.environ['QUANT_ENGINE_DATA_ROOT']}/dataPortfolio"
     r"/baseline/generations"
     r"/20709bfd5f9a5846879854bf3166c11223a100cc62fcb13fe0b76040f881b542"
 )

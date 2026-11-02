@@ -647,7 +647,7 @@ def _crosswalk(
         )
     # Declared zero-activity accounts: attestation-based mapping.
     # Declared raw accounts may share an internal account with an existing
-    # NAV-mapped raw account (Flex label alias, e.g. ba3d1d8039a6d9d7).
+    # NAV-mapped raw account (Flex label alias).
     declared_raw_ids: set[str] = set()
     for decl in declared_zero_activity:
         raw_id = decl["raw_account_id"]

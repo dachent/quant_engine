@@ -10,14 +10,14 @@ Independent of production-spec.json: the root set comes from the materializer's
 own PRODUCTION_ROOTS, and the superseding generations from the prepared root.
 """
 
+import os
 import hashlib
 import json
 import pathlib
 import sys
 
 REPO = pathlib.Path(
-    "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    "/.codex-bootstrap/mvp2-execution/repo"
+    os.environ["QUANT_ENGINE_DATA_ROOT"] + "/.codex-bootstrap/mvp2-execution/repo"
 )
 sys.path[:0] = [str(REPO / "packages/core/src"), str(REPO / "tools"), str(REPO)]
 
@@ -25,7 +25,7 @@ from quant_engine.core.publication import generation_inventory_sha256  # noqa: E
 from quant_engine.core.release import ReleaseAuthorityPointer  # noqa: E402
 from portfolio_pipeline_materialize import PRODUCTION_ROOTS  # noqa: E402
 
-Q = pathlib.Path("C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine")
+Q = pathlib.Path(os.environ["QUANT_ENGINE_DATA_ROOT"])
 PORTFOLIO = Q / "dataPortfolio"
 COORD = PORTFOLIO / "releases-refresh-2026"
 PREPARED = pathlib.Path("C:/Dev/scratch/quant-engine/pl12/run2/release-roots")
