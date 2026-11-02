@@ -113,6 +113,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a command is required after --")
+    # A child's output is decoded with errors="replace"; a Windows console codec (cp1252) must not
+    # turn a replacement character into a crash that hides the child's failure message.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
     if command[0] in ("python", "python3"):
         # Hosted runners put their own Python first on PATH, not the project venv.
         command = [sys.executable, *command[1:]]
