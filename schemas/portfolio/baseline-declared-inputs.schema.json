@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/baseline-declared-inputs.schema.json",
+  "title": "Declared inputs of a baseline spec (cutoff-dependent, held in the release-inputs root)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "cutoff",
+    "spec_schema_version",
+    "policy_version",
+    "cost_economics",
+    "sources",
+    "replay"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "qe-baseline-declared-inputs/1"
+    },
+    "cutoff": {
+      "type": "string",
+      "format": "date"
+    },
+    "spec_schema_version": {
+      "enum": [
+        3
+      ]
+    },
+    "policy_version": {
+      "const": "PORT-PERF-1"
+    },
+    "cost_economics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of_date",
+        "schema_name",
+        "schema_version"
+      ],
+      "properties": {
+        "as_of_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "schema_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "not": {
+          "enum": [
+            "cost-economics",
+            "cost-evidence"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/source_ref"
+      }
+    },
+    "replay": {
+      "$ref": "#/$defs/replay"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "(^[A-Za-z]:|^/|\\\\|(^|/)\\.\\.?(/|$))"
+      }
+    },
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_id",
+        "relative_path",
+        "expected_sha256",
+        "as_of_date",
+        "schema_name",
+        "schema_version"
+      ],
+      "properties": {
+        "root_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "relative_path": {
+          "$ref": "#/$defs/relative_path"
+        },
+        "expected_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "as_of_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "schema_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "expected_decimal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "tolerance"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
+        },
+        "tolerance": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+        }
+      }
+    },
+    "replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_liquid_usd",
+        "systematic_total_usd",
+        "reserve_total_usd",
+        "nav_coverage",
+        "correlation_one_stress",
+        "full_systematic_hwm_status",
+        "portfolio_action"
+      ],
+      "properties": {
+        "total_liquid_usd": {
+          "$ref": "#/$defs/expected_decimal"
+        },
+        "systematic_total_usd": {
+          "$ref": "#/$defs/expected_decimal"
+        },
+        "reserve_total_usd": {
+          "$ref": "#/$defs/expected_decimal"
+        },
+        "nav_coverage": {
+          "$ref": "#/$defs/expected_decimal"
+        },
+        "correlation_one_stress": {
+          "$ref": "#/$defs/expected_decimal"
+        },
+        "full_systematic_hwm_status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "portfolio_action": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

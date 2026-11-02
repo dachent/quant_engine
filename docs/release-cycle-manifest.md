@@ -151,3 +151,26 @@ meaning.
 A content-hash resolver and spec-rewriting CLI on `tools/release_restore_world.py` (replacing
 `resolve_pins.py`), and a driver config key naming the roots file, are deliberately left to the
 block that first needs them; `--root` and `--roots-file` are the stable surface until then.
+
+## B3: baseline spec builder
+
+`tools/release_baseline_spec.py` builds the cycle's baseline spec (replaces `mk_baseline_spec.py` and
+`patch_baseline_spec.py`). Schema of its governed input: `schemas/portfolio/baseline-declared-inputs.schema.json`.
+
+```
+release_baseline_spec.py build --resolved-cycle R --release-inputs-root D --release-inputs-manifest-sha256 H     --root ID=DIR ... --provenance-generation G --ledger-generation L [--cost-root-id ID] [--repo-root DIR] --out FILE
+release_baseline_spec.py declare --previous-spec FILE --out FILE --roots-out FILE
+```
+
+- Reads from the resolved cycle: `cutoff` (the spec `as_of_date`), `cost_inputs.economics` (required) and
+  `cost_inputs.evidence` (optional), `providers.*.generation_id` and `manifest_sha256`.
+- The static sources and the replay expectation (cutoff dependent) are the declared-inputs file
+  `ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json`, read through the release-inputs loader
+  (every entry verified, cutoff must equal the cycle cutoff). `declare` authors it from a previous baseline spec.
+- `--root ID=DIR` must name exactly the root ids the declared sources use. Every static and cost file is hashed
+  against its pin. The two cost files must share one directory (root id `--cost-root-id`, default `cost-inputs`).
+- The cost-evidence `as_of_date` is the latest `feed_last_date` in the file, not typed.
+- The ledger generation must have the cutoff as `as_of_date` and admit exactly the cycle's provider generations
+  (id and manifest sha256). The financial-MVP triple binds the contract, registry and schema of `--repo-root`.
+- Output is create-only, canonical bytes (sorted keys, compact, no trailing newline), checked against
+  `baseline-spec.schema.json`. Refusals are `release-baseline-spec: FAIL: CODE: detail`, exit 1.
