@@ -752,7 +752,9 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         and _stage(i).get("only_ceremony", "full") == "full"
     ] == [
         "selected-inputs",
-        *pass26,
+        *pass26[: pass26.index("replica-copy") + 1],
+        "replica-inventory",
+        *pass26[pass26.index("replica-copy") + 1 :],
     ]
     assert ids[-2:] == ["commit", "pack-evidence"]
 
@@ -1660,3 +1662,57 @@ def test_later_stages_may_change_the_replica_tree_the_copy_stage_only_binds_its_
     shipped = _stage("replica-copy")
     assert shipped["outputs"] == ["{replica_workspace}/.replica-root.json"]
     assert shipped["must_not_exist"] == ["{replica_workspace}"]
+
+
+def test_the_replica_must_still_be_its_inventoried_copy_before_the_next_stage_uses_it(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    replica = world["tmp"] / "replica-root"
+    _config(world, replica_workspace=str(replica))
+    code = (
+        "import pathlib,sys;r=pathlib.Path(sys.argv[1]);(r/'data').mkdir(parents=True,exist_ok=True);"
+        "(r/'data'/'CURRENT.json').write_text('{}');(r/'data'/'merge-attestation.json').write_text('a')"
+    )
+    stages = [
+        {
+            "id": "copy",
+            "must_not_exist": [str(replica)],
+            "outputs": [str(replica / "data" / "CURRENT.json")],
+            "argv": ["{python}", "-c", code, str(replica)],
+        },
+        {
+            "id": "inv",
+            "requires": ["copy"],
+            "builtin": "replica_inventory",
+            "outputs": ["{cycle}/inv.json"],
+        },
+        {
+            "id": "spec",
+            "requires": ["inv"],
+            "verify_inventory": {
+                "file": "{cycle}/inv.json",
+                "root": "{replica_workspace}",
+                "except": [str(replica / "data" / "merge-attestation.json")],
+            },
+            "outputs": ["{cycle}/spec.txt"],
+            "argv": _write_stage("{cycle}/spec.txt"),
+        },
+    ]
+    graph = _graph(world, stages)
+    assert _drive(world, graph, "--through", "inv") == 0
+    (replica / "data" / "merge-attestation.json").write_text(
+        "recreated", encoding="utf-8"
+    )  # expected to change
+    assert _drive(world, graph, "--only", "spec") == 0
+    (replica / "data" / "CURRENT.json").write_text(
+        '{"edited": true}', encoding="utf-8"
+    )  # a copied byte corrupted
+    assert _drive(world, graph, "--only", "spec", "--replace") == 2
+    (replica / "data" / "extra.json").write_text("x", encoding="utf-8")
+    (replica / "data" / "CURRENT.json").write_text("{}", encoding="utf-8")
+    assert (
+        _drive(world, graph, "--only", "spec", "--replace") == 2
+    )  # an added file is a change too
+    shipped = _stage("replica-spec")["verify_inventory"]
+    assert shipped["file"] == "{cycle}/replica-inventory.json"
+    assert shipped["except"] == ["{replica_coordination_root}/merge-attestation.json"]

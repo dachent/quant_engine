@@ -827,9 +827,19 @@
       ]
     },
     {
-      "id": "replica-provider-generations",
+      "id": "replica-inventory",
       "requires": [
         "replica-copy"
+      ],
+      "builtin": "replica_inventory",
+      "outputs": [
+        "{cycle}/replica-inventory.json"
+      ]
+    },
+    {
+      "id": "replica-provider-generations",
+      "requires": [
+        "replica-inventory"
       ],
       "builtin": "replica_provider_generations",
       "outputs": [
@@ -912,7 +922,14 @@
         "{ledger_receipt}",
         "--provider-generations",
         "{replica_provgens}"
-      ]
+      ],
+      "verify_inventory": {
+        "file": "{cycle}/replica-inventory.json",
+        "root": "{replica_workspace}",
+        "except": [
+          "{replica_coordination_root}/merge-attestation.json"
+        ]
+      }
     },
     {
       "id": "lanes",
