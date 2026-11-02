@@ -29,9 +29,9 @@ DECLARATION = {
     "schema": "strategy-basis-declaration/1",
     "strategies": [{"strategy_id": "strategy-1", "basis": "SLEEVE_EPOCH"}],
 }
-# sha256 of the canonical report bytes the unmodified main (59db826d, after #744 and #764) builds from this
+# sha256 of the canonical report bytes the unmodified main (f10eb617, after the pass-29 and pass-30 wording) builds from this
 # fixture with no declaration; the switch off must reproduce them exactly
-MAIN_OFF_DIGEST = "5f88af487c244fc5ff2b397176ad1c31bf8d4b24f1042adb6da5f67247968df1"
+MAIN_OFF_DIGEST = "10a40c5dca2aa4f4ba475f7d117dd1499067cbb0d0057a534b8ebceefaf5f6d4"
 
 
 def _facts() -> dict[str, Any]:
