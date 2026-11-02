@@ -31,6 +31,7 @@ import argparse
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -279,17 +280,27 @@ def _validator_check(spec_path: Path) -> None:
     provider_ledger.build_catalog(spec_path)
 
 
+def _put(path: Path, data: bytes) -> None:
+    """Create ``path`` atomically with ``data``; an existing file is accepted only if identical."""
+
+    if path.exists():
+        if path.read_bytes() != data:
+            raise LedgerSpecError(
+                "OUTPUT_EXISTS",
+                f"{path} exists with other content; outputs are create-only",
+            )
+        return
+    staging = path.with_name(path.name + ".tmp")
+    staging.write_bytes(data)
+    os.replace(staging, path)
+
+
 def write_and_check(
     built: Mapping[str, Any],
     check: Callable[[Path], None] = _validator_check,
 ) -> dict[str, Any]:
     out: Path = built["out"]
     observation_path, spec_path = out / OBSERVATION_NAME, out / SPEC_NAME
-    for path in (observation_path, spec_path):
-        if path.exists():
-            raise LedgerSpecError(
-                "OUTPUT_EXISTS", f"{path} already exists; outputs are create-only"
-            )
     observation_bytes = _dumps(built["observation"])
     spec = dict(built["spec"])
     spec["run_observation"] = {
@@ -299,15 +310,15 @@ def write_and_check(
     }
     spec_bytes = _dumps(spec)
     out.mkdir(parents=True, exist_ok=True)
-    with observation_path.open("xb") as handle:
-        handle.write(observation_bytes)
-    with spec_path.open("xb") as handle:
-        handle.write(spec_bytes)
+    # Resumable: a file that already holds exactly these bytes is kept (an interrupted earlier run,
+    # or a finished one, is re-validated below); a file with other bytes is a refusal.
+    _put(observation_path, observation_bytes)
+    _put(spec_path, spec_bytes)
     try:
         check(spec_path)
     except Exception as exc:
         for path in (observation_path, spec_path):
-            path.rename(path.with_name(path.name + ".rejected"))
+            os.replace(path, path.with_name(path.name + ".rejected"))
         raise LedgerSpecError("SELF_CHECK", f"{type(exc).__name__}: {exc}") from exc
     return {
         "run_observation": observation_path.as_posix(),
