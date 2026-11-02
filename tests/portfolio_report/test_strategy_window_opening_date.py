@@ -178,6 +178,12 @@ def test_window_opens_at_the_opening_nav_date_and_annualises_over_it(
             - date.fromisoformat(opening)
         ).days
     )
+    # a row that opened inside its close year: the YTD window is the whole window
+    if first[:4] == END[:4]:
+        assert after["ytd_window"]["start"] == opening
+        assert after["ytd_window"]["days"] == days
+        assert after["annualisation_basis"]["ytd_twr"]["window_days"] == days
+        assert before["ytd_window"]["days"] == days - 1
     # the annualised CAGR the report publishes over that window
     assert reporter._cagr(cumulative, opening, END) != reporter._cagr(
         cumulative, first, END
