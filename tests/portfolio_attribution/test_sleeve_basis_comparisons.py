@@ -520,7 +520,7 @@ def test_report_row_is_sleeve_primary_with_a_labelled_account_block(
                 f"{prefix}_assignment_authority",
                 f"{prefix}_assignment_status",
                 f"{prefix}_comparison_reason",
-                f"{prefix}_comparison_window",
+                f"{prefix}_comparison_window",  # carried once, by the annualization
                 f"{prefix}_effective_end",
                 f"{prefix}_effective_start",
                 f"{prefix}_evidence_status",
@@ -811,6 +811,7 @@ def test_the_window_limit_is_derived_from_the_window_and_the_cutoff(
 ) -> None:
     cutoff = "2026-01-03"
     limits = {}
+    closures = {}
     for window_end in ("2026-01-01", "2026-01-02"):
         sub = tmp_path / window_end
         sub.mkdir()
@@ -820,6 +821,7 @@ def test_the_window_limit_is_derived_from_the_window_and_the_cutoff(
             {STRATEGY: _restatement()},
         )
         limits[window_end] = row["comparison_basis"]["benchmark_window_limit"]
+        closures[window_end] = row["comparison_basis"]["benchmark_closure"]
         # the window labels the payload carries are the lane's own start and end
         merged = report._merge_attribution(  # noqa: SLF001
             _strategies(),
@@ -842,17 +844,20 @@ def test_the_window_limit_is_derived_from_the_window_and_the_cutoff(
         assert provider_window["end"] == window_end
     short, full = limits["2026-01-01"], limits["2026-01-02"]
     assert short["status"] == "SHORT_OF_CUTOFF" and short["days_short"] == 2
-    assert short["uncovered_sleeve_dates"] == {
-        "count": 1,
-        "first": "2026-01-02",
-        "last": "2026-01-02",
-    }
+    # carried once, in the closure beside the limit
+    assert "uncovered_sleeve_dates" not in short
+    assert (
+        closures["2026-01-01"]["sleeve_dates_after_window_count"],
+        closures["2026-01-01"]["sleeve_dates_after_window_first"],
+        closures["2026-01-01"]["sleeve_dates_after_window_last"],
+    ) == (1, "2026-01-02", "2026-01-02")
     assert "2 days before the calculation cutoff 2026-01-03" in short["sentence"]
     assert (
-        "R3" in short["sentence"] and short["reference_series_id"] in short["sentence"]
+        "R3" in short["sentence"]
+        and closures["2026-01-01"]["reference_series_id"] in short["sentence"]
     )
     assert full["status"] == "SHORT_OF_CUTOFF" and full["days_short"] == 1
-    assert full["uncovered_sleeve_dates"]["count"] == 0
+    assert closures["2026-01-02"]["sleeve_dates_after_window_count"] == 0
     # a window that reaches the cutoff says so
     reaching = report._window_limit(  # noqa: SLF001
         {

@@ -5032,11 +5032,8 @@
       "required": [
         "calculation_cutoff_date",
         "days_short",
-        "reference_series_id",
-        "reference_stored_end",
         "sentence",
         "status",
-        "uncovered_sleeve_dates",
         "window_end",
         "window_start"
       ],
@@ -5049,14 +5046,6 @@
           "type": "integer",
           "minimum": 0
         },
-        "reference_series_id": {
-          "type": "string",
-          "minLength": 1
-        },
-        "reference_stored_end": {
-          "type": "string",
-          "format": "date"
-        },
         "sentence": {
           "type": "string",
           "minLength": 1
@@ -5066,35 +5055,6 @@
             "AT_CUTOFF",
             "SHORT_OF_CUTOFF"
           ]
-        },
-        "uncovered_sleeve_dates": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "count",
-            "first",
-            "last"
-          ],
-          "properties": {
-            "count": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "first": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "format": "date"
-            },
-            "last": {
-              "type": [
-                "string",
-                "null"
-              ],
-              "format": "date"
-            }
-          }
         },
         "window_end": {
           "type": "string",

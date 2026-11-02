@@ -9432,18 +9432,6 @@ def _strategy_underwriting(
                 cluster.get("observed_pair_correlation_maximum") if cluster else None
             ),
             "strategy_systematic_weight": strategy.get("systematic_weight"),
-            **(
-                {
-                    "strategy_systematic_weight_account_basis": account_lanes[
-                        strategy_id
-                    ]["systematic_weight"],
-                    "strategy_weight_account_basis_label": account_lanes[strategy_id][
-                        "label"
-                    ],
-                }
-                if account_lanes is not None and strategy_id in account_lanes
-                else {}
-            ),
             # The two weights come from two sets: the strategy's current cutoff weight
             # and the policy weights behind the cluster budget.
             "strategy_weight_basis": strategy.get("weight_basis"),
@@ -9638,8 +9626,14 @@ def _strategy_underwriting(
                                 "basis": _object(
                                     strategy.get("return_scope"), "return scope"
                                 ).get("basis"),
-                                "basis_label": strategy.get("return_scope_label"),
-                                "account_basis": dict(account_lanes[strategy_id]),
+                                # carried once: the label is the strategy row's own
+                                # `return_scope_label`, the figures (return, drawdowns,
+                                # value, weight, series, window) are the account row's
+                                # `account_basis` block, named here by key
+                                "account_basis_ref": {
+                                    key: account_lanes[strategy_id][key]
+                                    for key in ("account_id", "block", "series_sha256")
+                                },
                             }
                             if account_lanes is not None
                             and strategy_id in account_lanes
