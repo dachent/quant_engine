@@ -4126,6 +4126,7 @@ def test_preparation_forwards_evaluation_to_each_release_recipe(
     assert all(recipe["evaluated_on"] == "2026-09-19" for recipe in recipes)
     # no sleeve policy in this fixture: no declaration is passed, the default path
     assert recipes[1]["strategy_basis_path"] is None
+    assert recipes[1]["sleeve_facts_path"] is None
 
 
 def test_source_clock_excludes_finite_history_from_live_common_eod() -> None:
@@ -5145,6 +5146,75 @@ def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
     inputs = checkpoint["input_identity"]["inputs"]
     assert inputs["strategy_basis_declaration"] == preparation._definition(declaration)
     assert "sleeve-facts" in checkpoint["input_identity"]["predecessors"]
+
+
+def test_a_declaration_hands_its_facts_to_the_final_release_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report refuses a declaration without the facts: the recipe must carry both."""
+
+    import build_sleeve_facts_release as sleeve_release
+    import portfolio_release_builder as release
+
+    spec, calls, _identity = _preparation_function_fixture(
+        tmp_path, monkeypatch, history_rebuild_required=True
+    )
+    section = _sleeve_section(tmp_path)
+    declaration = tmp_path / "strategy-basis-declaration.json"
+    declaration.write_bytes(b'{"schema":"strategy-basis-declaration/1"}')
+    original = preparation._validated_inputs
+
+    def with_declaration(*args: object) -> tuple[dict[str, object], object]:
+        config, plan = original(*args)
+        return {
+            **config,
+            "sleeve_facts": section,
+            "strategy_basis_declaration": preparation._definition(declaration),
+        }, plan
+
+    monkeypatch.setattr(preparation, "_validated_inputs", with_declaration)
+
+    def build(**kwargs: Any) -> dict[str, object]:
+        destination = Path(kwargs["output_dir"])
+        _facts_file(destination, "sleeve-account-facts", "sleeve-account-facts.json")
+        _facts_file(destination, "quantbase-fund-facts", "quantbase-fund-facts.json")
+        return {
+            "files": [
+                {"path": "sleeve-account-facts.json"},
+                {"path": "quantbase-fund-facts.json"},
+            ]
+        }
+
+    monkeypatch.setattr(sleeve_release, "build_release_sleeve_facts", build)
+
+    def rebuild(*_args: object, **_kwargs: object) -> Path:
+        calls["history"] += 1
+        normalized = tmp_path / "rebuilt" / "normalized"
+        normalized.mkdir(parents=True, exist_ok=True)
+        (normalized / "generation.json").write_text("{}", encoding="utf-8")
+        return normalized
+
+    monkeypatch.setattr(preparation, "_rebuild_layered_history", rebuild)
+    recipes: list[dict[str, object]] = []
+
+    def create_recipe(**kwargs: object) -> None:
+        recipes.append(dict(kwargs))
+        preparation._write(Path(str(kwargs["output"])), {})
+
+    monkeypatch.setattr(release, "create_recipe", create_recipe)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    final = recipes[-1]
+    assert final["strategy_basis_path"] == declaration.resolve()
+    assert final["sleeve_facts_path"] == (
+        output / "preparation" / "sleeve-facts" / "sleeve-account-facts.json"
+    )
 
 
 def test_a_declaration_without_the_sleeve_configuration_is_refused(

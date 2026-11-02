@@ -2589,6 +2589,9 @@ def _prepare_attended_inputs(
             nested_tag_map_path=_sleeve_tag_map_path(config.get("sleeve_facts")),
             sleeve_disclosure_sources_path=disclosure_sources_path,
             strategy_basis_path=_strategy_basis_declaration_path(config),
+            sleeve_facts_path=(
+                basis_facts_path if basis_declaration_path is not None else None
+            ),
         )
         checkpoint(
             "epoch",
