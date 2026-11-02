@@ -1534,3 +1534,41 @@ def test_a_copied_attestation_is_removed_in_the_replica_only_and_the_ceremony_us
     assert argv[argv.index("--expected") + 1] == "{expected_baseline_arg}"
     ids = [s["id"] for s in _shipped()["stages"]]
     assert ids.index("replica-clear-attestation") < ids.index("replica-attest")
+
+
+def test_replica_only_may_read_the_live_workspace_but_full_probe_still_refuses_it(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    live = world["tmp"] / "live"
+    (live / "dataPortfolio").mkdir(parents=True)
+    ceremony = _ceremony_world(world)
+    stage = {
+        "id": "spec",
+        "live_guard_keys": ["portfolio_root"],
+        "outputs": ["{cycle}/spec.txt"],
+        "argv": _write_stage("{cycle}/spec.txt"),
+    }
+    graph = _graph(world, [stage])
+    _config(
+        world,
+        mode="probe",
+        live_workspace=str(live),
+        portfolio_root=str(live / "dataPortfolio"),
+    )
+    before = _tree(live)
+    assert (
+        _drive(world, graph) == 0
+    )  # replica-only: reading the live portfolio root is allowed
+    assert _tree(live) == before
+    _config(world, ceremony="full")
+    assert (
+        _drive(world, graph, "--only", "spec", "--replace") == 2
+    )  # a full probe still refuses it
+    _config(world, ceremony="replica-only")
+    bad = {**stage, "outputs": [str(live / "dataPortfolio" / "x.txt")]}
+    _config(world, source_workspace=str(live))
+    assert (
+        _drive(world, _graph(world, [bad]), "--only", "spec", "--replace") == 2
+    )  # writing it is refused
+    assert not (live / "dataPortfolio" / "x.txt").exists()
+    assert ceremony["real"]

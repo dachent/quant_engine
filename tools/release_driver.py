@@ -610,6 +610,10 @@ def check_probe_guard(run: Run, stage: Mapping[str, Any]) -> None:
 
     if run.values["mode"] != "probe":
         return
+    if run.values["ceremony"] == REPLICA_ONLY:
+        # a replica-only run may READ the real roots (the replica copy and its spec bind them); what it
+        # may never do is write one, which ``check_replica_guard`` refuses for every declared output
+        return
     keys, spec_template = stage.get("live_guard_keys", []), stage.get("guard_spec")
     if not keys and spec_template is None:
         return
