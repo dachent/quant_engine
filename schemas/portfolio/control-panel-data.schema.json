@@ -375,6 +375,19 @@
         "additionalProperties": false,
         "required": ["canonical_live_series_sha256", "evidence_layer", "factor_window_observed_end", "factor_window_observed_start", "factor_window_return_observations", "factor_window_series_sha256", "generation_id", "live_version_ref", "observed_end", "observed_start", "report_catalog_version_ref", "return_observations", "series_id", "strategy_id", "strategy_version"],
         "properties": {
+          "account_basis": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["account_id", "label", "observations", "observed_end", "observed_start", "series_sha256"],
+            "properties": {
+              "account_id": { "type": "string", "minLength": 1 },
+              "label": { "type": "string", "minLength": 1 },
+              "observations": { "type": "integer", "minimum": 1 },
+              "observed_end": { "type": "string", "format": "date" },
+              "observed_start": { "type": "string", "format": "date" },
+              "series_sha256": { "$ref": "#/$defs/hash" }
+            }
+          },
           "canonical_live_series_sha256": { "$ref": "#/$defs/hash" },
           "evidence_layer": { "enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE"] },
           "factor_window_observed_end": { "type": "string", "format": "date" },

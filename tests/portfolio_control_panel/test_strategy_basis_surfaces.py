@@ -342,3 +342,64 @@ def test_switched_off_the_canonical_series_row_has_no_account_block() -> None:
     (empty,) = _canonical({})
     assert "account_basis" not in plain
     assert json.dumps(plain, sort_keys=True) == json.dumps(empty, sort_keys=True)
+
+
+def _canonical_row_validator() -> Any:
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    root = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "schemas"
+            / "portfolio"
+            / "control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    item = root["properties"]["canonical_strategy_series"]["items"]
+    return Draft202012Validator(
+        {"$defs": root["$defs"], **item}, format_checker=FormatChecker()
+    )
+
+
+def _canonical_row() -> dict[str, Any]:
+    return {
+        "canonical_live_series_sha256": SHA,
+        "evidence_layer": "ACCOUNT_LIVE",
+        "factor_window_observed_end": "2026-09-17",
+        "factor_window_observed_start": "2026-02-02",
+        "factor_window_return_observations": 160,
+        "factor_window_series_sha256": SHA,
+        "generation_id": SHA,
+        "live_version_ref": "live",
+        "observed_end": "2026-09-17",
+        "observed_start": "2026-02-02",
+        "report_catalog_version_ref": "catalog",
+        "return_observations": 160,
+        "series_id": "S",
+        "strategy_id": SID,
+        "strategy_version": "1",
+    }
+
+
+def test_the_closed_panel_schema_admits_the_labelled_account_lane_on_a_canonical_row() -> (
+    None
+):
+    validator = _canonical_row_validator()
+    row = _canonical_row()
+    assert not list(validator.iter_errors(row))
+    lane = {
+        "account_id": "acct",
+        "label": "whole account acct incl. the unallocated margin bucket",
+        "observations": 171,
+        "observed_end": "2026-09-17",
+        "observed_start": "2026-01-22",
+        "series_sha256": SHA,
+    }
+    assert not list(validator.iter_errors({**row, "account_basis": lane}))
+    # the block is closed and every member is required
+    assert list(validator.iter_errors({**row, "account_basis": {**lane, "x": 1}}))
+    without = {key: value for key, value in lane.items() if key != "label"}
+    assert list(validator.iter_errors({**row, "account_basis": without}))
+    assert list(
+        validator.iter_errors({**row, "account_basis": {**lane, "series_sha256": "z"}})
+    )
