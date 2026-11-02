@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
+import types
 from pathlib import Path
 
 import pytest
@@ -67,3 +69,79 @@ def test_inventories_are_identical_for_serial_and_parallel_hashing(
         )
     assert results[0] == results[1]
     assert len(results[0][0]) == 40
+
+
+class _StubManifest:
+    generation_id = "g1"
+    verification = pipeline.VerificationStatus.VERIFIED
+    coverage = types.SimpleNamespace(
+        status=pipeline.CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    )
+
+    @classmethod
+    def from_json_bytes(cls, _content: bytes) -> type[_StubManifest]:
+        return cls
+
+
+def _generation_node(
+    tmp_path: Path, source_dir: Path | None
+) -> tuple[types.SimpleNamespace, pipeline.GenerationNode]:
+    spec = types.SimpleNamespace(roots={"r": tmp_path / "root"})
+    holder = source_dir or tmp_path / "root" / "generations" / "g1"
+    holder.mkdir(parents=True)
+    (holder / "generation.json").write_bytes(b"{}")
+    (holder / "data.bin").write_bytes(b"x" * 100)
+    expected = pipeline._inventory(holder)
+    manifest_sha256 = hashlib.sha256(b"{}").hexdigest()
+    node = pipeline.GenerationNode(
+        node_id="n",
+        depends_on=(),
+        root_id="r",
+        generation_id="g1",
+        manifest_sha256=manifest_sha256,
+        files=expected,
+        source_dir=source_dir,
+        release_target=True,
+    )
+    return spec, node
+
+
+@pytest.mark.parametrize(
+    ("layout", "expected_inventories"),
+    [("in-place", 1), ("present-destination", 2), ("fresh-copy", 3)],
+)
+def test_verify_generation_hashes_each_tree_only_when_it_could_have_changed(
+    layout: str,
+    expected_inventories: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pipeline, "GenerationManifest", _StubManifest)
+    source = None if layout == "in-place" else tmp_path / "source"
+    spec, node = _generation_node(tmp_path, source)
+    if layout == "present-destination":
+        shutil.copytree(source, tmp_path / "root" / "generations" / "g1")
+    calls: list[Path] = []
+    real = pipeline._inventory
+    monkeypatch.setattr(
+        pipeline, "_inventory", lambda path: (calls.append(path), real(path))[1]
+    )
+    assert pipeline._verify_generation(spec, node, materialize=True) == (
+        node.manifest_sha256
+    )
+    assert len(calls) == expected_inventories
+    destination = tmp_path / "root" / "generations" / "g1"
+    assert real(destination) == node.files
+
+
+def test_verify_generation_still_refuses_a_differing_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline, "GenerationManifest", _StubManifest)
+    source = tmp_path / "source"
+    spec, node = _generation_node(tmp_path, source)
+    destination = tmp_path / "root" / "generations" / "g1"
+    shutil.copytree(source, destination)
+    (destination / "data.bin").write_bytes(b"y" * 100)
+    with pytest.raises(pipeline.PipelineExecutionError, match="destination"):
+        pipeline._verify_generation(spec, node, materialize=True)

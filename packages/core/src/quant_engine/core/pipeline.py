@@ -3388,12 +3388,18 @@ def _verify_generation(
         is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
     ):
         raise PipelineValidationError(f"{node.node_id} release coverage is incomplete")
+    # The destination's inventory is only re-hashed at the end when something
+    # could have changed it since it was last compared with `expected`: an
+    # in-place source or an already present destination was just compared, so
+    # a second pass over the same unwritten tree would repeat that result.
+    destination_verified = source.resolve() == destination.resolve()
     if source.resolve() != destination.resolve() and materialize:
         if destination.exists():
             if _inventory(destination) != expected:
                 raise PipelineExecutionError(
                     f"{node.node_id} destination generation differs"
                 )
+            destination_verified = True
         else:
             destination.parent.mkdir(parents=True, exist_ok=True)
             temporary = Path(
@@ -3419,7 +3425,7 @@ def _verify_generation(
                     and temporary.parent.resolve() == destination.parent.resolve()
                 ):
                     shutil.rmtree(temporary)
-    if materialize and _inventory(destination) != expected:
+    if materialize and not destination_verified and _inventory(destination) != expected:
         raise PipelineExecutionError(f"{node.node_id} destination verification failed")
     return manifest_hash
 
