@@ -457,6 +457,7 @@ def _copy_repo(destination: Path) -> None:
         source = REPO_ROOT / relative
         if source.is_dir():
             shutil.copytree(source, destination / relative, ignore=ignore)
+    shutil.copy2(REPO_ROOT / ".gitignore", destination / ".gitignore")
     graph = destination / "ops" / "mvp2-release"
     graph.mkdir(parents=True)
     _git(destination, "init", "-q")
@@ -478,6 +479,8 @@ def staged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]
     )
     patch = pytest.MonkeyPatch()
     patch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", objects)
+    # the stage tools run in the copy: they must leave its tree clean (no bytecode)
+    patch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     cycle_world = real_cycle(base / "world")
     repo = base / "repo"
     repo.mkdir()
