@@ -27,6 +27,7 @@
     "mvp2": "{repo_root}/ops/mvp2-release/scripts",
     "contract": "{repo_root}/contracts/portfolio-financial-mvp-source-v1.json",
     "source_matrix": "{repo_root}/generated/financial-mvp/source-matrix.json",
+    "resolved_cycle": "{cycle}/resolved-cycle.json",
     "ledger_receipt": "{run}/stages/ledger/generations/{ledger_id}/admit-or-declare-receipt.json",
     "ledger_catalog": "{run}/stages/ledger/generations/{ledger_id}/provider-ledger.json",
     "pre": "{cycle}/pre",
@@ -591,6 +592,15 @@
         "recipe"
       ],
       "builtin": "provider_generations",
+      "config_inputs": {
+        "provider_sources": {
+          "from_ledger": [
+            "{cycle}/ledger-spec.json",
+            "{resolved_cycle}",
+            "{ledger_catalog}"
+          ]
+        }
+      },
       "outputs": [
         "{cycle}/provider-generations.json"
       ]

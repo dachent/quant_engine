@@ -83,9 +83,14 @@ claim the validator rejects leaves both files as `*.rejected`.
 ## B2: `provider_sources: "from_ledger"` in the release driver
 
 See `docs/release-driver.md` (Run configuration). The `provider-generations` stage derives each
-`provider-<id>` row from `{cycle}/ledger-spec.json` and compares it with the staged ledger catalog
-(graph path `ledger_catalog`); a different generation id, a directory that is not that generation,
-or an override for an unbound root is a refusal. The explicit map form still works.
+`provider-<id>` row from the resolved cycle (`{cycle}/resolved-cycle.json`: the provider's
+`generation_dir` under the root its cycle-manifest root key names). `{cycle}/ledger-spec.json` must name
+the same root, generation id and manifest hash, and the staged ledger catalog (graph path
+`ledger_catalog`) must admit that generation id; a disagreement, a directory that is not that
+generation inside its root, or a run configuration that still has `real_root_overrides` (retired) is a
+refusal. A provider whose bytes live in another root is declared so in the cycle manifest. Both files
+and the catalog are recorded as stage inputs, so a resumed run refuses a changed one. The explicit map
+form still works.
 
 The row for each provider is `<ledger-spec providers.<id>.root>/generations/<generation_id>`. When
 the cycle staged a provider generation in one place for the ledger but the run must bind another

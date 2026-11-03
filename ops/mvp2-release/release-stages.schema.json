@@ -76,6 +76,7 @@
         "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
         "requires": {"$ref": "#/$defs/strings"},
         "inputs": {"$ref": "#/$defs/strings"},
+        "config_inputs": {"type": "object", "additionalProperties": {"type": "object", "additionalProperties": {"$ref": "#/$defs/strings"}}},
         "outputs": {"$ref": "#/$defs/strings"},
         "must_not_exist": {"$ref": "#/$defs/strings"},
         "only_scheme": {"enum": ["git-commit-v1", "git-tree-v2"]},
