@@ -92,7 +92,7 @@ def test_a5_account_live_cagr_label_renders_beside_the_cagr_not_the_cumulative_r
         account_live_cagr_annualization=_label(
             basis="CAGR",
             frequency="DAILY",
-            label="annualized from 183 daily observations, 2026-01-09..2026-07-10 (<1 year)",
+            label="annualized over 182 calendar days (183 daily returns), 2026-01-09..2026-07-10 (<1 year)",
             observations=183,
             periods_per_year=None,
         ),
@@ -109,9 +109,9 @@ def test_a5_account_live_cagr_label_renders_beside_the_cagr_not_the_cumulative_r
     # rather than the label being attached to the cumulative-return figure.
     # F50: a label that already carries its own parenthesis is joined with " · ", not nested.
     label_html_variants = (
-        "CAGR 21.0% · annualized from 183 daily observations, "
+        "CAGR 21.0% · annualized over 182 calendar days (183 daily returns), "
         "2026-01-09..2026-07-10 (&lt;1 year)",
-        "CAGR 21.0% · annualized from 183 daily observations, "
+        "CAGR 21.0% · annualized over 182 calendar days (183 daily returns), "
         "2026-01-09..2026-07-10 (<1 year)",
     )
     assert any(variant in table for variant in label_html_variants)

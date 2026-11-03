@@ -87,3 +87,100 @@ def test_a_retained_strategy_carries_the_economic_exit_day_and_how_its_end_is_da
         "economic_end_date": None,
         "end_recognition_basis": None,
     }
+
+
+def test_the_mixed_basis_disclosure_is_stated_with_a_bridge_that_foots() -> None:
+    """T6: the row says it mixes bases, names the ruling and release, and the printed terms sum."""
+
+    import re
+    from decimal import Decimal
+
+    item = {
+        "strategy_id": "p123-ai-factor",
+        "return_window_start": "2030-01-02",
+        "return_close_date": "2030-09-03",
+        "window_days": 244,
+        "mwr_opening_date": "2030-01-10",
+        "mwr_terminal_date": "2030-09-03",
+        "annualisation_basis": {"mwr_xirr": {"window_days": 236}},
+    }
+    report: dict[str, Any] = {"strategy_summary": [item]}
+    sleeves = {f"{PARENT}-s{n}": PARENT for n in (1, 2, 3)}
+    report_module._apply_return_scope(report, _rows(), sleeves, ["p123-ai-factor"])
+    label = item["return_scope_label"]
+    disclosure = item["return_scope"]["mixed_basis_disclosure"]
+
+    assert "MIXED BASIS: this row mixes account and sleeve bases" in label
+    assert "2030-01-02 to 2030-09-03, 244 days" in label
+    assert (
+        "parent account's (2030-01-02" in label
+        and "sleeve epoch's (2030-01-10" in label
+    )
+    assert (
+        "Account-by-strategy epoch rows (Performance & HWM) and the dollar-value chart "
+        "show the sleeve's own values; model-vs-actual audit epochs are on the parent "
+        "account (the parent account)"
+    ) in label
+    assert "[source: ADR 0002 / #624]" in label
+    assert "2030-01-10 to 2030-09-03, 236 days" in label
+    assert "owner ruled" in label and "restated to the sleeve basis" in label
+    assert f"release {report_module.MIXED_BASIS_SCHEDULED_RELEASE}" in label
+    assert disclosure["status"] == "MIXED_BASIS"
+    assert disclosure["scheduled_release"] == "R2.2"
+    # footing: the terms as printed in the label sum to the printed net
+    bridge = re.search(r"points: (.*?) \(net ([+-][\d.]+)\)", label)
+    assert bridge is not None
+    terms = [Decimal(m) for m in re.findall(r" ([+-]\d+\.\d+)(?:,|$)", bridge.group(1))]
+    assert len(terms) == len(report_module.MIXED_BASIS_BRIDGE_POINTS) == 3
+    assert sum(terms) == Decimal(bridge.group(2)) == Decimal("1.086")
+    # audit figure plus the net lands on the sleeve-basis return to within the terms' 0.001 rounding
+    audit = Decimal(report_module.MIXED_BASIS_AUDIT_FIGURE_PERCENT)
+    assert abs((audit + sum(terms)) - Decimal("15.435")) <= Decimal("0.001")
+    assert [t["points"] for t in disclosure["bridge_points"]] == [
+        f"{t:+}" for t in terms
+    ]
+
+
+def test_the_audit_epoch_clause_names_the_parent_account_from_the_rows_own_fields() -> (
+    None
+):
+    """Pass 29: model-vs-actual audit epochs are on the parent account; it is named from provider and last four."""
+
+    rows = _rows()
+    for row in rows:
+        if row["account_id"].startswith(PARENT):
+            row.update(provider="SYNBROKER", last_four="0042")
+    item = {"strategy_id": "p123-ai-factor"}
+    report: dict[str, Any] = {"strategy_summary": [item]}
+    sleeves = {f"{PARENT}-s{n}": PARENT for n in (1, 2, 3)}
+    report_module._apply_return_scope(report, rows, sleeves, ["p123-ai-factor"])
+    assert (
+        "model-vs-actual audit epochs are on the parent account (SYNBROKER 0042)"
+        in item["return_scope_label"]
+    )
+
+
+def test_the_matrix_clause_is_scoped_to_the_current_perimeter_matrix() -> None:
+    """Pass 29: providers with no admitted path are not all in the matrix the page prints."""
+
+    text = (
+        "7 accepted flow records across SYNPROV; providers without an admitted flow path "
+        "remain explicit in the account fact matrix"
+    )
+    scoped = report_module._matrix_scope_clause(text)
+    assert "remain explicit in the account fact matrix" not in scoped
+    assert scoped.startswith("7 accepted flow records across SYNPROV; ")
+    assert "explicit in the account fact matrix when the account is in it" in scoped
+    assert "accounts not in it are named in the note under the matrix" in scoped
+    assert report_module._matrix_scope_clause("unrelated") == "unrelated"
+
+
+def test_the_positions_effect_clause_no_longer_says_only_current_rows_are_reported() -> (
+    None
+):
+    """Pass 30: the position record count includes dated historical snapshots."""
+
+    old = report_module._POSITIONS_EFFECT
+    new = report_module._POSITIONS_EFFECT_SCOPED
+    assert old.startswith("Only accepted current position rows")
+    assert "Only" not in new and "current and historical snapshots" in new

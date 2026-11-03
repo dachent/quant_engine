@@ -10833,9 +10833,9 @@ def _panel_data(
                 )
             ),
             (
-                "Positions remain partial and FX remains unavailable; the panel does not infer either."
+                "Positions and FX records are not complete; the panel does not infer the missing ones."
                 if position_count
-                else "Positions and FX remain unavailable; the panel does not infer either."
+                else "Positions and FX records are not complete; the panel does not infer the missing ones."
             ),
             "MWR is annualized ACTUAL_365 and remains unavailable unless its declared valuation perimeter and complete dated source-bound flows are present.",
             *(
@@ -10846,7 +10846,7 @@ def _panel_data(
                 == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
                 else []
             ),
-            "Provider, account-live, predecessor, shadow, and backtest evidence are not concatenated.",
+            "Provider, account-live, predecessor, shadow, and backtest evidence are not concatenated, except in the LIVE_PLUS_BACKTEST mode, where version-matched backtest history before live inception is joined to the live line and the joined line is labelled by origin.",
             *(str(row.get("known_gap")) for row in coverage if row.get("known_gap")),
             *source_clock_lines,
             *(
