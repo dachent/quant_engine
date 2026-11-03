@@ -9,7 +9,10 @@ Classes (plan 4.5B):
 
 ``BLOCKER_INVARIANT``   mathematical or logical contradiction
 ``BLOCKER_AUTHORITY``   wrong, unadmitted or stale identity, status or source
-``BLOCKER_REGRESSION``  a fixed-baseline expected value regressed
+``BLOCKER_REGRESSION``  a fixed-baseline expected value regressed; also a payload block (or
+                       the generation's physical size) over its committed budget
+                       (``lint.payload_size`` against ``payload_budget.json``, #540): the
+                       committed budget is the fixed baseline, and an overrun blocks
 ``NOT_READY``           required data unavailable and honestly labelled
 ``WARNING``             plausibility lint; never blocks a run (plan 4.5E)
 
@@ -31,7 +34,7 @@ from pathlib import Path
 import re
 from typing import Any, cast
 
-from . import shell
+from . import facts_bindings, shell, sleeve_basis
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -210,6 +213,16 @@ class Context:
     # the governed source of each strategy's opening capital anchor. ``None`` when the
     # run was given no ledger; the opening date then comes from the manifest trace.
     provider_ledger: Mapping[str, Any] | None = None
+    # #624: the ``strategy-basis-declaration/1`` the generation was built with ({strategy id:
+    # basis}) and the sleeve facts its sleeve epochs stand on.  ``None`` is no declaration:
+    # every strategy is on its parent-account basis and nothing below changes.
+    strategy_basis: Mapping[str, str] | None = None
+    sleeve_facts: Mapping[str, Any] | None = None
+    # the ledger run's own sources the facts are bound against (provider ledger, the IBKR
+    # catalog of its generation, the tag map); refused when absent
+    facts_sources: facts_bindings.FactsSources | None = None
+    # a facts file named a regression reference may lack the corporate-action binding
+    facts_regression_reference: bool = False
 
     @property
     def report(self) -> dict[str, Any]:
@@ -2864,6 +2877,28 @@ def _capital_claims(row: Mapping[str, Any]) -> dict[str, Decimal]:
     return claims
 
 
+def _account_lane_totals(
+    ctx: Context, cutoff_systematic: Decimal
+) -> dict[str, Decimal]:
+    """The cutoff total on the account lane of the declared strategies (#624).
+
+    The baseline's own reconciliation record is stamped on the account basis (the
+    baseline is not rebuilt for a declaration).  Its total is reproducible from the
+    restated cutoff values by taking each declared strategy back from its sleeve value
+    to the account equity: sleeve NAV plus the unallocated bucket (the liability line),
+    both derived from the sleeve facts.  Empty without a declaration and facts.
+    """
+
+    figures = declared_sleeve_figures(ctx)
+    if not figures:
+        return {}
+    shift = sum((f.value - f.parent_equity for f in figures.values()), Decimal(0))
+    return {
+        "sum(current account values at cutoff, account lane of the declared "
+        "strategies)": cutoff_systematic - shift
+    }
+
+
 def _itemized_candidates(
     ctx: Context, row: Mapping[str, Any]
 ) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
@@ -2877,6 +2912,7 @@ def _itemized_candidates(
     reserve_value = reserve or Decimal(0)
     cutoff = cutoff_capital_by_strategy(ctx)
     cutoff_systematic = sum((amount for amount, _ in cutoff.values()), Decimal(0))
+    account_lane = _account_lane_totals(ctx, cutoff_systematic)
     allocation = {
         "sum(allocation_history SYSTEMATIC)": systematic,
         "sum(allocation_history SYSTEMATIC + RESERVE)": systematic + reserve_value,
@@ -2886,6 +2922,7 @@ def _itemized_candidates(
         "sum(current account values at cutoff) + reserve": cutoff_systematic
         + reserve_value,
     }
+    at_cutoff.update(account_lane)
     strategy = row.get("strategy_id")
     if isinstance(strategy, str):
         for item in rows(ctx.report, "allocation_history"):
@@ -4420,6 +4457,463 @@ def check_derived_cash_evidence(ctx: Context) -> Iterator[Finding]:
         )
 
 
+StrategyBasisRefusal = sleeve_basis.Refusal
+FactsSources = facts_bindings.FactsSources
+
+
+def load_facts_sources(
+    ledger: Mapping[str, Any],
+    facts: Mapping[str, Any],
+    ibkr_root: Path | None,
+    tag_map_path: Path | None,
+) -> facts_bindings.FactsSources:
+    """The sources a facts file is bound against (the CLI's reader)."""
+
+    return facts_bindings.load_sources(ledger, facts, ibkr_root, tag_map_path)
+
+
+def parse_strategy_basis(raw: bytes) -> dict[str, str]:
+    """``{strategy id: basis}`` of a ``strategy-basis-declaration/1`` (the CLI's reader)."""
+
+    return sleeve_basis.parse_declaration(raw)
+
+
+def declared_sleeve_figures(ctx: Context) -> dict[str, sleeve_basis.SleeveFigures]:
+    """The independent sleeve derivation of each declared strategy (empty without facts).
+
+    A strategy whose facts are refused is absent here; ``returns.sleeve_basis`` says why,
+    and every basis-aware check that needs the figures fails closed on their absence.
+    """
+
+    declared = getattr(ctx, "strategy_basis", None) or {}
+    if not declared or ctx.sleeve_facts is None:
+        return {}
+    cached = ctx._cache.get("declared_sleeve_figures")
+    if isinstance(cached, dict):
+        return cached
+    figures: dict[str, sleeve_basis.SleeveFigures] = {}
+    for strategy in sorted(declared):
+        try:
+            figures[strategy] = sleeve_basis.derive_sleeve(ctx.sleeve_facts, strategy)
+        except sleeve_basis.Refusal:
+            pass
+    ctx._cache["declared_sleeve_figures"] = figures
+    return figures
+
+
+def declared_sleeve_values(ctx: Context) -> dict[str, Decimal]:
+    """The value of each strategy the declaration states on its sleeve (#624).
+
+    With the sleeve facts, the independent derivation's closing NAV.  Without them, the
+    open sleeve epoch's own manifest value; a strategy with neither is left on the
+    account basis here and ``returns.sleeve_basis`` reports why.
+    """
+
+    declared = getattr(ctx, "strategy_basis", None) or {}
+    if not declared:
+        return {}
+    cached = ctx._cache.get("declared_sleeve_values")
+    if isinstance(cached, dict):
+        return cached
+    values: dict[str, Decimal] = {}
+    derived = declared_sleeve_figures(ctx)
+    for strategy in sorted(declared):
+        if ctx.sleeve_facts is not None:
+            if strategy in derived:
+                values[strategy] = derived[strategy].value
+            continue
+        epochs = [
+            to_decimal(row.get("current_value"))
+            for _, row in manifest_rows(ctx)
+            if str(row.get("strategy_id")) == strategy
+            and row.get("effective_end") is None
+        ]
+        if len(epochs) == 1 and epochs[0] is not None:
+            values[strategy] = epochs[0]
+    ctx._cache["declared_sleeve_values"] = values
+    return values
+
+
+def _other_strategy_capitals(
+    ctx: Context, declared: Mapping[str, str]
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Every undeclared systematic strategy's capital: ``(used, oracle)``.
+
+    The report publishes each capital exactly; the oracle (the expected baseline,
+    derived from the ledger and manifest) states it rounded to the cent, half up.  The
+    published exact capital is used for the weights when it is within half a cent of the
+    oracle's (the documented bound of that rounding); otherwise the oracle's capital is
+    used and the difference is a finding.  Without an oracle the published capital is
+    all there is (the weights are then derived, the capital itself is not independent).
+    """
+
+    oracle: dict[str, Decimal] = {}
+    for expected in ctx.expected or []:
+        if expected.get("metric_id") == "capital.strategy.cutoff":
+            amount = to_decimal(expected.get("expected"))
+            if amount is not None and str(expected.get("entity")) not in declared:
+                oracle[str(expected.get("entity"))] = amount
+    published: dict[str, Decimal] = {}
+    for row in rows(ctx.panel, "strategies"):
+        amount = to_decimal(row.get("current_value_usd"))
+        strategy = str(row.get("strategy_id"))
+        if (
+            amount is not None
+            and strategy not in declared
+            and row.get("record_kind") != "RETAINED_HISTORY_ONLY"
+        ):
+            published[strategy] = amount
+    used: dict[str, Decimal] = {}
+    for strategy in sorted(set(oracle) | set(published)):
+        shown, reference = published.get(strategy), oracle.get(strategy)
+        if reference is None:
+            assert shown is not None
+            used[strategy] = shown
+        elif shown is not None and abs(shown - reference) <= (
+            sleeve_basis.HALF_CENT + Decimal("1e-9")
+        ):
+            used[strategy] = shown
+        else:
+            used[strategy] = reference
+    return used, oracle
+
+
+def _account_basis_blocks(ctx: Context) -> dict[str, Mapping[str, Any]]:
+    """``account_summary[].account_basis`` by account id (the report's, else the panel's)."""
+
+    found: dict[str, Mapping[str, Any]] = {}
+    for document in (ctx.panel, ctx.report):
+        for row in rows(document, "account_summary"):
+            block = row.get("account_basis")
+            if isinstance(block, Mapping) and str(row.get("account_id")) not in found:
+                found[str(row.get("account_id"))] = block
+    return found
+
+
+def _parent_window_findings(
+    ctx: Context, figures: sleeve_basis.SleeveFigures
+) -> Iterator[Finding]:
+    """The parent account lane's window opens at the ledger's opening anchor (#736).
+
+    Derived from the provider ledger's OPENING_CAPITAL_ANCHOR of the declared strategy
+    (``nav_recognition_date``), never from the published block; compared with the window
+    the ``account_basis`` block publishes.  Without a ledger nothing is compared.
+    """
+
+    blocks = _account_basis_blocks(ctx)
+    block = blocks.get(figures.parent_account_id)
+    ledger = ctx.provider_ledger
+    if block is None or not isinstance(ledger, Mapping):
+        return
+    opened = _ledger_opening_date(ctx, figures.strategy_id, figures.end_date)
+    if opened is None:
+        return
+    raw_window = block.get("window")
+    window: Mapping[str, Any] = raw_window if isinstance(raw_window, Mapping) else {}
+    expected_days = (figures.end_date - opened).days
+    for name, shown, wanted in (
+        ("window.start", window.get("start"), opened.isoformat()),
+        ("window.days", window.get("days"), expected_days),
+        # the ledger's opening anchor is an opening NAV date: the window says so
+        (
+            "window.start_kind",
+            window.get("start_kind"),
+            sleeve_basis.START_KIND_OPENING_NAV,
+        ),
+        (
+            "window.days_basis",
+            window.get("days_basis"),
+            sleeve_basis.DAYS_BASIS_EXCLUSIVE,
+        ),
+    ):
+        if shown != wanted:
+            yield _finding(
+                "returns.sleeve_basis",
+                BLOCKER_INVARIANT,
+                figures.strategy_id,
+                shown,
+                wanted,
+                PANEL,
+                f"$.account_summary[{figures.parent_account_id}].account_basis.{name}",
+                (),
+                "PUBLISHED_PARENT_WINDOW_DIFFERS: the account lane's window opens at the "
+                "ledger's opening anchor and runs to the end date",
+            )
+
+
+def _bridge_window_findings(
+    ctx: Context, figures: sleeve_basis.SleeveFigures
+) -> Iterator[Finding]:
+    """The account-to-sleeve bridge's windows declare the convention of their start dates.
+
+    The sleeve window is re-derived from the sleeve facts; the account window must be the
+    ``account_basis`` block's own window (kind and day count included).
+    """
+
+    entries = node(ctx.panel, "strategy_basis_disclosure", "strategies")
+    entry = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, Mapping)
+            and item.get("strategy_id") == figures.strategy_id
+        )
+        if isinstance(entries, list)
+        else iter(()),
+        None,
+    )
+    if entry is None:
+        return
+    ret = node(entry, "bridges", "account_to_sleeve", "return")
+    if not isinstance(ret, Mapping):
+        return
+    first_return = figures.daily_returns[0][0] if figures.daily_returns else None
+    where = f"$.strategy_basis_disclosure.strategies[{figures.strategy_id}].bridges.account_to_sleeve.return"
+    problems = sleeve_basis.window_declaration_findings(
+        ret.get("sleeve_window"),
+        start=figures.opening_date,
+        end=figures.end_date,
+        first_return=first_return,
+        where=f"{where}.sleeve_window",
+    )
+    block = _account_basis_blocks(ctx).get(figures.parent_account_id)
+    window = block.get("window") if isinstance(block, Mapping) else None
+    account_window = ret.get("account_window")
+    if isinstance(window, Mapping):
+        for name in ("start", "end", "days", "days_basis", "start_kind"):
+            if not isinstance(account_window, Mapping) or account_window.get(
+                name
+            ) != window.get(name):
+                problems.append(
+                    sleeve_basis.Finding(
+                        "PUBLISHED_WINDOW_DECLARATION_DIFFERS",
+                        f"{where}.account_window.{name}",
+                        window.get(name),
+                        None
+                        if not isinstance(account_window, Mapping)
+                        else account_window.get(name),
+                        "the bridge's account window is not the account-basis block's window",
+                    )
+                )
+    for finding in problems:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_INVARIANT,
+            figures.strategy_id,
+            finding.published,
+            finding.derived,
+            PANEL,
+            finding.where,
+            (),
+            f"{finding.code}: {finding.message}",
+        )
+
+
+def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
+    """#624: a declared strategy's row is the independent sleeve derivation, no other is.
+
+    The derivation reads the sleeve facts only (``sleeve_basis``); the panel is read
+    afterwards, to compare.  A generation that states a strategy on its sleeve without a
+    declaration naming it is refused, and so is a declared strategy still on its parent
+    account.  With no declaration and no sleeve-basis row this check emits nothing.
+    """
+
+    declared = getattr(ctx, "strategy_basis", None) or {}
+    for position, row in enumerate(rows(ctx.panel, "strategies")):
+        scope = row.get("return_scope")
+        strategy = str(row.get("strategy_id"))
+        if (
+            isinstance(scope, Mapping)
+            and scope.get("basis") == sleeve_basis.BASIS_SLEEVE
+            and strategy not in declared
+        ):
+            yield _finding(
+                "returns.sleeve_basis",
+                BLOCKER_AUTHORITY,
+                strategy,
+                sleeve_basis.BASIS_SLEEVE,
+                "a strategy-basis declaration naming the strategy",
+                PANEL,
+                f"$.strategies[{position}].return_scope.basis",
+                (),
+                "the row is stated on its sleeve but no declaration names the strategy",
+            )
+    if not declared:
+        return
+    if ctx.sleeve_facts is None:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_AUTHORITY,
+            "declaration",
+            sorted(declared),
+            "sleeve facts to derive the declared rows from",
+            "(validator)",
+            "--sleeve-facts",
+            (),
+            "a declaration is in force but no sleeve facts were supplied: the sleeve "
+            "basis cannot be verified independently",
+        )
+        return
+    try:
+        facts_bindings.check_bindings(
+            ctx.sleeve_facts,
+            ctx.facts_sources,
+            regression_reference=ctx.facts_regression_reference,
+        )
+    except sleeve_basis.Refusal as exc:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_AUTHORITY,
+            "sleeve-facts",
+            exc.code,
+            "sleeve facts bound to this run's provider ledger, catalog and tag map",
+            "(sleeve facts)",
+            "bindings",
+            (),
+            str(exc),
+        )
+        return
+    figures = []
+    listed = {
+        str(row.get("account_id")): row for row in rows(ctx.panel, "account_summary")
+    }
+    for strategy in sorted(declared):
+        parent = to_decimal(
+            (listed.get(str(ctx.sleeve_facts.get("parent_account_id"))) or {}).get(
+                "latest_value_usd"
+            )
+        )
+        try:
+            figures.append(
+                sleeve_basis.derive_sleeve(
+                    ctx.sleeve_facts, strategy, parent_equity=parent
+                )
+            )
+        except sleeve_basis.Refusal as exc:
+            yield _finding(
+                "returns.sleeve_basis",
+                BLOCKER_AUTHORITY,
+                strategy,
+                exc.code,
+                "an internally consistent sleeve derivation",
+                "(sleeve facts)",
+                "--sleeve-facts",
+                (),
+                str(exc),
+            )
+    if len(figures) != len(declared):
+        return
+    try:
+        used, oracle = _other_strategy_capitals(ctx, declared)
+        perimeter, weights = sleeve_basis.perimeter_and_weights(figures, used)
+    except sleeve_basis.Refusal as exc:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_AUTHORITY,
+            "portfolio",
+            exc.code,
+            "a positive restated perimeter",
+            "(validator)",
+            "perimeter",
+            (),
+            str(exc),
+        )
+        return
+    events = node(ctx.panel, "invested_capital", "events") or node(
+        ctx.report, "invested_capital", "events"
+    )
+    mwr = None
+    if isinstance(events, list) and figures:
+        try:
+            mwr = sleeve_basis.portfolio_mwr(events, perimeter, figures[0].end_date)
+        except sleeve_basis.Refusal:
+            mwr = None
+    other_weights = {k: v for k, v in weights.items() if k in used}
+    for item in figures:
+        yield from _parent_window_findings(ctx, item)
+        yield from _bridge_window_findings(ctx, item)
+        for finding in sleeve_basis.compare_published(
+            item,
+            perimeter,
+            weights[item.strategy_id],
+            ctx.panel,
+            mwr,
+            other_weights,
+            used,
+            oracle,
+        ):
+            yield _finding(
+                "returns.sleeve_basis",
+                BLOCKER_INVARIANT,
+                item.strategy_id,
+                finding.published,
+                finding.derived,
+                PANEL,
+                finding.where,
+                (),
+                f"{finding.code}: {finding.message}",
+            )
+
+
+def check_sleeve_leverage(ctx: Context) -> Iterator[Finding]:
+    """#624: a restated row's levered and unlevered returns are the independent derivation.
+
+    The derivation reads the sleeve facts only.  A row that publishes the figures must
+    equal it; a row that publishes none must say why (a reason code).
+    """
+
+    declared = getattr(ctx, "strategy_basis", None) or {}
+    if not declared or ctx.sleeve_facts is None:
+        return
+    for position, row in enumerate(rows(ctx.panel, "strategies")):
+        strategy = str(row.get("strategy_id"))
+        if strategy not in declared:
+            continue
+        where = f"$.strategies[{position}]"
+        published = row.get("return_levered_cumulative") is not None
+        if not published:
+            if not row.get("return_levered_na_reason"):
+                yield _finding(
+                    "returns.sleeve_leverage",
+                    BLOCKER_INVARIANT,
+                    strategy,
+                    None,
+                    "levered figures or a reason they are absent",
+                    PANEL,
+                    f"{where}.return_levered_na_reason",
+                    (),
+                    "the restated row publishes neither levered returns nor a reason",
+                )
+            continue
+        try:
+            derived = sleeve_basis.derive_leverage(ctx.sleeve_facts, strategy)
+        except sleeve_basis.Refusal as exc:
+            yield _finding(
+                "returns.sleeve_leverage",
+                BLOCKER_INVARIANT,
+                strategy,
+                "published levered returns",
+                "an internally consistent sleeve derivation",
+                PANEL,
+                where,
+                (),
+                f"{exc.code}: {exc}",
+            )
+            continue
+        for difference in sleeve_basis.compare_leverage(row, derived):
+            yield _finding(
+                "returns.sleeve_leverage",
+                BLOCKER_INVARIANT,
+                strategy,
+                difference,
+                "the independent derivation from the sleeve facts",
+                PANEL,
+                where,
+                (),
+                difference,
+            )
+
+
 def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[str]]]:
     values = {
         str(row.get("account_id")): to_decimal(row.get("latest_value_usd"))
@@ -4427,10 +4921,15 @@ def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[st
     }
     cash = derived_cash_by_strategy(ctx)
     parents = derived_account_parents(ctx)
+    declared = declared_sleeve_values(ctx)
     totals: dict[str, tuple[Decimal, list[str]]] = {}
     for strategy, accounts in current_accounts_by_strategy(ctx).items():
         amount = cash.get(strategy, Decimal(0))
         counted: set[str] = set()
+        if strategy in declared:
+            # #624: a declared strategy stands on its sleeve, not on the account it hangs on
+            totals[strategy] = (amount + declared[strategy], sorted(accounts))
+            continue
         for account in accounts:
             # a derived sleeve epoch's strategy capital is on the account basis of the
             # provider account it hangs on, counted once however many sleeves it has
@@ -5407,6 +5906,177 @@ def strategy_confirmed_retained(ctx: Context, strategy_id: str) -> bool:
     )
 
 
+def _declared_benchmark_findings(
+    ctx: Context,
+    position: int,
+    row: Mapping[str, Any],
+    summary: tuple[int, Mapping[str, Any]] | None,
+) -> Iterator[Finding]:
+    """B3 for a declared strategy: two lanes, each against its own independent figure.
+
+    The comparison keeps the account lane (``metrics``: the whole account, the series the
+    ``account_basis`` block carries) and adds a sleeve lane (``sleeve_basis``).  The sleeve
+    lane's account return is derived here from the sleeve facts (the compound of the
+    sleeve's daily returns dated inside the lane's own window); the account lane's must
+    equal the account figure over the same window; the summary row displays the sleeve
+    lane's.  Without the facts the sleeve lane cannot be derived and the check fails
+    closed.
+    """
+
+    strategy = str(row.get("strategy_id"))
+    pointer = f"$.strategy_attribution.benchmark_comparisons[{position}]"
+    raw_metrics = row.get("metrics")
+    metrics: Mapping[str, Any] = raw_metrics if isinstance(raw_metrics, Mapping) else {}
+    lane = row.get("sleeve_basis")
+    figures = declared_sleeve_figures(ctx).get(strategy)
+    if figures is None:
+        yield _finding(
+            "returns.benchmark_account_return",
+            BLOCKER_AUTHORITY,
+            strategy,
+            None,
+            "an independent sleeve derivation of the benchmark comparison's sleeve lane",
+            REPORT,
+            f"{pointer}.sleeve_basis",
+            ("B3",),
+            "a declared strategy's benchmark comparison needs the sleeve facts to be "
+            "checked: none were derived",
+        )
+        return
+    lane_metrics = (
+        lane.get("metrics")
+        if isinstance(lane, Mapping) and isinstance(lane.get("metrics"), Mapping)
+        else None
+    )
+    if (
+        not isinstance(lane, Mapping)
+        or lane.get("basis") != sleeve_basis.BASIS_SLEEVE
+        or lane_metrics is None
+    ):
+        yield _finding(
+            "returns.benchmark_account_return",
+            BLOCKER_INVARIANT,
+            strategy,
+            None,
+            "a sleeve lane (basis SLEEVE_EPOCH) in the benchmark comparison",
+            REPORT,
+            f"{pointer}.sleeve_basis",
+            ("B3",),
+            "the strategy is stated on its sleeve but its benchmark comparison has no "
+            "sleeve lane",
+        )
+        return
+    start, end = (
+        to_date(lane_metrics.get("observed_start")),
+        to_date(lane_metrics.get("observed_end")),
+    )
+    selected = [
+        value
+        for day, value in figures.daily_returns
+        if (start is None or day >= start) and (end is None or day <= end)
+    ]
+    shown = to_decimal(lane_metrics.get("account_cumulative_return"))
+    if shown is None or not selected:
+        yield _finding(
+            "returns.benchmark_account_return",
+            BLOCKER_INVARIANT,
+            strategy,
+            shown,
+            "the sleeve's compounded return over the lane's window",
+            REPORT,
+            f"{pointer}.sleeve_basis.metrics.account_cumulative_return",
+            ("B3",),
+            "the sleeve lane states no usable return or window",
+        )
+        return
+    computed = compound(selected)
+    if abs(shown - computed) > RETURN_TOLERANCE:
+        yield _finding(
+            "returns.benchmark_account_return",
+            BLOCKER_INVARIANT,
+            strategy,
+            {"sleeve_lane_account_cumulative_return": shown},
+            {
+                "compound_sleeve_series": computed,
+                "sleeve_rows_in_window": len(selected),
+                "window": [start, end],
+            },
+            REPORT,
+            f"{pointer}.sleeve_basis.metrics.account_cumulative_return",
+            ("B3",),
+            "the sleeve lane's account return differs from the sleeve's own series "
+            f"over its window by {shown - computed}",
+        )
+    for name, derived in (
+        ("opening_date", figures.opening_date.isoformat()),
+        ("sleeve_account_id", figures.account_id),
+    ):
+        if lane.get(name) != derived:
+            yield _finding(
+                "returns.benchmark_account_return",
+                BLOCKER_INVARIANT,
+                strategy,
+                lane.get(name),
+                derived,
+                REPORT,
+                f"{pointer}.sleeve_basis.{name}",
+                ("B3",),
+                f"the sleeve lane's {name} is not the sleeve the facts derive",
+            )
+    # the account lane stays: it must equal the account figure over the same window
+    block = _account_basis_blocks(ctx).get(figures.parent_account_id)
+    raw_figure = block.get("figures") if block is not None else None
+    figure: Mapping[str, Any] = raw_figure if isinstance(raw_figure, Mapping) else {}
+    account_shown = to_decimal(metrics.get("account_cumulative_return"))
+    account_figure = to_decimal(figure.get("account_live_cumulative_return"))
+    if account_shown is not None:
+        if account_figure is None:
+            yield _finding(
+                "returns.benchmark_account_return",
+                BLOCKER_INVARIANT,
+                strategy,
+                account_shown,
+                "the account lane's figure in account_summary[...].account_basis",
+                REPORT,
+                f"{pointer}.metrics.account_cumulative_return",
+                ("B3",),
+                "the comparison keeps an account lane that no account_basis figure "
+                "backs",
+            )
+        elif (
+            abs(account_shown - account_figure) > RETURN_TOLERANCE
+            or to_date(metrics.get("observed_start"))
+            != to_date(figure.get("account_live_observed_start"))
+            or to_date(metrics.get("observed_end"))
+            != to_date(figure.get("account_live_observed_end"))
+        ):
+            yield _finding(
+                "returns.benchmark_account_return",
+                BLOCKER_INVARIANT,
+                strategy,
+                account_shown,
+                account_figure,
+                REPORT,
+                f"{pointer}.metrics.account_cumulative_return",
+                ("B3",),
+                "the account lane differs from the account figure over its window",
+            )
+    if summary is not None:
+        displayed = to_decimal(summary[1].get("benchmark_account_cumulative_return"))
+        if displayed is not None and abs(displayed - shown) > RETURN_TOLERANCE:
+            yield _finding(
+                "returns.benchmark_account_return",
+                BLOCKER_INVARIANT,
+                strategy,
+                displayed,
+                shown,
+                REPORT,
+                f"$.strategy_summary[{summary[0]}].benchmark_account_cumulative_return",
+                ("B3",),
+                "the displayed benchmark account return is not the sleeve lane's",
+            )
+
+
 def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
     """B3: the account return inside a benchmark comparison equals the live series."""
 
@@ -5422,6 +6092,11 @@ def check_benchmark_account_return(ctx: Context) -> Iterator[Finding]:
             continue
         metrics = row["metrics"]
         strategy = str(row.get("strategy_id"))
+        if strategy in (getattr(ctx, "strategy_basis", None) or {}):
+            yield from _declared_benchmark_findings(
+                ctx, position, row, summary.get(strategy)
+            )
+            continue
         start, end = (
             to_date(metrics.get("observed_start")),
             to_date(metrics.get("observed_end")),
@@ -8258,6 +8933,11 @@ def _strategy_opening_date(
 
     if first_return is None:
         return None
+    if strategy_id in (getattr(ctx, "strategy_basis", None) or {}):
+        # a declared strategy stands on its sleeve: the window opens at the sleeve's
+        # opening NAV, derived from the facts (never the parent account's anchor)
+        figures = declared_sleeve_figures(ctx).get(str(strategy_id))
+        return figures.opening_date if figures is not None else None
     return _ledger_opening_date(
         ctx, strategy_id, first_return
     ) or _manifest_opening_date(ctx, strategy_id, first_return)
@@ -8294,10 +8974,18 @@ def _opening_window_problems(ctx: Context, row: Mapping[str, Any]) -> dict[str, 
     if end is None or first_return is None:
         return {}
     opened = _strategy_opening_date(ctx, row.get("strategy_id"), first_return)
+    declared_row = row.get("strategy_id") in (
+        getattr(ctx, "strategy_basis", None) or {}
+    )
     if opened is None:
+        if declared_row:
+            # fail closed: a declared strategy's window cannot be derived without facts
+            return {
+                "opening_not_derivable": "the sleeve facts do not derive an opening date"
+            }
         return {}
     problems: dict[str, Any] = {}
-    note = _note_opening_date(ctx, row.get("strategy_id"))
+    note = None if declared_row else _note_opening_date(ctx, row.get("strategy_id"))
     if note is not None and note != opened:
         problems["opening_note_disagrees"] = {
             "derived": opened.isoformat(),
@@ -8823,6 +9511,152 @@ def check_lint_display_tokens(ctx: Context) -> Iterator[Finding]:
         )
 
 
+PAYLOAD_BUDGET_RELATIVE = (
+    Path("apps") / "portfolio-control-panel" / "payload_budget.json"
+)
+
+
+def _payload_budget(ctx: Context) -> tuple[dict[str, Any] | None, str]:
+    """The committed payload budget: the run's repo root first, else the validator's own."""
+
+    own = Path(__file__).resolve().parents[2]
+    roots = ([ctx.repo_root] if ctx.repo_root is not None else []) + [own]
+    for root in roots:
+        path = root / PAYLOAD_BUDGET_RELATIVE
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_bytes())
+            except (OSError, ValueError) as exc:
+                return None, f"{path} is unreadable: {exc}"
+            if (
+                isinstance(loaded, dict)
+                and isinstance(loaded.get("blocks"), dict)
+                and isinstance(loaded.get("physical"), dict)
+                and isinstance(loaded.get("unlisted_block_max_bytes"), int)
+                and isinstance(loaded.get("other_blocks_max_bytes"), int)
+            ):
+                return loaded, str(path)
+            return None, f"{path} lacks the budget members"
+    return None, "payload_budget.json was not found"
+
+
+def payload_block_bytes(panel: Mapping[str, Any]) -> dict[str, int]:
+    """Serialized bytes of each top-level panel block (canonical JSON, the published form)."""
+
+    return {
+        str(key): len(
+            json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        )
+        for key, value in panel.items()
+    }
+
+
+def payload_budget_findings(
+    blocks: Mapping[str, int],
+    physical: Mapping[str, int],
+    budget: Mapping[str, Any],
+) -> list[tuple[str, int, int, str]]:
+    """``(entity, measured, limit, text)`` for every figure over its committed budget."""
+
+    over: list[tuple[str, int, int, str]] = []
+    listed = budget["blocks"]
+    other = 0
+    for name, size in sorted(blocks.items()):
+        if name in listed:
+            if size > listed[name]:
+                over.append(
+                    (name, size, listed[name], f"block {name} is over its budget")
+                )
+        elif size > budget["unlisted_block_max_bytes"]:
+            over.append(
+                (
+                    name,
+                    size,
+                    budget["unlisted_block_max_bytes"],
+                    f"block {name} has no budget and exceeds the unlisted maximum",
+                )
+            )
+        else:
+            other += size
+    if other > budget["other_blocks_max_bytes"]:
+        over.append(
+            (
+                "unlisted small blocks",
+                other,
+                budget["other_blocks_max_bytes"],
+                "the unlisted small blocks together are over their budget",
+            )
+        )
+    for key, limit in sorted(budget["physical"].items()):
+        measured = physical.get(key)
+        if measured is not None and measured > limit:
+            over.append((key, measured, limit, f"{key} is over its budget"))
+    return over
+
+
+def _physical_sizes(ctx: Context) -> dict[str, int]:
+    scan = ctx.gen.scan
+    # An embedded-only report is a virtual file read out of index.html (already counted
+    # there); the budget's physical sizes are the files on disk, as panel_payload_size.py
+    # measures them, so it is not a file to size here.
+    files = {
+        rel: size
+        for rel, (size, _) in scan.files.items()
+        if not (scan.report_embedded_only and rel == REPORT)
+    }
+    sizes: dict[str, int] = {}
+    if files:
+        sizes["total_bytes"] = sum(files.values())
+    for key, rel in (
+        ("index_html_bytes", "index.html"),
+        ("dashboard_data_json_bytes", "data/dashboard_data.json"),
+        ("dashboard_data_js_bytes", "data/dashboard_data.js"),
+    ):
+        if rel in files:
+            sizes[key] = files[rel]
+    return sizes
+
+
+def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
+    """#540: the payload against its committed budget; every overrun blocks (regression)."""
+
+    budget, source = _payload_budget(ctx)
+    if budget is None:
+        yield _finding(
+            "lint.payload_size",
+            BLOCKER_AUTHORITY,
+            "payload_budget",
+            source,
+            "the committed payload budget",
+            "(validator)",
+            str(PAYLOAD_BUDGET_RELATIVE).replace("\\", "/"),
+            ("F5",),
+            "the committed payload budget cannot be read; the payload cannot be judged",
+        )
+        return
+    cached = ctx._cache.get("payload_block_bytes")
+    if not isinstance(cached, dict):
+        cached = payload_block_bytes(ctx.panel)
+        ctx._cache["payload_block_bytes"] = cached
+    for entity, measured, limit, text in payload_budget_findings(
+        cached, _physical_sizes(ctx), budget
+    ):
+        yield _finding(
+            "lint.payload_size",
+            BLOCKER_REGRESSION,
+            entity,
+            measured,
+            limit,
+            PANEL,
+            f"$.{entity}" if entity in cached else "(payload size)",
+            ("F5",),
+            f"{text}: {measured} B > {limit} B (payload_budget.json); raising a budget "
+            "is an explicit edit in the change that grows the block",
+        )
+
+
 def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     """F4/F5: payload size and duplicate copies (never a G1 prerequisite)."""
 
@@ -8861,6 +9695,7 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
         if window is not None and isinstance(weeks, list) and isinstance(series, list)
         else payload_cells
     )
+    yield from _payload_budget_findings(ctx)
     if large or duplicates:
         yield _finding(
             "lint.payload_size",
@@ -11142,6 +11977,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("capital.as_of_cutoff", check_capital_as_of),
     ("capital.strategy_vs_cutoff_accounts", check_strategy_vs_cutoff_accounts),
     ("capital.account_identity", check_account_identity),
+    ("returns.sleeve_basis", check_sleeve_basis),
+    ("returns.sleeve_leverage", check_sleeve_leverage),
     ("universe.authority_missing", check_universe_authority),
     ("universe.active_set_consistent", check_active_universe),
     ("universe.hardcoded_count_text", check_hardcoded_count_text),

@@ -32,6 +32,8 @@ from test_returns_engine_consumption import (
 )
 
 PARENT = "account-a"
+# the canonical bytes of the last report `_build` produced (for byte-identity checks)
+LAST_BYTES: dict[str, bytes] = {}
 CURRENT = (f"{PARENT}-s2", "strategy-1", "2026-07-02", None)
 RETAINED = (f"{PARENT}-s1", "strategy-9", "2026-07-01", "2026-07-20")
 
@@ -128,6 +130,10 @@ def _build(
     details_edit: Any = None,
     tag_map_sha256: str | None = None,
     disclosure_sources: dict[str, Any] | None = None,
+    strategy_basis: dict[str, Any] | None = None,
+    sleeve_facts: dict[str, Any] | None = None,
+    facts_ledger_generation: str | None = "a" * 64,
+    parent_returns: tuple[tuple[str, str], ...] | None = None,
 ) -> dict[str, Any]:
     current = _epoch(date(2026, 7, 2), "104")
     retained = _epoch(date(2026, 7, 1), "104")
@@ -169,7 +175,8 @@ def _build(
                 "return": value,
                 "strategy_id": "strategy-1",
             }
-            for day, value in (("2026-07-01", "0"), ("2026-07-30", twr))
+            for day, value in parent_returns
+            or (("2026-07-01", "0"), ("2026-07-30", twr))
         ],
     }
     # the facts were built from the very map the report is given, unless a test says not
@@ -222,6 +229,22 @@ def _build(
     if disclosure_sources is not None:
         sources_path = tmp_path / "sleeve-disclosure-sources.json"
         sources_path.write_bytes(json.dumps(disclosure_sources).encode("utf-8"))
+    basis_path = None
+    if strategy_basis is not None:
+        basis_path = tmp_path / "strategy-basis-declaration.json"
+        basis_path.write_bytes(json.dumps(strategy_basis).encode("utf-8"))
+    if facts_ledger_generation is not None:
+        # the synthetic baseline binds no provider-ledger catalog: stand in for the
+        # generation id the selected ledger records for the facts' provider
+        monkeypatch.setattr(
+            full.reporter,
+            "_facts_ledger_generation_id",
+            lambda *_args, **_kwargs: facts_ledger_generation,
+        )
+    facts_path = None
+    if sleeve_facts is not None:
+        facts_path = tmp_path / "sleeve-account-facts.json"
+        facts_path.write_bytes(json.dumps(sleeve_facts).encode("utf-8"))
     report, _content, _path = full.reporter.build_report_data(
         baseline_root,
         epoch_manifest_path=tmp_path / "synthetic-manifest.json",
@@ -230,7 +253,10 @@ def _build(
         epoch_manifest_generation_root=REPOSITORY_ROOT,
         nested_tag_map_path=tag_map_path,
         sleeve_disclosure_sources_path=sources_path,
+        strategy_basis_path=basis_path,
+        sleeve_facts_path=facts_path,
     )
+    LAST_BYTES["content"] = _content
     result: dict[str, Any] = report
     return result
 

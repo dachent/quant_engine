@@ -54,6 +54,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--inputs", type=Path, help="acceptance-inputs manifest")
     parser.add_argument("--sleeve-inputs", type=Path)
     parser.add_argument("--sleeves-only", action="store_true")
+    parser.add_argument(
+        "--strategy-basis",
+        type=Path,
+        help="strategy-basis-declaration/1: states the named strategies on their sleeve",
+    )
     return parser
 
 
@@ -88,6 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest=manifest,
             sleeve_inputs=args.sleeve_inputs,
             sleeves_only=args.sleeves_only,
+            strategy_basis=args.strategy_basis,
         )
     except InputError as exc:
         print(f"derive_a: input error: {exc}", file=sys.stderr)

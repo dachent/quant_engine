@@ -316,7 +316,7 @@ def declared_roots(
     return Roots(bases)
 
 
-def _release_inputs(root: Path | None, manifest_sha256: str | None) -> Any:
+def _release_inputs(root: Path | None, manifest_sha256: str | None, cutoff: str) -> Any:
     """The verified release-inputs set, or None when the checkout still carries the files."""
 
     if root is None and manifest_sha256 is None:
@@ -327,9 +327,15 @@ def _release_inputs(root: Path | None, manifest_sha256: str | None) -> Any:
             "--release-inputs-root and --release-inputs-manifest-sha256 go together",
         )
     try:
-        return load_release_inputs(root, manifest_sha256)
+        inputs = load_release_inputs(root, manifest_sha256)
     except ReleaseInputsError as exc:
         raise PrepareError("RELEASE_INPUTS", str(exc)) from exc
+    if inputs.cutoff != cutoff:
+        raise PrepareError(
+            "CUTOFF_MISMATCH",
+            f"release inputs are for {inputs.cutoff}, the cycle cutoff is {cutoff}",
+        )
+    return inputs
 
 
 def _inputs_file(repo: Path, relative: str, inputs: Any) -> str:
@@ -929,7 +935,9 @@ def build_prep_spec(
             "epoch admission policy changed since the cycle was resolved",
         )
     repo = Path(os.path.realpath(repo_root))
-    inputs = _release_inputs(release_inputs_root, release_inputs_manifest_sha256)
+    inputs = _release_inputs(
+        release_inputs_root, release_inputs_manifest_sha256, resolved["cutoff"]
+    )
     spec["epoch_crosswalk_template"] = _pin_file(
         roots, _inputs_file(repo, CROSSWALK, inputs), "epoch crosswalk"
     )

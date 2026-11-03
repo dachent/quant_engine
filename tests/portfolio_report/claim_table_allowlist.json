@@ -65,6 +65,56 @@
    "file": "tools/portfolio_baseline.py",
    "pattern": "^accounts without reported rows remain unavailable\\.$",
    "justification": "the baseline's own positions-effect sentence; the report builder replaces it before it reaches the report or panel (row AB2 asserts the replacement), and the baseline bytes are pinned"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^(Gross sleeve NAV \\(the row's value\\)|Less the other live sleeves|Sleeve value, margin liability line and net equivalent|What the row carried before it stood on its sleeve|Account basis to sleeve basis|Bridge from the account basis to the sleeve basis|Return on gross sleeve assets, before the margin loan)$",
+   "justification": "a column, row or section label naming the basis of the figures beneath it: a label, not a claim; the figures it names are the payload's own and are asserted by rows R22-1 to R22-7"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^(Identity: sleeve NAVs \\{\\} plus bucket \\{\\} against account NAV \\{\\} \\(difference \\{\\}\\)|Leverage disclosures: \\{\\} rows of this account and strategy|The account series also holds sleeve \\{\\} \\(\\{\\}\\), \\{\\} to \\{\\}, at the cutoff it \\{\\})",
+   "justification": "a template: every number is substituted from the payload when it is rendered or built; the sentence states no figure of its own"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "pattern": "^Sleeve value, margin liability, account basis and bridges$",
+   "justification": "a column, row or section label naming the basis of the figures beneath it: a label, not a claim; the figures it names are the payload's own and are asserted by rows R22-1 to R22-7"
+  },
+  {
+   "file": "apps/portfolio-control-panel/index.html",
+   "pattern": "^Unlevered is the daily sleeve profit and loss, after allocated interest and fees, over the prior-close value of the sleeve's gross assets\\.$",
+   "justification": "the definition of a measurement convention, marked in the page as a policy statement not derived from the payload; the figures measured by it are the strategy rows' own"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^(The \\{\\} comparison window \\{\\}\\.\\.\\{\\} ends \\{\\} days before the calculation cutoff|Account basis: the whole live series of parent account \\{\\})",
+   "justification": "a template: every number is substituted from the payload when it is rendered or built; the sentence states no figure of its own"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^Implementation bridge on the sleeve basis$",
+   "justification": "a column, row or section label naming the basis of the figures beneath it: a label, not a claim; the figures it names are the payload's own and are asserted by rows R22-1 to R22-7"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "pattern": "^\\{\\} \\(cash left in a liquidated epoch;$",
+   "justification": "a template: every number is substituted from the payload when it is rendered or built; the sentence states no figure of its own"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
+   "pattern": "^the restated strategy is valued at its gross sleeve NAV, so the residual parent account's unallocated cash and margin is not in this residual",
+   "justification": "states why a residual excludes the parent account's unallocated cash and margin: it follows from the restated strategy's value (gross sleeve NAV), whose amount row R22-6 asserts as sleeve value minus parent value"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^\\{\\}: (sleeve profit and loss after allocated costs over the prior-close sleeve NAV|the same profit over the prior-close sleeve NAV less the)",
+   "justification": "a template: the basis code, the loan rule and the window are substituted from the derivation that produced the figure; the sentence defines the measurement and states no figure of its own"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^Computed from the sleeve facts, not observed at the source: \\{\\} with an amount",
+   "justification": "the Derived measures tile subtitle: its count is the number of DERIVED rows with an amount, computed in the same function from the same rows as the tile value; S03 checks the tiles partition the rows"
   }
  ]
 }

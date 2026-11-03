@@ -167,6 +167,7 @@ class World:
             "transactions": list(rows.transactions),
             "positions": list(rows.positions),
             "change_in_nav_observations": list(rows.change_in_nav),
+            "corporate_actions": list(rows.corporate_actions),
         }
         self.ibkr_root = tmp_path / "ibkr"
         self.ibkr_dir = _generation(
@@ -406,3 +407,84 @@ def test_the_committed_policy_is_pinned_valid_and_complete() -> None:
     sources = manifest["quantbase-fund-facts"]["sources"]
     assert set(sources["dashboards"]) == needed
     assert set(sources) == {"account_activity", "accounts", "dashboards"}
+
+
+def _pin_declaration(world: World, raw: bytes) -> Path:
+    path = world.policy / "strategy-basis-declaration.json"
+    path.write_bytes(raw)
+    world.manifest["strategy-basis-declaration"] = {
+        "path": path.name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+    world.write_manifest()
+    return path
+
+
+def test_a_pinned_basis_declaration_is_accepted_and_changes_no_fact(
+    world: World,
+) -> None:
+    """The pin is a policy input: the facts are byte-identical with or without it."""
+
+    without = world.build()
+    _pin_declaration(world, b'{"schema": "strategy-basis-declaration/1"}\n')
+    with_pin = world.build(output=world.tmp_path / "out-pinned")
+    # the selection records the manifest bytes it was built under, nothing else moves
+    assert {k: v for k, v in with_pin.items() if k != "policy_manifest_sha256"} == {
+        k: v for k, v in without.items() if k != "policy_manifest_sha256"
+    }
+    for name in ("sleeve-account-facts.json", "quantbase-fund-facts.json"):
+        assert (world.tmp_path / "out" / name).read_bytes() == (
+            world.tmp_path / "out-pinned" / name
+        ).read_bytes()
+
+
+def test_a_tampered_or_malformed_basis_pin_is_refused(world: World) -> None:
+    path = _pin_declaration(world, b"{}\n")
+    path.write_bytes(b"{} \n")
+    with pytest.raises(release.SleeveFactsReleaseError, match="governed pin"):
+        world.build()
+    path.unlink()
+    with pytest.raises(release.SleeveFactsReleaseError, match="not a plain file"):
+        world.build()
+    path.write_bytes(b"{}\n")
+    world.manifest["strategy-basis-declaration"]["extra"] = 1
+    world.write_manifest()
+    with pytest.raises(release.SleeveFactsReleaseError, match="keys differ"):
+        world.build()
+    world.manifest["strategy-basis-declaration"] = {
+        "path": "../sources/accounts.csv",
+        "sha256": "0" * 64,
+        "size_bytes": 1,
+    }
+    world.write_manifest()
+    with pytest.raises(release.SleeveFactsReleaseError, match="escapes"):
+        world.build()
+
+
+def test_the_committed_basis_declaration_is_pinned_and_names_data_not_code() -> None:
+    import strategy_basis
+
+    declaration = Path(strategy_basis.__file__).parents[1] / (
+        "ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json"
+    )
+    raw = declaration.read_bytes()
+    assert b"\r" not in raw
+    # the sleeve policy manifest is a release input outside Git; where the pinned root
+    # is available it must pin exactly these bytes
+    manifest_path = GOVERNED_POLICY / "sleeve-policy-manifest.json"
+    if manifest_path.is_file():
+        pin = json.loads(manifest_path.read_bytes()).get("strategy-basis-declaration")
+        if pin is not None:
+            assert hashlib.sha256(raw).hexdigest() == pin["sha256"]
+            assert len(raw) == pin["size_bytes"]
+    declared = strategy_basis.load_declaration(raw)
+    assert declared and set(declared.values()) == {strategy_basis.BASIS_SLEEVE_EPOCH}
+    # the strategy ids live only in the declaration, never in the tools that read it
+    tools = Path(strategy_basis.__file__).parent
+    for name in (
+        "build_sleeve_facts_release.py",
+        "portfolio_attended_preparation.py",
+    ):
+        text = (tools / name).read_text(encoding="utf-8")
+        assert not any(strategy_id in text for strategy_id in declared), name

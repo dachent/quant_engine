@@ -19,6 +19,12 @@ Nothing is guessed.  The run stops, with a count, on:
 * an unassigned trade on a day that also holds an execution without a time of
   day, because which of them came first would decide the attribution.
 
+Corporate actions (the catalog's ``corporate_actions`` rows of the account) are
+read as plain facts: each action's delivered security and quantity and, when
+one security is surrendered and one delivered on the same date and kind, the
+surrendered security and quantity.  The ledger uses them to recognise the cash
+paid in lieu of a fractional entitlement.
+
 The caller supplies de-duplicated rows for one account.
 """
 
@@ -30,7 +36,7 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
 from nested_strategy_tag_map import ParentMap
-from sleeve_ledger import Dividend, SleevePolicy, TaggedTrade
+from sleeve_ledger import CorporateAction, Dividend, SleevePolicy, TaggedTrade
 
 _DIVIDEND_KINDS = frozenset(
     {
@@ -56,6 +62,7 @@ class SleeveInputs:
     parent: ParentMap
     # The owner's fallback sleeve for each security an unmatched execution opens.
     unheld_fallback: Mapping[str, str]
+    corporate_actions: tuple[CorporateAction, ...] = ()
 
     def policy(
         self,
@@ -125,8 +132,22 @@ class SleeveInputs:
                     else str(trade.close_price),
                     "commission": str(trade.commission),
                     "tag": trade.tag,
+                    "reference": trade.reference,
                 }
                 for trade in self.trades
+            ],
+            "corporate_actions": [
+                {
+                    "day": action.day,
+                    "kind": action.kind,
+                    "new_security": action.new_security,
+                    "new_quantity": str(action.new_quantity),
+                    "old_security": action.old_security,
+                    "old_quantity": None
+                    if action.old_quantity is None
+                    else str(action.old_quantity),
+                }
+                for action in self.corporate_actions
             ],
             "positions": {
                 day: {key: str(value) for key, value in book.items()}
@@ -190,6 +211,61 @@ def _resolver(parent: ParentMap) -> Callable[[str | None, str], str | None]:
     return resolve
 
 
+def corporate_actions_from_rows(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[CorporateAction, ...]:
+    """The account's corporate actions, one per delivered security and date.
+
+    The catalog repeats an action under each provider-account scope, so rows
+    equal in date, kind, security and quantity count once.  A date and kind with
+    exactly one surrendered (negative) and one delivered (positive) security is
+    one action; every other delivered quantity stands alone, without a
+    surrendered security.
+    """
+
+    seen: set[tuple[str, str, str, Decimal]] = set()
+    groups: dict[tuple[str, str], list[tuple[str, Decimal]]] = {}
+    for row in rows:
+        day, kind, security = (
+            row.get("event_date"),
+            row.get("kind"),
+            row.get("security_id"),
+        )
+        if not (
+            isinstance(day, str) and isinstance(kind, str) and isinstance(security, str)
+        ):
+            raise SleeveInputError("a corporate action has no date, kind or security")
+        try:
+            date.fromisoformat(day)
+        except ValueError as error:
+            raise SleeveInputError(
+                f"corporate action date is not an ISO date: {day!r}"
+            ) from error
+        amount = _decimal(row.get("quantity"), "corporate action quantity")
+        key = (day, kind, security, amount)
+        if key in seen or amount == 0:
+            continue
+        seen.add(key)
+        groups.setdefault((day, kind), []).append((security, amount))
+    actions: list[CorporateAction] = []
+    for (day, kind), items in sorted(groups.items()):
+        gave = [item for item in items if item[1] < 0]
+        got = [item for item in items if item[1] > 0]
+        paired = len(gave) == 1 and len(got) == 1
+        for security, amount in sorted(got):
+            actions.append(
+                CorporateAction(
+                    day=day,
+                    kind=kind,
+                    new_security=security,
+                    new_quantity=amount,
+                    old_security=gave[0][0] if paired else None,
+                    old_quantity=-gave[0][1] if paired else None,
+                )
+            )
+    return tuple(actions)
+
+
 def _unsupported_securities(positions: Sequence[Mapping[str, Any]]) -> set[str]:
     """Securities the ledger cannot value at face: not shares, or with a multiplier."""
 
@@ -214,6 +290,7 @@ def sleeve_inputs(
     *,
     base_currency: str,
     days: Sequence[str],
+    corporate_actions: Sequence[Mapping[str, Any]] = (),
 ) -> SleeveInputs:
     """Executions, positions, marks and dividends of one account.
 
@@ -288,6 +365,9 @@ def sleeve_inputs(
                         row["commission"], "trade commission", base_currency
                     ),
                     tag=tag if isinstance(tag, str) else None,
+                    reference=row.get("record_id")
+                    if isinstance(row.get("record_id"), str)
+                    else None,
                 )
             )
         elif kind in _DIVIDEND_KINDS and isinstance(security, str):
@@ -348,4 +428,5 @@ def sleeve_inputs(
         resolve=resolve,
         parent=parent,
         unheld_fallback=fallback,
+        corporate_actions=corporate_actions_from_rows(corporate_actions),
     )

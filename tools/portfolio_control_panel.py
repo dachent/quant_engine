@@ -50,6 +50,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.core import inventory_identity
 import sleeve_disclosures
+import strategy_basis_lens_moves
 from portfolio_private_stage import validate_private_stage_target
 from portfolio_invested_capital import (
     CapitalValidationError,
@@ -2722,12 +2723,174 @@ def _current_product_baseline_projection(
     return projection
 
 
+def _strategy_basis_module() -> Any:
+    try:
+        return import_module("tools.strategy_basis")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        return import_module("strategy_basis")
+
+
+_BASIS_DECLARATION_NAMES: Final = (
+    "strategy-basis-declaration.json",
+    "input/strategy-basis-declaration.json",
+)
+
+
+def _report_strategy_basis_declaration(
+    report: Mapping[str, Any], report_path: Path
+) -> bytes | None:
+    """The declaration bytes a restated report was built from (#624), bound to its provenance.
+
+    A report that names a ``strategy-basis-declaration`` in its provenance is restated:
+    the declaration file beside it (candidate) or under its generation's ``input``
+    (published) must hash to that provenance entry, or the panel refuses.  A report that
+    carries no such entry must not look restated either (a sleeve-basis return scope or a
+    basis disclosure without its declaration refuses).
+    """
+
+    entries = [
+        item
+        for item in report.get("provenance", [])
+        if isinstance(item, Mapping)
+        and item.get("artifact") == "strategy-basis-declaration"
+    ]
+    restated_marker = report.get("strategy_basis_disclosure") is not None or any(
+        isinstance(row.get("return_scope"), Mapping)
+        and row["return_scope"].get("basis") == "SLEEVE_EPOCH"
+        for row in report.get("strategy_summary", [])
+        if isinstance(row, Mapping)
+    )
+    if not entries:
+        if restated_marker:
+            raise ControlPanelValidationError(
+                "a restated report carries no strategy basis declaration in its provenance"
+            )
+        return None
+    if len(entries) != 1:
+        raise ControlPanelValidationError("report provenance names two declarations")
+    for name in _BASIS_DECLARATION_NAMES:
+        path = report_path.parent / name
+        if path.is_file() and not path.is_symlink():
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != entries[0].get("sha256"):
+                raise ControlPanelValidationError(
+                    "strategy basis declaration differs from the report provenance"
+                )
+            return content
+    raise ControlPanelValidationError(
+        "the strategy basis declaration of a restated report is missing"
+    )
+
+
+def _panel_strategy_basis_restatements(
+    declaration: bytes,
+    account_manifest: Mapping[str, Any],
+    crosswalk: Mapping[str, Any],
+    controls: Mapping[str, Mapping[str, str]],
+    baseline_catalog: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The sleeve restatements the verified account manifest gives each declared strategy.
+
+    The same derivation the report makes from its verified epoch details: the declared
+    strategy's one open derived sleeve epoch, its own observation-trace links, and the
+    one provider the baseline's account-live rows name.  Nothing is read from the report.
+    """
+
+    basis = _strategy_basis_module()
+    try:
+        declared = basis.load_declaration(declaration)
+    except basis.StrategyBasisError as exc:
+        raise ControlPanelValidationError(str(exc)) from exc
+    included = _current_epoch_crosswalk_included_tuples(crosswalk)
+    crosswalk_accounts = {str(key[0]) for key in included}
+    product_rows = _split_manifest_epoch_rows(
+        _objects(account_manifest.get("rows"), "account_manifest.rows"),
+        included,
+        controls,
+    )[0]
+    providers: dict[str, set[str]] = {}
+    for ledger_row in _objects(
+        baseline_catalog.get("strategy_returns", []), "strategy_returns"
+    ):
+        if ledger_row.get("evidence_layer") == "ACCOUNT_LIVE":
+            providers.setdefault(str(ledger_row.get("strategy_id")), set()).add(
+                str(ledger_row.get("provider_id"))
+            )
+    result: dict[str, Any] = {}
+    for strategy_id in sorted(declared):
+        rows = [
+            row
+            for row in product_rows
+            if row.get("strategy_id") == strategy_id
+            and row.get("effective_end") is None
+            and isinstance(row.get("account_id"), str)
+            and row["account_id"] not in crosswalk_accounts
+        ]
+        if len(rows) != 1 or len(providers.get(strategy_id, ())) != 1:
+            raise ControlPanelValidationError(
+                f"restated strategy needs one open derived sleeve epoch: {strategy_id}"
+            )
+        row = rows[0]
+        parent = _derived_epoch_parent(str(row["account_id"]), crosswalk_accounts)
+        trace = row.get("observation_trace")
+        if parent is None or not isinstance(trace, Mapping):
+            raise ControlPanelValidationError(
+                f"restated strategy sleeve has no verified trace: {strategy_id}"
+            )
+        try:
+            result[strategy_id] = basis.sleeve_restatement(
+                strategy_id=strategy_id,
+                account_id=str(row["account_id"]),
+                parent_account_id=parent,
+                provider_id=next(iter(providers[strategy_id])),
+                links=_objects(trace.get("links"), "sleeve own path links"),
+                effective_start=row.get("effective_start"),
+                effective_end=row.get("effective_end"),
+            )
+        except basis.StrategyBasisError as exc:
+            raise ControlPanelValidationError(str(exc)) from exc
+    return result
+
+
+def _expected_custody_current_capital(
+    baseline_catalog: Mapping[str, Any], restatements: Mapping[str, Any] | None
+) -> Mapping[str, Any] | None:
+    """The custody capital the selected baseline authorises, restated like the report's (#624).
+
+    A restated report carries each declared strategy at its sleeve value; the expectation
+    is the same ``restate_current_capital`` over the baseline's block.
+    """
+
+    capital = baseline_catalog.get("current_capital")
+    if not isinstance(capital, Mapping) or not capital.get("custody_authority"):
+        return None
+    if not restatements:
+        return capital
+    basis = _strategy_basis_module()
+    try:
+        restated: Mapping[str, Any] = basis.restate_current_capital(
+            capital, restatements
+        )
+    except basis.StrategyBasisError as exc:
+        raise ControlPanelValidationError(str(exc)) from exc
+    return restated
+
+
 def _validate_current_product_baseline_projection(
     report: Mapping[str, Any],
     baseline_catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]],
+    restatements: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Bind report HWM inputs and returns to an independent current projection."""
+    """Bind report HWM inputs and returns to an independent current projection.
+
+    A report restated onto a sleeve (#624) publishes the restated ``strategy_returns``;
+    the expectation is then the baseline's returns restated through the same function
+    from the panel's own sleeve restatements, projected the same way.  The report's
+    carried ``hwm_inputs`` stay the baseline's.
+    """
 
     calculation_cutoff_date = (
         _panel_date(
@@ -2744,7 +2907,26 @@ def _validate_current_product_baseline_projection(
         raise ControlPanelValidationError(
             "report hwm_inputs differs from the current-product baseline projection"
         )
-    if report.get("strategy_returns", []) != projection.get("strategy_returns", []):
+    expected_returns = projection.get("strategy_returns", [])
+    if restatements:
+        basis = _strategy_basis_module()
+        try:
+            restated_catalog = {
+                **baseline_catalog,
+                "strategy_returns": basis.restate_returns(
+                    _objects(
+                        baseline_catalog.get("strategy_returns", []),
+                        "strategy_returns",
+                    ),
+                    restatements,
+                ),
+            }
+        except basis.StrategyBasisError as exc:
+            raise ControlPanelValidationError(str(exc)) from exc
+        expected_returns = _current_product_baseline_projection(
+            restated_catalog, strategy_product_controls, calculation_cutoff_date
+        ).get("strategy_returns", [])
+    if report.get("strategy_returns", []) != expected_returns:
         raise ControlPanelValidationError(
             "report strategy_returns differ from the current-product baseline projection"
         )
@@ -4207,6 +4389,148 @@ def _dependence_weight_authority() -> dict[str, str]:
     }
 
 
+def _policy_constant_sensitivity(
+    dependence: Mapping[str, Any],
+    strategies: Sequence[Mapping[str, Any]],
+    series_names: set[str],
+) -> dict[str, Any] | None:
+    """Beside the owner-approved dependence weights, what the restated weights would give.
+
+    The PORT-DEPENDENCE-1 allocation weights and conservative loss fractions are static
+    owner inputs and are never restated.  When a strategy is on its sleeve basis the
+    payload says so and shows, from data, the central-case and conservative-bound losses
+    with the weights replaced by the restated current-capital weights of the dependence
+    strategies, normalized within that perimeter exactly as the policy weights are.  The
+    adverse loss fractions and the dependence matrix are the payload's own (measured on
+    the restated path), so only the weights differ.  ``None`` when nothing is restated.
+    """
+
+    try:
+        basis = import_module("tools.strategy_basis")
+    except ModuleNotFoundError as exc:  # direct `python tools/...` execution
+        if exc.name != "tools":
+            raise
+        basis = import_module("strategy_basis")
+    restated = sorted(
+        _text(row.get("strategy_name"), "strategy_name")
+        for row in strategies
+        if isinstance(row.get("return_scope"), dict)
+        and row["return_scope"].get("basis") == basis.BASIS_SLEEVE_EPOCH
+        and row.get("strategy_name") in series_names
+    )
+    if not restated:
+        return None
+    central = _object(dependence.get("central_case"), "dependence.central_case")
+    components = _objects(central.get("components"), "central_case.components")
+    matrix = _object(central.get("dependence_matrix"), "central_case.dependence_matrix")
+    values = matrix.get("values")
+    bound = _object(dependence.get("correlation_one"), "dependence.correlation_one")
+    bound_components = {
+        _text(item.get("series_id"), "correlation_one series"): item
+        for item in _objects(bound.get("components"), "correlation_one.components")
+    }
+    weight_by_name = {
+        _text(row.get("strategy_name"), "strategy_name"): row.get("systematic_weight")
+        for row in strategies
+        if row.get("strategy_name") in series_names
+    }
+    names = [_text(item.get("series_id"), "central series") for item in components]
+    if (
+        not isinstance(values, list)
+        or len(values) != len(names)
+        or set(names) != set(weight_by_name)
+        or any(weight_by_name[name] is None for name in names)
+    ):
+        raise ControlPanelValidationError(
+            "policy-constant sensitivity inputs are unavailable"
+        )
+    with localcontext() as context:
+        context.prec = 50
+        capital = {name: Decimal(str(weight_by_name[name])) for name in names}
+        total = sum(capital.values(), Decimal(0))
+        if total <= 0:
+            raise ControlPanelValidationError("restated capital weights are empty")
+        restated_weights = {name: capital[name] / total for name in names}
+        policy_weights = {
+            _text(item.get("series_id"), "central series"): Decimal(
+                str(item.get("allocation_weight"))
+            )
+            for item in components
+        }
+        adverse = {
+            _text(item.get("series_id"), "central series"): Decimal(
+                str(item.get("adverse_loss_fraction"))
+            )
+            for item in components
+        }
+
+        def central_loss(weights: Mapping[str, Decimal]) -> Decimal:
+            vector = [weights[name] * adverse[name] for name in names]
+            quadratic = sum(
+                (
+                    vector[row] * Decimal(str(values[row][column])) * vector[column]
+                    for row in range(len(names))
+                    for column in range(len(names))
+                ),
+                Decimal(0),
+            )
+            return quadratic.sqrt() if quadratic > 0 else Decimal(0)
+
+        def bound_loss(weights: Mapping[str, Decimal]) -> Decimal:
+            return sum(
+                (
+                    weights[name]
+                    * Decimal(str(bound_components[name]["conservative_loss_fraction"]))
+                    for name in names
+                ),
+                Decimal(0),
+            )
+
+        policy_central, policy_bound = (
+            central_loss(policy_weights),
+            bound_loss(policy_weights),
+        )
+        restated_central, restated_bound = (
+            central_loss(restated_weights),
+            bound_loss(restated_weights),
+        )
+    return {
+        "classification": "OWNER_APPROVED_POLICY_CONSTANT_NOT_RESTATED",
+        "constants": ["allocation_weight", "conservative_loss_fraction"],
+        "policy_id": DEPENDENCE_POLICY_ID,
+        "restated_strategies": restated,
+        "policy": {
+            "allocation_weight": {
+                n: _number_text(float(policy_weights[n])) for n in names
+            },
+            "central_case_loss": _number_text(float(policy_central)),
+            "correlation_one_loss": _number_text(float(policy_bound)),
+        },
+        "sensitivity": {
+            "basis": "RESTATED_CURRENT_CAPITAL_WEIGHT_NORMALIZED_WITHIN_DEPENDENCE_PERIMETER",
+            "allocation_weight": {
+                n: _number_text(float(restated_weights[n])) for n in names
+            },
+            "central_case_loss": _number_text(float(restated_central)),
+            "correlation_one_loss": _number_text(float(restated_bound)),
+            "central_case_loss_difference": _number_text(
+                float(restated_central - policy_central)
+            ),
+            "correlation_one_loss_difference": _number_text(
+                float(restated_bound - policy_bound)
+            ),
+        },
+        "statement": (
+            "The dependence allocation weights and conservative loss fractions are "
+            "owner-approved policy constants (PORT-DEPENDENCE-1), not restated. "
+            "Shown beside them: the same central-case and conservative-bound losses "
+            "with the weights replaced by the restated current-capital weights of "
+            "the dependence strategies, normalized within the perimeter. The adverse "
+            "loss fractions and correlations are measured on the restated paths."
+        ),
+    }
+
+
 def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
     summary = _summary(report)
     counts = {
@@ -4341,7 +4665,11 @@ def _effective_hwm_policy_for_current_strategies(
 
 
 def _validate_panel_hwm_envelope(
-    envelope: Mapping[str, Any], catalog: Mapping[str, Any]
+    envelope: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    *,
+    membership_starts: Mapping[str, date] | None = None,
+    endpoint_exempt: frozenset[str] = frozenset(),
 ) -> None:
     """Enforce the FULL hwm_inputs envelope contract against the governed
     baseline catalog before the panel trusts the envelope for recomputation.
@@ -4406,6 +4734,8 @@ def _validate_panel_hwm_envelope(
             ),
             allocations=_objects(hwm_allocations, "allocations"),
             acceptance_record=hwm_acceptance_record,
+            membership_starts=membership_starts,
+            endpoint_exempt=endpoint_exempt,
         )
     except HwmInputsContractError as exc:
         raise ControlPanelValidationError(str(exc)) from exc
@@ -4570,6 +4900,9 @@ def _source_clock_display_lines(value: object) -> list[str]:
 def _compute_panel_numerical_hwm(
     catalog: Mapping[str, Any],
     epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
+    *,
+    membership_starts: Mapping[str, date] | None = None,
+    endpoint_exempt: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Recompute the numerical full-systematic HWM from the governed
     baseline catalog so the panel can reconcile it against the report.
@@ -4628,7 +4961,12 @@ def _compute_panel_numerical_hwm(
         return _unavailable("HWM_INPUTS_INVALID")
     # The envelope is never trusted on its own: it must satisfy the full
     # governed contract against the catalog before any recomputation runs.
-    _validate_panel_hwm_envelope(envelope, catalog)
+    _validate_panel_hwm_envelope(
+        envelope,
+        catalog,
+        membership_starts=membership_starts,
+        endpoint_exempt=endpoint_exempt,
+    )
 
     crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
@@ -6418,15 +6756,58 @@ def _decomposition_lenses(
             raise ControlPanelValidationError(
                 f"decomposition lens input changed during render: {path}"
             )
+    moves = _strategy_basis_lens_moves(root, unique_bindings)
     return (
         {
             **live,
             "default_evidence_mode": "LIVE_ONLY",
             "evidence_modes": list(modes),
             "modes": modes,
+            **({"strategy_basis_lens_moves": moves} if moves is not None else {}),
         },
         tuple(unique_bindings.items()),
     )
+
+
+def _strategy_basis_lens_moves(
+    root: Path, bindings: dict[Path, str]
+) -> dict[str, Any] | None:
+    """The restated strategy's lens-model moves (#624), hash-bound beside the lenses.
+
+    ``strategy-basis-lens-moves.json`` is generated by ``tools/strategy_basis_lens_moves.py``
+    from the sleeve-lane and account-lane runs of the same plan.  Its sentence must be the
+    one the table generates, and a table that holds a finding (a model that changed status
+    and keeps no account-lane figure) is a diminished row: the panel is not built.
+    """
+
+    path = root / "strategy-basis-lens-moves.json"
+    if not path.is_file():
+        return None
+    moves, _content, sha256 = _json_snapshot(path, "strategy-basis lens moves")
+    if moves.get("schema") != "strategy-basis-lens-moves/1":
+        raise ControlPanelValidationError("strategy-basis lens moves schema differs")
+    try:
+        expected = strategy_basis_lens_moves.sentence(moves)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ControlPanelValidationError(
+            "strategy-basis lens moves are malformed"
+        ) from exc
+    if moves.get("sentence") != expected:
+        raise ControlPanelValidationError(
+            "strategy-basis lens moves sentence is not the table's"
+        )
+    findings = moves.get("findings")
+    if not isinstance(findings, list) or findings:
+        codes = sorted({str(item.get("code")) for item in findings or []})
+        raise ControlPanelValidationError(
+            f"strategy-basis lens moves hold a diminished row: {codes}"
+        )
+    previous = bindings.setdefault(path, sha256)
+    if previous != sha256:
+        raise ControlPanelValidationError(
+            f"strategy-basis lens moves changed during render: {path}"
+        )
+    return moves
 
 
 def _decomposition_plan_strategy_mapping(plan_bundle: Path) -> dict[str, str]:
@@ -7817,6 +8198,69 @@ def _report_return_window(
     }
 
 
+def _restated_account_lanes(
+    strategies: Sequence[Mapping[str, Any]],
+    accounts: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """The labelled parent-account lane of every strategy row restated onto its sleeve.
+
+    A restated row carries ``return_scope.account_basis_ref`` (report side, #624): the
+    account and the series hash its account-basis figures stand on.  The figures
+    themselves are the account row's ``account_basis`` block.  A row that carries no
+    reference has no second lane (nothing is added for it); a reference the account rows
+    cannot resolve to the same series hash fails closed.
+    """
+
+    lanes: dict[str, dict[str, Any]] = {}
+    for strategy in strategies:
+        scope = strategy.get("return_scope")
+        reference = (
+            scope.get("account_basis_ref") if isinstance(scope, Mapping) else None
+        )
+        if not isinstance(reference, Mapping):
+            continue
+        strategy_id = _text(strategy.get("strategy_id"), "restated strategy_id")
+        block = next(
+            (
+                row.get("account_basis")
+                for row in accounts
+                if row.get("account_id") == reference.get("account_id")
+                and isinstance(row.get("account_basis"), Mapping)
+            ),
+            None,
+        )
+        if not isinstance(block, Mapping):
+            raise ControlPanelValidationError(
+                f"restated strategy has no account basis block: {strategy_id}"
+            )
+        series = _object(block.get("series"), "account basis series")
+        if (
+            series.get("sha256") != reference.get("series_sha256")
+            or block.get("strategy_id") != strategy_id
+        ):
+            raise ControlPanelValidationError(
+                f"restated strategy account basis differs from its reference: {strategy_id}"
+            )
+        figures = _object(block.get("figures"), "account basis figures")
+        window = _object(block.get("window"), "account basis window")
+        lanes[strategy_id] = {
+            "label": _text(block.get("label"), "account basis label"),
+            "basis": block.get("basis"),
+            "account_id": block.get("account_id"),
+            "observed_start": window.get("start"),
+            "observed_end": window.get("end"),
+            "observations": block.get("observations"),
+            "series_sha256": series.get("sha256"),
+            "cumulative_return": figures.get("account_live_cumulative_return"),
+            "max_drawdown": figures.get("account_live_max_drawdown"),
+            "current_drawdown": figures.get("hwm_current_drawdown"),
+            "current_value_usd": figures.get("current_value_usd"),
+            "systematic_weight": figures.get("systematic_weight"),
+            "block": reference.get("block"),
+        }
+    return lanes
+
+
 def _canonical_strategy_series_contracts(
     evidence_by_strategy: Mapping[str, Mapping[str, Any]],
     strategy_names: Mapping[str, str],
@@ -7825,6 +8269,7 @@ def _canonical_strategy_series_contracts(
     weekly_returns: Mapping[str, Any],
     report_strategy_returns: Sequence[Mapping[str, Any]],
     dependence_strategy_names: set[str] | None = None,
+    account_lanes: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Prove that every analytical view consumed the canonical live path."""
 
@@ -8075,6 +8520,24 @@ def _canonical_strategy_series_contracts(
                 "factor_window_observed_start": factor_observed_start,
                 "factor_window_return_observations": factor_observations,
                 "factor_window_series_sha256": factor_series_sha256,
+                # a restated strategy keeps its parent-account series visible, labelled
+                **(
+                    {
+                        "account_basis": {
+                            key: account_lanes[strategy_id][key]
+                            for key in (
+                                "label",
+                                "account_id",
+                                "observed_start",
+                                "observed_end",
+                                "observations",
+                                "series_sha256",
+                            )
+                        }
+                    }
+                    if account_lanes is not None and strategy_id in account_lanes
+                    else {}
+                ),
             }
         )
     return contracts
@@ -8790,6 +9253,7 @@ def _strategy_underwriting(
     *,
     performance_lineage_available: bool = True,
     implementation_contracts: Mapping[str, Mapping[str, Any] | None] | None = None,
+    account_lanes: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Compose an advisory evidence ledger without creating new fact authority."""
 
@@ -9181,13 +9645,51 @@ def _strategy_underwriting(
                             "account_live_cumulative_return"
                         ),
                         "max_drawdown": strategy.get("account_live_max_drawdown"),
+                        # a restated row: the figures above are the sleeve's (the row's
+                        # own basis label says so); the parent-account lane stays beside
+                        **(
+                            {
+                                "basis": _object(
+                                    strategy.get("return_scope"), "return scope"
+                                ).get("basis"),
+                                # carried once: the label is the strategy row's own
+                                # `return_scope_label`, the figures (return, drawdowns,
+                                # value, weight, series, window) are the account row's
+                                # `account_basis` block, named here by key
+                                "account_basis_ref": {
+                                    key: account_lanes[strategy_id][key]
+                                    for key in ("account_id", "block", "series_sha256")
+                                },
+                            }
+                            if account_lanes is not None
+                            and strategy_id in account_lanes
+                            else {}
+                        ),
                     },
                     "implementation_reconciliation": {
                         "status": strategy.get("implementation_reconciliation_status")
                         or gap["status"],
                         "comparison_status": implementation_comparison_status,
                         "contracts": contract_context,
-                        "detail": implementation_detail,
+                        # a restated strategy's detail is exactly its own row's
+                        # implementation contracts: carried once, in `strategies`, and
+                        # named here (the page resolves it); every other row is unchanged
+                        "detail": (
+                            {
+                                "strategy_row_ref": {
+                                    "block": "strategies",
+                                    "strategy_id": strategy_id,
+                                    "return_attribution": (
+                                        "implementation_return_attribution"
+                                    ),
+                                    "reconciliation": "implementation_reconciliation",
+                                }
+                            }
+                            if account_lanes is not None
+                            and strategy_id in account_lanes
+                            and implementation_detail is not None
+                            else implementation_detail
+                        ),
                     },
                 },
                 "design_fit": {
@@ -9763,6 +10265,9 @@ def _panel_data(
     underwriting_policy_snapshot: bytes | None = None,
     correlation_strategy_names: Mapping[str, str] | None = None,
     epoch_hpr_receipts: Sequence[Mapping[str, Any]] | None = None,
+    hwm_basis: tuple[Mapping[str, Any], Mapping[str, date], frozenset[str]]
+    | None = None,
+    strategy_basis_declaration: bytes | None = None,
 ) -> dict[str, Any]:
     if freshness_health is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -9775,8 +10280,25 @@ def _panel_data(
     strategy_product_controls = _financial_mvp_product_controls(
         financial_contract_snapshot
     )
+    basis_restatements: dict[str, Any] = {}
+    if strategy_basis_declaration is not None:
+        if (
+            account_manifest is None
+            or account_manifest_identity is None
+            or account_manifest_identity.get("current_epoch_crosswalk") is None
+        ):
+            raise ControlPanelValidationError(
+                "a restated report needs the verified account manifest and its crosswalk"
+            )
+        basis_restatements = _panel_strategy_basis_restatements(
+            strategy_basis_declaration,
+            account_manifest,
+            account_manifest_identity["current_epoch_crosswalk"],
+            strategy_product_controls,
+            baseline_catalog,
+        )
     current_product_catalog = _validate_current_product_baseline_projection(
-        report, baseline_catalog, strategy_product_controls
+        report, baseline_catalog, strategy_product_controls, basis_restatements
     )
     _validate_current_product_boundary(report, strategy_product_controls)
     strategies = _current_product_rows(report_strategies, strategy_product_controls)
@@ -9830,11 +10352,9 @@ def _panel_data(
     if not fact_coverage_matrix:
         raise ControlPanelValidationError("fact coverage matrix is unavailable")
     report_capital_expectations = _report_panel_expectations(report)
-    if report_capital_expectations.get("custody_current_capital") != (
-        baseline_catalog.get("current_capital")
-        if baseline_catalog.get("current_capital", {}).get("custody_authority")
-        else None
-    ):
+    if report_capital_expectations.get(
+        "custody_current_capital"
+    ) != _expected_custody_current_capital(baseline_catalog, basis_restatements):
         raise ControlPanelValidationError(
             "custody report differs from selected baseline"
         )
@@ -9842,7 +10362,23 @@ def _panel_data(
     # capital as the report carried it; the report's rows are reconciled with the
     # baseline here and with the panel's own strategy rows below.
     capital_parts = _capital_summary(summary)
-    _reconcile_capital_with_baseline(capital_parts, baseline_catalog)
+    _reconcile_capital_with_baseline(
+        capital_parts,
+        (
+            {
+                **baseline_catalog,
+                "current_capital": _strategy_basis_module().restate_current_capital(
+                    _object(
+                        baseline_catalog.get("current_capital"),
+                        "baseline current_capital",
+                    ),
+                    basis_restatements,
+                ),
+            }
+            if basis_restatements
+            else baseline_catalog
+        ),
+    )
     account_ids = [
         _text(row.get("account_id"), "account_summary.account_id") for row in accounts
     ]
@@ -10306,6 +10842,13 @@ def _panel_data(
                         f"{strategy_name}"
                     )
         dependence_analysis = dependence_modes[default_dependence_mode]
+    for mode_payload in dependence_modes.values():
+        sensitivity = _policy_constant_sensitivity(
+            mode_payload, strategies, dependence_strategy_names
+        )
+        if sensitivity is not None:
+            mode_payload["policy_constant_sensitivity"] = sensitivity
+    restated_account_lanes = _restated_account_lanes(strategies, accounts)
     canonical_strategy_series = _canonical_strategy_series_contracts(
         evidence_by_strategy,
         strategy_names,
@@ -10314,6 +10857,7 @@ def _panel_data(
         accepted_weekly_returns,
         _objects(report.get("strategy_returns", []), "report strategy returns"),
         dependence_strategy_names,
+        account_lanes=restated_account_lanes,
     )
     freshness_dates = {
         _text(item.get("evaluated_on"), "freshness evaluated_on")
@@ -10479,8 +11023,28 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "governed HWM proof differs from the accepted portfolio report"
             )
+    # a strategy restated onto its sleeve (#624): the catalog with its envelope periods and
+    # return references on the sleeve, derived by the caller from the verified account
+    # manifest (the same derivation the report makes); without it, the baseline catalog
+    if hwm_basis is None and basis_restatements:
+        derived_basis = _strategy_basis_module().restate_hwm_catalog(
+            current_product_catalog, basis_restatements
+        )
+        hwm_basis = (
+            derived_basis.catalog,
+            derived_basis.membership_starts,
+            derived_basis.endpoint_exempt,
+        )
+    hwm_catalog, hwm_starts, hwm_exempt = (
+        hwm_basis
+        if hwm_basis is not None
+        else (current_product_catalog, {}, frozenset())
+    )
     hwm_numerical = _compute_panel_numerical_hwm(
-        current_product_catalog, epoch_hpr_receipts
+        hwm_catalog,
+        epoch_hpr_receipts,
+        membership_starts=hwm_starts,
+        endpoint_exempt=hwm_exempt,
     )
     # The coverage rows inherit the current cutoff values and weights of the strategy
     # rows; the summary says which weight set it shows (the report says the same).
@@ -10552,6 +11116,7 @@ def _panel_data(
             key: (report[key] if isinstance(report.get(key), Mapping) else None)
             for _kind, key in _IMPLEMENTATION_REFERENCE_KEYS
         },
+        account_lanes=restated_account_lanes,
     )
     admitted_nav_names = sorted(
         _text(row.get("strategy_name"), "provider NAV strategy_name")
@@ -11123,6 +11688,10 @@ def _panel_data(
         "leverage_disclosures": list(report["leverage_disclosures"]),
         "weekly_returns": accepted_weekly_returns,
     }
+    if report.get("strategy_basis_disclosure") is not None:
+        # #624: the margin liability line and the bridges of a restated strategy row,
+        # and (inside account_summary) the parent-account figures it used to carry
+        panel_data["strategy_basis_disclosure"] = report["strategy_basis_disclosure"]
     if report.get("lifecycle_schema_version") == 1:
         # Lifecycle fields (#592): the current strategy rows already carry them
         # from the report; the retained history-only records follow them.  A
@@ -12454,6 +13023,9 @@ def _rendered_files(
             if verified_strategy_history is not None
             else None
         ),
+        strategy_basis_declaration=_report_strategy_basis_declaration(
+            report, report_path
+        ),
     )
     if invested_capital is not None:
         data["invested_capital"] = invested_capital
@@ -13005,8 +13577,37 @@ def _replication_disposition_counts(
     }
 
 
+def _resolved_implementation_detail(
+    detail: Mapping[str, Any], strategies: Sequence[Mapping[str, Any]]
+) -> Mapping[str, Any]:
+    """The detail a ``strategy_row_ref`` names: the strategies row's own contracts."""
+
+    reference = detail.get("strategy_row_ref")
+    if reference is None:
+        return detail
+    ref = _object(reference, "underwriting detail reference")
+    row = next(
+        (
+            item
+            for item in strategies
+            if item.get("strategy_id") == ref.get("strategy_id")
+        ),
+        None,
+    )
+    if row is None or ref.get("block") != "strategies":
+        raise ControlPanelValidationError(
+            "underwriting detail names a strategies row that is absent"
+        )
+    resolved = dict(_object(row.get(str(ref.get("reconciliation"))), "reconciliation"))
+    resolved["return_attribution"] = _object(
+        row.get(str(ref.get("return_attribution"))), "return attribution"
+    )
+    return resolved
+
+
 def _check_implementation_layers(
     underwriting_rows: Sequence[Mapping[str, Any]],
+    strategies: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Recompute the underwriting gap and implementation layers from their rows.
 
@@ -13059,7 +13660,12 @@ def _check_implementation_layers(
             if comparison_status == STALE_IMPLEMENTATION_STATUS:
                 stale_shapes_valid = False
             continue
-        detail = _object(detail_value, "underwriting implementation detail")
+        detail = _object(
+            _resolved_implementation_detail(
+                _object(detail_value, "underwriting implementation detail"), strategies
+            ),
+            "underwriting implementation detail",
+        )
         stale_present = False
         for stale_key, kind, stale_ids, live_key in (
             (
@@ -13903,7 +14509,9 @@ def verify_candidate(
         "account_live",
         "implementation_reconciliation",
     }
-    implementation_findings = _check_implementation_layers(underwriting_rows)
+    implementation_findings = _check_implementation_layers(
+        underwriting_rows, _objects(data.get("strategies"), "strategies")
+    )
     causal_contract_present = any(
         row.get("artifact") == "strategy-implementation-return-attribution"
         for row in _objects(data.get("provenance"), "panel provenance")

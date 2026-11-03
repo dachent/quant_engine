@@ -22,6 +22,35 @@
     "benchmark_assignments": {"type": "array", "minItems": 9, "maxItems": 9},
     "benchmark_comparisons": {"type": "array", "minItems": 9, "maxItems": 9},
     "comparisons": {"type": "array", "minItems": 9, "maxItems": 9},
-    "costs": {"type": "array", "minItems": 9, "maxItems": 9}
+    "costs": {"type": "array", "minItems": 9, "maxItems": 9},
+    "strategy_basis": {
+      "$comment": "Present only when a strategy-basis declaration restated a comparison to the sleeve path; every declared strategy's comparison rows then carry a sleeve_basis lane beside the unchanged account-basis fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basis", "declaration_sha256", "sleeve_facts_sha256", "strategies"],
+      "properties": {
+        "basis": {"const": "SLEEVE_EPOCH"},
+        "declaration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sleeve_facts_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["opening_date", "parent_account_id", "series_observations", "series_observed_end", "series_sha256", "sleeve_account_id", "strategy_id"],
+            "properties": {
+              "opening_date": {"type": "string", "format": "date"},
+              "parent_account_id": {"type": "string", "minLength": 1},
+              "series_observations": {"type": "integer", "minimum": 1},
+              "series_observed_end": {"type": "string", "format": "date"},
+              "series_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "sleeve_account_id": {"type": "string", "minLength": 1},
+              "strategy_id": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    }
   }
 }

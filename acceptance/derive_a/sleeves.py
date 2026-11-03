@@ -14,7 +14,7 @@ import json
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal as D, DecimalException, localcontext
+from decimal import ROUND_FLOOR, Decimal as D, DecimalException, localcontext
 from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +65,122 @@ def resolve(t: dict[str, Any], sleeves: list[dict[str, Any]]) -> list[str]:
             )
         )
     ]
+
+
+CA_WINDOW_DAYS = 5
+
+
+def corporate_fraction(
+    day: str,
+    days: list[str],
+    rows: list[dict[str, Any]],
+    sec: str,
+    q: D,
+    holdings: dict[str, Any],
+    real: list[str],
+    all_s: list[str],
+    actual: D,
+) -> dict[str, Any] | None:
+    """Cash in lieu of a corporate action's fraction, split by each sleeve's own fraction.
+
+    An untagged SELL of the security a corporate action delivered, within five ledger
+    days of the action, that several sleeves hold and that is the fractional part of the
+    account's aggregate entitlement, is charged to each sleeve by the fraction of its
+    own entitlement (held x new / old, less its whole shares).  Anything else returns
+    ``None`` and stays pro rata.  Every inconsistency is a refusal, never a fallback.
+    """
+    if q >= 0:
+        return None
+    seen: set[tuple[str, str, str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for row in rows:
+        key = (
+            str(row["event_date"]),
+            str(row["kind"]),
+            str(row["security_id"]),
+            str(D(str(row["quantity"]))),
+        )
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    delivered = [
+        r
+        for r in unique
+        if r["security_id"] == sec
+        and D(str(r["quantity"])) > 0
+        and str(r["event_date"]) <= day
+    ]
+    delivered = [
+        r
+        for r in delivered
+        if sum(1 for d in days if str(r["event_date"]) < d <= day) <= CA_WINDOW_DAYS
+    ]
+    if not delivered:
+        return None
+    new_total = D(str(delivered[-1]["quantity"]))
+    fraction_sold = new_total - new_total.to_integral_value(rounding=ROUND_FLOOR)
+    if fraction_sold == 0 or abs(-q - fraction_sold) > D("0.000000001"):
+        return None
+    holders = [s for s in real if holdings[s][sec] > 0]
+    if len(holders) < 2:
+        return None
+    action = delivered[-1]
+    old_rows = [
+        r
+        for r in unique
+        if r["event_date"] == action["event_date"]
+        and r["kind"] == action["kind"]
+        and D(str(r["quantity"])) < 0
+        and r["security_id"] != sec
+    ]
+    if len(old_rows) != 1:
+        raise InputError(
+            f"corporate action {action['event_date']} delivers {sec} but names "
+            f"{len(old_rows)} surrendered securities: no cash-in-lieu rule applies"
+        )
+    old_total = -D(str(old_rows[0]["quantity"]))
+    held = {s: holdings[s][sec] for s in holders}
+    held_total = sum(held.values(), D(0))
+    if any(
+        s not in holders and abs(holdings[s][sec]) > D("0.000000001") for s in all_s
+    ):
+        raise InputError(f"{day} {sec}: a non-holder sleeve carries the security")
+    if abs(held_total - old_total) <= D("0.000001"):
+        factor = new_total / old_total
+        unit = old_total / new_total
+    elif abs(held_total - new_total) <= D("0.000001"):
+        factor = D(1)
+        unit = D(1)
+    else:
+        raise InputError(
+            f"{day} {sec}: holdings {held_total} match neither the surrendered "
+            f"{old_total} nor the delivered {new_total} quantity"
+        )
+    entitled = {s: held[s] * factor for s in holders}
+    whole = {s: entitled[s].to_integral_value(rounding=ROUND_FLOOR) for s in holders}
+    fraction = {s: entitled[s] - whole[s] for s in holders}
+    if abs(sum(fraction.values(), D(0)) - fraction_sold) > D("0.000001"):
+        raise InputError(
+            f"{day} {sec}: sleeve fractions {sum(fraction.values(), D(0))} do not "
+            f"add to the {fraction_sold} sold"
+        )
+    if abs(sum(whole.values(), D(0)) - actual) > D("0.000001"):
+        raise InputError(
+            f"{day} {sec}: whole shares {sum(whole.values(), D(0))} are not the "
+            f"account position {actual}"
+        )
+    total_fraction = sum(fraction.values(), D(0))
+    return {
+        "shares": {s: fraction[s] / total_fraction for s in holders if fraction[s]},
+        "unit": unit,
+        "entitled": entitled,
+        "whole": whole,
+        "fraction": fraction,
+        "held": held,
+        "old_total": old_total,
+        "new_total": new_total,
+        "action_day": str(action["event_date"]),
+    }
 
 
 def ibkr_facts(
@@ -296,6 +412,59 @@ def ibkr_facts(
             q = D(t["quantity"])
             price = D(t["execution_price"])
             c = D(t["commission"]["value"])
+            ca = (
+                None
+                if s
+                else corporate_fraction(
+                    day,
+                    days,
+                    src.get("corporate_actions", []),
+                    sec,
+                    q,
+                    holdings,
+                    real,
+                    all_s,
+                    D(pos[day].get(sec, {}).get("quantity", "0")),
+                )
+            )
+            if ca is not None:
+                # each sleeve is charged its own fraction; its holding moves in the
+                # holdings' own units (old shares until the reconciliation scales them)
+                shares = ca["shares"]
+                for sleeve, share in shares.items():
+                    part = q * share
+                    holdings[sleeve][sec] += part * ca["unit"]
+                    nt[sleeve] += part * price
+                    comm[sleeve] += c * share
+                disc["manual_assignments"].append(
+                    dict(
+                        day=day,
+                        security_id=sec,
+                        quantity=q,
+                        how="corporate_action_fraction",
+                        sleeves=shares,
+                    )
+                )
+                disc.setdefault("corporate_action_fractions", []).append(
+                    dict(
+                        day=day,
+                        security_id=sec,
+                        action_day=ca["action_day"],
+                        sold=q,
+                        sleeves={
+                            sleeve: dict(
+                                held=ca["held"][sleeve],
+                                entitlement=ca["entitled"][sleeve],
+                                whole=ca["whole"][sleeve],
+                                fraction=ca["fraction"][sleeve],
+                                cash=-q * share * price,
+                                commission=c * share,
+                            )
+                            for sleeve, share in shares.items()
+                        },
+                    )
+                )
+                continue
             if s:
                 shares = {s: D(1)}
             else:

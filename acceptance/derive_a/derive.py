@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from . import DERIVATION, SCHEMA
+from .basis import SCHEMA as SCHEMA_BASIS, Declaration, load_declaration, restate
 from .numerics import (
     BOD,
     ONE,
@@ -862,6 +863,9 @@ def _day(value: dt.date) -> str:
 class Output:
     metrics: list[dict[str, Any]] = field(default_factory=list)
     not_derivable: list[dict[str, Any]] = field(default_factory=list)
+    # Unrounded values behind the rounded rows (never serialized): the declared sleeve
+    # basis (#624) restates the systematic total from these, not from cents.
+    exact: dict[str, Decimal] = field(default_factory=dict)
 
     def metric(
         self,
@@ -3912,6 +3916,7 @@ def derive(
     manifest: InputsManifest | None = None,
     sleeve_inputs: Path | None = None,
     sleeves_only: bool = False,
+    strategy_basis: Path | None = None,
 ) -> dict[str, Any]:
     """Derive every metric.
 
@@ -3925,6 +3930,22 @@ def derive(
 
     if sleeves_only and sleeve_inputs is None:
         raise InputError("--sleeves-only requires --sleeve-inputs")
+    declaration: Declaration | None = None
+    if strategy_basis is not None:
+        if sleeve_inputs is None or sleeves_only or manifest is None:
+            raise InputError(
+                "--strategy-basis restates strategy rows on the sleeve basis of a "
+                "combined run: it requires --inputs and --sleeve-inputs, and not "
+                "--sleeves-only"
+            )
+        try:
+            declaration = load_declaration(
+                strategy_basis.read_bytes(), strategy_basis.as_posix()
+            )
+        except OSError as exc:
+            raise InputError(
+                f"cannot read strategy basis declaration {strategy_basis}"
+            ) from exc
     if sleeves_only:
         from .sleeves import append_sleeves
 
@@ -3985,6 +4006,7 @@ def derive(
             sleeve_document,
             sleeve_parents,
             sleeve_members,
+            declaration,
         )
     if sleeve_document is not None:
         for key in ("metrics", "not_derivable"):
@@ -4070,6 +4092,7 @@ def _derive(
     sleeve_document: dict[str, Any] | None = None,
     sleeve_parents: Mapping[str, str] | None = None,
     sleeve_members: Mapping[str, Member] | None = None,
+    strategy_basis: Declaration | None = None,
 ) -> dict[str, Any]:
     if sleeve_document is not None and (
         manifest is None or manifest.epoch_metadata is None
@@ -4165,6 +4188,7 @@ def _derive(
     )
     statuses = parse_membership_status(contract_bytes[MVP_CONTRACT])
     output = Output()
+    restated_rows: list[str] = []
     notes = list(CONVENTION_NOTES)
     if v3 and authority is not None:
         notes.extend(V3_CONVENTION_NOTES)
@@ -4232,6 +4256,8 @@ def _derive(
                 sleeve_members or {},
                 residual,
             )
+            if strategy_basis is not None:
+                restated_rows = restate(output, strategy_basis, sleeve_document)
     if manifest is not None:
         # Per-row source provenance: every inputs_used reference names the actual
         # selected bytes. The sources are built from the fixed v1 role paths; with
@@ -4312,6 +4338,17 @@ def _derive(
         input_records.append(
             {"path": item.path, "sha256": item.sha256, "bytes": item.size}
         )
+    basis_block: dict[str, Any] = {}
+    if strategy_basis is not None and sleeve_document is not None:
+        basis_block["strategy_basis"] = {
+            "schema": SCHEMA_BASIS,
+            "path": strategy_basis.label,
+            "sha256": strategy_basis.sha256,
+            "strategies": list(strategy_basis.strategies),
+            "restated_rows": sorted(restated_rows),
+        }
+    if basis_block:
+        document = document | basis_block
     return document | {
         "inputs": input_records,
         "contracts": [
@@ -4882,6 +4919,7 @@ def _derive_strategies_and_portfolio(
             )
         _strategy_returns(output, strategy_id, membership, sources, cutoff)
     if systematic_ok:
+        output.exact["systematic"] = systematic
         output.metric(
             "capital.portfolio.systematic.cutoff",
             "portfolio",
@@ -5270,6 +5308,7 @@ def _derive_strategies_and_portfolio_v3(
             value = total + (facts.cash if facts is not None else ZERO)
             systematic += value
             capitals[strategy_id] = value
+            output.exact[f"capital:{strategy_id}"] = value
             systematic_inputs.update(strategy_inputs)
             row_notes = [f"members {holders}"]
             if facts is not None:
@@ -5310,6 +5349,7 @@ def _derive_strategies_and_portfolio_v3(
             )
         _strategy_returns(output, strategy_id, membership, sources, cutoff)
     if systematic_ok:
+        output.exact["systematic"] = systematic
         output.metric(
             "capital.portfolio.systematic.cutoff",
             "portfolio",

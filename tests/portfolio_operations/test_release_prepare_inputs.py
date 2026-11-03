@@ -1145,3 +1145,48 @@ def test_a_directory_field_refuses_pin_and_a_file_field_refuses_dir(
         pins=[f"sleeve_facts.quantbase_source_dir=data:new/x.csv@{sha}"],
     )
     _refusal("OVERRIDE_SHAPE", world.prep, dirs=["base_factor_file=data:new"])
+
+
+def test_release_inputs_for_another_cutoff_are_refused(world: World) -> None:
+    from quant_engine.core.release_inputs import build_manifest
+
+    inputs = world.tmp / "release-inputs-other"
+    for relative in (tool.CROSSWALK, tool.POLICY_MANIFEST):
+        (inputs / relative).parent.mkdir(parents=True, exist_ok=True)
+        (inputs / relative).write_bytes((world.repo / relative).read_bytes())
+    _, digest = build_manifest(
+        inputs, [tool.CROSSWALK, tool.POLICY_MANIFEST], cutoff="2001-01-01"
+    )
+    _refusal(
+        "CUTOFF_MISMATCH",
+        world.prep,
+        release_inputs_root=inputs,
+        release_inputs_manifest_sha256=digest,
+    )
+
+
+def test_the_shipped_prep_spec_stage_passes_the_release_inputs_to_the_tool() -> None:
+    graph = json.loads(
+        (tool.REPO_ROOT / "ops/mvp2-release/release-stages.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    argv = next(s for s in graph["stages"] if s["id"] == "prep-spec")["argv"]
+    assert "--release-inputs-root" in argv
+    assert argv[argv.index("--release-inputs-root") + 1] == "{release_inputs_root}"
+    assert "--release-inputs-manifest-sha256" in argv
+    assert tool._parser().parse_args(  # the tool accepts both flags
+        [
+            "prep-spec",
+            "--resolved-cycle",
+            "x",
+            "--out",
+            "y",
+            "--predecessor-spec",
+            "z",
+            "--release-inputs-root",
+            "r",
+            "--release-inputs-manifest-sha256",
+            "0" * 64,
+        ]
+    ).release_inputs_root == Path("r")
