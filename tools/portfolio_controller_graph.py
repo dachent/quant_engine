@@ -153,6 +153,7 @@ _PATH_STAGES = {
     # panel that renders it) must be re-run.
     "tools/portfolio_implementation_reconciliation.py": ["report", "panel"],
     "tools/portfolio_implementation_return_attribution.py": ["report", "panel"],
+    "tools/portfolio_implementation_sleeve_basis.py": ["report", "panel"],
     # PANEL-VIS-002 (#593): the portfolio-level totals are built inside the report
     # and re-derived by its verifier, then carried into the panel payload.
     "tools/portfolio_totals.py": ["report", "panel"],
@@ -274,6 +275,18 @@ _PATH_STAGES = {
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
     # derived sleeves); the report, the panel and the HWM selection bind to it.
     "tools/derived_epoch_perimeter.py": ["report", "panel"],
+    # #624: the opt-in strategy-basis restatement.  The report reads it when a declaration
+    # is given and the layered-history generation derives the declared strategy's live
+    # segment from it, so dependence, the plans and their lenses move with it as well.
+    "tools/strategy_basis.py": ["analytics", "report", "panel"],
+    # #624: levered and unlevered sleeve returns from the sleeve facts (read by the report).
+    "tools/strategy_leverage.py": ["report", "panel"],
+    # #624: the disclosure of a restated row (account basis, margin liability line, the two
+    # bridges), computed from the sleeve facts the report is then given.
+    "tools/strategy_basis_disclosure.py": ["report", "panel"],
+    # #624: the table of lens models whose status changes between the sleeve lane and the
+    # account lane; the panel reads and verifies it beside the lenses.
+    "tools/strategy_basis_lens_moves.py": ["analytics", "panel"],
     # #567 stage 5: the post-ledger sleeve-facts builders and the release step that
     # runs them.  Attended preparation builds the facts, the epoch manifest selects
     # them and the HWM replay re-supplies them, so a change to any of them moves the
@@ -287,7 +300,7 @@ _PATH_STAGES = {
     "tools/schwab_capture_driver.py": [],
     "tools/schwab_capture_ingest.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
-    "schemas/portfolio/sleeve-account-facts.schema.json": [],
+    "schemas/portfolio/sleeve-account-facts.schema.json": ["report", "panel"],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
     # source bytes only, and the release step runs it beside the IBKR builder.
     "tools/build_quantbase_fund_facts.py": ["report", "panel"],
@@ -385,6 +398,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "tools/portfolio_strategy_backtests.py",
             "tools/portfolio_provider_track_record.py",
             "tools/account_strategy_manifest.py",
+            "tools/strategy_basis.py",
             _PREPARATION,
             "contracts/portfolio-financial-mvp-source-v1.json",
             "schemas/portfolio/layered-history-generation.schema.json",
@@ -747,7 +761,11 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
     },
     {
         "id": "attribution-catalog-generation",
-        "source_paths": (_ATTRIBUTION, _RELEASE),
+        "source_paths": (
+            _ATTRIBUTION,
+            _RELEASE,
+            "schemas/portfolio/strategy-attribution.schema.json",
+        ),
         "contracts": ("contracts/portfolio-performance-policy-v1.json",),
         "producer": (_ATTRIBUTION, "stage_catalog"),
         "artifacts": ("strategy-attribution generation",),

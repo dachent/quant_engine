@@ -618,6 +618,7 @@ def _build_slices(
     capital: Mapping[str, Any],
     sleeve_links: Mapping[str, tuple[str, str]],
     remainder: Mapping[str, Any] | None = None,
+    restated: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(manifest, Mapping):
         return _unavailable("ACCOUNT_MANIFEST_ABSENT")
@@ -746,6 +747,7 @@ def _build_slices(
                 bool(sleeve_links),
                 None if reference is None else reference - totals[-1],
                 remainder,
+                restated,
             ),
             "reason": None if reference is not None else "CAPITAL_SYSTEMATIC_ABSENT",
         },
@@ -848,7 +850,10 @@ def _build_flows(
 
 
 def _residual_label(
-    sleeves: bool, residual_cents: int | None, remainder: Mapping[str, Any] | None
+    sleeves: bool,
+    residual_cents: int | None,
+    remainder: Mapping[str, Any] | None,
+    restated: bool = False,
 ) -> str:
     """The residual's name; with sleeves and a memo remainder, both amounts are quoted."""
 
@@ -872,6 +877,16 @@ def _residual_label(
             "(the residual parent account's value outside the product sleeve: "
             f"unallocated cash, margin debit and any other sleeve's remainder) {rest:+,.2f} "
             "cash left in liquidated epochs"
+        )
+    if restated and sleeves:
+        # a strategy restated onto its sleeve is valued at the gross sleeve NAV, so the
+        # residual parent account's unallocated cash and margin is no part of the
+        # systematic capital and cannot be part of this residual either
+        return (
+            f"{base} (cash left in a liquidated epoch; the restated strategy is valued "
+            "at its gross sleeve NAV, so the residual parent account's unallocated cash "
+            "and margin is not in this residual: it is the liability line of "
+            "strategy_basis_disclosure)"
         )
     return (
         f"{base} (cash left in a liquidated epoch"
@@ -1223,6 +1238,22 @@ def _benchmark_entry(
     }
 
 
+def _restated_strategies(panel: Mapping[str, Any]) -> bool:
+    """Whether any strategy row of the panel is restated onto its sleeve (#624).
+
+    Read from the row's own ``return_scope.account_basis_ref``, the pointer a restated
+    row carries to its parent-account figures; no strategy is named here.
+    """
+
+    return any(
+        isinstance(row, Mapping)
+        and isinstance(
+            _mapping(row.get("return_scope")).get("account_basis_ref"), Mapping
+        )
+        for row in _sequence(panel.get("strategies"))
+    )
+
+
 def _return_scope_labels(panel: Mapping[str, Any]) -> dict[str, str]:
     """Series id -> the return-scope label the panel's strategy row states, when it does."""
 
@@ -1236,7 +1267,7 @@ def _return_scope_labels(panel: Mapping[str, Any]) -> dict[str, str]:
 def _qualified_label(label: str, line: Mapping[str, Any], dates: object) -> str:
     """A return-scope label, qualified where the line's own weeks are not live.
 
-    The label states the parent account's live series; a hybrid line's weeks before live
+    The label states the row's own basis; a hybrid line's weeks before live
     capital are backtest (or a mix at the boundary), which the line's origin runs say.
     """
 
@@ -1330,6 +1361,7 @@ def build_performance_tab(
                 )
             )
             or None,
+            _restated_strategies(panel),
         )
         if slices.get("status") == "AVAILABLE":
             slices["flows"]["report_crosscheck"] = _report_crosscheck(

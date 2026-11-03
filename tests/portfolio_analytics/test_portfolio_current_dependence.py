@@ -617,6 +617,8 @@ def _unmocked_fixture(
     *,
     return_shift: str = "0",
     coverage_strategies: Sequence[Mapping[str, Any]] | None = None,
+    history_rows_hook: Any = None,
+    manifest_extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one synthetic history and allocation authority through the real builders.
 
@@ -729,6 +731,9 @@ def _unmocked_fixture(
             "receipt_sha256": selected["source_generation_sha256"],
         }
 
+    if history_rows_hook is not None:
+        # a restated history: the contract keeps the pins of the unrestated rows
+        rows = history_rows_hook(rows)
     history_files: dict[str, bytes] = {}
     history_files["segments.csv"] = _canonical_csv(
         _SYNTHETIC_LAYERED_HISTORY_SEGMENT_FIELDS, rows
@@ -839,6 +844,7 @@ def _unmocked_fixture(
         },
         "tool_sha256": "3" * 64,
         "verification": "VERIFIED",
+        **(manifest_extra or {}),
     }
     history_generation_id = _sha256(canonical_json_bytes(history_manifest_without_id))
     history_manifest = {

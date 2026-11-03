@@ -1337,3 +1337,20 @@ def test_the_equal_weight_definition_does_not_claim_the_panel_has_no_daily_retur
             assert "Daily returns are not in the panel" not in line["definition"]
         ew = next(row for row in mode["lines"] if row["series_id"] == tab.EW_SERIES_ID)
         assert "enter this line as weekly returns" in ew["definition"]
+
+
+def test_a_restated_strategy_changes_the_residual_label_from_the_panel_data() -> None:
+    """A row that points at its account-basis figures is restated: the label says what is out."""
+
+    panel = _sleeve_panel()
+    plain = tab.build_performance_tab(panel)["slices"]["reconciliation"]
+    assert "unallocated cash of a residual parent" in plain["residual_label"]
+    panel["strategies"][0]["return_scope"] = {
+        "basis": "ANY_DECLARED_BASIS",
+        "account_basis_ref": {"block": "account_summary.account_basis"},
+    }
+    restated = tab.build_performance_tab(panel)["slices"]["reconciliation"]
+    assert "unallocated cash of a residual parent" not in restated["residual_label"]
+    assert "gross sleeve NAV" in restated["residual_label"]
+    assert restated["residual_cents"] == plain["residual_cents"]
+    tab.verify_performance_tab(tab.build_performance_tab(panel), panel)

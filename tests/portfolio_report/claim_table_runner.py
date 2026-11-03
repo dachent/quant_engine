@@ -1,7 +1,7 @@
 """Run the claim table over a panel candidate and a report candidate.
 
     python -X utf8 -I tests/portfolio_report/claim_table_runner.py \
-        --panel <panel candidate dir> --report <report candidate dir>
+        --panel <panel candidate dir> --report <report candidate dir>         [--bundle <generation dir>]
 
 Prints one line per row (PASS / FAIL / SKIP / STALE) with evidence, then the
 sentences that carry a claim pattern and have neither a row nor an allowlist
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -66,6 +67,51 @@ def load_payload(panel_dir: Path, report_dir: Path) -> Payload:
     if report is None:
         raise SystemExit(f"no portfolio-report-data.json under {report_dir}")
     return Payload(panel=_read_json(panel), report=_read_json(report))
+
+
+def load_bundle(bundle_dir: Path) -> dict[str, Any]:
+    """Read a generation directory (``generation.json`` plus the stored artifact files).
+
+    Records the manifest's verification status and artifact identities and, for every
+    ``panel/`` artifact, the sha256 and size of the file on disk (absent = not stored).
+    Other artifacts are not hashed: a bundle directory need not store them.
+    """
+
+    manifest_path = bundle_dir / "generation.json"
+    if not manifest_path.is_file():
+        raise SystemExit(f"no generation.json under {bundle_dir}")
+    manifest = _read_json(manifest_path)
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise SystemExit("generation.json carries no artifacts list")
+    identities = [
+        {
+            "artifact_id": a.get("artifact_id"),
+            "sha256": a.get("sha256"),
+            "size_bytes": a.get("size_bytes"),
+        }
+        for a in artifacts
+        if isinstance(a, dict)
+    ]
+    on_disk: dict[str, Any] = {}
+    root = bundle_dir.resolve()
+    for item in identities:
+        name = str(item["artifact_id"])
+        if not name.startswith("panel/"):
+            continue
+        path = (bundle_dir / name).resolve()
+        if root not in path.parents or not path.is_file():
+            continue
+        data = path.read_bytes()
+        on_disk[name] = {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data),
+        }
+    return {
+        "verification": manifest.get("verification"),
+        "artifacts": identities,
+        "on_disk": on_disk,
+    }
 
 
 @dataclass(frozen=True)
@@ -296,6 +342,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--panel", type=Path, help="panel candidate directory")
     parser.add_argument("--report", type=Path, help="report candidate directory")
     parser.add_argument(
+        "--bundle",
+        type=Path,
+        help="generation directory (generation.json + stored files): runs U02, "
+        "which is SKIP without it",
+    )
+    parser.add_argument(
         "--scan-only",
         action="store_true",
         help="no payload: only locate sentences and list UNCOVERED ones",
@@ -331,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = load_payload(args.panel, args.report)
     else:
         parser.error("--panel and --report are required unless --scan-only")
+    if args.bundle:
+        payload.bundle = load_bundle(args.bundle)
     if args.simulate_builders:
         simulate_builders(payload, args.repo)
     baseline = None if args.no_baseline else load_baseline(args.baseline)

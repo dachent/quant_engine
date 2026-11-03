@@ -207,3 +207,68 @@ The current A1.3 seam is owned across these in-repository surfaces:
 - `tools/portfolio_control_panel.py` binds a hash-addressed report candidate for
   the pre-publication panel path; this binding was added at `32bb7f8` and does
   not promote the candidate or workbook to report authority.
+
+## Opt-in strategy-basis restatement (#624, option B)
+
+By default a strategy whose product epoch is a derived sleeve (#567) publishes its
+return, drawdown, current value, weight and weekly series from the whole parent
+account (disclosure A) and its MWR and governed capital from the sleeve; its
+`return_scope` says so. `build --strategy-basis <file>` (or `strategy_basis_path`
+on `build_report_data`) reads a `strategy-basis-declaration/1` document naming the
+strategies to restate onto the sleeve instead:
+
+```json
+{"schema": "strategy-basis-declaration/1",
+ "strategies": [{"strategy_id": "p123-ai-factor", "basis": "SLEEVE_EPOCH"}]}
+```
+
+With no declaration the report bytes are unchanged (a test compares them with the
+bytes main produces). With one, the strategy's return rows are the sleeve epoch's
+verified observation trace (one row per link, the manifest member's own path), its current capital is the sleeve's closing NAV, the systematic total and
+every weight are recomputed from the rows, `return_scope.basis` is `SLEEVE_EPOCH`
+and the label is generated from the sleeve and window. The portfolio perimeter then
+equals the open epochs' value, so the portfolio MWR is computable. The row names
+what stays on the parent basis (`return_scope.not_restated`): benchmark and provider
+comparisons, the implementation bridge, dependence and the decomposition lenses,
+the legacy HWM envelope and the dated allocation snapshot. The weekly-returns and
+dependence inputs are separate artifacts built from the baseline return rows; a
+panel built from a restated report fails its report/dependence series parity gate
+until those inputs are restated the same way.
+
+Convention (ADR 0002, unchanged by this option): the sleeve epoch opens at its first
+closing NAV, so the entry day's own result is outside the sleeve TWR, and date-only
+transfers are placed at end of day. An audit that counts the entry day and places
+transfers at the start of day gets a different figure for the same NAV series
+(AI Factor s2: panel 15.43%, audit 14.35%, of which the entry day is 1.66 points).
+
+### What a restated row discloses, and the sleeve facts it needs
+
+A declaration also requires the sleeve facts (`build --sleeve-facts <file>`, or
+`sleeve_facts_path`): the `sleeve-account-facts` artifact of the parent account. It is
+validated against its closed schema, copied into the candidate as
+`sleeve-account-facts.json` (provenance entry with its sha256, publish artifact
+`input/sleeve-account-facts.json`) and read back from the candidate by `verify`, exactly as the
+declaration is. Without the declaration the facts are refused, and the report bytes do not change.
+
+With the declaration on, nothing the row used to carry for the parent account disappears:
+
+- `account_summary[parent].account_basis` holds the parent-account figures (cumulative return,
+  annualised, maximum and current drawdown, YTD and calendar-year, current value, systematic
+  weight on the account perimeter, series sha256, window, observations), produced by the same
+  engine over the UNRESTATED parent series, with a label generated from what the account holds
+  ("whole account 6907 incl. retired sleeves and the unallocated margin bucket"). The restated
+  row's `return_scope.account_basis_ref` points at it.
+- `strategy_basis_disclosure` (a closed block in the report and panel schemas) holds, per
+  restated strategy: the margin liability line (gross sleeve NAV, the unallocated cash and
+  margin bucket read from `perimeter_account.days[].nav_end` at the cutoff, the net equivalent,
+  the identity "sleeve NAVs plus bucket equal the ledger account NAV", a pointer to the account's
+  `leverage_disclosures` rows, and the statement that the other strategy rows are broker NAVs
+  while this row is gross by definition); the bridge from the account basis to the sleeve basis
+  (value and return, both windows, what the account series also holds); and the three-step bridge
+  from the audit's convention (own P&L, entry day included, inflows at the start of the day) to the
+  panel's (ADR 0002), each step and the residual recomputed from the facts and closed against the
+  sleeve trace.
+
+Every derivation fails closed: a broken identity, a facts binding the report can check and that
+differs (parent account, tag map digest, provider-ledger generation), flow legs that differ from the
+daily flows, or a bridge residual beyond 1e-9 stops the build.

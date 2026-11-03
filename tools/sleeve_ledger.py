@@ -16,7 +16,7 @@ and the closure to the account follow in later stages.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 import hashlib
 from typing import Callable, Final, Mapping, Sequence
 
@@ -32,6 +32,11 @@ SAME_SECOND_TIE_BREAK_SHA256: Final = hashlib.sha256(
 _ZERO = Decimal(0)
 _EPSILON = Decimal("1e-9")
 _RECONCILE_TOLERANCE = Decimal("1e-6")
+_WHOLE_SNAP = Decimal("1e-12")
+# A cash-in-lieu execution follows its corporate action within this many ledger
+# days (counted from the first ledger day on or after the action's date).
+CASH_IN_LIEU_WINDOW_DAYS: Final = 5
+CASH_IN_LIEU_HOW: Final = "corporate_action_fraction"
 _DIVIDEND_TYPES = frozenset(
     {"Dividends", "Payment In Lieu Of Dividends", "Withholding Tax"}
 )
@@ -51,6 +56,26 @@ class TaggedTrade:
     close_price: Decimal | None
     commission: Decimal
     tag: str | None
+    # The provider's own record of the execution (disclosed with a cash in lieu).
+    reference: str | None = None
+
+
+@dataclass(frozen=True)
+class CorporateAction:
+    """One corporate action of the account, as its ledger rows state it.
+
+    ``new_security`` receives ``new_quantity`` shares; when the action also
+    surrenders a security (a reverse split re-issues the security id) the old
+    security and the shares it gave up are stated too.  A row set that does not
+    identify the surrendered security leaves both None.
+    """
+
+    day: str
+    kind: str
+    new_security: str
+    new_quantity: Decimal
+    old_security: str | None = None
+    old_quantity: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +104,40 @@ class SleevePolicy:
 
 
 @dataclass(frozen=True)
+class SleeveEntitlement:
+    """One sleeve's own share of a corporate action's entitlement."""
+
+    sleeve_id: str
+    held_quantity: Decimal
+    entitlement: Decimal
+    whole_shares: Decimal
+    fraction: Decimal
+    charged_quantity: Decimal
+    cash_credited: Decimal
+    commission: Decimal
+
+
+@dataclass(frozen=True)
+class CashInLieu:
+    """An untagged execution that liquidated a corporate-action fraction."""
+
+    day: str
+    security_id: str
+    action: CorporateAction
+    ratio: Decimal
+    reference: str | None
+    timestamp: str
+    quantity: Decimal
+    price: Decimal
+    commission: Decimal
+    sleeves: tuple[SleeveEntitlement, ...]
+    entitled_total: Decimal
+    whole_total: Decimal
+    fraction_total: Decimal
+    account_position: Decimal
+
+
+@dataclass(frozen=True)
 class SleeveDay:
     day: str
     sleeve_id: str
@@ -103,6 +162,12 @@ class SleeveLedger:
     reconciliation_scalings: tuple[tuple[str, str, Decimal], ...]
     # Offsetting fractions closed because the account holds nothing.
     offsetting_residues: tuple[tuple[str, str, tuple[tuple[str, Decimal], ...]], ...]
+    # Corporate-action fractions each sleeve was charged by its own entitlement.
+    cash_in_lieu: tuple[CashInLieu, ...] = ()
+    # End-of-day holdings per sleeve (reconciled), for closure checks.
+    holdings: Mapping[str, Mapping[str, Mapping[str, Decimal]]] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
 
 Resolver = Callable[[str | None, str], str | None]
@@ -115,12 +180,17 @@ def derive_sleeve_ledger(
     dividends: Sequence[Dividend],
     resolve: Resolver,
     policy: SleevePolicy,
+    corporate_actions: Sequence[CorporateAction] = (),
 ) -> SleeveLedger:
     """Rebuild each sleeve's holdings day by day and value them at the marks.
 
     ``positions[day][symbol]`` and ``marks[day][symbol]`` are the account's
     own end-of-day figures; their dates are the ledger's dates.  ``resolve``
-    maps an execution's tag and day to a sleeve id or None.
+    maps an execution's tag and day to a sleeve id or None.  An untagged sale
+    of a security that several sleeves hold is split pro rata by held quantity,
+    except when it liquidates the fraction of a corporate action's entitlement
+    (``corporate_actions``): then each sleeve is charged its own fractional
+    entitlement, the only split that leaves every sleeve whole shares.
     """
 
     if set(positions) != set(marks):
@@ -156,6 +226,12 @@ def derive_sleeve_ledger(
     for dividend in dividends:
         dividends_by_day.setdefault(dividend.day, []).append(dividend)
     inverse_alias = {new: old for old, new in policy.aliases.items()}
+    actions_by_new: dict[str, list[CorporateAction]] = {}
+    for action in corporate_actions:
+        actions_by_new.setdefault(action.new_security, []).append(action)
+    used_actions: set[int] = set()
+    cash_in_lieu: list[CashInLieu] = []
+    holdings_by_day: dict[str, dict[str, dict[str, Decimal]]] = {}
 
     quantity: dict[str, dict[str, Decimal]] = {sleeve: {} for sleeve in every}
     rows: list[SleeveDay] = []
@@ -212,6 +288,36 @@ def derive_sleeve_ledger(
                     sleeve = holders[0]
                     manual.append((day, symbol, trade.quantity, "assigned", sleeve))
                 elif len(holders) > 1:
+                    matched = _matching_action(
+                        trade, day, days, actions_by_new.get(symbol, ()), used_actions
+                    )
+                    if matched is not None:
+                        record = _assign_fraction(
+                            trade,
+                            matched,
+                            quantity,
+                            every,
+                            residual,
+                            positions[day].get(symbol, _ZERO),
+                            legs,
+                            day,
+                        )
+                        used_actions.add(id(matched))
+                        cash_in_lieu.append(record)
+                        manual.append(
+                            (
+                                day,
+                                symbol,
+                                trade.quantity,
+                                CASH_IN_LIEU_HOW,
+                                ",".join(
+                                    item.sleeve_id
+                                    for item in record.sleeves
+                                    if item.fraction
+                                ),
+                            )
+                        )
+                        continue
                     total = sum(
                         (abs(quantity[item][symbol]) for item in holders), _ZERO
                     )
@@ -290,6 +396,14 @@ def derive_sleeve_ledger(
                     actual - total
                 )
 
+        holdings_by_day[day] = {
+            sleeve: {
+                key: value
+                for key, value in quantity[sleeve].items()
+                if abs(value) > _EPSILON
+            }
+            for sleeve in every
+        }
         dividend_share: dict[str, Decimal] = {}
         for dividend in dividends_by_day.get(day, ()):
             held = {
@@ -403,6 +517,146 @@ def derive_sleeve_ledger(
         reconciliation_gaps=tuple(gaps),
         reconciliation_scalings=tuple(scalings),
         offsetting_residues=tuple(offsets),
+        cash_in_lieu=tuple(cash_in_lieu),
+        holdings=holdings_by_day,
+    )
+
+
+def _fraction_of(amount: Decimal) -> Decimal:
+    return amount - amount.to_integral_value(rounding=ROUND_FLOOR)
+
+
+def _matching_action(
+    trade: TaggedTrade,
+    day: str,
+    days: Sequence[str],
+    candidates: Sequence[CorporateAction],
+    used: set[int],
+) -> CorporateAction | None:
+    """The corporate action whose entitlement fraction this untagged sale liquidates.
+
+    From data only: the sale's security is the one the action delivered, the
+    sale is untagged, falls within the cash-in-lieu window after the action, and
+    its size is exactly the fractional part of the action's aggregate entitlement.
+    """
+
+    if trade.quantity >= 0:
+        return None
+    for action in candidates:
+        if id(action) in used or day < action.day:
+            continue
+        first = next(
+            (index for index, item in enumerate(days) if item >= action.day), None
+        )
+        if first is None or days.index(day) - first > CASH_IN_LIEU_WINDOW_DAYS:
+            continue
+        fraction = _fraction_of(action.new_quantity)
+        if fraction > 0 and abs(-trade.quantity - fraction) <= _RECONCILE_TOLERANCE:
+            return action
+    return None
+
+
+def _assign_fraction(
+    trade: TaggedTrade,
+    action: CorporateAction,
+    quantity: dict[str, dict[str, Decimal]],
+    every: Sequence[str],
+    residual: str,
+    account_position: Decimal,
+    legs: list[tuple[str, TaggedTrade, Decimal, Decimal]],
+    day: str,
+) -> CashInLieu:
+    """Charge each sleeve its own fractional entitlement; fail closed otherwise."""
+
+    symbol = trade.symbol
+    where = f"cash in lieu of {symbol} on {day}"
+    if action.old_security is None or not action.old_quantity:
+        raise SleeveLedgerError(
+            f"{where}: the corporate action does not identify the security it "
+            "surrendered, so no sleeve's entitlement can be derived"
+        )
+    held = {
+        sleeve: quantity[sleeve][symbol]
+        for sleeve in every
+        if abs(quantity[sleeve].get(symbol, _ZERO)) > _EPSILON
+    }
+    if any(value < 0 for value in held.values()) or residual in held:
+        raise SleeveLedgerError(
+            f"{where}: a short or residual holding has no entitlement"
+        )
+    total_held = sum(held.values(), _ZERO)
+    old_quantity, new_quantity = action.old_quantity, action.new_quantity
+    if abs(total_held - old_quantity) <= _RECONCILE_TOLERANCE:
+        # Holdings are still in the surrendered security's shares.
+        in_old_units = True
+    elif abs(total_held - new_quantity) <= _RECONCILE_TOLERANCE:
+        in_old_units = False
+    else:
+        raise SleeveLedgerError(
+            f"{where}: the sleeves hold {total_held}, neither the {old_quantity} "
+            f"surrendered nor the {new_quantity} delivered"
+        )
+    entitlements: dict[str, tuple[Decimal, Decimal, Decimal]] = {}
+    for sleeve, amount in held.items():
+        entitled = amount * new_quantity / old_quantity if in_old_units else amount
+        nearest = entitled.to_integral_value()
+        if abs(entitled - nearest) <= _WHOLE_SNAP:
+            entitled = nearest
+        whole = entitled.to_integral_value(rounding=ROUND_FLOOR)
+        entitlements[sleeve] = (entitled, whole, entitled - whole)
+    fraction_total = sum((item[2] for item in entitlements.values()), _ZERO)
+    sold = -trade.quantity
+    if abs(fraction_total - sold) > _RECONCILE_TOLERANCE:
+        raise SleeveLedgerError(
+            f"{where}: the sleeves' own fractional entitlements total "
+            f"{fraction_total}, the execution sold {sold}"
+        )
+    whole_total = sum((item[1] for item in entitlements.values()), _ZERO)
+    if abs(whole_total - account_position) > _RECONCILE_TOLERANCE:
+        raise SleeveLedgerError(
+            f"{where}: the sleeves keep {whole_total} whole shares, the account "
+            f"holds {account_position}"
+        )
+    rows: list[SleeveEntitlement] = []
+    for sleeve in every:
+        if sleeve not in held:
+            continue
+        entitled, whole, fraction = entitlements[sleeve]
+        charged = trade.quantity * fraction / fraction_total if fraction else _ZERO
+        commission = trade.commission * fraction / fraction_total if fraction else _ZERO
+        rows.append(
+            SleeveEntitlement(
+                sleeve_id=sleeve,
+                held_quantity=held[sleeve],
+                entitlement=entitled,
+                whole_shares=whole,
+                fraction=fraction,
+                charged_quantity=charged,
+                cash_credited=-charged * trade.price,
+                commission=commission,
+            )
+        )
+        if not fraction:
+            continue
+        legs.append((sleeve, trade, charged, commission))
+        quantity[sleeve][symbol] += (
+            charged * old_quantity / new_quantity if in_old_units else charged
+        )
+    return CashInLieu(
+        day=day,
+        security_id=symbol,
+        action=action,
+        ratio=new_quantity / old_quantity,
+        reference=trade.reference,
+        timestamp=trade.timestamp,
+        quantity=trade.quantity,
+        price=trade.price,
+        commission=trade.commission,
+        sleeves=tuple(rows),
+        entitled_total=sum((item.entitlement for item in rows), _ZERO),
+        whole_total=whole_total,
+        fraction_total=fraction_total,
+        account_position=account_position,
     )
 
 

@@ -51,6 +51,72 @@ def test_unverifiable_rows_skip_with_a_reason(row: Row) -> None:
     assert verdict is Verdict.SKIP and "UNVERIFIABLE" in evidence
 
 
+def _u02() -> Row:
+    return next(row for row in ROWS if row.id == "U02")
+
+
+def test_u02_skips_without_a_bundle_and_runs_with_one() -> None:
+    row = _u02()
+    verdict, evidence = claim_table.evaluate(row, claim_table_fixtures.base_payload())
+    assert (
+        verdict is Verdict.SKIP
+        and "UNVERIFIABLE" in evidence
+        and "--bundle" in evidence
+    )
+    verdict, evidence = claim_table.evaluate(row, _prepared(row))
+    assert verdict is Verdict.PASS and "1 panel/ artifacts" in evidence
+
+
+@pytest.mark.parametrize("tamper", ["status", "bytes", "missing", "no_panel"])
+def test_u02_fails_on_a_tampered_or_absent_bundle(tamper: str) -> None:
+    payload = _prepared(_u02())
+    bundle = payload.bundle
+    assert bundle is not None
+    if tamper == "status":
+        bundle["verification"] = "PENDING"
+    elif tamper == "bytes":
+        bundle["on_disk"]["panel/index.html"]["size_bytes"] = 6
+    elif tamper == "missing":
+        bundle["on_disk"] = {}
+    else:
+        bundle["artifacts"] = bundle["artifacts"][1:]
+    verdict, evidence = claim_table.evaluate(_u02(), payload)
+    assert verdict is Verdict.FAIL, evidence
+
+
+def test_load_bundle_hashes_the_stored_panel_files(tmp_path: Path) -> None:
+    import hashlib
+
+    (tmp_path / "panel").mkdir()
+    data = b"<html>panel</html>"
+    (tmp_path / "panel" / "index.html").write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+    manifest = {
+        "verification": "VERIFIED",
+        "artifacts": [
+            {"artifact_id": "panel/index.html", "sha256": sha, "size_bytes": len(data)},
+            {"artifact_id": "panel/gone.js", "sha256": sha, "size_bytes": 1},
+            {"artifact_id": "evidence/x.json", "sha256": sha, "size_bytes": 1},
+        ],
+    }
+    import json
+
+    (tmp_path / "generation.json").write_bytes(json.dumps(manifest).encode())
+    bundle = claim_table_runner.load_bundle(tmp_path)
+    assert set(bundle["on_disk"]) == {"panel/index.html"}
+    payload = Payload(panel={}, report={}, bundle=bundle)
+    verdict, evidence = claim_table.evaluate(_u02(), payload)
+    assert verdict is Verdict.FAIL and "panel/gone.js" in evidence
+    (tmp_path / "panel" / "gone.js").write_bytes(b"x")
+    manifest["artifacts"][1]["sha256"] = hashlib.sha256(b"x").hexdigest()
+    (tmp_path / "generation.json").write_bytes(json.dumps(manifest).encode())
+    payload = Payload(
+        panel={}, report={}, bundle=claim_table_runner.load_bundle(tmp_path)
+    )
+    verdict, _ = claim_table.evaluate(_u02(), payload)
+    assert verdict is Verdict.PASS
+
+
 def test_a_predicate_that_raises_is_a_failure() -> None:
     verdict, evidence = claim_table.evaluate(CHECKABLE[0], Payload(panel={}, report={}))
     assert verdict in (Verdict.SKIP, Verdict.FAIL)

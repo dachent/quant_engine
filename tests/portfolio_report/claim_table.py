@@ -47,6 +47,8 @@ class Payload:
 
     panel: dict[str, Json]
     report: dict[str, Json]
+    # Optional generation-bundle evidence (``claim_table_runner.load_bundle``); None = not given.
+    bundle: dict[str, Json] | None = None
 
 
 @dataclass(frozen=True)
@@ -369,22 +371,26 @@ def p_leverage_tiles(payload: Payload) -> Result:
     if not rows:
         return skip("no leverage rows")
     observed = [r for r in rows if r.get("coverage_status") == "OBSERVED_ONLY"]
-    unavailable = [r for r in rows if r.get("coverage_status") != "OBSERVED_ONLY"]
+    derived = [r for r in rows if r.get("coverage_status") == "DERIVED"]
+    unavailable = [
+        r for r in rows if r.get("coverage_status") not in {"OBSERVED_ONLY", "DERIVED"}
+    ]
     statuses = {str(r.get("coverage_status")) for r in rows}
-    stray = statuses - {"OBSERVED_ONLY", "UNAVAILABLE"}
+    stray = statuses - {"OBSERVED_ONLY", "UNAVAILABLE", "DERIVED"}
     with_amount = sum(1 for r in observed if get(r, "amount", "value") is not None)
     no_amount = len(rows) - sum(
         1 for r in rows if get(r, "amount", "value") is not None
     )
     if stray:
         return bad(
-            f"coverage statuses other than OBSERVED_ONLY/UNAVAILABLE exist: {names(stray)}; "
-            f"the two tiles ({len(observed)} observed, {len(unavailable)} unavailable) "
-            "do not name them"
+            "coverage statuses other than OBSERVED_ONLY/DERIVED/UNAVAILABLE exist: "
+            f"{names(stray)}; the three tiles ({len(observed)} observed, {len(derived)} "
+            f"derived, {len(unavailable)} unavailable) do not name them"
         )
     return ok(
-        f"{len(observed)} observed ({with_amount} with an amount) + "
-        f"{len(unavailable)} unavailable = {len(rows)}; {no_amount} rows have no amount"
+        f"{len(observed)} observed ({with_amount} with an amount) + {len(derived)} "
+        f"derived + {len(unavailable)} unavailable = {len(rows)}; {no_amount} rows "
+        "have no amount"
     )
 
 
@@ -1025,6 +1031,66 @@ def b_no_inference_keys(payload: Payload) -> None:
 # --- sentences the payload cannot decide -----------------------------------
 
 
+def _bundle_evidence(payload: Payload) -> Result:
+    """U02: the generation manifest is VERIFIED and its panel artifacts match the bundle bytes.
+
+    Needs the bundle input; without it the row stays an UNVERIFIABLE skip.
+    """
+
+    bundle = payload.bundle
+    if bundle is None:
+        return skip(
+            "UNVERIFIABLE from the payload: needs the bundle bytes, not a payload field "
+            "(pass --bundle <generation dir> to run it)"
+        )
+    status = bundle.get("verification")
+    if status != "VERIFIED":
+        return bad(f"generation manifest verification is {status!r}, not 'VERIFIED'")
+    artifacts = bundle.get("artifacts")
+    on_disk = bundle.get("on_disk")
+    if not isinstance(artifacts, list) or not isinstance(on_disk, dict):
+        return bad("bundle evidence is malformed")
+    panel = [a for a in artifacts if str(a.get("artifact_id", "")).startswith("panel/")]
+    if not panel:
+        return bad("the manifest lists no panel/ artifact")
+    problems: list[str] = []
+    for artifact in panel:
+        name = artifact["artifact_id"]
+        found = on_disk.get(name)
+        if not isinstance(found, dict):
+            problems.append(f"{name}: not stored in the bundle")
+        elif (found.get("sha256"), found.get("size_bytes")) != (
+            artifact.get("sha256"),
+            artifact.get("size_bytes"),
+        ):
+            problems.append(f"{name}: bytes differ from the manifest")
+    if problems:
+        return bad("; ".join(problems[:5]))
+    return ok(
+        f"manifest VERIFIED; {len(panel)} panel/ artifacts byte-identical "
+        f"(sha256 + size) to the bundle files; {len(artifacts) - len(panel)} other "
+        "manifest artifacts not checked"
+    )
+
+
+def _b_bundle_evidence(payload: Payload) -> None:
+    bundle = payload.bundle
+    assert bundle is not None
+    bundle["on_disk"][bundle["artifacts"][0]["artifact_id"]]["sha256"] = "0" * 64
+
+
+def _p_bundle_evidence(payload: Payload) -> None:
+    sha = "a" * 64
+    payload.bundle = {
+        "verification": "VERIFIED",
+        "artifacts": [
+            {"artifact_id": "panel/index.html", "sha256": sha, "size_bytes": 5},
+            {"artifact_id": "evidence/x.json", "sha256": "b" * 64, "size_bytes": 9},
+        ],
+        "on_disk": {"panel/index.html": {"sha256": sha, "size_bytes": 5}},
+    }
+
+
 def _unverifiable(reason: str) -> Callable[[Payload], Result]:
     def predicate(_payload: Payload) -> Result:
         return skip(f"UNVERIFIABLE from the payload: {reason}")
@@ -1424,11 +1490,17 @@ ROWS: tuple[Row, ...] = (
         PANEL_JS,
         (r"verified generation bundle exact bytes",),
         "report-attested static publication bytes are verified",
-        _unverifiable("needs the bundle bytes, not a payload field"),
-        None,
-        unverifiable=True,
+        _bundle_evidence,
+        _b_bundle_evidence,
+        pass_fixture=_p_bundle_evidence,
     ),
 )
+
+# The rows of the sleeve restatement (#624); the module imports this one for Row, Payload and
+# the verdict helpers, so it is read after they are defined.
+from claim_table_sleeve import SLEEVE_ROWS  # noqa: E402
+
+ROWS = ROWS + SLEEVE_ROWS
 
 ROW_IDS = tuple(row.id for row in ROWS)
 assert len(set(ROW_IDS)) == len(ROW_IDS), "duplicate claim-table row ids"

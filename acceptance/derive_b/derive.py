@@ -12,7 +12,13 @@ import types
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, DecimalException, ROUND_HALF_UP, getcontext
+from decimal import (
+    Decimal,
+    DecimalException,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+    getcontext,
+)
 from pathlib import Path, PurePath
 from typing import Callable, Iterable, cast
 
@@ -3196,7 +3202,16 @@ def derive(
     qe_root: Path,
     inputs_manifest: dict[str, object] | None = None,
     sleeve_inputs: Path | None = None,
+    strategy_basis: Path | None = None,
 ) -> dict[str, object]:
+    declared_basis: tuple[list[str], str] | None = None
+    if strategy_basis is not None:
+        if sleeve_inputs is None:
+            raise SleeveInputError(
+                "--strategy-basis restates strategy rows on the sleeve basis: it "
+                "requires --sleeve-inputs"
+            )
+        declared_basis = load_strategy_basis(strategy_basis)
     input_paths = default_input_paths()
     schema_v3 = False
     authority_paths: list[Path] = []
@@ -4577,7 +4592,320 @@ def derive(
             "value."
         )
         output["sleeve_derivation"] = sleeve_result["sleeve_derivation"]
+        if declared_basis is not None and strategy_basis is not None:
+            moved = apply_strategy_basis(
+                output,
+                declared_basis[0],
+                declared_basis[1],
+                strategy_basis.as_posix(),
+                sleeve_result,
+                aggregate,
+            )
+            output["strategy_basis"] = {
+                "schema": STRATEGY_BASIS_SCHEMA,
+                "path": strategy_basis.as_posix(),
+                "sha256": declared_basis[1],
+                "strategies": declared_basis[0],
+                "restated_rows": sorted(moved),
+            }
+            output["convention_notes"].append(
+                "SLEEVE BASIS (#624): the declared strategies' twr.strategy, "
+                "capital.strategy.cutoff, capital.portfolio.systematic.cutoff and "
+                "weight.strategy.cutoff rows are stated on the open sleeve epoch "
+                "(its own ITD return and closing NAV); no other row moves."
+            )
     return output
+
+
+# ======================================================================
+# Declared sleeve basis (#624, option B)
+# ======================================================================
+
+STRATEGY_BASIS_SCHEMA = "strategy-basis-declaration/1"
+STRATEGY_BASIS_SLEEVE = "SLEEVE_EPOCH"
+
+
+def load_strategy_basis(path: Path) -> tuple[list[str], str]:
+    """The strategies a ``strategy-basis-declaration/1`` states on their sleeve.
+
+    Returns the sorted strategy ids and the declaration bytes' sha256.  Anything else
+    in the file is refused (exit status 2): a declaration is read whole or not at all.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise SleeveInputError(
+            f"cannot read strategy basis declaration {path}: {error}"
+        ) from error
+    try:
+        document = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SleeveInputError(
+            f"strategy basis declaration {path} is not JSON"
+        ) from error
+    if not isinstance(document, dict) or set(document) != {"schema", "strategies"}:
+        raise SleeveInputError(f"strategy basis declaration {path}: keys differ")
+    if document["schema"] != STRATEGY_BASIS_SCHEMA:
+        raise SleeveInputError(f"strategy basis declaration {path}: schema differs")
+    entries = document["strategies"]
+    if not isinstance(entries, list) or not entries:
+        raise SleeveInputError(f"strategy basis declaration {path} names no strategy")
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"strategy_id", "basis"}:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: an entry's keys differ"
+            )
+        name = entry["strategy_id"]
+        if not isinstance(name, str) or not name:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: an entry has no strategy id"
+            )
+        if entry["basis"] != STRATEGY_BASIS_SLEEVE:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: {entry['basis']!r} is not "
+                "restatable"
+            )
+        if name in names:
+            raise SleeveInputError(
+                f"strategy basis declaration {path}: {name} is declared twice"
+            )
+        names.append(name)
+    return sorted(names), hashlib.sha256(raw).hexdigest()
+
+
+def _basis_row(
+    rows: list[dict[str, object]],
+    metric_id: str,
+    entity: str,
+    replacement: dict[str, object],
+) -> None:
+    """Replace the row of a key in place (appending when it had none)."""
+    for index, row in enumerate(rows):
+        if row["metric_id"] == metric_id and row["entity"] == entity:
+            rows[index] = replacement
+            return
+    rows.append(replacement)
+
+
+def apply_strategy_basis(
+    output: dict[str, object],
+    declared: list[str],
+    declaration_sha256: str,
+    declaration_label: str,
+    sleeve_result: dict[str, object],
+    aggregate: dict[str, object],
+) -> list[str]:
+    """State each declared strategy on its open sleeve epoch; return the moved row keys.
+
+    Four row families move, for that stated reason only: ``twr.strategy`` (the epoch's
+    ITD return from this derivation's own epoch engine), ``capital.strategy.cutoff`` (the
+    epoch's closing NAV), ``capital.portfolio.systematic.cutoff`` (old strategy value
+    replaced, exact Decimal) and every ``weight.strategy.cutoff`` (over the new total).
+    ``mwr.strategy`` already stands on the sleeve; no other row is touched.
+    """
+    metrics = cast(list[dict[str, object]], output["metrics"])
+    unavailable = cast(list[dict[str, object]], output["not_derivable"])
+    records = cast(list[dict[str, object]], sleeve_result["epoch_records"])
+    sleeve_rows = cast(list[dict[str, object]], sleeve_result["metrics"])
+    sleeve_unavailable = cast(list[dict[str, object]], sleeve_result["not_derivable"])
+    sleeve_paths = sorted(
+        str(row["path"])
+        for row in cast(list[dict[str, object]], sleeve_result["inputs"])
+    )
+    values = cast(dict[str, Decimal], aggregate["strategies"])
+    stated_by = f"strategy-basis-declaration/1 {declaration_sha256[:16]}"
+    moved: list[str] = []
+    after: dict[str, Decimal] = {}
+    for strategy_id in declared:
+        found = [
+            record
+            for record in records
+            if record["strategy_id"] == strategy_id and record["effective_end"] is None
+        ]
+        if len(found) != 1:
+            raise SleeveInputError(
+                f"declared strategy {strategy_id}: {len(found)} derived sleeve epochs "
+                "are open at the cutoff, exactly one is required"
+            )
+        if strategy_id not in values:
+            raise SleeveInputError(
+                f"declared strategy {strategy_id} has no capital row to restate"
+            )
+        account = str(found[0]["account_id"])
+        nav = cast(list[list[str]], found[0]["nav"])
+        closing = D(nav[-1][1])
+        last_day = nav[-1][0]
+        after[strategy_id] = closing
+        used = sorted({*sleeve_paths, declaration_label})
+        twr = next(
+            (
+                row
+                for row in sleeve_rows
+                if row["metric_id"] == "twr.account"
+                and row["entity"] == account
+                and row.get("window") == "ITD"
+            ),
+            None,
+        )
+        before_twr = next(
+            (
+                row
+                for row in metrics
+                if row["metric_id"] == "twr.strategy" and row["entity"] == strategy_id
+            ),
+            None,
+        )
+        before_capital = next(
+            (
+                row
+                for row in metrics
+                if row["metric_id"] == "capital.strategy.cutoff"
+                and row["entity"] == strategy_id
+            ),
+            None,
+        )
+        stated = (
+            f"{stated_by} states {strategy_id} on its sleeve epoch {account} "
+            f"(opening NAV {found[0]['effective_start']})"
+        )
+        unavailable[:] = [
+            row
+            for row in unavailable
+            if not (row["metric_id"] == "twr.strategy" and row["entity"] == strategy_id)
+            and not (
+                row["metric_id"] == "capital.strategy.cutoff"
+                and row["entity"] == strategy_id
+            )
+        ]
+        if twr is None:
+            reason = next(
+                (
+                    str(row["reason"])
+                    for row in sleeve_unavailable
+                    if row["metric_id"] == "twr.account" and row["entity"] == account
+                ),
+                f"{account} has no derived return",
+            )
+            if before_twr is not None:
+                metrics.remove(before_twr)
+            add_not_derivable(
+                output, "twr.strategy", strategy_id, f"{stated}: {reason}", "ITD"
+            )
+        else:
+            _basis_row(
+                metrics,
+                "twr.strategy",
+                strategy_id,
+                metric(
+                    "twr.strategy",
+                    strategy_id,
+                    twr["value"],
+                    "ratio",
+                    sorted({*used, *cast(list[str], twr["inputs_used"])}),
+                    str(twr["as_of"]),
+                    window="ITD",
+                    notes=stated
+                    + "; the return is that epoch's ITD return: sleeve NAV with the "
+                    "sleeve's transfers external, date-only at end of day"
+                    + (
+                        f"; the parent-account basis row was {before_twr['value']}"
+                        if before_twr is not None
+                        else ""
+                    ),
+                ),
+            )
+        moved.append(f"twr.strategy|{strategy_id}")
+        _basis_row(
+            metrics,
+            "capital.strategy.cutoff",
+            strategy_id,
+            metric(
+                "capital.strategy.cutoff",
+                strategy_id,
+                money(closing),
+                "USD",
+                used,
+                last_day,
+                notes=stated
+                + "; capital is the sleeve's closing NAV after allocated costs"
+                + (
+                    f"; the parent-account basis row was {before_capital['value']}"
+                    if before_capital is not None
+                    else ""
+                ),
+            ),
+        )
+        moved.append(f"capital.strategy.cutoff|{strategy_id}")
+    total_row = next(
+        (
+            row
+            for row in metrics
+            if row["metric_id"] == "capital.portfolio.systematic.cutoff"
+        ),
+        None,
+    )
+    if total_row is None:
+        return moved
+    total = cast(Decimal, aggregate["systematic"])
+    for strategy_id in declared:
+        total += after[strategy_id] - values[strategy_id]
+    _basis_row(
+        metrics,
+        "capital.portfolio.systematic.cutoff",
+        "portfolio",
+        metric(
+            "capital.portfolio.systematic.cutoff",
+            "portfolio",
+            money(total),
+            "USD",
+            sorted(
+                {
+                    *cast(list[str], total_row["inputs_used"]),
+                    *sleeve_paths,
+                    declaration_label,
+                }
+            ),
+            str(total_row["as_of"]),
+            notes=(
+                f"{stated_by}: {', '.join(declared)} valued as its sleeve; the "
+                f"parent-account total was {total_row['value']}"
+            ),
+        ),
+    )
+    moved.append("capital.portfolio.systematic.cutoff|portfolio")
+    capitals = {**values, **after}
+    for row in [row for row in metrics if row["metric_id"] == "weight.strategy.cutoff"]:
+        strategy_id = str(row["entity"])
+        if strategy_id not in capitals:
+            continue
+        _basis_row(
+            metrics,
+            "weight.strategy.cutoff",
+            strategy_id,
+            metric(
+                "weight.strategy.cutoff",
+                strategy_id,
+                ratio(capitals[strategy_id] / total),
+                "ratio",
+                sorted(
+                    {
+                        *cast(list[str], row["inputs_used"]),
+                        *sleeve_paths,
+                        declaration_label,
+                    }
+                ),
+                str(row["as_of"]),
+                notes=(
+                    "the strategy is stated on its sleeve"
+                    if strategy_id in after
+                    else "the perimeter moved because a declared strategy is stated "
+                    "on its sleeve"
+                ),
+            ),
+        )
+        moved.append(f"weight.strategy.cutoff|{strategy_id}")
+    return moved
 
 
 # ======================================================================
@@ -4904,6 +5232,112 @@ def _cut_ibkr_slice(
     }
 
 
+CA_LEDGER_DAYS = 5
+
+
+def cash_in_lieu_fraction(
+    day: str,
+    nav_days: list[str],
+    action_rows: list[dict[str, object]],
+    sec: str,
+    qty: Decimal,
+    holdings: dict[str, dict[str, Decimal]],
+    real: list[str],
+    everyone: list[str],
+    account_position: Decimal,
+) -> dict[str, object] | None:
+    """An untagged sale that is the fraction of a corporate action's aggregate entitlement.
+
+    The delivered security's action row gives the new quantity; the surrendered security
+    on the same date and kind gives the old one.  The sale is cash in lieu when it sells
+    exactly the new quantity's fractional part inside five ledger days of the action and
+    several sleeves hold the security.  Each sleeve then pays its own fraction (held x
+    new / old less its whole shares).  Otherwise ``None`` (pro rata stays).  A broken
+    closure stops the derivation (``_fail``), it is never papered over.
+    """
+    if qty >= 0:
+        return None
+    distinct: dict[tuple[object, object, object, Decimal], dict[str, object]] = {}
+    for row in action_rows:
+        distinct[
+            (
+                row["event_date"],
+                row["kind"],
+                row["security_id"],
+                Decimal(str(row["quantity"])),
+            )
+        ] = row
+    delivered = [
+        (key, row)
+        for key, row in distinct.items()
+        if key[2] == sec
+        and key[3] > 0
+        and str(key[0]) <= day
+        and len([x for x in nav_days if str(key[0]) < x <= day]) <= CA_LEDGER_DAYS
+    ]
+    if not delivered:
+        return None
+    (event_day, kind, _sec, new_qty), _row = delivered[-1]
+    fraction_sold = new_qty - new_qty.to_integral_value(rounding=ROUND_FLOOR)
+    if fraction_sold == 0 or abs(-qty - fraction_sold) > Decimal("1e-9"):
+        return None
+    holders = [h for h in real if holdings[h].get(sec, Decimal(0)) > 0]
+    if len(holders) < 2:
+        return None
+    surrendered = [
+        key[3]
+        for key in distinct
+        if key[0] == event_day and key[1] == kind and key[3] < 0 and key[2] != sec
+    ]
+    if len(surrendered) != 1:
+        _fail(
+            f"corporate action {event_day} delivers {sec} but names "
+            f"{len(surrendered)} surrendered securities"
+        )
+    old_qty = -surrendered[0]
+    others = [
+        h
+        for h in everyone
+        if h not in holders and abs(holdings[h].get(sec, Decimal(0))) > Decimal("1e-9")
+    ]
+    if others:
+        _fail(f"{day} {sec}: sleeves {others} carry the security but are not holders")
+    held = {h: holdings[h][sec] for h in holders}
+    held_sum = sum(held.values())
+    if abs(held_sum - old_qty) <= Decimal("1e-6"):
+        scale, unit = new_qty / old_qty, old_qty / new_qty
+    elif abs(held_sum - new_qty) <= Decimal("1e-6"):
+        scale, unit = Decimal(1), Decimal(1)
+    else:
+        _fail(
+            f"{day} {sec}: holdings {fmt(held_sum)} match neither the surrendered "
+            f"{fmt(old_qty)} nor the delivered {fmt(new_qty)} quantity"
+        )
+    entitlement = {h: held[h] * scale for h in holders}
+    whole = {h: entitlement[h].to_integral_value(rounding=ROUND_FLOOR) for h in holders}
+    own = {h: entitlement[h] - whole[h] for h in holders}
+    if abs(sum(own.values()) - fraction_sold) > Decimal("1e-6"):
+        _fail(
+            f"{day} {sec}: sleeve fractions {fmt(sum(own.values()))} do not add to "
+            f"the {fmt(fraction_sold)} sold"
+        )
+    if abs(sum(whole.values()) - account_position) > Decimal("1e-6"):
+        _fail(
+            f"{day} {sec}: whole shares {fmt(sum(whole.values()))} are not the "
+            f"account position {fmt(account_position)}"
+        )
+    total = sum(own.values())
+    return {
+        "share": {h: own[h] / total for h in holders if own[h] != 0},
+        "unit": unit,
+        "held": held,
+        "entitlement": entitlement,
+        "whole": whole,
+        "fraction": own,
+        "action_day": event_day,
+    }
+
+
 def _ibkr_facts(
     slc: dict[str, object],
     declared: dict[str, object],
@@ -5085,6 +5519,7 @@ def _ibkr_facts(
     # ---------------- ledger ----------------
     holdings: dict[str, dict[str, Decimal]] = {s: {} for s in ALL}
     manual_assignments = []
+    cash_in_lieu_blocks: list[dict[str, object]] = []
     recon_gaps = []
     recon_scalings = []
     offsetting_residues = []
@@ -5150,6 +5585,60 @@ def _ibkr_facts(
                 holdings[s][sec] = holdings[s].get(sec, Decimal(0)) + qty
                 net_trade[s] += qty * price
                 comm[s] += c
+                continue
+            lieu = cash_in_lieu_fraction(
+                d,
+                nav_days,
+                slc.get("corporate_actions", []),  # type: ignore[arg-type]
+                sec,
+                qty,
+                holdings,
+                REAL,
+                ALL,
+                book[d].get(sec, Decimal(0)),
+            )
+            if lieu is not None:
+                shares_by_sleeve = cast(dict[str, Decimal], lieu["share"])
+                unit = cast(Decimal, lieu["unit"])
+                for h in sorted(shares_by_sleeve):
+                    share = shares_by_sleeve[h]
+                    holdings[h][sec] += share * qty * unit
+                    net_trade[h] += share * qty * price
+                    comm[h] += share * c
+                manual_assignments.append(
+                    {
+                        "day": d,
+                        "security_id": sec,
+                        "quantity": fmt(qty),
+                        "how": "corporate_action_fraction",
+                        "sleeves": sorted(shares_by_sleeve),
+                    }
+                )
+                cash_in_lieu_blocks.append(
+                    {
+                        "day": d,
+                        "security_id": sec,
+                        "action_day": lieu["action_day"],
+                        "sold": fmt(qty),
+                        "sleeves": {
+                            h: {
+                                "held": fmt(cast(dict[str, Decimal], lieu["held"])[h]),
+                                "entitlement": fmt(
+                                    cast(dict[str, Decimal], lieu["entitlement"])[h]
+                                ),
+                                "whole": fmt(
+                                    cast(dict[str, Decimal], lieu["whole"])[h]
+                                ),
+                                "fraction": fmt(
+                                    cast(dict[str, Decimal], lieu["fraction"])[h]
+                                ),
+                                "cash": fmt(-qty * shares_by_sleeve[h] * price),
+                                "commission": fmt(shares_by_sleeve[h] * c),
+                            }
+                            for h in sorted(shares_by_sleeve)
+                        },
+                    }
+                )
                 continue
             holders = [h for h in REAL if holdings[h].get(sec, Decimal(0)) * qty < 0]
             if len(holders) == 1:
@@ -5653,6 +6142,11 @@ def _ibkr_facts(
             "reconciliation_scalings": recon_scalings,
             "offsetting_residues": offsetting_residues,
             "unallocated_dividends": unallocated_dividends,
+            **(
+                {"corporate_action_fractions": cash_in_lieu_blocks}
+                if cash_in_lieu_blocks
+                else {}
+            ),
         },
         "refusals": refusals,
         "assumptions": assumptions,
@@ -7044,9 +7538,20 @@ def main() -> None:
             "(requires --sleeve-inputs)"
         ),
     )
+    parser.add_argument(
+        "--strategy-basis",
+        type=Path,
+        default=None,
+        help=(
+            "strategy-basis-declaration/1: states the named strategies on their "
+            "open sleeve epoch (requires --sleeve-inputs)"
+        ),
+    )
     args = parser.parse_args()
     if args.sleeves_only and args.sleeve_inputs is None:
         parser.exit(2, "input error: --sleeves-only requires --sleeve-inputs\n")
+    if args.strategy_basis is not None and args.sleeves_only:
+        parser.exit(2, "input error: --strategy-basis cannot be --sleeves-only\n")
     manifest = None
     if args.inputs is not None:
         try:
@@ -7068,7 +7573,12 @@ def main() -> None:
                 "sleeve_derivation": sleeve_result["sleeve_derivation"],
             }
         else:
-            result = derive(args.qe_root, manifest, sleeve_inputs=args.sleeve_inputs)
+            result = derive(
+                args.qe_root,
+                manifest,
+                sleeve_inputs=args.sleeve_inputs,
+                strategy_basis=args.strategy_basis,
+            )
     except SleeveInputError as error:
         parser.exit(2, f"input error: {error}\n")
     except ManifestError as error:
