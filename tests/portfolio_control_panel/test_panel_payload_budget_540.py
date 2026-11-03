@@ -115,6 +115,31 @@ def test_cli_reports_blocks_and_fails_on_an_over_budget_generation(
     assert size.main([str(tmp_path), "--out", str(out), "--no-check"]) == 0
 
 
+def test_a_raised_budget_is_the_measured_size_plus_the_stated_margin() -> None:
+    base = {
+        "blocks": {"strategies": 125000, "other": 10},
+        "committed_bytes": {"blocks": {"strategies": 121117, "other": 10}},
+    }
+    raised = size.raise_budgets(
+        base,
+        ["strategies"],
+        {"strategies": 136732},
+        {"strategies": 156861},
+        margin=0.01,
+        generation="gen",
+    )
+    assert raised["blocks"]["strategies"] == 159000  # ceil(156861 x 1.01 / 1000) x 1000
+    assert raised["blocks"]["other"] == 10
+    assert raised["committed_bytes"]["blocks"]["strategies"] == 156861
+    entry = raised["history"][0]["blocks"]["strategies"]
+    assert (entry["before"], entry["after"], entry["previous_limit"]) == (
+        136732,
+        156861,
+        125000,
+    )
+    assert base["blocks"]["strategies"] == 125000  # the input is not edited
+
+
 def test_every_raised_or_newly_listed_block_states_its_reason() -> None:
     # #691: a budget entry's justification is data. Blocks whose figure moved after R2
     # (and the block the checker used to flag as unlisted) must say why.

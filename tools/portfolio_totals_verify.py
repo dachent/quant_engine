@@ -105,6 +105,41 @@ def included_rows(
 # --------------------------------------------------------------- capital
 
 
+def _check_perimeter_restatement(
+    block: Mapping[str, Any], custody: Mapping[str, Any] | None
+) -> None:
+    """A published restatement memo agrees with the custody block it names."""
+
+    memo = block.get("memo")
+    published = memo.get("perimeter_restatement") if isinstance(memo, Mapping) else None
+    if published is None:
+        return
+    value_of: dict[str, Decimal] = {}
+    for item in (custody or {}).get("strategies") or []:
+        value = item.get("current_value") or {}
+        if item.get("scope") == "SYSTEMATIC" and value.get("status") == "AVAILABLE":
+            value_of[item["strategy_id"]] = _d(value["value"])
+    lines = published.get("lines") if isinstance(published, Mapping) else None
+    if not isinstance(lines, list) or not lines:
+        raise _fail("capital_reconciliation perimeter restatement has no lines")
+    total = Decimal(0)
+    for line in lines:
+        strategy = line.get("strategy_id")
+        difference = _d(line.get("sleeve_value_usd")) - _d(
+            line.get("account_basis_value_usd")
+        )
+        if (
+            value_of.get(strategy) != _d(line.get("sleeve_value_usd"))
+            or _d(line.get("difference_usd")) != difference
+        ):
+            raise _fail(
+                f"capital_reconciliation perimeter restatement line differs: {strategy}"
+            )
+        total += difference
+    if _d(published.get("difference_usd")) != total:
+        raise _fail("capital_reconciliation perimeter restatement total differs")
+
+
 def _check_perimeter_remainder(
     block: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
@@ -280,6 +315,7 @@ def _check_capital(
         if block.get("residual_usd") != "0":
             raise _fail("capital_reconciliation residual is not zero")
         _check_perimeter_remainder(block, rows, hwm_summary or {}, custody, cutoff)
+        _check_perimeter_restatement(block, custody)
         if manifest_rows is not None:
             _check_epoch_set(block, rows, manifest_rows)
         if block.get("open_epoch_count") != sum(1 for r in rows if r["end"] == cutoff):

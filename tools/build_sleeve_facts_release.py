@@ -43,6 +43,9 @@ import sleeve_nav as nav_module
 
 MANIFEST_ARTIFACT_ID: Final = "sleeve-policy-manifest"
 DISCLOSURE_SECTION: Final = "disclosure-inputs"
+# the declaration naming the strategies restated to their sleeve basis (#624)
+STRATEGY_BASIS_SECTION: Final = "strategy-basis-declaration"
+_OPTIONAL_PINS: Final = (DISCLOSURE_SECTION, STRATEGY_BASIS_SECTION)
 # The manifest keys each section by the artifact it builds.
 ACCOUNT_SECTION: Final = "sleeve-account-facts"
 FUND_SECTION: Final = "quantbase-fund-facts"
@@ -207,9 +210,8 @@ def build_release_sleeve_facts(
         loaded_manifest,
         {"schema_version", "artifact_id", ACCOUNT_SECTION, FUND_SECTION}
         | (
-            {DISCLOSURE_SECTION}
+            {name for name in _OPTIONAL_PINS if name in loaded_manifest}
             if isinstance(loaded_manifest, Mapping)
-            and DISCLOSURE_SECTION in loaded_manifest
             else set()
         ),
         "sleeve policy manifest",
@@ -217,6 +219,11 @@ def build_release_sleeve_facts(
     if DISCLOSURE_SECTION in manifest:
         # the governed disclosure inputs the report cites: pinned, never typed into code
         _pinned(policy_root, manifest[DISCLOSURE_SECTION], "sleeve disclosure inputs")
+    if STRATEGY_BASIS_SECTION in manifest:
+        # the declaration of which strategies are restated: data, never code
+        _pinned(
+            policy_root, manifest[STRATEGY_BASIS_SECTION], "strategy basis declaration"
+        )
     if (
         manifest["schema_version"] != 1
         or manifest["artifact_id"] != MANIFEST_ARTIFACT_ID

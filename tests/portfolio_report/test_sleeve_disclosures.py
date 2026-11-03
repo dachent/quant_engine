@@ -466,6 +466,48 @@ def test_a_bound_measured_on_a_replaced_parent_epoch_is_read_against_the_strateg
     } in absent["omitted"]
 
 
+def test_a_bound_of_a_restated_strategy_is_read_against_its_parent_account_figure(
+    tmp_path: Path,
+) -> None:
+    """The row is on its sleeve, the committed bound was measured on the parent series:
+    it is shown against the account-basis figure and says so, never dropped."""
+
+    sources = disclosures.build_sources(
+        facts_paths=_facts(tmp_path),
+        inputs_path=_inputs(tmp_path),
+        predecessor_data_root=None,
+        declared_inputs_path=_declared(tmp_path),
+    )
+    rows = [row for row in _rows() if row["account_id"] != PARENT]
+
+    def compose(sleeve: Decimal, account: Decimal | None) -> dict[str, Any]:
+        return disclosures.compose(
+            sources,
+            rows=rows,
+            invested_capital=None,
+            sleeve_accounts={S1: PARENT, S2: PARENT},
+            product_strategies=["p123-ai-factor"],
+            strategy_returns={"p123-ai-factor": sleeve},
+            account_basis_returns=(
+                None if account is None else {"p123-ai-factor": account}
+            ),
+        )
+
+    shown = compose(Decimal("0.15"), Decimal("0.02453178"))
+    timing = next(
+        i["value"] for i in shown["items"] if i["item"] == "Flow timing bounds"
+    )
+    assert "parent-account series (its row is restated onto its sleeve)" in timing
+    assert "cumulative TWR 2.45%" in timing and "-0.19 and +0.00" in timing
+    assert all("p123-ai-factor" not in o["entry"] for o in shown["omitted"])
+    # without the account figure the sleeve return cannot match the committed bound
+    dropped = compose(Decimal("0.15"), None)
+    assert {
+        "entry": f"timestamp bound p123-ai-factor on {PARENT}",
+        "reason": "COMMITTED_RETURN_DIFFERS_FROM_REPORT_ROW",
+    } in dropped["omitted"]
+
+
 def _committed_release(
     data_root: Path, release_id: str, panel_generation_id: str, **overrides: Any
 ) -> None:

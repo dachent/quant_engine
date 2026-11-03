@@ -480,6 +480,7 @@ def test_the_cli_writes_the_same_bytes(tmp_path: Path) -> None:
             "transactions": list(rows.transactions),
             "positions": list(rows.positions),
             "change_in_nav_observations": list(rows.change_in_nav),
+            "corporate_actions": list(rows.corporate_actions),
         }
     )
     (tmp_path / "rows.json").write_bytes(rows_bytes)

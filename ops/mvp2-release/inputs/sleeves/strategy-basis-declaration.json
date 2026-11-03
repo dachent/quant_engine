@@ -1,0 +1,9 @@
+{
+  "schema": "strategy-basis-declaration/1",
+  "strategies": [
+    {
+      "basis": "SLEEVE_EPOCH",
+      "strategy_id": "p123-ai-factor"
+    }
+  ]
+}

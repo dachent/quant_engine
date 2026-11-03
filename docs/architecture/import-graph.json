@@ -214,6 +214,11 @@
       1
     ],
     [
+      "portfolio_attended_preparation",
+      "strategy_basis",
+      1
+    ],
+    [
       "portfolio_attribution",
       "portfolio_current_dependence",
       1
@@ -221,6 +226,11 @@
     [
       "portfolio_attribution",
       "portfolio_report",
+      1
+    ],
+    [
+      "portfolio_attribution",
+      "strategy_basis",
       1
     ],
     [
@@ -286,6 +296,21 @@
     [
       "portfolio_control_panel",
       "sleeve_disclosures",
+      1
+    ],
+    [
+      "portfolio_control_panel",
+      "strategy_basis_lens_moves",
+      1
+    ],
+    [
+      "portfolio_current_decomposition_plan",
+      "strategy_basis_disclosure",
+      1
+    ],
+    [
+      "portfolio_current_dependence",
+      "strategy_basis",
       1
     ],
     [
@@ -371,6 +396,16 @@
     [
       "portfolio_implementation_return_attribution",
       "provider_ledger",
+      1
+    ],
+    [
+      "portfolio_implementation_sleeve_basis",
+      "portfolio_implementation_reconciliation",
+      1
+    ],
+    [
+      "portfolio_implementation_sleeve_basis",
+      "strategy_basis",
       1
     ],
     [
@@ -515,6 +550,11 @@
     ],
     [
       "portfolio_report",
+      "portfolio_implementation_sleeve_basis",
+      1
+    ],
+    [
+      "portfolio_report",
       "portfolio_invested_capital",
       1
     ],
@@ -550,12 +590,32 @@
     ],
     [
       "portfolio_report",
+      "strategy_basis",
+      1
+    ],
+    [
+      "portfolio_report",
+      "strategy_basis_disclosure",
+      1
+    ],
+    [
+      "portfolio_report",
+      "strategy_leverage",
+      1
+    ],
+    [
+      "portfolio_report",
       "verify_holdings_identity",
       1
     ],
     [
       "portfolio_strategy_history",
       "portfolio_strategy_backtests",
+      1
+    ],
+    [
+      "portfolio_target_series",
+      "strategy_basis",
       1
     ],
     [
@@ -651,6 +711,21 @@
     [
       "sleeve_nav",
       "sleeve_ledger",
+      1
+    ],
+    [
+      "strategy_basis",
+      "account_strategy_manifest",
+      1
+    ],
+    [
+      "strategy_basis",
+      "nested_strategy_tag_map",
+      1
+    ],
+    [
+      "strategy_basis_disclosure",
+      "strategy_basis",
       1
     ],
     [

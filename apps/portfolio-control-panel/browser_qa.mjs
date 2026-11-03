@@ -347,10 +347,15 @@ try {
         }
       } else {
         const declaredClasses = new Set(leverageRows.map((row) => row.data_class));
-        const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
+        // DERIVED rows (a restated sleeve's loan and equity) are neither observed nor unavailable:
+        // app.js renders them as their own "derived" count in the badge and a tile.
+        const observedCount = leverageRows.filter((row) => row.coverage_status === "OBSERVED_ONLY").length;
+        const derivedCount = leverageRows.filter((row) => row.coverage_status === "DERIVED").length;
+        const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY" && row.coverage_status !== "DERIVED");
+        const derivedBadge = derivedCount ? ` / derived ${derivedCount.toLocaleString("en-US")}` : "";
         if (leverageCoverageRows < declaredClasses.size
           || !leverageObservationKpi.includes(leverageRows.length.toLocaleString("en-US"))
-          || (unavailable.length > 0 && leverageStatus !== `Observed ${(leverageRows.length - unavailable.length).toLocaleString("en-US")} / unavailable ${unavailable.length.toLocaleString("en-US")}`)) {
+          || (unavailable.length > 0 && leverageStatus !== `Observed ${observedCount.toLocaleString("en-US")}${derivedBadge} / unavailable ${unavailable.length.toLocaleString("en-US")}`)) {
           throw new Error("rendered leverage disclosures diverge from the bound panel payload");
         }
       }

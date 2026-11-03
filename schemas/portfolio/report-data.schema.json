@@ -137,7 +137,15 @@
         }
       }
     },
-    "account_summary": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "account_summary": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {"account_basis": {"$ref": "#/$defs/account_basis"}}
+      }
+    },
+    "strategy_basis_disclosure": {"$ref": "#/$defs/strategy_basis_disclosure"},
     "lifecycle_schema_version": {"const": 1},
     "retained_strategies": {
       "type": "array",
@@ -175,9 +183,30 @@
         "type": "object",
         "required": ["capital_as_of_date", "capital_status", "weight_basis"],
         "properties": {
+          "return_unlevered_cumulative": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_annualised": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_max_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_current_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_window_days": {"type": ["integer", "null"], "minimum": 1},
+          "return_unlevered_basis_label": {"type": ["string", "null"], "minLength": 1},
+          "return_unlevered_na_reason": {"type": ["string", "null"], "minLength": 1},
+          "return_levered_cumulative": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_annualised": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_max_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_current_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_window_days": {"type": ["integer", "null"], "minimum": 1},
+          "return_levered_basis_label": {"type": ["string", "null"], "minLength": 1},
+          "return_levered_peak_gross_to_equity": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_current_gross_to_equity": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_na_reason": {"type": ["string", "null"], "minLength": 1},
+          "return_levered_series_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
           "capital_as_of_date": {"type": "string", "format": "date"},
           "capital_status": {"const": "AVAILABLE"},
-          "weight_basis": {"const": "CURRENT_CUTOFF"}
+          "weight_basis": {"const": "CURRENT_CUTOFF"},
+          "benchmark_account_basis": {"$ref": "#/$defs/benchmark_account_basis"},
+          "comparison_basis": {"$ref": "#/$defs/comparison_sleeve_basis"},
+          "provider_account_basis": {"$ref": "#/$defs/provider_account_basis"},
+          "sleeve_return_windows": { "$ref": "#/$defs/sleeve_return_windows" }
         }
       }
     },
@@ -411,7 +440,8 @@
         "benchmark_comparisons": {"type": "array", "maxItems": 7},
         "comparisons": {"type": "array", "minItems": 7, "maxItems": 7},
         "costs": {"type": "array", "minItems": 7, "maxItems": 7},
-        "generation_id": {"$ref": "#/$defs/sha256"}
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "strategy_basis": {"$ref": "#/$defs/strategy_basis_attribution_block"}
       }
     },
     "provenance": {"type": "array", "minItems": 2, "items": {"type": "object"}},
@@ -566,6 +596,962 @@
     }
   },
   "$defs": {
+    "weight_restatement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "perimeter_before_usd",
+        "perimeter_after_usd",
+        "difference_usd",
+        "common_factor",
+        "weights_sum_after",
+        "statement",
+        "rows"
+      ],
+      "properties": {
+        "perimeter_before_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "perimeter_after_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "difference_usd": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "common_factor": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "weights_sum_after": {
+          "$ref": "#/$defs/basis_decimal"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "restated",
+              "value_before_usd",
+              "value_after_usd",
+              "weight_before",
+              "weight_after"
+            ],
+            "properties": {
+              "strategy_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "restated": {
+                "type": "boolean"
+              },
+              "value_before_usd": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "value_after_usd": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "weight_before": {
+                "$ref": "#/$defs/basis_decimal"
+              },
+              "weight_after": {
+                "$ref": "#/$defs/basis_decimal"
+              }
+            }
+          }
+        }
+      }
+    },
+    "basis_decimal": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "window_declaration": {
+      "$comment": "A window with its day count, the rule of that count and the convention of its start date (R2.2 backlog item 5); published from the series the producer holds, only for a strategy restated onto its sleeve.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "days", "days_basis", "start_kind"],
+      "properties": {
+        "start": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "end": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "days": { "type": "integer", "minimum": 0 },
+        "days_basis": { "const": "EXCLUSIVE_END_MINUS_START" },
+        "start_kind": { "enum": ["OPENING_NAV_DATE", "FIRST_RETURN_DATE"] }
+      }
+    },
+    "sleeve_return_windows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_return", "opening_nav"],
+      "properties": {
+        "first_return": { "$ref": "#/$defs/window_declaration" },
+        "opening_nav": { "$ref": "#/$defs/window_declaration" }
+      }
+    },
+    "account_basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "strategy_id",
+        "account_id",
+        "window",
+        "observations",
+        "series",
+        "figures"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "loan_usd": {
+          "type": ["string", "null"],
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+        },
+        "gross_to_equity_ratio": {
+          "type": ["string", "null"],
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "start",
+            "end",
+            "days",
+            "days_basis",
+            "start_kind"
+          ],
+          "properties": {
+            "start": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            },
+            "end": {
+              "type": "string",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+            },
+            "days": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "days_basis": {
+              "const": "EXCLUSIVE_END_MINUS_START"
+            },
+            "start_kind": {
+              "enum": ["OPENING_NAV_DATE", "FIRST_RETURN_DATE"]
+            }
+          }
+        },
+        "observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "series": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "sha256"
+          ],
+          "properties": {
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "figures": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "account_live_cumulative_return",
+            "account_live_max_drawdown",
+            "current_value_usd",
+            "systematic_weight",
+            "account_live_return_series_sha256"
+          ],
+          "properties": {
+            "account_live_cumulative_return": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_cumulative_return_label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_cagr": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_cagr_annualization": {
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_cagr_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_max_drawdown": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "hwm_max_drawdown": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "hwm_current_drawdown": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ytd_twr": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "calendar_year_twr": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "current_value_usd": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cost_rate_denominator_usd": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "systematic_weight": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/basis_decimal"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_return_series_schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_return_series_sha256": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_return_observations": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            },
+            "account_live_observed_start": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_observed_end": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_live_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "account_live_path_metrics_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "hwm_path_metrics_status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "strategy_basis_disclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "sleeve_facts",
+        "strategies"
+      ],
+      "properties": {
+        "schema": {
+          "const": "strategy-basis-disclosure/1"
+        },
+        "sleeve_facts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact",
+            "sha256",
+            "parent_account_id",
+            "provider_id",
+            "bindings",
+            "bindings_verified",
+            "bindings_proved_upstream"
+          ],
+          "properties": {
+            "artifact": {
+              "const": "sleeve-account-facts"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "parent_account_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "provider_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "bindings": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tag_map_sha256",
+                "parent_ledger_generation_id",
+                "declared_inputs_sha256",
+                "account_rows_sha256"
+              ],
+              "properties": {
+                "tag_map_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "parent_ledger_generation_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "declared_inputs_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "account_rows_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            },
+            "bindings_verified": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "parent_account_id",
+                  "tag_map_sha256",
+                  "parent_ledger_generation_id"
+                ]
+              }
+            },
+            "bindings_proved_upstream": {
+              "type": "array",
+              "items": {
+                "enum": ["account_rows_sha256", "declared_inputs_sha256", "builder_code"]
+              }
+            }
+          }
+        },
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "strategy_name",
+              "sleeve_account_id",
+              "sleeve_id",
+              "parent_account_id",
+              "opening_date",
+              "cutoff_date",
+              "account_basis_ref",
+              "margin_liability",
+              "weight_restatement",
+              "bridges"
+            ],
+            "properties": {
+              "strategy_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "strategy_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sleeve_account_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sleeve_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parent_account_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "opening_date": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "cutoff_date": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "account_basis_ref": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "block",
+                  "account_id",
+                  "series_sha256",
+                  "label",
+                  "disclosure_block"
+                ],
+                "properties": {
+                  "block": {
+                    "const": "account_summary.account_basis"
+                  },
+                  "account_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "series_sha256": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "disclosure_block": {
+                    "const": "strategy_basis_disclosure"
+                  }
+                }
+              },
+              "weight_restatement": {"$ref": "#/$defs/weight_restatement"},
+              "margin_liability": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "cutoff_date",
+                  "gross_sleeve_nav_usd",
+                  "liability_line",
+                  "net_equivalent_usd",
+                  "identity",
+                  "leverage_disclosure",
+                  "other_strategy_rows",
+                  "gross_by_definition",
+                  "statement"
+                ],
+                "properties": {
+                  "cutoff_date": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                  },
+                  "gross_sleeve_nav_usd": {
+                    "$ref": "#/$defs/basis_decimal"
+                  },
+                  "liability_line": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "label",
+                      "kind",
+                      "account_id",
+                      "value_usd"
+                    ],
+                    "properties": {
+                      "label": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "kind": {
+                        "enum": [
+                          "MARGIN_DEBIT",
+                          "UNALLOCATED_CASH_CREDIT"
+                        ]
+                      },
+                      "account_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "value_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      }
+                    }
+                  },
+                  "net_equivalent_usd": {
+                    "$ref": "#/$defs/basis_decimal"
+                  },
+                  "identity": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "sleeve_navs_usd",
+                      "unallocated_bucket_usd",
+                      "account_nav_usd",
+                      "difference_usd",
+                      "tolerance_usd",
+                      "status"
+                    ],
+                    "properties": {
+                      "sleeve_navs_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "unallocated_bucket_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "account_nav_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "difference_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "tolerance_usd": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "status": {
+                        "const": "HOLDS"
+                      }
+                    }
+                  },
+                  "leverage_disclosure": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "table",
+                      "account_id",
+                      "strategy_id",
+                      "row_counts_by_data_class"
+                    ],
+                    "properties": {
+                      "table": {
+                        "const": "leverage_disclosures"
+                      },
+                      "account_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "strategy_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "row_counts_by_data_class": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      }
+                    }
+                  },
+                  "other_strategy_rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "gross_by_definition": {
+                    "const": true
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "bridges": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "account_to_sleeve",
+                  "sleeve_to_audit"
+                ],
+                "properties": {
+                  "account_to_sleeve": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "value",
+                      "return",
+                      "account_series_also_holds"
+                    ],
+                    "properties": {
+                      "value": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "account_value_usd",
+                          "unallocated_bucket_usd",
+                          "other_live_sleeves_usd",
+                          "sleeve_value_usd",
+                          "relation"
+                        ],
+                        "properties": {
+                          "account_value_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "unallocated_bucket_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "other_live_sleeves_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "sleeve_value_usd": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "relation": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "return": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "account_cumulative_return",
+                          "sleeve_cumulative_return",
+                          "difference",
+                          "account_window",
+                          "sleeve_window",
+                          "window_start_difference_days"
+                        ],
+                        "properties": {
+                          "account_cumulative_return": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "sleeve_cumulative_return": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "difference": {
+                            "$ref": "#/$defs/basis_decimal"
+                          },
+                          "account_window": { "$ref": "#/$defs/window_declaration" },
+                          "sleeve_window": { "$ref": "#/$defs/window_declaration" },
+                          "window_start_difference_days": {
+                            "type": "integer"
+                          }
+                        }
+                      },
+                      "account_series_also_holds": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "sleeve_id",
+                            "strategy_id",
+                            "account_id",
+                            "first_day",
+                            "last_day",
+                            "live_at_cutoff"
+                          ],
+                          "properties": {
+                            "sleeve_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "strategy_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "account_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "first_day": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                            },
+                            "last_day": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                            },
+                            "live_at_cutoff": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "sleeve_to_audit": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "direction",
+                      "window",
+                      "audit_convention_return",
+                      "steps",
+                      "panel_return",
+                      "recomputed_panel_return",
+                      "residual",
+                      "residual_tolerance",
+                      "closure_status"
+                    ],
+                    "properties": {
+                      "direction": {
+                        "const": "AUDIT_TO_PANEL"
+                      },
+                      "window": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "start",
+                          "end"
+                        ],
+                        "properties": {
+                          "start": {
+                            "type": "string",
+                            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                          },
+                          "end": {
+                            "type": "string",
+                            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                          }
+                        }
+                      },
+                      "audit_convention_return": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "steps": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 3,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "step",
+                            "description",
+                            "effect"
+                          ],
+                          "properties": {
+                            "step": {
+                              "enum": [
+                                "ALLOCATED_COSTS",
+                                "ENTRY_DAY_EXCLUSION",
+                                "END_OF_DAY_FLOW_CONVENTION"
+                              ]
+                            },
+                            "description": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "effect": {
+                              "$ref": "#/$defs/basis_decimal"
+                            },
+                            "allocated_cost_usd": {
+                              "$ref": "#/$defs/basis_decimal"
+                            },
+                            "entry_day": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                            },
+                            "entry_day_return": {
+                              "$ref": "#/$defs/basis_decimal"
+                            },
+                            "flow_days": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "date",
+                                  "net_flow_usd"
+                                ],
+                                "properties": {
+                                  "date": {
+                                    "type": "string",
+                                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                                  },
+                                  "net_flow_usd": {
+                                    "$ref": "#/$defs/basis_decimal"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "panel_return": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "recomputed_panel_return": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "residual": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "residual_tolerance": {
+                        "$ref": "#/$defs/basis_decimal"
+                      },
+                      "closure_status": {
+                        "const": "CLOSED"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "holdings_identity_v1": {
       "type": "object",
       "additionalProperties": false,
@@ -611,11 +1597,24 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "account_id", "as_of_date", "asset_category", "asset_category_status",
-              "asset_category_unavailable_reason", "currency", "identity",
-              "mapping_status", "provider", "quantity", "security_id",
-              "snapshot_status", "strategy_id", "symbol", "symbol_proof",
-              "symbol_source", "symbol_status", "symbol_unavailable_reason"
+              "account_id",
+              "as_of_date",
+              "asset_category",
+              "asset_category_status",
+              "asset_category_unavailable_reason",
+              "currency",
+              "identity",
+              "mapping_status",
+              "provider",
+              "quantity",
+              "security_id",
+              "snapshot_status",
+              "strategy_id",
+              "symbol",
+              "symbol_proof",
+              "symbol_source",
+              "symbol_status",
+              "symbol_unavailable_reason"
             ],
             "properties": {
               "account_id": {"type": "string"},
@@ -1500,8 +2499,8 @@
         "amount": {"$ref": "#/$defs/leverage_amount"},
         "classification": {"type": "string", "minLength": 1},
         "coverage_reason": {"type": "string", "minLength": 1},
-        "coverage_status": {"enum": ["OBSERVED_ONLY", "COMPLETE_WITHIN_DECLARED_BOUNDARY", "UNAVAILABLE"]},
-        "data_class": {"enum": ["FINANCING_COST", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE"]},
+        "coverage_status": {"enum": ["OBSERVED_ONLY", "COMPLETE_WITHIN_DECLARED_BOUNDARY", "UNAVAILABLE", "DERIVED"]},
+        "data_class": {"enum": ["FINANCING_COST", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE", "SLEEVE_EQUITY", "SLEEVE_FINANCING_LIABILITY"]},
         "included_in_nav": {"type": ["boolean", "null"]},
         "measurement_basis": {"type": "string", "minLength": 1},
         "native_source_record_id": {"type": ["string", "null"]},
@@ -1653,7 +2652,10 @@
         "window_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
         "window_days": {"type": "integer", "minimum": 0},
         "flow_count": {"type": "integer", "minimum": 0},
-        "terminal_value_usd": {"$ref": "#/$defs/decimal"}, "governed_perimeter_value_usd": {"$ref": "#/$defs/decimal"}, "current_of_open_epochs_usd": {"$ref": "#/$defs/decimal"}, "difference_usd": {"$ref": "#/$defs/decimal"},
+        "terminal_value_usd": {"$ref": "#/$defs/decimal"},
+        "governed_perimeter_value_usd": {"$ref": "#/$defs/decimal"},
+        "current_of_open_epochs_usd": {"$ref": "#/$defs/decimal"},
+        "difference_usd": {"$ref": "#/$defs/decimal"},
         "value": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
         "annualisation_basis": {"type": ["string", "null"]},
         "window_equivalent_cumulative": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
@@ -1791,13 +2793,30 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema_version", "status", "financial_acceptance", "assurance_profile",
-        "policy_id", "policy_sha256", "policy_semantic_digest", "receipt_sha256",
-        "input_authority_class", "calendar_authority_status",
-        "input_generation_sha256", "input_sha256", "return_basis", "evaluated_on",
-        "complete_through", "calculation_age_days", "maximum_age_days", "age_status",
-        "warnings", "current_index", "current_hwm", "current_drawdown",
-        "maximum_drawdown", "index_path"
+        "schema_version",
+        "status",
+        "financial_acceptance",
+        "assurance_profile",
+        "policy_id",
+        "policy_sha256",
+        "policy_semantic_digest",
+        "receipt_sha256",
+        "input_authority_class",
+        "calendar_authority_status",
+        "input_generation_sha256",
+        "input_sha256",
+        "return_basis",
+        "evaluated_on",
+        "complete_through",
+        "calculation_age_days",
+        "maximum_age_days",
+        "age_status",
+        "warnings",
+        "current_index",
+        "current_hwm",
+        "current_drawdown",
+        "maximum_drawdown",
+        "index_path"
       ],
       "properties": {
         "schema_version": {"const": 1},
@@ -1819,7 +2838,8 @@
         "maximum_age_days": {"type": "integer", "minimum": 0},
         "age_status": {"enum": ["CURRENT", "COMPLETE_DATA_AGE_WARNING"]},
         "warnings": {
-          "type": "array", "uniqueItems": true,
+          "type": "array",
+          "uniqueItems": true,
           "items": {"const": "HWM_COMPLETE_DATA_AGE"}
         },
         "current_index": {"$ref": "#/$defs/decimal"},
@@ -1827,9 +2847,11 @@
         "current_drawdown": {"$ref": "#/$defs/decimal"},
         "maximum_drawdown": {"$ref": "#/$defs/decimal"},
         "index_path": {
-          "type": "array", "minItems": 2,
+          "type": "array",
+          "minItems": 2,
           "items": {
-            "type": "object", "additionalProperties": false,
+            "type": "object",
+            "additionalProperties": false,
             "required": ["as_of", "index", "hwm", "drawdown"],
             "properties": {
               "as_of": {"type": "string", "format": "date"},
@@ -1876,9 +2898,9 @@
         "twr_status": {
           "enum": [
             "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
-              "UNAVAILABLE",
-              "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT",
-              "UNMAPPED",
+            "UNAVAILABLE",
+            "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT",
+            "UNMAPPED",
             "UNAVAILABLE_INSUFFICIENT_NAV",
             "UNAVAILABLE_MISSING_NAV",
             "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV",
@@ -2091,6 +3113,483 @@
           }
         }
       ]
+    },
+    "benchmark_account_basis": {
+      "$comment": "The account-basis comparison of a strategy restated to its sleeve, under the strategy row's own field names (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "parent_account_id"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "benchmark_comparison_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_comparison_disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_comparison_observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "benchmark_comparison_observed_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "benchmark_comparison_observed_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "benchmark_annualization": {
+          "$ref": "#/$defs/annualization_label"
+        },
+        "benchmark_comparison_window": {
+          "$ref": "#/$defs/comparison_window"
+        },
+        "benchmark_account_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_reference_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_cumulative_gap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_active_return_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_tracking_error_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_information_ratio": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_beta": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_correlation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_upside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_downside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "benchmark_relative_drawdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "provider_account_basis": {
+      "$comment": "The account-basis comparison of a strategy restated to its sleeve, under the strategy row's own field names (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "label",
+        "parent_account_id"
+      ],
+      "properties": {
+        "basis": {
+          "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_comparison_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_comparison_disposition": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_comparison_observations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "provider_comparison_observed_start": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "provider_comparison_observed_end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "provider_annualization": {
+          "$ref": "#/$defs/annualization_label"
+        },
+        "provider_comparison_window": {
+          "$ref": "#/$defs/comparison_window"
+        },
+        "provider_comparison_version_compatibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_account_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_reference_cumulative_return": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_cumulative_gap": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_active_return_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_tracking_error_annualized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_information_ratio": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_beta": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_correlation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_upside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_downside_capture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider_relative_drawdown": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "comparison_sleeve_closure": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "common_observations",
+        "reference_series_id",
+        "reference_stored_end",
+        "reference_stored_start",
+        "reference_subset_sha256",
+        "sleeve_dates_after_window_count",
+        "sleeve_dates_after_window_first",
+        "sleeve_dates_after_window_last",
+        "sleeve_dates_without_reference",
+        "sleeve_observations_in_window",
+        "window_open_date"
+      ],
+      "properties": {
+        "common_observations": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "reference_series_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reference_stored_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "reference_stored_start": {
+          "type": "string",
+          "format": "date"
+        },
+        "reference_subset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sleeve_dates_without_reference": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "date"
+          }
+        },
+        "sleeve_observations_in_window": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "window_open_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "sleeve_dates_after_window_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sleeve_dates_after_window_first": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "sleeve_dates_after_window_last": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        }
+      }
+    },
+    "comparison_window_limit": {
+      "$comment": "How far the comparison window of a restated strategy reaches against the calculation cutoff, derived from the data (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calculation_cutoff_date",
+        "days_short",
+        "sentence",
+        "status",
+        "window_end",
+        "window_start"
+      ],
+      "properties": {
+        "calculation_cutoff_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "days_short": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sentence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "AT_CUTOFF",
+            "SHORT_OF_CUTOFF"
+          ]
+        },
+        "window_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "window_start": {
+          "type": "string",
+          "format": "date"
+        }
+      }
+    },
+    "comparison_sleeve_basis": {
+      "$comment": "The basis the comparison fields of a restated strategy row stand on, with the closure of each comparison's pairing (#624).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "benchmark_closure",
+        "benchmark_window_limit",
+        "label",
+        "opening_date",
+        "parent_account_id",
+        "provider_closure",
+        "provider_window_limit",
+        "sleeve_account_id",
+        "sleeve_series_sha256"
+      ],
+      "properties": {
+        "basis": {
+          "const": "SLEEVE_EPOCH"
+        },
+        "benchmark_closure": {
+          "$ref": "#/$defs/comparison_sleeve_closure"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "opening_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "parent_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_closure": {
+          "$ref": "#/$defs/comparison_sleeve_closure"
+        },
+        "sleeve_account_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sleeve_series_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "benchmark_window_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/comparison_window_limit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_window_limit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/comparison_window_limit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "strategy_basis_attribution_block": {
+      "$comment": "Present only when a strategy-basis declaration restated the comparisons.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "declaration_sha256",
+        "sleeve_facts_sha256",
+        "strategies"
+      ],
+      "properties": {
+        "basis": {
+          "const": "SLEEVE_EPOCH"
+        },
+        "declaration_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sleeve_facts_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          }
+        }
+      }
     }
   },
   "allOf": [
