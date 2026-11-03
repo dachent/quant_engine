@@ -8,21 +8,21 @@
     "blocks": {
       "decomposition_lenses": 216164614,
       "weekly_returns": 27773403,
-      "leverage_disclosures": 15993665,
+      "leverage_disclosures": 15995061,
       "factor_analysis": 2126425,
       "account_manifest": 1557589,
       "invested_capital": 903747,
       "positions": 267474,
       "dependence_modes": 274797,
       "dependence_analysis": 136045,
-      "coverage": 128643,
-      "strategies": 159848,
+      "coverage": 128832,
+      "strategies": 159372,
       "hwm_governed_proof": 112860,
       "performance_tab": 381820,
       "orthogonal_risk_attribution": 168763,
-      "strategy_underwriting": 64219,
+      "strategy_underwriting": 64495,
       "model_vs_actual": 138128,
-      "account_summary": 7505,
+      "account_summary": 7602,
       "advisory": 2432,
       "allocations": 4316,
       "attribution_dispositions": 1570,
@@ -39,11 +39,11 @@
       "default_dependence_mode": 11,
       "fact_coverage_matrix": 49048,
       "fact_status": 464,
-      "gates": 2341,
+      "gates": 2423,
       "hwm_summary": 556,
       "hybrid_mode_gate": 2984,
       "lifecycle_schema_version": 1,
-      "limitations": 10787,
+      "limitations": 11121,
       "meta": 6561,
       "observation_windows": 3957,
       "panel_schema_version": 2,
@@ -62,19 +62,19 @@
   "blocks": {
     "decomposition_lenses": 218327000,
     "weekly_returns": 28052000,
-    "leverage_disclosures": 16154000,
+    "leverage_disclosures": 16156000,
     "factor_analysis": 2148000,
     "account_manifest": 1574000,
     "invested_capital": 913000,
     "positions": 271000,
     "dependence_modes": 278000,
     "dependence_analysis": 138000,
-    "coverage": 130000,
-    "strategies": 162000,
+    "coverage": 131000,
+    "strategies": 161000,
     "hwm_governed_proof": 114000,
     "performance_tab": 386000,
     "orthogonal_risk_attribution": 171000,
-    "strategy_underwriting": 65000,
+    "strategy_underwriting": 66000,
     "model_vs_actual": 140000,
     "account_summary": 8000,
     "advisory": 3000,
@@ -97,7 +97,7 @@
     "hwm_summary": 1000,
     "hybrid_mode_gate": 4000,
     "lifecycle_schema_version": 1000,
-    "limitations": 11000,
+    "limitations": 12000,
     "meta": 7000,
     "observation_windows": 4000,
     "panel_schema_version": 1000,
@@ -749,6 +749,319 @@
           "after": 64219,
           "previous_limit": 65000,
           "limit": 65000
+        },
+        "vendor_gap_fills": {
+          "before": 1400,
+          "after": 1400,
+          "previous_limit": 2000,
+          "limit": 2000
+        },
+        "weekly_returns": {
+          "before": 27773403,
+          "after": 27773403,
+          "previous_limit": 28052000,
+          "limit": 28052000
+        }
+      }
+    },
+    {
+      "generation": "70cb8a8a9765483a55f9aa8d67f6e8df1a30579fb54847b2299e9eafa31a51bd",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "blocks": {
+        "account_manifest": {
+          "before": 1557589,
+          "after": 1557589,
+          "previous_limit": 1574000,
+          "limit": 1574000
+        },
+        "account_summary": {
+          "before": 7505,
+          "after": 7602,
+          "previous_limit": 8000,
+          "limit": 8000
+        },
+        "advisory": {
+          "before": 2432,
+          "after": 2432,
+          "previous_limit": 3000,
+          "limit": 3000
+        },
+        "allocations": {
+          "before": 4316,
+          "after": 4316,
+          "previous_limit": 5000,
+          "limit": 5000
+        },
+        "attribution_dispositions": {
+          "before": 1570,
+          "after": 1570,
+          "previous_limit": 2000,
+          "limit": 2000
+        },
+        "blocking_items": {
+          "before": 1450,
+          "after": 1450,
+          "previous_limit": 2000,
+          "limit": 2000
+        },
+        "candidate_appendix": {
+          "before": 14460,
+          "after": 14460,
+          "previous_limit": 15000,
+          "limit": 15000
+        },
+        "candidate_driver_map": {
+          "before": 4,
+          "after": 4,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "canonical_strategy_series": {
+          "before": 6716,
+          "after": 6716,
+          "previous_limit": 7000,
+          "limit": 7000
+        },
+        "capital": {
+          "before": 107,
+          "after": 107,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "capital_as_of": {
+          "before": 87,
+          "after": 87,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "capital_reconciliation": {
+          "before": 10951,
+          "after": 10951,
+          "previous_limit": 12000,
+          "limit": 12000
+        },
+        "capital_status": {
+          "before": 137,
+          "after": 137,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "counts": {
+          "before": 150,
+          "after": 150,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "coverage": {
+          "before": 128643,
+          "after": 128832,
+          "previous_limit": 130000,
+          "limit": 131000
+        },
+        "custody_current_capital": {
+          "before": 10921,
+          "after": 10921,
+          "previous_limit": 12000,
+          "limit": 12000
+        },
+        "decomposition_lenses": {
+          "before": 216164614,
+          "after": 216164614,
+          "previous_limit": 218327000,
+          "limit": 218327000
+        },
+        "default_dependence_mode": {
+          "before": 11,
+          "after": 11,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "dependence_analysis": {
+          "before": 136045,
+          "after": 136045,
+          "previous_limit": 138000,
+          "limit": 138000
+        },
+        "dependence_modes": {
+          "before": 274797,
+          "after": 274797,
+          "previous_limit": 278000,
+          "limit": 278000
+        },
+        "fact_coverage_matrix": {
+          "before": 49048,
+          "after": 49048,
+          "previous_limit": 50000,
+          "limit": 50000
+        },
+        "fact_status": {
+          "before": 464,
+          "after": 464,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "factor_analysis": {
+          "before": 2126425,
+          "after": 2126425,
+          "previous_limit": 2148000,
+          "limit": 2148000
+        },
+        "gates": {
+          "before": 2341,
+          "after": 2423,
+          "previous_limit": 3000,
+          "limit": 3000
+        },
+        "hwm_governed_proof": {
+          "before": 112860,
+          "after": 112860,
+          "previous_limit": 114000,
+          "limit": 114000
+        },
+        "hwm_summary": {
+          "before": 556,
+          "after": 556,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "hybrid_mode_gate": {
+          "before": 2984,
+          "after": 2984,
+          "previous_limit": 4000,
+          "limit": 4000
+        },
+        "invested_capital": {
+          "before": 903747,
+          "after": 903747,
+          "previous_limit": 913000,
+          "limit": 913000
+        },
+        "leverage_disclosures": {
+          "before": 15993665,
+          "after": 15995061,
+          "previous_limit": 16154000,
+          "limit": 16156000
+        },
+        "lifecycle_schema_version": {
+          "before": 1,
+          "after": 1,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "limitations": {
+          "before": 10787,
+          "after": 11121,
+          "previous_limit": 11000,
+          "limit": 12000
+        },
+        "meta": {
+          "before": 6561,
+          "after": 6561,
+          "previous_limit": 7000,
+          "limit": 7000
+        },
+        "model_vs_actual": {
+          "before": 138128,
+          "after": 138128,
+          "previous_limit": 140000,
+          "limit": 140000
+        },
+        "observation_windows": {
+          "before": 3957,
+          "after": 3957,
+          "previous_limit": 4000,
+          "limit": 4000
+        },
+        "orthogonal_risk_attribution": {
+          "before": 168763,
+          "after": 168763,
+          "previous_limit": 171000,
+          "limit": 171000
+        },
+        "panel_schema_version": {
+          "before": 2,
+          "after": 2,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "performance": {
+          "before": 54052,
+          "after": 54052,
+          "previous_limit": 55000,
+          "limit": 55000
+        },
+        "performance_tab": {
+          "before": 381820,
+          "after": 381820,
+          "previous_limit": 386000,
+          "limit": 386000
+        },
+        "portfolio_mwr_annualised": {
+          "before": 456,
+          "after": 456,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "portfolio_twr_cumulative": {
+          "before": 909,
+          "after": 909,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "position_snapshots": {
+          "before": 336,
+          "after": 336,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "positions": {
+          "before": 267474,
+          "after": 267474,
+          "previous_limit": 271000,
+          "limit": 271000
+        },
+        "provenance": {
+          "before": 11479,
+          "after": 11479,
+          "previous_limit": 12000,
+          "limit": 12000
+        },
+        "provider_counts": {
+          "before": 63,
+          "after": 63,
+          "previous_limit": 1000,
+          "limit": 1000
+        },
+        "reconciliation_checks": {
+          "before": 3116,
+          "after": 3116,
+          "previous_limit": 4000,
+          "limit": 4000
+        },
+        "replication_analysis": {
+          "before": 1557,
+          "after": 1557,
+          "previous_limit": 2000,
+          "limit": 2000
+        },
+        "strategies": {
+          "before": 159848,
+          "after": 159372,
+          "previous_limit": 162000,
+          "limit": 161000
+        },
+        "strategy_basis_disclosure": {
+          "before": 7573,
+          "after": 7573,
+          "previous_limit": 8000,
+          "limit": 8000
+        },
+        "strategy_underwriting": {
+          "before": 64219,
+          "after": 64495,
+          "previous_limit": 65000,
+          "limit": 66000
         },
         "vendor_gap_fills": {
           "before": 1400,

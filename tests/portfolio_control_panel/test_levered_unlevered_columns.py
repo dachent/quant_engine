@@ -291,3 +291,48 @@ def test_dense_cell_columns_follow_the_long_text_columns() -> None:
         "Cost status",
         "Version",
     ]
+
+
+def test_derived_leverage_rows_are_counted_as_derived_not_unavailable(
+    tmp_path: Path,
+) -> None:
+    def row(status: str, data_class: str, value: str | None) -> dict[str, Any]:
+        return {
+            "account_id": "synthetic-account",
+            "provider_id": "synthetic",
+            "strategy_id": None,
+            "data_class": data_class,
+            "classification": "SYNTHETIC",
+            "measurement_basis": "SYNTHETIC",
+            "coverage_status": status,
+            "coverage_reason": "SYNTHETIC",
+            "included_in_nav": None,
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE" if value else "UNAVAILABLE",
+                "value": value,
+            },
+        }
+
+    payload = _capital_payload(_geared())
+    payload["leverage_disclosures"] = [
+        row("OBSERVED_ONLY", "FINANCING_COST", "5"),
+        row("UNAVAILABLE", "FINANCING_LIABILITY", None),
+        row("UNAVAILABLE", "LEVERAGE_EXPOSURE", None),
+        row("DERIVED", "SLEEVE_FINANCING_LIABILITY", "12345"),
+        row("DERIVED", "SLEEVE_EQUITY", "67890"),
+    ]
+    payload["account_summary"] = []
+    dom = _run(tmp_path, payload, "renderLeverageDisclosures")
+    kpis = _flat(dom, "#leverage-kpis")
+    assert "Derived measures" in kpis
+    # 1 observed, 2 derived, 2 unavailable: the tiles partition the five rows
+    values = re.findall(
+        r"(Observed measures|Derived measures|Unavailable measures)\s*(\d+)", kpis
+    )
+    assert dict(values) == {
+        "Observed measures": "1",
+        "Derived measures": "2",
+        "Unavailable measures": "2",
+    }, kpis
+    assert "derived 2" in _flat(dom, "#leverage-status")

@@ -9518,9 +9518,16 @@ def payload_budget_findings(
 
 def _physical_sizes(ctx: Context) -> dict[str, int]:
     scan = ctx.gen.scan
-    files = {rel: size for rel, (size, _) in scan.files.items()}
+    # An embedded-only report is a virtual file read out of index.html (already counted
+    # there); the budget's physical sizes are the files on disk, as panel_payload_size.py
+    # measures them, so it is not a file to size here.
+    files = {
+        rel: size
+        for rel, (size, _) in scan.files.items()
+        if not (scan.report_embedded_only and rel == REPORT)
+    }
     sizes: dict[str, int] = {}
-    if scan.files:
+    if files:
         sizes["total_bytes"] = sum(files.values())
     for key, rel in (
         ("index_html_bytes", "index.html"),

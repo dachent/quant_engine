@@ -110,6 +110,11 @@
    "file": "tools/portfolio_report.py",
    "pattern": "^\\{\\}: (sleeve profit and loss after allocated costs over the prior-close sleeve NAV|the same profit over the prior-close sleeve NAV less the)",
    "justification": "a template: the basis code, the loan rule and the window are substituted from the derivation that produced the figure; the sentence defines the measurement and states no figure of its own"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^Computed from the sleeve facts, not observed at the source: \\{\\} with an amount",
+   "justification": "the Derived measures tile subtitle: its count is the number of DERIVED rows with an amount, computed in the same function from the same rows as the tile value; S03 checks the tiles partition the rows"
   }
  ]
 }

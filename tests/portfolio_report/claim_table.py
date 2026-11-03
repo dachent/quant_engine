@@ -369,22 +369,26 @@ def p_leverage_tiles(payload: Payload) -> Result:
     if not rows:
         return skip("no leverage rows")
     observed = [r for r in rows if r.get("coverage_status") == "OBSERVED_ONLY"]
-    unavailable = [r for r in rows if r.get("coverage_status") != "OBSERVED_ONLY"]
+    derived = [r for r in rows if r.get("coverage_status") == "DERIVED"]
+    unavailable = [
+        r for r in rows if r.get("coverage_status") not in {"OBSERVED_ONLY", "DERIVED"}
+    ]
     statuses = {str(r.get("coverage_status")) for r in rows}
-    stray = statuses - {"OBSERVED_ONLY", "UNAVAILABLE"}
+    stray = statuses - {"OBSERVED_ONLY", "UNAVAILABLE", "DERIVED"}
     with_amount = sum(1 for r in observed if get(r, "amount", "value") is not None)
     no_amount = len(rows) - sum(
         1 for r in rows if get(r, "amount", "value") is not None
     )
     if stray:
         return bad(
-            f"coverage statuses other than OBSERVED_ONLY/UNAVAILABLE exist: {names(stray)}; "
-            f"the two tiles ({len(observed)} observed, {len(unavailable)} unavailable) "
-            "do not name them"
+            "coverage statuses other than OBSERVED_ONLY/DERIVED/UNAVAILABLE exist: "
+            f"{names(stray)}; the three tiles ({len(observed)} observed, {len(derived)} "
+            f"derived, {len(unavailable)} unavailable) do not name them"
         )
     return ok(
-        f"{len(observed)} observed ({with_amount} with an amount) + "
-        f"{len(unavailable)} unavailable = {len(rows)}; {no_amount} rows have no amount"
+        f"{len(observed)} observed ({with_amount} with an amount) + {len(derived)} "
+        f"derived + {len(unavailable)} unavailable = {len(rows)}; {no_amount} rows "
+        "have no amount"
     )
 
 

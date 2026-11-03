@@ -110,3 +110,57 @@ def test_a_real_generation_fits_the_committed_budget() -> None:
         checks.payload_budget_findings(checks.payload_block_bytes(data), sizes, budget)
         == []
     )
+
+
+def _ctx(files: dict[str, tuple[int, str]], embedded_only: bool) -> Any:
+    from types import SimpleNamespace
+
+    scan = SimpleNamespace(files=files, report_embedded_only=embedded_only)
+    return SimpleNamespace(gen=SimpleNamespace(scan=scan))
+
+
+def test_total_bytes_counts_files_on_disk_not_the_embedded_virtual_report() -> None:
+    files = {
+        "index.html": (9000, "a"),
+        "data/dashboard_data.json": (500, "b"),
+        checks.REPORT: (900_000, "c"),
+    }
+    sizes = checks._physical_sizes(_ctx(files, embedded_only=True))
+    assert sizes["total_bytes"] == 9500 and sizes["index_html_bytes"] == 9000
+    # a report that is a real file is a file on disk, and counts
+    assert checks._physical_sizes(_ctx(files, embedded_only=False))["total_bytes"] == (
+        909_500
+    )
+    # over-budget still blocks: the same physical figure against a smaller budget
+    assert over({"a": 1}, {"total_bytes": sizes["total_bytes"]}) == []
+    assert over({"a": 1}, {"total_bytes": 10_001}) == ["total_bytes"]
+
+
+def test_the_validator_and_the_script_measure_the_same_physical_total(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "index.html").write_bytes(b"x" * 300)
+    (tmp_path / "data" / "dashboard_data.json").write_bytes(b"{}" * 50)
+    files = {
+        rel: (path.stat().st_size, "d")
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+        for rel in [path.relative_to(tmp_path).as_posix()]
+    }
+    # the embedded virtual report is in the scan, not on disk
+    files[checks.REPORT] = (777_777, "e")
+    sizes = checks._physical_sizes(_ctx(files, embedded_only=True))
+    measured = script.physical(tmp_path)
+    for key in ("total_bytes", "index_html_bytes", "dashboard_data_json_bytes"):
+        assert sizes[key] == measured[key], key
+
+
+def test_every_block_in_the_committed_budget_is_checked_one_byte_over() -> None:
+    budget = json.loads(BUDGET_FILE.read_text(encoding="utf-8"))
+    for name in ("performance_tab", "orthogonal_risk_attribution", "limitations"):
+        assert name in budget["blocks"], name
+    for name, limit in budget["blocks"].items():
+        found = checks.payload_budget_findings({name: limit + 1}, {}, budget)
+        assert [f[0] for f in found] == [name], name
+        assert checks.payload_budget_findings({name: limit}, {}, budget) == [], name

@@ -1304,14 +1304,18 @@
       return;
     }
     const observed = rows.filter((row) => row.coverage_status === "OBSERVED_ONLY");
-    const unavailable = rows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
+    // Derived rows (a restated sleeve's loan and equity, computed from the sleeve facts) are neither observed nor unavailable.
+    const derived = rows.filter((row) => row.coverage_status === "DERIVED");
+    const unavailable = rows.filter((row) => row.coverage_status !== "OBSERVED_ONLY" && row.coverage_status !== "DERIVED");
     // F43: the badge says how many rows were observed and how many were not, never "observed only".
-    status.textContent = unavailable.length ? `Observed ${integer.format(observed.length)} / unavailable ${integer.format(unavailable.length)}` : "Observed";
+    const derivedBadge = derived.length ? ` / derived ${integer.format(derived.length)}` : "";
+    status.textContent = unavailable.length ? `Observed ${integer.format(observed.length)}${derivedBadge} / unavailable ${integer.format(unavailable.length)}` : (derived.length ? `Observed ${integer.format(observed.length)}${derivedBadge}` : "Observed");
     status.className = unavailable.length ? "badge badge-warning" : "badge badge-positive";
     const classes = [...new Set(rows.map((row) => row.data_class))].sort();
     renderKpis("#leverage-kpis", [
       ["Observations", integer.format(rows.length), `${classes.length} data class${classes.length === 1 ? "" : "es"} declared`],
       ["Observed measures", integer.format(observed.length), `Observed-only coverage: ${integer.format(observed.filter((row) => row.amount && row.amount.value != null).length)} with an amount, ${integer.format(observed.filter((row) => !(row.amount && row.amount.value != null)).length)} without; never completed by inference`, observed.length ? "positive" : "warning"],
+      ...(derived.length ? [["Derived measures", integer.format(derived.length), `Computed from the sleeve facts, not observed at the source: ${integer.format(derived.filter((row) => row.amount && row.amount.value != null).length)} with an amount`, "positive"]] : []),
       ["Unavailable measures", integer.format(unavailable.length), `By coverage status (${integer.format(rows.filter((row) => !(row.amount && row.amount.value != null)).length)} rows in all have no amount); never filled with zero`, unavailable.length ? "warning" : "positive"],
     ]);
     const coverage = new Map();
