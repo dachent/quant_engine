@@ -41,7 +41,7 @@ exists. Nothing is written when any check fails. Exit 2 is a usage error.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -49,7 +49,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Any
+from typing import Any, BinaryIO
 
 import release_cycle_manifest
 
@@ -379,6 +379,21 @@ def find_by_content(
 # ----------------------------------------------------------------------------- placement
 
 
+def _copy(source: Path, handle: BinaryIO, sha: str, what: str) -> None:
+    digest = hashlib.sha256()
+    try:
+        with source.open("rb") as reader:
+            for block in iter(lambda: reader.read(1024 * 1024), b""):
+                digest.update(block)
+                handle.write(block)
+    except OSError as exc:
+        raise AcceptanceInputsError("STAGE_FAILED", f"cannot stage {what}") from exc
+    if digest.hexdigest() != sha:
+        raise AcceptanceInputsError(
+            "STAGE_FAILED", f"{what} changed while it was copied"
+        )
+
+
 @dataclass
 class Placer:
     """Where a pinned file is read from by the derivations; copies are made only on ``commit``."""
@@ -435,20 +450,7 @@ class Placer:
                 _verified(destination, sha, None, f"existing staged copy {relative}")
                 reused.append(relative)
                 continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with source.open("rb") as reader, destination.open("xb") as writer:
-                    for block in iter(lambda: reader.read(1024 * 1024), b""):
-                        writer.write(block)
-            except OSError as exc:
-                raise AcceptanceInputsError(
-                    "STAGE_FAILED", f"cannot stage {relative}"
-                ) from exc
-            if _digest(destination)[0] != sha:
-                destination.unlink()
-                raise AcceptanceInputsError(
-                    "STAGE_FAILED", f"staged copy {relative} differs from its source"
-                )
+            _publish(destination, lambda handle: _copy(source, handle, sha, relative))
             staged.append(relative)
         return staged, reused
 
@@ -797,6 +799,10 @@ def _carried(
                 located = resolve_ref((QE_KEY, relative), roots, f"{family} pointer")
         else:
             located = resolve_ref((QE_KEY, "/".join(parts)), roots, family)
+            relative = pointers.get(sha)
+            if not located.is_file() and relative is not None:
+                # the recorded location is gone: the baseline's pointer for the same digest
+                located = resolve_ref((QE_KEY, relative), roots, f"{family} pointer")
         out[family] = (entry, located)
     return out
 
@@ -932,6 +938,13 @@ def build_acceptance_inputs(
         )
         located[role] = (path, sha, size, record)
     native = generations[NATIVE_PROVIDER]
+    if native.finalized_through != cutoff:
+        # the derivation seats do not agree on a later date (one takes it, one requires the cutoff),
+        # so a manifest both can read binds the cutoff exactly
+        raise AcceptanceInputsError(
+            "FINALITY_NOT_AT_CUTOFF",
+            f"{NATIVE_PROVIDER}: finalized through {native.finalized_through}, not the cutoff {cutoff}",
+        )
     catalog_path = located["matrixport_generation_catalog"][0]
     catalog = _object(_read_json(catalog_path, "native catalog"), "native catalog")
     run = catalog.get("source_run_id")
@@ -1119,15 +1132,45 @@ def build_sleeve_inputs(
 # ----------------------------------------------------------------------------- command line
 
 
-def _write_create_only(path: Path, data: bytes) -> None:
+def _publish(path: Path, write: Callable[[BinaryIO], None]) -> None:
+    """Create ``path`` from what ``write`` produces.
+
+    The bytes go to a temporary file beside it, which is then linked or renamed into place without
+    replacing anything, so an interrupted run leaves no partly written file at ``path``.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    published = False
     try:
-        with path.open("xb") as handle:
-            handle.write(data)
+        with temporary.open("xb") as handle:
+            write(handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name == "nt":
+            temporary.rename(path)  # refuses an existing target
+        else:
+            os.link(temporary, path)  # refuses an existing target
+            temporary.unlink()
+        published = True
     except FileExistsError as exc:
         raise AcceptanceInputsError(
-            "OUTPUT_EXISTS", f"{path} already exists; outputs are create-only"
+            "OUTPUT_EXISTS", f"{path.name} already exists; outputs are create-only"
         ) from exc
+    except OSError as exc:
+        raise AcceptanceInputsError(
+            "WRITE_FAILED", f"cannot write {path.name}: {exc.__class__.__name__}"
+        ) from exc
+    finally:
+        if not published:
+            temporary.unlink(missing_ok=True)
+
+
+def _write_create_only(path: Path, data: bytes) -> None:
+    def write(handle: BinaryIO) -> None:
+        handle.write(data)
+
+    _publish(path, write)
 
 
 def _placer(args: argparse.Namespace, roots: Mapping[str, Path]) -> Placer:

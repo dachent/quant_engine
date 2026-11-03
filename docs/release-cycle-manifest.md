@@ -224,7 +224,7 @@ release_acceptance_inputs.py sleeve-inputs     --resolved-cycle R --qe-root D --
 | provider ledger (`portfolio_and_strategy_capital_at_cutoff`) | `--ledger-generation`: `provider-ledger.json` there; `as_of_date` is the cutoff and `provider_generations` are exactly the cycle's (id and manifest sha256) |
 | `financial_source_contract` | `--file` or `repo:contracts/portfolio-financial-mvp-source-v1.json` |
 | Matrixport NAV, wallet files, native families, Quantbase accounts, activity and dashboard | the cycle's generations (artifact records); the native files must lie under `output/<source_run_id>/`, the run id read from the native catalog |
-| `fx_*`, `provider_capital_policy`, owner receipts (kept families) | the predecessor manifest's entry for the family (exactly one), located at its qe-relative path, else by sha256 through `--baseline-pointers` (the authority pointers of an expected-baseline file; two locations for one digest are not guessed). The file is hashed again and must equal the predecessor's pin (`CARRY_DRIFT`), unless `--file FAMILY=...` names its replacement. Other fields of the entry (`ticker`, `schema`, `fields`, `note`) are carried |
+| `fx_*`, `provider_capital_policy`, owner receipts (kept families) | the predecessor manifest's entry for the family (exactly one), located at its qe-relative path, else (also when that path is gone) by sha256 through `--baseline-pointers` (the authority pointers of an expected-baseline file; two locations for one digest are not guessed). The file is hashed again and must equal the predecessor's pin (`CARRY_DRIFT`), unless `--file FAMILY=...` names its replacement. Other fields of the entry (`ticker`, `schema`, `fields`, `note`) are carried |
 
 `generation_selection_evidence` is rebuilt from the cycle: `captured_at_utc`, `financial_cutoff`, and
 per provider with a declared finality the generation id, qualification, `finalized_through`, the
@@ -254,9 +254,10 @@ must carry it.
 | `PATH_ESCAPES_ROOT`, `UNKNOWN_ROOT`, `ROOTS`, `ROOT_MISSING` | a `--file`/`--stage-dir` path is absolute, has `..`, backslash or an empty part, or goes through a symlink or junction; a root key is unbound or bound twice |
 | `NOT_UNDER_ROOT`, `STAGE_CONFLICT`, `STAGE_FAILED` | a file under neither root and no `--stage-dir`; two different files for one staged path; a copy that does not verify |
 | `STALE_GENERATION`, `LEDGER_PROVIDERS`, `CUTOFF_MISMATCH` | a generation `as_of_date` or `finalized_through` before the cutoff; a ledger that is not at the cutoff or admitted another generation; a run output or governed input for another cutoff |
+| `FINALITY_NOT_AT_CUTOFF` | the native provider's generation is finalized after the cutoff: `derive_a` accepts a later date, `derive_b` requires the cutoff, so a manifest both can read binds the cutoff exactly |
 | `CARRY_DRIFT`, `CARRY_UNRESOLVED`, `PREDECESSOR` | a kept file changed; its location cannot be established; the predecessor is not a `qe-cp-acceptance-inputs/3` manifest with exactly one entry per kept family |
 | `RUN_PATH`, `CATALOG`, `ARTIFACT_RECORD`, `ID_MISMATCH`, `PROVIDER_MISSING` | a native file outside its source run; no `source_run_id`; a missing or duplicate artifact record; a generation file naming another generation; a provider absent from the cycle |
-| `OUTPUT_EXISTS` | `--out` exists (outputs are create-only) |
+| `OUTPUT_EXISTS`, `WRITE_FAILED` | `--out` exists (outputs are create-only); a write failed (the output and each staged copy are written to a temporary file beside the target and linked or renamed into place without replacing anything, so an interrupted run leaves no partial file and can be repeated) |
 | `RESOLVED_CYCLE`, `INPUT`, `UNKNOWN_ROLE`, `BASENAME`, `USAGE` | the resolved cycle is not a `qe-release-resolved-cycle/1` file; unreadable or non-JSON input; a `--file` name that is not a role of the command; a crosswalk basename the derivation does not place; malformed arguments |
 
 `acceptance/derive_a` no longer defaults `--cutoff`; the cycle's cutoff is always passed.

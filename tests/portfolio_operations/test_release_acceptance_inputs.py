@@ -955,3 +955,76 @@ def test_missing_required_run_files_and_bad_usage_exit_nonzero(
 def test_the_resolved_cycle_cutoff_is_the_only_cutoff(world: dict[str, Any]) -> None:
     assert tool.main(sleeve_args(world)) == 0
     assert result(world)["cutoff"] == world["resolved"]["cutoff"] == CUTOFF
+
+
+def test_a_native_generation_finalized_after_the_cutoff_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # derive_a takes a later finality date and derive_b requires the cutoff, so no manifest can bind one
+    world = make_world(tmp_path, finalized={"matrixport": "2031-03-15"})
+    refused(acceptance_args(world), "FINALITY_NOT_AT_CUTOFF", capsys)
+    assert not world["out"].exists()
+
+
+def test_a_missing_predecessor_path_falls_back_to_the_baseline_pointer(
+    world: dict[str, Any],
+) -> None:
+    predecessor = copy.deepcopy(world["predecessor"])
+    pointers = []
+    for entry in predecessor["inputs"]:
+        if entry["family"] == "fx_daily_rates":
+            pointers.append({"path": entry["path"], "sha256": entry["sha256"]})
+            entry["path"] = (
+                "carry/moved-away.json"  # a plain relative path that is gone
+            )
+    world["predecessor_path"].write_bytes(tool.dumps(predecessor))
+    baseline = world["tmp"] / "baseline.json"
+    baseline.write_bytes(
+        json.dumps({"metrics": [{"authority_pointer": pointers}]}).encode()
+    )
+    argv = acceptance_args(world, "--baseline-pointers", str(baseline))
+    assert tool.main(argv) == 0
+    assert by_family(result(world))["fx_daily_rates"][0]["path"] == (
+        "carry/fx_daily_rates.json"
+    )
+
+
+def test_an_interrupted_write_leaves_nothing_and_the_run_can_be_repeated(
+    world: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(_fd: int) -> None:
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tool.os, "fsync", fail)
+        refused(acceptance_args(world), "WRITE_FAILED", capsys)
+    assert not world["out"].exists()
+    assert not (world["qe"] / "stage").exists() or not any(
+        p.is_file() for p in (world["qe"] / "stage").rglob("*")
+    )
+    assert not list(world["tmp"].rglob(".*.tmp"))
+    assert (
+        tool.main(acceptance_args(world)) == 0
+    )  # no OUTPUT_EXISTS from a partial file
+
+
+def test_a_failure_while_writing_the_output_leaves_no_partial_file(
+    world: dict[str, Any],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # stage nothing: every file is under a root, so only the output itself is written
+    argv = sleeve_args(world, stage=False)
+    real = tool.os.fsync
+
+    def fail(fd: int) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tool.os, "fsync", fail)
+    refused(argv, "WRITE_FAILED", capsys)
+    monkeypatch.setattr(tool.os, "fsync", real)
+    assert not world["out"].exists()
+    assert not list(world["tmp"].rglob(".*.tmp"))
+    assert tool.main(argv) == 0
