@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import decimal
 import hashlib
 import json
 import os
@@ -27,7 +28,6 @@ import release_acceptance_inputs as tool  # noqa: E402
 import release_cycle_manifest as cycle_tool  # noqa: E402
 from derive_a import derive as derive_a  # noqa: E402
 from derive_a import sleeves as sleeves_a  # noqa: E402
-from derive_b import derive as derive_b  # noqa: E402
 
 CUTOFF = "2031-03-14"
 PROVIDERS = (
@@ -69,6 +69,15 @@ QB_FILES = {
         "dashboard_Total_pricehistory.csv",
     )
 }
+
+
+def _derive_b() -> Any:
+    """``derive_b`` sets the ambient decimal precision when imported; keep that out of this process."""
+
+    with decimal.localcontext():
+        from derive_b import derive as module
+
+    return module
 
 
 def _sha(data: bytes) -> str:
@@ -477,7 +486,7 @@ def test_sleeve_inputs_round_trip_through_both_committed_loaders(
     records_a, data_a = sleeves_a.load_sleeve_inputs(
         world["out"], world["qe"], world["repo"], cutoff
     )
-    loaded_b = derive_b.load_sleeve_inputs(
+    loaded_b = _derive_b().load_sleeve_inputs(
         world["out"], world["qe"], world["repo"], cutoff
     )
     assert loaded_b is not None
