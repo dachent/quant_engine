@@ -183,6 +183,23 @@
         "type": "object",
         "required": ["capital_as_of_date", "capital_status", "weight_basis"],
         "properties": {
+          "return_unlevered_cumulative": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_annualised": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_max_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_current_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_unlevered_window_days": {"type": ["integer", "null"], "minimum": 1},
+          "return_unlevered_basis_label": {"type": ["string", "null"], "minLength": 1},
+          "return_unlevered_na_reason": {"type": ["string", "null"], "minLength": 1},
+          "return_levered_cumulative": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_annualised": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_max_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_current_drawdown": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_window_days": {"type": ["integer", "null"], "minimum": 1},
+          "return_levered_basis_label": {"type": ["string", "null"], "minLength": 1},
+          "return_levered_peak_gross_to_equity": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_current_gross_to_equity": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "return_levered_na_reason": {"type": ["string", "null"], "minLength": 1},
+          "return_levered_series_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
           "capital_as_of_date": {"type": "string", "format": "date"},
           "capital_status": {"const": "AVAILABLE"},
           "weight_basis": {"const": "CURRENT_CUTOFF"},
@@ -669,6 +686,14 @@
       "properties": {
         "basis": {
           "const": "PARENT_ACCOUNT_LIVE_SERIES"
+        },
+        "loan_usd": {
+          "type": ["string", "null"],
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+        },
+        "gross_to_equity_ratio": {
+          "type": ["string", "null"],
+          "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
         },
         "label": {
           "type": "string",

@@ -113,6 +113,7 @@ from portfolio_totals import (
 import portfolio_implementation_sleeve_basis as implementation_sleeve_basis
 import sleeve_disclosures
 import strategy_basis
+import strategy_leverage
 import strategy_basis_disclosure
 from portfolio_totals_verify import (
     PortfolioTotalsVerificationError,
@@ -13762,6 +13763,88 @@ def _facts_ledger_generation_id(
     return matches[0]
 
 
+LEVERAGE_NOT_DERIVED: Final = "LEVERAGE_NOT_DERIVED"
+_LEVERAGE_ROW_FIELDS: Final = (
+    "return_unlevered_cumulative",
+    "return_unlevered_annualised",
+    "return_unlevered_max_drawdown",
+    "return_unlevered_current_drawdown",
+    "return_unlevered_window_days",
+    "return_unlevered_basis_label",
+    "return_unlevered_na_reason",
+    "return_levered_cumulative",
+    "return_levered_annualised",
+    "return_levered_max_drawdown",
+    "return_levered_current_drawdown",
+    "return_levered_window_days",
+    "return_levered_basis_label",
+    "return_levered_peak_gross_to_equity",
+    "return_levered_current_gross_to_equity",
+    "return_levered_na_reason",
+    "return_levered_series_sha256",
+)
+
+
+def _leverage_row_fields(
+    leverage: strategy_leverage.SleeveLeverage,
+) -> dict[str, Any]:
+    """A restated strategy row's levered and unlevered return fields (#624), from its facts.
+
+    The unlevered return is the sleeve's own return on gross assets and the levered one the
+    same profit over equity after the sleeve's loan; both are derived from the sleeve facts
+    by ``strategy_leverage`` and nothing here names a strategy or types a figure.  The
+    labels are generated from the derivation's own windows and rules.
+    """
+
+    payload = leverage.payload()
+    window = (
+        f"{leverage.opening_date} to {leverage.end_date}, {leverage.window_days} days"
+    )
+    return {
+        "return_unlevered_cumulative": payload["unlevered_cumulative"],
+        "return_unlevered_annualised": payload["unlevered_annualised"],
+        "return_unlevered_max_drawdown": payload["unlevered_max_drawdown"],
+        "return_unlevered_current_drawdown": payload["unlevered_current_drawdown"],
+        "return_unlevered_window_days": leverage.window_days,
+        "return_unlevered_basis_label": (
+            f"{payload['unlevered_basis']}: sleeve profit and loss after allocated costs "
+            f"over the prior-close sleeve NAV, {window}"
+        ),
+        "return_unlevered_na_reason": None,
+        "return_levered_cumulative": payload["levered_cumulative"],
+        "return_levered_annualised": payload["levered_annualised"],
+        "return_levered_max_drawdown": payload["levered_max_drawdown"],
+        "return_levered_current_drawdown": payload["levered_current_drawdown"],
+        "return_levered_window_days": leverage.window_days,
+        "return_levered_basis_label": (
+            f"{payload['levered_basis']}: the same profit over the prior-close sleeve NAV "
+            f"less the sleeve loan ({leverage.loan_rule}, allocated by "
+            f"{leverage.allocation_rule}), {window}"
+        ),
+        "return_levered_peak_gross_to_equity": payload["peak_gross_to_equity"],
+        "return_levered_current_gross_to_equity": payload["current_gross_to_equity"],
+        "return_levered_na_reason": None,
+        "return_levered_series_sha256": leverage.series_sha256,
+    }
+
+
+def _apply_leverage_to_rows(
+    report: dict[str, Any],
+    strategy_id: str,
+    fields: Mapping[str, Any],
+) -> None:
+    """The derived strategy carries every field; the others only the reasons (#624)."""
+
+    for row in _objects(report.get("strategy_summary"), "strategy_summary"):
+        if not isinstance(row, dict):
+            continue
+        if row.get("strategy_id") == strategy_id:
+            row.update(fields)
+        else:
+            row["return_unlevered_na_reason"] = LEVERAGE_NOT_DERIVED
+            row["return_levered_na_reason"] = LEVERAGE_NOT_DERIVED
+
+
 def _apply_strategy_basis_disclosure(
     report: dict[str, Any],
     restatements: Mapping[str, strategy_basis.SleeveRestatement],
@@ -13897,8 +13980,34 @@ def _apply_strategy_basis_disclosure(
         weights = disclosure.weight_restatement(
             unrestated_capital, current_capital, restated_strategy_id=strategy_id
         )
+        leverage_fields: dict[str, Any]
+        try:
+            leverage = strategy_leverage.derive_sleeve_leverage(
+                facts.document, sleeve_name, ledger_account_nav=ledger_value
+            )
+        except strategy_leverage.SleeveLeverageError as exc:
+            # facts that do not close publish no levered figure, and say why (the stable
+            # reason code); a figure is never produced from a book that does not close
+            leverage_fields = {
+                "return_unlevered_na_reason": exc.reason,
+                "return_levered_na_reason": exc.reason,
+            }
+        else:
+            if abs(leverage.unlevered_cumulative - sleeve_return) > Decimal("1e-12"):
+                raise ReportValidationError(
+                    "the unlevered return differs from the restated row's own series"
+                )
+            leverage_fields = _leverage_row_fields(leverage)
+        loan = max(Decimal(0), -bucket)
+        basis["loan_usd"] = decimal_text(loan)
+        basis["gross_to_equity_ratio"] = (
+            decimal_text((ledger_value + loan) / ledger_value)
+            if ledger_value > 0
+            else None
+        )
     except (disclosure.DisclosureError, ArithmeticError) as exc:
         raise ReportValidationError(str(exc)) from exc
+    _apply_leverage_to_rows(report, strategy_id, leverage_fields)
     parent_row["account_basis"] = basis
     methodology = report.get("methodology")
     if isinstance(methodology, list):

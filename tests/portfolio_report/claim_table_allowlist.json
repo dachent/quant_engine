@@ -105,6 +105,11 @@
    "file": "tools/portfolio_performance_tab.py",
    "pattern": "^the restated strategy is valued at its gross sleeve NAV, so the residual parent account's unallocated cash and margin is not in this residual",
    "justification": "states why a residual excludes the parent account's unallocated cash and margin: it follows from the restated strategy's value (gross sleeve NAV), whose amount row R22-6 asserts as sleeve value minus parent value"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "pattern": "^\\{\\}: (sleeve profit and loss after allocated costs over the prior-close sleeve NAV|the same profit over the prior-close sleeve NAV less the)",
+   "justification": "a template: the basis code, the loan rule and the window are substituted from the derivation that produced the figure; the sentence defines the measurement and states no figure of its own"
   }
  ]
 }

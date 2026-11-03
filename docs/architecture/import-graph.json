@@ -590,6 +590,11 @@
     ],
     [
       "portfolio_report",
+      "strategy_leverage",
+      1
+    ],
+    [
+      "portfolio_report",
       "verify_holdings_identity",
       1
     ],
