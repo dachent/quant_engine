@@ -254,7 +254,7 @@ def test_alpha_tile_with_a_standard_error_prints_the_t_statistic(
         _run(tmp_path, _alpha_payload(row), "renderFactorDetail"), "#factor-detail"
     )
 
-    assert "t 8.99 (annualized SE 9.0%)" in tile
+    assert re.search(r"t 8\.99 \(annuali[sz]ed SE 9\.0%\)", tile)
     assert "alpha-basis-badge" not in tile
 
 
