@@ -120,6 +120,8 @@ def test_declared_duplicate_identity_cli(
     output = tmp_path / "result.json"
     status = cli.main(
         [
+            "--cutoff",
+            "2026-09-17",
             "--qe-root",
             str(BASE / "tree/qe-root"),
             "--out",
@@ -275,6 +277,8 @@ def test_real_cli_refuses_perimeter(
     assert (
         cli.main(
             [
+                "--cutoff",
+                "2026-09-17",
                 "--qe-root",
                 str(BASE / "tree/qe-root"),
                 "--out",

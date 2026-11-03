@@ -193,6 +193,7 @@ _PATH_STAGES = {
     "tools/release_ledger_spec.py": [],
     "tools/release_hwm_calendar.py": [],
     "tools/release_post_commit.py": [],
+    "tools/release_acceptance_inputs.py": [],
     # Layered history, dependence and attribution feed the attribution stage and every
     # stage after it.
     "tools/release_pre_chain.py": list(_STAGE_ORDER[2:]),

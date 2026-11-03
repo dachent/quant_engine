@@ -180,3 +180,80 @@ release_baseline_spec.py declare --previous-spec FILE --out FILE --roots-out FIL
   (id and manifest sha256). The financial-MVP triple binds the contract, registry and schema of `--repo-root`.
 - Output is create-only, canonical bytes (sorted keys, compact, no trailing newline), checked against
   `baseline-spec.schema.json`. Refusals are `release-baseline-spec: FAIL: CODE: detail`, exit 1.
+
+## B9: acceptance-inputs and sleeve-inputs builder
+
+`tools/release_acceptance_inputs.py` writes the two files the independent derivation seats read
+(`acceptance/derive_a`, `acceptance/derive_b`). It replaces `mk_oracle_r2.py` (the
+`qe-cp-acceptance-inputs/3` manifest) and `mk_sleeve_inputs.py` (the `qe-cp-sleeve-inputs/1` file).
+The derivations stay the only readers and the only interpreters; this tool writes pins.
+
+```
+release_acceptance_inputs.py acceptance-inputs --resolved-cycle R --qe-root D --repo-root D [--root K=D ...]
+    --predecessor-manifest P [--predecessor-manifest-sha256 H] [--baseline-pointers FILE]
+    --ledger-generation KEY:REL --file declared_cutoff_date=KEY:REL --file account_strategy_map_and_active_universe=KEY:REL
+    [--file FAMILY=KEY:REL ...] [--artifact-dir PROVIDER=KEY:REL ...] [--stage-dir REL] --out FILE
+release_acceptance_inputs.py sleeve-inputs     --resolved-cycle R --qe-root D --repo-root D [--root K=D ...]
+    [--file ROLE=KEY:REL ...] [--artifact-dir PROVIDER=KEY:REL ...] [--stage-dir REL] --out FILE
+```
+
+- Reads from the resolved cycle: `cutoff` (the only cutoff; it is written into both files),
+  `captured_at_utc`, `roots` and the generation row of each provider. The provider generation
+  manifests are hashed again against the row's pin.
+- `KEY:REL` is a root key and a plain relative path with `/` separators. Root keys are the resolved
+  cycle's `roots`, `--root KEY=DIR`, and the two the derivations use, `qe` (`--qe-root`) and `repo`
+  (`--repo-root`). A key bound to two directories is a refusal.
+- Provider captures are not named by path. Each is the one file under `--artifact-dir` (default the
+  provider root) whose name, size and sha256 equal the record in that provider's generation manifest;
+  a generation's `normalized/*` outputs are looked up beside its manifest by content. Two matching
+  files are a refusal even with equal bytes: narrow `--artifact-dir`. Symlinks and junctions are not
+  followed and are never candidates.
+- Where a file lies decides how it is pinned. Under the qe root: pinned in place. Under the repo root
+  (sleeve inputs only): root `repo`. Under neither (a scratch ledger, a run output, the repository
+  contract for the acceptance manifest): copied create-only to `<qe root>/<--stage-dir>/...` and pinned
+  at the copy; a provider capture keeps its path below the provider root, so the path bindings the
+  derivation checks (`generations/<id>/`, `output/<source run>/`) hold. An existing staged copy must be
+  byte-identical. Without `--stage-dir` such a file is a refusal. Nothing is copied or written until
+  every check has passed.
+
+### acceptance-inputs
+
+| Entry (family) | Source |
+|---|---|
+| `declared_cutoff_date`, `account_strategy_map_and_active_universe` | `--file` (the run's stage outputs); `calculation_cutoff_date` and `as_of_date` must equal the cycle cutoff; the crosswalk must carry a basename the derivation recognizes |
+| provider ledger (`portfolio_and_strategy_capital_at_cutoff`) | `--ledger-generation`: `provider-ledger.json` there; `as_of_date` is the cutoff and `provider_generations` are exactly the cycle's (id and manifest sha256) |
+| `financial_source_contract` | `--file` or `repo:contracts/portfolio-financial-mvp-source-v1.json` |
+| Matrixport NAV, wallet files, native families, Quantbase accounts, activity and dashboard | the cycle's generations (artifact records); the native files must lie under `output/<source_run_id>/`, the run id read from the native catalog |
+| `fx_*`, `provider_capital_policy`, owner receipts (kept families) | the predecessor manifest's entry for the family (exactly one), located at its qe-relative path, else by sha256 through `--baseline-pointers` (the authority pointers of an expected-baseline file; two locations for one digest are not guessed). The file is hashed again and must equal the predecessor's pin (`CARRY_DRIFT`), unless `--file FAMILY=...` names its replacement. Other fields of the entry (`ticker`, `schema`, `fields`, `note`) are carried |
+
+`generation_selection_evidence` is rebuilt from the cycle: `captured_at_utc`, `financial_cutoff`, and
+per provider with a declared finality the generation id, qualification, `finalized_through`, the
+finality evidence file's path and sha256 (read again; `..._verified_V` is written `true` only after
+that read), plus the native catalog and manifest digests and the source run for the native provider.
+`provenance` names the cycle, the resolved-cycle sha256 and the predecessor manifest sha256.
+
+### sleeve-inputs
+
+`ibkr_catalog` and the six Quantbase captures come from their generations like the capture families
+above. `ibkr_declared_inputs`, `quantbase_declared_inputs`, `tag_map` and `crosswalk` default to the
+governed files under `repo:ops/mvp2-release/inputs/` and can be replaced with `--file ROLE=KEY:REL`;
+the declared inputs must end at the cycle cutoff (`window.last_day`, `data_cutoff`) and the crosswalk
+must carry it.
+
+### Refusals
+
+`release-acceptance-inputs: FAIL: CODE: detail`, exit 1, nothing written; exit 2 is a usage error.
+
+| Code | Raised when |
+|---|---|
+| `MISSING`, `HASH_MISMATCH`, `SIZE_MISMATCH` | a pinned or looked-up file is absent, or the bytes differ from the manifest record or pin (generation manifest, finality evidence, staged copy, `--resolved-cycle-sha256`, `--predecessor-manifest-sha256`) |
+| `AMBIGUOUS_FILE` | two files match one artifact record |
+| `PATH_ESCAPES_ROOT`, `UNKNOWN_ROOT`, `ROOTS`, `ROOT_MISSING` | a `--file`/`--stage-dir` path is absolute, has `..`, backslash or an empty part, or goes through a symlink or junction; a root key is unbound or bound twice |
+| `NOT_UNDER_ROOT`, `STAGE_CONFLICT`, `STAGE_FAILED` | a file under neither root and no `--stage-dir`; two different files for one staged path; a copy that does not verify |
+| `STALE_GENERATION`, `LEDGER_PROVIDERS`, `CUTOFF_MISMATCH` | a generation `as_of_date` or `finalized_through` before the cutoff; a ledger that is not at the cutoff or admitted another generation; a run output or governed input for another cutoff |
+| `CARRY_DRIFT`, `CARRY_UNRESOLVED`, `PREDECESSOR` | a kept file changed; its location cannot be established; the predecessor is not a `qe-cp-acceptance-inputs/3` manifest with exactly one entry per kept family |
+| `RUN_PATH`, `CATALOG`, `ARTIFACT_RECORD`, `ID_MISMATCH`, `PROVIDER_MISSING` | a native file outside its source run; no `source_run_id`; a missing or duplicate artifact record; a generation file naming another generation; a provider absent from the cycle |
+| `OUTPUT_EXISTS` | `--out` exists (outputs are create-only) |
+| `RESOLVED_CYCLE`, `INPUT`, `UNKNOWN_ROLE`, `BASENAME`, `USAGE` | the resolved cycle is not a `qe-release-resolved-cycle/1` file; unreadable or non-JSON input; a `--file` name that is not a role of the command; a crosswalk basename the derivation does not place; malformed arguments |
+
+`acceptance/derive_a` no longer defaults `--cutoff`; the cycle's cutoff is always passed.
