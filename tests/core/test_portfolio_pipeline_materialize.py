@@ -7950,3 +7950,237 @@ def test_release_identity_binds_commit_or_tree_and_refuses_anything_else(
     assert materializer._spec_identity_fields("git-tree-v2") == {
         "code_identity_scheme": "git-tree-v2"
     }
+
+
+# -- promotion gate on the real production specification ----------------------------
+#
+# The production specification carries no `portfolio-orchestration-contract` gate, so
+# the git-tree-v2 promotion gate (tree, mandatory merge attestation, runtime lock,
+# executing-code identity) used to be skipped at `execute --commit`. These tests load
+# the specification the production producer really writes.
+
+
+def _gate_git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _gate_repo(tmp_path: Path) -> SimpleNamespace:
+    """A merged checkout: its HEAD tree is the tree the specification binds."""
+
+    root = tmp_path / "gate-repo"
+    root.mkdir()
+    _gate_git(root, "init", "-b", "main")
+    (root / "uv.lock").write_bytes(b"lock-v1\n")
+    _gate_git(root, "add", "uv.lock")
+    _gate_git(root, "commit", "-m", "base")
+    _gate_git(root, "checkout", "-b", "pr")
+    (root / "a.txt").write_bytes(b"fix\n")
+    _gate_git(root, "add", "a.txt")
+    _gate_git(root, "commit", "-m", "candidate")
+    candidate = _gate_git(root, "rev-parse", "HEAD")
+    _gate_git(root, "checkout", "main")
+    _gate_git(root, "merge", "--no-ff", "pr", "-m", "merge pr")
+    return SimpleNamespace(
+        root=root,
+        candidate=candidate,
+        tree=_gate_git(root, "rev-parse", "HEAD^{tree}"),
+        commit=_gate_git(root, "rev-parse", "HEAD"),
+    )
+
+
+def _real_production_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> PipelineSpec:
+    """The specification the production producer writes, loaded from its bytes."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    materializer.build_production_spec(
+        inputs.recipe_path,
+        inputs.prepared_root,
+        inputs.semantic_gate,
+        inputs.production_root,
+        inputs.state_root,
+        inputs.spec_path,
+        financial_artifacts_path=inputs.financial_artifacts,
+    )
+    spec = PipelineSpec.from_json_bytes(inputs.spec_path.read_bytes())
+    # The real shape: no orchestration contract, production rebind gate present.
+    assert core_pipeline._portfolio_contract(spec) is None
+    assert core_pipeline._requires_production_product(spec)
+    return spec
+
+
+def _production_gate_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[PipelineSpec, SimpleNamespace]:
+    """The real production specification, rebound to a tree-bound synthetic checkout."""
+
+    from quant_engine.core import code_identity
+
+    spec = _real_production_spec(tmp_path, monkeypatch)
+    repo = _gate_repo(tmp_path)
+    monkeypatch.setattr(
+        core_pipeline, "_executing_repo_root", lambda: repo.root, raising=False
+    )
+    monkeypatch.setattr(
+        core_pipeline,
+        "executing_code_files",
+        lambda: ((repo.root / "a.txt").resolve(),),
+    )
+    tree_spec = replace(
+        spec,
+        code_commit=repo.tree,
+        code_identity_scheme=code_identity.TREE_SCHEME,
+    )
+    return tree_spec, repo
+
+
+def test_production_spec_commit_refuses_a_tree_release_without_an_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_engine.core import code_identity
+
+    spec, repo = _production_gate_spec(tmp_path, monkeypatch)
+    # Plan/build bind the tree only: no merge attestation can exist yet.
+    core_pipeline._validate_portfolio_orchestration(spec, verify_runtime=True)
+    # ... but they do bind it, before any node runs: a different tree refuses.
+    with pytest.raises(core_pipeline.PipelineValidationError, match="differs"):
+        core_pipeline._validate_portfolio_orchestration(
+            replace(spec, code_commit="1" * 40), verify_runtime=True
+        )
+    with pytest.raises(core_pipeline.PipelineValidationError, match="mandatory"):
+        core_pipeline._validate_portfolio_orchestration(
+            spec, verify_runtime=True, promote=True
+        )
+    # Pipeline status never promotes.
+    core_pipeline._validate_portfolio_orchestration(spec, verify_runtime=False)
+    code_identity.write_merge_attestation(
+        repo.root,
+        candidate_commit=repo.candidate,
+        base_ref="main",
+        coordination_root=spec.coordination_root,
+    )
+    core_pipeline._validate_portfolio_orchestration(
+        spec, verify_runtime=True, promote=True
+    )
+
+
+def test_production_spec_commit_refuses_a_different_tree_or_runtime_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_engine.core import code_identity
+
+    spec, repo = _production_gate_spec(tmp_path, monkeypatch)
+    code_identity.write_merge_attestation(
+        repo.root,
+        candidate_commit=repo.candidate,
+        base_ref="main",
+        coordination_root=spec.coordination_root,
+    )
+    other_tree = replace(spec, code_commit="1" * 40)
+    with pytest.raises(core_pipeline.PipelineValidationError, match="tree differs"):
+        core_pipeline._validate_portfolio_orchestration(
+            other_tree, verify_runtime=True, promote=True
+        )
+    (repo.root / "uv.lock").write_bytes(b"lock-v2\n")
+    _gate_git(repo.root, "commit", "-am", "lock moved")
+    moved = replace(spec, code_commit=_gate_git(repo.root, "rev-parse", "HEAD^{tree}"))
+    with pytest.raises(core_pipeline.PipelineValidationError):
+        core_pipeline._validate_portfolio_orchestration(
+            moved, verify_runtime=True, promote=True
+        )
+
+
+def test_production_spec_commit_refuses_code_that_is_not_the_attested_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_engine.core import code_identity
+
+    spec, repo = _production_gate_spec(tmp_path, monkeypatch)
+    code_identity.write_merge_attestation(
+        repo.root,
+        candidate_commit=repo.candidate,
+        base_ref="main",
+        coordination_root=spec.coordination_root,
+    )
+    core_pipeline._validate_portfolio_orchestration(
+        spec, verify_runtime=True, promote=True
+    )
+    # The executing-tree check: a modified running file is refused even though the
+    # checkout the specification names is clean.
+    other = tmp_path / "other-checkout"
+    shutil.copytree(repo.root, other)
+    (other / "a.txt").write_bytes(b"changed\n")
+    monkeypatch.setattr(
+        core_pipeline,
+        "executing_code_files",
+        lambda: ((other / "a.txt").resolve(),),
+    )
+    with pytest.raises(core_pipeline.PipelineValidationError, match="portfolio"):
+        core_pipeline._validate_portfolio_orchestration(
+            spec, verify_runtime=True, promote=True
+        )
+    # Fail closed on an identity scheme that is neither commit nor tree.
+    with pytest.raises(core_pipeline.PipelineValidationError):
+        core_pipeline._validate_portfolio_orchestration(
+            replace(spec, code_identity_scheme="git-unknown-v9"),
+            verify_runtime=True,
+            promote=True,
+        )
+
+
+def test_production_spec_git_commit_v1_commit_path_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1/R2/R2.1: git-commit-v1 never had this gate and must not gain one."""
+
+    from quant_engine.core import code_identity
+
+    spec = _real_production_spec(tmp_path, monkeypatch)
+    assert spec.code_identity_scheme == code_identity.COMMIT_SCHEME
+    assert "code_identity_scheme" not in spec.to_dict()
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("git-commit-v1 must not reach the tree promotion gate")
+
+    for name in (
+        "verify_promotion_identity",
+        "verify_executing_code",
+        "executing_code_files",
+    ):
+        monkeypatch.setattr(core_pipeline, name, forbidden)
+    monkeypatch.setattr(core_pipeline, "_executing_repo_root", forbidden, raising=False)
+    for promote in (False, True):
+        assert (
+            core_pipeline._validate_portfolio_orchestration(
+                spec, verify_runtime=True, promote=promote
+            )
+            is None
+        )
+
+
+def test_execute_pipeline_commit_path_promotes_through_the_orchestration_gate() -> None:
+    """The commit branch of `execute_pipeline` is the only caller that promotes."""
+
+    import inspect
+
+    source = inspect.getsource(core_pipeline.execute_pipeline)
+    call = "_validate_portfolio_orchestration(spec, verify_runtime=True, promote=True)"
+    assert call in source
+    assert source.index("if commit:") < source.index(call)
