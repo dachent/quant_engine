@@ -947,6 +947,7 @@ def compose(
     sleeve_accounts: Mapping[str, str],
     product_strategies: Sequence[str],
     strategy_returns: Mapping[str, Decimal] | None = None,
+    account_basis_returns: Mapping[str, Decimal] | None = None,
     hwm_current_index: str | None = None,
     hwm_index_path: Sequence[Mapping[str, Any]] | None = None,
     derived_patches: Sequence[Mapping[str, Any]] | None = None,
@@ -991,9 +992,21 @@ def compose(
             if row is None and entry["account_id"] in set(sleeve_accounts.values()):
                 # the epoch of a residual parent is replaced by its sleeves: the
                 # strategy's own account-live return is that parent account's series
-                own = (strategy_returns or {}).get(entry["strategy_id"])
+                # a strategy restated onto its sleeve keeps its parent-account figure in
+                # `account_basis_returns`; the committed bound was measured on that series
+                restated = entry["strategy_id"] in (account_basis_returns or {})
+                own = (
+                    (account_basis_returns or {})
+                    if restated
+                    else (strategy_returns or {})
+                ).get(entry["strategy_id"])
                 twr = None if own is None else own * 100
-                basis_note = ", the strategy's account-live series"
+                basis_note = (
+                    ", the strategy's parent-account series (its row is restated "
+                    "onto its sleeve)"
+                    if restated
+                    else ", the strategy's account-live series"
+                )
             if row is None and twr is None:
                 omitted.append(
                     {

@@ -105,7 +105,11 @@ from portfolio_invested_capital import (
     resolve_financial_input_authority,
     verify_governed_capital_result,
 )
-from portfolio_totals import PortfolioTotalsError, build_portfolio_totals
+from portfolio_totals import (
+    PortfolioTotalsError,
+    build_portfolio_totals,
+    perimeter_restatement,
+)
 import sleeve_disclosures
 import strategy_basis
 from portfolio_totals_verify import (
@@ -10094,6 +10098,10 @@ def build_report_data(
     # `strategy_summary`: the weights there are the current cutoff weights that
     # `_strategies` took from `current_capital`.
     allocation_history = _allocations(catalog, strategy_product_controls)
+    if basis_restatements:
+        allocation_history = strategy_basis.label_recorded_allocations(
+            allocation_history, basis_restatements
+        )
     coverage = _coverage(catalog)
     dependence_analysis: dict[str, Any] = {
         "default_evidence_mode": "LIVE_ONLY",
@@ -10778,6 +10786,13 @@ def build_report_data(
                         if isinstance(manifest_rows_raw, list)
                         else None
                     ),
+                    perimeter_restatement_memo=(
+                        perimeter_restatement(
+                            _current_capital(catalog), verified_capital
+                        )
+                        if basis_restatements
+                        else None
+                    ),
                 )
             )
         except PortfolioTotalsError as exc:
@@ -10795,6 +10810,9 @@ def build_report_data(
             sleeve_accounts,
             derived_product,
             basis_restatements,
+            account_basis_values=_account_basis_values(catalog)
+            if basis_restatements
+            else None,
         )
         if basis_restatements:
             report["methodology"].append(
@@ -10846,6 +10864,7 @@ def build_report_data(
                         if isinstance(item, Mapping)
                         and item.get("account_live_cumulative_return") is not None
                     },
+                    account_basis_returns=_account_basis_returns(report),
                 )
             except sleeve_disclosures.DisclosureError as exc:
                 raise ReportValidationError(str(exc)) from exc
@@ -12849,6 +12868,7 @@ def _apply_return_scope(
     sleeve_accounts: Mapping[str, str],
     derived_product: Sequence[str],
     restatements: Mapping[str, strategy_basis.SleeveRestatement] | None = None,
+    account_basis_values: Mapping[str, Decimal] | None = None,
 ) -> None:
     """Name the basis of a strategy whose product epoch is a derived sleeve.
 
@@ -12884,6 +12904,11 @@ def _apply_return_scope(
             item["return_scope_label"] = strategy_basis.return_scope_label(
                 restatements[strategy]
             )
+            note = strategy_basis.cost_rate_basis_note(
+                item, (account_basis_values or {}).get(strategy)
+            )
+            if note is not None:
+                item["cost_rate_reason"] = note
             continue
         item["return_scope"] = {
             "basis": "PARENT_ACCOUNT_LIVE_SERIES",
@@ -12914,6 +12939,44 @@ def _apply_return_scope(
             f"unallocated cash and margin). MWR and governed capital: sleeve "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
         )
+
+
+def _account_basis_values(catalog: Mapping[str, Any]) -> dict[str, Decimal]:
+    """Each systematic strategy's value on the UNRESTATED baseline current capital."""
+
+    found: dict[str, Decimal] = {}
+    for row in _current_capital(catalog).get("strategies", []):
+        value = row.get("current_value") if isinstance(row, Mapping) else None
+        if (
+            isinstance(row, Mapping)
+            and isinstance(value, Mapping)
+            and value.get("status") == "AVAILABLE"
+            and value.get("value") is not None
+        ):
+            found[str(row["strategy_id"])] = Decimal(str(value["value"]))
+    return found
+
+
+def _account_basis_returns(report: Mapping[str, Any]) -> dict[str, Decimal]:
+    """The parent-account cumulative return of every restated strategy, from the report.
+
+    Read from the ``account_basis`` block of the account row (its own figure under the
+    strategy row's own name); nothing is recomputed.  Empty without a restatement.
+    """
+
+    found: dict[str, Decimal] = {}
+    for row in report.get("account_summary", []):
+        block = row.get("account_basis") if isinstance(row, Mapping) else None
+        figures = block.get("figures") if isinstance(block, Mapping) else None
+        if (
+            isinstance(figures, Mapping)
+            and isinstance(block, Mapping)
+            and figures.get("account_live_cumulative_return") is not None
+        ):
+            found[str(block["strategy_id"])] = Decimal(
+                str(figures["account_live_cumulative_return"])
+            )
+    return found
 
 
 def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
