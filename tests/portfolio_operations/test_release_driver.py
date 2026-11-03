@@ -714,7 +714,11 @@ def test_the_shipped_graph_is_self_consistent() -> None:
     known = set(graph["paths"]) | set(graph["derive"])
 
     def placeholders(value: object) -> set[str]:
-        return set(re.findall(r"\{([A-Za-z_]\w*)\}", json.dumps(value)))
+        found = set(re.findall(r"\{([A-Za-z_]\w*)\}", json.dumps(value)))
+        # the two names a for_each group binds are not run configuration; the map it reads is
+        found -= {"each_key", "each_value"}
+        found |= set(re.findall(r'"for_each": "(\w+)"', json.dumps(value)))
+        return found
 
     for name in list(graph["paths"].values()) + list(graph["derive"].values()):
         config_keys |= placeholders(name) - known
@@ -759,6 +763,40 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "expected_baseline_sha256",
         "calendar_authority",
         "calendar_authority_sha256",
+        # staging group (docs/release-driver.md, "Staging group")
+        "cycle_manifest",
+        "cycle_manifest_sha256",
+        "cycle_roots_file",
+        "provenance_spec",
+        "provenance_spec_sha256",
+        "predecessor_ledger_spec",
+        "predecessor_ledger_spec_sha256",
+        "release_inputs_root",
+        "release_inputs_manifest_sha256",
+        "baseline_roots",
+        "baseline_declared_inputs_path",
+        "baseline_cost_root_id",
+        "calendar_attempt_run",
+        "calendar_attempt_spec",
+        "calendar_seed_authority",
+        "calendar_seed_authority_sha256",
+        "predecessor_selected_inputs",
+        "predecessor_selected_inputs_sha256",
+        "predecessor_prep_spec",
+        "predecessor_prep_spec_sha256",
+        "selected_files",
+        "factors_bundle",
+        "sector_bundle",
+        "style_bundle",
+        "factors_bundle_id",
+        "sector_bundle_id",
+        "style_bundle_id",
+        "weekly_gap_fill_spec",
+        "vendor_gap_fills",
+        "model_vs_actual_input",
+        "prep_pins",
+        "prep_dirs",
+        "prep_omit",
     }
     for tool in re.findall(r"\{(?:tools|mvp2)\}/([\w.]+)", json.dumps(graph)):
         base = (

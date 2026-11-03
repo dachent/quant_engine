@@ -612,7 +612,7 @@ def test_the_offline_plan_reproduces_every_recorded_pass_26_command_line(
     printed = capsys.readouterr().out
     for stage_id in recorded["stages"]:
         assert f"\n{stage_id}: " in "\n" + printed, stage_id
-    assert len(recorded["stages"]) == 16
+    assert len(recorded["stages"]) == 19
 
 
 def test_the_offline_plan_reads_and_writes_nothing(
@@ -722,7 +722,11 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
     # 5a financial artifacts), provider generations, production spec, replica copy, replica spec,
     # lanes; before it run_attended.sh, qa_only.sh and the pre-chain
     pass26 = [
+        "provenance",
+        "ledger",
+        "baseline",
         "pre-chain",
+        "prep-spec",
         "attended",
         "qa-browser",
         "qa-interaction",
@@ -751,8 +755,15 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         and "only_scheme" not in _stage(i)
         and _stage(i).get("only_ceremony", "full") == "full"
     ] == [
+        "cycle-resolve",
+        "provenance",
+        "ledger-spec",
+        "ledger",
+        "baseline-spec",
+        "baseline",
+        "selected-build",
         "selected-inputs",
-        *pass26[: pass26.index("replica-copy") + 1],
+        *pass26[pass26.index("pre-chain") : pass26.index("replica-copy") + 1],
         "replica-inventory",
         *pass26[pass26.index("replica-copy") + 1 :],
     ]
