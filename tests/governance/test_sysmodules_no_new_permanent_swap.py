@@ -34,6 +34,9 @@ ALLOWED_PERMANENT_SWAPS: dict[str, dict[str, int]] = {
     "tests/acceptance/test_derive_b_sleeves.py": {
         "load_module|spec.name": 1,
     },
+    "tests/acceptance/test_hwm_envelope_sleeve.py": {
+        "<module>|'portfolio_report'": 1,
+    },
     "tests/acceptance/test_validate_generation.py": {
         "_load_provider_ledger_tests|spec.name": 1,
         "_load_report_producer_fixture|spec.name": 1,
@@ -178,6 +181,15 @@ ALLOWED_PERMANENT_SWAPS: dict[str, dict[str, int]] = {
     },
     "tests/portfolio_analytics/test_spy_spxl_admission.py": {
         "_load|name": 1,
+    },
+    "tests/portfolio_analytics/test_strategy_basis_lens_moves.py": {
+        "test_the_panel_binds_a_table_and_refuses_findings_or_a_changed_sentence|spec.name": 1,
+    },
+    "tests/portfolio_analytics/test_strategy_basis_lenses.py": {
+        "<module>|_PLAN_SPEC.name": 1,
+    },
+    "tests/portfolio_analytics/test_strategy_basis_lenses_r2.py": {
+        "<module>|_SPEC.name": 1,
     },
     "tests/portfolio_attribution/test_annualization_frequency_guard.py": {
         "_load_fixture_module|spec.name": 1,
@@ -327,6 +339,9 @@ ALLOWED_PERMANENT_SWAPS: dict[str, dict[str, int]] = {
     },
     "tests/portfolio_report/test_epoch_manifest_workbook_binding.py": {
         "<module>|SPEC.name": 1,
+    },
+    "tests/portfolio_report/test_hwm_envelope_basis.py": {
+        "<module>|'portfolio_report'": 1,
     },
     "tests/portfolio_report/test_implementation_account_leg_binding.py": {
         "_load|name": 1,
