@@ -13845,6 +13845,67 @@ def _apply_leverage_to_rows(
             row["return_levered_na_reason"] = LEVERAGE_NOT_DERIVED
 
 
+def _derived_leverage_rows(
+    leverage: strategy_leverage.SleeveLeverage,
+    *,
+    strategy_id: str,
+    sleeve_account_id: str,
+    parent_account_id: str,
+    existing: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """The restated sleeve's loan and equity as leverage-table rows (#624, LV contract).
+
+    Both are derived from the sleeve facts, not observed: the loan row is outside the NAV
+    (the sleeve NAV is gross by definition), the equity row is the gross NAV less the loan.
+    The source catalog binding is the one the account's observed rows already carry; with
+    no observed row there is nothing to bind to and no row is produced.
+    """
+
+    anchor = next(
+        (row for row in existing if row.get("account_id") == parent_account_id),
+        next(iter(existing), None),
+    )
+    if anchor is None:
+        return []
+    shared = {
+        "account_id": sleeve_account_id,
+        "coverage_reason": "DERIVED_FROM_SLEEVE_FACTS",
+        "coverage_status": "DERIVED",
+        "measurement_basis": "SLEEVE_LOAN_EXPOSURE_SHARE",
+        "native_source_record_id": None,
+        "provider_id": anchor["provider_id"],
+        "reason": None,
+        "security_id": None,
+        "source_amount": None,
+        "source_catalog_generation_id": anchor["source_catalog_generation_id"],
+        "source_catalog_sha256": anchor["source_catalog_sha256"],
+        "source_record_ids": [],
+        "strategy_id": strategy_id,
+    }
+    return [
+        {
+            **shared,
+            "classification": classification,
+            "data_class": data_class,
+            "included_in_nav": included,
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": decimal_text(value),
+            },
+        }
+        for data_class, classification, included, value in (
+            (
+                "SLEEVE_FINANCING_LIABILITY",
+                "DERIVED_SLEEVE_LOAN",
+                False,
+                leverage.end_loan,
+            ),
+            ("SLEEVE_EQUITY", "DERIVED_SLEEVE_EQUITY", None, leverage.end_equity),
+        )
+    ]
+
+
 def _apply_strategy_basis_disclosure(
     report: dict[str, Any],
     restatements: Mapping[str, strategy_basis.SleeveRestatement],
@@ -13981,6 +14042,7 @@ def _apply_strategy_basis_disclosure(
             unrestated_capital, current_capital, restated_strategy_id=strategy_id
         )
         leverage_fields: dict[str, Any]
+        derived_rows: list[dict[str, Any]] = []
         try:
             leverage = strategy_leverage.derive_sleeve_leverage(
                 facts.document, sleeve_name, ledger_account_nav=ledger_value
@@ -13998,6 +14060,15 @@ def _apply_strategy_basis_disclosure(
                     "the unlevered return differs from the restated row's own series"
                 )
             leverage_fields = _leverage_row_fields(leverage)
+            derived_rows = _derived_leverage_rows(
+                leverage,
+                strategy_id=strategy_id,
+                sleeve_account_id=restated.account_id,
+                parent_account_id=restated.parent_account_id,
+                existing=_objects(
+                    report.get("leverage_disclosures"), "leverage_disclosures"
+                ),
+            )
         loan = max(Decimal(0), -bucket)
         basis["loan_usd"] = decimal_text(loan)
         basis["gross_to_equity_ratio"] = (
@@ -14008,6 +14079,10 @@ def _apply_strategy_basis_disclosure(
     except (disclosure.DisclosureError, ArithmeticError) as exc:
         raise ReportValidationError(str(exc)) from exc
     _apply_leverage_to_rows(report, strategy_id, leverage_fields)
+    report["leverage_disclosures"] = [
+        *_objects(report.get("leverage_disclosures"), "leverage_disclosures"),
+        *derived_rows,
+    ]
     parent_row["account_basis"] = basis
     methodology = report.get("methodology")
     if isinstance(methodology, list):

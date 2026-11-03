@@ -190,3 +190,45 @@ def test_the_check_passes_an_honest_row_and_catches_a_tampered_one() -> None:
     assert list(checks.check_sleeve_leverage(ctx))  # type: ignore[arg-type]
     ctx.panel = {"strategies": [{**bare, "return_levered_na_reason": "X"}]}
     assert list(checks.check_sleeve_leverage(ctx)) == []  # type: ignore[arg-type]
+
+
+def test_the_derived_loan_and_equity_rows_validate_and_close_to_the_sleeve_nav() -> (
+    None
+):
+    leverage = _derived()
+    observed = {
+        "account_id": "parent",
+        "provider_id": "p",
+        "source_catalog_generation_id": "a" * 64,
+        "source_catalog_sha256": "b" * 64,
+    }
+    rows = reporter._derived_leverage_rows(
+        leverage,
+        strategy_id="strat",
+        sleeve_account_id="sleeve",
+        parent_account_id="parent",
+        existing=[observed],
+    )
+    assert [r["data_class"] for r in rows] == [
+        "SLEEVE_FINANCING_LIABILITY",
+        "SLEEVE_EQUITY",
+    ]
+    loan, equity = (sl.Decimal(r["amount"]["value"]) for r in rows)
+    assert loan == leverage.end_loan and loan + equity == leverage.end_nav
+    assert rows[0]["included_in_nav"] is False and rows[1]["included_in_nav"] is None
+    for file in ("report-data.schema.json", "control-panel-data.schema.json"):
+        root = json.loads((SCHEMAS / file).read_text(encoding="utf-8"))
+        validator = Draft202012Validator(
+            {"$defs": root["$defs"], "$ref": "#/$defs/leverage_disclosure"},
+            format_checker=FormatChecker(),
+        )
+        for row in rows:
+            assert list(validator.iter_errors(row)) == [], file
+    # nothing to bind to: no row
+    assert not reporter._derived_leverage_rows(
+        leverage,
+        strategy_id="s",
+        sleeve_account_id="x",
+        parent_account_id="parent",
+        existing=[],
+    )
