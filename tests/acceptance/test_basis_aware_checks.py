@@ -21,13 +21,17 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from quant_engine.core import release_input_root
 import sleeve_basis_synthetic as synth
 
 from acceptance.validate import checks, sleeve_basis
 
 D = Decimal
 REPO = Path(__file__).resolve().parents[2]
-TAG_MAP = REPO / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+TAG_MAP = (
+    release_input_root(REPO)
+    / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+)
 
 
 def _figures() -> sleeve_basis.SleeveFigures:

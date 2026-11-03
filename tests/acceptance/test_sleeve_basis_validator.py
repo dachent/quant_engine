@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from quant_engine.core import release_input_root
 import sleeve_basis_synthetic as synth
 
 from acceptance.validate import checks, sleeve_basis
@@ -679,10 +680,13 @@ def test_a_baseline_without_the_epoch_rows_cannot_be_restated() -> None:
 
 # every committed baseline, computed: no declaration changes nothing, and the restatement
 # of the baseline that carries epoch rows moves exactly the four families
+# (the baselines are cutoff-dependent release inputs outside Git: none are collected without them)
+_BASELINES_ROOT = release_input_root(REPO) / "acceptance"
 COMMITTED = sorted(
-    [REPO / "acceptance" / "expected-baseline.json"]
-    + list((REPO / "acceptance" / "baselines").glob("expected-baseline*.json"))
+    [_BASELINES_ROOT / "expected-baseline.json"]
+    + list((_BASELINES_ROOT / "baselines").glob("expected-baseline*.json"))
 )
+COMMITTED = [path for path in COMMITTED if path.is_file()]
 
 
 def _open_epoch_strategies(document: dict[str, Any]) -> dict[str, str]:

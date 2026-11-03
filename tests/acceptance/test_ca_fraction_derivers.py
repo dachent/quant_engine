@@ -23,6 +23,7 @@ import sys
 from typing import Any, Callable
 
 import pytest
+from quant_engine.core import release_input_root
 import test_derive_b_combined as combined
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "acceptance"))
@@ -184,7 +185,10 @@ real = pytest.mark.skipif(
 )
 REPO = Path(__file__).resolve().parents[2]
 DECLARED = REPO / "ops/mvp2-release/inputs/sleeves/sleeve-declared-inputs.json"
-TAG_MAP = REPO / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+TAG_MAP = (
+    release_input_root(REPO)
+    / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+)
 
 
 def _compare(rows: dict[str, dict[str, Any]], facts: dict[str, Any]) -> tuple[int, D]:

@@ -5076,6 +5076,7 @@ def _facts_file(directory: Path, artifact_id: str, name: str) -> Path:
     return path
 
 
+@needs_release_inputs
 def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5171,6 +5172,7 @@ def test_a_declaration_rebuilds_the_history_from_facts_built_before_it(
     assert "sleeve-facts" in checkpoint["input_identity"]["predecessors"]
 
 
+@needs_release_inputs
 def test_a_declaration_hands_its_facts_to_the_final_release_recipe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5366,6 +5368,7 @@ def _pin_basis_declaration(
     return raw
 
 
+@needs_release_inputs
 def test_strategy_basis_declaration_is_absent_without_a_pin(tmp_path: Path) -> None:
     section = _sleeve_section(tmp_path)
     assert preparation._policy_basis_declaration_path(None) is None
@@ -5374,6 +5377,7 @@ def test_strategy_basis_declaration_is_absent_without_a_pin(tmp_path: Path) -> N
     assert preparation._strategy_basis_stage_input(None) == {}
 
 
+@needs_release_inputs
 def test_strategy_basis_declaration_is_returned_when_pinned(tmp_path: Path) -> None:
     section = _sleeve_section(tmp_path)
     _pin_basis_declaration(tmp_path, section, _BASIS_DECLARATION)
@@ -5384,6 +5388,7 @@ def test_strategy_basis_declaration_is_returned_when_pinned(tmp_path: Path) -> N
     }
 
 
+@needs_release_inputs
 def test_strategy_basis_declaration_tamper_is_refused(tmp_path: Path) -> None:
     import json
 
@@ -5425,6 +5430,7 @@ def test_strategy_basis_declaration_tamper_is_refused(tmp_path: Path) -> None:
             preparation._policy_basis_declaration_path(section)
 
 
+@needs_release_inputs
 def test_strategy_basis_declaration_that_is_not_valid_is_refused(
     tmp_path: Path,
 ) -> None:
@@ -5438,6 +5444,7 @@ def test_strategy_basis_declaration_that_is_not_valid_is_refused(
         preparation._policy_basis_declaration_path(section)
 
 
+@needs_release_inputs
 def test_epoch_stage_identity_changes_with_the_basis_declaration(
     tmp_path: Path,
 ) -> None:

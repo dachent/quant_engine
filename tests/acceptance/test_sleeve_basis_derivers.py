@@ -314,6 +314,8 @@ def test_a_a_declaration_without_a_combined_run_is_refused(
             str(tmp_path),
             "--out",
             str(tmp_path / "out.json"),
+            "--cutoff",
+            CUTOFF.isoformat(),
             "--strategy-basis",
             str(_declaration(tmp_path)),
         ]

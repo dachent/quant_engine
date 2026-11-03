@@ -22,12 +22,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from quant_engine.core import release_input_root
 import sleeve_basis_synthetic as synth
 
 from acceptance.validate import checks, facts_bindings as fb, sleeve_basis
 
 REPO = Path(__file__).resolve().parents[2]
-REPO_TAG_MAP = REPO / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+REPO_TAG_MAP = (
+    release_input_root(REPO)
+    / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+)
 
 
 def _refused(facts: dict[str, Any], sources: Any) -> sleeve_basis.Refusal:
@@ -368,6 +372,10 @@ def test_the_oracle_rows_are_the_r2_ledger_generations_rows() -> None:
     assert computed == facts["bindings"]["account_rows_sha256"]
 
 
+@pytest.mark.skipif(
+    not REPO_TAG_MAP.is_file(),
+    reason="the tag map is a release input outside Git: set QE_RELEASE_INPUTS_ROOT",
+)
 def test_the_committed_tag_map_is_the_one_map_of_the_r21_lineage() -> None:
     """Branch M's finding: file 10befe29, canonical digest b1cfa8e8, one map for all."""
 
