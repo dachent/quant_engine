@@ -37,6 +37,10 @@ change between cycles and this document is not regenerated automatically.
   a second worktree of the same tree is accepted; promotion by code of a different
   tree, a dirty tree or a non-git copy refuses (`EXECUTING_CODE_*` reasons). A
   `git-commit-v1` promotion is unchanged.
+  The production specification carries no orchestration contract, so it names
+  no repo root or lock path: there the gate takes the executing checkout as the
+  repo root and its `uv.lock` as the runtime lock, and a `git-tree-v2` production
+  `execute --commit` refuses without the same attestation, tree and lock.
 - **Generation ids bind `repository_sha`.** Two runs at different SHAs with
   cold caches produce different generation ids for identical content (layered
   history -> decomposition plan bundle -> lens generations -> panel candidate
