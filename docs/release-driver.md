@@ -197,7 +197,7 @@ aside).
 | `factors_bundle`, `sector_bundle`, `style_bundle` | optional public bundle names (`--<kind>-bundle`); the default is the bundle roots the resolved cycle names |
 | `factors_bundle_id`, `sector_bundle_id`, `style_bundle_id` | optional: choose one generation of a bundle root that holds two (`--<kind>-bundle-id`) |
 | `weekly_gap_fill_spec`, `vendor_gap_fills`, `model_vs_actual_input` | optional per-cycle inputs, each `"ROOT_KEY:relative@sha256"`, passed as `--pin KEY=...`; absent means the key is omitted from the spec |
-| `prep_pins`, `prep_dirs` | optional objects `KEY: "ROOT_KEY:relative@sha256"` / `KEY: "ROOT_KEY:relative"`: `--pin` / `--dir` replacements of carried inputs |
+| `prep_pins`, `prep_dirs` | optional objects `KEY: "ROOT_KEY:relative@sha256"` / `KEY: "ROOT_KEY:relative"`: `--pin` / `--dir` replacements of carried inputs. A directory-valued field (such as `sleeve_facts.quantbase_source_dir`) belongs in `prep_dirs`: a pin writes a `{path, sha256, size_bytes}` object where the attended preparation reads a path |
 | `prep_omit` | optional list of spec keys the cycle declares it has none of (`--omit`) |
 
 The graph's `config_paths` require the file-valued keys above to exist before any stage runs.

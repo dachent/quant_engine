@@ -670,7 +670,8 @@ def test_optional_prep_spec_inputs_become_arguments_when_configured(
             "vendor_gap_fills": "data:gap/vendor.json@" + "b" * 64,
             "factors_bundle": "factors-x",
             "style_bundle_id": "c" * 64,
-            "prep_pins": {"sleeve_facts.quantbase_source_dir": "data:qb@" + "d" * 64},
+            "prep_pins": {"base_factor_file": "data:bf.json@" + "d" * 64},
+            "prep_dirs": {"sleeve_facts.quantbase_source_dir": "data:qb"},
             "prep_omit": ["model_vs_actual_input", "authority_notes"],
             "rebind_cutoff": "true",
         }
@@ -683,7 +684,9 @@ def test_optional_prep_spec_inputs_become_arguments_when_configured(
     assert "--pin model_vs_actual_input" not in printed
     assert "--factors-bundle factors-x" in printed
     assert "--style-bundle-id " + "c" * 64 in printed
-    assert "--pin sleeve_facts.quantbase_source_dir=data:qb@" + "d" * 64 in printed
+    assert "--pin base_factor_file=data:bf.json@" + "d" * 64 in printed
+    # a directory field is replaced with --dir, never --pin (a pin turns the path into a file object)
+    assert "--dir sleeve_facts.quantbase_source_dir=data:qb" in printed
     assert (
         "--omit authority_notes" in printed
         and "--omit model_vs_actual_input" in printed
