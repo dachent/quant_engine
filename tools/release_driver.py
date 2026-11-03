@@ -216,17 +216,18 @@ class Run:
         pin = self.values.get("release_inputs_manifest_sha256")
         if pin is None:
             raise Refusal("release_inputs_root needs release_inputs_manifest_sha256")
-        if self.offline:
-            # an offline plan reads nothing: it shows where the baseline lies and binds no bytes
-            shown = str(Path(root) / BASELINE_INPUT)
-            self.values["expected_baseline"] = shown
-            self.values["expected_baseline_arg"] = shown
-            return
         try:
             inputs = self.release_inputs = load_release_inputs(root, pin)
             baseline = inputs.path(BASELINE_INPUT)
         except ReleaseInputsError as exc:
-            raise Refusal(f"release inputs: {exc}") from exc
+            if not self.offline:
+                raise Refusal(f"release inputs: {exc}") from exc
+            # an offline plan may name a root that is not mounted: it shows where the baseline would
+            # lie and binds no bytes
+            shown = str(Path(root) / BASELINE_INPUT)
+            self.values["expected_baseline"] = shown
+            self.values["expected_baseline_arg"] = shown
+            return
         requested = self.values.get("requested_as_of")
         if requested is not None and inputs.cutoff != requested:
             raise Refusal(
