@@ -52,7 +52,7 @@ def derivations(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     return {
         "a": _run(
             [str(REPOSITORY_ROOT / "acceptance" / "derive_a"), *common]
-            + ["--out", str(out_a)]
+            + ["--cutoff", "2026-09-17", "--out", str(out_a)]
         ),
         "b": _run(
             [str(REPOSITORY_ROOT / "acceptance" / "derive_b" / "derive.py"), *common]
