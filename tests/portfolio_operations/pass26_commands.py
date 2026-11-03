@@ -75,6 +75,10 @@ def write(OUT: Path) -> None:
         "baseline_roots": {
             "baseline-sources": C + "/in/baseline-sources",
         },
+        "predecessor_selected_inputs": C + "/in/predecessor-selected-inputs.json",
+        "predecessor_selected_inputs_sha256": _pin("predecessor-selected-inputs"),
+        "predecessor_prep_spec": C + "/in/predecessor-prep-spec.json",
+        "predecessor_prep_spec_sha256": _pin("predecessor-prep-spec"),
         "calendar_attempt_run": C + "/attempt1/out",
         "calendar_attempt_spec": C + "/attempt1/spec.json",
         "calendar_seed_authority": C + "/in/calendar-seed-authority.json",

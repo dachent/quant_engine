@@ -41,8 +41,33 @@ STAGING = (
     "baseline",
 )
 # stages whose tool and flags are checked against the tool's own --help
-TOOL_STAGES = (*STAGING, "pre-chain", "calendar-authority", "post-commit-verify")
+TOOL_STAGES = (
+    *STAGING,
+    "selected-build",
+    "pre-chain",
+    "calendar-authority",
+    "prep-spec",
+    "post-commit-verify",
+)
 NEW_CONFIG_KEYS = (
+    "predecessor_selected_inputs",
+    "predecessor_selected_inputs_sha256",
+    "predecessor_prep_spec",
+    "predecessor_prep_spec_sha256",
+    "rebind_cutoff",
+    "selected_files",
+    "factors_bundle",
+    "sector_bundle",
+    "style_bundle",
+    "factors_bundle_id",
+    "sector_bundle_id",
+    "style_bundle_id",
+    "weekly_gap_fill_spec",
+    "vendor_gap_fills",
+    "model_vs_actual_input",
+    "prep_pins",
+    "prep_dirs",
+    "prep_omit",
     "cycle_manifest",
     "cycle_manifest_sha256",
     "cycle_roots_file",
@@ -165,8 +190,15 @@ def test_the_staging_group_comes_first_in_the_order_stage_p23_ran_it() -> None:
     ids = [s["id"] for s in _shipped()["stages"]]
     # stage_p23.sh: provenance, ledger, baseline, then selected inputs and the pre-chain; each spec
     # builder runs just before the stage tool that reads its output
-    assert ids[:8] == [*STAGING, "selected-inputs", "pre-chain"]
-    assert ids.index("calendar-authority") == ids.index("attended") - 1
+    assert ids[:9] == [*STAGING, "selected-build", "selected-inputs", "pre-chain"]
+    # the calendar authority comes before the preparation spec that pins it, the spec before the run
+    assert ids[ids.index("pre-chain") + 1 : ids.index("attended") + 1] == [
+        "calendar-authority",
+        "prep-spec",
+        "attended",
+    ]
+    assert "prep-spec" in _closure("attended") and "pre-chain" in _closure("prep-spec")
+    assert "selected-build" in _closure("pre-chain")
     for earlier, later in zip(STAGING, STAGING[1:]):
         assert earlier in _closure(later), (earlier, later)
     assert set(STAGING) <= _closure("selected-inputs")
@@ -201,7 +233,13 @@ def test_a_stage_requires_every_stage_whose_output_it_reads() -> None:
         "ledger_out",
         "baseline_spec",
     } <= set(produced)
-    for stage_id in (*STAGING, "calendar-authority"):
+    for stage_id in (
+        *STAGING,
+        "selected-build",
+        "prep-spec",
+        "attended",
+        "calendar-authority",
+    ):
         stage = _stage(stage_id)
         used: set[str] = set()
         for template in [
@@ -210,6 +248,10 @@ def test_a_stage_requires_every_stage_whose_output_it_reads() -> None:
         ]:
             used |= reaches(template)
         for name, producer in produced.items():
+            # the calendar authority is an explicit stage's output the run pins by sha256 (the seed of a
+            # first attempt is operator-supplied), so no stage requires it
+            if name == "calendar_authority":
+                continue
             if name in used and producer != stage_id:
                 assert producer in _closure(stage_id), (stage_id, name, producer)
 
@@ -233,7 +275,7 @@ def test_staging_stages_write_only_under_the_cycle_and_in_every_ceremony(
     config = json.loads((pass26 / "pass26-run.json").read_text(encoding="utf-8"))
     run = driver.Run(config, _shipped(), offline=True)
     cycle = Path(config["cycle"])
-    for stage_id in (*STAGING, "calendar-authority"):
+    for stage_id in (*STAGING, "selected-build", "prep-spec", "calendar-authority"):
         stage = _stage(stage_id)
         assert "only_ceremony" not in stage and "only_mode" not in stage
         written = driver._claimed_outputs(run, stage)
@@ -344,7 +386,7 @@ def test_the_offline_plan_binds_no_release_inputs_and_shows_where_they_are(
 
 def test_for_each_refuses_a_map_that_is_not_an_object(world: dict[str, Any]) -> None:  # noqa: F811
     config = json.loads(world["config"].read_text(encoding="utf-8"))
-    config["baseline_roots"] = ["a"]
+    config["baseline_roots"] = "a"
     run = driver.Run(config, {"paths": {}, "derive": {}, "stages": []})
     stage = {
         "argv": [
@@ -587,3 +629,76 @@ def test_a_ledger_spec_that_names_another_provenance_generation_is_refused(
         assert _run(staged, "run", "--only", "ledger", "--replace") == 2
     finally:
         spec_path.write_bytes(original)
+
+
+# -- B4 stages: selected-inputs and the attended preparation spec -----------------------------
+
+
+def test_the_offline_plan_prints_the_selected_and_prep_spec_stages(
+    pass26: Path,
+) -> None:
+    code, printed = _plan(pass26, "--through", "attended")
+    assert code == 0
+    lines = {line.split(":", 1)[0]: line for line in printed.splitlines()}
+    selected, prep = lines["selected-build"], lines["prep-spec"]
+    ids = json.loads((pass26 / "pass26-ids.json").read_text(encoding="utf-8"))
+    config = json.loads((pass26 / "pass26-run.json").read_text(encoding="utf-8"))
+    # the frozen code identity is passed in, never read from git by the tool
+    assert f"--commit {config['code_commit']}" in selected
+    for flag, value in (
+        ("--baseline-id", ids["baseline_id"]),
+        ("--history-id", ids["history_id"]),
+        ("--attribution-id", ids["attribution_id"]),
+    ):
+        assert f"{flag} {value}" in prep
+    assert "--calendar-authority" in prep and "--selected-inputs" in prep
+    # optional inputs are absent unless the run names them
+    for absent in ("--pin", "--dir", "--omit", "--factors-bundle", "--rebind-cutoff"):
+        assert absent not in prep and absent not in selected
+
+
+def test_optional_prep_spec_inputs_become_arguments_when_configured(
+    pass26: Path,
+) -> None:
+    config = json.loads((pass26 / "pass26-run.json").read_text(encoding="utf-8"))
+    config.update(
+        {
+            "weekly_gap_fill_spec": "data:gap/weekly.json@" + "a" * 64,
+            "vendor_gap_fills": "data:gap/vendor.json@" + "b" * 64,
+            "factors_bundle": "factors-x",
+            "style_bundle_id": "c" * 64,
+            "prep_pins": {"sleeve_facts.quantbase_source_dir": "data:qb@" + "d" * 64},
+            "prep_omit": ["model_vs_actual_input", "authority_notes"],
+            "rebind_cutoff": "true",
+        }
+    )
+    (pass26 / "pass26-run.json").write_text(json.dumps(config), encoding="utf-8")
+    code, printed = _plan(pass26, "--only", "prep-spec")
+    assert code == 0
+    assert "--pin weekly_gap_fill_spec=data:gap/weekly.json@" + "a" * 64 in printed
+    assert "--pin vendor_gap_fills=data:gap/vendor.json@" + "b" * 64 in printed
+    assert "--pin model_vs_actual_input" not in printed
+    assert "--factors-bundle factors-x" in printed
+    assert "--style-bundle-id " + "c" * 64 in printed
+    assert "--pin sleeve_facts.quantbase_source_dir=data:qb@" + "d" * 64 in printed
+    assert (
+        "--omit authority_notes" in printed
+        and "--omit model_vs_actual_input" in printed
+    )
+    assert "--rebind-cutoff" in printed
+
+
+def test_selected_inputs_must_name_this_runs_ledger_generation_and_follow_its_builder() -> (
+    None
+):
+    stage = _stage("selected-inputs")
+    assert stage["requires"] == ["selected-build"]
+    assert ["{selected_inputs}", "{cycle_ledger_id}"] in stage["bound_ids"]
+    assert _stage("selected-build")["outputs"] == ["{selected_inputs}"]
+    assert _stage("prep-spec")["outputs"] == ["{preparation_spec}"]
+    # the prep spec is pinned to the calendar authority the attended run pins (same key, same pin)
+    pins = [tuple(item) for item in _stage("prep-spec")["pinned_inputs"]]
+    assert ("{calendar_authority}", "{calendar_authority_sha256}") in pins
+    assert ("{calendar_authority}", "{calendar_authority_sha256}") in [
+        tuple(item) for item in _stage("attended")["pinned_inputs"]
+    ]

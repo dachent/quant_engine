@@ -561,6 +561,23 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "calendar_attempt_spec",
         "calendar_seed_authority",
         "calendar_seed_authority_sha256",
+        "predecessor_selected_inputs",
+        "predecessor_selected_inputs_sha256",
+        "predecessor_prep_spec",
+        "predecessor_prep_spec_sha256",
+        "selected_files",
+        "factors_bundle",
+        "sector_bundle",
+        "style_bundle",
+        "factors_bundle_id",
+        "sector_bundle_id",
+        "style_bundle_id",
+        "weekly_gap_fill_spec",
+        "vendor_gap_fills",
+        "model_vs_actual_input",
+        "prep_pins",
+        "prep_dirs",
+        "prep_omit",
     }
     for tool in re.findall(r"\{(?:tools|mvp2)\}/([\w.]+)", json.dumps(graph)):
         base = (

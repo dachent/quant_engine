@@ -445,14 +445,17 @@ def stage_argv(
         if isinstance(item, str):
             argv.append(run.expand(item))
         elif "for_each" in item:
-            # one group of arguments per entry of a run-configuration map, in key order; the entry's key
-            # and value stand for {each_key} and {each_value} (a repeated ``--root ID=DIR``)
+            # one group of arguments per entry of a run-configuration map (or list: key = value = the item), in
+            # key order; the entry's key and value stand for {each_key} and {each_value}
+            # (a repeated ``--root ID=DIR``)
             table = run.config.get(item["for_each"])
             if table is None:
                 continue
+            if isinstance(table, list):
+                table = {str(entry): str(entry) for entry in table}
             if not isinstance(table, dict):
                 raise Refusal(
-                    f"run config {item['for_each']!r} must be an object of key to value"
+                    f"run config {item['for_each']!r} must be an object of key to value or a list"
                 )
             for key in sorted(table):
                 argv.extend(

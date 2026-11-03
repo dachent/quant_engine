@@ -123,9 +123,10 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 | group | stages |
 |---|---|
 | staging | `cycle-resolve`, `provenance`, `ledger-spec`, `ledger`, `baseline-spec`, `baseline` (below, "Staging group") |
-| inputs | `selected-inputs` (the hand-built selected-inputs and attribution spec must exist and are hash-bound; requires `baseline`) |
+| inputs | `selected-build` (`release_prepare_inputs.py selected`), then `selected-inputs` (the selected-inputs file and the hand-built attribution spec must exist and are hash-bound; the file must name this run's ledger generation) |
 | pre-chain | `pre-chain` (`tools/release_pre_chain.py`: layered history, dependence, attribution; reads the resolved cycle) |
 | calendar | `calendar-authority` (explicit: authors the HWM calendar authority from a first attempt; below) |
+| preparation | `prep-spec` (`release_prepare_inputs.py prep-spec`: the attended preparation spec; pins the calendar authority) |
 | attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
 | tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
 | replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
@@ -155,7 +156,7 @@ touches a real root).
 
 `ledger-spec` carries `resume.same_argv` (the builder accepts a pair of files it would write byte for byte and
 re-runs its check); the other staging stages have none, so a killed stage has its output moved aside and reruns.
-`selected-inputs` requires `baseline`, so `selected-inputs`, `pre-chain` and every later stage need the whole
+`selected-build` requires `baseline`, so `selected-inputs`, `pre-chain` and every later stage need the whole
 group finished with the bytes it recorded. Ids are derived from the outputs (`provenance_id`, `cycle_ledger_id`,
 `baseline_id`: the single generation under `{cycle}/prov`, `{cycle}/ledger`, `{cycle}/baseline`).
 
@@ -173,10 +174,36 @@ New run configuration keys:
 | `calendar_attempt_run`, `calendar_attempt_spec` | `calendar-authority`: the first attempt's run directory and prepared spec |
 | `calendar_seed_authority`, `calendar_seed_authority_sha256` | `calendar-authority`: the predecessor's authority (policy id and owner decision text) and its pin |
 
+### Selected inputs and preparation spec (block B4)
+
+`selected-build` writes `{selected_inputs}` (create-only) from a predecessor selected-inputs file: the contract, the
+three provider-ledger paths of this cycle's ledger generation and `repository_sha` (the run's `code_commit`, passed with
+`--commit`; the tool never reads git) are rebound, every other entry is carried only after its bytes match the predecessor's
+pin. `selected-inputs` then checks the file exists and, by `bound_ids`, that it names this run's ledger generation. (The file
+carries no baseline generation id, so none can be checked there; the baseline is bound by the preparation spec below.)
+`prep-spec` runs after `pre-chain` (it needs the history and attribution generations) and writes `{preparation_spec}`
+(create-only); the committed attended planning path validates it before the stage ends. `attended` requires it and keeps its
+own `bound_ids`. The calendar authority comes first in the order: `prep-spec` binds `{calendar_authority}` and refuses any
+file other than the one pinned by `calendar_authority_sha256`; the seed authority for a first attempt is an operator file
+(no committed tool writes it), the second attempt's is the `calendar-authority` stage's output (`--replace` moves the seed
+aside).
+
+| key | meaning |
+|---|---|
+| `predecessor_selected_inputs`, `predecessor_selected_inputs_sha256` | the predecessor's selected-inputs file and its pin |
+| `predecessor_prep_spec`, `predecessor_prep_spec_sha256` | the predecessor's attended preparation spec and its pin |
+| `rebind_cutoff` | optional, `"true"`: pass `--rebind-cutoff` to both builders (a predecessor of another cutoff) |
+| `selected_files` | optional object `NAME: "ROOT_KEY:relative@sha256"`: one `--file` per entry (the new native file of a carried entry) |
+| `factors_bundle`, `sector_bundle`, `style_bundle` | optional public bundle names (`--<kind>-bundle`); the default is the bundle roots the resolved cycle names |
+| `factors_bundle_id`, `sector_bundle_id`, `style_bundle_id` | optional: choose one generation of a bundle root that holds two (`--<kind>-bundle-id`) |
+| `weekly_gap_fill_spec`, `vendor_gap_fills`, `model_vs_actual_input` | optional per-cycle inputs, each `"ROOT_KEY:relative@sha256"`, passed as `--pin KEY=...`; absent means the key is omitted from the spec |
+| `prep_pins`, `prep_dirs` | optional objects `KEY: "ROOT_KEY:relative@sha256"` / `KEY: "ROOT_KEY:relative"`: `--pin` / `--dir` replacements of carried inputs |
+| `prep_omit` | optional list of spec keys the cycle declares it has none of (`--omit`) |
+
 The graph's `config_paths` require the file-valued keys above to exist before any stage runs.
 
 Two driver features serve these stages and are part of the graph schema: an argv group `{"for_each": KEY, "args": [...]}`
-repeats its arguments for every entry of the run-config object KEY (`{each_key}`, `{each_value}` stand for the entry),
+repeats its arguments for every entry of the run-config object (or list) KEY (`{each_key}`, `{each_value}` stand for the entry),
 and the derive rule `{"file_sha256": PATH}` yields the digest of a file an earlier stage wrote (the resolved-cycle pin
 the calendar tool authenticates its input with). Under `plan --offline` a configured `release_inputs_root` that cannot be
 opened (not mounted) is not an error: the plan shows the baseline path in that root and binds no bytes.
@@ -188,7 +215,7 @@ attempt's observed NAV dates, then the adapter's own interval returns) and write
 `{calendar_authority}.receipt.json`. It is explicit and nothing requires it: it needs a first attempt's staged run
 (`calendar_attempt_run`, a run directory other than this cycle's `run`), which a default run cannot have. Order of
 use: run the first attempt, `run --only calendar-authority`, set `calendar_authority_sha256` to the file's sha256
-(`attended` then refuses any other file, the carried-over authority included), and `rerecord --confirm-same-config`
+(`prep-spec` and `attended` then refuse any other file, the carried-over authority included), and `rerecord --confirm-same-config`
 the completed stages. `release_hwm_calendar.py author --check` re-derives and refuses a differing file.
 
 The graph schema still accepts `pinned_script` for an operator script outside the repository; the shipped graph uses
@@ -196,7 +223,7 @@ none (`pre-chain` runs the committed `release_pre_chain.py`).
 
 Not in the graph (no committed tool covers it, or it needs inputs a stage cannot yet name): the provenance spec
 builder, the IBKR generation staging (`ibkr_generation.py`; pass 26 reused the real-root generation), the
-selected-inputs and attended preparation spec builders (block B4), the public bundle and Quantbase source assemblers
+the public bundle and Quantbase source assemblers
 (`release_public_bundles.py`, `release_quantbase_sources.py`, block B7; they write under the bundle roots the manifest
 names, which lie outside the cycle) and the acceptance-input manifests (B9).
 
@@ -233,8 +260,8 @@ never touched. Every stage records `seconds`, `seconds_total` over its attempts,
 configuration and graph alone (derived ids come from `ids.json`; nothing under the run is read)
 and compares each recorded command flag by flag. `tests/portfolio_operations/pass26_commands.py` builds the pass-26
 configuration, its ids and its recorded command lines; the plan reproduces all 19 recorded stages (the 16 of
-pass 26 and the three staging tools of `stage_p23.sh`; the spec builders have no recorded command line and get no
-entry). A difference with a stated reason is listed under `known`: the ledger stage's explicit `--output-root`, and
+pass 26 and the three staging tools of `stage_p23.sh`; the spec builders, `selected-build` and `prep-spec` replace
+hand scripts whose command lines are not tool calls and get no entry). A difference with a stated reason is listed under `known`: the ledger stage's explicit `--output-root`, and
 the baseline path of `lanes` (R3 reads it from the pinned release inputs).
 
 ## Commit gate and the replica receipt

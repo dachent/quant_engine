@@ -401,9 +401,75 @@
       ]
     },
     {
-      "id": "selected-inputs",
+      "id": "selected-build",
       "requires": [
         "baseline"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{predecessor_selected_inputs}",
+        "{ledger_generation}"
+      ],
+      "pinned_inputs": [
+        [
+          "{predecessor_selected_inputs}",
+          "{predecessor_selected_inputs_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{selected_inputs}"
+      ],
+      "stdout_to": "{cycle}/logs/selected-build.json",
+      "argv": [
+        "{python}",
+        "{tools}/release_prepare_inputs.py",
+        "selected",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--resolved-cycle-sha256",
+        "{resolved_cycle_sha256}",
+        "--predecessor",
+        "{predecessor_selected_inputs}",
+        "--commit",
+        "{code_commit}",
+        "--repo-root",
+        "{repo_root}",
+        "--ledger-generation-dir",
+        "{ledger_generation}",
+        {
+          "if": "rebind_cutoff",
+          "equals": "true",
+          "args": [
+            "--rebind-cutoff"
+          ]
+        },
+        {
+          "for_each": "selected_files",
+          "args": [
+            "--file",
+            "{each_key}={each_value}"
+          ]
+        },
+        "--out",
+        "{selected_inputs}"
+      ],
+      "checks": [
+        {
+          "json": "{selected_inputs}",
+          "path": "financial_data_cutoff",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{selected_inputs}",
+          "path": "builder_kwargs.repository_sha",
+          "equals": "{code_commit}"
+        }
+      ]
+    },
+    {
+      "id": "selected-inputs",
+      "requires": [
+        "selected-build"
       ],
       "builtin": "inputs_only",
       "inputs": [
@@ -424,6 +490,12 @@
         [
           "{expected_baseline}",
           "{expected_baseline_sha256}"
+        ]
+      ],
+      "bound_ids": [
+        [
+          "{selected_inputs}",
+          "{cycle_ledger_id}"
         ]
       ]
     },
@@ -504,9 +576,166 @@
       ]
     },
     {
-      "id": "attended",
+      "id": "prep-spec",
       "requires": [
         "pre-chain"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{predecessor_prep_spec}",
+        "{selected_inputs}",
+        "{calendar_authority}"
+      ],
+      "pinned_inputs": [
+        [
+          "{predecessor_prep_spec}",
+          "{predecessor_prep_spec_sha256}"
+        ],
+        [
+          "{calendar_authority}",
+          "{calendar_authority_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{preparation_spec}"
+      ],
+      "stdout_to": "{cycle}/logs/prep-spec.json",
+      "argv": [
+        "{python}",
+        "{tools}/release_prepare_inputs.py",
+        "prep-spec",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--resolved-cycle-sha256",
+        "{resolved_cycle_sha256}",
+        "--predecessor-spec",
+        "{predecessor_prep_spec}",
+        "--repo-root",
+        "{repo_root}",
+        "--ledger-generation-dir",
+        "{ledger_generation}",
+        "--selected-inputs",
+        "{selected_inputs}",
+        "--calendar-authority",
+        "{calendar_authority}",
+        "--baseline-id",
+        "{baseline_id}",
+        "--history-id",
+        "{history_id}",
+        "--attribution-id",
+        "{attribution_id}",
+        {
+          "if": "rebind_cutoff",
+          "equals": "true",
+          "args": [
+            "--rebind-cutoff"
+          ]
+        },
+        {
+          "if": "factors_bundle",
+          "args": [
+            "--factors-bundle",
+            "{factors_bundle}"
+          ]
+        },
+        {
+          "if": "sector_bundle",
+          "args": [
+            "--sector-bundle",
+            "{sector_bundle}"
+          ]
+        },
+        {
+          "if": "style_bundle",
+          "args": [
+            "--style-bundle",
+            "{style_bundle}"
+          ]
+        },
+        {
+          "if": "factors_bundle_id",
+          "args": [
+            "--factors-bundle-id",
+            "{factors_bundle_id}"
+          ]
+        },
+        {
+          "if": "sector_bundle_id",
+          "args": [
+            "--sector-bundle-id",
+            "{sector_bundle_id}"
+          ]
+        },
+        {
+          "if": "style_bundle_id",
+          "args": [
+            "--style-bundle-id",
+            "{style_bundle_id}"
+          ]
+        },
+        {
+          "if": "weekly_gap_fill_spec",
+          "args": [
+            "--pin",
+            "weekly_gap_fill_spec={weekly_gap_fill_spec}"
+          ]
+        },
+        {
+          "if": "vendor_gap_fills",
+          "args": [
+            "--pin",
+            "vendor_gap_fills={vendor_gap_fills}"
+          ]
+        },
+        {
+          "if": "model_vs_actual_input",
+          "args": [
+            "--pin",
+            "model_vs_actual_input={model_vs_actual_input}"
+          ]
+        },
+        {
+          "for_each": "prep_pins",
+          "args": [
+            "--pin",
+            "{each_key}={each_value}"
+          ]
+        },
+        {
+          "for_each": "prep_dirs",
+          "args": [
+            "--dir",
+            "{each_key}={each_value}"
+          ]
+        },
+        {
+          "for_each": "prep_omit",
+          "args": [
+            "--omit",
+            "{each_key}"
+          ]
+        },
+        "--out",
+        "{preparation_spec}"
+      ],
+      "checks": [
+        {
+          "json": "{preparation_spec}",
+          "path": "financial_data_cutoff",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{preparation_spec}",
+          "path": "evaluation_date",
+          "equals": "{evaluated_on}"
+        }
+      ]
+    },
+    {
+      "id": "attended",
+      "requires": [
+        "pre-chain",
+        "prep-spec"
       ],
       "inputs": [
         "{preparation_spec}"
@@ -1565,6 +1794,12 @@
       "exists": true
     },
     "calendar_seed_authority": {
+      "exists": true
+    },
+    "predecessor_selected_inputs": {
+      "exists": true
+    },
+    "predecessor_prep_spec": {
       "exists": true
     }
   }
