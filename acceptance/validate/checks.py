@@ -4775,6 +4775,65 @@ def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
             )
 
 
+def check_sleeve_leverage(ctx: Context) -> Iterator[Finding]:
+    """#624: a restated row's levered and unlevered returns are the independent derivation.
+
+    The derivation reads the sleeve facts only.  A row that publishes the figures must
+    equal it; a row that publishes none must say why (a reason code).
+    """
+
+    declared = getattr(ctx, "strategy_basis", None) or {}
+    if not declared or ctx.sleeve_facts is None:
+        return
+    for position, row in enumerate(rows(ctx.panel, "strategies")):
+        strategy = str(row.get("strategy_id"))
+        if strategy not in declared:
+            continue
+        where = f"$.strategies[{position}]"
+        published = row.get("return_levered_cumulative") is not None
+        if not published:
+            if not row.get("return_levered_na_reason"):
+                yield _finding(
+                    "returns.sleeve_leverage",
+                    BLOCKER_INVARIANT,
+                    strategy,
+                    None,
+                    "levered figures or a reason they are absent",
+                    PANEL,
+                    f"{where}.return_levered_na_reason",
+                    (),
+                    "the restated row publishes neither levered returns nor a reason",
+                )
+            continue
+        try:
+            derived = sleeve_basis.derive_leverage(ctx.sleeve_facts, strategy)
+        except sleeve_basis.Refusal as exc:
+            yield _finding(
+                "returns.sleeve_leverage",
+                BLOCKER_INVARIANT,
+                strategy,
+                "published levered returns",
+                "an internally consistent sleeve derivation",
+                PANEL,
+                where,
+                (),
+                f"{exc.code}: {exc}",
+            )
+            continue
+        for difference in sleeve_basis.compare_leverage(row, derived):
+            yield _finding(
+                "returns.sleeve_leverage",
+                BLOCKER_INVARIANT,
+                strategy,
+                difference,
+                "the independent derivation from the sleeve facts",
+                PANEL,
+                where,
+                (),
+                difference,
+            )
+
+
 def cutoff_capital_by_strategy(ctx: Context) -> dict[str, tuple[Decimal, list[str]]]:
     values = {
         str(row.get("account_id")): to_decimal(row.get("latest_value_usd"))
@@ -11832,6 +11891,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("capital.strategy_vs_cutoff_accounts", check_strategy_vs_cutoff_accounts),
     ("capital.account_identity", check_account_identity),
     ("returns.sleeve_basis", check_sleeve_basis),
+    ("returns.sleeve_leverage", check_sleeve_leverage),
     ("universe.authority_missing", check_universe_authority),
     ("universe.active_set_consistent", check_active_universe),
     ("universe.hardcoded_count_text", check_hardcoded_count_text),

@@ -140,3 +140,53 @@ def test_a_report_without_a_declaration_carries_no_leverage_field(
         assert not [
             key for key in row if key.startswith(("return_levered", "return_unlevered"))
         ]
+
+
+# ------------------------------------------- the validator's independent derivation
+
+
+def _validator_facts() -> dict[str, Any]:
+    facts = _book_facts()
+    facts["window"] = {"last_day": facts["sleeves"][0]["last_day"]}
+    for sleeve in facts["sleeves"]:
+        sleeve["strategy_id"] = "strat_" + sleeve["sleeve_id"]
+    return facts
+
+
+def test_the_independent_derivation_equals_the_producer() -> None:
+    from acceptance.validate import sleeve_basis
+
+    independent = sleeve_basis.derive_leverage(_validator_facts(), "strat_s2")
+    produced = _derived().payload()
+    for name, value in independent.items():
+        assert abs(value - sl.Decimal(produced[name])) < sl.Decimal("1e-9"), name
+    assert not sleeve_basis.compare_leverage(
+        reporter._leverage_row_fields(_derived()), independent
+    )
+
+
+def test_the_check_passes_an_honest_row_and_catches_a_tampered_one() -> None:
+    from types import SimpleNamespace
+
+    from acceptance.validate import checks
+
+    facts = _validator_facts()
+    row = {
+        "strategy_id": "strat_s2",
+        **reporter._leverage_row_fields(_derived()),
+    }
+    ctx = SimpleNamespace(
+        strategy_basis={"strat_s2": "SLEEVE_EPOCH"},
+        sleeve_facts=facts,
+        panel={"strategies": [row]},
+    )
+    assert list(checks.check_sleeve_leverage(ctx)) == []  # type: ignore[arg-type]
+    ctx.panel = {"strategies": [{**row, "return_levered_cumulative": "0.5"}]}
+    findings = list(checks.check_sleeve_leverage(ctx))  # type: ignore[arg-type]
+    assert findings and "return_levered_cumulative" in findings[0].message
+    # no figure and no reason is a finding; a reason alone is not
+    bare = {"strategy_id": "strat_s2"}
+    ctx.panel = {"strategies": [bare]}
+    assert list(checks.check_sleeve_leverage(ctx))  # type: ignore[arg-type]
+    ctx.panel = {"strategies": [{**bare, "return_levered_na_reason": "X"}]}
+    assert list(checks.check_sleeve_leverage(ctx)) == []  # type: ignore[arg-type]

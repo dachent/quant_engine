@@ -1495,3 +1495,118 @@ def sleeve_legs(
     """Every sleeve transfer leg by account (signed), after proving each pair balances."""
 
     return _sleeve_legs(facts)
+
+
+# ------------------------------------------------- levered and unlevered returns (#624)
+
+LEVERAGE_TOLERANCE = Decimal("1e-9")
+_LEVERAGE_PUBLISHED = (
+    ("return_unlevered_cumulative", "unlevered_cumulative"),
+    ("return_unlevered_annualised", "unlevered_annualised"),
+    ("return_unlevered_max_drawdown", "unlevered_max_drawdown"),
+    ("return_unlevered_current_drawdown", "unlevered_current_drawdown"),
+    ("return_levered_cumulative", "levered_cumulative"),
+    ("return_levered_annualised", "levered_annualised"),
+    ("return_levered_max_drawdown", "levered_max_drawdown"),
+    ("return_levered_current_drawdown", "levered_current_drawdown"),
+    ("return_levered_peak_gross_to_equity", "peak_gross_to_equity"),
+    ("return_levered_current_gross_to_equity", "current_gross_to_equity"),
+)
+
+
+def derive_leverage(facts: Mapping[str, Any], strategy_id: str) -> dict[str, Decimal]:
+    """A sleeve's unlevered and levered figures from the sleeve facts alone.
+
+    Written from the definition, not from the producer: the account loan of a day is the
+    debit of the unallocated bucket, a sleeve carries it by its share of the day's live
+    exposure, a day's P&L is the NAV change less the external flow, the unlevered return
+    divides it by the prior sleeve NAV and the levered one by that NAV less the prior loan.
+    """
+
+    with localcontext() as context:
+        context.prec = PRECISION
+        sleeve = select_sleeve(facts, strategy_id)
+        bucket = _mapping(facts.get("perimeter_account"), "perimeter_account")
+        loan_of: dict[str, Decimal] = {}
+        for row in _sequence(bucket.get("days"), "perimeter_account.days"):
+            entry = _mapping(row, "perimeter day")
+            nav = _dec(entry.get("nav_end"), "bucket nav")
+            loan_of[str(entry.get("day"))[:10]] = max(Decimal(0), -nav)
+        exposure: dict[str, Decimal] = {}
+        for other in _sequence(facts.get("sleeves"), "sleeves"):
+            for row in _sequence(_mapping(other, "sleeve").get("days"), "days"):
+                entry = _mapping(row, "sleeve day")
+                day = str(entry.get("day"))[:10]
+                exposure[day] = exposure.get(day, Decimal(0)) + _dec(
+                    entry.get("exposure"), "exposure"
+                )
+        rows = [
+            _mapping(row, "sleeve day") for row in _sequence(sleeve.get("days"), "days")
+        ]
+        rows.sort(key=lambda row: str(row.get("day")))
+        if len(rows) < 2:
+            raise Refusal(WINDOW_EMPTY, "fewer than two NAV observations")
+        nav_rows: list[tuple[str, Decimal, Decimal, Decimal]] = []
+        for row in rows:
+            day = str(row.get("day"))[:10]
+            nav = _dec(row.get("nav_end_after_alloc"), "nav")
+            flow = _dec(row.get("flow_in"), "flow_in") + _dec(
+                row.get("flow_out"), "flow_out"
+            )
+            total = exposure.get(day, Decimal(0))
+            share = _dec(row.get("exposure"), "exposure") / total if total > 0 else 0
+            nav_rows.append((day, nav, flow, loan_of.get(day, Decimal(0)) * share))
+        unlevered = levered = Decimal(1)
+        peaks = [Decimal(1), Decimal(1)]
+        worst = [Decimal(0), Decimal(0)]
+        peak_ratio = Decimal(0)
+        for before, after in zip(nav_rows, nav_rows[1:], strict=False):
+            profit = after[1] - before[1] - after[2]
+            equity = before[1] - before[3]
+            if before[1] <= 0 or equity <= 0:
+                raise Refusal(NAV_NONPOSITIVE_BASE, f"{before[0]}: no positive base")
+            unlevered *= 1 + profit / before[1]
+            levered *= 1 + profit / equity
+            for k, index in enumerate((unlevered, levered)):
+                peaks[k] = max(peaks[k], index)
+                worst[k] = min(worst[k], index / peaks[k] - 1)
+        for _, nav, _, loan in nav_rows:
+            if nav - loan <= 0:
+                raise Refusal(NAV_NONPOSITIVE_BASE, "equity is not positive")
+            peak_ratio = max(peak_ratio, nav / (nav - loan))
+        span = (_day(rows[-1].get("day"), "day") - _day(rows[0].get("day"), "day")).days
+        if span <= 0 or unlevered <= 0 or levered <= 0:
+            raise Refusal(WINDOW_EMPTY, "a return is not annualisable")
+        exponent = Decimal(365) / Decimal(span)
+        last = nav_rows[-1]
+        return {
+            "unlevered_cumulative": unlevered - 1,
+            "unlevered_annualised": unlevered**exponent - 1,
+            "unlevered_max_drawdown": worst[0],
+            "unlevered_current_drawdown": unlevered / peaks[0] - 1,
+            "levered_cumulative": levered - 1,
+            "levered_annualised": levered**exponent - 1,
+            "levered_max_drawdown": worst[1],
+            "levered_current_drawdown": levered / peaks[1] - 1,
+            "peak_gross_to_equity": peak_ratio,
+            "current_gross_to_equity": last[1] / (last[1] - last[3]),
+        }
+
+
+def compare_leverage(
+    row: Mapping[str, Any], derived: Mapping[str, Decimal]
+) -> list[str]:
+    """Each published levered/unlevered figure that differs from the derivation."""
+
+    differences: list[str] = []
+    for published, name in _LEVERAGE_PUBLISHED:
+        try:
+            value = _dec(row.get(published), published)
+        except Refusal:
+            differences.append(f"{published}: not published (derived {derived[name]})")
+            continue
+        if abs(value - derived[name]) > LEVERAGE_TOLERANCE:
+            differences.append(
+                f"{published}: published {value}, derived {derived[name]}"
+            )
+    return differences
