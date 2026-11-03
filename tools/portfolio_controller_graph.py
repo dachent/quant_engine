@@ -191,6 +191,7 @@ _PATH_STAGES = {
     # Layered history, dependence and attribution feed the attribution stage and every
     # stage after it.
     "tools/release_pre_chain.py": list(_STAGE_ORDER[2:]),
+    "tools/release_post_commit.py": [],
     "schemas/portfolio/release-cycle-manifest.schema.json": [],
     "schemas/portfolio/release-resolved-cycle.schema.json": [],
     "tools/release_restore_world.py": [],

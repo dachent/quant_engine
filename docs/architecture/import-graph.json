@@ -574,6 +574,11 @@
       1
     ],
     [
+      "release_post_commit",
+      "release_driver",
+      1
+    ],
+    [
       "release_pre_chain",
       "portfolio_attended_preparation",
       1
