@@ -564,6 +564,16 @@
       1
     ],
     [
+      "release_hwm_calendar",
+      "portfolio_hwm_selected_inputs",
+      1
+    ],
+    [
+      "release_hwm_calendar",
+      "portfolio_invested_capital",
+      1
+    ],
+    [
       "release_ledger_spec",
       "provider_ledger",
       1
@@ -591,6 +601,16 @@
     [
       "release_pre_chain",
       "portfolio_current_dependence",
+      1
+    ],
+    [
+      "release_public_bundles",
+      "portfolio_public_decomposition_sources",
+      1
+    ],
+    [
+      "release_public_bundles",
+      "portfolio_public_style_sources",
       1
     ],
     [

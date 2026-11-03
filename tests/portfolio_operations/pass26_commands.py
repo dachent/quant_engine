@@ -53,7 +53,7 @@ def write(OUT: Path) -> None:
         "playwright_module": R + "/qa-node/node_modules/playwright/index.mjs",
         "playwright_executable": "C:/Users/BorisVaisman/AppData/Local/ms-playwright/chromium-1200/chrome-win64/chrome.exe",
         "evidence_dest": "C:/unused/evidence",
-        "resolved_cycle": "/synthetic/resolved-cycle.json",
+        "resolved_cycle": C + "/in/resolved-cycle.json",
     }
     ids = {
         "ledger_id": LEDGER,
@@ -131,7 +131,7 @@ def write(OUT: Path) -> None:
                 PY,
                 REPO + "/tools/release_pre_chain.py",
                 "--resolved-cycle",
-                "/synthetic/resolved-cycle.json",
+                C + "/in/resolved-cycle.json",
                 "--cycle",
                 C,
                 "--selected-inputs",

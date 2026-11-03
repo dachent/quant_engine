@@ -14,6 +14,13 @@ value is:
   merge. The commit is then recorded as a separate, mandatory attestation that is
   checked against the live repository at promotion.
 
+At promotion under ``git-tree-v2`` the code that is *executing* is verified too,
+not only the checkout the spec names (``verify_executing_code``): the git checkout
+that owns each loaded module must have the attested tree, be clean, and every loaded
+file and tracked python source must equal the attested tree's blob. The path is irrelevant (a second worktree
+of the same tree is the same code); a different tree, a dirty tree, an untracked
+python file, a modified loaded file, or a non-git copy is refused.
+
 Nothing here reinterprets an old identity: an artifact without a scheme marker is
 ``git-commit-v1``, and a scheme marker is only ever written for ``git-tree-v2``.
 """
@@ -187,6 +194,208 @@ def _commit_tree(repo: Path, commit: str) -> str:
     if _git(repo, "cat-file", "-t", commit) != "commit":
         raise CodeIdentityError("attested commit is not a commit object")
     return _git(repo, "rev-parse", f"{commit}^{{tree}}")
+
+
+class ExecutingCodeError(CodeIdentityError):
+    """The code that is actually running is not the attested tree.
+
+    ``code`` is a stable machine-readable reason; the message always starts with
+    ``executing code`` so a refusal is distinguishable from a repo_root refusal.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"executing code {detail} [{code}]")
+        self.code = code
+
+
+EXECUTING_NOT_GIT: Final = "EXECUTING_CODE_NOT_GIT"
+EXECUTING_TREE_DIFFERS: Final = "EXECUTING_CODE_TREE_DIFFERS"
+EXECUTING_TRACKED_MODIFIED: Final = "EXECUTING_CODE_TRACKED_MODIFIED"
+EXECUTING_UNTRACKED_PYTHON: Final = "EXECUTING_CODE_UNTRACKED_PYTHON"
+EXECUTING_FILE_DIFFERS: Final = "EXECUTING_CODE_FILE_DIFFERS"
+EXECUTING_UNIDENTIFIED: Final = "EXECUTING_CODE_UNIDENTIFIED"
+
+
+def executing_code_files() -> tuple[Path, ...]:
+    """Source files of the code that is running now, from the loaded modules.
+
+    These are every loaded ``quant_engine`` module and every loaded module that
+    lives beside the entry script (the ``tools`` directory), plus the entry script
+    itself. They come from ``__file__``, never from a spec.
+    """
+    files: set[Path] = set()
+    main_dir: Path | None = None
+    main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+    if isinstance(main_file, str) and main_file.endswith(".py"):
+        main_path = Path(main_file).resolve()
+        files.add(main_path)
+        main_dir = main_path.parent
+    for name, module in list(sys.modules.items()):
+        origin = getattr(module, "__file__", None)
+        if not isinstance(origin, str) or not origin.endswith(".py"):
+            continue
+        path = Path(origin).resolve()
+        if name == "quant_engine" or name.startswith("quant_engine."):
+            files.add(path)
+        elif main_dir is not None and path.parent == main_dir:
+            files.add(path)
+    return tuple(sorted(files))
+
+
+def _git_bytes(repo: Path, *args: str, stdin: bytes | None = None) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["git", "--literal-pathspecs", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            input=stdin,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutingCodeError(
+            EXECUTING_UNIDENTIFIED, "Git identity cannot be inspected"
+        ) from exc
+    return completed.stdout
+
+
+def _toplevel(directory: Path) -> Path | None:
+    try:
+        raw = _git_bytes(directory, "rev-parse", "--show-toplevel")
+    except ExecutingCodeError:
+        return None
+    text = raw.decode("utf-8", errors="strict").strip()
+    return Path(text).resolve() if text else None
+
+
+def _tracked_blobs(top: Path) -> dict[str, str]:
+    listing = _git_bytes(top, "ls-tree", "-r", "-z", "HEAD")
+    blobs: dict[str, str] = {}
+    for entry in listing.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition(b"\t")
+        fields = meta.split()
+        if len(fields) == 3 and fields[1] == b"blob":
+            blobs[path.decode("utf-8")] = fields[2].decode("ascii")
+    return blobs
+
+
+def _verify_checkout(top: Path, files: list[Path], claimed: str) -> None:
+    if head_tree(top) != claimed:
+        raise ExecutingCodeError(
+            EXECUTING_TREE_DIFFERS,
+            f"tree differs from the attested tree (running checkout {head_tree(top)})",
+        )
+    status = _git_bytes(top, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    for entry in status.split(b"\0"):
+        if len(entry) < 4:
+            continue
+        code, path = entry[:2], entry[3:].decode("utf-8", errors="replace")
+        if code == b"??":
+            # Decision: an untracked *.py file is refused, wherever it sits in the
+            # checkout (ignored files are excluded by git itself, and loaded ignored
+            # files are caught by the per-file blob check below). Any untracked
+            # python could be imported by the run without being part of the tree.
+            if path.lower().endswith(".py"):
+                raise ExecutingCodeError(
+                    EXECUTING_UNTRACKED_PYTHON, f"has an untracked python file {path}"
+                )
+            continue
+        raise ExecutingCodeError(
+            EXECUTING_TRACKED_MODIFIED, f"checkout has a modified tracked file {path}"
+        )
+    # Ignored python under the package/tool directories is invisible to status but
+    # importable (the tools are loaded by path after the gate): refuse it too.
+    ignored = _git_bytes(
+        top,
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--",
+        "packages",
+        "tools",
+    )
+    for entry in ignored.split(b"\0"):
+        path = entry.decode("utf-8", errors="replace")
+        if path.lower().endswith(".py"):
+            raise ExecutingCodeError(
+                EXECUTING_UNTRACKED_PYTHON, f"has an ignored python file {path}"
+            )
+    blobs = _tracked_blobs(top)
+    loaded: set[str] = set()
+    for file in files:
+        try:
+            loaded.add(file.relative_to(top).as_posix())
+        except ValueError as exc:
+            raise ExecutingCodeError(
+                EXECUTING_UNIDENTIFIED, f"file {file} is outside its checkout"
+            ) from exc
+    # Every tracked python source is checked, not only the modules loaded so far:
+    # the promotion path loads further tools by path after this gate, and a file
+    # hidden from status (assume-unchanged, skip-worktree) must not be runnable.
+    relatives = sorted(loaded | {path for path in blobs if path.endswith(".py")})
+    for relative in relatives:
+        if not (top / relative).is_file():
+            raise ExecutingCodeError(
+                EXECUTING_FILE_DIFFERS, f"source file {relative} is missing"
+            )
+    hashed = (
+        _git_bytes(
+            top,
+            "hash-object",
+            "--stdin-paths",
+            stdin=("\n".join(str(top / name) for name in relatives) + "\n").encode(
+                "utf-8"
+            ),
+        )
+        .decode("ascii")
+        .split()
+    )
+    if len(hashed) != len(relatives):
+        raise ExecutingCodeError(EXECUTING_UNIDENTIFIED, "file hashing is incomplete")
+    for relative, actual in zip(relatives, hashed, strict=True):
+        if blobs.get(relative) != actual:
+            raise ExecutingCodeError(
+                EXECUTING_FILE_DIFFERS,
+                f"source file {relative} is not the attested tree's content",
+            )
+
+
+def verify_executing_code(claimed_tree: str, files: tuple[Path, ...]) -> None:
+    """Refuse unless the code actually executing is the attested tree.
+
+    ``files`` are the loaded source files (``executing_code_files``). Every
+    distinct git checkout that owns one must have ``HEAD^{tree}`` equal to
+    ``claimed_tree``, no modified tracked file, no untracked python file (and no
+    ignored python under ``packages``/``tools``), and every loaded file and every
+    tracked ``*.py`` byte-equal (git blob hash) to the attested tree's file, since
+    the promotion path also loads tools by path after this gate. A second
+    worktree of the same tree is the same code and is accepted; a different tree,
+    a dirty tree or a modified loaded file is refused wherever it lives.
+
+    A copy that is not inside a git checkout (an installed wheel) is refused: its
+    files would have to be mapped to repository paths per distribution, and the
+    entry script and every other loaded module would have to be mapped too, which
+    cannot be made sound cheaply. Run the release from a checkout of the tree.
+    """
+    if _OBJECT_ID.fullmatch(claimed_tree) is None:
+        raise ExecutingCodeError(EXECUTING_UNIDENTIFIED, "attested tree is invalid")
+    if not files:
+        raise ExecutingCodeError(EXECUTING_UNIDENTIFIED, "cannot be identified")
+    owners: dict[Path, list[Path]] = {}
+    for file in files:
+        top = _toplevel(file.parent)
+        if top is None:
+            raise ExecutingCodeError(
+                EXECUTING_NOT_GIT,
+                f"{file} is not inside a git checkout; non-git execution of a "
+                "tree-bound release is refused",
+            )
+        owners.setdefault(top, []).append(file)
+    for top, owned in sorted(owners.items()):
+        _verify_checkout(top, owned, claimed_tree)
 
 
 def verify_candidate_identity(repo: Path, claimed: str, scheme: str) -> None:
