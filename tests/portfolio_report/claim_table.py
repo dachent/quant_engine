@@ -528,10 +528,14 @@ def b_mwr_effect(payload: Payload) -> None:
 
 
 def p_money_identity(payload: Payload) -> Result:
+    """Gain = Current - Net capital on the unrounded values; the cent-rounded cells differ by at most $0.01."""
+
     rows = [r for r in _manifest_rows(payload) if r.get("status") == "OK"]
     if not rows:
         return skip("no OK manifest rows")
     off = []
+    shown_off = []
+    checked = 0
     for row in rows:
         gain, cur, net = (
             dec(row.get("gain")),
@@ -541,11 +545,25 @@ def p_money_identity(payload: Payload) -> Result:
         if None in (gain, cur, net):
             continue
         assert gain is not None and cur is not None and net is not None
-        if abs(gain - (cur - net)) >= Decimal("0.005"):
+        checked += 1
+        if abs(gain - (cur - net)) > Decimal("1e-9"):
             off.append(str(row.get("strategy_id")))
+        cent = Decimal("0.01")
+        shown = abs(gain.quantize(cent) - (cur.quantize(cent) - net.quantize(cent)))
+        if shown > cent:
+            shown_off.append(str(row.get("strategy_id")))
     if off:
-        return bad(f"Gain != Current - Net capital on {len(off)} rows: {names(off)}")
-    return ok(f"Gain = Current - Net capital to the cent on {len(rows)} rows")
+        return bad(
+            f"Gain != Current - Net capital on the unrounded values of {len(off)} rows: {names(off)}"
+        )
+    if shown_off:
+        return bad(
+            f"displayed cent cells differ by more than $0.01 on {len(shown_off)} rows: {names(shown_off)}"
+        )
+    return ok(
+        f"Gain = Current - Net capital on the unrounded values of {checked} rows (tolerance 1e-9); "
+        "cent-rounded cells differ by at most $0.01"
+    )
 
 
 def b_money_identity(payload: Payload) -> None:
@@ -1270,8 +1288,18 @@ ROWS: tuple[Row, ...] = (
         "universal",
         "Risk",
         PANEL_HTML,
-        (r"to the cent on every available row",),
-        "Gain = Current - Net capital to the cent on every available row",
+        (r"holds on the unrounded values of every available row",),
+        "Gain = Current - Net capital on the unrounded values of every available row; displayed cells can differ by $0.01",
+        p_money_identity,
+        b_money_identity,
+    ),
+    Row(
+        "T08b",
+        "universal",
+        "Risk",
+        PANEL_JS,
+        (r"Gain = Current . Net capital on the unrounded values",),
+        "Gain = Current - Net capital on the unrounded values; displayed cells can differ by $0.01",
         p_money_identity,
         b_money_identity,
     ),

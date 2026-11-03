@@ -129,3 +129,16 @@ def test_S09_S10_the_attribution_prose_says_what_its_numbers_count() -> None:
     assert "each share is rounded to two decimals; unrounded they sum to 100%" in app
     # the printed total is the sum of the printed (rounded) parts, so the strip foots as printed
     assert "Number((Number(value) * 100).toFixed(2))" in app
+
+
+def test_A3_an_unpublished_aligned_count_is_not_printed_as_zero() -> None:
+    """Pass-30 A3: null aligned counts are not published; "|| 0" printed them as 0/0."""
+
+    app = _app()
+    assert "live/hybrid aligned" not in app
+    assert "history.live_aligned_observations || 0" not in app
+    assert "history.hybrid_aligned_observations || 0" not in app
+    assert 'number(history.live_aligned_observations) == null ? "not published"' in app
+    assert (
+        'number(history.hybrid_aligned_observations) == null ? "not published"' in app
+    )
