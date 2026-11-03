@@ -2027,6 +2027,29 @@ _MWR_SENTENCE_CURRENT = (
     "terminal NAV are proven; otherwise it remains unavailable with the row's "
     "status and reason."
 )
+# Pass 29 reworded sentences that were universal or scoped wrongly (the static-sentence audit);
+# each pair is (current, previous).  Restoring the previous text reproduces the pinned bytes.
+_P29_REWORDS = (
+    (
+        "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, "
+        "PARTIAL, FAILED, or UNMAPPED; a missing NAV is not interpolated, and a day the "
+        "HWM candidate fills is labelled with its origin.",
+        "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, "
+        "PARTIAL, FAILED, or UNMAPPED; no interpolation.",
+    ),
+    (
+        "backtest, official-vehicle, and conceptual-stress evidence remain separate, "
+        "except that the LIVE_PLUS_BACKTEST mode joins version-matched backtest history "
+        "before live inception to the live line and labels the joined line by origin.",
+        "backtest, official-vehicle, and conceptual-stress evidence remain separate.",
+    ),
+)
+
+
+def _undo_p29(content: bytes) -> bytes:
+    for current, previous in _P29_REWORDS:
+        content = content.replace(current.encode(), previous.encode())
+    return content
 
 
 def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged(
@@ -2053,7 +2076,7 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     # 8302d4e reworded the always-emitted MWR sentence of the report, nothing else:
     # restoring the previous sentence reproduces the previously pinned bytes exactly.
     assert content.count(_MWR_SENTENCE_CURRENT.encode()) == 1
-    previous = content.replace(
+    previous = _undo_p29(content).replace(
         _MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode()
     )
     # D6/D1/N29 added the strategy MWR fields (36036 - 34412 = 1624 bytes); the
@@ -2062,10 +2085,10 @@ def test_report_without_a_bound_has_no_disclosure_and_the_v1_bytes_are_unchanged
     assert hashlib.sha256(previous).hexdigest() == (
         "f5a865e31e434e6ae28f3c51afcd94a2b63f660b14e1c9fc37c2a9fcf6924912"
     )
-    assert len(content) == 36081
+    assert len(content) == 36317
     assert (
         hashlib.sha256(content).hexdigest()
-        == "b1f6682dcbf87d81c9f12050c0170627b19d675f242422fdf4287e7ce6c3334d"
+        == "d3893d32428d9311bc0fc4c37da010d8ca43110fbc2166b8d942184aa91f7f59"
     )
 
 
@@ -2124,7 +2147,9 @@ def test_undoing_exactly_the_current_capital_labels_reproduces_the_v1_bytes(
     content = canonical_json_bytes(undone)
     # 8302d4e reworded the always-emitted MWR sentence; v1 carried the old one.
     assert content.count(_MWR_SENTENCE_CURRENT.encode()) == 1
-    content = content.replace(_MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode())
+    content = _undo_p29(content).replace(
+        _MWR_SENTENCE_CURRENT.encode(), _MWR_SENTENCE_V1.encode()
+    )
     # The published synthetic baseline now carries its `current_capital` block and the
     # funding accounts, so its catalog bytes and generation identity differ from v1's;
     # those two identities are the only other bytes that moved.

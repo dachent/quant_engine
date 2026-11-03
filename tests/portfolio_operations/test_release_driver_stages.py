@@ -752,9 +752,11 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         and _stage(i).get("only_ceremony", "full") == "full"
     ] == [
         "selected-inputs",
-        *pass26,
+        *pass26[: pass26.index("replica-copy") + 1],
+        "replica-inventory",
+        *pass26[pass26.index("replica-copy") + 1 :],
     ]
-    assert ids[-2:] == ["commit", "pack-evidence"]
+    assert ids[-3:] == ["commit", "post-commit-verify", "pack-evidence"]
 
 
 def _stage(stage_id: str) -> dict[str, Any]:
@@ -1610,3 +1612,250 @@ def test_replica_only_still_refuses_to_execute_a_spec_bound_to_a_real_root(
         "findings-targets",
     ):
         assert _stage(stage_id)["only_ceremony"] == "full"
+
+
+# -- per-stage bindings and rerecord -----------------------------------------------------
+
+
+def _started(world: dict[str, Any]) -> dict[str, str]:  # noqa: F811
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    return {k: v["started_at"] for k, v in state["stages"].items()}
+
+
+def test_a_change_to_a_later_stage_keeps_the_earlier_stages_and_an_upstream_change_does_not(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph, "--through", "one") == 0
+    before = _started(world)
+    # `two` is added after `one` ran (as the replica stages were added to the shipped graph)
+    assert _drive(world, _graph(world, CHAIN)) == 0
+    assert _started(world)["one"] == before["one"]
+    # `one` itself is redefined: it and everything that requires it are no longer what ran
+    changed = [
+        {**CHAIN[0], "argv": _write_stage("{cycle}/one.txt", "changed")},
+        CHAIN[1],
+    ]
+    assert _drive(world, _graph(world, changed)) == 2
+
+
+def test_rerecord_rebinds_only_stages_whose_bytes_still_hash_and_needs_confirmation(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    state_path = world["cycle"] / driver.STATE_NAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    for record in state["stages"].values():
+        record["binding"] = "recorded-under-an-older-graph"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = _started(world)
+    assert _drive(world, graph) == 2  # the recorded binding is not the current one
+    args = ["rerecord", "--config", str(world["config"]), "--graph", str(graph)]
+    assert driver.main(args) == 2  # without confirmation nothing is re-bound
+    (world["cycle"] / "two.txt").write_text("edited", encoding="utf-8")
+    assert (
+        driver.main([*args, "--confirm-same-config"]) == 2
+    )  # a changed output is refused, and none re-bound
+    assert (
+        json.loads(state_path.read_text(encoding="utf-8"))["stages"]["one"]["binding"]
+        == "recorded-under-an-older-graph"
+    )
+    (world["cycle"] / "two.txt").write_text("2", encoding="utf-8")
+    assert driver.main([*args, "--confirm-same-config"]) == 0
+    assert _drive(world, graph) == 0  # kept, not rerun
+    assert _started(world) == before
+
+
+def test_later_stages_may_change_the_replica_tree_the_copy_stage_only_binds_its_marker(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    replica = world["tmp"] / "replica-root"
+    code = (
+        "import pathlib,sys;r=pathlib.Path(sys.argv[1]);(r/'dataPortfolio').mkdir(parents=True);"
+        "(r/'dataPortfolio'/'a.txt').write_text('x');(r/'.replica-root.json').write_text('{}')"
+    )
+    copy = {
+        "id": "replica-copy",
+        "must_not_exist": [str(replica)],
+        "outputs": [str(replica / ".replica-root.json")],
+        "argv": ["{python}", "-c", code, str(replica)],
+    }
+    mutate = {
+        "id": "attest",
+        "requires": ["replica-copy"],
+        "outputs": [str(replica / "dataPortfolio" / "merge-attestation.json")],
+        "argv": _write_stage(str(replica / "dataPortfolio" / "merge-attestation.json")),
+    }
+    after = {
+        "id": "spec",
+        "requires": ["attest"],
+        "outputs": ["{cycle}/spec.txt"],
+        "argv": _write_stage("{cycle}/spec.txt"),
+    }
+    graph = _graph(world, [copy, mutate, after])
+    assert _drive(world, graph, "--through", "attest") == 0
+    (replica / "dataPortfolio" / "a.txt").write_text(
+        "changed by a later stage", encoding="utf-8"
+    )
+    (replica / "dataPortfolio" / "merge-attestation.json").unlink()
+    (replica / "dataPortfolio" / "merge-attestation.json").write_text(
+        "recreated", encoding="utf-8"
+    )
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    state["stages"]["attest"]["outputs"] = {
+        str(replica / "dataPortfolio" / "merge-attestation.json"): driver.path_digest(
+            replica / "dataPortfolio" / "merge-attestation.json"
+        )
+    }
+    (world["cycle"] / driver.STATE_NAME).write_text(json.dumps(state), encoding="utf-8")
+    assert (
+        _drive(world, graph) == 0
+    )  # the tree changed; the copy's recorded marker did not
+    shipped = _stage("replica-copy")
+    assert shipped["outputs"] == ["{replica_workspace}/.replica-root.json"]
+    assert shipped["must_not_exist"] == ["{replica_workspace}"]
+
+
+def test_the_replica_must_still_be_its_inventoried_copy_before_the_next_stage_uses_it(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    replica = world["tmp"] / "replica-root"
+    _config(world, replica_workspace=str(replica))
+    code = (
+        "import pathlib,sys;r=pathlib.Path(sys.argv[1]);(r/'data').mkdir(parents=True,exist_ok=True);"
+        "(r/'data'/'CURRENT.json').write_text('{}');(r/'data'/'merge-attestation.json').write_text('a')"
+    )
+    stages = [
+        {
+            "id": "copy",
+            "must_not_exist": [str(replica)],
+            "outputs": [str(replica / "data" / "CURRENT.json")],
+            "argv": ["{python}", "-c", code, str(replica)],
+        },
+        {
+            "id": "inv",
+            "requires": ["copy"],
+            "builtin": "replica_inventory",
+            "outputs": ["{cycle}/inv.json"],
+        },
+        {
+            "id": "spec",
+            "requires": ["inv"],
+            "verify_inventory": {
+                "file": "{cycle}/inv.json",
+                "root": "{replica_workspace}",
+                "except": [str(replica / "data" / "merge-attestation.json")],
+            },
+            "outputs": ["{cycle}/spec.txt"],
+            "argv": _write_stage("{cycle}/spec.txt"),
+        },
+    ]
+    graph = _graph(world, stages)
+    assert _drive(world, graph, "--through", "inv") == 0
+    (replica / "data" / "merge-attestation.json").write_text(
+        "recreated", encoding="utf-8"
+    )  # expected to change
+    assert _drive(world, graph, "--only", "spec") == 0
+    (replica / "data" / "CURRENT.json").write_text(
+        '{"edited": true}', encoding="utf-8"
+    )  # a copied byte corrupted
+    assert _drive(world, graph, "--only", "spec", "--replace") == 2
+    (replica / "data" / "extra.json").write_text("x", encoding="utf-8")
+    (replica / "data" / "CURRENT.json").write_text("{}", encoding="utf-8")
+    assert (
+        _drive(world, graph, "--only", "spec", "--replace") == 2
+    )  # an added file is a change too
+    shipped = _stage("replica-spec")["verify_inventory"]
+    assert shipped["file"] == "{cycle}/replica-inventory.json"
+    assert shipped["except"] == ["{replica_coordination_root}/merge-attestation.json"]
+
+
+def test_a_link_like_provider_source_directory_is_recognised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "gen"
+    plain.mkdir()
+    assert driver._link_like(plain) is False
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "gen")
+    assert driver._link_like(plain) is True
+
+
+def test_a_link_anywhere_in_the_provider_root_chain_is_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "workspace-link" / "generations" / "G1"
+    source.mkdir(parents=True)
+    chain = (source, source.parent, source.parent.parent)
+    assert not any(driver._link_like(part) for part in chain)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self.name == "workspace-link")
+    assert any(driver._link_like(part) for part in chain)
+
+
+def test_rerecord_binds_a_newly_declared_output(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    assert _drive(world, _graph(world, CHAIN)) == 0
+    extra = world["cycle"] / "extra.txt"
+    extra.write_text("new", encoding="utf-8")
+    # `one` now also declares `extra.txt` (a graph change after it ran)
+    stages = [
+        {**CHAIN[0], "outputs": ["{cycle}/one.txt", "{cycle}/extra.txt"]},
+        CHAIN[1],
+    ]
+    changed = _graph(world, stages)
+    args = [
+        "rerecord",
+        "--config",
+        str(world["config"]),
+        "--graph",
+        str(changed),
+        "--confirm-same-config",
+    ]
+    assert driver.main(args) == 0
+    state = json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
+    assert str(extra) in state["stages"]["one"]["outputs"]  # bound from now on
+    assert _drive(world, changed) == 0
+    extra.unlink()
+    assert _drive(world, changed) == 2  # deleting it is no longer invisible
+    extra.write_text("new", encoding="utf-8")
+    (world["cycle"] / "two.txt").unlink()
+    extra.unlink()
+    assert (
+        driver.main(args) == 2
+    )  # a declared artifact that does not exist: nothing is re-recorded
+
+
+def test_rerecord_refuses_while_a_stage_of_the_run_is_live(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    graph = _graph(world, CHAIN)
+    assert _drive(world, graph) == 0
+    state_path = world["cycle"] / driver.STATE_NAME
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(60)"])
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        before = json.dumps(state, sort_keys=True)
+        state["stages"]["two"]["status"] = "running"
+        state["stages"]["two"]["pid"] = sleeper.pid
+        state["stages"]["two"]["process_started"] = process_started(sleeper.pid)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        args = [
+            "rerecord",
+            "--config",
+            str(world["config"]),
+            "--graph",
+            str(graph),
+            "--confirm-same-config",
+        ]
+        assert driver.main(args) == 2
+        assert (
+            json.loads(state_path.read_text(encoding="utf-8"))["stages"]["two"][
+                "status"
+            ]
+            == "running"
+        )
+        assert before  # nothing was saved over the running record
+    finally:
+        sleeper.kill()
+        sleeper.wait()

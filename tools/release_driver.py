@@ -183,10 +183,10 @@ class Run:
         )
         self.derived: dict[str, str] = {}
         # which ceremony runs decides which later stages apply, not what an earlier stage produced
-        bound = {key: value for key, value in config.items() if key != "ceremony"}
-        self.binding = hashlib.sha256(
-            json.dumps([bound, graph], sort_keys=True).encode()
-        ).hexdigest()
+        self._bound_config = {
+            key: value for key, value in config.items() if key != "ceremony"
+        }
+        self._stage_bindings: dict[str, str] = {}
         self.confirmed_release_id: str | None = None
         # roots a replica-only run must never write into
         self.real_roots = [
@@ -327,6 +327,46 @@ class Run:
             raise Refusal(f"{name}: unknown derive rule {sorted(rule)}")
         self.derived[name] = value
         return value
+
+    # -- bindings ----------------------------------------------------------------------
+    def stage_binding(self, stage_id: str) -> str:
+        """What a stage's result depends on: the run configuration, its own definition, the definitions of
+        every stage it requires, and the shared path and derive entries those definitions use.
+
+        A change to a later or unrelated stage (a replica stage, say) leaves this unchanged, so completed
+        build stages stay valid.
+        """
+
+        if stage_id in self._stage_bindings:
+            return self._stage_bindings[stage_id]
+        closure: set[str] = set()
+        todo = [stage_id]
+        while todo:
+            current = todo.pop()
+            if current not in closure:
+                closure.add(current)
+                todo.extend(self.stage(current).get("requires", []))
+        definitions = [self.stage(item) for item in sorted(closure)]
+        names: set[str] = set(_PLACEHOLDER.findall(json.dumps(definitions)))
+        shared: dict[str, Any] = {"paths": {}, "derive": {}}
+        pending = sorted(names)
+        while pending:
+            name = pending.pop()
+            for table in ("paths", "derive"):
+                if name in self.graph.get(table, {}) and name not in shared[table]:
+                    shared[table][name] = self.graph[table][name]
+                    pending.extend(
+                        _PLACEHOLDER.findall(json.dumps(self.graph[table][name]))
+                    )
+        for key in ("provider_roots", "provider_run_sources", "config_paths"):
+            shared[key] = self.graph.get(key)
+        digest = hashlib.sha256(
+            json.dumps(
+                [self._bound_config, definitions, shared], sort_keys=True
+            ).encode()
+        ).hexdigest()
+        self._stage_bindings[stage_id] = digest
+        return digest
 
     # -- repository identity -----------------------------------------------------------
     def _git(self, *args: str) -> str:
@@ -844,6 +884,7 @@ def check_ready(
                 f"{stage['id']} would collide with {path}, left by {where}; rerun with --replace"
             )
     check_bound_ids(run, stage)
+    check_inventory(run, stage)
     check_scheme(run, stage)
     check_replica_guard(run, stage)
     run.recheck_release_inputs()
@@ -973,6 +1014,22 @@ FROM_LEDGER = "from_ledger"
 PROVIDER_ROOT_PREFIX = "provider-"
 
 
+_LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
+
+
+def _link_like(path: Path) -> bool:
+    """A symlink, or on Windows a junction (not an OneDrive placeholder)."""
+
+    if path.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        return getattr(path.lstat(), "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
+    except OSError:
+        return False
+
+
 def _resolved_cycle(run: Run) -> dict[str, Any]:
     """The resolved cycle (``release_cycle_manifest resolve --out``): the cycle manifest's root keys, resolved."""
 
@@ -1062,6 +1119,11 @@ def _sources_from_ledger(run: Run, wanted: Sequence[str]) -> dict[str, str]:
         if (
             directory.name != generation_id
             or directory.resolve() != root.resolve() / "generations" / generation_id
+            # the provider root, its generations directory and the generation itself: no link among them
+            or any(
+                _link_like(part)
+                for part in (directory, directory.parent, directory.parent.parent)
+            )
         ):
             raise Refusal(
                 f"provider-generations: {root_id} source {directory} is not generation "
@@ -1111,11 +1173,17 @@ def provider_generations(run: Run, target: Path) -> dict[str, Any]:
     return {"roots": len(rows)}
 
 
-def verify_kept(run: Run, stage: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+def verify_kept(
+    run: Run,
+    stage: Mapping[str, Any],
+    record: Mapping[str, Any],
+    *,
+    check_binding: bool = True,
+) -> None:
     """A completed stage is reusable only if the run, the code and its bytes are still what it recorded."""
 
     run.require_frozen_repo()
-    if record.get("binding") != run.binding:
+    if check_binding and record.get("binding") != run.stage_binding(stage["id"]):
         raise Refusal(
             f"{stage['id']} was produced under a different run configuration or stage graph; rerun it with --only {stage['id']}"
         )
@@ -1126,7 +1194,7 @@ def verify_kept(run: Run, stage: Mapping[str, Any], record: Mapping[str, Any]) -
     for path, recorded in {**record["outputs"], **record.get("inputs", {})}.items():
         if path_digest(Path(path)) != recorded:
             raise Refusal(
-                f"{stage['id']}: {path} changed or vanished since the stage recorded it"
+                f"{stage['id']}: {path} changed or vanished since the stage recorded it; rerun it with --only {stage['id']} --replace"
             )
     # the guarded inputs of the stage are rechecked too, not only the paths it recorded
     check_bound_ids(run, stage)
@@ -1161,6 +1229,48 @@ def replica_provider_generations(run: Run, target: Path) -> dict[str, Any]:
     return {"roots": len(rows), "remapped": remapped}
 
 
+def _tree_inventory(root: Path) -> dict[str, str]:
+    return {
+        item.relative_to(root).as_posix(): _file_sha(item)
+        for item in sorted(root.rglob("*"))
+        if item.is_file()
+    }
+
+
+def replica_inventory(run: Run, target: Path) -> dict[str, Any]:
+    """Digest of every file the replica copy produced, written before any later stage can change the tree."""
+
+    root = Path(run.values["replica_workspace"])
+    inventory = _tree_inventory(root)
+    _write_json(target, {"root": str(root), "files": inventory})
+    return {"files": len(inventory)}
+
+
+def check_inventory(run: Run, stage: Mapping[str, Any]) -> None:
+    """The replica tree is still the copy that was inventoried, except for the paths named as expected to change."""
+
+    rule = stage.get("verify_inventory")
+    if rule is None:
+        return
+    recorded = _read_json(Path(run.expand(rule["file"])))["files"]
+    root = Path(run.expand(rule["root"]))
+    skipped = {
+        Path(run.expand(item)).resolve().relative_to(root.resolve()).as_posix()
+        for item in rule.get("except", [])
+    }
+    now = _tree_inventory(root)
+    changed = sorted(
+        name
+        for name in set(recorded) | set(now)
+        if name not in skipped and recorded.get(name) != now.get(name)
+    )
+    if changed:
+        raise Refusal(
+            f"{stage['id']}: the replica no longer matches its copy inventory ({len(changed)} path(s), e.g. {changed[:3]}); "
+            "recopy it with --only replica-copy --replace"
+        )
+
+
 def remove_replica_attestation(run: Run, target: Path) -> dict[str, Any]:
     """Drop the attestation the replica copy brought along: the replica gets its own, written create-only."""
 
@@ -1183,6 +1293,7 @@ _BUILTINS: dict[str, Callable[[Run, Path], dict[str, Any]]] = {
     "provider_generations": provider_generations,
     "replica_provider_generations": replica_provider_generations,
     "remove_replica_attestation": remove_replica_attestation,
+    "replica_inventory": replica_inventory,
 }
 
 
@@ -1358,7 +1469,7 @@ def execute_stage(
     started_at = _now()
     record: dict[str, Any] = {
         "status": "running",
-        "binding": run.binding,
+        "binding": run.stage_binding(stage["id"]),
         "code_commit": run.values["code_commit"],
         "started_at": started_at,
         "attempt": attempt,
@@ -1640,7 +1751,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "command",
-        choices=("plan", "run", "status", "check", "gate-commit", "stop"),
+        choices=("plan", "run", "status", "check", "gate-commit", "stop", "rerecord"),
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--graph", type=Path)
@@ -1654,6 +1765,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--confirm-release-id",
         help="the exact release id the owner confirmed (commit stage)",
+    )
+    parser.add_argument(
+        "--confirm-same-config",
+        action="store_true",
+        help="rerecord: the run configuration and stage definitions have not changed what these stages produced",
     )
     parser.add_argument(
         "--offline",
@@ -1718,6 +1834,51 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run.require_frozen_repo()
                 check_commit_gate(run, run.stage(stage_id))
             print(f"gate-commit: open for {gated}")
+            return 0
+        if args.command == "rerecord":
+            if not args.confirm_same_config:
+                raise Refusal(
+                    "rerecord re-binds completed stages to the current configuration and graph; "
+                    "pass --confirm-same-config after checking that neither changed what they produced"
+                )
+            # a live stage would later save its older in-memory state over these bindings
+            check_no_live_stage(run)
+            todo = [i for i in selected if run.state["stages"].get(i)]
+            current: dict[str, tuple[dict[str, str | None], dict[str, str | None]]] = {}
+            for stage_id in todo:
+                record = run.state["stages"][stage_id]
+                stage = run.stage(stage_id)
+                if record.get("status") != "ok":
+                    raise Refusal(
+                        f"{stage_id} is {record.get('status')}, not ok: nothing is re-recorded"
+                    )
+                verify_kept(run, stage, record, check_binding=False)
+                # the stage's declared artifacts as the current graph names them: all must exist, and
+                # they are what later runs verify, so a newly declared output is bound from now on
+                missing = [p for p in _outputs(run, stage) if not p.exists()]
+                missing += [
+                    Path(run.expand(i))
+                    for i in stage.get("inputs", [])
+                    if not Path(run.expand(i)).exists()
+                ]
+                if missing:
+                    raise Refusal(
+                        f"{stage_id}: declared artifact {missing[0]} does not exist: nothing is re-recorded"
+                    )
+                current[stage_id] = (
+                    {str(p): path_digest(p) for p in _outputs(run, stage)},
+                    {
+                        str(Path(run.expand(i))): path_digest(Path(run.expand(i)))
+                        for i in stage.get("inputs", [])
+                    },
+                )
+            for stage_id in todo:
+                record = run.state["stages"][stage_id]
+                record["outputs"], record["inputs"] = current[stage_id]
+                record["binding"] = run.stage_binding(stage_id)
+                record["rerecorded_at"] = _now()
+                print(f"{stage_id}: re-recorded")
+            run.save()
             return 0
         if args.command == "stop":
             for line in stop_own(run) or ["nothing of this run is running"]:

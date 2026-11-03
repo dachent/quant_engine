@@ -209,6 +209,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-pointer", type=Path, help="CURRENT_RELEASE.json")
     parser.add_argument("--corrections", type=Path, help="correction records (#326)")
     parser.add_argument(
+        "--provider-ledger",
+        type=Path,
+        help="provider-ledger.json the generation was built from: the governed source "
+        "of each strategy's opening capital anchor for the CAGR window check",
+    )
+    parser.add_argument(
         "--independent-no-oracle",
         action="store_true",
         help="validate against no expected baseline (requires --cutoff, forbids "
@@ -263,6 +269,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         corrections = (
             load_corrections(args.corrections) if args.corrections is not None else None
         )
+        provider_ledger: dict[str, Any] | None = None
+        if args.provider_ledger is not None:
+            try:
+                loaded = json.loads(args.provider_ledger.read_bytes())
+            except (OSError, ValueError) as exc:
+                raise ContractError(f"--provider-ledger is unreadable: {exc}") from exc
+            if not isinstance(loaded, dict) or not isinstance(
+                loaded.get("capital_anchors"), list
+            ):
+                raise ContractError("--provider-ledger carries no capital_anchors list")
+            provider_ledger = loaded
         generation = load_generation(
             args.generation_dir,
             discover=not args.no_discover,
@@ -305,6 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected=expected,
         expected_not_derivable=not_derivable,
         corrections=corrections,
+        provider_ledger=provider_ledger,
     )
     findings = run_checks(context)
     document = findings_document(

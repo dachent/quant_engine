@@ -345,3 +345,55 @@ def test_lineage_mismatch_withholds_both_charts(tmp_path: Path) -> None:
     assert "Performance withheld" in _plain(dom, "#perf-value-chart")
     assert "<polyline" not in dom["#perf-returns-chart"]["innerHTML"]
     assert "<polygon" not in dom["#perf-value-chart"]["innerHTML"]
+
+
+def test_the_printed_residual_equation_foots_with_every_term_it_names(
+    tmp_path: Path,
+) -> None:
+    """T1: the residual line prints each term of the published label, so the parts sum."""
+
+    payload = _payload()
+    # synthetic amounts: residual = memo remainder + cash left in liquidated epochs
+    residual, remainder, closed = "-1,234.56", "-1,240.01", "+5.45"
+    payload["performance_tab"]["slices"]["reconciliation"]["residual_cents"] = -123456
+    payload["performance_tab"]["slices"]["reconciliation"]["residual_label"] = (
+        f"SYSTEMATIC_CAPITAL_MINUS_SLICE_TOTAL_AT_CUTOFF: residual {residual} = "
+        f"capital_reconciliation.memo.perimeter_remainder {remainder} "
+        "(the residual parent account's value outside the product sleeve: "
+        f"unallocated cash and any other remainder) {closed} cash left in liquidated epochs"
+    )
+    dom = _run(tmp_path, payload, "renderPerformance")
+    text = _plain(dom, "#perf-value-legend")
+
+    match = re.search(
+        r"residual (-?[\d,]+\.\d\d) = [^()]*? (-?[\d,]+\.\d\d) ([+-][\d,]+\.\d\d) "
+        r"cash left in liquidated epochs",
+        text,
+    )
+    assert match is not None, text
+    left, memo, rest = (float(g.replace(",", "")) for g in match.groups())
+    assert round(memo + rest, 2) == left
+    assert "the residual parent account" not in text
+
+
+def test_the_dollar_legend_says_which_basis_a_sleeve_slice_is_on(
+    tmp_path: Path,
+) -> None:
+    """T6 fix: a sleeve slice's value is named as the sleeve's; the strategy row states its own basis."""
+
+    payload = _payload()
+    payload["strategies"] = [
+        {
+            "strategy_id": "alpha",
+            "strategy_name": "Alpha",
+            "return_scope_label": "MIXED BASIS: synthetic.",
+        }
+    ]
+    payload["performance_tab"]["slices"]["rows"][0]["sleeve_id"] = "sx"
+    text = _plain(_run(tmp_path, payload, "renderPerformance"), "#perf-value-legend")
+
+    assert "is the sleeve sx epoch value" in text
+    assert "The strategy row states its own basis for current value and weight" in text
+    payload["performance_tab"]["slices"]["rows"][0].pop("sleeve_id")
+    plain = _plain(_run(tmp_path, payload, "renderPerformance"), "#perf-value-legend")
+    assert "epoch value" not in plain
