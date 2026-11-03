@@ -47,6 +47,8 @@ class Payload:
 
     panel: dict[str, Json]
     report: dict[str, Json]
+    # Optional generation-bundle evidence (``claim_table_runner.load_bundle``); None = not given.
+    bundle: dict[str, Json] | None = None
 
 
 @dataclass(frozen=True)
@@ -1011,6 +1013,66 @@ def b_no_inference_keys(payload: Payload) -> None:
 # --- sentences the payload cannot decide -----------------------------------
 
 
+def _bundle_evidence(payload: Payload) -> Result:
+    """U02: the generation manifest is VERIFIED and its panel artifacts match the bundle bytes.
+
+    Needs the bundle input; without it the row stays an UNVERIFIABLE skip.
+    """
+
+    bundle = payload.bundle
+    if bundle is None:
+        return skip(
+            "UNVERIFIABLE from the payload: needs the bundle bytes, not a payload field "
+            "(pass --bundle <generation dir> to run it)"
+        )
+    status = bundle.get("verification")
+    if status != "VERIFIED":
+        return bad(f"generation manifest verification is {status!r}, not 'VERIFIED'")
+    artifacts = bundle.get("artifacts")
+    on_disk = bundle.get("on_disk")
+    if not isinstance(artifacts, list) or not isinstance(on_disk, dict):
+        return bad("bundle evidence is malformed")
+    panel = [a for a in artifacts if str(a.get("artifact_id", "")).startswith("panel/")]
+    if not panel:
+        return bad("the manifest lists no panel/ artifact")
+    problems: list[str] = []
+    for artifact in panel:
+        name = artifact["artifact_id"]
+        found = on_disk.get(name)
+        if not isinstance(found, dict):
+            problems.append(f"{name}: not stored in the bundle")
+        elif (found.get("sha256"), found.get("size_bytes")) != (
+            artifact.get("sha256"),
+            artifact.get("size_bytes"),
+        ):
+            problems.append(f"{name}: bytes differ from the manifest")
+    if problems:
+        return bad("; ".join(problems[:5]))
+    return ok(
+        f"manifest VERIFIED; {len(panel)} panel/ artifacts byte-identical "
+        f"(sha256 + size) to the bundle files; {len(artifacts) - len(panel)} other "
+        "manifest artifacts not checked"
+    )
+
+
+def _b_bundle_evidence(payload: Payload) -> None:
+    bundle = payload.bundle
+    assert bundle is not None
+    bundle["on_disk"][bundle["artifacts"][0]["artifact_id"]]["sha256"] = "0" * 64
+
+
+def _p_bundle_evidence(payload: Payload) -> None:
+    sha = "a" * 64
+    payload.bundle = {
+        "verification": "VERIFIED",
+        "artifacts": [
+            {"artifact_id": "panel/index.html", "sha256": sha, "size_bytes": 5},
+            {"artifact_id": "evidence/x.json", "sha256": "b" * 64, "size_bytes": 9},
+        ],
+        "on_disk": {"panel/index.html": {"sha256": sha, "size_bytes": 5}},
+    }
+
+
 def _unverifiable(reason: str) -> Callable[[Payload], Result]:
     def predicate(_payload: Payload) -> Result:
         return skip(f"UNVERIFIABLE from the payload: {reason}")
@@ -1400,9 +1462,9 @@ ROWS: tuple[Row, ...] = (
         PANEL_JS,
         (r"verified generation bundle exact bytes",),
         "report-attested static publication bytes are verified",
-        _unverifiable("needs the bundle bytes, not a payload field"),
-        None,
-        unverifiable=True,
+        _bundle_evidence,
+        _b_bundle_evidence,
+        pass_fixture=_p_bundle_evidence,
     ),
 )
 
