@@ -8059,6 +8059,11 @@ def test_production_spec_commit_refuses_a_tree_release_without_an_attestation(
     spec, repo = _production_gate_spec(tmp_path, monkeypatch)
     # Plan/build bind the tree only: no merge attestation can exist yet.
     core_pipeline._validate_portfolio_orchestration(spec, verify_runtime=True)
+    # ... but they do bind it, before any node runs: a different tree refuses.
+    with pytest.raises(core_pipeline.PipelineValidationError, match="differs"):
+        core_pipeline._validate_portfolio_orchestration(
+            replace(spec, code_commit="1" * 40), verify_runtime=True
+        )
     with pytest.raises(core_pipeline.PipelineValidationError, match="mandatory"):
         core_pipeline._validate_portfolio_orchestration(
             spec, verify_runtime=True, promote=True

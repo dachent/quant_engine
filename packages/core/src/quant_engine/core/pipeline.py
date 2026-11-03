@@ -2769,23 +2769,29 @@ def _executing_repo_root() -> Path:
     return Path(__file__).resolve().parents[5]
 
 
-def _verify_unbound_promotion(spec: PipelineSpec) -> None:
-    """Promotion identity for a spec that carries no orchestration contract.
+def _verify_unbound_identity(spec: PipelineSpec, *, promote: bool) -> None:
+    """Code identity for a spec that carries no orchestration contract.
 
     The production specification has no `portfolio-orchestration-contract` gate, so
     nothing names a repository root or a runtime lock; both are taken from the
     executing checkout (the lock is its `uv.lock`, the file the merge attestation
     records). git-commit-v1 is deliberately untouched: it never had this gate, and
-    R1/R2/R2.1 commit exactly as before. Any other scheme demands the full
-    git-tree-v2 gate and fails closed (an unknown scheme is refused by
-    `verify_promotion_identity`).
+    R1/R2/R2.1 run exactly as before. Any other scheme binds the tree at plan/build
+    time, before a node runs, and demands the full promotion gate (mandatory
+    attestation, runtime lock, executing code) at `execute --commit`, exactly as the
+    contract path does. An unknown scheme is refused (fail closed).
     """
 
     if spec.code_identity_scheme == COMMIT_SCHEME:
         return
     repo_root = _executing_repo_root()
     try:
-        _verify_tree_promotion(repo_root, spec, repo_root / "uv.lock")
+        if promote:
+            _verify_tree_promotion(repo_root, spec, repo_root / "uv.lock")
+        else:
+            verify_candidate_identity(
+                repo_root, spec.code_commit, spec.code_identity_scheme
+            )
     except CodeIdentityError as exc:
         raise PipelineValidationError(f"portfolio repository {exc}") from exc
 
@@ -2838,10 +2844,11 @@ def _validate_portfolio_orchestration(
 ) -> dict[str, Any] | None:
     contract = _portfolio_contract(spec)
     if contract is None:
-        # No orchestration contract (the production specification): the promotion
-        # identity gate must still run at `execute --commit`.
-        if verify_runtime and promote:
-            _verify_unbound_promotion(spec)
+        # No orchestration contract (the production specification): the code
+        # identity gates must still run, tree at plan/build and the full promotion
+        # gate at `execute --commit`.
+        if verify_runtime:
+            _verify_unbound_identity(spec, promote=promote)
         return None
     if verify_runtime:
         _verify_portfolio_runtime(contract, spec, promote=promote)
