@@ -25,6 +25,8 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="Node is not available")
 PRELUDE = (
     "const humanStatus = (status) => String(status || 'Unknown').replaceAll('_', ' ')"
     ".toLowerCase().replace(/^./, (character) => character.toUpperCase());\n"
+    "const number = (value) => value == null || value === '' || Number.isNaN(Number(value))"
+    " ? null : Number(value);"
 )
 
 
@@ -75,16 +77,20 @@ def test_a_recorded_bridge_model_basis_is_never_printed_as_not_recorded(
         "bridgeBasisText('EXACT_WORKBOOK_MODEL_RETURNS'), "
         "bridgeBasisText('A_BASIS_NOBODY_LABELLED'), bridgeBasisText(undefined), "
         "modelBasisText('P123_BOOK_TOTAL_EQUITY_NET_OF_CASH_ADDED'), "
-        "modelBasisText('PROVIDER_LIVE_MODEL_RETURNS'), modelBasisText(undefined)]",
+        "modelBasisText('PROVIDER_LIVE_MODEL_RETURNS'), modelBasisText(undefined), "
+        "ppFromFraction(-0.031195754), ppFromFraction(null) === '\\u2014', ppFromFraction(0)]",
     )
     assert got == [
         "P123 model book total equity, net of cash added",
         "exact workbook model returns",
         "a basis nobody labelled",
         "basis not recorded",
-        "P123 book total equity net of cash added",
+        "P123 model book total equity, net of cash added",
         "P123 provider live model returns",
         "Model (basis not recorded)",
+        "-3.12 pp",
+        True,
+        "0.00 pp",
     ]
 
 

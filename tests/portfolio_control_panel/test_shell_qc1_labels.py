@@ -1148,7 +1148,7 @@ def test_ai_factor_rows_carry_the_pre_policy_contract_date(tmp_path: Path) -> No
 
     assert (
         "P123 provider live model returns 15.01% · account -4.46% (governed account-live "
-        "series) · gap -19.47%"
+        "series) · gap -19.47 pp"
     ) in cell
     assert "Jan 22, 2026–Jul 24, 2026 · 132 exact common dates" in cell
     assert (
@@ -1193,7 +1193,7 @@ def test_grizzly_proxy_model_is_named_and_not_called_verified(tmp_path: Path) ->
 
     assert (
         "Signal-state × SPXL adjusted-close proxy model 27.52% · account 0.27% (governed "
-        "account-live series) · gap -27.25%"
+        "account-live series) · gap -27.25 pp"
     ) in cell
     assert "Diagnostic proxy not official provider NAV" in cell
     assert (
@@ -1241,3 +1241,38 @@ def test_snapshot_perimeter_listing_note_is_built_from_the_rows_shown_once(
     assert table.count("components are listed in the rows shown") == 1
     assert "2 of the 4 components are listed in the rows shown, totalling $500" in table
     assert "the other 2 ($500 of the perimeter) are not in the rows shown" in table
+
+
+def test_a_sleeve_ai_factor_row_prints_one_model_label_and_percentage_points(
+    tmp_path: Path,
+) -> None:
+    basis = "P123_BOOK_TOTAL_EQUITY_NET_OF_CASH_ADDED"
+    bridge = _bridge(0.1735506, 0.1423549, -3.1196, basis)
+    bridge["account_basis"] = "SLEEVE_EPOCH"
+    detail = {
+        "return_attribution": {
+            "bridge": bridge,
+            "observed_end": "2026-09-11",
+            "observed_start": "2026-02-02",
+            "verification": "PARTIAL_EXACT_ACTUAL_PNL_PARTIAL_COUNTERFACTUAL_GAP",
+        },
+        "return_reconciliation": {
+            "account_basis": "SLEEVE_EPOCH",
+            "account_cumulative_return": 0.1423549,
+            "account_minus_model_cumulative": -0.0311958,
+            "model_basis": basis,
+            "model_cumulative_return": 0.1735506,
+            "observations": 160,
+            "observed_end": "2026-09-11",
+            "observed_start": "2026-02-02",
+            "status": "TESTED_EXACT_COMMON_DATES",
+        },
+    }
+    row = _underwriting_row("p123-ai-factor", "AI Factor [P123]", detail)
+    dom = _run(tmp_path, _underwriting(row), "renderUnderwriting")
+    cell = _flat(dom, "#underwriting-table")
+    label = "P123 model book total equity, net of cash added"
+    # the comparison line and the waterfall name the recorded basis the same way
+    assert f"{label} 17.36% · sleeve 14.24% (sleeve epoch) · gap -3.12 pp" in cell
+    assert f"Causal return waterfall · bridge model ({label}) 17.36%" in cell
+    assert "gap -3.12%" not in cell
