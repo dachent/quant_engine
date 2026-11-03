@@ -604,6 +604,11 @@
       1
     ],
     [
+      "release_prepare_inputs",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "release_public_bundles",
       "portfolio_public_decomposition_sources",
       1
