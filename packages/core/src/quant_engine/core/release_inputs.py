@@ -289,3 +289,52 @@ def release_input_root(
     if key not in _LOADED:
         _LOADED[key] = load_release_inputs(root, pin)
     return _LOADED[key].root
+
+
+def resolve_release_input(
+    repo_root: Path,
+    relative: str,
+    *,
+    root: Path | str | None = None,
+    manifest_sha256: str | None = None,
+    cutoff: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """The file for a release-input ``relative`` path, from the pinned root when one is configured.
+
+    ``root`` and ``manifest_sha256`` (both or neither) win; otherwise ``QE_RELEASE_INPUTS_ROOT`` and
+    its pin; otherwise the checkout (``repo_root``). A configured root never falls back to the
+    checkout. A file that is absent raises :class:`ReleaseInputsError`: the removed tracked copy is
+    never the source once the inputs live outside Git.
+    """
+
+    if classify(_safe_relative(relative)) != RELEASE_INPUT:
+        raise ReleaseInputsError(f"{relative} is not a release input in the registry")
+    if (root is None) != (manifest_sha256 is None):
+        raise ReleaseInputsError(
+            "give both the release-inputs root and its pin, or neither"
+        )
+    if root is not None and manifest_sha256 is not None:
+        key = (str(root), str(manifest_sha256).lower())
+        if key not in _LOADED:
+            _LOADED[key] = load_release_inputs(root, manifest_sha256)
+        loaded = _LOADED[key]
+        if cutoff is not None and loaded.cutoff != cutoff:
+            raise ReleaseInputsError(
+                f"release inputs are for {loaded.cutoff}, this run is for {cutoff}"
+            )
+        return loaded.path(relative)
+    base = release_input_root(repo_root, environ)
+    if base != repo_root and cutoff is not None:
+        cached = [v for v in _LOADED.values() if v.root == base]
+        if cached and cached[0].cutoff != cutoff:
+            raise ReleaseInputsError(
+                f"release inputs are for {cached[0].cutoff}, this run is for {cutoff}"
+            )
+    target = base / relative
+    if target.is_symlink() or not target.is_file():
+        raise ReleaseInputsError(
+            f"release input {relative} is missing under {base}: cutoff-dependent inputs live "
+            "outside Git; configure the release-inputs root and its manifest pin"
+        )
+    return target
