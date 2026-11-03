@@ -235,7 +235,10 @@ that read), plus the native catalog and manifest digests and the source run for 
 ### sleeve-inputs
 
 `ibkr_catalog` and the six Quantbase captures come from their generations like the capture families
-above. `ibkr_declared_inputs`, `quantbase_declared_inputs`, `tag_map` and `crosswalk` default to the
+above. Quantbase captures that the data root keeps only inside archives are not found under the provider
+root: assemble them with `release_quantbase_sources.py` (B7, which checks them against the sleeve policy
+manifest's pins) and pass that directory as `--artifact-dir quantbase=KEY:REL`; each file must still
+equal the generation manifest's own record. `ibkr_declared_inputs`, `quantbase_declared_inputs`, `tag_map` and `crosswalk` default to the
 governed files under `repo:ops/mvp2-release/inputs/` and can be replaced with `--file ROLE=KEY:REL`;
 the declared inputs must end at the cycle cutoff (`window.last_day`, `data_cutoff`) and the crosswalk
 must carry it.
