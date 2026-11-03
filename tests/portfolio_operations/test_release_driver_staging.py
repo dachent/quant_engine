@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
 import re
 import shutil
@@ -403,7 +404,14 @@ def _copy_repo(destination: Path) -> None:
     def ignore(_: str, names: list[str]) -> list[str]:
         return [n for n in names if n in ("__pycache__", ".pytest_cache")]
 
-    for relative in ("tools", "schemas", "contracts", "docs/analytics", "acceptance"):
+    for relative in (
+        "tools",
+        "schemas",
+        "contracts",
+        "docs/analytics",
+        "docs/decisions",
+        "acceptance",
+    ):
         source = REPO_ROOT / relative
         if source.is_dir():
             shutil.copytree(source, destination / relative, ignore=ignore)
@@ -419,8 +427,15 @@ def _sha(path: Path) -> str:
 
 
 @pytest.fixture(scope="module")
-def staged(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+def staged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
     base = tmp_path_factory.mktemp("staging")
+    # the contract validator reads the accepted history commit with `git show`: the copy borrows the
+    # objects of this checkout instead of cloning it
+    objects = _git(
+        REPO_ROOT, "rev-parse", "--path-format=absolute", "--git-path", "objects"
+    )
+    patch = pytest.MonkeyPatch()
+    patch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", objects)
     cycle_world = real_cycle(base / "world")
     repo = base / "repo"
     repo.mkdir()
@@ -469,14 +484,17 @@ def staged(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     }
     config_path = base / "run.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
-    return {
-        "base": base,
-        "cycle": cycle,
-        "graph": graph_path,
-        "config": config_path,
-        "values": config,
-        "world": cycle_world,
-    }
+    try:
+        yield {
+            "base": base,
+            "cycle": cycle,
+            "graph": graph_path,
+            "config": config_path,
+            "values": config,
+            "world": cycle_world,
+        }
+    finally:
+        patch.undo()
 
 
 def _run(staged: dict[str, Any], *args: str) -> int:
