@@ -169,3 +169,32 @@ def test_a_strategy_without_an_aligned_window_still_renders_its_epochs(
 
     epochs = _detail(tmp_path, block, index, "epoch")
     assert 'id="mva-epoch-table"' in epochs
+
+
+def test_the_intro_sentence_matches_which_rows_carry_an_evidence_tag(
+    tmp_path: Path,
+) -> None:
+    """N7: strategy rows and components are tagged; the portfolio gap total carries no tag."""
+
+    html = (
+        Path(__file__).resolve().parents[2]
+        / "apps"
+        / "portfolio-control-panel"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+    intro = _plain(re.search(r'id="modelvsactual-heading".*?</p>', html, re.S).group(0))  # type: ignore[union-attr]
+    assert "Every number carries an evidence tag" not in intro
+    assert (
+        "Every strategy row and every component line carries an evidence tag" in intro
+    )
+    assert (
+        "the portfolio gap and the residual are totals computed from them and carry none"
+        in intro
+    )
+
+    block = _block()
+    root = _root(tmp_path, base(model_vs_actual=block))
+    body, _, foot = root.partition("<tfoot>")
+    foot = foot.split("</tfoot>")[0]
+    assert body.count('class="mva-tag mva-tag-') >= len(block["strategies"])
+    assert 'class="mva-tag' not in foot  # the portfolio total row carries no tag

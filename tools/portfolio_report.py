@@ -1613,6 +1613,8 @@ COST_EVIDENCE_KEYS: Final = (
     "declared",
     "execution_cost",
 )
+# Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
+COST_RATE_KEYS: Final = ("fee_rates",)
 
 
 def _plain_words(code: object) -> str:
@@ -1692,6 +1694,10 @@ def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
 FEES_STATUS_EVIDENCED: Final = "EVIDENCED_PRE_TAX"
 FEES_STATUS_UPPER_BOUND: Final = "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
 FEES_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
+# A percent-based cost: documented rates exist, no dollar cost does.
+FEES_STATUS_DOCUMENTED_RATE: Final = "DOCUMENTED_RATE_NOT_DOLLAR"
+COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
+COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 
 
 def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None:
@@ -1700,17 +1706,148 @@ def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None
     A cost amount exists for both a known cost (``known_fixed``, ``known_gold_api``)
     and a contract cap (``conservative_1pct_contract_cap``); only the first is
     evidence of a cost.  A cap is the most the contract allows, so it is labelled
-    as the upper bound it is.  ``None`` means an amount whose status names neither.
+    as the upper bound it is.  A documented percent rate has no dollar amount and
+    is labelled as a rate, never as evidence of a cost or a cap; a percent row that
+    carries an amount, or whose tier is unsettled, is never labelled as a rate.
+    ``None`` means an amount whose status names neither.
     """
 
+    text = cost_status if isinstance(cost_status, str) else ""
+    if text == COST_STATUS_DOCUMENTED_RATE:
+        return FEES_STATUS_DOCUMENTED_RATE if annual_cost is None else None
     if annual_cost is None:
         return FEES_STATUS_UNAVAILABLE
-    text = cost_status if isinstance(cost_status, str) else ""
     if text.startswith("known"):
         return FEES_STATUS_EVIDENCED
     if text.endswith("contract_cap"):
         return FEES_STATUS_UPPER_BOUND
     return None
+
+
+def _percent_text(rate: object) -> str:
+    """A fraction rate as percent text (``0.2`` -> ``20%``, ``0.035`` -> ``3.5%``)."""
+
+    percent = (Decimal(str(rate)) * 100).normalize()
+    return f"{percent:f}%"
+
+
+_BILLING_WORDS: Final = {12: "monthly", 4: "quarterly", 1: "annually"}
+
+_PLACEMENT_WORDS: Final = {
+    "INSIDE_VEHICLE_NAV": "inside the vehicle NAV",
+    "OUTSIDE_BILLED": "billed outside the NAV",
+    "NOT_STATED_IN_DOCUMENTATION": "not stated in the documentation",
+}
+
+
+def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
+    """The sentence a percent-based cost row discloses, built only from its fields.
+
+    ``None`` for a row that is not percent-based.  A row whose tier is unsettled
+    claims no rate.  Otherwise every number, tier label, placement and source page
+    in the sentence is read from ``fee_rates``; a rate the documentation does not
+    state is said not to be stated, never filled in.
+    """
+
+    status = cost.get("cost_status")
+    rates = cost.get("fee_rates")
+    unsettled = "the fee tier is not settled, so no rate is claimed"
+    if not isinstance(rates, Mapping):
+        if status == COST_STATUS_TIER_UNSETTLED:
+            return f"Percent-based cost: {unsettled}; no dollar cost is published."
+        return None
+    if rates.get("tier") == "TIER_UNSETTLED":
+        return f"Percent-based cost: {unsettled}; no dollar cost is published."
+    tier = next(
+        (
+            row
+            for row in rates.get("tier_table") or []
+            if isinstance(row, Mapping) and row.get("tier") == rates.get("tier")
+        ),
+        None,
+    )
+    if tier is None:
+        return None
+
+    def part(name: str, rate: object, mechanism: str = "") -> str:
+        if rate is None:
+            return f"{name} fee not stated in the documentation"
+        return f"{name} fee {_percent_text(rate)}{mechanism}"
+
+    mechanism = tier.get("performance_mechanism")
+    mechanism_text = (
+        f" (high-water mark: {mechanism})"
+        if mechanism
+        else " (high-water mark and assessment period not stated in the documentation)"
+    )
+    performance_rate = tier.get("performance_rate")
+    raw_derivation = rates.get("derivation")
+    derivation: Mapping[str, Any] = (
+        raw_derivation
+        if isinstance(raw_derivation, Mapping)
+        and raw_derivation.get("tier") == tier.get("tier")
+        else {}
+    )
+    settled = bool(derivation)
+    management = part("management", tier.get("management_rate"))
+    if settled and tier.get("management_rate") is not None:
+        count = derivation.get("periods_per_year")
+        periods = _BILLING_WORDS.get(count) if isinstance(count, int) else None
+        if periods is not None:
+            management += (
+                f" a year, billed {periods} at "
+                f"{_percent_text(derivation.get('periodic_rate'))} of fund value"
+            )
+    if settled and performance_rate is None:
+        performance = (
+            "performance fee none billed, no high-water mark billed"
+            if derivation.get("performance_fee") == "NONE_BILLED"
+            and derivation.get("hwm") == "NONE_BILLED"
+            else part("performance", None)
+        )
+    else:
+        performance = part(
+            "performance",
+            performance_rate,
+            mechanism_text if performance_rate is not None else "",
+        )
+    pieces = [management, performance]
+    if settled:
+        pieces.append(
+            f"tier settled by {derivation.get('rows')} posted fees "
+            f"({derivation.get('first_date')} to {derivation.get('last_date')}) "
+            f"each within ${derivation.get('tolerance_usd')} of that rate over fund "
+            "value"
+        )
+    placement = _PLACEMENT_WORDS.get(str(rates.get("placement")))
+    sentence = (
+        f"Documented rates, {tier.get('label')} ({tier.get('applies_to')}): "
+        + "; ".join(pieces)
+        + (f"; fee placement: {placement}" if placement else "")
+    )
+    redemption = rates.get("redemption")
+    if isinstance(redemption, Mapping):
+        words = _PLACEMENT_WORDS.get(str(redemption.get("placement")), "")
+        sentence += (
+            f"; redemption fee {_percent_text(redemption.get('rate'))} "
+            f"(placement: {words})"
+        )
+    lock = rates.get("lock")
+    if isinstance(lock, Mapping):
+        sentence += f"; lock {lock.get('days')} days"
+    pages = sorted(
+        {
+            f"{source.get('artifact')} p.{source.get('page')}"
+            for source in [
+                *(tier.get("sources") or []),
+                *((derivation.get("evidence") or []) if settled else []),
+            ]
+            if isinstance(source, Mapping)
+        }
+    )
+    if pages:
+        sentence += f"; sources: {', '.join(pages)}"
+    return f"{sentence}; no dollar cost is published."
 
 
 COST_RATE_AVAILABLE: Final = "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"
@@ -1771,7 +1908,11 @@ def _cutoff_cost_rate(
         "fees_status": fees_status_for_cost(cost.get("cost_status"), amount_text),
     }
     if amount_text is None:
-        result["cost_rate_reason"] = "no annual cost amount is evidenced"
+        result["cost_rate_reason"] = (
+            "the cost is a documented percent rate; no dollar amount is published"
+            if result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
+            else "no annual cost amount is evidenced"
+        )
         return result
     if value_text is None or strategy.get("capital_status") != "AVAILABLE":
         result["cost_rate_status"] = COST_RATE_NO_SLEEVE_VALUE
@@ -2002,8 +2143,13 @@ def _annualization_label(
     observations: object = None,
     periods_per_year: object = None,
     frequency: str | None = None,
+    calendar_day_exponent: bool = False,
 ) -> dict[str, Any] | None:
     """The basis and window an annualized figure stands on, or None without a window.
+
+    ``calendar_day_exponent`` is for a figure whose annualization exponent is the window's
+    calendar days (the account-live CAGR): its label names those days and the observation
+    count as the daily returns the cumulative return compounds, not as the scaling basis.
 
     A window under 365 days is a short-window annualization: ``short_window`` is true
     and the label says so beside the dates.  The label names the observation count
@@ -2030,6 +2176,11 @@ def _annualization_label(
     short = window_days < _ONE_YEAR_DAYS
     if frequency == "CASH_FLOW_DATES":
         text = f"annualized from cash flows, {start}..{end}"
+    elif calendar_day_exponent and count is not None and word is not None:
+        text = (
+            f"annualized over {window_days} calendar days "
+            f"({count} {word} returns), {start}..{end}"
+        )
     elif count is not None and word is not None:
         text = f"annualized from {count} {word} observations, {start}..{end}"
     else:
@@ -2091,6 +2242,7 @@ def _account_annualization_labels(
             end=row.get("account_live_observed_end"),
             observations=row.get("account_live_return_observations"),
             frequency="DAILY",
+            calendar_day_exponent=True,
         )
     mwr = None
     if row.get("mwr_xirr") is not None:
@@ -2438,7 +2590,9 @@ def _merge_attribution(
             )
         )
         cost_evidence: dict[str, Any] = {
-            key: cost[key] for key in COST_EVIDENCE_KEYS if key in cost
+            key: cost[key]
+            for key in (*COST_EVIDENCE_KEYS, *COST_RATE_KEYS)
+            if key in cost
         }
         components = cost_components(cost)
         result.append(
@@ -2529,6 +2683,11 @@ def _merge_attribution(
                 "after_tax_status": cost.get("after_tax_status"),
                 "fees_status": cost.get("fees_status"),
                 **cost_evidence,
+                **(
+                    {"cost_rate_disclosure": disclosure}
+                    if (disclosure := cost_rate_disclosure(cost)) is not None
+                    else {}
+                ),
                 **({"cost_components": components} if components else {}),
                 **(
                     {}
@@ -6177,7 +6336,8 @@ def _stale_implementation_row(
             f"ledger is {governed_ledger[:12]}. Its account return over "
             f"{start}..{end} differs from the governed account-live series by "
             f"{(figure - governed_figure) * 100.0:+.4f} pp. No model return, gap, "
-            "risk statistic or causal waterfall is published from it."
+            "risk statistic or causal waterfall is published from it; any figure the Model "
+            "vs actual view shows for this strategy is audit-derived, not governed."
         ),
         "repair_ref": _STALE_REPAIR_REF,
     }
@@ -7757,6 +7917,37 @@ def _allocations(
     return rows
 
 
+# The baseline's clause says the account fact matrix names every provider without an admitted path; the matrix
+# is the current-perimeter one, so a provider whose accounts are all outside it is named in the note under it.
+_MATRIX_CLAUSE: Final = "remain explicit in the account fact matrix"
+_MATRIX_CLAUSE_SCOPED: Final = (
+    "are explicit in the account fact matrix when the account is in it; accounts not "
+    "in it are named in the note under the matrix"
+)
+_MWR_EFFECT: Final = (
+    "MWR remains unavailable outside accounts and intervals with complete admitted "
+    "external-flow evidence."
+)
+_POSITIONS_EFFECT: Final = (
+    "Only accepted current position rows are reported; accounts without reported rows "
+    "remain unavailable."
+)
+_POSITIONS_EFFECT_SCOPED: Final = (
+    "Accepted position rows, current and historical snapshots, are reported; an "
+    "account with no reported row has none shown."
+)
+_MWR_EFFECT_SCOPED: Final = (
+    "MWR is shown only where admitted flows are complete for that epoch; the flows "
+    "fact overall remains partial."
+)
+
+
+def _matrix_scope_clause(text: str) -> str:
+    """The baseline's matrix clause, scoped to the matrix the page prints."""
+
+    return text.replace(_MATRIX_CLAUSE, _MATRIX_CLAUSE_SCOPED)
+
+
 def _scoped_known_gap(
     gap: object, provider_coverage: Sequence[Mapping[str, Any]]
 ) -> str:
@@ -7812,14 +8003,27 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "category": "FACT_COVERAGE",
                 "item": claim.get("fact_type"),
                 "known_gap": "; ".join(
-                    _scoped_known_gap(item, provider_coverage)
+                    _matrix_scope_clause(_scoped_known_gap(item, provider_coverage))
                     for item in claim.get("known_gaps", [])
                 ),
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
                 **(
                     {
-                        "disposition": claim.get("disposition"),
+                        "disposition": {
+                            **claim["disposition"],
+                            **(
+                                {
+                                    "effect": claim["disposition"]["effect"]
+                                    .replace(_MWR_EFFECT, _MWR_EFFECT_SCOPED)
+                                    .replace(
+                                        _POSITIONS_EFFECT, _POSITIONS_EFFECT_SCOPED
+                                    )
+                                }
+                                if isinstance(claim["disposition"].get("effect"), str)
+                                else {}
+                            ),
+                        },
                         "evidence_authority": claim.get("disposition", {}).get(
                             "authority"
                         ),
@@ -10504,7 +10708,7 @@ def build_report_data(
             },
             {
                 "item": "Evidence layers",
-                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate.",
+                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate, except that the LIVE_PLUS_BACKTEST mode joins version-matched backtest history before live inception to the live line and labels the joined line by origin.",
             },
             {
                 "item": "Account-live return authority",
@@ -10512,7 +10716,7 @@ def build_report_data(
             },
             {
                 "item": "Missing data",
-                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; no interpolation.",
+                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; a missing NAV is not interpolated, and a day the HWM candidate fills is labelled with its origin.",
             },
             {
                 "item": "Reserve",
@@ -12767,6 +12971,75 @@ def _workbook_evidence_binding_from_snapshots(
     return binding
 
 
+# T6 (owner ruling): a strategy whose row mixes the parent account's series with its sleeve epoch says so
+# plainly, names the owner's restatement ruling and its release, and shows the audit bridge.  The bridge terms
+# are fixed disclosure inputs, not payload fields: they come from ADR 0002 (entry day excluded, date-only
+# transfers at end of day) and issue #624 (allocated costs); no panel or report field carries them.
+MIXED_BASIS_AUDIT_FIGURE_PERCENT: Final = "14.348"
+MIXED_BASIS_BRIDGE_POINTS: Final[tuple[tuple[str, str], ...]] = (
+    ("allocated costs", "-0.256"),
+    ("entry-day exclusion", "+1.661"),
+    ("ADR 0002 end-of-day flow", "-0.319"),
+)
+MIXED_BASIS_SCHEDULED_RELEASE: Final = "R2.2"
+MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 / #624"
+
+
+def _mixed_basis_disclosure(
+    item: Mapping[str, Any], parent_label: str = "the parent account"
+) -> tuple[dict[str, Any], str]:
+    """The structured disclosure and its sentence, from the row's own windows and the fixed bridge."""
+
+    def span(start: Any, end: Any, days: Any) -> str:
+        if not (isinstance(start, str) and isinstance(end, str)):
+            return "its own window"
+        tail = f", {days} days exclusive (end minus start)" if days is not None else ""
+        return f"{start} to {end}{tail}"
+
+    basis = item.get("annualisation_basis")
+    mwr_days = (
+        basis.get("mwr_xirr", {}).get("window_days")
+        if isinstance(basis, Mapping) and isinstance(basis.get("mwr_xirr"), Mapping)
+        else None
+    )
+    parent_window = span(
+        item.get("return_window_start"),
+        item.get("return_close_date"),
+        item.get("window_days"),
+    )
+    sleeve_window = span(
+        item.get("mwr_opening_date"), item.get("mwr_terminal_date"), mwr_days
+    )
+    net = sum((Decimal(value) for _, value in MIXED_BASIS_BRIDGE_POINTS), Decimal(0))
+    terms = ", ".join(f"{name} {value}" for name, value in MIXED_BASIS_BRIDGE_POINTS)
+    sentence = (
+        "MIXED BASIS: this row mixes account and sleeve bases. On the strategy row, "
+        "return, drawdown, current value, weight and weekly series are the parent "
+        f"account's ({parent_window}); MWR and governed capital are the sleeve epoch's "
+        f"({sleeve_window}). Account-by-strategy epoch rows (Performance & HWM) and the "
+        "dollar-value chart show the sleeve's own values; model-vs-actual audit epochs "
+        f"are on the parent account ({parent_label}). The owner ruled that this row be restated to the sleeve basis; the "
+        f"restatement is scheduled as release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from "
+        f"the audit figure {MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, "
+        f"in percentage points: {terms} (net {net:+}) [source: {MIXED_BASIS_BRIDGE_SOURCE}]."
+    )
+    disclosure = {
+        "status": "MIXED_BASIS",
+        "restatement_basis": "SLEEVE_EPOCH",
+        "restatement_ruled_by": "OWNER",
+        "scheduled_release": MIXED_BASIS_SCHEDULED_RELEASE,
+        "parent_window": parent_window,
+        "sleeve_window": sleeve_window,
+        "audit_figure_percent": MIXED_BASIS_AUDIT_FIGURE_PERCENT,
+        "bridge_points": [
+            {"term": name, "points": value} for name, value in MIXED_BASIS_BRIDGE_POINTS
+        ],
+        "bridge_net_points": f"{net:+}",
+        "bridge_source": MIXED_BASIS_BRIDGE_SOURCE,
+    }
+    return disclosure, sentence
+
+
 def _apply_return_scope(
     report: dict[str, Any],
     rows: Sequence[Mapping[str, Any]],
@@ -12820,6 +13093,20 @@ def _apply_return_scope(
             "mwr_and_governed_capital_basis": "SLEEVE_EPOCH",
             "sleeve_epoch_accounts": sleeves,
         }
+        parent_names = sorted(
+            {
+                f"{row['provider']} {row['last_four']}"
+                for row in rows
+                if str(row.get("account_id")) in sleeve_accounts
+                and sleeve_accounts[str(row["account_id"])] in parents
+                and row.get("provider")
+                and row.get("last_four")
+            }
+        )
+        disclosure, disclosure_text = _mixed_basis_disclosure(
+            item, parent_names[0] if len(parent_names) == 1 else "the parent account"
+        )
+        item["return_scope"]["mixed_basis_disclosure"] = disclosure
         item["return_scope_label"] = (
             f"Return (cumulative, year-to-date, calendar-year, annualised), drawdowns "
             f"(account-live and HWM), current value, weight, cost-rate denominator and "
@@ -12827,7 +13114,7 @@ def _apply_return_scope(
             f"{', '.join(parents)} (includes retired sleeves "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in retired) or 'none'} and its "
             f"unallocated cash and margin). MWR and governed capital: sleeve "
-            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
+            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}. {disclosure_text}"
         )
 
 

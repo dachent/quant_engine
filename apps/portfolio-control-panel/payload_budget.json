@@ -1,5 +1,5 @@
 {
-  "basis": "R2 panel generation b216a53e (committed 2026-10-28, release 01fbe4d8): evidence/releases/2026-10-26-r2/final/evidence/measurements/sizes21.txt and final/README.md. committed_bytes is the measured figure; budgets allow 3% growth, rounded up to 1000 B. Raise a budget only in the change that grows the block, with the reason in the change description.",
+  "basis": "R2 panel generation b216a53e (committed 2026-10-28, release 01fbe4d8): evidence/releases/2026-10-26-r2/final/evidence/measurements/sizes21.txt and final/README.md. committed_bytes is the measured figure; budgets allow 3% growth, rounded up to 1000 B. Blocks the R2.1 panel (generation e3965439, the payload main builds) changed are re-measured on it: strategies, performance, performance_tab, weekly_returns. Raise a budget only in the change that grows the block, and state the reason for it under justifications.",
   "committed_bytes": {
     "total_physical": 381364971,
     "index_html": 47528130,
@@ -7,7 +7,7 @@
     "dashboard_data_js": 43397571,
     "blocks": {
       "decomposition_lenses": 216106053,
-      "weekly_returns": 27317555,
+      "weekly_returns": 27773144,
       "leverage_disclosures": 15993665,
       "factor_analysis": 2129845,
       "account_manifest": 1557310,
@@ -16,17 +16,18 @@
       "dependence_modes": 271278,
       "dependence_analysis": 134096,
       "coverage": 129325,
-      "strategies": 121117,
+      "strategies": 131808,
       "hwm_governed_proof": 112859,
-      "performance_tab": 375785,
+      "performance_tab": 381004,
       "orthogonal_risk_attribution": 168346,
       "strategy_underwriting": 76811,
-      "model_vs_actual": 133549
+      "model_vs_actual": 133549,
+      "performance": 54055
     }
   },
   "blocks": {
     "decomposition_lenses": 222590000,
-    "weekly_returns": 28138000,
+    "weekly_returns": 28607000,
     "leverage_disclosures": 16474000,
     "factor_analysis": 2194000,
     "account_manifest": 1605000,
@@ -35,12 +36,19 @@
     "dependence_modes": 280000,
     "dependence_analysis": 139000,
     "coverage": 134000,
-    "strategies": 125000,
+    "strategies": 136000,
     "hwm_governed_proof": 117000,
-    "performance_tab": 388000,
+    "performance_tab": 393000,
     "orthogonal_risk_attribution": 174000,
     "strategy_underwriting": 80000,
-    "model_vs_actual": 138000
+    "model_vs_actual": 138000,
+    "performance": 56000
+  },
+  "justifications": {
+    "strategies": "R2 committed 121117 B, R2.1 131808 B (+10691 B). The growth is new per-strategy evidence, not per-observation duplication: cost_components +3978 B (5 rows), execution_cost +2241 B (7 rows), corroboration +2100 B and declared +647 B (2 rows), provider_annualization and provider-comparison disposition and window fields about +1600 B. Trimming was examined and declined: repeated long strings inside the new fields total about 1200 B (under 1% of the block) and source.artifact, sha256 and artifact paths are provenance that tests pin. Limit = committed + 3%, rounded up to 1000 B.",
+    "performance": "New top-level block (distinct from performance_tab) carried since R2: 54048 B on R2 b216a53e, 54055 B on R2.1. It was unlisted and sat 4 KB over the 50000 B unlisted-block threshold, so the checker flagged it on every generation. Within 7 B between R2 and R2.1. Limit = committed + 3%, rounded up to 1000 B.",
+    "performance_tab": "R2.1 re-measure 381004 B (schema 3: union grid, flow-matched benchmarks), against 375785 B on the r21-integration panel the previous limit was cut from. The limit is re-cut at committed + 3% (393000 B, was 388000 B at 98.2% of committed) so the block has the same headroom every other block has.",
+    "weekly_returns": "R2.1 re-measure 27773144 B against 27317555 B at R2 (+1.7%). Per-observation series are the block this budget exists to watch, so the limit is re-cut at committed + 3% (28607000 B, was 28138000 B at 97.4% of committed); further growth needs its own reason."
   },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,

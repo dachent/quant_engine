@@ -12,9 +12,11 @@ import sys
 import tempfile
 from typing import Any, Mapping, Sequence, cast
 
+from quant_engine.core import timed_call
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = REPOSITORY_ROOT / "tools"
-XLSX_SKILL_ROOT = Path(r"C:\Users\BorisVaisman\.codex\skills\xlsx-win")
+XLSX_SKILL_ROOT = Path.home() / ".codex" / "skills" / "xlsx-win"
 XLSX_RUNTIME = Path(r"C:\Tools\xlsx-win\.venv\Scripts\python.exe")
 XLSX_CLI = XLSX_SKILL_ROOT / "control_plane" / "cli.py"
 # Match the existing Quality workflow's 20-minute job bound.
@@ -666,6 +668,7 @@ def _fact_admission(spec: Any) -> dict[str, Any]:
     return {"providers": dict(sorted(providers.items())), "status": "PASS"}
 
 
+@timed_call("release_preflight")
 def _release_preflight(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")
@@ -745,6 +748,7 @@ def _verify_committed_manifest(spec: Any, manifest: Any) -> dict[str, object]:
     }
 
 
+@timed_call("post_release_verify")
 def _post_release(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")

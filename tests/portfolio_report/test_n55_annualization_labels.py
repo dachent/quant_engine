@@ -468,7 +468,12 @@ def test_cagr_and_mwr_carry_their_basis_and_window_at_version_four(
             )
             assert cagr["short_window"] is (cagr["window_days"] < 365)
             assert cagr["observations"] == row["account_live_return_observations"]
-            assert cagr["label"].startswith("annualized from ")
+            # V27-3: the CAGR exponent is calendar days, so the label says that and names the
+            # observation count as the daily returns, not as the scaling basis
+            assert cagr["label"].startswith(
+                f"annualized over {cagr['window_days']} calendar days "
+                f"({cagr['observations']} daily returns), "
+            )
             assert cagr["label"].endswith(
                 f"{cagr['window_start']}..{cagr['window_end']}"
                 + (" (<1 year)" if cagr["short_window"] else "")

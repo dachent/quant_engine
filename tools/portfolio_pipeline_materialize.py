@@ -27,6 +27,10 @@ from quant_engine.core import (
     runtime_environment_sha256,
 )
 from quant_engine.core import CacheBaseError, run_storage, verify_if_promoted
+from quant_engine.core import (
+    CODE_IDENTITY_COMMIT_SCHEME as COMMIT_SCHEME,
+    CODE_IDENTITY_TREE_SCHEME as TREE_SCHEME,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
 from quant_engine.portfolio_ledger import (
@@ -1093,6 +1097,12 @@ def _schwab_selected_point_positions(
         financial_observation_date = captured.astimezone(
             ZoneInfo("America/New_York")
         ).date()
+        valuation_cutoff: date | None = None
+        if "valuation_cutoff" in metadata:
+            valuation_cutoff = date.fromisoformat(metadata["valuation_cutoff"])
+            if valuation_cutoff > financial_observation_date:
+                raise ValueError("valuation cutoff is later than the observation")
+            financial_observation_date = valuation_cutoff
         artifact = artifacts[0]
         if (
             artifact["as_of_date"] != day.isoformat()
@@ -1175,6 +1185,11 @@ def _schwab_selected_point_positions(
                 "source_record_id": record_id,
                 "source_artifact_id": artifact["artifact_id"],
                 "generation_id": manifest.generation_id,
+                **(
+                    {"valuation_cutoff": valuation_cutoff.isoformat()}
+                    if valuation_cutoff is not None
+                    else {}
+                ),
             }
         if source["current_position_account_count"] != len(
             {row["account_id"] for row in expected.values()}
@@ -1459,7 +1474,9 @@ def _provider_admission_authority(
                             # Native equality above binds the original UTC date
                             # and clock; EOD selection uses the provider day.
                             days = [
-                                datetime.fromisoformat(row["observed_at"])
+                                date.fromisoformat(row["valuation_cutoff"])
+                                if row.get("valuation_cutoff") is not None
+                                else datetime.fromisoformat(row["observed_at"])
                                 .astimezone(ZoneInfo("America/New_York"))
                                 .date()
                             ]
@@ -4437,6 +4454,26 @@ def _git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _release_identity(repo: Path, claimed: object) -> tuple[str, str]:
+    """Return (identity value, scheme) when ``claimed`` names the live repository.
+
+    A claimed commit SHA binds under the legacy git-commit-v1 scheme exactly as
+    before; a claimed ``HEAD^{tree}`` binds under git-tree-v2 (RELEASE-HASHTIME-001
+    cut 5). Anything else is refused, so a different tree can never pass.
+    """
+    head = _git(repo, "rev-parse", "HEAD")
+    if claimed == head:
+        return head, COMMIT_SCHEME
+    tree = _git(repo, "rev-parse", "HEAD^{tree}")
+    if claimed == tree and len(tree) == 40:
+        return tree, TREE_SCHEME
+    raise MaterializationError("repository must be clean at the recipe commit")
+
+
+def _spec_identity_fields(scheme: str) -> dict[str, str]:
+    return {} if scheme == COMMIT_SCHEME else {"code_identity_scheme": scheme}
+
+
 def _validate_output_path_budget(output_root: Path, recipe: Mapping[str, Any]) -> None:
     longest = 0
     for role in RELEASE_ROLES:
@@ -4488,10 +4525,8 @@ def build_spec(
     _validate_output_path_budget(output_root.resolve(), recipe)
     retained_cache_root = (retained_cache_root or output_root / "state").resolve()
     repo = Path(__file__).resolve().parents[1]
-    release_commit = _git(repo, "rev-parse", "HEAD")
-    if release_commit != recipe["release_commit"] or _git(
-        repo, "status", "--porcelain=v1", "--untracked-files=all"
-    ):
+    release_commit, identity_scheme = _release_identity(repo, recipe["release_commit"])
+    if _git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
         raise MaterializationError("repository must be clean at the recipe commit")
     runtime = Path(os.environ.get("QE_PIPELINE_PYTHON", sys.executable)).resolve()
     lock = repo / "uv.lock"
@@ -4876,6 +4911,7 @@ def build_spec(
     )
     launcher = output_root / "stages" / "panel" / "index.html"
     spec = {
+        **_spec_identity_fields(identity_scheme),
         "as_of_date": recipe["as_of_date"],
         "code_commit": release_commit,
         "companions": [
@@ -5333,10 +5369,8 @@ def build_production_spec(
             "schema-2 recipe is recovery-only and cannot create a production specification"
         )
     repo = Path(__file__).resolve().parents[1]
-    release_commit = _git(repo, "rev-parse", "HEAD")
-    if release_commit != recipe["release_commit"] or _git(
-        repo, "status", "--porcelain=v1", "--untracked-files=all"
-    ):
+    release_commit, identity_scheme = _release_identity(repo, recipe["release_commit"])
+    if _git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
         raise MaterializationError("repository must be clean at the recipe commit")
     prepared_root = prepared_root.resolve()
     semantic_path = semantic_path.resolve()
@@ -5700,6 +5734,7 @@ def build_production_spec(
         spec_path.with_name("financial-epoch-manifest-input-authority.json"),
     )
     spec = {
+        **_spec_identity_fields(identity_scheme),
         "as_of_date": recipe["as_of_date"],
         "code_commit": release_commit,
         "companions": [
@@ -7041,10 +7076,12 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
             "attended requested as-of differs from source selection"
         )
     release_commit = _text(source.get("release_commit"), "attended release_commit")
-    if len(release_commit) != 40 or release_commit != _git(
-        repo_root, "rev-parse", "HEAD"
-    ):
+    if len(release_commit) != 40:
         raise MaterializationError("attended release commit differs")
+    try:
+        _release_identity(repo_root, release_commit)
+    except MaterializationError as exc:
+        raise MaterializationError("attended release commit differs") from exc
     _attended_artifacts(source.get("artifacts"))
     attended = source.get("attended")
     expected_attended = {
@@ -7967,6 +8004,16 @@ def _parser() -> argparse.ArgumentParser:
     attended_cmd.add_argument("--retained-cache-root", type=Path, required=True)
     attended_cmd.add_argument("--requested-as-of", required=True)
     attended_cmd.add_argument("--evaluated-on")
+    attended_cmd.add_argument(
+        "--code-identity-scheme",
+        choices=(COMMIT_SCHEME, TREE_SCHEME),
+        default=COMMIT_SCHEME,
+        help=(
+            "release code identity: git-commit-v1 binds HEAD (default, legacy); "
+            "git-tree-v2 binds HEAD^{tree} so a PR-head candidate can be promoted "
+            "after merge behind a mandatory merge attestation"
+        ),
+    )
     attended_inputs = attended_cmd.add_mutually_exclusive_group(required=True)
     attended_inputs.add_argument("--source-run", type=Path)
     attended_inputs.add_argument("--preparation-spec", type=Path)
@@ -8292,7 +8339,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     output_root=Path(args.output_root).resolve(),
                     requested_as_of=args.requested_as_of,
                     evaluated_on=args.evaluated_on,
-                    release_commit=_git(REPOSITORY_ROOT, "rev-parse", "HEAD"),
+                    release_commit=_git(
+                        REPOSITORY_ROOT,
+                        "rev-parse",
+                        "HEAD^{tree}"
+                        if getattr(args, "code_identity_scheme", COMMIT_SCHEME)
+                        == TREE_SCHEME
+                        else "HEAD",
+                    ),
                     resume=args.resume,
                     on_create=storage.mark_created,
                 )

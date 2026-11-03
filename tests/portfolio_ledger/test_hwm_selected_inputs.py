@@ -1976,6 +1976,47 @@ def test_mvp2_matrixport_declared_nav_gap_omits_observation_and_spans_hwm(
     assert ("2026-04-25", "2026-04-26") not in robuxio_intervals
 
 
+def test_synthetic_authority_reaches_hwm_tool_after_contract_module_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Collection order must not decide whether the HWM tool sees the fixture authority.
+
+    test_portfolio_financial_mvp_contract replaces the registered contract module
+    at collection. A tool imported before that holds the previous instance, so the
+    mvp2 fixture must patch the instance the HWM tool actually calls. Run in
+    ``tests/portfolio_ledger tests/core`` order, the declared-gap test used to fail
+    with "mixed version status requires a nonempty proper subset".
+    """
+    fixture_spec = importlib.util.spec_from_file_location(
+        "mvp2_financial_fixture_swap_unit",
+        REPO / "tests/core/mvp2_financial_fixture.py",
+    )
+    assert fixture_spec is not None and fixture_spec.loader is not None
+    fixture_module = importlib.util.module_from_spec(fixture_spec)
+    monkeypatch.setitem(sys.modules, fixture_spec.name, fixture_module)
+    fixture_spec.loader.exec_module(fixture_module)
+
+    contract_spec = importlib.util.spec_from_file_location(
+        "portfolio_financial_mvp_contract",
+        REPO / "tools/portfolio_financial_mvp_contract.py",
+    )
+    assert contract_spec is not None and contract_spec.loader is not None
+    fresh = importlib.util.module_from_spec(contract_spec)
+    monkeypatch.setitem(sys.modules, contract_spec.name, fresh)
+    contract_spec.loader.exec_module(fresh)
+
+    hwm_tool = sys.modules["portfolio_hwm_selected_inputs"]
+    stale = hwm_tool.financial_contract
+    assert stale is not fresh
+    before = stale.load_contract
+
+    fixture_module.install_synthetic_financial_authority(monkeypatch, [])
+
+    assert stale.load_contract is not before
+    assert stale.load_contract is fresh.load_contract
+    assert "install_synthetic_financial_authority" in stale.load_contract.__qualname__
+
+
 def test_rejects_hwm_only_interval_without_declared_gap() -> None:
     """Accepting an unexplained HWM-only interval would hide missing coverage."""
     hwm_rows, ledger_rows = _robuxio_gap_parity_rows()

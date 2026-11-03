@@ -4,7 +4,7 @@
     [
       "alpaca",
       "core",
-      2
+      5
     ],
     [
       "alpaca",
@@ -19,7 +19,7 @@
     [
       "fidelity",
       "core",
-      2
+      3
     ],
     [
       "fidelity",
@@ -29,7 +29,7 @@
     [
       "ibkr",
       "core",
-      2
+      3
     ],
     [
       "ibkr",
@@ -39,11 +39,16 @@
     [
       "matrixport",
       "core",
-      2
+      3
     ],
     [
       "portfolio123",
       "core",
+      4
+    ],
+    [
+      "portfolio123",
+      "web_contracts",
       2
     ],
     [
@@ -119,6 +124,11 @@
       1
     ],
     [
+      "gate_profile",
+      "verify_release_restore",
+      1
+    ],
+    [
       "portfolio_attended_preparation",
       "build_sleeve_facts_release",
       1
@@ -176,7 +186,7 @@
     [
       "portfolio_attended_preparation",
       "portfolio_target_series",
-      3
+      4
     ],
     [
       "portfolio_attended_preparation",
@@ -296,7 +306,7 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_correlation",
-      1
+      2
     ],
     [
       "portfolio_financial_outcomes",
@@ -306,7 +316,7 @@
     [
       "portfolio_financial_outcomes",
       "portfolio_decomposition",
-      1
+      2
     ],
     [
       "portfolio_financial_outcomes",
@@ -549,6 +559,86 @@
       1
     ],
     [
+      "quantbase_har_to_csv",
+      "capture_quantbase_har",
+      1
+    ],
+    [
+      "release_acceptance_inputs",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "release_driver",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "release_hwm_calendar",
+      "portfolio_hwm_selected_inputs",
+      1
+    ],
+    [
+      "release_hwm_calendar",
+      "portfolio_invested_capital",
+      1
+    ],
+    [
+      "release_ledger_spec",
+      "provider_ledger",
+      1
+    ],
+    [
+      "release_ledger_spec",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "release_post_commit",
+      "release_driver",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "release_pre_chain",
+      "portfolio_current_dependence",
+      1
+    ],
+    [
+      "release_prepare_inputs",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "release_public_bundles",
+      "portfolio_public_decomposition_sources",
+      1
+    ],
+    [
+      "release_public_bundles",
+      "portfolio_public_style_sources",
+      1
+    ],
+    [
+      "release_spec_remap",
+      "release_cycle_manifest",
+      1
+    ],
+    [
+      "schwab_capture_ingest",
+      "schwab_capture_driver",
+      1
+    ],
+    [
       "sleeve_inputs",
       "nested_strategy_tag_map",
       1
@@ -561,6 +651,16 @@
     [
       "sleeve_nav",
       "sleeve_ledger",
+      1
+    ],
+    [
+      "tt_source_manifest_builder",
+      "portfolio_implementation_reconciliation",
+      1
+    ],
+    [
+      "tt_source_manifest_builder",
+      "portfolio_implementation_return_attribution",
       1
     ],
     [

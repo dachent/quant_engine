@@ -186,18 +186,29 @@ class LiveReadGovernance:
             )
 
 
-def authorize_live_read(
+@dataclass(frozen=True, slots=True)
+class ValidatedEvidence:
+    """The facts of an evidence file that passed the live gate's validator."""
+
+    evidence_sha256: str
+    review: dict[str, str]
+    approved_endpoints: frozenset[str]
+    max_requests: int
+    issued_at: datetime
+    expires_at: datetime
+
+
+def validate_live_read_evidence(
     evidence_path: str | Path,
     *,
     operation: str,
     mode: str | None,
     now: Callable[[], datetime] | None = None,
-) -> LiveReadGovernance:
-    """Validate and consume one local operator-provided attestation artifact.
+) -> ValidatedEvidence:
+    """Validate one evidence file exactly as the live gate does, without consuming it.
 
-    The review reference is shape-checked but is not remotely authenticated by
-    this local boundary; callers must operate in the trusted-workspace model
-    documented in ``docs/providers/matrixport.md``.
+    ``authorize_live_read`` calls this and then creates the single-use receipt, so
+    a file accepted here is accepted by the gate (until it is consumed or expires).
     """
     evidence_file = Path(evidence_path).resolve()
     if not evidence_file.is_file():
@@ -285,7 +296,36 @@ def authorize_live_read(
     if metering["retry_count"] != 0:
         raise GovernanceError("governance retry_count must be exactly zero")
 
-    evidence_sha256 = hashlib.sha256(evidence_bytes).hexdigest()
+    return ValidatedEvidence(
+        evidence_sha256=hashlib.sha256(evidence_bytes).hexdigest(),
+        review=review,
+        approved_endpoints=approved_endpoints,
+        max_requests=max_requests,
+        issued_at=issued_at,
+        expires_at=expires_at,
+    )
+
+
+def authorize_live_read(
+    evidence_path: str | Path,
+    *,
+    operation: str,
+    mode: str | None,
+    now: Callable[[], datetime] | None = None,
+) -> LiveReadGovernance:
+    """Validate and consume one local operator-provided attestation artifact.
+
+    The review reference is shape-checked but is not remotely authenticated by
+    this local boundary; callers must operate in the trusted-workspace model
+    documented in ``docs/providers/matrixport.md``.
+    """
+    validated = validate_live_read_evidence(
+        evidence_path, operation=operation, mode=mode, now=now
+    )
+    evidence_sha256 = validated.evidence_sha256
+    review = validated.review
+    approved_endpoints = validated.approved_endpoints
+    max_requests = validated.max_requests
     receipt_root = _prepare_canonical_state_root(_canonical_state_root())
     receipt_path = receipt_root / f"{evidence_sha256}.json"
     initial_receipt = {

@@ -1,5 +1,10 @@
 """Governed Portfolio123 capability routing."""
 
+from quant_engine.portfolio123.capture_catalog import (
+    CaptureRefusal,
+    catalog_rows,
+    verify_confirmed_shape,
+)
 from quant_engine.portfolio123.capture import (
     CaptureTarget,
     account_capture_targets,
@@ -39,6 +44,7 @@ __all__ = [
     "ApiEffect",
     "ApiRunEvidence",
     "CapabilityPolicy",
+    "CaptureRefusal",
     "CaptureTarget",
     "Portfolio123RoutingError",
     "Portfolio123GenerationError",
@@ -47,6 +53,7 @@ __all__ = [
     "Transport",
     "account_capture_targets",
     "capability_policy",
+    "catalog_rows",
     "create_cutover_plan",
     "cutover_sources",
     "managed_strategy_capture_targets",
@@ -55,5 +62,6 @@ __all__ = [
     "route_capability",
     "stage_candidate",
     "shared_strategy_capture_targets",
+    "verify_confirmed_shape",
     "verify_published",
 ]

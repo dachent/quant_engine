@@ -7,7 +7,9 @@ overlay from the previous pass can seed the next pass even at a new commit: a mi
 solved, never refused, and a key that includes a changed producer simply misses.
 
 ``promote``  hard-link a PASSED run's overlay into a new sealed base. The source commit is
-             read from the run's own vertical recipe, never typed.
+             read from the run's own vertical recipe, never typed. A cold run (no base)
+             has no overlay marker; its plain cache root is accepted only when the run's
+             root marker names it, and only the content-keyed kinds are sealed.
 ``verify``   prove a base is byte-for-byte what ``promote`` recorded (the attended runner
              also does this before it links any overlay to a promoted base).
 ``report``   after a run: per cache kind, entries inherited from the base vs new, and
@@ -28,6 +30,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from quant_engine.core import (
+    COLD_CACHE_KINDS,
     CacheBaseError,
     iter_cache_files,
     promote_cache_base,
@@ -36,6 +39,8 @@ from quant_engine.core import (
 )
 
 OVERLAY_MARKER = "retained-cache-overlay.json"
+RUN_MARKER = "attended-run-root.json"
+RUN_MARKER_KIND = "quant-engine-attended-run-root"
 RUN_STATE = "attended-run-state.json"
 RECIPE = Path("preparation") / "release-recipe.json"
 EXIT_SUSPICIOUS_REUSE = 4
@@ -58,6 +63,25 @@ def _json(path: Path, what: str) -> dict[str, Any]:
     return value
 
 
+def _require_cold_root(run_root: Path, overlay: Path) -> None:
+    """A run with no base keeps its cache in a plain root with no overlay marker. Accept
+    that root only when the run's own root marker names it as that run's cold cache."""
+
+    marker = _json(run_root / RUN_MARKER, "attended run root marker")
+    if marker.get("kind") != RUN_MARKER_KIND:
+        raise CacheBaseError(f"run root marker kind differs: {run_root}")
+    if marker.get("retained_cache_base") is not None:
+        raise CacheBaseError(
+            "run was seeded from a base, so its cache root must carry an overlay "
+            f"marker, and {overlay} has none"
+        )
+    if (
+        Path(str(marker.get("retained_cache_root"))).resolve() != overlay.resolve()
+        or Path(str(marker.get("run_root"))).resolve() != run_root.resolve()
+    ):
+        raise CacheBaseError("cache root is not this run's cold retained cache")
+
+
 def source_commit_of(run_root: Path, overlay: Path) -> str:
     """The commit the run was frozen at, from the run itself; refuses an unfinished run
     or an overlay that belongs to another run."""
@@ -65,9 +89,12 @@ def source_commit_of(run_root: Path, overlay: Path) -> str:
     state = _json(run_root / RUN_STATE, "attended run state").get("state")
     if state != "PASSED":
         raise CacheBaseError(f"run is not PASSED (state {state!r}): {run_root}")
-    marker = _json(overlay / OVERLAY_MARKER, "overlay marker")
-    if Path(str(marker.get("run_root"))).resolve() != run_root.resolve():
-        raise CacheBaseError("overlay belongs to a different run root")
+    if (overlay / OVERLAY_MARKER).exists():
+        marker = _json(overlay / OVERLAY_MARKER, "overlay marker")
+        if Path(str(marker.get("run_root"))).resolve() != run_root.resolve():
+            raise CacheBaseError("overlay belongs to a different run root")
+    else:
+        _require_cold_root(run_root, overlay)
     commit = _json(run_root / RECIPE, "vertical recipe").get("release_commit")
     if not isinstance(commit, str) or len(commit) != 40:
         raise CacheBaseError("run recipe carries no 40-hex release_commit")
@@ -148,7 +175,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if a.command == "promote":
             commit = source_commit_of(a.run_root, a.overlay)
-            out: dict[str, Any] = promote_cache_base(a.overlay, a.base, commit)
+            cold = not (a.overlay / OVERLAY_MARKER).exists()
+            out: dict[str, Any] = promote_cache_base(
+                a.overlay,
+                a.base,
+                commit,
+                cold_kinds=COLD_CACHE_KINDS if cold else None,
+            )
+            if cold:
+                out["cold_run_kinds_sealed"] = sorted(COLD_CACHE_KINDS)
             code = 0
         elif a.command == "verify":
             out, code = verify_cache_base(a.base), 0

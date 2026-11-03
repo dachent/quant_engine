@@ -128,3 +128,81 @@ root to exactly the generation, manifest hash and inventory hash the release bou
 preserved bound-generation zips) to be found by hash among the restored files. A release
 also binds each root's directory identity, so `read_current_release` cannot pass in a
 different location by design: adopting restored roots needs a new release over them.
+
+## Data-only gate profile (default off, owner approval required)
+
+`DATA_ONLY_V1` lets a real-roots `data_pipeline.py execute --commit --gate-profile data-only`
+present a *reuse receipt* instead of a fresh replica ceremony receipt. It replaces exactly one
+check, `verify_replica_receipt`; validator findings, A/B derivers, telescoping checks, browser and
+interaction QA, payload proofs, pointer snapshots and post-release verification are unchanged and
+still run every release. Without the flag the commit path is byte-identical to before.
+
+Enabling needs `--gate-profile-approval <file>`: an owner approval record written with
+`tools/gate_profile.py seal-approval` only after the owner's direct ruling (`profile`,
+`approved_by=owner`, `approved_on`, `statement`, `max_consecutive_reuse`). A missing or invalid
+record is a hard refusal. Every other failed condition falls back, automatically, to the full
+replica receipt check and writes `gate-profile-decision.json` beside the spec (`llm_review:
+REQUIRED` on fallback, `NOT_REQUIRED` when the profile engaged).
+
+The profile engages only when ALL hold: the tool identity (HEAD commit and tree, `uv.lock`, Python
+runtime, clean worktree; `core.gate_profile.tool_identity`) is byte-identical to the one the reuse
+receipt recorded; the previous release was committed at this code commit (so the first release
+after a code merge always falls back); the receipt vouches for the release that is COMMITTED right
+now; the root-id set, node count and target count are unchanged; the number of consecutive reuses
+is below the owner's limit; and the leaf diff against the previous release
+(`core.release_diff.explain_release`) has no unexplained change. A changed number is explained
+only by a changed input generation in its target's `depends_on` ancestry; a derived target that
+changed with no changed ancestor, an added or removed key or file, a type or boolean change, or
+changed wording (text differing beyond digits) is unexplained.
+
+Procedure per release: (1) full ceremony once, `tools/release_replica.py ceremony`; (2) after the
+real commit and `post-release-verify`, `tools/gate_profile.py issue --ceremony-receipt <replica
+receipt> --post-release-verify-receipt <receipt> --clean-room <dir> --out <reuse receipt>` (runs the
+clean-room restore; refuses if it fails); (3) next data-only release commits with `--gate-profile
+data-only --gate-profile-approval <file> --reuse-receipt <reuse receipt>`; (4) after it, `issue
+--previous-reuse-receipt <that receipt>` extends the chain. `tools/gate_profile.py select` previews
+the decision without committing. Run the four-family review when the decision record says
+REQUIRED. Receipts and approvals are tamper-evident, not forgery-proof.
+
+What it gives up, in plain terms: no rehearsal of this week's commit on a copy (a commit-path
+refusal is found on the real commit and rolls back), no fresh injected-failure recovery rehearsal,
+no fresh semantic review while every change is input-explained, and lineage is coarse (one changed
+upstream input explains all downstream changes).
+
+## Release inputs outside Git (`release_inputs`)
+
+Cutoff-dependent inputs (the expected baseline, the governed capital/HWM/sleeve/receipt inputs,
+retained baselines) change every period. While tracked they change the git tree, so the data-only
+gate profile (`gate_profile`) always falls back to the full gates. `quant_engine.core.release_inputs`
+resolves them from a **release-inputs root outside the repository** instead.
+
+* The root holds the files at their repo-relative paths plus `release-inputs.manifest.json`
+  (path, sha256, size per file, and the cutoff). The sha256 of the manifest file is the **pin**; the
+  run config carries it (`release_inputs_manifest_sha256`), so the release identity names the bytes.
+* `release_inputs_root` and the pin come from the run config (`release_driver.py`) or from
+  `RELEASE_INPUTS_ROOT` / `RELEASE_INPUTS_MANIFEST_SHA256` / `RELEASE_INPUTS_CUTOFF` (`build_vertical.sh`; a set built for another cutoff refuses). Nothing is hardcoded.
+  With neither set, the repo copies are used and nothing changes.
+* The loader fails closed and verifies **every** entry at load: a missing root, manifest or file, a
+  pin mismatch, a changed or resized file, an unsafe path, a symlink, a duplicate entry, a path the
+  registry does not classify as a release input, a baseline cutoff other than the run's, or an
+  `expected_baseline_sha256` that disagrees with the manifest all refuse. There is no fallback to a
+  repo copy once a root is configured.
+* `tools/release_inputs.py`: `census` (tracked files by disposition), `extract` (copy a commit's
+  release-input blobs into a new root outside the repo and write the manifest; prints the pin),
+  `verify`, `path` (both take `--cutoff` and refuse a set for another one). The driver re-hashes the pinned baseline at every stage start and every kept-stage check; `stop`/`status` never load the root.
+* The registry (`REGISTRY` in `release_inputs.py`) classifies tracked paths: `release-input` (leaves
+  Git), `code-bound` (embeds the cutoff but is read by code from a fixed repo path; moving it needs a
+  code change, so it still moves the tool identity), `policy` (stays).
+* **Cutover.** The 34 `release-input` files are no longer tracked: the real bytes live in a
+  release-inputs root outside Git (extracted with `tools/release_inputs.py extract`, pinned by its
+  manifest sha256), so a new cutoff no longer moves the tool identity and the data-only gate profile
+  can engage. The run config (`release_inputs_root`, `release_inputs_manifest_sha256`) or, for
+  `build_vertical.sh`, `RELEASE_INPUTS_ROOT` / `_MANIFEST_SHA256` / `_CUTOFF` point the tools at it.
+* **Tests that read real values** (`test_expected_baseline`, the real-baseline checks in
+  `test_validate_alignment`, the governed-input tests in `test_sleeve_disclosures`,
+  `test_build_sleeve_facts_release`, `test_attended_preparation` and
+  `test_portfolio_financial_mvp_contract`) resolve their inputs through
+  `quant_engine.core.release_input_root`. With `QE_RELEASE_INPUTS_ROOT` and
+  `QE_RELEASE_INPUTS_MANIFEST_SHA256` set they run against the verified root (a bad pin or a tampered
+  file fails the run); without them they are skipped, so CI (which holds no real data) does not run
+  them. Run them where the root is present, for example before each release.

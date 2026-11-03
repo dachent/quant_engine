@@ -12,6 +12,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -483,6 +484,7 @@ def _current_snapshot(
     int,
     int,
     SourceArtifact,
+    date | None,
 ]:
     source = _object(value, "current_snapshot")
     _strict(
@@ -535,6 +537,10 @@ def _current_snapshot(
     }
     if snapshot_version == 2:
         snapshot_keys.add("transport")
+        if "valuation_cutoff" in document:
+            # Optional explicit financial day of a capture whose observation is
+            # the real capture instant (a capture taken after the cutoff day).
+            snapshot_keys.add("valuation_cutoff")
     _strict(document, snapshot_keys, "current snapshot")
     if document["provider"] != "SCHWAB" or snapshot_version not in {1, 2}:
         raise SchwabGenerationError("current snapshot identity is unsupported")
@@ -551,6 +557,18 @@ def _current_snapshot(
     observed_at = _aware_datetime(document["observed_at"], "current observed_at")
     if observed_at.date() != generation_as_of:
         raise SchwabGenerationError("current observation date differs from generation")
+    valuation_cutoff: date | None = None
+    if "valuation_cutoff" in document:
+        valuation_cutoff = _date(
+            document["valuation_cutoff"], "current valuation_cutoff"
+        )
+        if (
+            valuation_cutoff
+            > observed_at.astimezone(ZoneInfo("America/New_York")).date()
+        ):
+            raise SchwabGenerationError(
+                "current valuation cutoff is later than the observation"
+            )
 
     accounts: list[dict[str, object]] = []
     observed_accounts: set[str] = set()
@@ -683,6 +701,7 @@ def _current_snapshot(
         current_balance_available_count,
         current_position_account_count,
         artifact,
+        valuation_cutoff,
     )
 
 
@@ -1850,6 +1869,7 @@ def build_generation(
     )
     current_accounts: list[dict[str, object]] | None = None
     current_observed_at: datetime | None = None
+    current_valuation_cutoff: date | None = None
     snapshot_positions: list[dict[str, object]] = []
     current_reconciliation: list[dict[str, object]] = []
     sweep_vehicle_count: int | None = None
@@ -1866,6 +1886,7 @@ def build_generation(
             current_balance_available_count,
             current_position_account_count,
             current_artifact,
+            current_valuation_cutoff,
         ) = _current_snapshot(
             spec["current_snapshot"],
             roots=roots,
@@ -2046,7 +2067,14 @@ def build_generation(
         "nav_observations": nav,
         "positions": positions,
         "position_snapshot_as_of": (
-            {"observed_at": position_as_of}
+            {
+                "observed_at": position_as_of,
+                **(
+                    {"valuation_cutoff": current_valuation_cutoff.isoformat()}
+                    if current_valuation_cutoff is not None
+                    else {}
+                ),
+            }
             if current_accounts is not None
             else {
                 "local_datetime": position_as_of,

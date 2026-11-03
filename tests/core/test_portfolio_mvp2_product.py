@@ -113,10 +113,11 @@ PATCH_INVENTORY: dict[tuple[str, str], tuple[int | tuple[int, int], str]] = {
         "current dependence resolves the same narrowed contract module",
     ),
     ("portfolio_financial_mvp_contract", "load_contract"): (
-        2,
+        (2, 3),
         _LOAD_CONTRACT_RESIDUAL
         + ".  Two calls: the fixture's sys.modules scan (this module holds the "
-        "original) and its explicit patch",
+        "original) and its explicit patch.  A third when the HWM tool still holds "
+        "a contract instance that a collection-time swap replaced in sys.modules",
     ),
     ("portfolio_hwm_selected_inputs", "_GOVERNED_MEMBERSHIP_CENSUS"): (
         1,
@@ -1018,7 +1019,7 @@ def test_patch_inventory_rejects_an_extra_load_contract_replacement() -> None:
             targets["portfolio_financial_mvp_contract"], "load_contract", object()
         )
         assert patch_inventory_problems(monkeypatch) == [
-            "portfolio_financial_mvp_contract.load_contract: declared 2, patched 3"
+            "portfolio_financial_mvp_contract.load_contract: declared 2..3, patched 4"
         ]
     with pytest.MonkeyPatch.context() as monkeypatch:
         targets = _replay_inventory(monkeypatch)

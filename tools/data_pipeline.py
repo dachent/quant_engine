@@ -9,10 +9,12 @@ import sys
 from typing import Sequence
 
 from quant_engine.core import (
+    GateProfileError,
     ReplicaGateError,
     is_replica_spec,
     verify_replica_receipt,
     PipelineExecutionError,
+    canonical_json_bytes,
     PipelineUnknownOutcomeError,
     PipelineValidationError,
     execute_pipeline,
@@ -21,7 +23,10 @@ from quant_engine.core import (
     pipeline_status,
     plan_pipeline,
     recover_pipeline,
+    select_gate_profile,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -38,6 +43,12 @@ def _parser() -> argparse.ArgumentParser:
             # (replica_gate.REPLICA_MARKER_NAME) is the replica itself and needs none.
             command.add_argument("--replica-receipt", type=Path)
             command.add_argument("--allow-external-read", action="store_true")
+            # Default OFF. The data-only gate profile (core/gate_profile.py) replaces the
+            # replica receipt check only with an owner approval record and a reuse receipt;
+            # any failed condition falls back to the full replica receipt check above.
+            command.add_argument("--gate-profile", choices=("data-only",))
+            command.add_argument("--gate-profile-approval", type=Path)
+            command.add_argument("--reuse-receipt", type=Path)
             # Deliberately no CLI escape hatch for the release-validation
             # gate: a flag on the primary publish command is a friction-free
             # bypass that leaves no trail (journal, manifest, execute.json
@@ -69,7 +80,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 if args.commit and not is_replica_spec(spec):
-                    verify_replica_receipt(args.replica_receipt, spec)
+                    if args.gate_profile is None:
+                        verify_replica_receipt(args.replica_receipt, spec)
+                    else:
+                        decision = select_gate_profile(
+                            spec=spec,
+                            repo_root=REPO_ROOT,
+                            approval_path=args.gate_profile_approval,
+                            reuse_receipt_path=args.reuse_receipt,
+                        )
+                        (args.spec.parent / "gate-profile-decision.json").write_bytes(
+                            canonical_json_bytes(decision.to_dict())
+                        )
+                        if decision.profile == "FULL":
+                            print(
+                                "data-pipeline: gate profile fell back to the full gates: "
+                                + "; ".join(decision.reasons),
+                                file=sys.stderr,
+                            )
+                            verify_replica_receipt(args.replica_receipt, spec)
                 result = execute_pipeline(
                     spec,
                     commit=args.commit,
@@ -81,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         PipelineExecutionError,
         PipelineUnknownOutcomeError,
         PipelineValidationError,
+        GateProfileError,
         ReplicaGateError,
         RuntimeError,
         ValueError,
