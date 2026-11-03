@@ -75,7 +75,8 @@ def test_with_the_switch_on_the_row_stands_on_the_sleeve(
     assert scope["sleeve_epoch_accounts"] == ["account-a-s2"]
     # the fixture manifest carries no rows, so no retired sleeve account is listed here
     assert scope["excludes_retired_sleeve_accounts"] == []
-    assert "benchmark_comparison" in scope["not_restated"]
+    assert "benchmark_comparison" not in scope["not_restated"]
+    assert "benchmark_comparison" in scope["applies_to"]
     # the label is generated from the sleeve and window, not typed
     assert (
         "sleeve s2 of parent account account-a, from 2026-07-02"

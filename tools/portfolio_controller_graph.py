@@ -694,7 +694,11 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
     },
     {
         "id": "attribution-catalog-generation",
-        "source_paths": (_ATTRIBUTION, _RELEASE),
+        "source_paths": (
+            _ATTRIBUTION,
+            _RELEASE,
+            "schemas/portfolio/strategy-attribution.schema.json",
+        ),
         "contracts": ("contracts/portfolio-performance-policy-v1.json",),
         "producer": (_ATTRIBUTION, "stage_catalog"),
         "artifacts": ("strategy-attribution generation",),
