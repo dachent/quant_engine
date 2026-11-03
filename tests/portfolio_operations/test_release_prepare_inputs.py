@@ -1093,3 +1093,55 @@ def test_the_selected_inputs_are_read_by_the_real_attended_consumer(
         "portfolio123_version_evidence_path",
     }
     assert all(path.is_file() for path in authorities.values())
+
+
+def test_prep_spec_reads_the_crosswalk_and_policy_from_the_release_inputs_root(
+    world: World,
+) -> None:
+    from quant_engine.core.release_inputs import build_manifest
+
+    inputs = world.tmp / "release-inputs"
+    for relative in (tool.CROSSWALK, tool.POLICY_MANIFEST):
+        (inputs / relative).parent.mkdir(parents=True, exist_ok=True)
+        (inputs / relative).write_bytes((world.repo / relative).read_bytes())
+        (world.repo / relative).unlink()  # the checkout no longer carries them
+    _, digest = build_manifest(
+        inputs, [tool.CROSSWALK, tool.POLICY_MANIFEST], cutoff=CUTOFF
+    )
+    world.selected_file()
+    spec = tool.build_prep_spec(
+        world.resolved,
+        world.prep_pred,
+        roots=tool.declared_roots(world.resolved, world.repo, inputs),
+        repo_root=world.repo,
+        ledger_dir=world.cycle / "ledger" / "generations" / LEDGER,
+        release_inputs_root=inputs,
+        release_inputs_manifest_sha256=digest,
+    )
+    assert spec["epoch_crosswalk_template"] == _pin(inputs / tool.CROSSWALK)
+    assert spec["sleeve_facts"]["policy_manifest"] == _pin(
+        inputs / tool.POLICY_MANIFEST
+    )
+    assert _refusal(
+        "RELEASE_INPUTS",
+        tool.build_prep_spec,
+        world.resolved,
+        world.prep_pred,
+        roots=tool.declared_roots(world.resolved, world.repo, inputs),
+        repo_root=world.repo,
+        ledger_dir=world.cycle / "ledger" / "generations" / LEDGER,
+        release_inputs_root=inputs,
+    )
+
+
+def test_a_directory_field_refuses_pin_and_a_file_field_refuses_dir(
+    world: World,
+) -> None:
+    fresh = _put(world.data / "new" / "x.csv", "x")
+    sha = _sha(fresh.read_bytes())
+    _refusal(
+        "OVERRIDE_SHAPE",
+        world.prep,
+        pins=[f"sleeve_facts.quantbase_source_dir=data:new/x.csv@{sha}"],
+    )
+    _refusal("OVERRIDE_SHAPE", world.prep, dirs=["base_factor_file=data:new"])
