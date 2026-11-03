@@ -220,9 +220,10 @@ class Run:
             inputs = self.release_inputs = load_release_inputs(root, pin)
             baseline = inputs.path(BASELINE_INPUT)
         except ReleaseInputsError as exc:
-            if not self.offline:
+            if not self.offline or Path(root).exists():
                 raise Refusal(f"release inputs: {exc}") from exc
-            # an offline plan may name a root that is not mounted: it shows where the baseline would
+            # an offline plan may name a root that is not mounted (no such directory; a present but
+            # damaged root still refuses): it shows where the baseline would
             # lie and binds no bytes
             shown = str(Path(root) / BASELINE_INPUT)
             self.values["expected_baseline"] = shown

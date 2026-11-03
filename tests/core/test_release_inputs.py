@@ -460,13 +460,20 @@ def test_default_expansion_is_byte_identical_to_the_legacy_graph(
         }
         - set(new_graph["paths"])
         - set(new_graph["derive"])
+        - {"release_inputs_root", "release_inputs_manifest_sha256"}
     )
     config = {name: f"<{name}>" for name in names}
     config.update(_run_config(tmp_path, tmp_path / "repo"))
     new_run = driver.Run(config, new_graph, offline=True)
     old_run = driver.Run(config, old_graph, offline=True)
-    new_out = [new_run.expand(s) for s in _strings(new_graph["stages"])]
-    old_out = [old_run.expand(s) for s in _strings(old_graph["stages"])]
+
+    # the baseline spec stage names the release-inputs root itself; configuring one is what switches the
+    # run to it, so those strings are outside this comparison
+    def comparable(graph: Any) -> list[str]:
+        return [s for s in _strings(graph["stages"]) if "release_inputs" not in s]
+
+    new_out = [new_run.expand(s) for s in comparable(new_graph)]
+    old_out = [old_run.expand(s) for s in comparable(old_graph)]
     assert new_out == old_out
     assert any(s.endswith("acceptance/expected-baseline.json") for s in new_out)
     assert (

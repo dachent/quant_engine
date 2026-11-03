@@ -206,7 +206,7 @@ Two driver features serve these stages and are part of the graph schema: an argv
 repeats its arguments for every entry of the run-config object (or list) KEY (`{each_key}`, `{each_value}` stand for the entry),
 and the derive rule `{"file_sha256": PATH}` yields the digest of a file an earlier stage wrote (the resolved-cycle pin
 the calendar tool authenticates its input with). Under `plan --offline` a configured `release_inputs_root` that cannot be
-opened (not mounted) is not an error: the plan shows the baseline path in that root and binds no bytes.
+opened because the directory is absent (not mounted) is not an error: the plan shows the baseline path in that root and binds no bytes.
 
 ### Calendar authority (explicit stage)
 
