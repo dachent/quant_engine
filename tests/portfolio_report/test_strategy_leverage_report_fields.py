@@ -232,3 +232,17 @@ def test_the_derived_loan_and_equity_rows_validate_and_close_to_the_sleeve_nav()
         parent_account_id="parent",
         existing=[],
     )
+    # another account's row is not the parent's: never borrow its provenance
+    other = {
+        "account_id": "other",
+        "provider_id": "p",
+        "source_catalog_generation_id": "a" * 64,
+        "source_catalog_sha256": "b" * 64,
+    }
+    assert not reporter._derived_leverage_rows(
+        leverage,
+        strategy_id="s",
+        sleeve_account_id="x",
+        parent_account_id="parent",
+        existing=[other],
+    )

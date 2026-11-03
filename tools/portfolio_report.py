@@ -14011,7 +14011,7 @@ def _derived_leverage_rows(
 
     anchor = next(
         (row for row in existing if row.get("account_id") == parent_account_id),
-        next(iter(existing), None),
+        None,
     )
     if anchor is None:
         return []
