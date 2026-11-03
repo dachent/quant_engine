@@ -67,6 +67,14 @@ SCHEMA_DEFAULT = GRAPH_DEFAULT.with_name("release-stages.schema.json")
 STATE_NAME = "release-driver-state.json"
 TIMING_NAME = "release-driver-timing.log"
 BASELINE_INPUT = "acceptance/expected-baseline.json"
+# files the staging stages read from the release-inputs set (they are not in Git); a set that lacks
+# one refuses at the start of the run, not at the stage that first needs it
+REQUIRED_RELEASE_INPUTS = (
+    BASELINE_INPUT,
+    "ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json",
+    "ops/mvp2-release/inputs/current-epoch-crosswalk.json",
+    "ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json",
+)
 COMMIT_SCHEME = "git-commit-v1"
 TREE_SCHEME = "git-tree-v2"
 FULL_CEREMONY = "full"
@@ -221,6 +229,15 @@ class Run:
         try:
             inputs = self.release_inputs = load_release_inputs(root, pin)
             baseline = inputs.path(BASELINE_INPUT)
+            missing = [
+                name for name in REQUIRED_RELEASE_INPUTS if name not in inputs.paths
+            ]
+            if missing:
+                raise ReleaseInputsError(
+                    "the set lacks "
+                    + ", ".join(missing)
+                    + " (the staging stages read them)"
+                )
         except ReleaseInputsError as exc:
             if not self.offline or Path(root).exists():
                 raise Refusal(f"release inputs: {exc}") from exc

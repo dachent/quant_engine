@@ -708,3 +708,24 @@ def test_selected_inputs_must_name_this_runs_ledger_generation_and_follow_its_bu
     assert ("{calendar_authority}", "{calendar_authority_sha256}") in [
         tuple(item) for item in _stage("attended")["pinned_inputs"]
     ]
+
+
+def test_a_release_inputs_set_without_the_staging_files_is_refused_at_the_start(
+    world: dict[str, Any],  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    from quant_engine.core.release_inputs import build_manifest
+
+    root = tmp_path / "ri"
+    baseline = root / driver.BASELINE_INPUT
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("{}\n", encoding="utf-8")
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    _, pin = build_manifest(root, [driver.BASELINE_INPUT], cutoff="2026-09-17")
+    config.update(
+        release_inputs_root=str(root),
+        release_inputs_manifest_sha256=pin,
+        requested_as_of="2026-09-17",
+    )
+    with pytest.raises(driver.Refusal, match="lacks .*baseline-declared-inputs"):
+        driver.Run(config, {"paths": {}, "derive": {}, "stages": []})
