@@ -34,8 +34,9 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 reporter = sys.modules.get("portfolio_report") or importlib.util.module_from_spec(SPEC)
 if "portfolio_report" not in sys.modules:
-    sys.modules["portfolio_report"] = reporter
-    SPEC.loader.exec_module(reporter)
+    with pytest.MonkeyPatch.context() as _registry:
+        _registry.setitem(sys.modules, "portfolio_report", reporter)
+        SPEC.loader.exec_module(reporter)
 
 PLAIN = "strat-plain"
 SLEEVE = "strat-sleeve"

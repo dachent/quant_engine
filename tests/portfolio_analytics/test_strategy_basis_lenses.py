@@ -57,8 +57,9 @@ _PLAN_SPEC = importlib.util.spec_from_file_location(
 )
 assert _PLAN_SPEC is not None and _PLAN_SPEC.loader is not None
 planner = importlib.util.module_from_spec(_PLAN_SPEC)
-sys.modules[_PLAN_SPEC.name] = planner
-_PLAN_SPEC.loader.exec_module(planner)
+with pytest.MonkeyPatch.context() as _registry:
+    _registry.setitem(sys.modules, _PLAN_SPEC.name, planner)
+    _PLAN_SPEC.loader.exec_module(planner)
 # digest of the planner's rows, composition, interval policies and target bytes for the
 # synthetic fixture with no declaration, equal under the planner at K head 07f02431
 SWITCH_OFF_IDENTITY_DIGEST = (

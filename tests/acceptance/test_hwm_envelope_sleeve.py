@@ -34,8 +34,9 @@ _SPEC = importlib.util.spec_from_file_location(
 assert _SPEC is not None and _SPEC.loader is not None
 reporter = sys.modules.get("portfolio_report") or importlib.util.module_from_spec(_SPEC)
 if "portfolio_report" not in sys.modules:
-    sys.modules["portfolio_report"] = reporter
-    _SPEC.loader.exec_module(reporter)
+    with pytest.MonkeyPatch.context() as _registry:
+        _registry.setitem(sys.modules, "portfolio_report", reporter)
+        _SPEC.loader.exec_module(reporter)
 
 PLAIN, SLEEVE = "strat-plain", "strat-sleeve"
 ACCOUNT, PARENT = "acct-1-s2", "acct-1"
