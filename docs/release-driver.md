@@ -25,7 +25,7 @@ Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
 `cycle` (the scratch cycle directory that holds state, logs and production outputs),
 `run` (the attended run's output root), `qa`, `code_commit`, `pipeline_id`,
 `mode`, `live_workspace` (probe), `requested_as_of`, `history_store`, `expect_superseded`, `build_portfolio_root`,
-`portfolio_root`, `retained_cache_root`, and `provider_sources` (root id to the provider
+`portfolio_root`, `retained_cache_root`, `resolved_cycle` (the `qe-release-resolved-cycle/1` file of the cycle manifest; read by `post-commit-verify`), and `provider_sources` (root id to the provider
 generation directory the release binds, or the string `from_ledger`, below). The epoch manifest
 generation comes from the run itself.
 
@@ -209,3 +209,24 @@ The run config must declare `ceremony`; a run without it is refused, so writing 
 
 `check`, `run` and `plan --offline` print which ceremony they are in. Switching the ceremony keeps completed stages (it is
 left out of the run binding); any other configuration change invalidates them.
+
+## Post-commit verification (real roots)
+
+Stage `post-commit-verify` (release mode, full ceremony, requires `commit`; `pack-evidence`
+requires it) runs `tools/release_post_commit.py verify`. It replaces the hand-run
+`t_post_real.sh` and the post-commit half of `t_commit_real.sh`:
+
+1. the commit result is `COMMITTED` for exactly this spec; `CURRENT_RELEASE` names the committed
+   release, which is not the cycle's predecessor; the predecessor's release directory is still
+   present; the only release directory added is the committed one; `CURRENT_RELEASE` moved;
+2. `portfolio_qc.py --profile post-release-verify` exits 0 and its receipt is PASS for this spec,
+   release and the single preflight receipt, with its authority digest equal to the
+   `CURRENT_RELEASE` pointer;
+3. `data_recovery_rehearsal.py` and `verify_release_restore.py` exit 0 against the same real spec,
+   each into a fresh root under `post-commit/`.
+
+The repository must be clean at `code_commit` before and after. The post-commit pointer snapshot
+(`post-commit-pointers.json`) and a create-only receipt `post-commit-verify.json`
+(`qe-post-commit-verify/1`: file digests and ids, no absolute paths) are written under
+`{cycle}/post-commit/`.
+

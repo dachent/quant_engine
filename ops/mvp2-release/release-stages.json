@@ -39,6 +39,10 @@
     "replica_provgens": "{cycle}/replica-provider-generations.json",
     "replica_rehearsal": "{cycle}/replica-rehearsal",
     "clean_room": "{cycle}/clean-room",
+    "post_commit": "{cycle}/post-commit",
+    "post_release_evidence": "{cycle}/production/post-release-evidence",
+    "real_rehearsal": "{cycle}/post-commit/rehearsal",
+    "real_clean_room": "{cycle}/post-commit/clean-room",
     "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
     "replica_coordination_root": "{replica_workspace}/{coordination_rel}"
   },
@@ -1084,10 +1088,58 @@
       "only_ceremony": "full"
     },
     {
-      "id": "pack-evidence",
+      "id": "post-commit-verify",
       "explicit": true,
       "requires": [
         "commit"
+      ],
+      "only_mode": "release",
+      "argv": [
+        "{python}",
+        "{tools}/release_post_commit.py",
+        "verify",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--spec",
+        "{prod_spec}",
+        "--commit-result",
+        "{production}/execute-commit.json",
+        "--pre-pointers",
+        "{lane_real}/pointers-after-dry-run.json",
+        "--preflight-evidence-dir",
+        "{production}/evidence",
+        "--post-evidence-dir",
+        "{post_release_evidence}",
+        "--rehearsal-root",
+        "{real_rehearsal}",
+        "--clean-room",
+        "{real_clean_room}",
+        "--harness-code-commit",
+        "{code_commit}",
+        "--post-pointers",
+        "{post_commit}/post-commit-pointers.json",
+        "--log-dir",
+        "{post_commit}/logs",
+        "--out",
+        "{post_commit}/post-commit-verify.json"
+      ],
+      "outputs": [
+        "{post_commit}"
+      ],
+      "checks": [
+        {
+          "json": "{post_commit}/post-commit-verify.json",
+          "path": "schema_version",
+          "equals": "qe-post-commit-verify/1"
+        }
+      ],
+      "only_ceremony": "full"
+    },
+    {
+      "id": "pack-evidence",
+      "explicit": true,
+      "requires": [
+        "post-commit-verify"
       ],
       "only_mode": "release",
       "argv": [
@@ -1105,6 +1157,7 @@
         "provider-generations.json",
         "laneout",
         "replica-production",
+        "post-commit",
         "--exclude",
         "logs/pack-evidence.*",
         "production/state/*",

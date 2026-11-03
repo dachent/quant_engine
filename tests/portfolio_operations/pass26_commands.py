@@ -55,6 +55,7 @@ def write(OUT: Path) -> None:
         "evidence_dest": "C:/unused/evidence",
         "pre_chain_script": R + "/work/pre_chain.py",
         "pre_chain_sha256": "0" * 64,
+        "resolved_cycle": "/synthetic/resolved-cycle.json",
     }
     ids = {
         "ledger_id": LEDGER,
