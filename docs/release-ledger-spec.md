@@ -34,7 +34,10 @@ regenerated blocks are ignored; any other key is a refusal. The provenance block
 provenance generation directory (its name is the id). Rebinding the layered `returns.csv` stays with
 the existing rebind tool.
 
-Outputs (create-only, `--out-root` must lie inside the cycle scratch root): `run-observation.json`
+Outputs (create-only and resumable: each file is written through a temporary name and renamed into place;
+a file already holding exactly the bytes the builder produces is kept and the self-check runs again, so a
+killed run resumes; a file with other bytes is refused as `OUTPUT_EXISTS`; `--out-root` must lie inside the
+cycle scratch root): `run-observation.json`
 and `ledger-spec.json`, whose `run_observation` block points at the first. The new spec is then
 checked by the committed ledger validator (`provider_ledger.build_catalog`, writes nothing). Any error
 is a refusal and both files are renamed `*.rejected`. `--plan` builds and prints without writing or
@@ -45,6 +48,11 @@ Refusal codes: `RESOLVED_VERSION`, `OUT_ROOT`, `PROVIDER_SET`, `PREDECESSOR_SPEC
 `CATALOG_NOT_IN_MANIFEST`, `COVERAGE_UNBOUNDED`, `QUALIFICATION_COVERAGE`,
 `FINALITY_BEYOND_COVERAGE`, `FINALITY_EVIDENCE_MISSING`, `FINALITY_NOT_MANIFEST`,
 `FINALITY_NOT_SELECTED_ARTIFACT`, `OUTPUT_EXISTS`, `SELF_CHECK`; cycle-manifest codes pass through.
+
+Tests: `tests/portfolio_operations/test_release_ledger_spec_e2e.py` derives a cycle manifest from the
+synthetic native-format generations that `tests/provider_ledger/test_admit_or_declare.py` builds, and the
+builder's default self-check (the real validator, nothing patched) accepts all seven providers; a finality
+claim the validator rejects leaves both files as `*.rejected`.
 
 ## B2: `provider_sources: "from_ledger"` in the release driver
 

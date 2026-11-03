@@ -665,7 +665,8 @@
         "--emit-commit-authorization",
         "{production}/commit-authorization.json"
       ],
-      "explicit": true
+      "explicit": true,
+      "only_ceremony": "full"
     },
     {
       "id": "plan",
@@ -696,7 +697,8 @@
           "equals": []
         }
       ],
-      "explicit": true
+      "explicit": true,
+      "only_ceremony": "full"
     },
     {
       "id": "dry-run",
@@ -718,7 +720,8 @@
         "--spec",
         "{prod_spec}"
       ],
-      "explicit": true
+      "explicit": true,
+      "only_ceremony": "full"
     },
     {
       "id": "findings-panel",
@@ -750,7 +753,8 @@
         "--details-out",
         "{production}/panel-findings-details.json"
       ],
-      "explicit": true
+      "explicit": true,
+      "only_ceremony": "full"
     },
     {
       "id": "findings-targets",
@@ -770,7 +774,8 @@
         "--release-id",
         "{serial_release_id}"
       ],
-      "explicit": true
+      "explicit": true,
+      "only_ceremony": "full"
     },
     {
       "id": "attest",

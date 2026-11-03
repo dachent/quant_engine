@@ -232,9 +232,30 @@ def test_write_is_create_only_and_runs_the_self_check_on_the_written_spec(
         "size_bytes": observation_path.stat().st_size,
     }
     assert b"\r" not in observation_path.read_bytes()
+    assert not list(world["out"].glob("*.tmp"))
+    # a finished pair is re-validated, not refused; a file with other bytes is refused
+    again = tool.write_and_check(_build(world), check)
+    assert again == result and len(seen) == 2
+    observation_path.write_bytes(observation_path.read_bytes() + b" ")
     with pytest.raises(tool.LedgerSpecError) as info:
         tool.write_and_check(_build(world), check)
     assert info.value.code == "OUTPUT_EXISTS"
+
+
+def test_an_interrupted_write_resumes_at_the_missing_file_and_validates(
+    world: dict[str, Any],
+) -> None:
+    calls: list[Path] = []
+    tool.write_and_check(_build(world), calls.append)
+    (
+        world["out"] / tool.SPEC_NAME
+    ).unlink()  # killed after the first file, before the second
+    (world["out"] / (tool.SPEC_NAME + ".tmp")).write_bytes(
+        b"half"
+    )  # and a torn temp file
+    result = tool.write_and_check(_build(world), calls.append)
+    assert len(calls) == 2 and Path(result["ledger_spec"]).is_file()
+    assert not list(world["out"].glob("*.tmp"))
 
 
 def test_a_failing_self_check_refuses_and_sets_both_files_aside(
