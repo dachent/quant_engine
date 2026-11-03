@@ -23,6 +23,7 @@ _PASSTHROUGH = (
     "expiry",
     "figi",
     "isin",
+    "listing_exchange",
     "multiplier",
     "provider_identifier_sha256",
     "put_call",

@@ -285,3 +285,79 @@ def test_build_supports_a_closed_sector_return_universe(tmp_path: Path) -> None:
     assert result["universe_ids"] == ["us-sector-return"]
     assert [item["series_id"] for item in result["series"]] == list(tickers)
     assert result["series"][0]["role"] == "SECTOR_RETURN_PROXY"
+
+
+def test_calendar_extension_keeps_a_longer_history_before_the_cash_proxy_starts(
+    tmp_path: Path,
+) -> None:
+    catalog, source, manifest, _ = _inputs(tmp_path)
+    catalog_document = json.loads(catalog.read_text(encoding="utf-8"))
+    catalog_document["prior_baseline"]["calendar_extension_proxy"] = "VALUE"
+    catalog_document["universes"][0]["candidates"].append(
+        {"candidate_id": "BTC-USD", "source_id": "yahoo-adjusted-etf-daily"}
+    )
+    _write_json(catalog, catalog_document)
+    source_document = json.loads(source.read_text(encoding="utf-8"))
+    source_document["tickers"].append("BTC-USD")
+    template = next(row for row in source_document["rows"] if row["Ticker"] == "VALUE")
+    for ticker, start, offsets in (
+        ("VALUE", date(2025, 12, 30), (0, 1, 2)),
+        ("BTC-USD", date(2025, 12, 29), (0, 1, 2, 3, 4, 5, 6)),
+    ):
+        for offset in offsets:
+            close = str(Decimal("100") * Decimal("1.1") ** offset)
+            source_document["rows"].append(
+                {
+                    **template,
+                    "Ticker": ticker,
+                    "Date": (start + timedelta(days=offset)).isoformat() + "T00:00:00",
+                    "Open": close,
+                    "High": close,
+                    "Low": close,
+                    "Close": close,
+                }
+            )
+    # The extension dates 2025-12-30..2026-01-01 precede the first BIL price.
+    source, content = _write_json(source, source_document)
+    manifest_document = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_document["request"]["tickers"].append("BTC-USD")
+    manifest_document["artifact"]["sha256"] = hashlib.sha256(content).hexdigest()
+    manifest_document["artifact"]["size_bytes"] = len(content)
+    manifest_document["coverage"]["observed_tickers"].append("BTC-USD")
+    _write_json(manifest, manifest_document)
+
+    outputs, result = sources.build_bundle(catalog, source, manifest)
+    rows = _csv_rows(outputs[sources.OUTPUT_NAME])
+    dates = [row[0] for row in rows[1:]]
+    assert dates == sorted(set(dates))
+    assert dates[0] == "2025-12-31"
+    assert "2026-01-03" in dates and "2026-01-04" in dates
+    first_bil = next(row[0] for row in rows[1:] if row[rows[0].index("BIL")] != "")
+    assert any(date_ < first_bil for date_ in dates)
+    assert all(
+        row[rows[0].index("BIL")] == "" for row in rows[1:] if row[0] < first_bil
+    )
+    assert result["policies"]["calendar"] == (
+        "BIL_OBSERVED_RETURN_DATES_EXTENDED_BEFORE_FIRST_BY_VALUE_NO_FILL"
+    )
+
+
+def test_calendar_extension_is_ignored_by_universes_that_do_not_list_it(
+    tmp_path: Path,
+) -> None:
+    catalog, source, manifest, _ = _inputs(tmp_path)
+    document = json.loads(catalog.read_text(encoding="utf-8"))
+    document["prior_baseline"]["calendar_extension_proxy"] = "NOT-REQUESTED"
+    _write_json(catalog, document)
+    outputs, result = sources.build_bundle(catalog, source, manifest)
+    assert result["policies"]["calendar"] == "PROVIDER_OBSERVED_EXACT_DATE_NO_FILL"
+    assert outputs[sources.OUTPUT_NAME]
+
+
+def test_calendar_extension_may_not_be_the_cash_proxy(tmp_path: Path) -> None:
+    catalog, source, manifest, _ = _inputs(tmp_path)
+    document = json.loads(catalog.read_text(encoding="utf-8"))
+    document["prior_baseline"]["calendar_extension_proxy"] = "BIL"
+    _write_json(catalog, document)
+    with pytest.raises(sources.StyleSourceError, match="differ from the cash proxy"):
+        sources.build_bundle(catalog, source, manifest)

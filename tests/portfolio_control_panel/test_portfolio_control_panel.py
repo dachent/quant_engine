@@ -702,8 +702,8 @@ def _capital_summary_row(
 # 2026-07-30 figure; nothing is retained excluded.  The report rows and the governed
 # baseline's `current_capital` below are the same numbers.
 FIXTURE_SYSTEMATIC = "7021"
-FIXTURE_RESERVE = "100043.62"
-FIXTURE_TOTAL_LIQUID = "107064.62"
+FIXTURE_RESERVE = "78654.294044"
+FIXTURE_TOTAL_LIQUID = "85675.294044"
 FIXTURE_CAPITAL_DAY = "2026-07-30"
 
 
@@ -775,7 +775,7 @@ def _report() -> dict[str, object]:
     allocations = [
         {
             "as_of_date": "2026-07-30",
-            "current_value_usd": "100043.62",
+            "current_value_usd": "78654.294044",
             "scope": "RESERVE",
             "source_key": "synthetic-summary",
             "strategy_id": None,
@@ -2344,7 +2344,7 @@ def _panel_baseline_catalog(
             "current_value": {
                 "currency": "USD",
                 "status": "AVAILABLE",
-                "value": "100043.62",
+                "value": "78654.294044",
             },
             "scope": "RESERVE",
             "strategy_id": None,
@@ -2965,6 +2965,8 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         {
             "account_id": "account-00",
             "as_of_date": "2026-07-30",
+            "asset_category": None,
+            "asset_category_label": None,
             "evidence_class": "WCH_CURRENT",
             "market_value_usd": "30",
             "quantity": "3",
@@ -6442,8 +6444,8 @@ def test_real_qa_harness_output_validates_and_publishes_without_locators(
 
     manifests = sorted(qa.glob("*/manifest.json"))
     lints = sorted(qa.glob("*/visual-lint.json"))
-    assert len(manifests) == 31
-    assert len(lints) == 30
+    assert len(manifests) == 34
+    assert len(lints) == 33
     for path in (*manifests, *lints):
         record = json.loads(path.read_text(encoding="utf-8"))
         assert record["qa_manifest_version"] == 2
@@ -7639,13 +7641,13 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
 def test_mvp_exposes_all_nine_accepted_views() -> None:
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
 
-    # Ten views exist (the Performance charts tab was added), but only nine are primary navigation.  The frozen
+    # Eleven views exist (Performance charts and Model vs actual were added), but only ten are primary navigation.  The frozen
     # candidate catalog is dated research context that cannot change current
     # strategies, readiness or allocation, so it is reachable only through the
     # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
     # elements anywhere in the document, and the last published generation
     # (41f41362) shipped none.
-    assert template.count('class="nav-item') == 9
+    assert template.count('class="nav-item') == 10
     for view in (
         "command",
         "capital",
@@ -7655,6 +7657,7 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "dependence",
         "weekly",
         "performance",
+        "modelvsactual",
         "data",
     ):
         assert f'data-nav="{view}"' in template
@@ -9528,7 +9531,7 @@ def _manifest_row(**overrides: Any) -> dict[str, Any]:
         "internal_out": "0.00",
         "withdrawn": "0.00",
         "net_capital": "50000.00",
-        "current_value": "56832.54",
+        "current_value": "44681.742948",
         "gain": "6832.54",
         "mwr": "0.1367",
         "annualized_mwr": "0.2237",
@@ -10552,7 +10555,7 @@ def test_account_manifest_blocked_flows_through_build_and_verify(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "manifest",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     built_with = panel.build_candidate(
@@ -10753,7 +10756,7 @@ def test_financial_mode_requires_separately_selected_flow_coverage(
 ) -> None:
     """Omitting the receipt input must not let financial mode treat flows as zero."""
     manifest_path, authority = _produce_manifest(
-        tmp_path / "manifest", "56832.54", accepted_baseline_root=inputs["baseline"]
+        tmp_path / "manifest", "44681.742948", accepted_baseline_root=inputs["baseline"]
     )
     with pytest.raises(
         panel.ControlPanelValidationError,
@@ -10809,7 +10812,9 @@ def test_financial_manifest_rejects_mutated_flow_coverage_input(
 def test_financial_mode_does_not_reuse_generic_report_baseline(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    manifest_path, authority = _produce_manifest(tmp_path / "baseline-seam", "56832.54")
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "baseline-seam", "44681.742948"
+    )
     with pytest.raises(
         panel.ControlPanelValidationError,
         match="independently selected baseline root",
@@ -10858,7 +10863,7 @@ def test_financial_mode_rejects_manifest_from_a_different_as_of_candidate(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "date-seam",
-        "56832.54",
+        "44681.742948",
         as_of="2026-07-29",
         accepted_baseline_root=inputs["baseline"],
     )
@@ -10890,7 +10895,7 @@ def test_financial_mode_rejects_manifest_outside_usd_reporting_perimeter(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "eur-seam",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
         accounting_currency="EUR",
     )
@@ -10923,7 +10928,7 @@ def test_financial_mode_rejects_self_consistent_unapproved_policy_path(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "canonical",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     copied_policy = tmp_path / "copied-policy.json"
@@ -10956,7 +10961,7 @@ def test_financial_mode_rejects_report_unbound_manifest_baseline(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     manifest_path, authority = _produce_manifest(
-        tmp_path / "foreign-baseline", "56832.54"
+        tmp_path / "foreign-baseline", "44681.742948"
     )
 
     with pytest.raises(
@@ -11030,7 +11035,7 @@ def test_financial_mode_rebuild_rejects_independent_authority_drift(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / drifted_authority,
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     if drifted_authority == "ledger":
@@ -11104,7 +11109,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
 ) -> None:
     manifest_path, authority = _produce_manifest(
         tmp_path / "status-downgrade",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -11170,7 +11175,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
 def test_account_manifest_snapshot_bytes_are_read_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    manifest_path, _ = _produce_manifest(tmp_path / "snapshot", "56832.54")
+    manifest_path, _ = _produce_manifest(tmp_path / "snapshot", "44681.742948")
     original_read_bytes = Path.read_bytes
     reads = 0
 
@@ -11955,7 +11960,7 @@ def test_account_manifest_money_identity_fails_closed(
 def test_account_manifest_epoch_continuity_fails_closed(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    first = _manifest_row(strategy_id="strategy-a", current_value="56832.54")
+    first = _manifest_row(strategy_id="strategy-a", current_value="44681.742948")
     successor = _manifest_row(
         strategy_id="strategy-b",
         effective_start="2026-08-14",
@@ -11985,13 +11990,13 @@ def test_account_manifest_epoch_continuity_fails_closed(
 def test_account_manifest_v1_rollover_is_rejected(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    first = _manifest_row(strategy_id="strategy-a", current_value="56832.54")
+    first = _manifest_row(strategy_id="strategy-a", current_value="44681.742948")
     successor = _manifest_row(
         strategy_id="strategy-b",
         effective_start="2026-08-14",
-        **{"opening_capital": "56832.54"},
-        invested="56832.54",
-        net_capital="56832.54",
+        **{"opening_capital": "44681.742948"},
+        invested="44681.742948",
+        net_capital="44681.742948",
         current_value="57100.00",
         gain="267.46",
     )
@@ -12348,7 +12353,7 @@ def _financial_manifest_kwargs(
     target_dir: Path, accepted_baseline_root: Path
 ) -> dict[str, Any]:
     manifest_path, authority = _produce_manifest(
-        target_dir, "56832.54", accepted_baseline_root=accepted_baseline_root
+        target_dir, "44681.742948", accepted_baseline_root=accepted_baseline_root
     )
     return {
         "account_manifest_path": manifest_path,
@@ -12822,7 +12827,7 @@ def test_account_manifest_producer_to_publish_blocked_seam(
     verify -> publish, and distinct manifests must yield distinct panels."""
     manifest_path, authority = _produce_manifest(
         tmp_path / "primary",
-        "56832.54",
+        "44681.742948",
         accepted_baseline_root=inputs["baseline"],
     )
     built = panel.build_candidate(
@@ -14314,6 +14319,7 @@ def test_g2_lazy_view_renders_only_direct_hash_and_refreshes_hidden_context(
         "renderDependence",
         "renderWeekly",
         "renderPerformance",
+        "renderModelVsActual",
         "renderCandidates",
         "renderData",
     )
@@ -14408,7 +14414,7 @@ def test_g2_lazy_view_keeps_source_clock_visible_to_native_browser_qa(
     )
     assert result.returncode == 0, f"native browser QA failed: {result.stderr}"
     manifests = list(output.glob("*/manifest.json"))
-    assert len(manifests) == 31
+    assert len(manifests) == 34
     assert all(
         json.loads(path.read_text(encoding="utf-8"))["source_clock_display"]["valid"]
         for path in manifests
@@ -15044,7 +15050,54 @@ def test_the_governed_number_is_a_candidate_beside_the_unaccepted_status(
         "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
     }
 
-    candidate = panel._hwm_candidate(proof, summary)
+    receipts = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "receipt": {
+                "span_return_receipts": [
+                    {
+                        "missing_source_date": "2026-01-27",
+                        "span_start_date": "2026-01-26",
+                        "span_end_date": "2026-01-28",
+                        "return": "-0.0171",
+                    }
+                ]
+            },
+        }
+    ]
+    candidate = panel._hwm_candidate(proof, summary, receipts)
+    kpi = candidate.pop("kpi")
+    path = proof["index_path"]
+    assert kpi == {
+        "value": format(
+            Decimal(proof["current_index"]).quantize(Decimal("0.0001")), "f"
+        ),
+        "hwm": format(Decimal(proof["current_hwm"]).quantize(Decimal("0.0001")), "f"),
+        "drawdown": format(
+            Decimal(proof["current_drawdown"]).quantize(Decimal("0.0001")), "f"
+        ),
+        "label": "Governed PORT-HWM-4 candidate, pending owner acceptance",
+        "perimeter": "SYSTEMATIC_EX_RESERVE",
+        "return_basis": proof["return_basis"],
+        "index_points": len(path),
+        "window_start": path[0]["as_of"],
+        "window_end": path[-1]["as_of"],
+        "gated_status": {
+            "policy_id": None,
+            "hwm_numerical_status": "UNAVAILABLE",
+            "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+        },
+        "missing_daily_points": [
+            {
+                "strategy_id": "robuxio-crypto",
+                "date": "2026-01-27",
+                "span_start_date": "2026-01-26",
+                "span_end_date": "2026-01-28",
+                "span_return": "-0.0171",
+            }
+        ],
+    }
+    assert panel._hwm_candidate(proof, summary)["kpi"]["missing_daily_points"] == []
 
     assert candidate == {
         "status": "CANDIDATE_PENDING_OWNER_ACCEPTANCE",
@@ -15251,7 +15304,7 @@ def test_a_rejected_lineage_suppresses_the_version_four_cost_rate_fields() -> No
         "annual_external_cost_rate_pre_tax": "0.07",
         "cost_rate_status": "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE",
         "cost_rate_reason": None,
-        "cost_rate_denominator_usd": "51233.9",
+        "cost_rate_denominator_usd": "40280.09218",
         "cost_rate_denominator_as_of_date": "2026-09-17",
         "cost_rate_denominator_basis": "CURRENT_CUTOFF",
         "cost_schedule_as_of_date": "2026-07-25",
@@ -15721,3 +15774,97 @@ def test_panel_schema_binds_the_lifecycle_marker_to_the_fields() -> None:
         "performance": [{**row, **_LIFECYCLE_ACTIVE}] * 13,
     }
     assert lifecycle_errors(current) == []
+
+
+def test_model_vs_actual_rides_through_the_real_render_schema_and_pin(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The optional block is built, schema-validated and bound only when its pinned input is supplied."""
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_mva_synthetic", Path(__file__).with_name("test_model_vs_actual.py")
+    )
+    assert spec is not None and spec.loader is not None
+    mva_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mva_tests)
+    staged = tmp_path / "audit-bridges.json"
+    staged.write_bytes(mva_tests.synthetic_staged_bytes())
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    base_args = (inputs["report"], inputs["legacy"], panel.DEFAULT_TEMPLATE_ROOT)
+    base_kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+    }
+    without_files, without_data, without_bound = panel._rendered_files(
+        *base_args, **base_kwargs
+    )
+    assert "model_vs_actual" not in without_data
+    assert "model_vs_actual_input" not in without_bound
+
+    files, data, bound = panel._rendered_files(
+        *base_args, **base_kwargs, model_vs_actual_input=(staged, pin)
+    )
+    assert data["model_vs_actual"]["schema_version"] == 1
+    assert data["model_vs_actual"]["audit_input"]["sha256"] == pin
+    assert bound["model_vs_actual_input"] == (staged, pin)
+    published = json.loads(files["data/dashboard_data.json"])
+    assert published["model_vs_actual"]["strategies"][0]["strategy_id"]
+    # Everything else is unchanged by the optional block.
+    assert {
+        k: v for k, v in files.items() if k != "data/dashboard_data.json"
+    }.keys() == {
+        k: v for k, v in without_files.items() if k != "data/dashboard_data.json"
+    }.keys()
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._rendered_files(
+            *base_args, **base_kwargs, model_vs_actual_input=(staged, "0" * 64)
+        )
+    with pytest.raises(panel.ControlPanelValidationError, match="not usable"):
+        panel._rendered_files(
+            *base_args,
+            **base_kwargs,
+            model_vs_actual_input=(staged.with_name("absent.json"), pin),
+        )
+
+
+def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The optional fill record is bound by its pin and refused when no span receipt declares its day."""
+
+    staged = tmp_path / "fills.json"
+    staged.write_bytes(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "subject": {"strategy_id": "fixture-strategy"},
+                "inputs": {"policy_sha256": "b" * 64},
+                "fills": [
+                    {
+                        "date": "2026-01-02",
+                        "rule": "LINEAR_INTERPOLATION",
+                        "origin_label": "ESTIMATED_VENDOR_GAP",
+                        "nav": "0.99",
+                        "previous_nav": {"date": "2026-01-01", "nav": "1"},
+                        "next_nav": {"date": "2026-01-03", "nav": "0.98"},
+                        "leg_in_return": "-0.01",
+                        "leg_out_return": "-0.010101010101010101",
+                        "span_return": "-0.02",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+    )
+    pin = hashlib.sha256(staged.read_bytes()).hexdigest()
+    base_args = (inputs["report"], inputs["legacy"], panel.DEFAULT_TEMPLATE_ROOT)
+    base_kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+    }
+    _files, data, bound = panel._rendered_files(*base_args, **base_kwargs)
+    assert "vendor_gap_fills" not in data
+    assert "vendor_gap_fills" not in bound
+    with pytest.raises(panel.ControlPanelValidationError, match="vendor_gap_fills"):
+        panel._rendered_files(*base_args, **base_kwargs, vendor_gap_fills=(staged, pin))

@@ -4,8 +4,8 @@
 # publishes a private proof and moves nothing in dataPortfolio.
 set -euo pipefail
 
-REPO="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/.codex-bootstrap/mvp2-execution/repo"
-Q="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
+REPO="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}/.codex-bootstrap/mvp2-execution/repo"
+Q="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}"
 PY="C:/Dev/scratch/quant-engine/.venv-mvp2/Scripts/python.exe"
 W="C:/Dev/scratch/quant-engine/pl12"
 CA="$Q/dataPortfolio/rollforward/2026-09-10-mvp2-live-only/correction-authority"

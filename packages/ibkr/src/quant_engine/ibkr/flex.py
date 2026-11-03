@@ -176,6 +176,9 @@ class FlexPosition:
     expiry: str | None = None
     strike: Decimal | None = None
     put_call: str | None = None
+    # The listing the held lot trades on (OpenPosition listingExchange); a
+    # symbol is only unique with it (WILC on NASDAQ, WILCF on PINK).
+    listing_exchange: str | None = None
 
 
 @dataclass(frozen=True)
@@ -390,6 +393,7 @@ def _position(element: ET.Element, raw_account_id: str) -> FlexPosition:
         expiry=_optional(element.attrib.get("expiry")),
         strike=_optional_decimal(element.attrib.get("strike"), "position.strike"),
         put_call=_optional(element.attrib.get("putCall")),
+        listing_exchange=_optional(element.attrib.get("listingExchange")),
     )
 
 

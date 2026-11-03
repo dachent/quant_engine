@@ -158,3 +158,39 @@ def test_d8_status_words_bad_control_catches_an_injected_status_word() -> None:
         " PUBLISHED stage input, hash-bound at build"
     )
     assert _d8_status_word_match(bad) == "PUBLISHED"
+
+
+def _code_lines(text: str) -> list[str]:
+    return [
+        line for line in text.splitlines() if not line.lstrip().startswith(("//", "*"))
+    ]
+
+
+def test_no_acceptance_state_wording_is_hardcoded_in_app_js() -> None:
+    """P24: 'pending owner acceptance' (any case) is read from the payload status, never typed."""
+
+    hits = [
+        number
+        for number, line in enumerate(_code_lines(_app_js()), start=1)
+        if re.search(r"pending\s+owner\s+acceptance", line, re.IGNORECASE)
+    ]
+
+    assert hits == []
+
+
+def test_the_hardcoded_acceptance_scan_catches_the_old_literals() -> None:
+    old = (
+        "const a = `candidate shown, pending owner acceptance`;"
+        + NL
+        + "const b = `<strong>GOVERNED REAL DATA \u2014 PENDING OWNER ACCEPTANCE</strong>`;"
+        + NL
+        + "// a comment about pending owner acceptance is fine"
+    )
+
+    found = [
+        line
+        for line in _code_lines(old)
+        if re.search(r"pending\s+owner\s+acceptance", line, re.IGNORECASE)
+    ]
+
+    assert len(found) == 2

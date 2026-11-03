@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+from typing import Any
 import sys
 
 import pytest
@@ -70,6 +71,7 @@ def _correlation_fixture(
     *,
     source_artifact_id: str = "provider-rollforward/layered-strategy-returns.csv",
     strategy_count: int = 9,
+    backtest_date: str = "2026-07-20",
 ) -> tuple[Path, Path]:
     strategy_returns = tmp_path / "strategy-returns.csv"
     selected_strategies = STRATEGIES[:strategy_count]
@@ -97,7 +99,7 @@ def _correlation_fixture(
         if index == 0:
             rows.append(
                 {
-                    "date": "2026-07-20",
+                    "date": backtest_date,
                     "evidence_layer": "BACKTEST",
                     "return": "0.02",
                     "series_id": strategy,
@@ -182,6 +184,7 @@ def _plan_fixture(
     tmp_path: Path,
     *,
     observation_dates: tuple[str, ...] = ("2026-07-27", "2026-07-28"),
+    market_history_dates: tuple[str, ...] = ("2026-07-14", "2026-07-15"),
 ) -> Path:
     bundle = tmp_path / ("b" * 64)
     sources = {
@@ -243,6 +246,18 @@ def _plan_fixture(
         ]
         _write_csv(path, columns, rows)
         manifest_inputs.append({"path": relative, "sha256": _sha(path)})
+    market_path = bundle / "inputs/market/style_returns.csv"
+    market_rows = [
+        {"date": observed, "SPY": "0.004", "SPXL": "0.012", "BIL": ""}
+        for observed in market_history_dates
+    ] + [
+        {"date": observed, "SPY": "0.01", "SPXL": "0.03", "BIL": "0.0001"}
+        for observed in observation_dates
+    ]
+    _write_csv(market_path, ["date", "BIL", "SPY", "SPXL"], market_rows)
+    manifest_inputs.append(
+        {"path": "inputs/market/style_returns.csv", "sha256": _sha(market_path)}
+    )
     _write_json(
         bundle / "plan-manifest.json",
         {
@@ -873,3 +888,963 @@ def test_weekly_compounding_error_is_bounded_well_below_the_consumers_resolution
         exact -= 1
     assert len(published) == 1
     assert abs(Decimal(next(iter(published.values()))) - exact) < Decimal("4e-27")
+
+
+def test_full_history_benchmarks_come_from_the_market_input_not_the_gated_lens(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+
+    payload, inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+
+    by_id = {row["series_id"]: row for row in payload["series"]}
+    for ticker in weekly.FULL_HISTORY_BENCHMARKS:
+        row = by_id[f"market:{ticker}"]
+        assert row["source_key"] == "core-benchmark-market"
+        assert "CORE_BENCHMARK" in row["display_groups"]
+        # the history before the cash proxy's first observation is kept
+        assert row["coverage"]["first_week"] == "2026-07-13"
+    assert plan_bundle / "inputs/market/style_returns.csv" in inputs
+    assert by_id["market:IWX"]["source_key"] == "us-equity-style"
+
+    daily = payload["daily_benchmark_returns"]
+    assert daily["status"] == "AVAILABLE"
+    assert daily["source_id"] == "yahoo-adjusted-etf-daily"
+    assert daily["unit"] == "DECIMAL_DAILY_RETURN"
+    assert daily["source_artifact"]["path"] == "inputs/market/style_returns.csv"
+    spy = next(item for item in daily["series"] if item["ticker"] == "SPY")
+    assert spy["series_id"] == "market:SPY"
+    assert spy["dates"][:2] == ["2026-07-14", "2026-07-15"]
+    assert spy["returns"][:2] == ["0.004", "0.004"]
+    assert spy["observation_count"] == len(spy["dates"]) == len(spy["returns"])
+    assert spy["dates"] == sorted(set(spy["dates"]))
+    assert max(spy["dates"]) <= payload["as_of_date"]
+    # daily and weekly agree: the weekly value is the product of the daily returns
+    week = [
+        Decimal(1) + Decimal(value)
+        for day, value in zip(spy["dates"], spy["returns"], strict=True)
+        if "2026-07-13" <= day <= "2026-07-19"
+    ]
+    product = Decimal(1)
+    for factor in week:
+        product *= factor
+    assert Decimal(by_id["market:SPY"]["values"]["2026-07-13"]) == product - 1
+
+
+def test_market_benchmark_input_hash_is_bound_to_the_plan_manifest(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    market = plan_bundle / "inputs/market/style_returns.csv"
+    market.write_bytes(market.read_bytes() + b"2026-07-29,,0.5,0.5\n")
+
+    with pytest.raises(weekly.WeeklyReturnError, match="hash differs"):
+        weekly.build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+
+
+def _gap_fill_root(
+    tmp_path: Path,
+    *,
+    flag: str = "ORIGIN_DERIVED",
+    days: tuple[str, ...] = (
+        "2026-07-13",
+        "2026-07-14",
+        "2026-07-15",
+        "2026-07-16",
+        "2026-07-17",
+        "2026-07-20",
+        "2026-07-21",
+        "2026-07-22",
+        "2026-07-23",
+        "2026-07-24",
+    ),
+    mode: str = "LIVE_PLUS_BACKTEST",
+    series: str = "Strategy 0",
+) -> Path:
+    root = tmp_path / "gap-fill"
+    rows = [
+        {
+            "series_id": "Fill Source",
+            "date": day,
+            "return": "0.01",
+            "evidence_layer": "DERIVED",
+            "return_basis": "FIXTURE",
+        }
+        for day in days
+    ] + [
+        {
+            "series_id": "Other Source",
+            "date": "2026-07-14",
+            "return": "0.5",
+            "evidence_layer": "DERIVED",
+            "return_basis": "FIXTURE",
+        }
+    ]
+    staging = tmp_path / "fill-returns.csv"
+    _write_csv(
+        staging,
+        ["series_id", "date", "return", "evidence_layer", "return_basis"],
+        rows,
+    )
+    artifact = SourceArtifact.from_path(
+        staging,
+        artifact_id="returns.csv",
+        as_of_date=EXECUTION_DATE,
+        schema_name="fixture-returns",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=EXECUTION_DATE,
+        adapter=AdapterIdentity("synthetic-fill", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic fill",
+            fact_types=("fill",),
+            observed_start=date(2026, 7, 13),
+            observed_end=date(2026, 7, 24),
+        ),
+        artifacts=(artifact,),
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation = root / "generations" / manifest.generation_id
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    (generation / "returns.csv").write_bytes(staging.read_bytes())
+    _write_json(
+        root / "spec.json",
+        {
+            "schema_version": 1,
+            "policy_id": "fixture-fill",
+            "fills": [
+                {
+                    "strategy_series_id": series,
+                    "mode": mode,
+                    "origin_flag": flag,
+                    "source": {
+                        "generation_id": manifest.generation_id,
+                        "returns_artifact": "returns.csv",
+                        "series_id": "Fill Source",
+                        "evidence_layer": "DERIVED",
+                    },
+                }
+            ],
+        },
+    )
+    return root
+
+
+def test_gap_fill_supplies_only_the_unobserved_hybrid_weeks_with_an_origin_flag(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(
+        tmp_path, backtest_date="2026-07-06"
+    )
+    plan_bundle = _plan_fixture(tmp_path)
+    before, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+    base = next(r for r in before["series"] if r["series_id"] == "strategy:Strategy 0")
+    base_hybrid = base["values_by_mode"]["LIVE_PLUS_BACKTEST"]
+    assert base["mode_coverage"]["LIVE_PLUS_BACKTEST"]["internal_missing_weeks"] == 2
+    assert before["gap_fills"] == {"fills": [], "policy_id": None, "spec_sha256": None}
+
+    root = _gap_fill_root(tmp_path)
+    payload, inputs = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, root
+    )
+    row = next(r for r in payload["series"] if r["series_id"] == "strategy:Strategy 0")
+    hybrid = row["values_by_mode"]["LIVE_PLUS_BACKTEST"]
+    meta = row["observation_meta_by_mode"]["LIVE_PLUS_BACKTEST"]
+    # existing weeks are untouched; the two gap weeks are filled and flagged
+    assert hybrid["2026-07-06"] == base_hybrid["2026-07-06"]
+    assert hybrid["2026-07-27"] == base_hybrid["2026-07-27"]
+    assert meta["2026-07-13"][4] == ["ORIGIN_DERIVED"]
+    assert meta["2026-07-20"][4] == ["ORIGIN_DERIVED"]
+    assert meta["2026-07-13"][0] == 5
+    assert "ORIGIN_DERIVED" not in meta["2026-07-27"][4]
+    expected = Decimal("1.01") ** 5 - 1
+    assert abs(Decimal(hybrid["2026-07-13"]) - expected) < Decimal("1E-20")
+    coverage = row["mode_coverage"]["LIVE_PLUS_BACKTEST"]
+    assert coverage["internal_missing_weeks"] == 0
+    detail = coverage["gap_fill"]
+    assert detail["filled_weeks"] == 2
+    assert detail["filled_daily_observations"] == 10
+    assert detail["first_filled_week"] == "2026-07-13"
+    assert detail["observations_outside_gap_ignored"] == 0
+    # LIVE_ONLY never carries a fill
+    assert "gap_fill" not in row["mode_coverage"]["LIVE_ONLY"]
+    assert all(
+        "ORIGIN_DERIVED" not in item[4]
+        for item in row["observation_meta_by_mode"]["LIVE_ONLY"].values()
+    )
+    assert payload["gap_fills"]["fills"][0]["origin_flag"] == "ORIGIN_DERIVED"
+    assert root / "spec.json" in inputs
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"flag": "ORIGIN_BACKTEST"}, "origin flag is unsupported"),
+        ({"mode": "LIVE_ONLY"}, "hybrid mode"),
+        ({"series": "No Such Strategy"}, "unknown strategy"),
+        ({"days": ("2026-07-13", "2026-07-14")}, "unfilled weeks"),
+    ],
+)
+def test_gap_fill_refuses_unsupported_or_incomplete_fills(
+    tmp_path: Path, overrides: dict[str, object], message: str
+) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(
+        tmp_path, backtest_date="2026-07-06"
+    )
+    plan_bundle = _plan_fixture(tmp_path)
+    root = _gap_fill_root(tmp_path, **overrides)  # type: ignore[arg-type]
+    with pytest.raises(weekly.WeeklyReturnError, match=message):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+
+
+def test_gap_fill_requires_a_real_gap_and_an_untampered_source(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    root = _gap_fill_root(tmp_path)
+    with pytest.raises(weekly.WeeklyReturnError, match="no gap"):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+    generation = next((root / "generations").iterdir())
+    returns = generation / "returns.csv"
+    returns.write_bytes(returns.read_bytes() + b"\n")
+    with pytest.raises(weekly.WeeklyReturnError, match="differ from their manifest"):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+
+
+def test_daily_benchmark_block_validates_against_the_panel_schema(
+    tmp_path: Path,
+) -> None:
+    import jsonschema
+
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle
+    )
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas/portfolio/control-panel-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    block_schema = {
+        "$defs": schema["$defs"],
+        **schema["properties"]["weekly_returns"]["properties"][
+            "daily_benchmark_returns"
+        ],
+    }
+    validator = jsonschema.Draft202012Validator(
+        block_schema, format_checker=jsonschema.FormatChecker()
+    )
+    validator.validate(payload["daily_benchmark_returns"])
+    broken = json.loads(json.dumps(payload["daily_benchmark_returns"]))
+    broken["unit"] = "PERCENT"
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(broken)
+
+
+def test_gap_fill_generation_must_pass_the_manifest_contract(tmp_path: Path) -> None:
+    correlation_root, strategy_returns = _correlation_fixture(tmp_path)
+    plan_bundle = _plan_fixture(tmp_path)
+    root = _gap_fill_root(tmp_path)
+    generation = next((root / "generations").iterdir())
+    manifest = generation / "generation.json"
+    manifest.write_bytes(manifest.read_bytes().replace(b'"VERIFIED"', b'"VERIFIED" '))
+    manifest_text = json.loads(manifest.read_bytes())
+    manifest_text["coverage"] = {"forged": True}
+    manifest.write_bytes(json.dumps(manifest_text).encode("utf-8"))
+    with pytest.raises(weekly.WeeklyReturnError, match="manifest contract"):
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, root
+        )
+
+
+def test_gap_fill_spec_pin_must_be_named_spec_json() -> None:
+    import portfolio_release_builder as builder
+
+    builder.require_gap_fill_spec_name(Path("x/spec.json"))
+    with pytest.raises(builder.VerticalBuildError, match="spec.json"):
+        builder.require_gap_fill_spec_name(Path("x/other.json"))
+
+
+def test_vendor_gap_fills_recipe_pin_becomes_the_panel_arguments(
+    tmp_path: Path,
+) -> None:
+    import portfolio_release_builder as builder
+
+    assert builder._vendor_gap_fill_arguments({}) == ()
+    fills = tmp_path / "fills.json"
+    fills.write_bytes(b"{}\n")
+    definition = builder._file_definition(fills)
+    arguments = builder._vendor_gap_fill_arguments({"vendor_gap_fills": definition})
+    assert arguments[0] == "--vendor-gap-fills"
+    assert arguments[2] == "--vendor-gap-fills-sha256"
+    assert arguments[3] == definition["sha256"]
+
+
+# --- accepted multi-day spans (N1) -------------------------------------------------
+# All values below are synthetic.  A span is an accepted holding-period return whose
+# end date has no daily row, so the weekly line must compound it into the week that
+# contains its end date and the line must telescope to the governed epoch return.
+
+SPAN_SERIES = "Span Strategy"
+PLAIN_SERIES = "Plain Strategy"
+SPAN_DAILY = {
+    "2026-07-20": "0.01",
+    "2026-07-21": "0.02",
+    "2026-07-24": "0.005",
+    "2026-07-28": "-0.01",
+    "2026-07-29": "0.02",
+}
+# (start, end, return): the second span crosses the ISO week boundary.
+SPAN_LINKS = (
+    ("2026-07-21", "2026-07-23", "-0.03"),
+    ("2026-07-24", "2026-07-27", "0.015"),
+)
+SPAN_TOLERANCE = Decimal("1e-24")
+
+
+def _span_coverage(
+    path: Path,
+    *,
+    links: tuple[tuple[str, str, str], ...] = SPAN_LINKS,
+    daily_sha: str | None = None,
+    epoch_shift: Decimal = Decimal(0),
+    strategy_id: str = "span-s",
+    observed_end: str = "2026-07-29",
+    bind: bool = True,
+) -> Path:
+    daily = [(date.fromisoformat(day), Decimal(r)) for day, r in SPAN_DAILY.items()]
+    daily_wealth = Decimal(1)
+    for _day, value in daily:
+        daily_wealth *= 1 + value
+    epoch_wealth = daily_wealth
+    for _start, _end, value in links:
+        epoch_wealth *= 1 + Decimal(value)
+    _write_json(
+        path,
+        {
+            "strategies": [
+                {"series_id": SPAN_SERIES, "strategy_id": "span-s"},
+                {"series_id": PLAIN_SERIES, "strategy_id": "plain-s"},
+                {"series_id": None, "strategy_id": "excluded-s"},
+            ],
+            "epoch_hpr_receipts": [
+                {
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "strategy_id": strategy_id,
+                    "receipt": {
+                        "daily_cumulative_return": str(daily_wealth - 1),
+                        "daily_return_series_sha256": daily_sha
+                        or weekly._canonical_series_sha256(daily),
+                        "epoch_cumulative_return": str(epoch_wealth - 1 + epoch_shift),
+                        "observed_end": observed_end,
+                        "span_return_receipts": [
+                            {
+                                "return": value,
+                                "span_days": (
+                                    date.fromisoformat(end) - date.fromisoformat(start)
+                                ).days,
+                                "span_end_date": end,
+                                "span_start_date": start,
+                            }
+                            for start, end, value in links
+                        ],
+                    },
+                }
+            ],
+        },
+    )
+    # the dependence source packages this file by hash and size
+    digest = _sha(path)
+    _write_json(
+        path.parent / "dependence-source.json",
+        {
+            "history_authority": {
+                "coverage": {
+                    "sha256": digest if bind else "0" * 64,
+                    "size_bytes": path.stat().st_size,
+                }
+            }
+        },
+    )
+    return path
+
+
+def _span_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    rows = [
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": value,
+            "series_id": SPAN_SERIES,
+            "strategy_version": "v-span",
+        }
+        for day, value in SPAN_DAILY.items()
+    ]
+    rows.append(
+        {
+            "date": "2026-07-13",
+            "evidence_layer": "BACKTEST",
+            "return": "0.02",
+            "series_id": SPAN_SERIES,
+            "strategy_version": "v-span",
+        }
+    )
+    rows.extend(
+        {
+            "date": day,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.001",
+            "series_id": PLAIN_SERIES,
+            "strategy_version": "v-plain",
+        }
+        for day in ("2026-07-20", "2026-07-21", "2026-07-22")
+    )
+    strategy_returns = tmp_path / "strategy-returns.csv"
+    _write_csv(
+        strategy_returns,
+        ["series_id", "date", "return", "evidence_layer", "strategy_version"],
+        rows,
+    )
+
+    def composition(series: str, live: int, backtest: int) -> dict[str, object]:
+        return {
+            "backtest_observations_used": backtest,
+            "live_inception": "2026-07-20",
+            "live_observations": live,
+            "strategy_version": "v-span" if series == SPAN_SERIES else "v-plain",
+        }
+
+    correlation = {
+        "analytics_schema_version": 2,
+        "complete_through": "2026-07-31",
+        "default_evidence_mode": "LIVE_ONLY",
+        "dependence_modes": {
+            "LIVE_ONLY": {
+                "series_composition": {
+                    SPAN_SERIES: composition(SPAN_SERIES, 5, 0),
+                    PLAIN_SERIES: composition(PLAIN_SERIES, 3, 0),
+                }
+            },
+            "LIVE_PLUS_BACKTEST": {
+                "series_composition": {
+                    SPAN_SERIES: composition(SPAN_SERIES, 5, 1),
+                    PLAIN_SERIES: composition(PLAIN_SERIES, 3, 0),
+                }
+            },
+        },
+        "source": {
+            "artifact_id": "provider-rollforward/layered-strategy-returns.csv",
+            "sha256": _sha(strategy_returns),
+            "size_bytes": strategy_returns.stat().st_size,
+        },
+    }
+    correlation_source = tmp_path / "correlation.json"
+    _write_json(correlation_source, correlation)
+    correlation_root = tmp_path / "correlation-root"
+    manifest = GenerationManifest.build(
+        as_of_date=EXECUTION_DATE,
+        adapter=AdapterIdentity("synthetic-correlation", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic layered strategy evidence",
+            fact_types=("layered strategy returns",),
+            observed_start=date(2026, 7, 13),
+            observed_end=date(2026, 7, 31),
+        ),
+        artifacts=(
+            SourceArtifact.from_path(
+                strategy_returns,
+                artifact_id="provider-rollforward/layered-strategy-returns.csv",
+                as_of_date=EXECUTION_DATE,
+                schema_name="portfolio-layered-strategy-returns",
+                schema_version="2",
+            ),
+            SourceArtifact.from_path(
+                correlation_source,
+                artifact_id="normalized/correlation.json",
+                as_of_date=EXECUTION_DATE,
+                schema_name="portfolio-correlation-analytics",
+                schema_version="2",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(correlation_root, manifest)
+    (manifest_path.parent / "correlation.json").write_bytes(
+        correlation_source.read_bytes()
+    )
+    publish_generation(correlation_root, manifest.generation_id)
+    return correlation_root, strategy_returns, _plan_fixture(tmp_path)
+
+
+def _span_series(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(
+        row for row in payload["series"] if row["series_id"] == f"strategy:{name}"
+    )
+
+
+def _line_end(values: dict[str, str], start: str | None = None) -> Decimal:
+    wealth = Decimal(1)
+    for week in sorted(values):
+        if start is None or week >= start:
+            wealth *= 1 + Decimal(values[week])
+    return wealth
+
+
+def test_accepted_spans_compound_into_the_week_containing_their_end(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+    coverage = _span_coverage(tmp_path / "history-coverage.json")
+    payload, paths = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, None, coverage
+    )
+    assert coverage in paths
+    row = _span_series(payload, SPAN_SERIES)
+    first = Decimal("1.01") * Decimal("1.02") * Decimal("0.97") * Decimal("1.005")
+    second = Decimal("1.015") * Decimal("0.99") * Decimal("1.02")
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        values = row["values_by_mode"][mode]
+        # week 07-20 holds the 07-23 span; week 07-27 holds the span that ends on
+        # 07-27 even though it starts in the prior week.
+        assert abs(Decimal(values["2026-07-20"]) - (first - 1)) < SPAN_TOLERANCE
+        assert abs(Decimal(values["2026-07-27"]) - (second - 1)) < SPAN_TOLERANCE
+    assert row["values_by_mode"]["LIVE_PLUS_BACKTEST"]["2026-07-13"] == "0.02"
+    meta = row["observation_meta_by_mode"]["LIVE_ONLY"]
+    assert meta["2026-07-20"][0] == 4 and meta["2026-07-27"][0] == 3
+    spans = row["mode_coverage"]["LIVE_ONLY"]["accepted_multi_day_spans"]
+    assert spans == [
+        {
+            "end": "2026-07-23",
+            "return": "-0.03",
+            "start": "2026-07-21",
+            "strategy_id": "span-s",
+        },
+        {
+            "end": "2026-07-27",
+            "return": "0.015",
+            "start": "2026-07-24",
+            "strategy_id": "span-s",
+        },
+    ]
+    plain = _span_series(payload, PLAIN_SERIES)
+    assert "accepted_multi_day_spans" not in plain["mode_coverage"]["LIVE_ONLY"]
+
+
+def test_weekly_line_telescopes_to_the_product_of_accepted_links(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+    coverage = _span_coverage(tmp_path / "history-coverage.json")
+    payload, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, None, coverage
+    )
+    values = _span_series(payload, SPAN_SERIES)["values_by_mode"]["LIVE_ONLY"]
+    daily = [Decimal(value) for value in SPAN_DAILY.values()]
+    spans = [Decimal(value) for _start, _end, value in SPAN_LINKS]
+    # the end value of the line equals the governed compounded return of every link
+    governed = Decimal(1)
+    for value in [*daily, *spans]:
+        governed *= 1 + value
+    assert abs(_line_end(values) - governed) < SPAN_TOLERANCE
+    # and the ratio over a whole-week window equals the links ending in that window
+    last_week = Decimal("1.015") * Decimal("0.99") * Decimal("1.02")
+    assert abs(_line_end(values, "2026-07-27") - last_week) < SPAN_TOLERANCE
+    assert (
+        abs(_line_end(values) / _line_end(values, "2026-07-27") - governed / last_week)
+        < SPAN_TOLERANCE
+    )
+    # without the governed coverage the same builder omits both measured spans
+    bare, _ = weekly.build_weekly_returns(
+        correlation_root, strategy_returns, plan_bundle, None, None
+    )
+    bare_values = _span_series(bare, SPAN_SERIES)["values_by_mode"]["LIVE_ONLY"]
+    assert abs(_line_end(bare_values) - governed) > Decimal("0.01")
+
+
+def test_accepted_spans_are_refused_when_they_do_not_bind(tmp_path: Path) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+
+    def build(coverage: Path) -> None:
+        weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, None, coverage
+        )
+
+    with pytest.raises(weekly.WeeklyReturnError, match="bind the live daily path"):
+        build(_span_coverage(tmp_path / "a.json", daily_sha="0" * 64))
+    with pytest.raises(weekly.WeeklyReturnError, match="do not telescope"):
+        build(_span_coverage(tmp_path / "b.json", epoch_shift=Decimal("0.001")))
+    with pytest.raises(weekly.WeeklyReturnError, match="unknown strategy"):
+        build(_span_coverage(tmp_path / "c.json", strategy_id="missing-s"))
+    with pytest.raises(weekly.WeeklyReturnError, match="daily observation"):
+        build(
+            _span_coverage(
+                tmp_path / "d.json", links=(("2026-07-27", "2026-07-29", "0.01"),)
+            )
+        )
+    with pytest.raises(weekly.WeeklyReturnError, match="not a multi-day span"):
+        build(
+            _span_coverage(
+                tmp_path / "e.json", links=(("2026-07-22", "2026-07-23", "0.01"),)
+            )
+        )
+    with pytest.raises(weekly.WeeklyReturnError, match="overlap"):
+        build(
+            _span_coverage(
+                tmp_path / "f.json",
+                links=(
+                    ("2026-07-21", "2026-07-24", "0.01"),
+                    ("2026-07-22", "2026-07-26", "0.01"),
+                ),
+            )
+        )
+
+
+def test_release_builder_passes_the_history_coverage_to_the_weekly_stage(
+    tmp_path: Path,
+) -> None:
+    import portfolio_release_builder as builder
+
+    # a legacy source carries no dependence receipt and so no span authority
+    assert builder._weekly_history_coverage_arguments(tmp_path) == ()
+    (tmp_path / "dependence-source.json").write_bytes(b"{}\n")
+    with pytest.raises(builder.VerticalBuildError, match="history coverage"):
+        builder._weekly_history_coverage_arguments(tmp_path)
+    (tmp_path / "history-coverage.json").write_bytes(b"{}\n")
+    assert builder._weekly_history_coverage_arguments(tmp_path) == (
+        "--history-coverage",
+        str(tmp_path / "history-coverage.json"),
+    )
+
+
+def test_weekly_spans_must_equal_the_manifest_links_exactly(tmp_path: Path) -> None:
+    import portfolio_release_builder as builder
+
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+    coverage = _span_coverage(tmp_path / "history-coverage.json")
+    weekly_root = tmp_path / "weekly"
+    candidate = weekly.build_candidate(
+        correlation_root, strategy_returns, plan_bundle, weekly_root, None, coverage
+    )
+    weekly.publish(
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        Path(candidate["candidate_dir"]),
+        weekly_root,
+        None,
+        coverage,
+    )
+
+    def manifest(factors: tuple[str, str]) -> Path:
+        path = tmp_path / f"manifest-{factors[0]}-{factors[1]}.json"
+        _write_json(
+            path,
+            {
+                "rows": [
+                    {
+                        "strategy_id": "span-s",
+                        "account_id": "acct-1",
+                        "observation_trace": {
+                            "links": [
+                                {
+                                    "start_date": start,
+                                    "end_date": end,
+                                    "factor": factor,
+                                }
+                                for (start, end, _value), factor in zip(
+                                    SPAN_LINKS, factors, strict=True
+                                )
+                            ]
+                        },
+                    }
+                ]
+            },
+        )
+        return path
+
+    assert builder._verify_weekly_spans_against_manifest(weekly_root, None) == 0
+    exact = manifest(("0.97", "1.015"))
+    assert builder._verify_weekly_spans_against_manifest(weekly_root, exact) == 2
+    for drifted in (("0.97", "1.0150000000001"), ("0.9700000001", "1.015")):
+        with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+            builder._verify_weekly_spans_against_manifest(
+                weekly_root, manifest(drifted)
+            )
+    gone = tmp_path / "manifest-empty.json"
+    _write_json(
+        gone,
+        {"rows": [{"strategy_id": "span-s", "observation_trace": {"links": []}}]},
+    )
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(weekly_root, gone)
+
+
+def test_span_tolerance_passes_arithmetic_noise_and_fails_real_drift(
+    tmp_path: Path,
+) -> None:
+    import portfolio_release_builder as builder
+
+    assert builder.SPAN_FACTOR_TOLERANCE == Decimal("1e-26")
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+
+    def published(index: int, first_return: str) -> Path:
+        links = (
+            ("2026-07-21", "2026-07-23", first_return),
+            SPAN_LINKS[1],
+        )
+        coverage = _span_coverage(tmp_path / f"cov-{index}.json", links=links)
+        root = tmp_path / f"weekly-{index}"
+        candidate = weekly.build_candidate(
+            correlation_root, strategy_returns, plan_bundle, root, None, coverage
+        )
+        weekly.publish(
+            correlation_root,
+            strategy_returns,
+            plan_bundle,
+            Path(candidate["candidate_dir"]),
+            root,
+            None,
+            coverage,
+        )
+        return root
+
+    def manifest(first_factor: str, index: int) -> Path:
+        path = tmp_path / f"manifest-{index}.json"
+        _write_json(
+            path,
+            {
+                "rows": [
+                    {
+                        "strategy_id": "span-s",
+                        "account_id": "acct-1",
+                        "observation_trace": {
+                            "links": [
+                                {
+                                    "start_date": "2026-07-21",
+                                    "end_date": "2026-07-23",
+                                    "factor": first_factor,
+                                },
+                                {
+                                    "start_date": "2026-07-24",
+                                    "end_date": "2026-07-27",
+                                    "factor": "1.015",
+                                },
+                            ]
+                        },
+                    }
+                ]
+            },
+        )
+        return path
+
+    # a real pair is about 5e-28 apart: same quantity, different arithmetic
+    noisy = "0.9700000000000000000000000005"
+    root = published(0, "-0.03")
+    assert builder._verify_weekly_spans_against_manifest(root, manifest(noisy, 0)) == 2
+    # 1e-12 relative drift in the manifest source fails
+    drifted_manifest = str(Decimal("0.97") * (1 + Decimal("1e-12")))
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(
+            root, manifest(drifted_manifest, 1)
+        )
+    # 1e-12 relative drift in the weekly (history receipt) source fails
+    drifted_weekly = published(2, str(Decimal("-0.03") * (1 + Decimal("1e-12"))))
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(
+            drifted_weekly, manifest("0.97", 2)
+        )
+
+
+def test_accepted_spans_bind_to_the_dependence_source_and_the_common_cutoff(
+    tmp_path: Path,
+) -> None:
+    correlation_root, strategy_returns, plan_bundle = _span_fixture(tmp_path)
+
+    def build(coverage: Path) -> dict[str, Any]:
+        payload, _ = weekly.build_weekly_returns(
+            correlation_root, strategy_returns, plan_bundle, None, coverage
+        )
+        return payload
+
+    # a coverage the dependence source receipt does not name is not authority
+    with pytest.raises(weekly.WeeklyReturnError, match="dependence source receipt"):
+        build(_span_coverage(tmp_path / "unbound.json", bind=False))
+    unbound = tmp_path / "other" / "history-coverage.json"
+    unbound.parent.mkdir()
+    _span_coverage(unbound)
+    (unbound.parent / "dependence-source.json").unlink()
+    with pytest.raises(weekly.WeeklyReturnError, match="dependence source receipt"):
+        build(unbound)
+    # an epoch that runs past the common cutoff cannot reproduce its full-epoch daily
+    # hash from the projected returns, so only the receipt binding applies
+    ragged = build(
+        _span_coverage(
+            tmp_path / "ragged.json", daily_sha="0" * 64, observed_end="2026-08-15"
+        )
+    )
+    values = _span_series(ragged, SPAN_SERIES)["values_by_mode"]["LIVE_ONLY"]
+    first = Decimal("1.01") * Decimal("1.02") * Decimal("0.97") * Decimal("1.005")
+    assert abs(Decimal(values["2026-07-20"]) - (first - 1)) < SPAN_TOLERANCE
+
+
+def _handmade_weekly(
+    tmp_path: Path, spans: dict[str, tuple[str, str, str]], monkeypatch: Any
+) -> Path:
+    """A weekly payload whose strategy series each carry one accepted span."""
+
+    import portfolio_release_builder as builder
+
+    generation = tmp_path / "generation"
+    generation.mkdir(exist_ok=True)
+    series = [
+        {
+            "series_id": f"strategy:{name}",
+            "mode_coverage": {
+                "LIVE_ONLY": {
+                    "accepted_multi_day_spans": [
+                        {
+                            "strategy_id": strategy_id,
+                            "start": "2026-07-21",
+                            "end": "2026-07-23",
+                            "return": value,
+                        }
+                    ]
+                }
+            },
+        }
+        for name, (strategy_id, value, _unused) in spans.items()
+    ]
+    _write_json(generation / "weekly-returns.json", {"series": series})
+    monkeypatch.setattr(
+        builder, "_published_generation", lambda _root: ("g", generation)
+    )
+    return generation
+
+
+def _span_manifest(
+    path: Path, rows: dict[tuple[str, str], str], interval: tuple[str, str]
+) -> Path:
+    _write_json(
+        path,
+        {
+            "rows": [
+                {
+                    "strategy_id": strategy_id,
+                    "account_id": account_id,
+                    "observation_trace": {
+                        "links": [
+                            {
+                                "start_date": interval[0],
+                                "end_date": interval[1],
+                                "factor": factor,
+                            }
+                        ]
+                    },
+                }
+                for (strategy_id, account_id), factor in rows.items()
+            ]
+        },
+    )
+    return path
+
+
+def test_span_check_matches_each_strategy_to_its_own_manifest_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_release_builder as builder
+
+    # two strategies share one interval with different measured factors
+    _handmade_weekly(
+        tmp_path,
+        {"A": ("s-a", "-0.03", ""), "B": ("s-b", "0.02", "")},
+        monkeypatch,
+    )
+    interval = ("2026-07-21", "2026-07-23")
+    right = _span_manifest(
+        tmp_path / "right.json",
+        {("s-a", "acct-a"): "0.97", ("s-b", "acct-b"): "1.02"},
+        interval,
+    )
+    assert builder._verify_weekly_spans_against_manifest(tmp_path, right) == 2
+    swapped = _span_manifest(
+        tmp_path / "swapped.json",
+        {("s-a", "acct-a"): "1.02", ("s-b", "acct-b"): "0.97"},
+        interval,
+    )
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, swapped)
+    # another strategy's matching row does not stand in for the owner's
+    other_only = _span_manifest(
+        tmp_path / "other.json",
+        {("s-a", "acct-a"): "0.97", ("s-c", "acct-c"): "1.02"},
+        interval,
+    )
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, other_only)
+    # two account rows of one strategy must both agree with the span
+    disagree = _span_manifest(
+        tmp_path / "disagree.json",
+        {("s-a", "acct-a"): "0.97", ("s-a", "acct-a2"): "0.96", ("s-b", "b"): "1.02"},
+        interval,
+    )
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, disagree)
+
+
+def test_span_check_fails_on_a_manifest_link_the_weekly_line_omits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_release_builder as builder
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_json(
+        source / "history-coverage.json",
+        {"strategies": [{"strategy_id": "s-a", "series_id": "A"}]},
+    )
+    _write_csv(
+        source / "returns.csv",
+        ["series_id", "date", "return", "evidence_layer", "strategy_version"],
+        [
+            {
+                "series_id": "A",
+                "date": day,
+                "return": "0.01",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "strategy_version": "v",
+            }
+            for day in ("2026-07-20", "2026-07-21", "2026-07-24")
+        ],
+    )
+    manifest = _span_manifest(
+        tmp_path / "m.json", {("s-a", "acct-a"): "0.97"}, ("2026-07-21", "2026-07-23")
+    )
+    # the weekly payload carries no span for the interval the manifest measured
+    _handmade_weekly(tmp_path, {}, monkeypatch)
+    with pytest.raises(builder.VerticalBuildError, match="no weekly accepted span"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, manifest, source)
+    # with its span the same inputs pass, and a weekly span without any manifest
+    # row fails the other way
+    _handmade_weekly(tmp_path, {"A": ("s-a", "-0.03", "")}, monkeypatch)
+    assert (
+        builder._verify_weekly_spans_against_manifest(tmp_path, manifest, source) == 1
+    )
+    empty = _span_manifest(tmp_path / "e.json", {}, ("2026-07-21", "2026-07-23"))
+    with pytest.raises(builder.VerticalBuildError, match="manifest link"):
+        builder._verify_weekly_spans_against_manifest(tmp_path, empty, source)

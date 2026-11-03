@@ -17,11 +17,13 @@ import tempfile
 from types import ModuleType
 from typing import Any, Callable, Final, Mapping, Protocol, Self, cast
 
+from quant_engine.core.code_identity import COMMIT_SCHEME, TREE_SCHEME
 from quant_engine.core.contracts import (
     CoverageStatus,
     VerificationStatus,
     canonical_json_bytes,
 )
+from quant_engine.core.replica_marker import root_carries_marker, translate_identity
 from quant_engine.core.publication import (
     CurrentPointer,
     PointerIntegrityError,
@@ -43,6 +45,8 @@ _AUTHORITY_SCHEMA_VERSION: Final = 1
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_COMMIT_SCHEME: Final = COMMIT_SCHEME
+_TREE_SCHEME: Final = TREE_SCHEME
 _PREDECESSOR_REPAIR_GATE_ID: Final = "predecessor-authority-repair"
 _POINTER_RECOVERY_GATE_ID: Final = "predecessor-pointer-recovery"
 # The only refusals a root's own pointer may carry and still be recovered; anything else
@@ -763,9 +767,13 @@ class ReleaseManifest:
     companions: tuple[CompanionPlan, ...]
     previous_authority: ReleaseAuthorityPointer | None = None
     release_schema_version: int = _SCHEMA_VERSION
+    # Absent (legacy) means git-commit-v1; only git-tree-v2 is ever serialized.
+    code_identity_scheme: str = _COMMIT_SCHEME
 
     def __post_init__(self) -> None:
         _hash(self.release_id, "release_id")
+        if self.code_identity_scheme not in {_COMMIT_SCHEME, _TREE_SCHEME}:
+            raise ReleaseValidationError("code identity scheme is unknown")
         if _COMMIT.fullmatch(self.code_commit) is None:
             raise ReleaseValidationError("code_commit must be 40 lower-case hex")
         if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
@@ -855,6 +863,8 @@ class ReleaseManifest:
                 if self.previous_authority is not None
                 else None
             )
+        if self.code_identity_scheme != _COMMIT_SCHEME:
+            value["code_identity_scheme"] = self.code_identity_scheme
         return value
 
     def to_json_bytes(self) -> bytes:
@@ -872,6 +882,7 @@ class ReleaseManifest:
         gates: tuple[GateEvidence, ...],
         companions: tuple[CompanionPlan, ...] = (),
         previous_authority: ReleaseAuthorityPointer | None = None,
+        code_identity_scheme: str = _COMMIT_SCHEME,
     ) -> Self:
         ordered_targets = tuple(sorted(targets, key=lambda item: item.root_id))
         ordered_gates = tuple(sorted(gates, key=lambda item: item.gate_id))
@@ -895,6 +906,8 @@ class ReleaseManifest:
                 previous_authority.to_dict() if previous_authority is not None else None
             ),
         }
+        if code_identity_scheme != _COMMIT_SCHEME:
+            payload["code_identity_scheme"] = code_identity_scheme
         release_id = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
         return cls(
             release_id=release_id,
@@ -904,6 +917,7 @@ class ReleaseManifest:
             gates=ordered_gates,
             companions=ordered_companions,
             previous_authority=previous_authority,
+            code_identity_scheme=code_identity_scheme,
         )
 
     @classmethod
@@ -928,6 +942,8 @@ class ReleaseManifest:
         }
         if schema_version >= _COORDINATED_SCHEMA_VERSION:
             expected.add("previous_authority")
+        if "code_identity_scheme" in decoded:
+            expected.add("code_identity_scheme")
         _strict(decoded, expected, "release")
         if not isinstance(decoded["release_id"], str) or not isinstance(
             decoded["code_commit"], str
@@ -970,6 +986,7 @@ class ReleaseManifest:
                 )
             ),
             release_schema_version=schema_version,
+            code_identity_scheme=decoded.get("code_identity_scheme", _COMMIT_SCHEME),
         )
 
 
@@ -1254,10 +1271,38 @@ def _validate_root_identities(
     if manifest.release_schema_version < _SCHEMA_VERSION:
         return
     for target in manifest.targets:
-        if _root_identity(roots[target.root_id]) != target.root_identity:
+        root = roots[target.root_id]
+        if root_carries_marker(root):
+            raise ReleaseConflictError(
+                f"release root contains a replica marker: {target.root_id}"
+            )
+        computed = _root_identity(root)
+        # A scratch replica never has the real directory's identity; the marker's identity
+        # map (written by the copy) pairs the recorded identity with the copy's own. Real
+        # roots carry no marker, so their check is unchanged.
+        if computed != translate_identity(root, target.root_identity, computed):
             raise ReleaseConflictError(
                 f"release root identity changed: {target.root_id}"
             )
+
+
+def directory_identity(path: Path) -> str:
+    """The identity digest a release records for a directory (volume serial, file index)."""
+
+    return _root_identity(path)
+
+
+def _replica_expected(path: Path, recorded: str | None) -> str | None:
+    """The identity a lease must see for ``path``: the recorded one, or for a marked replica
+    copy the copy's own identity when the marker's map pairs it with the recorded one."""
+
+    if recorded is None:
+        return None
+    try:
+        computed = _root_identity(path)
+    except OSError:
+        return recorded
+    return translate_identity(path, recorded, computed)
 
 
 def _release_lease_expectations(
@@ -1265,7 +1310,8 @@ def _release_lease_expectations(
 ) -> dict[Path, str | None]:
     expected: dict[Path, str | None] = {}
     for target in manifest.targets:
-        expected[roots[target.root_id]] = target.root_identity
+        root = roots[target.root_id]
+        expected[root] = target.root_identity
     for companion in manifest.companions:
         parent = _companion_path(
             roots[companion.root_id], companion.relative_path
@@ -1278,7 +1324,9 @@ def _release_lease_expectations(
         ):
             raise ReleaseConflictError("release directory identities conflict")
         expected[parent] = companion.parent_identity or prior
-    return expected
+    # Compare the RECORDED identities first (above); only the final per-path expectation is
+    # translated to the copy's own identity, so a root shared with a companion parent works.
+    return {path: _replica_expected(path, value) for path, value in expected.items()}
 
 
 def _validate_previous_inventory(root: Path, target: ReleaseTarget) -> None:
@@ -1308,6 +1356,7 @@ def prepare_release(
     companions: tuple[CompanionInput, ...] = (),
     allow_invalid_previous_artifact_inventory: bool = False,
     allow_unusable_predecessor_pointers: bool = False,
+    code_identity_scheme: str = _COMMIT_SCHEME,
 ) -> ReleaseManifest:
     """Create a hash-bound release and recovery state without changing pointers."""
 
@@ -1496,6 +1545,7 @@ def prepare_release(
         gates=gates,
         companions=tuple(plans),
         previous_authority=previous_authority,
+        code_identity_scheme=code_identity_scheme,
     )
     directory = _release_dir(coordination_root, release_manifest.release_id)
     _create_exact(directory / "release.json", release_manifest.to_json_bytes())

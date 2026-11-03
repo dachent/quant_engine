@@ -51,3 +51,16 @@ def test_core_benchmarks_include_spy_and_spxl_and_the_panel_count_agrees() -> No
     )
     assert "CORE_BENCHMARK_COUNT: Final = 11" in source
     assert "!= 9" not in source.split("def _govern_weekly_hybrid_modes")[0][-6000:]
+
+
+def test_catalog_extends_the_style_calendar_before_the_cash_proxy_with_spy() -> None:
+    baseline = _catalog()["prior_baseline"]
+    universe = next(
+        u
+        for u in _catalog()["universes"]
+        if u["universe_id"] == "multi-asset-etf-style"
+    )
+    candidates = {c["candidate_id"] for c in universe["candidates"]}
+    assert baseline["calendar_extension_proxy"] in candidates
+    assert baseline["calendar_extension_proxy"] != baseline["risk_free_proxy"]
+    assert baseline["calendar_extension_proxy"] == "SPY"

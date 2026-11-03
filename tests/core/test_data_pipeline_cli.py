@@ -49,6 +49,7 @@ def test_execute_commit_forwards_commit_authorization(
         return {"release_state": "COMMITTED"}
 
     monkeypatch.setattr(data_pipeline, "execute_pipeline", execute)
+    monkeypatch.setattr(data_pipeline, "is_replica_spec", lambda _s: True)
 
     return_code = data_pipeline.main(
         [
@@ -68,3 +69,66 @@ def test_execute_commit_forwards_commit_authorization(
         "commit_authorization": authorization,
         "spec": spec,
     }
+
+
+def test_real_roots_commit_without_replica_receipt_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(data_pipeline, "load_pipeline_spec", lambda _path: object())
+    monkeypatch.setattr(data_pipeline, "is_replica_spec", lambda _s: False)
+    called: list[object] = []
+    monkeypatch.setattr(
+        data_pipeline, "execute_pipeline", lambda *a, **k: called.append(a)
+    )
+
+    return_code = data_pipeline.main(
+        ["execute", "--spec", str(tmp_path / "s.json"), "--commit"]
+    )
+
+    assert return_code == 1
+    assert called == []
+    assert "requires --replica-receipt" in capsys.readouterr().err
+
+
+def test_real_roots_commit_verifies_the_replica_receipt_then_executes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = object()
+    receipt = tmp_path / "receipt.json"
+    seen: list[tuple[object, object]] = []
+    monkeypatch.setattr(data_pipeline, "load_pipeline_spec", lambda _path: spec)
+    monkeypatch.setattr(data_pipeline, "is_replica_spec", lambda _s: False)
+    monkeypatch.setattr(
+        data_pipeline,
+        "verify_replica_receipt",
+        lambda path, s: seen.append((path, s)) or {},
+    )
+    monkeypatch.setattr(
+        data_pipeline,
+        "execute_pipeline",
+        lambda *a, **k: {"release_state": "COMMITTED"},
+    )
+
+    return_code = data_pipeline.main(
+        [
+            "execute",
+            "--spec",
+            str(tmp_path / "s.json"),
+            "--commit",
+            "--replica-receipt",
+            str(receipt),
+        ]
+    )
+
+    assert return_code == 0
+    assert seen == [(receipt, spec)]
+
+
+def test_dry_run_needs_no_replica_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(data_pipeline, "load_pipeline_spec", lambda _path: object())
+    monkeypatch.setattr(
+        data_pipeline, "execute_pipeline", lambda *a, **k: {"release_state": "PREPARED"}
+    )
+    assert data_pipeline.main(["execute", "--spec", str(tmp_path / "s.json")]) == 0

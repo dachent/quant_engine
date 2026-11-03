@@ -169,7 +169,7 @@ class RepositoryBoundaryTests(unittest.TestCase):
                 1,
             ),
             canonical.replace(
-                'allowed_credential_classes = ["NONE", "OS_CREDENTIAL_REFERENCE"]',
+                'allowed_credential_classes = ["NONE", "OS_CREDENTIAL_REFERENCE", "SECRET_MANAGER_REFERENCE"]',
                 'allowed_credential_classes = ["NONE", "PLAINTEXT"]',
                 1,
             ),
@@ -838,6 +838,24 @@ class RepositoryBoundaryTests(unittest.TestCase):
                 self.endpoint(method="POST", name="read-via-post"), endpoint_policy
             ),
         )
+
+    def test_secret_manager_reference_is_allowed_but_literals_still_are_not(
+        self,
+    ) -> None:
+        endpoint_policy = self.policy().endpoint
+        manager = self.endpoint(
+            credential_class="SECRET_MANAGER_REFERENCE",
+            credential_source="SECRET_MANAGER_REFERENCE",
+        )
+        self.assertEqual(
+            [], boundary.validate_endpoint_record(manager, endpoint_policy)
+        )
+        for bad in ("LITERAL", "PLAINTEXT", "SECRET_MANAGER"):
+            with self.subTest(credential_class=bad):
+                findings = boundary.validate_endpoint_record(
+                    self.endpoint(credential_class=bad), endpoint_policy
+                )
+                self.assertTrue(findings)
 
     def test_every_externally_effective_get_is_denied(self) -> None:
         endpoint_policy = self.policy().endpoint

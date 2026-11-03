@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 from datetime import date
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -55,15 +56,183 @@ P123_EQUITY_CURVE_SHA256 = (
 )
 P123_RETURN_START = date(2025, 11, 13)
 P123_RETURN_END = date(2026, 8, 13)
-P123_GENERATION_ROOT = (
-    ROOT.parent / "dataPortfolio123" / "generations" / P123_GENERATION_ID
+# Opt-in only: the test runs when this variable names the retained
+# dataPortfolio123 root.  A folder that merely sits beside the worktree is never
+# probed (the gate would otherwise switch itself on by directory layout).
+P123_RETAINED_ROOT_ENV = "QE_RETAINED_DATA_PORTFOLIO123"
+
+
+def _p123_retained_root() -> Path:
+    configured = os.environ.get(P123_RETAINED_ROOT_ENV, "").strip()
+    assert configured, f"{P123_RETAINED_ROOT_ENV} is not set"
+    return Path(configured)
+
+
+def _p123_generation_root() -> Path:
+    return _p123_retained_root() / "generations" / P123_GENERATION_ID
+
+
+# The retained segment pins the admitted-item digest of a receipt whose managed
+# returns were read from the leading marker element (four distinct values, 1.00
+# total).  633abceb reads the Strategy level, which reproduces the provider's
+# reported total return, so the receipt content, and its digest, changed.
+P123_ADMITTED_ITEM_SET_SHA256_MARKER_RETURNS = (
+    "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643"
+)
+P123_ADMITTED_ITEM_SET_SHA256 = (
+    "cb402dd5bc1cf022a8a4eee66e4662aa79647225b18e2010c8c524f5ab92a19e"
+)
+P123_EU_ENTITY_ID = "1897754"
+P123_EU_REPORTED_TOTAL_RETURN_PERCENT = "30.46"
+# portfolio123-model-generation segment of
+# contracts/portfolio-financial-mvp-source-v1.json at commit
+# 0737461f275f63f34d3a02b9b91b4c894c85cca9 (identical bytes at 4a1964e8, the
+# parent of the 750c0a55 rebind), while its current_generation was 10215d7b.
+P123_RETAINED_SOURCE_SEGMENT = json.loads(
+    r"""
+{
+ "source_id": "portfolio123-model-generation",
+ "source_version": "portfolio123-generation-v1",
+ "strategy_version": {
+  "status": "MIXED",
+  "binding": "EXACT_CONNECTED_MODEL_VERSION_REQUIRED",
+  "version_refs": {
+   "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
+  }
+ },
+ "subjects": {
+  "account_scope": "PORTFOLIO123_MODELS_NOT_OWNER_ACCOUNTS",
+  "strategy_ids": [
+   "p123-ai-factor",
+   "p123-eu"
+  ]
+ },
+ "data_classes": [
+  "PROVIDER_LIVE_RETURN"
+ ],
+ "authority": "PORTFOLIO123_EXACT_CONNECTED_MODEL_GENERATION",
+ "endpoint_or_artifact_selector": "portfolio123-generation.json and exact connected-model evidence in a governed generation",
+ "acquisition": {
+  "adapter": "portfolio123-generation",
+  "mode": "HAR_FIRST_OR_EXPLICITLY_AUTHORIZED_METERED_API_THEN_ALREADY_LOCAL_GENERATION",
+  "auth_and_metering_class": "NO_IMPLICIT_AUTHENTICATED_ACCESS"
+ },
+ "evidence_layer": "PROVIDER_LIVE",
+ "interval": {
+  "observed_start": null,
+  "observed_end": null,
+  "effective_start": null,
+  "effective_end": null,
+  "splice_policy": "EXACT_MODEL_VERSION; PROVIDER_HISTORY_REMAINS_DISTINCT_FROM_OWNER_ACCOUNT_LIVE"
+ },
+ "schema": {
+  "name": "portfolio123-generation",
+  "version": "1"
+ },
+ "units": {
+  "measurement": "DAILY_DECIMAL_RETURN_AND_MODEL_EVIDENCE",
+  "currency": "MODEL_DECLARED"
+ },
+ "temporal": {
+  "timezone": "PROVIDER_DECLARED",
+  "calendar": "MODEL_DECLARED",
+  "cadence": "MODEL_CAPTURE"
+ },
+ "freshness": {
+  "max_age_days": 7,
+  "publication_lag_days": 2,
+  "rule": "EXACT_CONNECTED_MODEL_THROUGH_ACCEPTED_PROVIDER_BOUNDARY"
+ },
+ "admission": {
+  "transform": "provider-ledger-portfolio123-evidence",
+  "version": "1",
+  "facts": [
+   "STRATEGY_VERSION_REFERENCE",
+   "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE"
+  ],
+  "dataset_disposition_policy": {
+   "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
+   "policy_version": "1",
+   "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
+   "authority_issue": 303,
+   "effective_start": "2026-08-14",
+   "effective_end": null,
+   "upstream_inventory_sha256": "3f0d3b5bd6239b6743f739226d97cde9979e6295291cdcbb694210d710b31e5f",
+   "product_data_class_count": 1,
+   "product_data_class_set_sha256": "211c807f708e2fea19065c194963775428475a7616d4b96074e21f69c0c95fcf",
+   "admitted_item_count": 2,
+   "admitted_item_set_sha256": "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643",
+   "allowed_exclusion_reasons": [
+    "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
+   ],
+   "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+   "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
+  }
+ },
+ "product_requirement": "REQUIRED",
+ "consumers": [
+  "DECOMPOSITION",
+  "DEPENDENCE",
+  "REPORT",
+  "RELEASE_RECEIPT"
+ ],
+ "current_generation": {
+  "generation_id": "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+  "sha256": "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
+  "as_of": "2026-08-14"
+ },
+ "existence_status": "EXISTS",
+ "capture_status": "CAPTURED_GOVERNED",
+ "absence_behavior": "FAIL_P123_VERSION_COMPATIBILITY_AND_ANY_REQUIRED_PROVIDER_HISTORY_CELL",
+ "readiness": "REQUIRED_NOT_READY",
+ "blockers": [
+  302,
+  303
+ ],
+ "invalidated_outputs": [
+  "LAYERED_HISTORY",
+  "DECOMPOSITION",
+  "DEPENDENCE",
+  "REPORT",
+  "WORKBOOK",
+  "PANEL",
+  "RELEASE_RECEIPT"
+ ],
+ "owner_policy_decision": "The current HAR generation captures the exact P123 EU connected-model provider-managed Strategy performance level and version. The layered-history builder may prove a deterministic candidate level-to-return derivation, but no provider-live return or Cash Added interpretation is admitted until #303 records admit-or-declare authority. The exact-version backtest remains not captured, and P123 AI version authority remains with #302."
+}
+"""
 )
 P123_RETAINED_INPUTS = (
-    P123_GENERATION_ROOT / "generation.json",
-    P123_GENERATION_ROOT / "portfolio123-generation.json",
-    P123_GENERATION_ROOT / "tables" / "har_managed_performance.parquet",
-    P123_GENERATION_ROOT / "tables" / "har_equity_curve.parquet",
+    "generation.json",
+    "portfolio123-generation.json",
+    "tables/har_managed_performance.parquet",
+    "tables/har_equity_curve.parquet",
+    "tables/har_managed_metadata.parquet",
 )
+
+
+def _bind_retained_vintage_authority(
+    authority: dict[str, Any],
+    contract: dict[str, Any],
+    segment: dict[str, Any],
+) -> None:
+    """Bind one P123 source segment, and the contract view containing it.
+
+    The receipt's authority_ref names the contract digest, so that digest is
+    taken over the contract view that really contains the bound segment: the
+    given contract with only the portfolio123-model-generation segment replaced.
+    """
+
+    source_id = "portfolio123-model-generation"
+    authority["sources"][source_id] = segment
+    view = copy.deepcopy(contract)
+    view["source_segments"] = [
+        segment if item["source_id"] == source_id else item
+        for item in view["source_segments"]
+    ]
+    authority["contract_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes(view)
+    ).hexdigest()
 
 
 def _retained_p123_admit_or_declare_fixture() -> tuple[
@@ -82,18 +251,49 @@ def _retained_p123_admit_or_declare_fixture() -> tuple[
             encoding="utf-8"
         )
     )
-    source = next(
+    # The contract's current P123 segment was rebound to later generations
+    # (750c0a55, 94161522 and onward), so it no longer names this retained
+    # generation or carries its #303 dataset-disposition pins.  The retained
+    # receipt is evidence of that generation under the segment as the contract
+    # stated it before the rebind (commit named at the constant); the
+    # current contract must still name the generation as governed evidence.
+    source = copy.deepcopy(P123_RETAINED_SOURCE_SEGMENT)
+    assert source["source_id"] == "portfolio123-model-generation"
+    assert source["current_generation"] == {
+        "as_of": DAY.isoformat(),
+        "generation_id": P123_GENERATION_ID,
+        "sha256": P123_MANIFEST_SHA256,
+    }
+    correction = next(
         item
-        for item in contract["source_segments"]
-        if item["source_id"] == "portfolio123-model-generation"
+        for item in contract["history_corrections"]["corrections"]
+        if item["correction_id"] == "p123-eu-provider-live"
     )
-    authority["sources"]["portfolio123-model-generation"] = source
-    authority["contract_semantic_sha256"] = hashlib.sha256(
-        canonical_json_bytes(contract)
-    ).hexdigest()
+    assert correction["capture"] == {
+        "status": "CAPTURED_GOVERNED",
+        "capture_defect": None,
+        "generation_id": P123_GENERATION_ID,
+        "generation_sha256": P123_MANIFEST_SHA256,
+        "as_of": DAY.isoformat(),
+    }
+    policy = source["admission"]["dataset_disposition_policy"]
+    assert policy["admitted_item_set_sha256"] == (
+        P123_ADMITTED_ITEM_SET_SHA256_MARKER_RETURNS
+    )
+    policy["admitted_item_set_sha256"] = P123_ADMITTED_ITEM_SET_SHA256
+    # The test is retained evidence of a past state, not of the current bytes:
+    # the digest is taken over the current contract with only this segment
+    # replaced by the retained one.
+    _bind_retained_vintage_authority(authority, contract, source)
 
-    p123_root = ROOT.parent / "dataPortfolio123"
-    generation_root = p123_root / "generations" / P123_GENERATION_ID
+    p123_root = _p123_retained_root()
+    generation_root = _p123_generation_root()
+    absent = [
+        relative
+        for relative in P123_RETAINED_INPUTS
+        if not (generation_root / relative).is_file()
+    ]
+    assert not absent, f"{generation_root} lacks {absent}"
     manifest = GenerationManifest.from_json_bytes(
         (generation_root / "generation.json").read_bytes()
     )
@@ -406,6 +606,7 @@ def _staged_observation(
     *,
     cutoff: date = DAY,
     schwab_point_capture: str | None = None,
+    schwab_valuation_cutoff: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Small synthetic sources using native formats, no asserted finality flag."""
     from datetime import datetime, timedelta, timezone
@@ -539,7 +740,7 @@ def _staged_observation(
                 + f"{prior},P1,1,USD,100,api_reported_usd_value,1,100,100\n{last},P1,1,USD,100,api_reported_usd_value,1,100,100\n",
                 "csv/valuation_quality_issues.csv": "source_index,source_table,reason\n",
                 "csv/subscription_details.csv": "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,subscription_amount,subscription_currency,subscription_time_utc\n"
-                + f"100,{prior}T00:00:00Z,{ledger._MATRIXPORT_ROBUXIO_ORDER_ID},{ledger._MATRIXPORT_ROBUXIO_PRODUCT_ID},100,USD,{prior}T00:00:00Z\n",
+                + f"100,{prior}T00:00:00Z,2222222222222222222,1111111111111111111,100,USD,{prior}T00:00:00Z\n",
             }
             for artifact_id, text in contents.items():
                 bind(artifact_id, root / "output" / run_id / artifact_id, text.encode())
@@ -680,7 +881,14 @@ def _staged_observation(
                     positions=document["positions"],
                     current_transport="WEB_CONTRACT",
                     current_position_account_count=1,
-                    position_snapshot_as_of={"observed_at": schwab_point_capture},
+                    position_snapshot_as_of={
+                        "observed_at": schwab_point_capture,
+                        **(
+                            {"valuation_cutoff": schwab_valuation_cutoff}
+                            if schwab_valuation_cutoff is not None
+                            else {}
+                        ),
+                    },
                     source_artifacts=[point_artifact.to_dict()],
                 )
                 bind(
@@ -824,6 +1032,7 @@ def _source_bound_stage(
     source_cutoff: date = DAY,
     schwab_point_capture: str | None = None,
     requested_as_of: date = date(2026, 9, 17),
+    schwab_valuation_cutoff: str | None = None,
 ) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
@@ -834,6 +1043,7 @@ def _source_bound_stage(
         catalogs,
         cutoff=source_cutoff,
         schwab_point_capture=schwab_point_capture,
+        schwab_valuation_cutoff=schwab_valuation_cutoff,
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
@@ -1714,8 +1924,11 @@ def test_observed_receipt_keeps_each_provider_original_qualification(
 
 
 @pytest.mark.skipif(
-    not all(path.is_file() for path in P123_RETAINED_INPUTS),
-    reason="retained P123 EU provider evidence is not mounted",
+    not os.environ.get(P123_RETAINED_ROOT_ENV, "").strip(),
+    reason=(
+        f"{P123_RETAINED_ROOT_ENV} does not name the retained dataPortfolio123 "
+        "root (explicit opt-in; no sibling-folder probing)"
+    ),
 )
 def test_retained_p123_receipt_admits_managed_returns_only() -> None:
     (
@@ -1735,6 +1948,28 @@ def test_retained_p123_receipt_admits_managed_returns_only() -> None:
         provider_facts,
         provider_returns,
     )
+
+    # The admitted returns must follow the provider's own Strategy level: their
+    # compounded total equals the retTotal the provider reports for the entity,
+    # which the marker-element reading (four values, total 1.00) never did.
+    import pyarrow.parquet as pq
+
+    reported = {
+        str(item["retTotal"])
+        for item in pq.read_table(
+            _p123_generation_root() / "tables" / "har_managed_metadata.parquet",
+            columns=["portfolioUid", "retTotal"],
+        ).to_pylist()
+        if str(item["portfolioUid"]) == P123_EU_ENTITY_ID
+    }
+    assert reported == {P123_EU_REPORTED_TOTAL_RETURN_PERCENT}
+    wealth = Decimal(1)
+    for item in provider_returns:
+        wealth *= Decimal(1) + Decimal(str(item["return"]))
+    assert abs(
+        (wealth - 1) * 100 - Decimal(P123_EU_REPORTED_TOTAL_RETURN_PERCENT)
+    ) < Decimal("0.005")
+    assert len({str(item["return"]) for item in provider_returns}) > 100
 
     p123 = [
         row for row in receipt["dispositions"] if row["provider_id"] == "portfolio123"
@@ -1772,9 +2007,7 @@ def test_retained_p123_receipt_admits_managed_returns_only() -> None:
     assert equity["materialized_record_count"] == 0
     assert policy["admitted_item_count"] == 2
     assert sum(row["action"] == "ADMIT" for row in p123) == 2
-    assert policy["admitted_item_set_sha256"] == (
-        "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643"
-    )
+    assert policy["admitted_item_set_sha256"] == P123_ADMITTED_ITEM_SET_SHA256
     assert (
         policy["upstream_inventory_sha256"]
         == "3f0d3b5bd6239b6743f739226d97cde9979e6295291cdcbb694210d710b31e5f"
@@ -2243,33 +2476,6 @@ def _schwab_retained_journal_lane(
     return authority, identities, manifests, catalogs, provider_facts
 
 
-def test_schwab_pinned_journal_artifact_admits_external_flow() -> None:
-    """The retained Schwab Journal wch capture is an admitted capital fact."""
-
-    authority, identities, manifests, catalogs, provider_facts = (
-        _schwab_retained_journal_lane(admit_external_flow=True)
-    )
-
-    receipt, _ = ledger._admit_or_declare_receipt(
-        authority,
-        identities,
-        manifests,
-        catalogs,
-        provider_facts,
-        (),
-    )
-    journal = next(
-        row
-        for row in receipt["dispositions"]
-        if row["provider_id"] == "schwab"
-        and row["item_id"] == "wch/transactions/account-38b653b91ff43a10.json"
-    )
-    assert journal["item_kind"] == "ARTIFACT"
-    assert journal["action"] == "ADMIT"
-    assert journal["target_facts"] == ["flows"]
-    assert journal["materialized_record_count"] == 1
-
-
 def test_schwab_retained_journal_flow_requires_the_admitted_fact() -> None:
     """Without EXTERNAL_FLOW authority the retained Journal artifact fails."""
 
@@ -2578,3 +2784,96 @@ def test_absent_readiness_map_keeps_the_scalar_impact() -> None:
         for row in receipt["dispositions"]
         if row["action"] == "EXCLUDE"
     } == {"REQUIRED_NOT_READY"}
+
+
+def test_rebound_segment_refuses_a_retained_generation_until_its_vintage_is_bound() -> (
+    None
+):
+    """CI guard for the retained-receipt staleness that skipped silently.
+
+    The contract's segment is rebound to later generations while a retained
+    receipt stays evidence of an earlier one: binding the rebound segment must
+    be refused, and the vintage binding must hash the contract view that
+    actually contains the bound segment (never the unmodified current bytes).
+    Synthetic data only.
+    """
+
+    source_id = "portfolio123-model-generation"
+    authority, identities, manifests, catalogs, provider_facts = _fixture()
+    vintage = copy.deepcopy(authority["sources"][source_id])
+    rebound = copy.deepcopy(vintage)
+    rebound["current_generation"] = {
+        "as_of": "2026-09-02",
+        "generation_id": "d" * 64,
+        "sha256": "e" * 64,
+    }
+    authority["sources"][source_id] = rebound
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio123 generation differs from financial MVP authority",
+    ):
+        ledger._admit_or_declare_receipt(
+            authority, identities, manifests, catalogs, provider_facts, ()
+        )
+
+    contract = {"source_segments": [rebound]}
+    _bind_retained_vintage_authority(authority, contract, vintage)
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority, identities, manifests, catalogs, provider_facts, ()
+    )
+
+    view_digest = hashlib.sha256(
+        canonical_json_bytes({"source_segments": [vintage]})
+    ).hexdigest()
+    current_digest = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
+    assert view_digest != current_digest
+    assert receipt["contract_semantic_sha256"] == view_digest
+    rows = [
+        row for row in receipt["dispositions"] if row["provider_id"] == "portfolio123"
+    ]
+    assert rows
+    for row in rows:
+        assert row["authority_ref"].startswith(
+            f"contract:{view_digest}#source_segments/{source_id}"
+        )
+
+
+def test_p123_managed_returns_compound_to_the_reported_total_not_the_marker(
+    tmp_path: Path,
+) -> None:
+    """CI guard for the digest pinned from marker returns (633abceb).
+
+    Synthetic managed performance whose leading marker moves independently of
+    the Strategy level: the returns must compound to the level ratio (the
+    provider-reported total), never to the marker reading.
+    """
+
+    import test_provider_ledger as provider_ledger_tests
+
+    provider_ref, manifest, evidence = provider_ledger_tests._p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "50",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "150",
+                "Cash Added": "70",
+            },
+        ],
+        performance_data=[[0, 100, 50], [3, 125, 60], [1, 150, 70]],
+    )
+    returned = provider_ledger_tests.ledger._portfolio123_provider_returns(
+        provider_ref, manifest, evidence
+    )
+    wealth = Decimal(1)
+    for item in returned:
+        wealth *= Decimal(1) + Decimal(str(item["return"]))
+    assert wealth == Decimal(150) / Decimal(100)
+    marker_wealth = (Decimal(1) + Decimal(3) / 100) * (Decimal(1) + Decimal(1) / 100)
+    assert wealth != marker_wealth

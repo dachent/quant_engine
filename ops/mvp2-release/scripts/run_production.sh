@@ -7,8 +7,8 @@
 # fails if anything moved.
 set -euo pipefail
 
-REPO="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/.codex-bootstrap/mvp2-execution/repo"
-Q="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
+REPO="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}/.codex-bootstrap/mvp2-execution/repo"
+Q="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}"
 PY="C:/Dev/scratch/quant-engine/.venv-mvp2/Scripts/python.exe"
 W="C:/Dev/scratch/quant-engine/pl12"
 P="$W/production"
@@ -119,5 +119,5 @@ fi
 
 echo "== execute --commit =="
 "$PY" tools/data_pipeline.py execute --spec "$P/production-spec.json" \
-  --commit --commit-authorization "$P/commit-authorization.json" > "$P/execute.json"
+  --commit --commit-authorization "$P/commit-authorization.json" \n  --replica-receipt "${REPLICA_RECEIPT:?set REPLICA_RECEIPT to the replica-receipt.json from tools/release_replica.py ceremony|lanes}" \n  > "$P/execute.json"
 cat "$P/execute.json"

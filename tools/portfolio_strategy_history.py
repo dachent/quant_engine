@@ -198,6 +198,18 @@ def _xlsx_rows_from_archive(
     return result
 
 
+def xlsx_sheet_rows(path: Path, sheet_name: str) -> list[list[object | None]]:
+    """Public reader for a workbook sheet's cached cell values (stdlib only)."""
+
+    return _xlsx_rows(path, sheet_name)
+
+
+def excel_cell_date(value: object, name: str) -> date:
+    """Public reader for a workbook date cell (serial, ISO or US text)."""
+
+    return _excel_date(value, name)
+
+
 def _xlsx_rows(path: Path, sheet_name: str) -> list[list[object | None]]:
     """Read cached XLSX cell values using only the Python standard library."""
 

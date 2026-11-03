@@ -5,20 +5,20 @@ accounts the 13 epochs resolve against. The r9 copy names `dfe455ac`, which is
 not the baseline this vertical publishes; every row otherwise stays byte-equal.
 """
 
+import os
 import hashlib
 import json
 import sys
 from pathlib import Path
 
 REPO = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    r"/.codex-bootstrap/mvp2-execution/repo"
+    os.environ["QUANT_ENGINE_DATA_ROOT"] + r"/.codex-bootstrap/mvp2-execution/repo"
 )
 sys.path[:0] = [str(p) for p in REPO.glob("packages/*/src")]
 from quant_engine.core.contracts import canonical_json_bytes  # noqa: E402
 
 SRC = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio"
+    f"{os.environ['QUANT_ENGINE_DATA_ROOT']}/dataPortfolio"
     r"/rollforward/2026-09-05-mvp2-execution/source-repair"
     r"/current-epoch-crosswalk-r9-current.json"
 )

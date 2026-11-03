@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from datetime import date
+from decimal import Decimal
 import json
 from pathlib import Path
 from typing import Sequence
@@ -58,8 +60,27 @@ def _web_current(
     }
 
 
+def _official_closes(directory: Path, day: date) -> dict[str, Decimal]:
+    """Official closes of ``day`` from ``<SYMBOL>_yahoo_daily.csv`` files (date,open,
+    high,low,close,adjclose,volume,dividend), the retained public-source format."""
+
+    closes: dict[str, Decimal] = {}
+    for path in sorted(directory.glob("*_yahoo_daily.csv")):
+        symbol = path.name[: -len("_yahoo_daily.csv")]
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                if row.get("date") == day.isoformat():
+                    closes[symbol] = Decimal(str(row["close"]))
+    return closes
+
+
 def _holdings_v2_current(
-    raw_response: Path, spec_path: Path, receipt_path: Path, output: Path
+    raw_response: Path,
+    spec_path: Path,
+    receipt_path: Path,
+    output: Path,
+    closes_directory: Path | None = None,
+    price_date: date | None = None,
 ) -> dict[str, object]:
     raw = json.loads(raw_response.read_text(encoding="utf-8-sig"))
     spec = json.loads(spec_path.read_text(encoding="utf-8-sig"))
@@ -77,6 +98,12 @@ def _holdings_v2_current(
         raw,
         crosswalk=crosswalk,
         captured_at=receipt.get("captured_at_utc"),
+        official_closes=(
+            None
+            if closes_directory is None or price_date is None
+            else _official_closes(closes_directory, price_date)
+        ),
+        price_date=price_date if closes_directory is not None else None,
     )
     if snapshot.observed_at.date() != generation_date:
         raise ValueError("capture receipt UTC date differs from generation as_of_date")
@@ -112,6 +139,16 @@ def _parser() -> argparse.ArgumentParser:
     holdings_v2.add_argument("spec", type=Path)
     holdings_v2.add_argument("capture_receipt", type=Path)
     holdings_v2.add_argument("output", type=Path)
+    holdings_v2.add_argument(
+        "--official-closes-dir",
+        type=Path,
+        help="directory of <SYMBOL>_yahoo_daily.csv files holding the official closes",
+    )
+    holdings_v2.add_argument(
+        "--price-date",
+        type=date.fromisoformat,
+        help="the date every priced row must carry and whose official close values it",
+    )
     stage = subparsers.add_parser("stage", help="create an immutable candidate")
     stage.add_argument("spec", type=Path)
     stage.add_argument("output_root", type=Path)
@@ -132,7 +169,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _web_current(args.raw_response, args.spec, args.output)
     elif args.command == "normalize-holdings-v2":
         result = _holdings_v2_current(
-            args.raw_response, args.spec, args.capture_receipt, args.output
+            args.raw_response,
+            args.spec,
+            args.capture_receipt,
+            args.output,
+            args.official_closes_dir,
+            args.price_date,
         )
     elif args.command == "stage":
         result = stage_generation_candidate(args.spec, args.output_root)

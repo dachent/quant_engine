@@ -50,6 +50,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import shared_provider_live_blocks
 from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     HwmInputsContractError,
@@ -1603,9 +1604,100 @@ def _capital_coverage_bounds(
     }
 
 
+# Cost-row keys the attribution catalog carries from the baseline (declared basis,
+# corroborating observed charges, separate execution cost); equal to
+# portfolio_attribution.COST_EVIDENCE_KEYS, which a test enforces.
+COST_EVIDENCE_KEYS: Final = (
+    "corroboration",
+    "cost_class",
+    "declared",
+    "execution_cost",
+)
+# Present only on a percent-based cost row; equal to portfolio_attribution.COST_RATE_KEYS.
+COST_RATE_KEYS: Final = ("fee_rates",)
+
+
+def _plain_words(code: object) -> str:
+    """An enum code in plain lower-case words (``PROVIDER_DECLARED`` -> provider declared)."""
+
+    return str(code).replace("_", " ").lower()
+
+
+def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The structured cost pieces of one strategy row, every word taken from data.
+
+    One SUBSCRIPTION component when the cost row carries a declared amount (with
+    the plain-words source and the corroborating observed charges), and one
+    EXECUTION component per native currency when the ledger states commissions.
+    ``annual_external_cost_usd`` stays the headline annual amount; an execution
+    amount is period-to-date and has no annual equivalent.
+    """
+
+    components: list[dict[str, Any]] = []
+    declared = cost.get("declared")
+    if isinstance(declared, Mapping):
+        corroboration = [
+            item
+            for item in cost.get("corroboration") or []
+            if isinstance(item, Mapping)
+        ]
+        label = None
+        if corroboration:
+            observations = [
+                row
+                for item in corroboration
+                for row in item.get("observations") or []
+                if isinstance(row, Mapping)
+            ]
+            dates = sorted(str(row["date"]) for row in observations)
+            kind = _plain_words(corroboration[0].get("kind"))
+            feed_end = max(str(item.get("feed_last_date")) for item in corroboration)
+            if dates:
+                label = (
+                    f"{kind} {dates[0]}..{dates[-1]} ({len(dates)} charges, "
+                    f"feed through {feed_end})"
+                )
+        components.append(
+            {
+                "amount": declared.get("amount"),
+                "annual_equivalent_usd": cost.get("annual_external_cost_usd"),
+                "corroboration_label": label,
+                "currency": declared.get("currency"),
+                "kind": "SUBSCRIPTION",
+                "period": declared.get("period"),
+                "source_label": _plain_words(declared.get("basis")),
+                "status": cost.get("cost_status"),
+                "window_end": None,
+                "window_start": None,
+            }
+        )
+    execution = cost.get("execution_cost")
+    if isinstance(execution, Mapping) and execution.get("status") == "AVAILABLE":
+        for item in execution.get("by_currency") or []:
+            components.append(
+                {
+                    "amount": item.get("amount"),
+                    "annual_equivalent_usd": None,
+                    "corroboration_label": None,
+                    "currency": item.get("currency"),
+                    "kind": "EXECUTION",
+                    "period": "PERIOD_TO_DATE",
+                    "source_label": _plain_words(execution.get("basis")),
+                    "status": execution.get("status"),
+                    "window_end": execution.get("window_end"),
+                    "window_start": execution.get("window_start"),
+                }
+            )
+    return components
+
+
 FEES_STATUS_EVIDENCED: Final = "EVIDENCED_PRE_TAX"
 FEES_STATUS_UPPER_BOUND: Final = "UPPER_BOUND_CONTRACT_CAP_PRE_TAX"
 FEES_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
+# A percent-based cost: documented rates exist, no dollar cost does.
+FEES_STATUS_DOCUMENTED_RATE: Final = "DOCUMENTED_RATE_NOT_DOLLAR"
+COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
+COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 
 
 def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None:
@@ -1614,17 +1706,148 @@ def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None
     A cost amount exists for both a known cost (``known_fixed``, ``known_gold_api``)
     and a contract cap (``conservative_1pct_contract_cap``); only the first is
     evidence of a cost.  A cap is the most the contract allows, so it is labelled
-    as the upper bound it is.  ``None`` means an amount whose status names neither.
+    as the upper bound it is.  A documented percent rate has no dollar amount and
+    is labelled as a rate, never as evidence of a cost or a cap; a percent row that
+    carries an amount, or whose tier is unsettled, is never labelled as a rate.
+    ``None`` means an amount whose status names neither.
     """
 
+    text = cost_status if isinstance(cost_status, str) else ""
+    if text == COST_STATUS_DOCUMENTED_RATE:
+        return FEES_STATUS_DOCUMENTED_RATE if annual_cost is None else None
     if annual_cost is None:
         return FEES_STATUS_UNAVAILABLE
-    text = cost_status if isinstance(cost_status, str) else ""
     if text.startswith("known"):
         return FEES_STATUS_EVIDENCED
     if text.endswith("contract_cap"):
         return FEES_STATUS_UPPER_BOUND
     return None
+
+
+def _percent_text(rate: object) -> str:
+    """A fraction rate as percent text (``0.2`` -> ``20%``, ``0.035`` -> ``3.5%``)."""
+
+    percent = (Decimal(str(rate)) * 100).normalize()
+    return f"{percent:f}%"
+
+
+_BILLING_WORDS: Final = {12: "monthly", 4: "quarterly", 1: "annually"}
+
+_PLACEMENT_WORDS: Final = {
+    "INSIDE_VEHICLE_NAV": "inside the vehicle NAV",
+    "OUTSIDE_BILLED": "billed outside the NAV",
+    "NOT_STATED_IN_DOCUMENTATION": "not stated in the documentation",
+}
+
+
+def cost_rate_disclosure(cost: Mapping[str, Any]) -> str | None:
+    """The sentence a percent-based cost row discloses, built only from its fields.
+
+    ``None`` for a row that is not percent-based.  A row whose tier is unsettled
+    claims no rate.  Otherwise every number, tier label, placement and source page
+    in the sentence is read from ``fee_rates``; a rate the documentation does not
+    state is said not to be stated, never filled in.
+    """
+
+    status = cost.get("cost_status")
+    rates = cost.get("fee_rates")
+    unsettled = "the fee tier is not settled, so no rate is claimed"
+    if not isinstance(rates, Mapping):
+        if status == COST_STATUS_TIER_UNSETTLED:
+            return f"Percent-based cost: {unsettled}; no dollar cost is published."
+        return None
+    if rates.get("tier") == "TIER_UNSETTLED":
+        return f"Percent-based cost: {unsettled}; no dollar cost is published."
+    tier = next(
+        (
+            row
+            for row in rates.get("tier_table") or []
+            if isinstance(row, Mapping) and row.get("tier") == rates.get("tier")
+        ),
+        None,
+    )
+    if tier is None:
+        return None
+
+    def part(name: str, rate: object, mechanism: str = "") -> str:
+        if rate is None:
+            return f"{name} fee not stated in the documentation"
+        return f"{name} fee {_percent_text(rate)}{mechanism}"
+
+    mechanism = tier.get("performance_mechanism")
+    mechanism_text = (
+        f" (high-water mark: {mechanism})"
+        if mechanism
+        else " (high-water mark and assessment period not stated in the documentation)"
+    )
+    performance_rate = tier.get("performance_rate")
+    raw_derivation = rates.get("derivation")
+    derivation: Mapping[str, Any] = (
+        raw_derivation
+        if isinstance(raw_derivation, Mapping)
+        and raw_derivation.get("tier") == tier.get("tier")
+        else {}
+    )
+    settled = bool(derivation)
+    management = part("management", tier.get("management_rate"))
+    if settled and tier.get("management_rate") is not None:
+        count = derivation.get("periods_per_year")
+        periods = _BILLING_WORDS.get(count) if isinstance(count, int) else None
+        if periods is not None:
+            management += (
+                f" a year, billed {periods} at "
+                f"{_percent_text(derivation.get('periodic_rate'))} of fund value"
+            )
+    if settled and performance_rate is None:
+        performance = (
+            "performance fee none billed, no high-water mark billed"
+            if derivation.get("performance_fee") == "NONE_BILLED"
+            and derivation.get("hwm") == "NONE_BILLED"
+            else part("performance", None)
+        )
+    else:
+        performance = part(
+            "performance",
+            performance_rate,
+            mechanism_text if performance_rate is not None else "",
+        )
+    pieces = [management, performance]
+    if settled:
+        pieces.append(
+            f"tier settled by {derivation.get('rows')} posted fees "
+            f"({derivation.get('first_date')} to {derivation.get('last_date')}) "
+            f"each within ${derivation.get('tolerance_usd')} of that rate over fund "
+            "value"
+        )
+    placement = _PLACEMENT_WORDS.get(str(rates.get("placement")))
+    sentence = (
+        f"Documented rates, {tier.get('label')} ({tier.get('applies_to')}): "
+        + "; ".join(pieces)
+        + (f"; fee placement: {placement}" if placement else "")
+    )
+    redemption = rates.get("redemption")
+    if isinstance(redemption, Mapping):
+        words = _PLACEMENT_WORDS.get(str(redemption.get("placement")), "")
+        sentence += (
+            f"; redemption fee {_percent_text(redemption.get('rate'))} "
+            f"(placement: {words})"
+        )
+    lock = rates.get("lock")
+    if isinstance(lock, Mapping):
+        sentence += f"; lock {lock.get('days')} days"
+    pages = sorted(
+        {
+            f"{source.get('artifact')} p.{source.get('page')}"
+            for source in [
+                *(tier.get("sources") or []),
+                *((derivation.get("evidence") or []) if settled else []),
+            ]
+            if isinstance(source, Mapping)
+        }
+    )
+    if pages:
+        sentence += f"; sources: {', '.join(pages)}"
+    return f"{sentence}; no dollar cost is published."
 
 
 COST_RATE_AVAILABLE: Final = "AVAILABLE_AT_CUTOFF_SLEEVE_VALUE"
@@ -1685,7 +1908,11 @@ def _cutoff_cost_rate(
         "fees_status": fees_status_for_cost(cost.get("cost_status"), amount_text),
     }
     if amount_text is None:
-        result["cost_rate_reason"] = "no annual cost amount is evidenced"
+        result["cost_rate_reason"] = (
+            "the cost is a documented percent rate; no dollar amount is published"
+            if result["fees_status"] == FEES_STATUS_DOCUMENTED_RATE
+            else "no annual cost amount is evidenced"
+        )
         return result
     if value_text is None or strategy.get("capital_status") != "AVAILABLE":
         result["cost_rate_status"] = COST_RATE_NO_SLEEVE_VALUE
@@ -1901,6 +2128,13 @@ _FREQUENCY_WORDS: Final = {
 }
 
 
+WINDOW_DAYS_BASIS_EXCLUSIVE: Final = "EXCLUSIVE_END_MINUS_START"
+
+
+def _exclusive_days_text(days: int) -> str:
+    return f"{days} days exclusive (end minus start)"
+
+
 def _annualization_label(
     *,
     basis: str,
@@ -1909,8 +2143,13 @@ def _annualization_label(
     observations: object = None,
     periods_per_year: object = None,
     frequency: str | None = None,
+    calendar_day_exponent: bool = False,
 ) -> dict[str, Any] | None:
     """The basis and window an annualized figure stands on, or None without a window.
+
+    ``calendar_day_exponent`` is for a figure whose annualization exponent is the window's
+    calendar days (the account-live CAGR): its label names those days and the observation
+    count as the daily returns the cumulative return compounds, not as the scaling basis.
 
     A window under 365 days is a short-window annualization: ``short_window`` is true
     and the label says so beside the dates.  The label names the observation count
@@ -1937,6 +2176,11 @@ def _annualization_label(
     short = window_days < _ONE_YEAR_DAYS
     if frequency == "CASH_FLOW_DATES":
         text = f"annualized from cash flows, {start}..{end}"
+    elif calendar_day_exponent and count is not None and word is not None:
+        text = (
+            f"annualized over {window_days} calendar days "
+            f"({count} {word} returns), {start}..{end}"
+        )
     elif count is not None and word is not None:
         text = f"annualized from {count} {word} observations, {start}..{end}"
     else:
@@ -1949,6 +2193,10 @@ def _annualization_label(
         "periods_per_year": periods,
         "short_window": short,
         "window_days": window_days,
+        # window_days is end minus start: model_vs_actual counts both endpoints, so each
+        # place states which convention its day count follows
+        "window_days_basis": WINDOW_DAYS_BASIS_EXCLUSIVE,
+        "window_days_text": _exclusive_days_text(window_days),
         "window_end": end,
         "window_start": start,
     }
@@ -1970,8 +2218,14 @@ def _comparison_annualization(
     )
 
 
-def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
-    """The CAGR and MWR labels of one strategy summary row (version 4)."""
+def _account_annualization_labels(
+    row: Mapping[str, Any], opening_date: str | None = None
+) -> dict[str, Any]:
+    """The CAGR and MWR labels of one strategy summary row (version 4).
+
+    ``opening_date`` is the opening NAV date of a canonical path (version 5); the
+    CAGR window opens there rather than at the first return date.
+    """
 
     cagr = None
     if row.get("account_live_cagr") is not None:
@@ -1984,10 +2238,11 @@ def _account_annualization_labels(row: Mapping[str, Any]) -> dict[str, Any]:
                 if derived
                 else ANNUALIZATION_BASIS_SOURCE_REPORTED
             ),
-            start=row.get("account_live_observed_start"),
+            start=opening_date or row.get("account_live_observed_start"),
             end=row.get("account_live_observed_end"),
             observations=row.get("account_live_return_observations"),
             frequency="DAILY",
+            calendar_day_exponent=True,
         )
     mwr = None
     if row.get("mwr_xirr") is not None:
@@ -2120,15 +2375,19 @@ def _window_equivalent(rate: object, start: object, end: object) -> str | None:
 
 
 def _strategy_period_fields(
-    row: Mapping[str, Any], pieces: Mapping[str, Any] | None
+    row: Mapping[str, Any],
+    pieces: Mapping[str, Any] | None,
+    opening_date: str | None = None,
 ) -> dict[str, Any]:
     """Window, annualisation basis, YTD and calendar-year returns of one strategy.
 
     ``twr_annualised`` exists only from 365 days; the accepted cumulative return,
     CAGR and pooled MWR are never changed, each is named with its basis.
+    ``opening_date`` is the opening NAV date of a canonical path: the window opens
+    there, the close before its first return, like the manifest's window.
     """
 
-    start = row.get("account_live_observed_start")
+    start = opening_date or row.get("account_live_observed_start")
     end = row.get("account_live_observed_end")
     cumulative = row.get("account_live_cumulative_return")
     days: int | None = None
@@ -2162,6 +2421,24 @@ def _strategy_period_fields(
 
     calendar = {} if pieces is None else dict(pieces["calendar_year_twr"])
     windows = {} if pieces is None else dict(pieces["calendar_year_windows"])
+    first_return = row.get("account_live_observed_start")
+    if (
+        opening_date is not None
+        and isinstance(end, str)
+        and isinstance(first_return, str)
+        and windows
+    ):
+        # the first year's window opens at the first return; it opens at the
+        # opening NAV date like the whole window it belongs to
+        first_year = min(windows)
+        if windows[first_year]["start"] == first_return:
+            opened = _date(opening_date, "opening NAV date")
+            windows[first_year] = {
+                **windows[first_year],
+                "start": opening_date,
+                "days": (_date(windows[first_year]["end"], "window end") - opened).days,
+                "covers_period": opened.year < int(first_year),
+            }
     ytd_key = end[:4] if isinstance(end, str) else None
     ytd_key = ytd_key if ytd_key in calendar else None
     return {
@@ -2229,6 +2506,8 @@ def _label_window(label: object) -> dict[str, Any] | None:
         "start": label.get("window_start"),
         "end": label.get("window_end"),
         "days": label.get("window_days"),
+        "days_basis": label.get("window_days_basis"),
+        "days_text": label.get("window_days_text"),
         "observations": label.get("observations"),
     }
 
@@ -2310,6 +2589,12 @@ def _merge_attribution(
                 "attribution.benchmark_comparison.metrics",
             )
         )
+        cost_evidence: dict[str, Any] = {
+            key: cost[key]
+            for key in (*COST_EVIDENCE_KEYS, *COST_RATE_KEYS)
+            if key in cost
+        }
+        components = cost_components(cost)
         result.append(
             {
                 **item,
@@ -2397,6 +2682,13 @@ def _merge_attribution(
                 "after_tax_annual_cost_rate": cost.get("after_tax_annual_cost_rate"),
                 "after_tax_status": cost.get("after_tax_status"),
                 "fees_status": cost.get("fees_status"),
+                **cost_evidence,
+                **(
+                    {"cost_rate_disclosure": disclosure}
+                    if (disclosure := cost_rate_disclosure(cost)) is not None
+                    else {}
+                ),
+                **({"cost_components": components} if components else {}),
                 **(
                     {}
                     if cost_rate_at_cutoff is None
@@ -4118,12 +4410,238 @@ def _validate_report_account_manifest(
     return actual
 
 
+VALUE_BASIS_DERIVED: Final = "DERIVED_FROM_OFFICIAL_CLOSES"
+
+
+def _derived_value_index(
+    source_phase: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Declared derived-value sets (account, dates, evidence) from the admitted finality evidence.
+
+    A provider's finality evidence may declare a derived patch: the selected NAV, and the
+    position values priced from it, for named accounts and dates are computed from official
+    closes instead of observed. The evidence file is the one the run observation pins (its
+    path, sha256 and size are verified here); nothing is read from outside that binding.
+    """
+
+    if source_phase is None:
+        return []
+    observation = source_phase.get("source_provenance")
+    providers = (
+        observation.get("providers") if isinstance(observation, Mapping) else None
+    )
+    rows = (
+        list(providers.values())
+        if isinstance(providers, Mapping)
+        else list(providers or [])
+    )
+    found: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or not isinstance(
+            row.get("finality_evidence"), Mapping
+        ):
+            continue
+        path = _source_clock_file_path(row["finality_evidence"], "finality evidence")
+        # the bytes are verified against the pin above; a file that is not a JSON object
+        # (a selected-source date-label bundle) declares no derived patch
+        try:
+            document = json.loads(path.read_bytes())
+        except (UnicodeDecodeError, ValueError):
+            continue
+        patch = document.get("derived_patch") if isinstance(document, Mapping) else None
+        if not isinstance(patch, Mapping):
+            continue
+        interpretation = row.get("finality_interpretation")
+        try:
+            found.append(
+                {
+                    # each account's derived dates are its OWN patched rows: the
+                    # validator allows per-entry subsets of the top-level dates
+                    "accounts": {
+                        str(entry["account_id"]): frozenset(
+                            str(d) for d in entry["patched_values"]
+                        )
+                        for entry in patch["patches"]
+                    },
+                    "value_basis": {
+                        "basis": str(patch["derivation_basis"]),
+                        "derivation_record_sha256": str(
+                            patch["derivation_record"]["sha256"]
+                        ),
+                        "finality_evidence_sha256": str(
+                            row["finality_evidence"]["sha256"]
+                        ),
+                        "official_closes_manifest_sha256": str(
+                            patch["official_closes_manifest"]["sha256"]
+                        ),
+                        "provider_finality_guarantee": (
+                            interpretation.get("provider_finality_guarantee")
+                            if isinstance(interpretation, Mapping)
+                            else None
+                        ),
+                    },
+                }
+            )
+        except (KeyError, TypeError) as exc:
+            raise ReportValidationError(
+                "finality evidence derived patch differs"
+            ) from exc
+    return found
+
+
+def _derived_value_basis(
+    index: Sequence[Mapping[str, Any]] | None, account_id: object, as_of_date: object
+) -> dict[str, Any] | None:
+    """The declared value basis of an account's value on a date, or None when observed."""
+
+    for entry in index or []:
+        if as_of_date in entry["accounts"].get(account_id, ()):
+            return dict(entry["value_basis"])
+    return None
+
+
+_PROVIDER_REPORTED_AUTHORITY: Final = "remain provider-reported USD authority"
+
+
+def _noun(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _derived_aggregate_text(
+    account_summary: Sequence[Mapping[str, Any]], capital: Mapping[str, Any] | None
+) -> str:
+    """The aggregates and totals that are sums over labelled account values, from the payload.
+
+    A strategy's current value is derived when one of its member accounts carries a
+    ``value_basis`` on the member's own date; a capital total is derived when it is ready
+    and one of its components is. Returns "" when nothing is derived or no capital block
+    is given.
+    """
+
+    if not isinstance(capital, Mapping):
+        return ""
+    labelled = {
+        (str(row.get("account_id")), row.get("as_of_date"))
+        for row in account_summary
+        if isinstance(row.get("value_basis"), Mapping)
+    }
+
+    def member_derived(members: object) -> bool:
+        return any(
+            isinstance(member, Mapping)
+            and (str(member.get("account_id")), member.get("as_of_date")) in labelled
+            for member in (members if isinstance(members, Sequence) else [])
+        )
+
+    strategies = [
+        str(row.get("strategy_id"))
+        for row in capital.get("strategies", [])
+        if isinstance(row, Mapping)
+        and row.get("status") == "AVAILABLE"
+        and member_derived(row.get("members"))
+    ]
+    totals: list[str] = []
+    derived_blocks: set[str] = set()
+    for key, label in (
+        ("reserve", "reserve"),
+        ("retained_excluded", "retained excluded capital"),
+        ("systematic", "systematic capital"),
+        ("total_liquid", "total liquid"),
+    ):
+        block = capital.get(key)
+        if not isinstance(block, Mapping) or block.get("status") != "AVAILABLE":
+            continue
+        components = block.get("components") or []
+        if key == "reserve":
+            hit = member_derived(block.get("members"))
+        elif key == "total_liquid":
+            hit = any(str(part) in derived_blocks for part in components)
+        else:
+            hit = any(str(part) in strategies for part in components)
+        if hit:
+            derived_blocks.add(key)
+            totals.append(label)
+    parts: list[str] = []
+    if strategies:
+        parts.append(
+            f"{len(strategies)} strategy current "
+            f"{'value' if len(strategies) == 1 else 'values'} ({_join_words(strategies)})"
+        )
+    if totals:
+        parts.append(f"the totals {_join_words(totals)}")
+    if not parts:
+        return ""
+    return (
+        f"aggregates computed from those values are derived too: {' and '.join(parts)}"
+    )
+
+
+def _join_words(items: Sequence[str]) -> str:
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + f" and {items[-1]}"
+
+
+def _restate_value_authority(
+    coverage: Sequence[Mapping[str, Any]],
+    account_summary: Sequence[Mapping[str, Any]],
+    positions: Sequence[Mapping[str, Any]],
+    cutoff: str,
+    capital: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Re-word the baseline's "provider-reported USD authority" clause from the value labels.
+
+    The baseline states that account NAV, positions, allocations and HWM values remain
+    provider-reported USD authority. For every value the report labels with a
+    ``value_basis`` (derived from official closes) that is not true, so the clause names
+    the labelled values by basis, counted from the account rows and the CURRENT position
+    rows (the latest accepted snapshot dated at the cutoff, as the panel classifies current
+    holdings; a historical snapshot the patch also covers is not a current position).
+    With no labelled value the text is unchanged. This is the one generator: the panel gates,
+    coverage and limitations copy these coverage rows.
+    """
+
+    counts: dict[str, list[int]] = {}
+    current_positions = [
+        row
+        for row in positions
+        if row.get("snapshot_status") == "LATEST_ACCEPTED_ACCOUNT_SNAPSHOT"
+        and row.get("as_of_date") == cutoff
+    ]
+    for index, rows in enumerate((account_summary, current_positions)):
+        for row in rows:
+            basis = row.get("value_basis")
+            if isinstance(basis, Mapping) and isinstance(basis.get("basis"), str):
+                counts.setdefault(str(basis["basis"]), [0, 0])[index] += 1
+    if not counts:
+        return [dict(row) for row in coverage]
+    labelled = "; ".join(
+        f"{sum(pair)} {'value' if sum(pair) == 1 else 'values'} labelled {label} "
+        f"({_noun(pair[0], 'account NAV', 'account NAVs')} and "
+        f"{_noun(pair[1], 'current position', 'current positions')})"
+        for label, pair in sorted(counts.items())
+    )
+    replacement = f"remain USD authority and are provider-reported except {labelled}"
+    aggregates = _derived_aggregate_text(account_summary, capital)
+    if aggregates:
+        replacement += f"; {aggregates}"
+    restated: list[dict[str, Any]] = []
+    for row in coverage:
+        item = dict(row)
+        gap = item.get("known_gap")
+        if isinstance(gap, str) and _PROVIDER_REPORTED_AUTHORITY in gap:
+            item["known_gap"] = gap.replace(_PROVIDER_REPORTED_AUTHORITY, replacement)
+        restated.append(item)
+    return restated
+
+
 def _accounts(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
     current_epoch_account_details: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     raw_observation_coverage: Mapping[str, str] | None = None,
+    derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     latest = _latest_nav(catalog)
     synthetic_controls = strategy_product_controls is not None and all(
@@ -4179,6 +4697,12 @@ def _accounts(
             "role": role,
             "status": status,
         }
+        value_basis = _derived_value_basis(derived_values, account_id, as_of)
+        if value_basis is not None:
+            account_row["value_basis"] = value_basis
+            if status == "AVAILABLE_LATEST_OBSERVATION":
+                # a derived value is not a provider's latest observation
+                account_row["status"] = f"AVAILABLE_{value_basis['basis']}"
         if current_epoch_account_details is not None:
             detail = current_epoch_account_details.get(account_id)
             account_row["account_label"] = detail["account_label"] if detail else None
@@ -4612,6 +5136,129 @@ def _cagr(cumulative_return: str, observed_start: str, observed_end: str) -> str
             Decimal("1") + cumulative, Decimal("365") / Decimal(elapsed_days)
         ) - Decimal("1")
     return decimal_text(annualized)
+
+
+def _period_returns_era(
+    catalog: Mapping[str, Any], performance: Sequence[Mapping[str, Any]]
+) -> bool:
+    """True when the epoch rows carry schema-10 period fields (report version 5)."""
+
+    return _uses_cutoff_basis(catalog) and any(
+        "annualisation_basis" in item for item in performance
+    )
+
+
+def _opening_nav_date(
+    strategy_id: str,
+    first_return: str,
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The opening NAV date of a canonical strategy path, from governed dated facts.
+
+    A return belongs to its end date and is measured from the prior close, so the
+    window of a path whose first return is dated ``first_return`` opens at the
+    close before it (ADR 0002; the manifest's ``return_window_start``).  The
+    closest governed date strictly before the first return is taken from the
+    strategy's epoch rows (``return_window_start``) and from its opening capital
+    anchors (``nav_recognition_date``); it is never the day before the first
+    return, which is wrong for a trading-day series that opens after a weekend.
+    """
+
+    first = _date(first_return, "account-live first return date")
+    candidates: list[date] = []
+    for row in performance:
+        start = row.get("return_window_start")
+        if row.get("strategy_id") == strategy_id and isinstance(start, str):
+            parsed = _date(start, "performance.return_window_start")
+            if parsed < first:
+                candidates.append(parsed)
+    anchors = catalog.get("capital_anchors")
+    for anchor in anchors if isinstance(anchors, list) else []:
+        if (
+            isinstance(anchor, Mapping)
+            and anchor.get("strategy_id") == strategy_id
+            and anchor.get("evidence_layer") == "ACCOUNT_LIVE"
+            and anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR"
+            and isinstance(anchor.get("nav_recognition_date"), str)
+        ):
+            parsed = _date(anchor["nav_recognition_date"], "capital anchor date")
+            if parsed < first:
+                candidates.append(parsed)
+    return max(candidates).isoformat() if candidates else None
+
+
+def _with_ledger_opening_anchors(
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+) -> Mapping[str, Any]:
+    """The catalog with the provider ledger's capital anchors, for opening NAV dates.
+
+    The baseline catalog does not carry ``capital_anchors``; they are read from the
+    provider-ledger generation the baseline is bound to (the hash-bound catalog
+    ``_selected_provider_ledger_catalog`` selects), so a strategy whose opening anchor
+    predates its only epoch row (a sleeve) still opens at the ledger anchor. Outside
+    the version-5 era, or with no readable ledger, the catalog is returned as given and
+    ``_canonical_opening_nav_date`` fails closed where an opening date is needed.
+    """
+
+    if "capital_anchors" in catalog or not _period_returns_era(catalog, performance):
+        return catalog
+    try:
+        provider_catalog = _selected_provider_ledger_catalog(
+            catalog, baseline_root, provider_ledger_root
+        )[1]
+    except ReportValidationError:
+        return catalog
+    anchors = provider_catalog.get("capital_anchors")
+    return {
+        **catalog,
+        "capital_anchors": list(anchors) if isinstance(anchors, list) else [],
+    }
+
+
+def _canonical_opening_nav_date(
+    strategy_id: str,
+    first_return: object,
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The opening NAV date a version-5 canonical strategy window starts at.
+
+    None outside that era (earlier reports keep their first-return-date window);
+    inside it a canonical path with no governed opening date fails closed.
+    """
+
+    if not isinstance(first_return, str) or not _period_returns_era(
+        catalog, performance
+    ):
+        return None
+    opening = _opening_nav_date(strategy_id, first_return, catalog, performance)
+    if opening is None:
+        raise ReportValidationError(
+            f"{strategy_id} has no opening NAV date before its first return "
+            f"{first_return}"
+        )
+    return opening
+
+
+def _row_opening_nav_date(
+    row: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    performance: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """The opening NAV date of a strategy summary row's canonical window, if any."""
+
+    if row.get("account_live_return_authority") != "CANONICAL_STRATEGY_RETURNS":
+        return None
+    return _canonical_opening_nav_date(
+        str(row.get("strategy_id")),
+        row.get("account_live_observed_start"),
+        catalog,
+        performance,
+    )
 
 
 def _report_product_controls(
@@ -5226,6 +5873,12 @@ def _strategy_provider_evidence(
                 "return_series_sha256": canonical["return_series_sha256"],
             }
         rows.append(row)
+    shared = shared_provider_live_blocks(rows)
+    if shared:
+        raise ReportValidationError(
+            "strategy provider evidence provider-live block is shared by strategies: "
+            + ", ".join(f"{first}={second}" for first, second in shared)
+        )
     return rows
 
 
@@ -5683,7 +6336,8 @@ def _stale_implementation_row(
             f"ledger is {governed_ledger[:12]}. Its account return over "
             f"{start}..{end} differs from the governed account-live series by "
             f"{(figure - governed_figure) * 100.0:+.4f} pp. No model return, gap, "
-            "risk statistic or causal waterfall is published from it."
+            "risk statistic or causal waterfall is published from it; any figure the Model "
+            "vs actual view shows for this strategy is audit-derived, not governed."
         ),
         "repair_ref": _STALE_REPAIR_REF,
     }
@@ -6501,8 +7155,16 @@ def _strategies(
             "last_date"
         )
         cumulative_return = account_metrics.get("cumulative_return")
+        # the window opens at the opening NAV date (the close before the first return)
+        window_open = (
+            _canonical_opening_nav_date(
+                strategy_id, observed_start, catalog, performance
+            )
+            if canonical_account
+            else None
+        )
         account_cagr = (
-            _cagr(cumulative_return, observed_start, observed_end)
+            _cagr(cumulative_return, window_open or observed_start, observed_end)
             if canonical_account
             and cumulative_return is not None
             and observed_start is not None
@@ -6965,8 +7627,14 @@ def _transactions_and_flows(
     return sorted(rows, key=lambda item: (str(item["date"]), str(item["record_id"])))
 
 
+# A position row whose market value is not available says so with the ledger's own status.
+MARKET_VALUE_REASON_PREFIX: Final = "SOURCE_SNAPSHOT_MARKET_VALUE_"
+
+
 def _positions(
-    catalog: Mapping[str, Any], current_account_ids: set[str] | None = None
+    catalog: Mapping[str, Any],
+    current_account_ids: set[str] | None = None,
+    derived_values: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows = _objects(catalog.get("positions"), "positions")
     if current_account_ids is not None:
@@ -7015,6 +7683,13 @@ def _positions(
                     if status == "AVAILABLE"
                     else None
                 ),
+                # Why a row has no value: the source snapshot states none (the
+                # status is the ledger's own word for it), never a guessed one.
+                **(
+                    {}
+                    if status == "AVAILABLE"
+                    else {"market_value_reason": MARKET_VALUE_REASON_PREFIX + status}
+                ),
                 "quantity": item.get("quantity"),
                 "security_id": item.get("security_id"),
                 "snapshot_status": (
@@ -7029,8 +7704,21 @@ def _positions(
                 ),
                 "strategy_id": item.get("strategy_id"),
                 "symbol": item.get("symbol"),
+                # The capture the row was observed under, when its as-of date is
+                # the financial day of a later-dated native capture.
+                **{
+                    key: item[key]
+                    for key in ("as_of_basis", "capture_date", "observed_at")
+                    if item.get(key) is not None
+                },
             }
         )
+        # A value the finality evidence declares derived is not "captured": the row says
+        # how it was valued and keeps the capture date and clock it was held under.
+        value_basis = _derived_value_basis(derived_values, account_id, as_of_date)
+        if value_basis is not None:
+            accepted[-1]["value_basis"] = value_basis
+            accepted[-1]["as_of_basis"] = value_basis["basis"]
     return sorted(
         accepted,
         key=lambda item: (
@@ -7229,6 +7917,37 @@ def _allocations(
     return rows
 
 
+# The baseline's clause says the account fact matrix names every provider without an admitted path; the matrix
+# is the current-perimeter one, so a provider whose accounts are all outside it is named in the note under it.
+_MATRIX_CLAUSE: Final = "remain explicit in the account fact matrix"
+_MATRIX_CLAUSE_SCOPED: Final = (
+    "are explicit in the account fact matrix when the account is in it; accounts not "
+    "in it are named in the note under the matrix"
+)
+_MWR_EFFECT: Final = (
+    "MWR remains unavailable outside accounts and intervals with complete admitted "
+    "external-flow evidence."
+)
+_POSITIONS_EFFECT: Final = (
+    "Only accepted current position rows are reported; accounts without reported rows "
+    "remain unavailable."
+)
+_POSITIONS_EFFECT_SCOPED: Final = (
+    "Accepted position rows, current and historical snapshots, are reported; an "
+    "account with no reported row has none shown."
+)
+_MWR_EFFECT_SCOPED: Final = (
+    "MWR is shown only where admitted flows are complete for that epoch; the flows "
+    "fact overall remains partial."
+)
+
+
+def _matrix_scope_clause(text: str) -> str:
+    """The baseline's matrix clause, scoped to the matrix the page prints."""
+
+    return text.replace(_MATRIX_CLAUSE, _MATRIX_CLAUSE_SCOPED)
+
+
 def _scoped_known_gap(
     gap: object, provider_coverage: Sequence[Mapping[str, Any]]
 ) -> str:
@@ -7284,14 +8003,27 @@ def _coverage(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "category": "FACT_COVERAGE",
                 "item": claim.get("fact_type"),
                 "known_gap": "; ".join(
-                    _scoped_known_gap(item, provider_coverage)
+                    _matrix_scope_clause(_scoped_known_gap(item, provider_coverage))
                     for item in claim.get("known_gaps", [])
                 ),
                 "status": claim.get("status"),
                 "value": claim.get("record_count"),
                 **(
                     {
-                        "disposition": claim.get("disposition"),
+                        "disposition": {
+                            **claim["disposition"],
+                            **(
+                                {
+                                    "effect": claim["disposition"]["effect"]
+                                    .replace(_MWR_EFFECT, _MWR_EFFECT_SCOPED)
+                                    .replace(
+                                        _POSITIONS_EFFECT, _POSITIONS_EFFECT_SCOPED
+                                    )
+                                }
+                                if isinstance(claim["disposition"].get("effect"), str)
+                                else {}
+                            ),
+                        },
                         "evidence_authority": claim.get("disposition", {}).get(
                             "authority"
                         ),
@@ -9285,6 +10017,7 @@ def build_report_data(
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_manifest_rows: list[Mapping[str, Any]] = []
+    manifest_rows_raw: object = None
     epoch_included_rows: list[Mapping[str, Any]] = []
     epoch_perimeter: derived_epoch_perimeter.EffectivePerimeter | None = None
     epoch_crosswalk_rows: list[dict[str, Any]] = []
@@ -9505,8 +10238,11 @@ def build_report_data(
         implementation_reconciliation_path,
         implementation_return_attribution_path,
     )
+    opening_catalog = _with_ledger_opening_anchors(
+        catalog, performance, baseline_root, provider_ledger_root
+    )
     strategy_summary = _strategies(
-        catalog,
+        opening_catalog,
         performance,
         history_contract,
         implementation_contract,
@@ -9575,7 +10311,14 @@ def build_report_data(
         )
     if _uses_cutoff_basis(catalog):
         strategy_summary = [
-            {**row, **_account_annualization_labels(row)} for row in strategy_summary
+            {
+                **row,
+                **_account_annualization_labels(
+                    row,
+                    _row_opening_nav_date(row, opening_catalog, performance),
+                ),
+            }
+            for row in strategy_summary
         ]
     # Version 5 (manifest schema 10): every epoch row carries its period returns.
     period_returns_enabled = _uses_cutoff_basis(catalog) and any(
@@ -9600,6 +10343,7 @@ def build_report_data(
                     if row.get("account_live_return_authority")
                     == "CANONICAL_STRATEGY_RETURNS"
                     else None,
+                    _row_opening_nav_date(row, opening_catalog, performance),
                 ),
                 "benchmark_comparison_window": _label_window(
                     row.get("benchmark_annualization")
@@ -9897,11 +10641,16 @@ def build_report_data(
         current_account_ids,
         "provider_admissions",
     )
+    derived_values = _derived_value_index(
+        None if source_clock_authority is None else source_clock_authority[0]
+    )
+    position_rows = _positions(catalog, current_account_ids, derived_values)
     account_summary = _accounts(
         catalog,
         strategy_product_controls,
         current_epoch_account_details,
         raw_observation_coverage=raw_observation_coverage,
+        derived_values=derived_values,
     )
     # B4: the report never compared a strategy value with its accounts.  The account
     # rows come from the NAV facts, the strategy values from the baseline block; a
@@ -9930,7 +10679,13 @@ def build_report_data(
         "as_of_date": catalog.get("as_of_date"),
         "baseline": baseline_ref,
         "corrections": _corrections(catalog),
-        "coverage_data_quality": coverage,
+        "coverage_data_quality": _restate_value_authority(
+            coverage,
+            account_summary,
+            position_rows,
+            str(calculation_cutoff_date or catalog.get("as_of_date")),
+            verified_capital,
+        ),
         "dependence_analysis": dependence_analysis,
         "dependence_rows": dependence_rows,
         "fact_coverage_matrix": with_account_roles(
@@ -9953,7 +10708,7 @@ def build_report_data(
             },
             {
                 "item": "Evidence layers",
-                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate.",
+                "value": "Account-live, provider-live, predecessor, shadow/OOS, backtest, official-vehicle, and conceptual-stress evidence remain separate, except that the LIVE_PLUS_BACKTEST mode joins version-matched backtest history before live inception to the live line and labels the joined line by origin.",
             },
             {
                 "item": "Account-live return authority",
@@ -9961,7 +10716,7 @@ def build_report_data(
             },
             {
                 "item": "Missing data",
-                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; no interpolation.",
+                "value": "Missing NAV, flows, FX, costs, positions, or mappings yields UNAVAILABLE, PARTIAL, FAILED, or UNMAPPED; a missing NAV is not interpolated, and a day the HWM candidate fills is labelled with its origin.",
             },
             {
                 "item": "Reserve",
@@ -9999,10 +10754,7 @@ def build_report_data(
             ),
         ],
         "observation_windows": catalog.get("observation_windows", []),
-        "positions": _positions(
-            catalog,
-            current_account_ids,
-        ),
+        "positions": position_rows,
         "provider_admissions": provider_admissions,
         "provider_coverage": catalog.get("provider_coverage", []),
         "provider_strategy_returns": provider_strategy_returns,
@@ -10269,6 +11021,11 @@ def build_report_data(
                     hwm_summary=hwm_summary,
                     calculation_cutoff_date=calculation_cutoff_date,
                     custody_current_capital=report.get("custody_current_capital"),
+                    manifest_rows=(
+                        manifest_rows_raw
+                        if isinstance(manifest_rows_raw, list)
+                        else None
+                    ),
                 )
             )
         except PortfolioTotalsError as exc:
@@ -10296,6 +11053,16 @@ def build_report_data(
                         if governed_hwm_proof is None
                         or governed_hwm_proof.get("current_index") is None
                         else str(governed_hwm_proof["current_index"])
+                    ),
+                    hwm_index_path=(
+                        None
+                        if governed_hwm_proof is None
+                        else governed_hwm_proof.get("index_path")
+                    ),
+                    derived_patches=_derived_value_index(
+                        None
+                        if source_clock_authority is None
+                        else source_clock_authority[0]
                     ),
                     strategy_returns={
                         str(item["strategy_id"]): Decimal(
@@ -12204,6 +12971,75 @@ def _workbook_evidence_binding_from_snapshots(
     return binding
 
 
+# T6 (owner ruling): a strategy whose row mixes the parent account's series with its sleeve epoch says so
+# plainly, names the owner's restatement ruling and its release, and shows the audit bridge.  The bridge terms
+# are fixed disclosure inputs, not payload fields: they come from ADR 0002 (entry day excluded, date-only
+# transfers at end of day) and issue #624 (allocated costs); no panel or report field carries them.
+MIXED_BASIS_AUDIT_FIGURE_PERCENT: Final = "14.348"
+MIXED_BASIS_BRIDGE_POINTS: Final[tuple[tuple[str, str], ...]] = (
+    ("allocated costs", "-0.256"),
+    ("entry-day exclusion", "+1.661"),
+    ("ADR 0002 end-of-day flow", "-0.319"),
+)
+MIXED_BASIS_SCHEDULED_RELEASE: Final = "R2.2"
+MIXED_BASIS_BRIDGE_SOURCE: Final = "ADR 0002 / #624"
+
+
+def _mixed_basis_disclosure(
+    item: Mapping[str, Any], parent_label: str = "the parent account"
+) -> tuple[dict[str, Any], str]:
+    """The structured disclosure and its sentence, from the row's own windows and the fixed bridge."""
+
+    def span(start: Any, end: Any, days: Any) -> str:
+        if not (isinstance(start, str) and isinstance(end, str)):
+            return "its own window"
+        tail = f", {days} days exclusive (end minus start)" if days is not None else ""
+        return f"{start} to {end}{tail}"
+
+    basis = item.get("annualisation_basis")
+    mwr_days = (
+        basis.get("mwr_xirr", {}).get("window_days")
+        if isinstance(basis, Mapping) and isinstance(basis.get("mwr_xirr"), Mapping)
+        else None
+    )
+    parent_window = span(
+        item.get("return_window_start"),
+        item.get("return_close_date"),
+        item.get("window_days"),
+    )
+    sleeve_window = span(
+        item.get("mwr_opening_date"), item.get("mwr_terminal_date"), mwr_days
+    )
+    net = sum((Decimal(value) for _, value in MIXED_BASIS_BRIDGE_POINTS), Decimal(0))
+    terms = ", ".join(f"{name} {value}" for name, value in MIXED_BASIS_BRIDGE_POINTS)
+    sentence = (
+        "MIXED BASIS: this row mixes account and sleeve bases. On the strategy row, "
+        "return, drawdown, current value, weight and weekly series are the parent "
+        f"account's ({parent_window}); MWR and governed capital are the sleeve epoch's "
+        f"({sleeve_window}). Account-by-strategy epoch rows (Performance & HWM) and the "
+        "dollar-value chart show the sleeve's own values; model-vs-actual audit epochs "
+        f"are on the parent account ({parent_label}). The owner ruled that this row be restated to the sleeve basis; the "
+        f"restatement is scheduled as release {MIXED_BASIS_SCHEDULED_RELEASE}. Bridge from "
+        f"the audit figure {MIXED_BASIS_AUDIT_FIGURE_PERCENT}% to the sleeve-basis return, "
+        f"in percentage points: {terms} (net {net:+}) [source: {MIXED_BASIS_BRIDGE_SOURCE}]."
+    )
+    disclosure = {
+        "status": "MIXED_BASIS",
+        "restatement_basis": "SLEEVE_EPOCH",
+        "restatement_ruled_by": "OWNER",
+        "scheduled_release": MIXED_BASIS_SCHEDULED_RELEASE,
+        "parent_window": parent_window,
+        "sleeve_window": sleeve_window,
+        "audit_figure_percent": MIXED_BASIS_AUDIT_FIGURE_PERCENT,
+        "bridge_points": [
+            {"term": name, "points": value} for name, value in MIXED_BASIS_BRIDGE_POINTS
+        ],
+        "bridge_net_points": f"{net:+}",
+        "bridge_source": MIXED_BASIS_BRIDGE_SOURCE,
+    }
+    return disclosure, sentence
+
+
 def _apply_return_scope(
     report: dict[str, Any],
     rows: Sequence[Mapping[str, Any]],
@@ -12257,6 +13093,20 @@ def _apply_return_scope(
             "mwr_and_governed_capital_basis": "SLEEVE_EPOCH",
             "sleeve_epoch_accounts": sleeves,
         }
+        parent_names = sorted(
+            {
+                f"{row['provider']} {row['last_four']}"
+                for row in rows
+                if str(row.get("account_id")) in sleeve_accounts
+                and sleeve_accounts[str(row["account_id"])] in parents
+                and row.get("provider")
+                and row.get("last_four")
+            }
+        )
+        disclosure, disclosure_text = _mixed_basis_disclosure(
+            item, parent_names[0] if len(parent_names) == 1 else "the parent account"
+        )
+        item["return_scope"]["mixed_basis_disclosure"] = disclosure
         item["return_scope_label"] = (
             f"Return (cumulative, year-to-date, calendar-year, annualised), drawdowns "
             f"(account-live and HWM), current value, weight, cost-rate denominator and "
@@ -12264,7 +13114,7 @@ def _apply_return_scope(
             f"{', '.join(parents)} (includes retired sleeves "
             f"{', '.join(a.rsplit('-', 1)[-1] for a in retired) or 'none'} and its "
             f"unallocated cash and margin). MWR and governed capital: sleeve "
-            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}."
+            f"{', '.join(a.rsplit('-', 1)[-1] for a in sleeves)}. {disclosure_text}"
         )
 
 

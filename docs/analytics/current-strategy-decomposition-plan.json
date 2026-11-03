@@ -1463,7 +1463,7 @@
       "assignments": [
         {
           "source_key": "multi-asset-style",
-          "constraint": "LONG_ONLY_SUM_TO_ONE",
+          "constraint": "UNCONSTRAINED",
           "factor_sets": [
             [
               "BTC-USD"

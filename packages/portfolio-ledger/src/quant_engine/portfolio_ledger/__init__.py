@@ -45,6 +45,9 @@ from quant_engine.portfolio_ledger.hwm import (
     validate_as_held_hwm_receipt_generation_binding,
     verify_as_held_hwm_receipt,
 )
+from quant_engine.portfolio_ledger.hwm_calendar_authority import (
+    derive_governed_calendar_authority,
+)
 from quant_engine.portfolio_ledger.hwm_governed import (
     CLOSED_SOURCE_TREATMENT,
     GOVERNED_HWM_CALENDAR_AUTHORITY_CLASS,
@@ -84,6 +87,7 @@ from quant_engine.portfolio_ledger.provider_admission import (
     admitted_binding_set_digest,
     product_data_class_set_digest,
     provider_upstream_inventory_digest,
+    shared_provider_live_blocks,
     validate_admit_or_declare_receipt,
     validate_dataset_dispositions,
     validate_provider_authority,
@@ -219,6 +223,7 @@ __all__ = [
     "opening_point",
     "product_data_class_set_digest",
     "provider_upstream_inventory_digest",
+    "shared_provider_live_blocks",
     "reconcile_position_values",
     "reconcile_allocation_bridge",
     "splice_spans",
@@ -230,6 +235,7 @@ __all__ = [
     "validate_admit_or_declare_receipt",
     "validate_dataset_dispositions",
     "validate_governed_hwm_calendar_authority",
+    "derive_governed_calendar_authority",
     "verify_as_held_hwm_receipt",
     "validate_provider_authority",
     "xirr",

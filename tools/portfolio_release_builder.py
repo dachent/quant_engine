@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import csv
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, localcontext
 import hashlib
 import importlib.util
 import io
@@ -17,7 +18,16 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterable, Iterator, Mapping, Sequence, TypedDict
+import time
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+    TypedDict,
+)
 
 from quant_engine.core import (
     GenerationManifest,
@@ -41,8 +51,45 @@ from portfolio_counted_producer import (
 from portfolio_private_stage import validate_private_stage_target
 
 
+#: The weekly builder reads the gap-fill policy from ``<root>/spec.json`` only.
+WEEKLY_GAP_FILL_SPEC_NAME = "spec.json"
+
+
 class VerticalBuildError(ValueError):
     """A source, stage, or proof differs from the vertical-build contract."""
+
+
+def require_gap_fill_spec_name(path: Path) -> None:
+    """The weekly builder reads ``<root>/spec.json`` only, so a pin must name it."""
+
+    if path.name != WEEKLY_GAP_FILL_SPEC_NAME:
+        raise VerticalBuildError(
+            f"weekly_gap_fill_spec must be named {WEEKLY_GAP_FILL_SPEC_NAME}"
+        )
+
+
+def _vendor_gap_fill_arguments(recipe: Mapping[str, Any]) -> tuple[str, ...]:
+    """The panel arguments that carry the recipe's pinned vendor gap-day fill record."""
+
+    definition = recipe.get("vendor_gap_fills")
+    if not isinstance(definition, dict):
+        return ()
+    return (
+        "--vendor-gap-fills",
+        str(_path(definition["path"], "vendor_gap_fills.path")),
+        "--vendor-gap-fills-sha256",
+        str(definition["sha256"]),
+    )
+
+
+def _declared_periods(declared: Mapping[str, int], series_id: str) -> int:
+    """The base specification's annualisation of a series; absent is an error."""
+
+    if series_id not in declared:
+        raise VerticalBuildError(
+            f"base decomposition declares no periods_per_year for {series_id}"
+        )
+    return declared[series_id]
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -680,9 +727,12 @@ def _recipe(path: Path) -> dict[str, Any]:
         - {
             "dependence_selected_inputs",
             "evaluated_on",
+            "model_vs_actual_input",
             "nested_tag_map",
             "sleeve_disclosure_sources",
             "source_clock",
+            "vendor_gap_fills",
+            "weekly_gap_fill_spec",
         }
         != required
     ):
@@ -751,6 +801,32 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("nested_tag_map identity differs")
+    if "weekly_gap_fill_spec" in recipe:
+        definition = recipe["weekly_gap_fill_spec"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("weekly_gap_fill_spec definition differs")
+        artifact = _path(definition["path"], "weekly_gap_fill_spec.path")
+        require_gap_fill_spec_name(artifact)
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("weekly_gap_fill_spec identity differs")
+    if "vendor_gap_fills" in recipe:
+        definition = recipe["vendor_gap_fills"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("vendor_gap_fills definition differs")
+        artifact = _path(definition["path"], "vendor_gap_fills.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("vendor_gap_fills identity differs")
+    _model_vs_actual_arguments(recipe)
     if "sleeve_disclosure_sources" in recipe:
         definition = recipe["sleeve_disclosure_sources"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -938,6 +1014,9 @@ def create_recipe(
     evaluated_on: str | None = None,
     nested_tag_map_path: Path | None = None,
     sleeve_disclosure_sources_path: Path | None = None,
+    weekly_gap_fill_spec_path: Path | None = None,
+    vendor_gap_fills_path: Path | None = None,
+    model_vs_actual_input_path: Path | None = None,
 ) -> dict[str, Any]:
     financial_cutoff = date.fromisoformat(as_of_date)
     normalized_evaluated_on: str | None = None
@@ -1048,6 +1127,17 @@ def create_recipe(
         payload["source_clock"] = _file_definition(source_clock_path.resolve())
     if nested_tag_map_path is not None:
         payload["nested_tag_map"] = _file_definition(nested_tag_map_path.resolve())
+    if vendor_gap_fills_path is not None:
+        payload["vendor_gap_fills"] = _file_definition(vendor_gap_fills_path.resolve())
+    if weekly_gap_fill_spec_path is not None:
+        require_gap_fill_spec_name(weekly_gap_fill_spec_path)
+        payload["weekly_gap_fill_spec"] = _file_definition(
+            weekly_gap_fill_spec_path.resolve()
+        )
+    if model_vs_actual_input_path is not None:
+        payload["model_vs_actual_input"] = _file_definition(
+            model_vs_actual_input_path.resolve()
+        )
     if sleeve_disclosure_sources_path is not None:
         payload["sleeve_disclosure_sources"] = _file_definition(
             sleeve_disclosure_sources_path.resolve()
@@ -1106,6 +1196,67 @@ def create_recipe(
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
+
+
+_LENS_WORKERS_ENV = "QE_LENS_WORKERS"
+_LensBuild = tuple[str, list[dict[str, Any]]]
+
+
+def _lens_worker_count(jobs: int) -> int:
+    """Concurrent lens builds; ``QE_LENS_WORKERS=1`` keeps the serial walk."""
+    configured = os.environ.get(_LENS_WORKERS_ENV)
+    if configured is None:
+        requested = max(1, (os.cpu_count() or 1) // 4)
+    else:
+        try:
+            requested = int(configured)
+        except ValueError:
+            requested = 0
+        if requested < 1:
+            raise VerticalBuildError(f"{_LENS_WORKERS_ENV} must be a positive integer")
+    return max(1, min(jobs, requested, 8))
+
+
+def _build_lenses(
+    items: Sequence[tuple[Path, Mapping[str, Any]]],
+    build: Callable[[Path, Mapping[str, Any]], _LensBuild],
+    *,
+    workers: int,
+) -> Iterator[_LensBuild]:
+    """Yield each lens build in declared order, running independent ones together.
+
+    Each lens is its own pair of producer subprocesses over its own spec and
+    output root. Runs whose specs have the same bytes share one reuse key, so
+    they stay in a single task, in order; everything else overlaps. Results are
+    consumed in declared order, so recorded operations and bindings do not
+    depend on which build finished first.
+    """
+    if workers < 2 or len(items) < 2:
+        for bundle, row in items:
+            yield build(bundle, row)
+        return
+    groups: dict[object, list[int]] = {}
+    for index, (_bundle, row) in enumerate(items):
+        digest = row.get("sha256")
+        groups.setdefault(digest if isinstance(digest, str) else index, []).append(
+            index
+        )
+
+    def run(indexes: list[int]) -> list[tuple[int, _LensBuild]]:
+        return [(index, build(*items[index])) for index in indexes]
+
+    results: dict[int, _LensBuild] = {}
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = [pool.submit(run, indexes) for indexes in groups.values()]
+        for future in futures:
+            results.update(future.result())
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    for index in range(len(items)):
+        yield results[index]
 
 
 def _note_progress(what: str) -> None:
@@ -3112,6 +3263,26 @@ def _governed_plan_sources(
     ):
         raise VerticalBuildError("governed current strategy plan is unavailable")
     plan = _load(attribution_bundle / plan_relative, "governed current strategy plan")
+    # The annualisation the expected models carry is the governed base spec's, per
+    # target series; it is never a literal here.
+    declared_periods_per_year: dict[str, int] = {}
+    base_spec = _load(
+        attribution_bundle / "inputs/governance/base-decomposition-spec.json",
+        "base decomposition specification",
+    )
+    for base_model in base_spec.get("models", []):
+        if not isinstance(base_model, dict):
+            raise VerticalBuildError("base decomposition model differs")
+        base_series = _text(base_model.get("series_id"), "base model series_id")
+        base_periods = base_model.get("periods_per_year")
+        if (
+            not isinstance(base_periods, int)
+            or isinstance(base_periods, bool)
+            or base_periods < 1
+            or declared_periods_per_year.setdefault(base_series, base_periods)
+            != base_periods
+        ):
+            raise VerticalBuildError("base decomposition periods_per_year differs")
     if plan.get("schema_version") != 3:
         raise VerticalBuildError("governed current strategy plan schema differs")
     sources = plan.get("sources")
@@ -3399,7 +3570,9 @@ def _governed_plan_sources(
                             3, minimum_per_factor * len(factor_set)
                         ),
                         "parsimony_tolerance": parsimony_tolerance,
-                        "periods_per_year": 252,
+                        "periods_per_year": _declared_periods(
+                            declared_periods_per_year, series_id
+                        ),
                         "series_id": series_id,
                         "static_constraint": static_constraint,
                     }
@@ -4305,6 +4478,21 @@ def _build_base_analytics(
     return base_spec, base_source, decomposition_generation_id
 
 
+def _weekly_history_coverage_arguments(correlation_source: Path) -> tuple[str, ...]:
+    """Name the governed history coverage that carries the accepted multi-day spans.
+
+    A weekly line built without them omits measured holding-period returns, so a
+    current dependence source must supply them.  Legacy sources carry no receipt.
+    """
+
+    if not (correlation_source / "dependence-source.json").is_file():
+        return ()
+    coverage = correlation_source / "history-coverage.json"
+    if not coverage.is_file():
+        raise VerticalBuildError("current dependence source lacks history coverage")
+    return ("--history-coverage", str(coverage))
+
+
 def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
@@ -4333,6 +4521,13 @@ def build_analytics(
     correlation_source = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
     )
+    gap_fill_arguments: tuple[str, ...] = ()
+    gap_fill_definition = recipe.get("weekly_gap_fill_spec")
+    if isinstance(gap_fill_definition, dict):
+        gap_fill_arguments = (
+            "--gap-fill-root",
+            str(_path(gap_fill_definition["path"], "weekly_gap_fill_spec.path").parent),
+        )
     current_dependence_receipt = correlation_source / "dependence-source.json"
     if current_dependence_receipt.is_file():
         correlation_identity = _load(
@@ -4462,17 +4657,22 @@ def build_analytics(
         hybrid_bundles["dynamic-style"] = _text(
             hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
         )
-    for lens_bundle, row in spec_sources:
+
+    def lens_layout(row: Mapping[str, Any]) -> tuple[Path, str]:
         source_key = _text(row.get("source_key"), "lens source_key")
         if current_plan:
             surface = _text(row.get("surface"), "lens surface")
             evidence_mode = _text(row.get("evidence_mode"), "lens evidence_mode")
-            spec_id = _text(row.get("spec_id"), "lens spec_id")
-            lens_root = lenses_root / evidence_mode / surface / source_key
-        else:
-            lens_root = lenses_root / source_key
+            return lenses_root / evidence_mode / surface / source_key, source_key
+        return lenses_root / source_key, source_key
+
+    def build_lens(lens_bundle: Path, row: Mapping[str, Any]) -> _LensBuild:
+        """Stage and publish one lens; return its generation and its operations."""
+        lens_root, _source_key = lens_layout(row)
         lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
+        operations: list[dict[str, Any]] = []
         _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
+        started = time.monotonic()
         staged = _tool(
             "portfolio_decomposition.py",
             "stage",
@@ -4489,8 +4689,9 @@ def build_analytics(
             ),
             timeout=7200,
         )
+        staged_seconds = time.monotonic() - started
         _record_numerical_producer_operation(
-            producer_operations,
+            operations,
             tool="portfolio_decomposition.py",
             operation="stage",
             spec_path=lens_spec,
@@ -4515,7 +4716,7 @@ def build_analytics(
             timeout=7200,
         )
         _record_numerical_producer_operation(
-            producer_operations,
+            operations,
             tool="portfolio_decomposition.py",
             operation="publish",
             spec_path=lens_spec,
@@ -4523,10 +4724,32 @@ def build_analytics(
             output_root=lens_root,
             producer_result=result,
         )
-        generation_id = _generation_id(
-            result.get("generation_id"), "lens generation_id"
+        _note_progress(
+            f"decomposition lens {lens_root.name}/{lens_spec.stem} done "
+            f"stage={staged_seconds:.1f}s total={time.monotonic() - started:.1f}s"
         )
+        return (
+            _generation_id(result.get("generation_id"), "lens generation_id"),
+            operations,
+        )
+
+    built_lenses = _build_lenses(
+        [(lens_bundle, row) for lens_bundle, row in spec_sources],
+        build_lens,
+        # Hybrid lenses derive a second decomposition from each one inside this
+        # same loop, so only the current plan's independent lens runs overlap.
+        workers=_lens_worker_count(len(spec_sources)) if current_plan else 1,
+    )
+    for (lens_bundle, row), (generation_id, operations) in zip(
+        spec_sources, built_lenses, strict=True
+    ):
+        lens_root, source_key = lens_layout(row)
+        lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
+        producer_operations.extend(operations)
         if current_plan:
+            surface = _text(row.get("surface"), "lens surface")
+            evidence_mode = _text(row.get("evidence_mode"), "lens evidence_mode")
+            spec_id = _text(row.get("spec_id"), "lens spec_id")
             lens_key = f"{evidence_mode}:{spec_id}" if len(mode_plans) > 1 else spec_id
             lenses[lens_key] = generation_id
             lens_bindings.append(
@@ -4615,6 +4838,10 @@ def build_analytics(
     correlation_generation_id = _generation_id(
         correlation.get("generation_id"), "correlation generation_id"
     )
+    gap_fill_arguments = (
+        *gap_fill_arguments,
+        *_weekly_history_coverage_arguments(correlation_source),
+    )
     weekly_root = output_root / "weekly-returns"
     built = _tool(
         "portfolio_weekly_returns.py",
@@ -4627,6 +4854,7 @@ def build_analytics(
         str(attribution_bundle),
         "--output-root",
         str(weekly_root),
+        *gap_fill_arguments,
         timeout=7200,
     )
     candidate_dir = _path(built.get("candidate_dir"), "weekly candidate")
@@ -4641,6 +4869,7 @@ def build_analytics(
         str(attribution_bundle),
         "--candidate-dir",
         str(candidate_dir),
+        *gap_fill_arguments,
         timeout=7200,
     )
     weekly = _tool(
@@ -4656,6 +4885,7 @@ def build_analytics(
         str(weekly_root),
         "--candidate-dir",
         str(candidate_dir),
+        *gap_fill_arguments,
         timeout=7200,
     )
     weekly_generation_id = _generation_id(
@@ -5291,6 +5521,146 @@ def _verified_epoch_manifest_panel_arguments(
     )
 
 
+# Largest absolute difference accepted between a manifest link factor and
+# ``1 + return`` of the matching weekly span.  The two are the same measured quantity
+# computed by different arithmetic: the manifest factor is a 40-digit quotient of the
+# Matrixport generation's NAVs, the receipt return a longer quotient of the same
+# endpoints.  On the pass-24 data they are about 5e-28 apart.  The bound is 1e-26,
+# roughly twenty times that and fourteen orders below any real drift (a 1e-12 relative
+# change fails); an absolute bound is used so the result does not depend on where a
+# significant-digit rounding boundary falls.
+SPAN_FACTOR_TOLERANCE = Decimal("1e-26")
+
+
+def _history_source(recipe: Mapping[str, Any]) -> Path | None:
+    definition = recipe.get("correlation_source_root")
+    if not isinstance(definition, dict):
+        return None
+    return _path(definition.get("path"), "correlation source root")
+
+
+def _live_dates_by_series(returns_csv: Path) -> dict[str, set[date]]:
+    live: dict[str, set[date]] = {}
+    with returns_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("evidence_layer") == "ACCOUNT_LIVE":
+                live.setdefault(str(row["series_id"]), set()).add(
+                    date.fromisoformat(str(row["date"]))
+                )
+    return live
+
+
+def _verify_weekly_spans_against_manifest(
+    weekly_root: Path,
+    account_strategy_manifest: Path | None,
+    history_source: Path | None = None,
+) -> int:
+    """Fail unless the weekly accepted spans and the manifest links agree both ways.
+
+    The weekly stage reads its spans from the governed history coverage because the
+    account manifest is staged later.  Once the manifest exists:
+
+    * every weekly span must equal, within SPAN_FACTOR_TOLERANCE, the factor of the
+      same interval on every manifest row of the span's owning strategy (a row's
+      ``strategy_id`` against the span's ``strategy_id``; a row of another strategy,
+      or an account row of the same strategy that disagrees, cannot satisfy it), and
+      at least one such row must exist;
+    * when ``history_source`` (the dependence source holding ``returns.csv`` and the
+      history coverage) is given, every manifest link of a covered strategy whose end
+      date carries no daily live observation must have its weekly span, so a measured
+      interval the weekly line leaves out stops the build.
+    """
+
+    if account_strategy_manifest is None:
+        return 0
+    generation_id, generation = _published_generation(weekly_root)
+    weekly_path = generation / "weekly-returns.json"
+    if weekly_path.is_symlink() or not weekly_path.is_file():
+        raise VerticalBuildError("weekly generation lacks its payload")
+    weekly = _load(weekly_path, f"weekly returns {generation_id}")
+    manifest = _load(account_strategy_manifest, "account-strategy manifest")
+    rows = [row for row in manifest.get("rows") or [] if isinstance(row, dict)]
+    # (strategy, start, end) -> [(account, factor)] over every manifest row
+    factors: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
+    for row in rows:
+        trace = row.get("observation_trace")
+        links = trace.get("links") if isinstance(trace, dict) else None
+        for link in links if isinstance(links, list) else []:
+            if isinstance(link, dict):
+                key = (
+                    str(row.get("strategy_id")),
+                    str(link.get("start_date")),
+                    str(link.get("end_date")),
+                )
+                factors.setdefault(key, []).append(
+                    (str(row.get("account_id")), str(link.get("factor")))
+                )
+
+    def close(span_return: object, factor_text: str) -> bool:
+        with localcontext() as context:
+            context.prec = 60
+            expected = Decimal(1) + Decimal(str(span_return))
+            return abs(expected - Decimal(factor_text)) <= SPAN_FACTOR_TOLERANCE
+
+    seen: set[tuple[str, str, str]] = set()
+    checked = 0
+    for series in weekly.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        coverage = series.get("mode_coverage")
+        if not isinstance(coverage, dict):
+            continue
+        spans = {
+            json.dumps(span, sort_keys=True): span
+            for mode in coverage.values()
+            if isinstance(mode, dict)
+            for span in mode.get("accepted_multi_day_spans", [])
+        }
+        for span in spans.values():
+            key = (str(span.get("strategy_id")), str(span["start"]), str(span["end"]))
+            owners = factors.get(key, [])
+            if not owners or not all(close(span["return"], f) for _a, f in owners):
+                raise VerticalBuildError(
+                    "weekly accepted span differs from the account manifest link: "
+                    f"{series.get('series_id')} {key[1]}..{key[2]}"
+                )
+            seen.add(key)
+            checked += 1
+    if history_source is not None:
+        coverage_path = history_source / "history-coverage.json"
+        returns_path = history_source / "returns.csv"
+        if coverage_path.is_file() and returns_path.is_file():
+            history = _load(coverage_path, "history coverage")
+            series_of = {
+                str(item["strategy_id"]): str(item["series_id"])
+                for item in history.get("strategies") or []
+                if isinstance(item, dict) and item.get("series_id") is not None
+            }
+            live = _live_dates_by_series(returns_path)
+            for row in rows:
+                series_id = series_of.get(str(row.get("strategy_id")))
+                days = live.get(series_id or "")
+                trace = row.get("observation_trace")
+                links = trace.get("links") if isinstance(trace, dict) else None
+                for link in links if isinstance(links, list) else []:
+                    if not days or not isinstance(link, dict):
+                        continue
+                    end = date.fromisoformat(str(link.get("end_date")))
+                    if not min(days) < end <= max(days) or end in days:
+                        continue
+                    key = (
+                        str(row.get("strategy_id")),
+                        str(link.get("start_date")),
+                        str(link.get("end_date")),
+                    )
+                    if key not in seen:
+                        raise VerticalBuildError(
+                            "account manifest link has no weekly accepted span: "
+                            f"{row.get('account_id')} {key[0]} {key[1]}..{key[2]}"
+                        )
+    return checked
+
+
 def _stage_account_strategy_manifest(
     recipe: Mapping[str, Any],
     report_root: Path,
@@ -5333,6 +5703,34 @@ def _stage_account_strategy_manifest(
     staged = output_root / "account-strategy-manifest.json"
     _write_exact(staged, canonical_json_bytes(manifest))
     return staged
+
+
+def _model_vs_actual_arguments(recipe: Mapping[str, Any]) -> tuple[str, ...]:
+    """The panel flags for the optional model_vs_actual audit input, from the recipe pin.
+
+    The pin is re-verified at every call: a missing file or a changed byte refuses here,
+    before the panel is invoked, and the same sha256 is the producer's own pin.
+    """
+
+    if "model_vs_actual_input" not in recipe:
+        return ()
+    definition = recipe["model_vs_actual_input"]
+    if not isinstance(definition, dict) or set(definition) != {
+        "path",
+        "sha256",
+        "size_bytes",
+    }:
+        raise VerticalBuildError("model_vs_actual_input definition differs")
+    artifact = _path(definition["path"], "model_vs_actual_input.path")
+    sha256, size = _sha(artifact)
+    if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+        raise VerticalBuildError("model_vs_actual_input identity differs")
+    return (
+        "--model-vs-actual-input",
+        str(artifact),
+        "--model-vs-actual-input-sha256",
+        sha256,
+    )
 
 
 def _panel_financial_arguments(
@@ -5408,6 +5806,7 @@ def build_panel_candidate(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    model_vs_actual_arguments = _model_vs_actual_arguments(recipe)
     dependence_selected_inputs = recipe.get("dependence_selected_inputs")
     dependence_selected_arguments = (
         (
@@ -5456,12 +5855,18 @@ def build_panel_candidate(
             raise VerticalBuildError(
                 "epoch-manifest generation source identity differs"
             )
+    _verify_weekly_spans_against_manifest(
+        Path(_text(analytics.get("weekly_root"), "weekly_root")),
+        account_strategy_manifest,
+        _history_source(recipe),
+    )
     financial_arguments = _panel_financial_arguments(
         recipe,
         baseline_root,
         account_strategy_manifest,
     )
     epoch_arguments = _verified_epoch_manifest_panel_arguments(epoch_identity)
+    vendor_gap_fill_arguments = _vendor_gap_fill_arguments(recipe)
     hybrid_arguments = (
         (
             "--hybrid-decomposition-plan-bundle",
@@ -5477,6 +5882,7 @@ def build_panel_candidate(
         str(report_root),
         *strategy_history_arguments,
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5499,6 +5905,7 @@ def build_panel_candidate(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--output-root",
@@ -5513,6 +5920,7 @@ def build_panel_candidate(
         str(report_root),
         *strategy_history_arguments,
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5535,6 +5943,7 @@ def build_panel_candidate(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -5612,6 +6021,7 @@ def publish_panel(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    model_vs_actual_arguments = _model_vs_actual_arguments(recipe)
     dependence_selected_inputs = recipe.get("dependence_selected_inputs")
     dependence_selected_arguments = (
         (
@@ -5639,12 +6049,18 @@ def publish_panel(
             baseline_root,
             output_root,
         )
+    _verify_weekly_spans_against_manifest(
+        Path(_text(analytics.get("weekly_root"), "weekly_root")),
+        account_strategy_manifest,
+        _history_source(recipe),
+    )
     financial_arguments = _panel_financial_arguments(
         recipe,
         baseline_root,
         account_strategy_manifest,
     )
     epoch_arguments = _verified_epoch_manifest_panel_arguments(epoch_identity)
+    vendor_gap_fill_arguments = _vendor_gap_fill_arguments(recipe)
     # portfolio_control_panel.py:11963 requires private stage context for a
     # governed financial publication, a financial-mode panel and a verified
     # account-manifest bundle alike, not only when governed HWM or capital
@@ -5712,6 +6128,7 @@ def publish_panel(
         str(report_root),
         *strategy_history_arguments,
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5731,6 +6148,7 @@ def publish_panel(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -5765,6 +6183,7 @@ def publish_panel(
         # them here let the panel verify and then fail at the last step of the
         # last stage.
         *dependence_selected_arguments,
+        *model_vs_actual_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5787,6 +6206,7 @@ def publish_panel(
         *epoch_arguments,
         *hwm_arguments,
         *capital_arguments,
+        *vendor_gap_fill_arguments,
         "--freshness-health",
         str(freshness_health),
         "--candidate-dir",
@@ -6560,6 +6980,9 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
     recipe.add_argument("--dependence-selected-inputs", type=Path)
+    recipe.add_argument("--weekly-gap-fill-spec", type=Path)
+    recipe.add_argument("--vendor-gap-fills", type=Path)
+    recipe.add_argument("--model-vs-actual-input", type=Path)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
     recipe.add_argument("--as-of-date", required=True)
     recipe.add_argument("--pipeline-id", required=True)
@@ -6645,6 +7068,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.hybrid_decomposition_plan_bundle
                 ),
                 correlation_source_root=args.correlation_source_root,
+                weekly_gap_fill_spec_path=args.weekly_gap_fill_spec,
+                vendor_gap_fills_path=args.vendor_gap_fills,
+                model_vs_actual_input_path=args.model_vs_actual_input,
                 legacy_panel=args.legacy_panel,
                 as_of_date=args.as_of_date,
                 pipeline_id=args.pipeline_id,

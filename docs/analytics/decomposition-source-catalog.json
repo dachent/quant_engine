@@ -12,7 +12,8 @@
       "IWM_XS",
       "HYG_XS"
     ],
-    "risk_free_proxy": "BIL"
+    "risk_free_proxy": "BIL",
+    "calendar_extension_proxy": "SPY"
   },
   "selection_policy": {
     "exact_date_alignment": true,

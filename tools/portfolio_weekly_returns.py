@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -32,7 +33,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "0.2.0"
+BUILDER_VERSION: Final = "0.5.0"
 SCHEMA_VERSION: Final = 2
 STRATEGY_MODES: Final = ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
 PUBLIC_SOURCES: Final = {
@@ -86,6 +87,24 @@ CORE_BENCHMARKS: Final = {
     "SPY": "U.S. large-cap equity (S&P 500)",
     "SPXL": "U.S. large-cap equity, 3x daily leveraged",
 }
+# SPY and SPXL are the dollar-matched comparison benchmarks.  Their governed
+# history reaches back before the cash proxy that bounds every factor lens, so the
+# weekly and daily series are read from the unprojected market input of the plan
+# bundle (the cash-proxy-gated lens copy would truncate them) and never from a lens.
+FULL_HISTORY_BENCHMARKS: Final = ("SPY", "SPXL")
+MARKET_BENCHMARK_SOURCE: Final = (
+    "inputs/market/style_returns.csv",
+    "STYLE_MULTI_ASSET",
+    "TOTAL_RETURN_ETF_PROXY",
+)
+DAILY_BENCHMARK_SOURCE_ID: Final = "yahoo-adjusted-etf-daily"
+# A governed fill may only supply the weeks that lie between two observed segments of
+# a hybrid series, and every filled week carries a flag naming its origin.
+GAP_FILL_SPEC_NAME: Final = "spec.json"
+GAP_FILL_MODE: Final = "LIVE_PLUS_BACKTEST"
+GAP_FILL_ORIGIN_FLAGS: Final = frozenset(
+    {"ORIGIN_DERIVED", "ORIGIN_PROVIDER_MODEL_LIVE"}
+)
 
 
 class WeeklyReturnError(ValueError):
@@ -268,6 +287,130 @@ def _coverage(values: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class AcceptedSpan:
+    """One accepted multi-day holding-period return, owned by its end date.
+
+    The daily strategy-return source carries no row for the end date of such a span
+    (its previous endpoint is more than one day earlier), so the span's return is the
+    only measured link across that interval and a cumulative line must compound it.
+    """
+
+    start: date
+    end: date
+    value: Decimal
+
+
+@dataclass(frozen=True)
+class AcceptedSpans:
+    """The governed accepted spans per strategy series, with the daily-path binding."""
+
+    spans: dict[str, tuple[AcceptedSpan, ...]]
+    daily_sha256: dict[str, str]
+    observed_end: dict[str, date]
+    strategy_ids: dict[str, str]
+
+
+DEPENDENCE_RECEIPT_NAME: Final = "dependence-source.json"
+SPAN_TELESCOPE_TOLERANCE: Final = Decimal("1e-18")
+
+
+def _load_accepted_spans(path: Path | None) -> tuple[AcceptedSpans, list[Path]]:
+    """Read the accepted multi-day spans from the governed history coverage.
+
+    ``epoch_hpr_receipts`` is the history producer's separately admitted holding-period
+    path: its daily path hash plus the span links that cumulative consumers must
+    compound.  No dates live in code; an absent file means no spans are accepted.
+    """
+
+    if path is None:
+        return AcceptedSpans({}, {}, {}, {}), []
+    # The coverage is authority only as the dependence source packaged it: the
+    # sibling receipt must name this exact file by hash and size.
+    receipt_path = path.parent / DEPENDENCE_RECEIPT_NAME
+    receipt_document = _load_json(receipt_path, "dependence source receipt")
+    authority = receipt_document.get("history_authority")
+    declared = authority.get("coverage") if isinstance(authority, dict) else None
+    actual_hash, actual_size = hash_file(path)
+    if (
+        not isinstance(declared, dict)
+        or declared.get("sha256") != actual_hash
+        or declared.get("size_bytes") != actual_size
+    ):
+        raise WeeklyReturnError(
+            "history coverage differs from the dependence source receipt"
+        )
+    coverage = _load_json(path, "history coverage")
+    series_by_strategy: dict[str, str] = {}
+    for entry in _objects(coverage.get("strategies"), "history strategies"):
+        series_id = entry.get("series_id")
+        if series_id is not None:
+            series_by_strategy[_text(entry.get("strategy_id"), "strategy_id")] = _text(
+                series_id, "history series_id"
+            )
+    spans: dict[str, tuple[AcceptedSpan, ...]] = {}
+    daily_sha: dict[str, str] = {}
+    observed_end: dict[str, date] = {}
+    owner: dict[str, str] = {}
+    for item in _objects(coverage.get("epoch_hpr_receipts"), "epoch HPR receipts"):
+        if item.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(item.get("strategy_id"), "epoch HPR strategy_id")
+        series_id = series_by_strategy.get(strategy_id)
+        if series_id is None:
+            raise WeeklyReturnError(
+                f"epoch HPR names an unknown strategy: {strategy_id}"
+            )
+        if series_id in spans:
+            raise WeeklyReturnError(f"epoch HPR receipt is duplicated: {series_id}")
+        receipt = item.get("receipt")
+        if not isinstance(receipt, dict):
+            raise WeeklyReturnError("epoch HPR receipt must be an object")
+        accepted: list[AcceptedSpan] = []
+        for raw in _objects(receipt.get("span_return_receipts"), "span receipts"):
+            try:
+                start = date.fromisoformat(
+                    _text(raw.get("span_start_date"), "span start")
+                )
+                end = date.fromisoformat(_text(raw.get("span_end_date"), "span end"))
+            except ValueError as exc:
+                raise WeeklyReturnError("span receipt date is invalid") from exc
+            if (end - start).days < 2:
+                raise WeeklyReturnError("span receipt is not a multi-day span")
+            accepted.append(
+                AcceptedSpan(start, end, _decimal(raw.get("return"), "span return"))
+            )
+        accepted.sort(key=lambda span: span.end)
+        if any(a.end > b.start for a, b in zip(accepted, accepted[1:], strict=False)):
+            raise WeeklyReturnError(f"accepted spans overlap: {series_id}")
+        # The receipt must telescope: daily path times spans is the epoch return.
+        wealth = Decimal(1) + _decimal(
+            receipt.get("daily_cumulative_return"), "daily cumulative"
+        )
+        for span in accepted:
+            wealth *= Decimal(1) + span.value
+        epoch = Decimal(1) + _decimal(
+            receipt.get("epoch_cumulative_return"), "epoch cumulative"
+        )
+        if abs(wealth - epoch) > SPAN_TELESCOPE_TOLERANCE:
+            raise WeeklyReturnError(f"accepted spans do not telescope: {series_id}")
+        spans[series_id] = tuple(accepted)
+        owner[series_id] = strategy_id
+        daily_sha[series_id] = _text(
+            receipt.get("daily_return_series_sha256"), "daily path sha"
+        )
+        try:
+            observed_end[series_id] = date.fromisoformat(
+                _text(receipt.get("observed_end"), "epoch HPR observed_end")
+            )
+        except ValueError as exc:
+            raise WeeklyReturnError("epoch HPR observed_end is invalid") from exc
+    return AcceptedSpans(spans, daily_sha, observed_end, owner), [
+        receipt_path,
+        path,
+    ]
+
+
 def _correlation_inputs(
     correlation_root: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, Path, Path]:
@@ -328,11 +471,213 @@ def _correlation_cutoff(
     return observed_end
 
 
+@dataclass(frozen=True)
+class GapFill:
+    """One governed segment that fills the unobserved weeks of a hybrid series."""
+
+    strategy_series_id: str
+    origin_flag: str
+    generation_id: str
+    returns_sha256: str
+    source_series_id: str
+    evidence_layer: str
+    observations: dict[date, Decimal]
+
+
+def _load_gap_fills(
+    root: Path | None,
+) -> tuple[dict[str, GapFill], list[Path], dict[str, Any]]:
+    """Read the pinned gap-fill spec and the generations it names.
+
+    The spec is policy data: it names the strategy, the evidence mode, the origin flag
+    and the generation (verified against its own manifest) that supplies the daily
+    returns.  Nothing about which series is filled lives in code.
+    """
+
+    empty: dict[str, Any] = {"policy_id": None, "spec_sha256": None, "fills": []}
+    if root is None:
+        return {}, [], empty
+    spec_path = root / GAP_FILL_SPEC_NAME
+    spec = _load_json(spec_path, "gap fill spec")
+    if set(spec) != {"schema_version", "policy_id", "fills"} or (
+        spec.get("schema_version") != 1
+    ):
+        raise WeeklyReturnError("gap fill spec shape differs")
+    policy_id = _text(spec.get("policy_id"), "gap fill policy_id")
+    paths: list[Path] = [spec_path]
+    fills: dict[str, GapFill] = {}
+    provenance: list[dict[str, Any]] = []
+    for entry in _objects(spec.get("fills"), "gap fill entries"):
+        if set(entry) != {"strategy_series_id", "mode", "origin_flag", "source"}:
+            raise WeeklyReturnError("gap fill entry shape differs")
+        series_id = _text(entry.get("strategy_series_id"), "gap fill series")
+        if entry.get("mode") != GAP_FILL_MODE:
+            raise WeeklyReturnError("a gap fill may only apply to the hybrid mode")
+        flag = _text(entry.get("origin_flag"), "gap fill origin_flag")
+        if flag not in GAP_FILL_ORIGIN_FLAGS:
+            raise WeeklyReturnError(f"gap fill origin flag is unsupported: {flag}")
+        if series_id in fills:
+            raise WeeklyReturnError(f"gap fill series is duplicated: {series_id}")
+        source = entry.get("source")
+        if not isinstance(source, dict) or set(source) != {
+            "generation_id",
+            "returns_artifact",
+            "series_id",
+            "evidence_layer",
+        }:
+            raise WeeklyReturnError("gap fill source shape differs")
+        generation_id = _text(source.get("generation_id"), "gap fill generation_id")
+        artifact_id = _text(source.get("returns_artifact"), "gap fill artifact")
+        generation = root / "generations" / generation_id
+        manifest_path = generation / "generation.json"
+        try:
+            manifest = read_generation(root, generation_id)
+        except (GenerationConflictError, OSError, ValueError) as exc:
+            raise WeeklyReturnError(
+                f"gap fill generation fails the manifest contract: {exc}"
+            ) from exc
+        if manifest.verification is not VerificationStatus.VERIFIED:
+            raise WeeklyReturnError("gap fill generation is not verified")
+        declared = {item.artifact_id: item for item in manifest.artifacts}
+        returns_path = generation / PurePosixPath(artifact_id)
+        entry_artifact = declared.get(artifact_id)
+        if (
+            entry_artifact is None
+            or returns_path.is_symlink()
+            or not returns_path.is_file()
+        ):
+            raise WeeklyReturnError("gap fill returns artifact is missing")
+        content = returns_path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if entry_artifact.sha256 != digest or entry_artifact.size_bytes != len(content):
+            raise WeeklyReturnError("gap fill returns differ from their manifest")
+        source_series = _text(source.get("series_id"), "gap fill source series")
+        layer = _text(source.get("evidence_layer"), "gap fill evidence layer")
+        observations: dict[date, Decimal] = {}
+        reader = csv.DictReader(content.decode("utf-8").splitlines())
+        if not {"series_id", "date", "return", "evidence_layer"} <= set(
+            reader.fieldnames or ()
+        ):
+            raise WeeklyReturnError("gap fill returns columns differ")
+        for row in reader:
+            if (
+                row.get("series_id") != source_series
+                or row.get("evidence_layer") != layer
+            ):
+                continue
+            try:
+                observed = date.fromisoformat(_text(row.get("date"), "gap fill date"))
+            except ValueError as exc:
+                raise WeeklyReturnError("gap fill date is invalid") from exc
+            if observed in observations:
+                raise WeeklyReturnError("gap fill has a duplicate date")
+            observations[observed] = _decimal(row.get("return"), "gap fill return")
+        if not observations:
+            raise WeeklyReturnError("gap fill source holds no matching returns")
+        fills[series_id] = GapFill(
+            strategy_series_id=series_id,
+            origin_flag=flag,
+            generation_id=generation_id,
+            returns_sha256=digest,
+            source_series_id=source_series,
+            evidence_layer=layer,
+            observations=observations,
+        )
+        paths.extend((manifest_path, returns_path))
+        provenance.append(
+            {
+                "evidence_layer": layer,
+                "generation_id": generation_id,
+                "mode": GAP_FILL_MODE,
+                "origin_flag": flag,
+                "returns_sha256": digest,
+                "source_series_id": source_series,
+                "strategy_series_id": series_id,
+            }
+        )
+    return (
+        fills,
+        paths,
+        {
+            "fills": provenance,
+            "policy_id": policy_id,
+            "spec_sha256": hash_file(spec_path)[0],
+        },
+    )
+
+
+def _apply_gap_fill(
+    values: dict[str, str],
+    observation_meta: dict[str, list[Any]],
+    fill: GapFill,
+    as_of: date,
+) -> tuple[dict[str, str], dict[str, list[Any]], dict[str, Any]]:
+    """Fill the weeks between observed segments, refusing anything unproved."""
+
+    if not values:
+        raise WeeklyReturnError(
+            f"gap fill target has no weeks: {fill.strategy_series_id}"
+        )
+    first = date.fromisoformat(min(values))
+    last = date.fromisoformat(max(values))
+    gap_weeks: list[str] = []
+    cursor = first
+    while cursor <= last:
+        key = cursor.isoformat()
+        if key not in values:
+            gap_weeks.append(key)
+        cursor += timedelta(days=7)
+    if not gap_weeks:
+        raise WeeklyReturnError(
+            f"gap fill declared but the series has no gap: {fill.strategy_series_id}"
+        )
+    gap_set = set(gap_weeks)
+    inside = {
+        day: value
+        for day, value in fill.observations.items()
+        if _week_start(day).isoformat() in gap_set and day <= as_of
+    }
+    fill_values, fill_meta, _calendar = _weekly_series(inside.items(), as_of=as_of)
+    unfilled = [week for week in gap_weeks if week not in fill_values]
+    if unfilled:
+        raise WeeklyReturnError(
+            f"gap fill leaves unfilled weeks for {fill.strategy_series_id}: "
+            f"{unfilled[0]}..{unfilled[-1]} ({len(unfilled)})"
+        )
+    merged_values = {**values, **fill_values}
+    merged_meta = dict(observation_meta)
+    for week in gap_weeks:
+        count, start, end = fill_meta[week][:3]
+        # a join inside the series is not a source boundary: the flag names the origin
+        merged_meta[week] = [
+            count,
+            start,
+            end,
+            "COMPLETE_WITHIN_ACCEPTED_CALENDAR",
+            [fill.origin_flag],
+        ]
+    detail = {
+        "evidence_layer": fill.evidence_layer,
+        "filled_daily_observations": len(inside),
+        "filled_weeks": len(gap_weeks),
+        "first_filled_week": gap_weeks[0],
+        "generation_id": fill.generation_id,
+        "last_filled_week": gap_weeks[-1],
+        "observations_outside_gap_ignored": len(fill.observations) - len(inside),
+        "origin_flag": fill.origin_flag,
+        "returns_sha256": fill.returns_sha256,
+        "source_series_id": fill.source_series_id,
+    }
+    return merged_values, merged_meta, detail
+
+
 def _strategy_rows(
     strategy_returns: Path,
     correlation: Mapping[str, Any],
     generation_manifest: GenerationManifest,
     as_of: date,
+    gap_fills: Mapping[str, GapFill] | None = None,
+    accepted_spans: AcceptedSpans | None = None,
 ) -> list[dict[str, Any]]:
     raw_source = correlation.get("source")
     if not isinstance(raw_source, dict) or not all(
@@ -404,6 +749,16 @@ def _strategy_rows(
             (observed_date, _decimal(row.get("return"), "strategy return"))
         )
 
+    accepted = accepted_spans or AcceptedSpans({}, {}, {}, {})
+    unknown_spans = sorted(set(accepted.spans) - set(compositions["LIVE_ONLY"]))
+    if unknown_spans:
+        raise WeeklyReturnError(
+            f"accepted span names an unknown strategy: {unknown_spans[0]}"
+        )
+    fills = dict(gap_fills or {})
+    unknown = sorted(set(fills) - set(compositions["LIVE_ONLY"]))
+    if unknown:
+        raise WeeklyReturnError(f"gap fill names an unknown strategy: {unknown[0]}")
     series_rows: list[dict[str, Any]] = []
     for series_id in sorted(compositions["LIVE_ONLY"]):
         values_by_mode: dict[str, dict[str, str]] = {}
@@ -428,6 +783,32 @@ def _strategy_rows(
             else:
                 backtest = []
             selected = live if mode == "LIVE_ONLY" else [*backtest, *live]
+            span_links: list[AcceptedSpan] = []
+            if series_id in accepted.spans:
+                # The receipt hashes the whole epoch.  Where the epoch runs past the
+                # common cutoff the returns source is projected to it and cannot
+                # reproduce that hash; the receipt binding above is the authority.
+                if accepted.observed_end[series_id] <= as_of and accepted.daily_sha256[
+                    series_id
+                ] != (_canonical_series_sha256(live)):
+                    raise WeeklyReturnError(
+                        f"accepted spans do not bind the live daily path: {series_id}"
+                    )
+                live_days = {row[0] for row in live}
+                span_links = [
+                    span
+                    for span in accepted.spans[series_id]
+                    if span.end <= as_of
+                    and (live_inception is None or span.end >= live_inception)
+                ]
+                if any(span.end in live_days for span in span_links):
+                    raise WeeklyReturnError(
+                        f"accepted span end has a daily observation: {series_id}"
+                    )
+                selected = [
+                    *selected,
+                    *((span.end, span.value) for span in span_links),
+                ]
             expected_live = item.get("live_observations")
             expected_backtest = item.get("backtest_observations_used")
             if expected_live != len(live):
@@ -441,15 +822,36 @@ def _strategy_rows(
             values, observation_meta, calendar_basis = _weekly_series(
                 selected, as_of=as_of
             )
+            fill_detail: dict[str, Any] | None = None
+            if mode == GAP_FILL_MODE and series_id in fills:
+                values, observation_meta, fill_detail = _apply_gap_fill(
+                    values, observation_meta, fills[series_id], as_of
+                )
             values_by_mode[mode] = values
             observation_meta_by_mode[mode] = observation_meta
             calendar_by_mode[mode] = calendar_basis
             mode_coverage[mode] = {
                 **_coverage(values),
+                **({"gap_fill": fill_detail} if fill_detail is not None else {}),
                 "backtest_daily_observations": len(backtest)
                 if mode != "LIVE_ONLY"
                 else 0,
                 "canonical_live_series_sha256": _canonical_series_sha256(live),
+                **(
+                    {
+                        "accepted_multi_day_spans": [
+                            {
+                                "end": span.end.isoformat(),
+                                "return": _decimal_text(span.value),
+                                "strategy_id": accepted.strategy_ids[series_id],
+                                "start": span.start.isoformat(),
+                            }
+                            for span in span_links
+                        ]
+                    }
+                    if span_links
+                    else {}
+                ),
                 "live_daily_observations": len(live),
                 "strategy_version": version,
             }
@@ -567,9 +969,59 @@ def _wide_return_columns(
     return values
 
 
+def _selected_return_columns(
+    path: Path, selected: Iterable[str], as_of: date
+) -> dict[str, list[tuple[date, Decimal]]]:
+    wanted = tuple(selected)
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        header = csv.DictReader(handle).fieldnames
+    if header is None or "date" not in header:
+        raise WeeklyReturnError(f"wide return source lacks date: {path.name}")
+    absent = [column for column in wanted if column not in header]
+    if absent:
+        raise WeeklyReturnError(f"market benchmark column is absent: {absent[0]}")
+    columns = _wide_return_columns(
+        path, {name for name in header if name not in wanted}
+    )
+    return {
+        column: [item for item in columns[column] if item[0] <= as_of]
+        for column in wanted
+    }
+
+
+def _daily_benchmark_block(
+    selected: Mapping[str, list[tuple[date, Decimal]]],
+    relative: str,
+    sha256: str,
+) -> dict[str, Any]:
+    series = []
+    for column in FULL_HISTORY_BENCHMARKS:
+        observations = sorted(selected[column])
+        series.append(
+            {
+                "dates": [day.isoformat() for day, _ in observations],
+                "first_date": observations[0][0].isoformat(),
+                "last_date": observations[-1][0].isoformat(),
+                "observation_count": len(observations),
+                "returns": [_decimal_text(value) for _, value in observations],
+                "series_id": f"market:{column}",
+                "ticker": column,
+            }
+        )
+    return {
+        "first_price_policy": "DROPPED_NO_PREDECESSOR",
+        "return_basis": MARKET_BENCHMARK_SOURCE[2],
+        "series": series,
+        "source_artifact": {"path": relative, "sha256": sha256},
+        "source_id": DAILY_BENCHMARK_SOURCE_ID,
+        "status": "AVAILABLE",
+        "unit": "DECIMAL_DAILY_RETURN",
+    }
+
+
 def _public_rows(
     plan_bundle: Path, as_of: date
-) -> tuple[list[dict[str, Any]], list[Path]]:
+) -> tuple[list[dict[str, Any]], list[Path], dict[str, Any]]:
     expected_hashes = _manifest_hashes(plan_bundle)
     rows_by_id: dict[str, dict[str, Any]] = {}
     input_paths: list[Path] = [plan_bundle / "plan-manifest.json"]
@@ -584,6 +1036,8 @@ def _public_rows(
             raise WeeklyReturnError(f"planning input hash differs: {relative}")
         input_paths.append(path)
         for column, observations in _wide_return_columns(path, excluded).items():
+            if column.upper() in FULL_HISTORY_BENCHMARKS:
+                continue
             if source_key.startswith("us-economic"):
                 canonical_id = f"factor:us:{column.upper()}"
                 display_name = f"U.S. {column.upper()}"
@@ -618,6 +1072,40 @@ def _public_rows(
                     f"canonical weekly series is duplicated: {canonical_id}"
                 )
             rows_by_id[canonical_id] = item
+    market_relative, market_group, market_basis = MARKET_BENCHMARK_SOURCE
+    market_path = plan_bundle / Path(market_relative)
+    market_sha256 = hash_file(market_path)[0]
+    if expected_hashes.get(market_relative) != market_sha256:
+        raise WeeklyReturnError(f"planning input hash differs: {market_relative}")
+    input_paths.append(market_path)
+    market_columns = _selected_return_columns(
+        market_path, FULL_HISTORY_BENCHMARKS, as_of
+    )
+    for column, observations in market_columns.items():
+        if not observations:
+            raise WeeklyReturnError(f"market benchmark has no observations: {column}")
+        values, observation_meta, calendar_basis = _weekly_series(
+            observations, as_of=as_of
+        )
+        canonical_id = f"market:{column}"
+        if canonical_id in rows_by_id:
+            raise WeeklyReturnError(
+                f"canonical weekly series is duplicated: {canonical_id}"
+            )
+        rows_by_id[canonical_id] = {
+            "absent_value_status": "UNAVAILABLE_NO_OBSERVATION_IN_WEEK",
+            "calendar_basis": calendar_basis,
+            "coverage": _coverage(values),
+            "display_groups": [market_group, "CORE_BENCHMARK"],
+            "display_name": f"{column} · {CORE_BENCHMARKS[column]}",
+            "primary_group": market_group,
+            "observation_meta": observation_meta,
+            "return_basis": market_basis,
+            "series_id": canonical_id,
+            "source_key": "core-benchmark-market",
+            "values": values,
+        }
+    daily_block = _daily_benchmark_block(market_columns, market_relative, market_sha256)
     benchmark_ids = {
         row["series_id"].split(":", 1)[1]
         for row in rows_by_id.values()
@@ -625,22 +1113,31 @@ def _public_rows(
     }
     if benchmark_ids != set(CORE_BENCHMARKS):
         raise WeeklyReturnError("core benchmark boundary differs")
-    return [rows_by_id[key] for key in sorted(rows_by_id)], input_paths
+    return [rows_by_id[key] for key in sorted(rows_by_id)], input_paths, daily_block
 
 
 def build_weekly_returns(
     correlation_root: Path,
     strategy_returns: Path,
     plan_bundle: Path,
+    gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> tuple[dict[str, Any], tuple[Path, ...]]:
     correlation, generation_manifest, correlation_path, manifest_path = (
         _correlation_inputs(correlation_root)
     )
     as_of = _correlation_cutoff(correlation, generation_manifest)
+    gap_fills, gap_fill_paths, gap_fill_provenance = _load_gap_fills(gap_fill_root)
+    accepted_spans, span_paths = _load_accepted_spans(history_coverage)
     strategy_rows = _strategy_rows(
-        strategy_returns, correlation, generation_manifest, as_of
+        strategy_returns,
+        correlation,
+        generation_manifest,
+        as_of,
+        gap_fills,
+        accepted_spans,
     )
-    public_rows, public_paths = _public_rows(plan_bundle, as_of)
+    public_rows, public_paths, daily_benchmarks = _public_rows(plan_bundle, as_of)
     rows = [*strategy_rows, *public_rows]
     series_ids = [row["series_id"] for row in rows]
     if len(series_ids) != len(set(series_ids)):
@@ -660,6 +1157,8 @@ def build_weekly_returns(
         "as_of_date": as_of.isoformat(),
         "builder_version": BUILDER_VERSION,
         "current_week": current_week,
+        "daily_benchmark_returns": daily_benchmarks,
+        "gap_fills": gap_fill_provenance,
         "default_evidence_mode": "LIVE_ONLY",
         "display_groups": [
             "STRATEGY",
@@ -693,7 +1192,16 @@ def build_weekly_returns(
     ).hexdigest()
     return (
         payload,
-        tuple([correlation_path, manifest_path, strategy_returns, *public_paths]),
+        tuple(
+            [
+                correlation_path,
+                manifest_path,
+                strategy_returns,
+                *public_paths,
+                *gap_fill_paths,
+                *span_paths,
+            ]
+        ),
     )
 
 
@@ -719,8 +1227,16 @@ def build_candidate(
     strategy_returns: Path,
     plan_bundle: Path,
     output_root: Path,
+    gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> dict[str, Any]:
-    payload, _ = build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+    payload, _ = build_weekly_returns(
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        gap_fill_root,
+        history_coverage,
+    )
     content = canonical_json_bytes(payload)
     candidate_id = hashlib.sha256(content).hexdigest()
     candidate = output_root / "candidates" / candidate_id
@@ -738,8 +1254,16 @@ def verify_candidate(
     strategy_returns: Path,
     plan_bundle: Path,
     candidate_dir: Path,
+    gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> dict[str, Any]:
-    payload, _ = build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+    payload, _ = build_weekly_returns(
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        gap_fill_root,
+        history_coverage,
+    )
     correlation, _manifest, _correlation_path, _manifest_path = _correlation_inputs(
         correlation_root
     )
@@ -799,12 +1323,23 @@ def publish(
     plan_bundle: Path,
     candidate_dir: Path,
     output_root: Path,
+    gap_fill_root: Path | None = None,
+    history_coverage: Path | None = None,
 ) -> dict[str, Any]:
     verification = verify_candidate(
-        correlation_root, strategy_returns, plan_bundle, candidate_dir
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        candidate_dir,
+        gap_fill_root,
+        history_coverage,
     )
     payload, input_paths = build_weekly_returns(
-        correlation_root, strategy_returns, plan_bundle
+        correlation_root,
+        strategy_returns,
+        plan_bundle,
+        gap_fill_root,
+        history_coverage,
     )
     as_of = date.fromisoformat(payload["as_of_date"])
     artifacts = [
@@ -885,6 +1420,16 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--correlation-root", type=Path, required=True)
         command.add_argument("--strategy-returns", type=Path, required=True)
         command.add_argument("--plan-bundle", type=Path, required=True)
+        command.add_argument(
+            "--gap-fill-root",
+            type=Path,
+            help="directory holding spec.json and the generations it names",
+        )
+        command.add_argument(
+            "--history-coverage",
+            type=Path,
+            help="governed history coverage naming the accepted multi-day spans",
+        )
         if name in {"build", "publish"}:
             command.add_argument("--output-root", type=Path, required=True)
         if name in {"verify", "publish"}:
@@ -901,6 +1446,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.strategy_returns,
                 args.plan_bundle,
                 args.output_root,
+                args.gap_fill_root,
+                args.history_coverage,
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -908,6 +1455,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.strategy_returns,
                 args.plan_bundle,
                 args.candidate_dir,
+                args.gap_fill_root,
+                args.history_coverage,
             )
         else:
             result = publish(
@@ -916,6 +1465,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.plan_bundle,
                 args.candidate_dir,
                 args.output_root,
+                args.gap_fill_root,
+                args.history_coverage,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-weekly-returns: FAIL: {exc}", file=sys.stderr)

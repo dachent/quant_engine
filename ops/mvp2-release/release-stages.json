@@ -1,0 +1,1816 @@
+{
+  "schema_version": 1,
+  "description": "Release stages of RELEASE-DRIVER-001, cycle manifest resolution and the staging group (provenance, ledger, baseline) through selected inputs, the replica ceremony and the gated commit. Every id and path is derived from the run's own outputs by tools/release_driver.py.",
+  "provider_roots": [
+    "provider-alpaca",
+    "provider-fidelity",
+    "provider-ibkr",
+    "provider-matrixport",
+    "provider-portfolio123",
+    "provider-quantbase",
+    "provider-schwab",
+    "epoch-manifest"
+  ],
+  "provider_run_sources": {
+    "epoch-manifest": "{run}/stages/epoch/generations/{epoch_id}"
+  },
+  "paths": {
+    "tail": "{cycle}/tail",
+    "ca": "{cycle}/tail/ca",
+    "production": "{cycle}/production",
+    "recipe_probe": "{cycle}/pipeline-recipe-probe.json",
+    "recipe": "{cycle}/pipeline-recipe.json",
+    "prod_spec": "{cycle}/production/production-spec.json",
+    "tools": "{repo_root}/tools",
+    "expected_baseline": "{repo_root}/acceptance/expected-baseline.json",
+    "expected_baseline_arg": "acceptance/expected-baseline.json",
+    "mvp2": "{repo_root}/ops/mvp2-release/scripts",
+    "contract": "{repo_root}/contracts/portfolio-financial-mvp-source-v1.json",
+    "source_matrix": "{repo_root}/generated/financial-mvp/source-matrix.json",
+    "resolved_cycle": "{cycle}/resolved-cycle.json",
+    "ledger_receipt": "{run}/stages/ledger/generations/{ledger_id}/admit-or-declare-receipt.json",
+    "ledger_catalog": "{run}/stages/ledger/generations/{ledger_id}/provider-ledger.json",
+    "pre": "{cycle}/pre",
+    "attribution": "{cycle}/attribution",
+    "laneout": "{cycle}/laneout",
+    "lane_real": "{cycle}/laneout/real",
+    "lane_replica": "{cycle}/laneout/replica",
+    "replica_cycle": "{cycle}/replica-production",
+    "replica_spec": "{cycle}/replica-production/production-spec.json",
+    "replica_provgens": "{cycle}/replica-provider-generations.json",
+    "replica_rehearsal": "{cycle}/replica-rehearsal",
+    "clean_room": "{cycle}/clean-room",
+    "post_commit": "{cycle}/post-commit",
+    "post_release_evidence": "{cycle}/production/post-release-evidence",
+    "real_rehearsal": "{cycle}/post-commit/rehearsal",
+    "real_clean_room": "{cycle}/post-commit/clean-room",
+    "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
+    "replica_coordination_root": "{replica_workspace}/{coordination_rel}",
+    "prov": "{cycle}/prov",
+    "prov_generation": "{prov}/generations/{provenance_id}",
+    "ledger_spec": "{cycle}/ledger-spec.json",
+    "run_observation": "{cycle}/run-observation.json",
+    "ledger_out": "{cycle}/ledger",
+    "ledger_generation": "{ledger_out}/generations/{cycle_ledger_id}",
+    "baseline_spec": "{cycle}/baseline-spec.json",
+    "baseline_out": "{cycle}/baseline"
+  },
+  "derive": {
+    "ledger_id": {
+      "single_dir": "{run}/stages/ledger/generations"
+    },
+    "epoch_id": {
+      "single_dir": "{run}/stages/epoch/generations"
+    },
+    "panel_gid": {
+      "json_field": [
+        "{run}/stages/panel/CURRENT.json",
+        "generation_id"
+      ]
+    },
+    "spec_panel_gid": {
+      "spec_node_field": [
+        "{prod_spec}",
+        "portfolio-panel",
+        "generation_id"
+      ]
+    },
+    "panel_root": {
+      "spec_root": [
+        "{prod_spec}",
+        "portfolio-panel"
+      ]
+    },
+    "release_id": {
+      "json_field": [
+        "{lane_real}/dry-run.0.stdout.log",
+        "release_id"
+      ]
+    },
+    "baseline_id": {
+      "single_dir": "{cycle}/baseline/generations"
+    },
+    "cycle_ledger_id": {
+      "single_dir": "{cycle}/ledger/generations"
+    },
+    "attribution_id": {
+      "single_dir": "{cycle}/attribution/generations"
+    },
+    "history_id": {
+      "single_dir": "{cycle}/pre/history"
+    },
+    "candidate_id": {
+      "single_dir": "{run}/stages/panel/candidates"
+    },
+    "serial_release_id": {
+      "json_field": [
+        "{production}/execute-stage.json",
+        "release_id"
+      ]
+    },
+    "coordination_rel": {
+      "relative_to": [
+        "{coordination_root}",
+        "{source_workspace}"
+      ]
+    },
+    "provenance_id": {
+      "single_dir": "{prov}/generations"
+    },
+    "resolved_cycle_sha256": {
+      "file_sha256": "{resolved_cycle}"
+    }
+  },
+  "stages": [
+    {
+      "id": "cycle-resolve",
+      "inputs": [
+        "{cycle_manifest}",
+        "{cycle_roots_file}"
+      ],
+      "pinned_inputs": [
+        [
+          "{cycle_manifest}",
+          "{cycle_manifest_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{resolved_cycle}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_cycle_manifest.py",
+        "resolve",
+        "--manifest",
+        "{cycle_manifest}",
+        "--manifest-sha256",
+        "{cycle_manifest_sha256}",
+        "--roots-file",
+        "{cycle_roots_file}",
+        "--out",
+        "{resolved_cycle}"
+      ],
+      "checks": [
+        {
+          "json": "{resolved_cycle}",
+          "path": "schema_version",
+          "equals": "qe-release-resolved-cycle/1"
+        },
+        {
+          "json": "{resolved_cycle}",
+          "path": "cycle_manifest_sha256",
+          "equals": "{cycle_manifest_sha256}"
+        },
+        {
+          "json": "{resolved_cycle}",
+          "path": "cutoff",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{resolved_cycle}",
+          "path": "evaluated_on",
+          "equals": "{evaluated_on}"
+        }
+      ]
+    },
+    {
+      "id": "provenance",
+      "requires": [
+        "cycle-resolve"
+      ],
+      "inputs": [
+        "{provenance_spec}"
+      ],
+      "pinned_inputs": [
+        [
+          "{provenance_spec}",
+          "{provenance_spec_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{prov}"
+      ],
+      "stdout_to": "{cycle}/logs/provenance-stage.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_provenance.py",
+        "stage",
+        "--spec",
+        "{provenance_spec}",
+        "--output-root",
+        "{prov}"
+      ],
+      "checks": [
+        {
+          "exists": "{prov_generation}/portfolio-provenance.json"
+        }
+      ]
+    },
+    {
+      "id": "ledger-spec",
+      "requires": [
+        "cycle-resolve",
+        "provenance"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{predecessor_ledger_spec}",
+        "{prov_generation}"
+      ],
+      "pinned_inputs": [
+        [
+          "{predecessor_ledger_spec}",
+          "{predecessor_ledger_spec_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{ledger_spec}",
+        "{run_observation}"
+      ],
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_ledger_spec.py",
+        "build",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--predecessor-spec",
+        "{predecessor_ledger_spec}",
+        "--out-root",
+        "{cycle}",
+        "--provenance-generation-dir",
+        "{prov_generation}",
+        "--repo-root",
+        "{repo_root}"
+      ],
+      "checks": [
+        {
+          "json": "{ledger_spec}",
+          "path": "as_of_date",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{ledger_spec}",
+          "path": "provenance.generation_id",
+          "equals": "{provenance_id}"
+        }
+      ]
+    },
+    {
+      "id": "ledger",
+      "requires": [
+        "ledger-spec"
+      ],
+      "inputs": [
+        "{ledger_spec}",
+        "{run_observation}"
+      ],
+      "bound_ids": [
+        [
+          "{ledger_spec}",
+          "{provenance_id}"
+        ]
+      ],
+      "outputs": [
+        "{ledger_out}"
+      ],
+      "stdout_to": "{cycle}/logs/ledger-stage.json",
+      "argv": [
+        "{python}",
+        "{tools}/provider_ledger.py",
+        "stage",
+        "--spec",
+        "{ledger_spec}",
+        "--output-root",
+        "{ledger_out}"
+      ],
+      "checks": [
+        {
+          "exists": "{ledger_generation}/provider-ledger.json"
+        }
+      ]
+    },
+    {
+      "id": "baseline-spec",
+      "requires": [
+        "ledger"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{prov_generation}",
+        "{ledger_generation}"
+      ],
+      "outputs": [
+        "{baseline_spec}"
+      ],
+      "stdout_to": "{cycle}/logs/baseline-spec.json",
+      "argv": [
+        "{python}",
+        "{tools}/release_baseline_spec.py",
+        "build",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--release-inputs-root",
+        "{release_inputs_root}",
+        "--release-inputs-manifest-sha256",
+        "{release_inputs_manifest_sha256}",
+        {
+          "if": "baseline_declared_inputs_path",
+          "args": [
+            "--declared-inputs-path",
+            "{baseline_declared_inputs_path}"
+          ]
+        },
+        {
+          "for_each": "baseline_roots",
+          "args": [
+            "--root",
+            "{each_key}={each_value}"
+          ]
+        },
+        {
+          "if": "baseline_cost_root_id",
+          "args": [
+            "--cost-root-id",
+            "{baseline_cost_root_id}"
+          ]
+        },
+        "--provenance-generation",
+        "{prov_generation}",
+        "--ledger-generation",
+        "{ledger_generation}",
+        "--repo-root",
+        "{repo_root}",
+        "--out",
+        "{baseline_spec}"
+      ],
+      "checks": [
+        {
+          "json": "{baseline_spec}",
+          "path": "as_of_date",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{baseline_spec}",
+          "path": "provider_ledger.generation_id",
+          "equals": "{cycle_ledger_id}"
+        },
+        {
+          "json": "{baseline_spec}",
+          "path": "provenance.generation_id",
+          "equals": "{provenance_id}"
+        }
+      ]
+    },
+    {
+      "id": "baseline",
+      "requires": [
+        "baseline-spec"
+      ],
+      "inputs": [
+        "{baseline_spec}"
+      ],
+      "bound_ids": [
+        [
+          "{baseline_spec}",
+          "{cycle_ledger_id}"
+        ],
+        [
+          "{baseline_spec}",
+          "{provenance_id}"
+        ]
+      ],
+      "outputs": [
+        "{baseline_out}"
+      ],
+      "stdout_to": "{cycle}/logs/baseline-stage.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_baseline.py",
+        "stage",
+        "--spec",
+        "{baseline_spec}",
+        "--output-root",
+        "{baseline_out}"
+      ],
+      "checks": [
+        {
+          "exists": "{baseline_out}/generations/{baseline_id}/portfolio-baseline.json"
+        }
+      ]
+    },
+    {
+      "id": "selected-build",
+      "requires": [
+        "baseline"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{predecessor_selected_inputs}",
+        "{ledger_generation}"
+      ],
+      "pinned_inputs": [
+        [
+          "{predecessor_selected_inputs}",
+          "{predecessor_selected_inputs_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{selected_inputs}"
+      ],
+      "stdout_to": "{cycle}/logs/selected-build.json",
+      "argv": [
+        "{python}",
+        "{tools}/release_prepare_inputs.py",
+        "selected",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--resolved-cycle-sha256",
+        "{resolved_cycle_sha256}",
+        "--predecessor",
+        "{predecessor_selected_inputs}",
+        "--commit",
+        "{code_commit}",
+        "--repo-root",
+        "{repo_root}",
+        "--ledger-generation-dir",
+        "{ledger_generation}",
+        {
+          "if": "rebind_cutoff",
+          "equals": "true",
+          "args": [
+            "--rebind-cutoff"
+          ]
+        },
+        {
+          "for_each": "selected_files",
+          "args": [
+            "--file",
+            "{each_key}={each_value}"
+          ]
+        },
+        "--out",
+        "{selected_inputs}"
+      ],
+      "checks": [
+        {
+          "json": "{selected_inputs}",
+          "path": "financial_data_cutoff",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{selected_inputs}",
+          "path": "builder_kwargs.repository_sha",
+          "equals": "{code_commit}"
+        }
+      ]
+    },
+    {
+      "id": "selected-inputs",
+      "requires": [
+        "selected-build"
+      ],
+      "builtin": "inputs_only",
+      "inputs": [
+        "{selected_inputs}",
+        "{cycle}/attribution-spec.json"
+      ],
+      "predecessor_check": {
+        "inputs": "{disclosure_inputs}",
+        "current_release": "{coordination_root}/CURRENT_RELEASE.json",
+        "panel_current": "{portfolio_root}/control-panel/CURRENT.json",
+        "workspace": "{source_workspace}"
+      },
+      "expected_baseline": {
+        "file": "{expected_baseline}",
+        "cutoff": "{requested_as_of}"
+      },
+      "pinned_inputs": [
+        [
+          "{expected_baseline}",
+          "{expected_baseline_sha256}"
+        ]
+      ],
+      "bound_ids": [
+        [
+          "{selected_inputs}",
+          "{cycle_ledger_id}"
+        ]
+      ]
+    },
+    {
+      "id": "pre-chain",
+      "requires": [
+        "selected-inputs"
+      ],
+      "resume": {
+        "same_argv": true
+      },
+      "outputs": [
+        "{pre}",
+        "{attribution}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_pre_chain.py",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--cycle",
+        "{cycle}",
+        "--selected-inputs",
+        "{selected_inputs}",
+        "--baseline-id",
+        "{baseline_id}",
+        "--commit",
+        "{code_commit}"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{cycle}/baseline/generations/{baseline_id}",
+        "{cycle}/ledger/generations/{cycle_ledger_id}"
+      ]
+    },
+    {
+      "id": "calendar-authority",
+      "explicit": true,
+      "requires": [
+        "cycle-resolve"
+      ],
+      "inputs": [
+        "{calendar_attempt_spec}",
+        "{calendar_seed_authority}"
+      ],
+      "pinned_inputs": [
+        [
+          "{calendar_seed_authority}",
+          "{calendar_seed_authority_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{calendar_authority}",
+        "{calendar_authority}.receipt.json"
+      ],
+      "stdout_to": "{cycle}/logs/calendar-authority.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_hwm_calendar.py",
+        "author",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--resolved-cycle-sha256",
+        "{resolved_cycle_sha256}",
+        "--run",
+        "{calendar_attempt_run}",
+        "--spec",
+        "{calendar_attempt_spec}",
+        "--seed-authority",
+        "{calendar_seed_authority}",
+        "--out",
+        "{calendar_authority}",
+        "--repo-root",
+        "{repo_root}"
+      ]
+    },
+    {
+      "id": "prep-spec",
+      "requires": [
+        "pre-chain"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{predecessor_prep_spec}",
+        "{selected_inputs}",
+        "{calendar_authority}"
+      ],
+      "pinned_inputs": [
+        [
+          "{predecessor_prep_spec}",
+          "{predecessor_prep_spec_sha256}"
+        ],
+        [
+          "{calendar_authority}",
+          "{calendar_authority_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{preparation_spec}"
+      ],
+      "stdout_to": "{cycle}/logs/prep-spec.json",
+      "argv": [
+        "{python}",
+        "{tools}/release_prepare_inputs.py",
+        "prep-spec",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--resolved-cycle-sha256",
+        "{resolved_cycle_sha256}",
+        "--predecessor-spec",
+        "{predecessor_prep_spec}",
+        "--repo-root",
+        "{repo_root}",
+        "--ledger-generation-dir",
+        "{ledger_generation}",
+        "--selected-inputs",
+        "{selected_inputs}",
+        "--calendar-authority",
+        "{calendar_authority}",
+        "--baseline-id",
+        "{baseline_id}",
+        "--history-id",
+        "{history_id}",
+        "--attribution-id",
+        "{attribution_id}",
+        {
+          "if": "rebind_cutoff",
+          "equals": "true",
+          "args": [
+            "--rebind-cutoff"
+          ]
+        },
+        {
+          "if": "factors_bundle",
+          "args": [
+            "--factors-bundle",
+            "{factors_bundle}"
+          ]
+        },
+        {
+          "if": "sector_bundle",
+          "args": [
+            "--sector-bundle",
+            "{sector_bundle}"
+          ]
+        },
+        {
+          "if": "style_bundle",
+          "args": [
+            "--style-bundle",
+            "{style_bundle}"
+          ]
+        },
+        {
+          "if": "factors_bundle_id",
+          "args": [
+            "--factors-bundle-id",
+            "{factors_bundle_id}"
+          ]
+        },
+        {
+          "if": "sector_bundle_id",
+          "args": [
+            "--sector-bundle-id",
+            "{sector_bundle_id}"
+          ]
+        },
+        {
+          "if": "style_bundle_id",
+          "args": [
+            "--style-bundle-id",
+            "{style_bundle_id}"
+          ]
+        },
+        {
+          "if": "weekly_gap_fill_spec",
+          "args": [
+            "--pin",
+            "weekly_gap_fill_spec={weekly_gap_fill_spec}"
+          ]
+        },
+        {
+          "if": "vendor_gap_fills",
+          "args": [
+            "--pin",
+            "vendor_gap_fills={vendor_gap_fills}"
+          ]
+        },
+        {
+          "if": "model_vs_actual_input",
+          "args": [
+            "--pin",
+            "model_vs_actual_input={model_vs_actual_input}"
+          ]
+        },
+        {
+          "for_each": "prep_pins",
+          "args": [
+            "--pin",
+            "{each_key}={each_value}"
+          ]
+        },
+        {
+          "for_each": "prep_dirs",
+          "args": [
+            "--dir",
+            "{each_key}={each_value}"
+          ]
+        },
+        {
+          "for_each": "prep_omit",
+          "args": [
+            "--omit",
+            "{each_key}"
+          ]
+        },
+        "--out",
+        "{preparation_spec}"
+      ],
+      "checks": [
+        {
+          "json": "{preparation_spec}",
+          "path": "financial_data_cutoff",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{preparation_spec}",
+          "path": "evaluation_date",
+          "equals": "{evaluated_on}"
+        }
+      ]
+    },
+    {
+      "id": "attended",
+      "requires": [
+        "pre-chain",
+        "prep-spec"
+      ],
+      "inputs": [
+        "{preparation_spec}"
+      ],
+      "bound_ids": [
+        [
+          "{preparation_spec}",
+          "{history_id}"
+        ],
+        [
+          "{preparation_spec}",
+          "{attribution_id}"
+        ],
+        [
+          "{preparation_spec}",
+          "{baseline_id}"
+        ],
+        [
+          "{preparation_spec}",
+          "{cycle_ledger_id}"
+        ]
+      ],
+      "must_not_exist": [
+        "{run}"
+      ],
+      "expect_rc": 1,
+      "resume": {
+        "argv": [
+          "{python}",
+          "{tools}/portfolio_pipeline_materialize.py",
+          "attended",
+          "--repo-root",
+          "{repo_root}",
+          "--python",
+          "{python}",
+          "--workspace-root",
+          "{workspace_root}",
+          {
+            "if": "identity_scheme",
+            "equals": "git-tree-v2",
+            "args": [
+              "--code-identity-scheme",
+              "git-tree-v2"
+            ]
+          },
+          "--output-root",
+          "{run}",
+          "--retained-cache-root",
+          "{retained_cache_root}",
+          "--requested-as-of",
+          "{requested_as_of}",
+          "--evaluated-on",
+          "{evaluated_on}",
+          "--preparation-spec",
+          "{preparation_spec}",
+          "--resume",
+          "--execute",
+          "--qa-hold"
+        ]
+      },
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "attended",
+        "--repo-root",
+        "{repo_root}",
+        "--python",
+        "{python}",
+        "--workspace-root",
+        "{workspace_root}",
+        {
+          "if": "identity_scheme",
+          "equals": "git-tree-v2",
+          "args": [
+            "--code-identity-scheme",
+            "git-tree-v2"
+          ]
+        },
+        "--output-root",
+        "{run}",
+        {
+          "if": "retained_cache_base",
+          "args": [
+            "--retained-cache-base",
+            "{retained_cache_base}"
+          ]
+        },
+        "--retained-cache-root",
+        "{retained_cache_root}",
+        "--requested-as-of",
+        "{requested_as_of}",
+        "--evaluated-on",
+        "{evaluated_on}",
+        "--preparation-spec",
+        "{preparation_spec}",
+        "--execute",
+        "--qa-hold"
+      ],
+      "checks": [
+        {
+          "exists": "{run}/stages/panel/candidates/{candidate_id}"
+        },
+        {
+          "json": "{run}/attended-run-state.json",
+          "path": "state",
+          "one_of": [
+            "FAILED",
+            "PASSED"
+          ]
+        },
+        {
+          "json": "{run}/preparation/release-recipe.json",
+          "path": "release_commit",
+          "equals": "{code_commit}"
+        }
+      ],
+      "pinned_inputs": [
+        [
+          "{calendar_authority}",
+          "{calendar_authority_sha256}"
+        ]
+      ]
+    },
+    {
+      "id": "qa-browser",
+      "requires": [
+        "attended"
+      ],
+      "env": {
+        "PLAYWRIGHT_MODULE": "{playwright_module}",
+        "PLAYWRIGHT_EXECUTABLE_PATH": "{playwright_executable}",
+        "NODE_OPTIONS": "--max-old-space-size=8192"
+      },
+      "argv": [
+        "{node}",
+        "{repo_root}/apps/portfolio-control-panel/browser_qa.mjs",
+        "--html",
+        "{run}/stages/panel/candidates/{candidate_id}/index.html",
+        "--output",
+        "{qa}",
+        "--expected-calculation-cutoff",
+        "{requested_as_of}"
+      ],
+      "must_not_exist": [
+        "{qa}"
+      ]
+    },
+    {
+      "id": "qa-interaction",
+      "requires": [
+        "qa-browser"
+      ],
+      "outputs": [
+        "{qa}/interaction-results.json"
+      ],
+      "env": {
+        "PLAYWRIGHT_MODULE": "{playwright_module}",
+        "PLAYWRIGHT_EXECUTABLE_PATH": "{playwright_executable}",
+        "NODE_OPTIONS": "--max-old-space-size=8192"
+      },
+      "argv": [
+        "{node}",
+        "{repo_root}/apps/portfolio-control-panel/interaction_qa.mjs",
+        "--html",
+        "{run}/stages/panel/candidates/{candidate_id}/index.html",
+        "--output",
+        "{qa}/interaction-results.json",
+        "--expected-calculation-cutoff",
+        "{requested_as_of}"
+      ]
+    },
+    {
+      "id": "qa-native",
+      "requires": [
+        "qa-interaction"
+      ],
+      "stdout_to": "{cycle}/logs/qa-native.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_control_panel.py",
+        "qa",
+        "--candidate-dir",
+        "{run}/stages/panel/candidates/{candidate_id}",
+        "--qa-dir",
+        "{qa}"
+      ],
+      "outputs": []
+    },
+    {
+      "id": "resume",
+      "requires": [
+        "qa-native"
+      ],
+      "updates": [
+        "{run}"
+      ],
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "attended",
+        "--repo-root",
+        "{repo_root}",
+        "--python",
+        "{python}",
+        "--workspace-root",
+        "{workspace_root}",
+        {
+          "if": "identity_scheme",
+          "equals": "git-tree-v2",
+          "args": [
+            "--code-identity-scheme",
+            "git-tree-v2"
+          ]
+        },
+        "--output-root",
+        "{run}",
+        "--retained-cache-root",
+        "{retained_cache_root}",
+        "--requested-as-of",
+        "{requested_as_of}",
+        "--evaluated-on",
+        "{evaluated_on}",
+        "--preparation-spec",
+        "{preparation_spec}",
+        "--qa-dir",
+        "{qa}",
+        "--resume",
+        "--execute"
+      ],
+      "checks": [
+        {
+          "json": "{run}/attended-run-state.json",
+          "path": "state",
+          "equals": "PASSED"
+        },
+        {
+          "json": "{run}/preparation/release-recipe.json",
+          "path": "release_commit",
+          "equals": "{code_commit}"
+        }
+      ]
+    },
+    {
+      "id": "recipe-probe",
+      "inputs": [
+        "{run}/preparation/release-recipe.json"
+      ],
+      "outputs": [
+        "{recipe_probe}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "recipe",
+        "--vertical-recipe",
+        "{run}/preparation/release-recipe.json",
+        "--proof-root",
+        "{run}",
+        "--qa-dir",
+        "{qa}",
+        "--pipeline-id",
+        "{pipeline_id}",
+        "--financial-mvp-contract",
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "--financial-mvp-source-matrix",
+        "generated/financial-mvp/source-matrix.json",
+        "--output",
+        "{recipe_probe}"
+      ],
+      "requires": [
+        "resume"
+      ]
+    },
+    {
+      "id": "registries",
+      "requires": [
+        "recipe-probe"
+      ],
+      "outputs": [
+        "{ca}"
+      ],
+      "argv": [
+        "{python}",
+        "{mvp2}/draft_correction_registries.py",
+        "--run",
+        "{run}",
+        "--pipeline-recipe",
+        "{recipe_probe}",
+        "--history-store",
+        "{history_store}",
+        "--expect-superseded",
+        "{expect_superseded}",
+        "--out",
+        "{ca}"
+      ]
+    },
+    {
+      "id": "recipe",
+      "requires": [
+        "registries"
+      ],
+      "outputs": [
+        "{recipe}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "recipe",
+        "--vertical-recipe",
+        "{run}/preparation/release-recipe.json",
+        "--proof-root",
+        "{run}",
+        "--qa-dir",
+        "{qa}",
+        "--pipeline-id",
+        "{pipeline_id}",
+        "--financial-mvp-contract",
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "--financial-mvp-source-matrix",
+        "generated/financial-mvp/source-matrix.json",
+        "--correction-registry",
+        "{ca}/portfolio-correction-registry.json",
+        "--rederive-receipt-registry",
+        "{ca}/portfolio-rederive-receipt-registry.json",
+        "--output",
+        "{recipe}"
+      ]
+    },
+    {
+      "id": "pipeline-spec",
+      "live_guard_keys": [
+        "build_portfolio_root",
+        "retained_cache_root"
+      ],
+      "requires": [
+        "recipe"
+      ],
+      "inputs": [
+        "{run}/preparation/hwm-governed-result.json",
+        "{run}/preparation/hwm-input-generation.json",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "{ledger_receipt}",
+        "{run}/preparation/invested-capital-result.json",
+        "{run}/preparation/capital-input-generation.json"
+      ],
+      "outputs": [
+        "{run}/pipeline-spec.json"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "spec",
+        "--recipe",
+        "{recipe}",
+        "--output-root",
+        "{run}",
+        "--spec",
+        "{run}/pipeline-spec.json",
+        "--hwm-governed-result",
+        "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation",
+        "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt",
+        "{ledger_receipt}",
+        "--invested-capital-result",
+        "{run}/preparation/invested-capital-result.json",
+        "--invested-capital-input-generation",
+        "{run}/preparation/capital-input-generation.json",
+        "--financial-input-contract",
+        "contracts/portfolio-financial-mvp-source-v1.json",
+        "--portfolio-root",
+        "{build_portfolio_root}",
+        "--retained-cache-root",
+        "{retained_cache_root}"
+      ]
+    },
+    {
+      "id": "semantic",
+      "requires": [
+        "recipe"
+      ],
+      "outputs": [
+        "{run}/evidence/post-build-semantic.json"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "semantic",
+        "--recipe",
+        "{recipe}",
+        "--output",
+        "{run}/evidence/post-build-semantic.json"
+      ]
+    },
+    {
+      "id": "financial-artifacts",
+      "requires": [
+        "recipe"
+      ],
+      "outputs": [
+        "{production}/financial-artifacts.json"
+      ],
+      "argv": [
+        "{python}",
+        "{mvp2}/build_financial_artifacts.py",
+        "--run",
+        "{run}",
+        "--cycle",
+        "{cycle}",
+        "--out",
+        "{production}/financial-artifacts.json"
+      ]
+    },
+    {
+      "id": "provider-generations",
+      "requires": [
+        "recipe"
+      ],
+      "builtin": "provider_generations",
+      "config_inputs": {
+        "provider_sources": {
+          "from_ledger": [
+            "{cycle}/ledger-spec.json",
+            "{resolved_cycle}",
+            "{ledger_catalog}"
+          ]
+        }
+      },
+      "outputs": [
+        "{cycle}/provider-generations.json"
+      ]
+    },
+    {
+      "id": "production-spec",
+      "live_guard_keys": [
+        "portfolio_root",
+        "retained_cache_root"
+      ],
+      "requires": [
+        "pipeline-spec",
+        "semantic",
+        "financial-artifacts",
+        "provider-generations"
+      ],
+      "outputs": [
+        "{prod_spec}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "production-spec",
+        "--recipe",
+        "{recipe}",
+        "--prepared-root",
+        "{run}",
+        "--semantic-gate",
+        "{run}/evidence/post-build-semantic.json",
+        "--portfolio-root",
+        "{portfolio_root}",
+        "--state-root",
+        "{retained_cache_root}",
+        "--spec",
+        "{prod_spec}",
+        "--financial-artifacts",
+        "{production}/financial-artifacts.json",
+        "--hwm-governed-result",
+        "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation",
+        "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt",
+        "{ledger_receipt}",
+        "--provider-generations",
+        "{cycle}/provider-generations.json"
+      ],
+      "counter_keys": [
+        "model_fit_calls",
+        "receipt_reuse_count"
+      ]
+    },
+    {
+      "id": "preflight",
+      "guard_spec": "{prod_spec}",
+      "requires": [
+        "production-spec"
+      ],
+      "outputs": [
+        "{production}/evidence",
+        "{production}/commit-authorization.json"
+      ],
+      "stdout_to": "{production}/preflight.log",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_qc.py",
+        "--profile",
+        "release-preflight",
+        "--spec",
+        "{prod_spec}",
+        "--evidence-dir",
+        "{production}/evidence",
+        "--emit-commit-authorization",
+        "{production}/commit-authorization.json"
+      ],
+      "explicit": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "plan",
+      "guard_spec": "{prod_spec}",
+      "requires": [
+        "preflight"
+      ],
+      "outputs": [
+        "{production}/plan.json"
+      ],
+      "stdout_to": "{production}/plan.json",
+      "argv": [
+        "{python}",
+        "{tools}/data_pipeline.py",
+        "plan",
+        "--spec",
+        "{prod_spec}"
+      ],
+      "checks": [
+        {
+          "json": "{production}/plan.json",
+          "path": "financial_mvp.ready_for_execution",
+          "equals": true
+        },
+        {
+          "json": "{production}/plan.json",
+          "path": "financial_mvp.blocking_reasons",
+          "equals": []
+        }
+      ],
+      "explicit": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "dry-run",
+      "guard_spec": "{prod_spec}",
+      "requires": [
+        "plan"
+      ],
+      "outputs": [
+        "{production}/execute-stage.json",
+        "{production}/pointers-after-execute.json"
+      ],
+      "stdout_to": "{production}/execute-stage.json",
+      "pointers_unchanged": "{prod_spec}",
+      "snapshot_to": "{production}/pointers-after-execute.json",
+      "argv": [
+        "{python}",
+        "{tools}/data_pipeline.py",
+        "execute",
+        "--spec",
+        "{prod_spec}"
+      ],
+      "explicit": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "findings-panel",
+      "guard_spec": "{prod_spec}",
+      "requires": [
+        "dry-run"
+      ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "outputs": [
+        "{production}/validate-panel.log",
+        "{production}/panel-findings-details.json"
+      ],
+      "stdout_to": "{production}/validate-panel.log",
+      "argv": [
+        "{python}",
+        "{tools}/validate_generation.py",
+        "{panel_root}/generations/{panel_gid}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
+        "--details-out",
+        "{production}/panel-findings-details.json"
+      ],
+      "explicit": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "findings-targets",
+      "guard_spec": "{prod_spec}",
+      "requires": [
+        "dry-run"
+      ],
+      "outputs": [
+        "{production}/validate-targets.log"
+      ],
+      "stdout_to": "{production}/validate-targets.log",
+      "argv": [
+        "{python}",
+        "{tools}/validate_release_targets.py",
+        "--spec",
+        "{prod_spec}",
+        "--release-id",
+        "{serial_release_id}"
+      ],
+      "explicit": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "attest",
+      "only_scheme": "git-tree-v2",
+      "requires": [
+        "production-spec"
+      ],
+      "live_guard_keys": [
+        "coordination_root"
+      ],
+      "outputs": [
+        "{coordination_root}/merge-attestation.json"
+      ],
+      "argv": [
+        "{python}",
+        "-m",
+        "quant_engine.core.code_identity",
+        "attest",
+        "--repo",
+        "{repo_root}",
+        "--candidate-commit",
+        "{candidate_commit}",
+        "--base-ref",
+        "{base_ref}",
+        "--coordination-root",
+        "{coordination_root}"
+      ],
+      "only_ceremony": "full"
+    },
+    {
+      "id": "replica-copy",
+      "requires": [
+        "production-spec",
+        "attest"
+      ],
+      "outputs": [
+        "{replica_workspace}/.replica-root.json"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_replica.py",
+        "copy",
+        "--spec",
+        "{prod_spec}",
+        "--workspace-root",
+        "{source_workspace}",
+        "--replica-root",
+        "{replica_workspace}",
+        "--allow-state-root",
+        "{retained_cache_root}"
+      ],
+      "must_not_exist": [
+        "{replica_workspace}"
+      ]
+    },
+    {
+      "id": "replica-inventory",
+      "requires": [
+        "replica-copy"
+      ],
+      "builtin": "replica_inventory",
+      "outputs": [
+        "{cycle}/replica-inventory.json"
+      ]
+    },
+    {
+      "id": "replica-provider-generations",
+      "requires": [
+        "replica-inventory"
+      ],
+      "builtin": "replica_provider_generations",
+      "outputs": [
+        "{replica_provgens}"
+      ]
+    },
+    {
+      "id": "replica-clear-attestation",
+      "only_scheme": "git-tree-v2",
+      "only_ceremony": "replica-only",
+      "requires": [
+        "replica-provider-generations"
+      ],
+      "builtin": "remove_replica_attestation"
+    },
+    {
+      "id": "replica-attest",
+      "only_scheme": "git-tree-v2",
+      "only_ceremony": "replica-only",
+      "requires": [
+        "replica-provider-generations",
+        "replica-clear-attestation"
+      ],
+      "outputs": [
+        "{replica_coordination_root}/merge-attestation.json"
+      ],
+      "argv": [
+        "{python}",
+        "-m",
+        "quant_engine.core.code_identity",
+        "attest",
+        "--repo",
+        "{repo_root}",
+        "--candidate-commit",
+        "{candidate_commit}",
+        "--base-ref",
+        "{base_ref}",
+        "--coordination-root",
+        "{replica_coordination_root}"
+      ]
+    },
+    {
+      "id": "replica-spec",
+      "requires": [
+        "replica-provider-generations",
+        "replica-attest"
+      ],
+      "outputs": [
+        "{replica_spec}"
+      ],
+      "counter_keys": [
+        "model_fit_calls",
+        "receipt_reuse_count"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_pipeline_materialize.py",
+        "production-spec",
+        "--recipe",
+        "{recipe}",
+        "--prepared-root",
+        "{run}",
+        "--semantic-gate",
+        "{run}/evidence/post-build-semantic.json",
+        "--portfolio-root",
+        "{replica_workspace}/dataPortfolio",
+        "--state-root",
+        "{retained_cache_root}",
+        "--spec",
+        "{replica_spec}",
+        "--financial-artifacts",
+        "{production}/financial-artifacts.json",
+        "--hwm-governed-result",
+        "{run}/preparation/hwm-governed-result.json",
+        "--hwm-governed-input-generation",
+        "{run}/preparation/hwm-input-generation.json",
+        "--hwm-governed-calendar-authority",
+        "{run}/preparation/hwm-calendar-authority.json",
+        "--hwm-governed-admission-receipt",
+        "{ledger_receipt}",
+        "--provider-generations",
+        "{replica_provgens}"
+      ],
+      "verify_inventory": {
+        "file": "{cycle}/replica-inventory.json",
+        "root": "{replica_workspace}",
+        "except": [
+          "{replica_coordination_root}/merge-attestation.json"
+        ]
+      }
+    },
+    {
+      "id": "lanes",
+      "requires": [
+        "replica-spec"
+      ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "outputs": [
+        "{laneout}",
+        "{lane_replica}/replica-receipt.json",
+        "{lane_real}/pointers-after-dry-run.json",
+        "{lane_real}/commit-authorization.json"
+      ],
+      "guard_spec": "{prod_spec}",
+      "argv": [
+        "{python}",
+        "{tools}/release_replica.py",
+        "lanes",
+        "--real-spec",
+        "{prod_spec}",
+        "--replica-spec",
+        "{replica_spec}",
+        "--out-dir",
+        "{laneout}",
+        "--real-panel-dir",
+        "{panel_root}/generations/{panel_gid}",
+        "--replica-panel-dir",
+        "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{crosswalk}",
+        "--harness-code-commit",
+        "{code_commit}",
+        "--rehearsal-root",
+        "{replica_rehearsal}",
+        "--clean-room",
+        "{clean_room}"
+      ],
+      "needs_attestation": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "ceremony",
+      "only_ceremony": "replica-only",
+      "requires": [
+        "replica-spec"
+      ],
+      "needs_attestation": "{replica_coordination_root}",
+      "outputs": [
+        "{lane_replica}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_replica.py",
+        "ceremony",
+        "--real-spec",
+        "{prod_spec}",
+        "--replica-spec",
+        "{replica_spec}",
+        "--out-dir",
+        "{lane_replica}",
+        "--replica-panel-dir",
+        "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{crosswalk}",
+        "--harness-code-commit",
+        "{code_commit}",
+        "--rehearsal-root",
+        "{replica_rehearsal}",
+        "--clean-room",
+        "{clean_room}"
+      ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "replica_spec_guard": "{replica_spec}"
+    },
+    {
+      "id": "pack-probe",
+      "explicit": true,
+      "requires": [
+        "lanes",
+        "ceremony"
+      ],
+      "only_mode": "probe",
+      "argv": [
+        "{python}",
+        "{tools}/release_evidence_pack.py",
+        "--cycle",
+        "{cycle}",
+        "--dest",
+        "{evidence_dest}",
+        "--include",
+        "production",
+        "logs",
+        "release-driver-state-at-pack.json",
+        "pipeline-recipe.json",
+        "provider-generations.json",
+        "laneout",
+        "replica-production",
+        "--exclude",
+        "logs/pack-probe.*",
+        "production/state/*",
+        "*.prev-*"
+      ],
+      "outputs": [
+        "{evidence_dest}/manifest.json"
+      ],
+      "state_snapshot_to": "{cycle}/release-driver-state-at-pack.json"
+    },
+    {
+      "id": "commit",
+      "explicit": true,
+      "requires": [
+        "lanes"
+      ],
+      "commit_gate": {
+        "spec": "{prod_spec}",
+        "replica_spec": "{replica_spec}",
+        "replica_verify": [
+          "{python}",
+          "{tools}/release_replica.py",
+          "verify",
+          "--receipt",
+          "{lane_replica}/replica-receipt.json",
+          "--real-spec",
+          "{prod_spec}"
+        ],
+        "replica_receipt": "{lane_replica}/replica-receipt.json",
+        "pointer_snapshot": "{lane_real}/pointers-after-dry-run.json"
+      },
+      "outputs": [
+        "{production}/execute-commit.json"
+      ],
+      "stdout_to": "{production}/execute-commit.json",
+      "argv": [
+        "{python}",
+        "{tools}/data_pipeline.py",
+        "execute",
+        "--spec",
+        "{prod_spec}",
+        "--commit",
+        "--commit-authorization",
+        "{lane_real}/commit-authorization.json",
+        "--replica-receipt",
+        "{lane_replica}/replica-receipt.json"
+      ],
+      "checks": [
+        {
+          "json": "{production}/execute-commit.json",
+          "path": "release_state",
+          "equals": "COMMITTED"
+        }
+      ],
+      "needs_attestation": true,
+      "only_ceremony": "full"
+    },
+    {
+      "id": "post-commit-verify",
+      "explicit": true,
+      "requires": [
+        "commit"
+      ],
+      "only_mode": "release",
+      "argv": [
+        "{python}",
+        "{tools}/release_post_commit.py",
+        "verify",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--spec",
+        "{prod_spec}",
+        "--commit-result",
+        "{production}/execute-commit.json",
+        "--pre-pointers",
+        "{lane_real}/pointers-after-dry-run.json",
+        "--preflight-evidence-dir",
+        "{production}/evidence",
+        "--post-evidence-dir",
+        "{post_release_evidence}",
+        "--rehearsal-root",
+        "{real_rehearsal}",
+        "--clean-room",
+        "{real_clean_room}",
+        "--harness-code-commit",
+        "{code_commit}",
+        "--post-pointers",
+        "{post_commit}/post-commit-pointers.json",
+        "--log-dir",
+        "{post_commit}/logs",
+        "--out",
+        "{post_commit}/post-commit-verify.json"
+      ],
+      "outputs": [
+        "{post_commit}"
+      ],
+      "checks": [
+        {
+          "json": "{post_commit}/post-commit-verify.json",
+          "path": "schema_version",
+          "equals": "qe-post-commit-verify/1"
+        }
+      ],
+      "only_ceremony": "full"
+    },
+    {
+      "id": "pack-evidence",
+      "explicit": true,
+      "requires": [
+        "post-commit-verify"
+      ],
+      "only_mode": "release",
+      "argv": [
+        "{python}",
+        "{tools}/release_evidence_pack.py",
+        "--cycle",
+        "{cycle}",
+        "--dest",
+        "{evidence_dest}",
+        "--include",
+        "production",
+        "logs",
+        "release-driver-state-at-pack.json",
+        "pipeline-recipe.json",
+        "provider-generations.json",
+        "laneout",
+        "replica-production",
+        "post-commit",
+        "--exclude",
+        "logs/pack-evidence.*",
+        "production/state/*",
+        "*.prev-*"
+      ],
+      "outputs": [
+        "{evidence_dest}/manifest.json"
+      ],
+      "state_snapshot_to": "{cycle}/release-driver-state-at-pack.json",
+      "only_ceremony": "full"
+    }
+  ],
+  "config_paths": {
+    "retained_cache_base": {
+      "exists": true,
+      "under": "{cycle}"
+    },
+    "retained_cache_root": {
+      "under": "{cycle}"
+    },
+    "run": {
+      "under": "{cycle}"
+    },
+    "qa": {
+      "under": "{cycle}"
+    },
+    "cycle_manifest": {
+      "exists": true
+    },
+    "cycle_roots_file": {
+      "exists": true
+    },
+    "provenance_spec": {
+      "exists": true
+    },
+    "predecessor_ledger_spec": {
+      "exists": true
+    },
+    "calendar_attempt_run": {
+      "exists": true
+    },
+    "calendar_attempt_spec": {
+      "exists": true
+    },
+    "calendar_seed_authority": {
+      "exists": true
+    },
+    "predecessor_selected_inputs": {
+      "exists": true
+    },
+    "predecessor_prep_spec": {
+      "exists": true
+    }
+  }
+}

@@ -441,11 +441,77 @@ def perimeter_remainder(
         }
 
 
+EPOCH_SET_NOTE: Final = (
+    "report_epochs are the governed epochs the report's totals use; "
+    "outside_report_epochs are the remaining epoch-manifest rows (closed sleeves of "
+    "a parent account, retired provider funds) whose gain is in no report total. "
+    "A consumer that plots every manifest row differs from the report's gain of all "
+    "epochs by the gain of the outside rows."
+)
+
+
+def _epoch_set_line(row: Mapping[str, Any]) -> dict[str, Any]:
+    gain = row.get("gain")
+    value = row.get("current_value")
+    return {
+        "account_id": row.get("account_id"),
+        "strategy_id": row.get("strategy_id"),
+        "effective_start": row.get("effective_start"),
+        "effective_end": row.get("effective_end"),
+        "status": row.get("status"),
+        "lifecycle_state": row.get("lifecycle_state"),
+        "gain_usd": None if gain is None else _text(_decimal(gain, "gain")),
+        "current_value_usd": (
+            None if value is None else _text(_decimal(value, "current_value"))
+        ),
+    }
+
+
+def build_epoch_set(
+    rows: Sequence[Mapping[str, Any]],
+    manifest_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The report's epochs against every epoch-manifest row, epoch by epoch."""
+
+    report_keys = {_row_key(row) for row in rows}
+    inside = [_epoch_set_line(row) for row in rows]
+    outside = [
+        _epoch_set_line(row)
+        for row in manifest_rows
+        if isinstance(row, Mapping) and _row_key(row) not in report_keys
+    ]
+    key = ("effective_start", "account_id", "strategy_id")
+
+    def ordered(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(lines, key=lambda line: tuple(str(line[name]) for name in key))
+
+    def gain_of(lines: Sequence[Mapping[str, Any]]) -> str:
+        with localcontext() as context:
+            context.prec = DECIMAL_PRECISION
+            return _text(
+                sum(
+                    (Decimal(line["gain_usd"]) for line in lines if line["gain_usd"]),
+                    Decimal(0),
+                )
+            )
+
+    return {
+        "report_epoch_count": len(inside),
+        "manifest_row_count": len(inside) + len(outside),
+        "gain_of_report_epochs_usd": gain_of(inside),
+        "gain_of_outside_report_epochs_usd": gain_of(outside),
+        "report_epochs": ordered(inside),
+        "outside_report_epochs": ordered(outside),
+        "note": EPOCH_SET_NOTE,
+    }
+
+
 def build_capital_reconciliation(
     rows: Sequence[Mapping[str, Any]],
     invested_capital: Mapping[str, Any],
     cutoff: str,
     perimeter_remainder_memo: Mapping[str, Any] | None = None,
+    manifest_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Name every dollar between derived total net capital and governed capital."""
 
@@ -647,6 +713,11 @@ def build_capital_reconciliation(
             "difference_usd": _text(difference),
             "components": components,
             "residual_usd": "0",
+            **(
+                {"epoch_set": build_epoch_set(rows, manifest_rows)}
+                if manifest_rows is not None
+                else {}
+            ),
             "memo": {
                 "post_liquidation_income_usd": _text(post_liquidation),
                 "note": (
@@ -688,6 +759,7 @@ def build_portfolio_totals(
     hwm_summary: Mapping[str, Any] | None,
     calculation_cutoff_date: str | None,
     custody_current_capital: Mapping[str, Any] | None = None,
+    manifest_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The three report blocks, or nothing when no epoch manifest or capital exists."""
 
@@ -726,6 +798,10 @@ def build_portfolio_totals(
             invested_capital, terminal, calculation_cutoff_date, mismatch
         ),
         "capital_reconciliation": build_capital_reconciliation(
-            rows, invested_capital, calculation_cutoff_date, remainder
+            rows,
+            invested_capital,
+            calculation_cutoff_date,
+            remainder,
+            manifest_rows,
         ),
     }

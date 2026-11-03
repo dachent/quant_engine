@@ -27,6 +27,14 @@ from quant_engine.core import (
     stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1067,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "6c9c2d444905aaa782d355849784353598bc44c121a1118b266bebe930c3ae32"
+        "ebc2d2476b7b022684a65d71d6ef3791e1c936daf9edddf5c38b3d3240fd9e1c"
     )
 
 
@@ -1515,6 +1523,7 @@ def test_retired_funded_members_stay_outside_the_owner_perimeter_decision() -> N
         assert row["effective_product_interval"]["effective_end"] is not None
 
 
+@needs_release_inputs
 def test_every_tag_map_sleeve_has_a_funded_census_epoch_and_a_registry_row() -> None:
     """The governed tag maps and the census name the same derived epochs."""
 
@@ -1530,7 +1539,7 @@ def test_every_tag_map_sleeve_has_a_funded_census_epoch_and_a_registry_row() -> 
         for assignment in sleeve["assignments"]
         if assignment["status"] == "FUNDED_MEMBERSHIP"
     }
-    sleeve_root = ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
+    sleeve_root = _RELEASE_INPUT_ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
     seen: set[str] = set()
     for tag_map_path in (sleeve_root / "nested-strategy-tag-map.json",):
         tag_map = json.loads(tag_map_path.read_bytes())
@@ -4350,7 +4359,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "03bb8ec0a8864d896c3c59ca1d88d4aaf356d1f7f2c739612679d612131a704f"
+        "15d2527fe543f3b8eb2f67ae2c845530426370024381cebfba72735f2fd759d8"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4387,7 +4396,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "03bb8ec0a8864d896c3c59ca1d88d4aaf356d1f7f2c739612679d612131a704f"
+        "15d2527fe543f3b8eb2f67ae2c845530426370024381cebfba72735f2fd759d8"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

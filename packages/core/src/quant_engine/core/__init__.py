@@ -1,5 +1,7 @@
 """Minimal provenance and generation envelope for quant_engine."""
 
+from quant_engine.core.stage_timing import stage as timed_stage, timed as timed_call
+
 from quant_engine.core.authority import (
     AdmissionDecision,
     AuthorityCatalog,
@@ -23,7 +25,55 @@ from quant_engine.core.authority import (
     local_freshness_alerts,
 )
 
+from quant_engine.core.code_identity import (
+    COMMIT_SCHEME as CODE_IDENTITY_COMMIT_SCHEME,
+    TREE_SCHEME as CODE_IDENTITY_TREE_SCHEME,
+)
+from quant_engine.core.retained_cache_base import (
+    COLD_CACHE_KINDS,
+    CacheBaseError,
+    iter_cache_files,
+    promote_cache_base,
+    read_cache_base_provenance,
+    verify_cache_base,
+    verify_if_promoted,
+)
+from quant_engine.core.replica_marker import (
+    REPLICA_MARKER_KIND,
+    REPLICA_MARKER_NAME,
+    ReplicaGateError,
+)
+from quant_engine.core.replica_gate import (
+    build_receipt as build_replica_receipt,
+    is_replica_spec,
+    replica_anchor,
+    verify_receipt as verify_replica_receipt,
+)
+from quant_engine.core.release_inputs import (
+    MANIFEST_NAME as RELEASE_INPUTS_MANIFEST_NAME,
+    CODE_BOUND as RELEASE_INPUTS_CODE_BOUND,
+    POLICY as RELEASE_INPUTS_POLICY,
+    RELEASE_INPUT as RELEASE_INPUTS_KIND,
+    ReleaseInputs,
+    ReleaseInputsError,
+    build_manifest as build_release_inputs_manifest,
+    classify as classify_release_input,
+    load_release_inputs,
+    release_input_root,
+)
+from quant_engine.core.gate_profile import (
+    APPROVAL_KIND as GATE_PROFILE_APPROVAL_KIND,
+    PROFILE_ID as GATE_PROFILE_ID,
+    SCHEMA_VERSION as GATE_PROFILE_SCHEMA_VERSION,
+    GateProfileError,
+    issue_reuse_receipt as issue_gate_profile_reuse_receipt,
+    load_approval as load_gate_profile_approval,
+    seal as seal_gate_profile_record,
+    select_profile as select_gate_profile,
+    tool_identity as gate_profile_tool_identity,
+)
 from quant_engine.core.contracts import (
+    canonical_json_bytes,
     AdapterIdentity,
     CoverageClaim,
     CoverageStatus,
@@ -85,6 +135,7 @@ from quant_engine.core.pipeline import (
 )
 from quant_engine.core.release import (
     CompanionInput,
+    directory_identity as release_directory_identity,
     CompanionPlan,
     GateEvidence,
     ReleaseCommitError,
@@ -103,7 +154,20 @@ from quant_engine.core.release import (
     recover_release,
     rollback_release,
 )
+from quant_engine.core.credentials import (
+    BitwardenSource,
+    CredentialError,
+    CredentialPlan,
+    CredentialResolver,
+    KeyVaultSource,
+    SecretCandidate,
+    SecretValue,
+    WindowsCredentialSource,
+    plan_from_config,
+    sources_from_config,
+)
 from quant_engine.core.directory_identity import inventory_identity
+from quant_engine.core.run_storage import process_alive, process_started
 from quant_engine.core.providers import (
     AdapterCapabilities,
     ProviderCapability,
@@ -122,6 +186,57 @@ from quant_engine.core.rehearsal import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "BitwardenSource",
+    "CredentialError",
+    "CredentialPlan",
+    "CredentialResolver",
+    "KeyVaultSource",
+    "SecretCandidate",
+    "SecretValue",
+    "WindowsCredentialSource",
+    "plan_from_config",
+    "sources_from_config",
+    "CODE_IDENTITY_COMMIT_SCHEME",
+    "CODE_IDENTITY_TREE_SCHEME",
+    "timed_call",
+    "timed_stage",
+    "release_directory_identity",
+    "COLD_CACHE_KINDS",
+    "CacheBaseError",
+    "iter_cache_files",
+    "process_alive",
+    "process_started",
+    "promote_cache_base",
+    "read_cache_base_provenance",
+    "verify_cache_base",
+    "verify_if_promoted",
+    "REPLICA_MARKER_KIND",
+    "REPLICA_MARKER_NAME",
+    "ReplicaGateError",
+    "RELEASE_INPUTS_MANIFEST_NAME",
+    "RELEASE_INPUTS_CODE_BOUND",
+    "RELEASE_INPUTS_POLICY",
+    "RELEASE_INPUTS_KIND",
+    "ReleaseInputs",
+    "build_release_inputs_manifest",
+    "classify_release_input",
+    "ReleaseInputsError",
+    "load_release_inputs",
+    "release_input_root",
+    "GATE_PROFILE_APPROVAL_KIND",
+    "GATE_PROFILE_ID",
+    "GATE_PROFILE_SCHEMA_VERSION",
+    "GateProfileError",
+    "gate_profile_tool_identity",
+    "issue_gate_profile_reuse_receipt",
+    "load_gate_profile_approval",
+    "seal_gate_profile_record",
+    "select_gate_profile",
+    "build_replica_receipt",
+    "canonical_json_bytes",
+    "is_replica_spec",
+    "replica_anchor",
+    "verify_replica_receipt",
     "inventory_identity",
     "AdapterCapabilities",
     "ProviderCapability",

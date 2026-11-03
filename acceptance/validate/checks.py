@@ -206,6 +206,10 @@ class Context:
     # never a production output). ``None`` is the checkout that holds this module,
     # which is where ``tools/validate_generation.py`` runs from.
     repo_root: Path | None = None
+    # The provider-ledger catalog the generation was built from (``--provider-ledger``):
+    # the governed source of each strategy's opening capital anchor. ``None`` when the
+    # run was given no ledger; the opening date then comes from the manifest trace.
+    provider_ledger: Mapping[str, Any] | None = None
 
     @property
     def report(self) -> dict[str, Any]:
@@ -8183,6 +8187,135 @@ def _window_days(start: Any, end: Any) -> int | None:
     return (last - first).days
 
 
+_OPENING_NOTE = re.compile(r"\bopening (\d{4}-\d{2}-\d{2})\b")
+
+
+def _ledger_opening_date(
+    ctx: Context, strategy_id: object, first_return: date
+) -> date | None:
+    """The strategy's OPENING_CAPITAL_ANCHOR recognition date in the provider ledger, if any."""
+
+    ledger = getattr(ctx, "provider_ledger", None)
+    dates: list[date] = []
+    for anchor in (
+        rows(ledger, "capital_anchors") if isinstance(ledger, Mapping) else []
+    ):
+        if (
+            anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR"
+            and anchor.get("evidence_layer") == "ACCOUNT_LIVE"
+            and anchor.get("strategy_id") == strategy_id
+        ):
+            recognised = to_date(anchor.get("nav_recognition_date"))
+            if recognised is not None and recognised < first_return:
+                dates.append(recognised)
+    return max(dates) if dates else None
+
+
+def _manifest_opening_date(
+    ctx: Context, strategy_id: object, first_return: date
+) -> date | None:
+    """The start of the panel manifest trace link that ends on the strategy's first return."""
+
+    for row in rows(node(ctx.panel, "account_manifest"), "rows"):
+        if row.get("strategy_id") != strategy_id:
+            continue
+        for link in rows(node(row, "observation_trace"), "links"):
+            if to_date(link.get("end_date")) == first_return:
+                opened = to_date(link.get("start_date"))
+                if opened is not None and opened < first_return:
+                    return opened
+    return None
+
+
+def _note_opening_date(ctx: Context, strategy_id: object) -> date | None:
+    """The opening date the expected baseline's hand note names: a cross-check, never a source."""
+
+    for expected in getattr(ctx, "expected", None) or []:
+        if (
+            isinstance(expected, Mapping)
+            and expected.get("metric_id") == "twr.strategy"
+            and expected.get("entity") == strategy_id
+        ):
+            match = _OPENING_NOTE.search(str(expected.get("notes") or ""))
+            if match:
+                return to_date(match.group(1))
+    return None
+
+
+def _strategy_opening_date(
+    ctx: Context, strategy_id: object, first_return: date | None
+) -> date | None:
+    """The opening NAV date of a strategy's canonical path, from this validator's own reads.
+
+    A return belongs to its end date and is measured from the prior close, so the CAGR
+    window opens at the opening NAV date, which is not "the first return date minus one
+    day" (a trading-day series opens after a weekend or holiday gap). Governed records
+    only, none of them the producer's rule or output: the provider ledger's
+    OPENING_CAPITAL_ANCHOR (``nav_recognition_date``), then the panel manifest trace link
+    that ends on the first return date. The expected baseline's note is not a source (see
+    ``_opening_cross_check``). ``None`` when neither names a date before the first return.
+    """
+
+    if first_return is None:
+        return None
+    return _ledger_opening_date(
+        ctx, strategy_id, first_return
+    ) or _manifest_opening_date(ctx, strategy_id, first_return)
+
+
+def _cagr_window_days(ctx: Context, row: Mapping[str, Any]) -> int | None:
+    """Days from the strategy's opening NAV date to its last return date (else the first return)."""
+
+    end = to_date(row.get("account_live_observed_end"))
+    first_return = to_date(row.get("account_live_observed_start"))
+    if end is None or first_return is None:
+        return None
+    opened = _strategy_opening_date(ctx, row.get("strategy_id"), first_return)
+    return (end - (opened or first_return)).days
+
+
+def _opening_window_problems(ctx: Context, row: Mapping[str, Any]) -> dict[str, Any]:
+    """A canonical strategy row's published window against the one derived here.
+
+    The opening NAV date comes from this validator's own records (``_strategy_opening_date``),
+    never from the row; the published ``return_window_start`` and ``window_days`` are then
+    compared with it. Rows that carry no ``return_window_start`` (earlier versions) and
+    non-canonical rows are not compared.
+    """
+
+    published = row.get("return_window_start")
+    if (
+        row.get("account_live_return_authority") != "CANONICAL_STRATEGY_RETURNS"
+        or published is None
+    ):
+        return {}
+    end = to_date(row.get("account_live_observed_end"))
+    first_return = to_date(row.get("account_live_observed_start"))
+    if end is None or first_return is None:
+        return {}
+    opened = _strategy_opening_date(ctx, row.get("strategy_id"), first_return)
+    if opened is None:
+        return {}
+    problems: dict[str, Any] = {}
+    note = _note_opening_date(ctx, row.get("strategy_id"))
+    if note is not None and note != opened:
+        problems["opening_note_disagrees"] = {
+            "derived": opened.isoformat(),
+            "expected_baseline_note": note.isoformat(),
+        }
+    if published != opened.isoformat():
+        problems["return_window_start"] = {
+            "published": published,
+            "derived": opened.isoformat(),
+        }
+    if row.get("window_days") != (end - opened).days:
+        problems["window_days"] = {
+            "published": row.get("window_days"),
+            "derived": (end - opened).days,
+        }
+    return problems
+
+
 def _unique_label(prefix: str, row: Mapping[str, Any], taken: Mapping[str, Any]) -> str:
     """``prefix`` and the row's ``account|strategy|start`` label, never one already taken.
 
@@ -8257,9 +8390,9 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                 short[f"dependence.{mode}:{series}"] = days
     for row in rows(ctx.report, "strategy_summary"):
         cagr = to_decimal(row.get("account_live_cagr"))
-        days = _window_days(
-            row.get("account_live_observed_start"), row.get("account_live_observed_end")
-        )
+        # the CAGR window opens at the opening NAV date, read from this validator's own
+        # records (never the report's published return_window_start)
+        days = _cagr_window_days(ctx, row)
         if cagr is not None and (cagr > 1 or cagr < Decimal("-0.5")):
             extreme[f"strategy_summary:{row.get('strategy_id')}"] = {"cagr": cagr}
         if cagr is not None and days is not None and days < ONE_YEAR_DAYS:
@@ -8514,6 +8647,7 @@ def check_period_returns(ctx: Context) -> Iterator[Finding]:
         problems = _period_row_problems(row, False)
         if "annualisation_basis" not in row:
             problems["annualisation_basis"] = "missing"
+        problems.update(_opening_window_problems(ctx, row))
         if problems:
             found[f"strategy_summary:{row.get('strategy_id')}"] = problems
     if found:

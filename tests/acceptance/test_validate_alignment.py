@@ -62,6 +62,15 @@ from test_validate_generation import (
 
 from acceptance.validate import checks
 from acceptance.validate.generation import load_generation
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
+
 
 CENSUS_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
 CENSUS_CHECK = "identity.blocked_admission_census"
@@ -3426,7 +3435,7 @@ def test_the_report_producers_own_block_is_verified_by_the_validator(
 
 def _real_context() -> checks.Context:
     baseline = json.loads(
-        (REPOSITORY_ROOT / "acceptance" / "expected-baseline.json").read_text(
+        (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").read_text(
             encoding="utf-8"
         )
     )
@@ -3438,6 +3447,7 @@ def _real_context() -> checks.Context:
     )
 
 
+@needs_release_inputs
 def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     """Guard: contract bytes == the baseline's authority pointer, and the qsi tuple."""
 
@@ -3448,7 +3458,7 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     assert state.census is not None
     assert (
         state.census.sha256
-        == "c3e3a721206ae26da6f728184a2d35172b414233747ac59806c6c1e5066a7c24"
+        == "5db45d3f6a1ff8c677628b5ab19ed9e7c222a6a89958a3ccc931168eb3f70f33"
     )
     census = json.loads(
         (
@@ -3471,6 +3481,7 @@ def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     assert not [t for t in tuples if t[1] == "ASSIGNMENT_ONLY"]
 
 
+@needs_release_inputs
 def test_the_real_baseline_holds_the_oracle_rows_the_bound_check_reads() -> None:
     """Guard: current admitted NAV and FX reach September 17 in the oracle."""
 

@@ -72,6 +72,20 @@ _EVENT_KEYS: Final = {
 }
 
 
+# The catalog fields the sleeve facts read (trades with signed quantity and prices,
+# positions with marks, commissions) arrived with catalog schema 7; later schemas
+# only add fields, so a later catalog is admitted rather than refused by a literal.
+MIN_CATALOG_SCHEMA_VERSION: Final = 7
+
+
+def _catalog_schema_admitted(version: object) -> bool:
+    return (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version >= MIN_CATALOG_SCHEMA_VERSION
+    )
+
+
 class SleeveFactsError(ValueError):
     """The sleeve facts cannot be built from the inputs; nothing was written."""
 
@@ -943,12 +957,12 @@ def rows_from_catalog(
     catalog = _load_json(raw, "catalog")
     if not isinstance(catalog, Mapping):
         raise SleeveFactsError("catalog is not an object")
-    if (
-        catalog.get("provider_id") != provider_id
-        or catalog.get("catalog_schema_version") != 7
+    if catalog.get("provider_id") != provider_id or not _catalog_schema_admitted(
+        catalog.get("catalog_schema_version")
     ):
         raise SleeveFactsError(
-            "catalog is not a schema-7 catalog of the tag map's provider"
+            f"catalog is not a schema-{MIN_CATALOG_SCHEMA_VERSION}-or-later "
+            "catalog of the tag map's provider"
         )
     accounts = catalog.get("accounts")
     if not isinstance(accounts, list) or parent_account_id not in {

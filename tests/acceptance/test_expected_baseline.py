@@ -12,17 +12,32 @@ import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+import pytest
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
+
+pytestmark = needs_release_inputs
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BASELINE_PATH = REPO_ROOT / "acceptance" / "expected-baseline.json"
+BASELINE_PATH = _RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json"
 HISTORICAL_V2_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-v2.json"
+    _RELEASE_INPUT_ROOT / "acceptance" / "baselines" / "expected-baseline-v2.json"
 )
 HISTORICAL_V2_SHA256 = (
     "b87ab5bfd638d0ceb7d4415c05b5c43a7df7c48517519ddee0d815f4b9c6ce91"
 )
 HISTORICAL_09F6_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-09f6-054ff579.json"
+    _RELEASE_INPUT_ROOT
+    / "acceptance"
+    / "baselines"
+    / "expected-baseline-09f6-054ff579.json"
 )
 HISTORICAL_09F6_SHA256 = (
     "054ff579f8a4e940055a9987869ed4353e8e86a613b98623a4001b40be91a2ec"
@@ -31,29 +46,35 @@ HISTORICAL_FC9A_SHA256 = (
     "1584761a58de8a69b51c2b3fabbdfc6c3ba2b62d0a0171aaf6de9f54982bde4b"
 )
 HISTORICAL_FC9A_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-fc9a-1584761a.json"
+    _RELEASE_INPUT_ROOT
+    / "acceptance"
+    / "baselines"
+    / "expected-baseline-fc9a-1584761a.json"
 )
 HISTORICAL_V3_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-v3-49df41d2.json"
+    _RELEASE_INPUT_ROOT
+    / "acceptance"
+    / "baselines"
+    / "expected-baseline-v3-49df41d2.json"
 )
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
 )
-CURRENT_SUCCESSOR_HEAD = "9f16723214dc6ffd44e692c5416dd0a21edaf190"
+CURRENT_SUCCESSOR_HEAD = "9d9cac1edabe0dd98f8e7f3a0a0d1f9f3c86dd3d"
 CURRENT_AGREE_COUNT = 165
 CURRENT_NOT_DERIVABLE_COUNT = 18
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "86865c8aad85ba02e5ba9f3539bdd26b6a15305c3f95ba4dcff7256026c13aad",
-    "b": "f2bca0cb6f14123448e726bc51de2bb409e9ce2ba36bf312bb873543f9db45ab",
+    "a": "6c3ccb059ed1f1238925409f09fd01bd6c47d2a920a9fa58b6b938958bba22ec",
+    "b": "cce95d07704aec7105014b82e0be0d0313d02eeb19a0c9c09ffa0cad47e3e859",
 }
 CURRENT_ORACLE_MANIFEST_SHA256 = {
-    # R2.1 (#468 repin): both derivers read the same acceptance-inputs manifest (evidence/releases/2026-10-26-r2/oracle-r2-1).
-    "a": "6409cf97a0423c9f26c84304a612c5a1064aa61b2de196501fbde71d3f6bb325",
-    "b": "6409cf97a0423c9f26c84304a612c5a1064aa61b2de196501fbde71d3f6bb325",
+    # R2.1: both derivers read the same acceptance-inputs manifest (p24 manifest: Schwab 09-17 ledger 8c20b436).
+    "a": "4165a1d0e1c584ba8a0e79e07e3c1c2424a4f6598a700697c66a00c7e987b5b7",
+    "b": "4165a1d0e1c584ba8a0e79e07e3c1c2424a4f6598a700697c66a00c7e987b5b7",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
-    "c3e3a721206ae26da6f728184a2d35172b414233747ac59806c6c1e5066a7c24",
+    "5db45d3f6a1ff8c677628b5ab19ed9e7c222a6a89958a3ccc931168eb3f70f33",
 )
 CURRENT_AUDIT_AUTHORITY_POINTERS: frozenset[tuple[str, str]] = frozenset()
 
@@ -308,10 +329,10 @@ def test_current_successor_identity_and_authority_coverage() -> None:
         "75112945918983b311aff52a92a172fdfe7a3ca0348686e906933103898fe775"
     )
     assert doc["pointer_map_sha256"] == (
-        "3527320b8527d40ea3436762e82bb2b5b1783fb745bb3587592d7808cba59c74"
+        "efb9f694d8cf4f0444bf0eef6c3ad790d879f068b288b2d4383e5bbf3728b2ea"
     )
     assert doc["admission_decision_sha256"] == (
-        "374b0481a1090f20e0cabd90bc518be2ba1a2673d1da937a6dd30f0359621fb6"
+        "267ddea1609a79618fa1cea2c71158dfe265e69d92b09d3278e76be765c8a34f"
     )
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT

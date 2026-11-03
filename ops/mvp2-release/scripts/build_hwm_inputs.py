@@ -3,17 +3,17 @@
 Every path here is an artifact this cycle actually produced. Nothing synthetic.
 """
 
+import os
 import json
 import sys
 from pathlib import Path
 
 REPO = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    r"/.codex-bootstrap/mvp2-execution/repo"
+    os.environ["QUANT_ENGINE_DATA_ROOT"] + r"/.codex-bootstrap/mvp2-execution/repo"
 )
 sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
 
-Q = Path(r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine")
+Q = Path(os.environ["QUANT_ENGINE_DATA_ROOT"])
 LIVE = Q / "dataPortfolio/rollforward/2026-09-10-mvp2-live-only"
 RUN = Path(r"C:/Dev/scratch/quant-engine/pl12/run2")
 OUT = Path(r"C:/Dev/scratch/quant-engine/pl12/hwm")

@@ -16,7 +16,8 @@ Two steps, so a report is a pure function of its pinned inputs:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -448,13 +449,138 @@ def _resolve_predecessor(
             )
     except (KeyError, IndexError, ValueError, StopIteration, TypeError):
         return {"status": "OMITTED", "reason": "POINTER_DOES_NOT_RESOLVE", **release}
-    return {
+    resolved: dict[str, Any] = {
         "status": "RESOLVED",
         **release,
         "data_file_sha256": sha256,
         "pointers": dict(pointers),
         "values": values,
     }
+    index_path = _predecessor_index_path(document, pointers)
+    if index_path is not None:
+        resolved["hwm_index_path"] = index_path
+    return resolved
+
+
+def _predecessor_index_path(
+    document: Mapping[str, Any], pointers: Mapping[str, Any]
+) -> list[list[str]] | None:
+    """The predecessor's dated index path, or None when its pointer does not resolve.
+
+    The pointer is ``hwm_index_path`` when named, else the ``index_path`` sibling of the
+    ``hwm_current_index`` pointer (the governed proof block carries both).
+    """
+
+    pointer = pointers.get("hwm_index_path")
+    if pointer is None and "hwm_current_index" in pointers:
+        head, _sep, _tail = str(pointers["hwm_current_index"]).rpartition("/")
+        pointer = f"{head}/index_path"
+    if pointer is None:
+        return None
+    try:
+        rows = _pointer(document, str(pointer))
+        return [[str(row["as_of"]), str(row["index"])] for row in rows]
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+
+
+COORDINATION_RELATIVE: Final = Path("dataPortfolio") / "releases-refresh-2026"
+PANEL_ROOT_ID: Final = "portfolio-panel"
+
+
+def committed_release_panel(data_root: Path) -> tuple[str, str]:
+    """The committed CURRENT_RELEASE id and its portfolio-panel generation id.
+
+    Reads the committed release authority (pointer, manifest hash, journal state, the
+    panel target's generation) and refuses when any of it is missing or not committed.
+    """
+
+    coordination = data_root / COORDINATION_RELATIVE
+    pointer_path = coordination / "CURRENT_RELEASE.json"
+    if pointer_path.is_symlink():
+        raise DisclosureError("CURRENT_RELEASE.json must not be a symlink")
+    if not pointer_path.is_file():
+        raise DisclosureError("predecessor release authority is not published")
+    pointer = _object(pointer_path.read_bytes(), "CURRENT_RELEASE pointer")
+    release_id = str(pointer.get("release_id"))
+    if pointer.get("state") != "COMMITTED":
+        raise DisclosureError("CURRENT_RELEASE is not COMMITTED")
+    directory = coordination / "releases" / release_id
+    manifest_path = directory / "release.json"
+    journal_path = directory / "journal.json"
+    if manifest_path.is_symlink() or journal_path.is_symlink():
+        raise DisclosureError("retained release records must not be symlinks")
+    if not manifest_path.is_file() or not journal_path.is_file():
+        raise DisclosureError("CURRENT_RELEASE names a release that is not retained")
+    raw = manifest_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != pointer.get("release_manifest_sha256"):
+        raise DisclosureError("CURRENT_RELEASE manifest differs from its pointer")
+    manifest = _object(raw, "current release manifest")
+    journal = _object(journal_path.read_bytes(), "current release journal")
+    if (
+        manifest.get("release_id") != release_id
+        or journal.get("release_id") != release_id
+        or journal.get("state") != "COMMITTED"
+    ):
+        raise DisclosureError("CURRENT_RELEASE is not a committed release")
+    panels = [
+        item.get("proposed_generation_id")
+        for item in manifest.get("targets", [])
+        if isinstance(item, Mapping) and item.get("root_id") == PANEL_ROOT_ID
+    ]
+    if len(panels) != 1:
+        raise DisclosureError("current release does not name one panel generation")
+    return release_id, str(panels[0])
+
+
+def check_predecessor_is_current_release(
+    entry: Mapping[str, Any], data_root: Path
+) -> None:
+    """Refuse a predecessor that is not the committed CURRENT_RELEASE panel generation.
+
+    The comparison the report states ("against X in the previous release") is only true
+    when the pinned predecessor IS the release that is committed when the next one is
+    frozen.  A stale pin still hashes cleanly, so the byte-pin check cannot see it; the
+    release id and the panel generation must equal the committed ones.  ``entry`` is a
+    ``predecessor_comparison`` block or the ``predecessor`` block of the disclosure
+    sources document: both carry ``release_id`` and ``panel_generation_id``.
+    """
+
+    release_id, panel = committed_release_panel(data_root)
+    if (
+        entry.get("release_id") != release_id
+        or entry.get("panel_generation_id") != panel
+    ):
+        raise DisclosureError(
+            "disclosure predecessor is not the committed CURRENT_RELEASE panel: "
+            f"pinned release {str(entry.get('release_id'))[:8]} panel "
+            f"{str(entry.get('panel_generation_id'))[:8]}, committed release "
+            f"{release_id[:8]} panel {panel[:8]}"
+        )
+
+
+def check_sources_bound_to_current_release(
+    sources: Mapping[str, Any], inputs: Mapping[str, Any], data_root: Path
+) -> None:
+    """A written sleeve-disclosure-sources document and its inputs name CURRENT_RELEASE.
+
+    Id and data-file sha: the inputs pin the data file the sources were read from, and
+    both name the committed release and its panel generation.
+    """
+
+    entry = inputs.get("predecessor_comparison")
+    block = sources.get("predecessor")
+    if not isinstance(entry, Mapping) or not isinstance(block, Mapping):
+        raise DisclosureError("no predecessor comparison to bind to CURRENT_RELEASE")
+    check_predecessor_is_current_release(entry, data_root)
+    check_predecessor_is_current_release(block, data_root)
+    data_file = entry.get("data_file")
+    if (
+        block.get("status") != "RESOLVED"
+        or not isinstance(data_file, Mapping)
+        or block.get("data_file_sha256") != data_file.get("sha256")
+    ):
+        raise DisclosureError("disclosure sources do not carry the pinned data file")
 
 
 def build_sources(
@@ -542,6 +668,8 @@ def build_sources(
         }
     predecessor = inputs.get("predecessor_comparison")
     if isinstance(predecessor, Mapping):
+        if predecessor_data_root is not None:
+            check_predecessor_is_current_release(predecessor, predecessor_data_root)
         sources["predecessor"] = _resolve_predecessor(
             predecessor, predecessor_data_root
         )
@@ -581,6 +709,86 @@ def _margin_allocation(
     else:
         where = f": {' and '.join(split)}" if split else ""
     return f"{head}{where} (declared: {event['note']})"
+
+
+def _pool_inflow_before(
+    event: Mapping[str, str], by_source: Mapping[str, Mapping[str, Mapping[str, str]]]
+) -> str:
+    """What the unallocated pool received the day before a margin allocation drew on it.
+
+    The activity carries no link from cash to a fund purchase, so the margin share of an
+    allocation out of the pool is not sized; the bound inflow of the day before is named
+    so the reader can see the amount that did not come from margin-funded activity alone.
+    """
+
+    account = next(
+        (a for a in by_source if a.rsplit("-", 1)[-1] == event["sleeve_id"]),
+        None,
+    )
+    if account is None:
+        return ""
+    day = date.fromisoformat(event["day"])
+    before = (day - timedelta(days=1)).isoformat()
+    sentences: list[str] = []
+    for pool in sorted(by_source.get(account, {}).get(event["day"], {})):
+        if not pool.endswith("-unallocated"):
+            continue
+        received = by_source.get(pool, {}).get(before, {})
+        if not received:
+            continue
+        named = " and ".join(
+            f"{_usd(_dec(v))} from {_sleeve_label(cp)}"
+            for cp, v in sorted(received.items())
+        )
+        sentences.append(
+            f" The {event['day']} margin share of the allocation drawn from the "
+            f"unallocated pool is not sized (the activity does not link cash to fund "
+            f"purchases); the pool had received {named} on {before}."
+        )
+    return "".join(sentences)
+
+
+def _other_margin_events(
+    sources: Mapping[str, Any],
+    *,
+    product_sleeves: Mapping[str, str],
+    sleeve_accounts: Mapping[str, str],
+    parents: Collection[str],
+    by_source: Mapping[str, Mapping[str, Mapping[str, str]]],
+    named: str,
+) -> str:
+    """Declared margin allocations into retained sleeves of the product's parent account."""
+
+    listed: list[str] = []
+    for event in sources.get("margin_funding_events", []):
+        if event["kind"] != "IN" or event["sleeve_id"] in product_sleeves:
+            continue
+        account = next(
+            (
+                a
+                for a, parent in sleeve_accounts.items()
+                if parent in parents and a.rsplit("-", 1)[-1] == event["sleeve_id"]
+            ),
+            None,
+        )
+        parts = (
+            None if account is None else by_source.get(account, {}).get(event["day"])
+        )
+        if not parts:
+            continue
+        total = sum((_dec(v) for v in parts.values()), Decimal(0))
+        if f"{event['sleeve_id']} {_usd(total)} on {event['day']}" in named:
+            continue
+        listed.append(
+            f"{event['sleeve_id']} {_usd(total)} on {event['day']} "
+            f"(declared: {event['note']})"
+        )
+    if not listed:
+        return ""
+    return (
+        " Declared margin-funded allocations into retained sleeves of the same account, "
+        f"outside the product's own capital ({len(listed)}): {'; '.join(listed)}."
+    )
 
 
 def _exit_proceeds(
@@ -665,39 +873,164 @@ def _perimeter_reconciliation(
     # differences (the unrounded remainder is within one cent of it)
     difference = gain - sleeves
     remainder = difference - entry_total
-    if abs(remainder - _dec(reconciliation["unattributed"])) >= _CENT:
+    unattributed = _dec(reconciliation["unattributed"])
+    if abs(remainder - unattributed) >= _CENT:
         raise DisclosureError("the shown perimeter figures do not close")
+    # the printed residual is the source's own amount rounded once, never the difference of
+    # rounded figures; when the printed parts then differ from the printed total by a cent,
+    # the sentence says so and gives the identity at four decimals
+    printed = unattributed.quantize(_CENT)
+    printed_text = f"{printed:+,.2f}"
+    if Decimal(printed_text.replace(",", "")) != unattributed.quantize(_CENT):
+        raise DisclosureError(
+            "the printed residual is not the once-rounded source value"
+        )
+    rounding = (
+        " (figures are rounded independently and may differ from their total by 0.01; "
+        f"unrounded: entry-day {_dec(reconciliation['entry_day_total']):+,.4f}, "
+        f"{unattributed:+,.4f} not attributed, "
+        f"{_dec(reconciliation['account_gain']) - _dec(reconciliation['sleeve_gain_total']):+,.4f} "
+        "in total)"
+        if entry_total + printed != difference
+        else ""
+    )
     later = _dec(reconciliation["paid_in_after_anchor"])
     withdrawn = _dec(reconciliation.get("withdrawn_after_anchor", "0"))
     left = f", {_usd(withdrawn)} withdrawn" if withdrawn else ""
     return (
         " Sleeve gains are measured from each sleeve's first-day end-of-day NAV, not from "
         f"the amount allocated to it; the entry-day differences ({entries}; total "
-        f"{entry_total:+,.2f}) belong to no sleeve. Parent account gain over "
+        f"{entry_total:+,.2f}) belong to no sleeve and lie outside every sleeve's TWR and "
+        f"MWR. Parent account gain over "
         f"{reconciliation['anchor_day']}..{reconciliation['last_day']} is {gain:+,.2f} on "
-        f"{_usd(_dec(reconciliation['paid_in']))} of external capital (opening NAV "
-        f"{_usd(_dec(reconciliation['opening_nav']))} plus {_usd(later)} paid in later{left}); "
+        f"{_usd(_dec(reconciliation['paid_in']))} of paid-in capital including the opening "
+        f"value (the opening NAV on {reconciliation['anchor_day']}, "
+        f"{_usd(_dec(reconciliation['opening_nav']))}, plus {_usd(later)} of inflows the "
+        "parent account's ledger recognises after that day, counted whatever their "
+        f"provider classification{left}); "
         f"the sleeves sum to {sleeves:+,.2f}; the {difference:+,.2f} difference is the "
-        f"entry-day differences ({entry_total:+,.2f}) and {remainder:+,.2f} not attributed "
-        "(days before the first sleeve day and the parent remainder)."
+        f"entry-day differences ({entry_total:+,.2f}) and {printed_text} not attributed "
+        f"(days before the first sleeve day and the parent remainder){rounding}."
     )
 
 
-def _index_move(predecessor: object, current: str | None) -> str:
-    if (
+def _path_by_date(rows: Sequence[Any] | None) -> dict[str, Decimal]:
+    """Dated index values from mapping rows (as_of, index) or [date, index] pairs."""
+
+    result: dict[str, Decimal] = {}
+    for row in rows or []:
+        if isinstance(row, Mapping):
+            result[str(row["as_of"])] = _dec(row["index"])
+        else:
+            result[str(row[0])] = _dec(row[1])
+    return result
+
+
+def _derived_scope(
+    derived_patches: Sequence[Mapping[str, Any]] | None, accounts: Collection[str]
+) -> dict[str, str]:
+    """Date -> derivation basis, for the given accounts' own declared derived dates.
+
+    ``derived_patches`` comes from the finality evidence the run observation pins: each
+    entry maps an account to the dates of ITS patched rows. Nothing is inferred from a
+    provider's data date or finality label.
+    """
+
+    found: dict[str, str] = {}
+    for entry in derived_patches or []:
+        dates_by_account = entry.get("accounts")
+        if not isinstance(dates_by_account, Mapping):
+            continue
+        for account in accounts:
+            for day in dates_by_account.get(account, ()):
+                found[str(day)] = str(entry["value_basis"]["basis"])
+    return found
+
+
+def _index_move(
+    predecessor: object,
+    current: str | None,
+    current_path: Sequence[Any] | None = None,
+    derived_patches: Sequence[Mapping[str, Any]] | None = None,
+    member_accounts: Collection[str] = (),
+) -> str:
+    if not (
         current is not None
         and isinstance(predecessor, Mapping)
         and predecessor.get("status") == "RESOLVED"
         and "hwm_current_index" in predecessor["values"]
     ):
-        before = _dec(predecessor["values"]["hwm_current_index"])
-        now = _dec(current)
+        return "Its movement against the previous release is not attributed to a named cause."
+    before = _dec(predecessor["values"]["hwm_current_index"])
+    now = _dec(current)
+    head = (
+        f"The index is {now:.4f} against {before:.4f} in the previous release "
+        f"({now - before:+.2f}, {((now - before) / before * 100):+.2f}%)"
+    )
+    prior = _path_by_date(predecessor.get("hwm_index_path"))
+    later = _path_by_date(current_path)
+    if not prior or not later:
+        return head + "; the move is not attributed to a named cause."
+    last_prior, last_now = max(prior), max(later)
+    # the paths must end on the figures printed above, else no split is stated
+    if (
+        last_prior not in later
+        or prior[last_prior].quantize(Decimal("0.0001"))
+        != before.quantize(Decimal("0.0001"))
+        or later[last_now].quantize(Decimal("0.0001"))
+        != now.quantize(Decimal("0.0001"))
+    ):
+        return head + "; the move is not attributed to a named cause."
+    restated = later[last_prior] - prior[last_prior]
+    extension = later[last_now] - later[last_prior]
+    common = sorted(set(prior) & set(later))
+    differing = [
+        d
+        for d in common
+        if later[d].quantize(Decimal("0.0001")) != prior[d].quantize(Decimal("0.0001"))
+    ]
+    if last_now == last_prior and not differing:
         return (
-            f"The index is {now:.4f} against {before:.4f} in the previous release "
-            f"({now - before:+.2f}, {((now - before) / before * 100):+.2f}%); the move is "
-            "not attributed beyond this timing."
+            head
+            + f"; both releases end on {last_now} and their paths do not differ on any of "
+            f"{len(common)} common dates."
         )
-    return "Its movement against the previous release is not attributed beyond this timing."
+    restatement = (
+        f"the restatement of the previous release's own last date {last_prior} "
+        f"({later[last_prior]:.4f} now against {prior[last_prior]:.4f})"
+    )
+    if last_now == last_prior:
+        # both releases end on the same date: there is no movement between dates to state
+        split = f"; all of this is {restatement}"
+    else:
+        split = (
+            f"; of this {restated:+.2f} is {restatement} and {extension:+.2f} is the "
+            f"movement from {last_prior} to {last_now}"
+        )
+    parts = f"{split}; the two paths differ on {len(differing)} of {len(common)} common dates"
+    revisions = _derived_scope(derived_patches, member_accounts)
+    if differing and all(d in revisions for d in differing):
+        named = "; ".join(f"{d} ({revisions[d]})" for d in differing)
+        return (
+            head
+            + parts
+            + ", all of them dates on which the finality evidence declares this member's "
+            f"account NAV derived: {named}; the restatement is attributed to that NAV "
+            "revision."
+        )
+    if differing:
+        where = (
+            f" ({differing[0]})"
+            if len(differing) == 1
+            else f" (first {differing[0]}, last {differing[-1]})"
+        )
+        return (
+            head
+            + parts
+            + where
+            + "; that difference is not attributed to a named cause."
+        )
+    return head + parts + "; the move is the extension of the path only."
 
 
 def compose(
@@ -709,6 +1042,8 @@ def compose(
     product_strategies: Sequence[str],
     strategy_returns: Mapping[str, Decimal] | None = None,
     hwm_current_index: str | None = None,
+    hwm_index_path: Sequence[Mapping[str, Any]] | None = None,
+    derived_patches: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Methodology items from the sources and the report's own rows.
 
@@ -781,8 +1116,8 @@ def compose(
                 f"{label} (cumulative TWR {_pct(twr)}%{basis_note}): placing each flow "
                 "at the beginning or the end of its day, independently, moves it by "
                 f"between {_signed_pt(entry['b_all_lower_pt'])} and "
-                f"{_signed_pt(entry['b_all_upper_pt'])} points (external flows only: "
-                f"{_signed_pt(entry['b_ext_lower_pt'])} / "
+                f"{_signed_pt(entry['b_all_upper_pt'])} points (flows classified external "
+                f"only: {_signed_pt(entry['b_ext_lower_pt'])} / "
                 f"{_signed_pt(entry['b_ext_upper_pt'])}){every_bod}"
             )
         if parts:
@@ -795,6 +1130,14 @@ def compose(
                         "the return depends on flow timing as follows: "
                         + "; ".join(parts)
                         + f". Source: {evidence['path']} (sha256 {evidence['sha256'][:12]}). "
+                        "The external-only bound covers only the flows the measured epoch's "
+                        "own flow reconciliation classifies as external, so it depends on "
+                        "that classification (the perimeter is the epoch's flow "
+                        "reconciliation, not the parent account's ledger, whose inflows are "
+                        "counted as paid-in whatever their classification): an inflow "
+                        "classified as an internal transfer is outside it, and a reader who "
+                        "treats such an inflow as external capital should read the all-flows "
+                        "bound instead. "
                         "Epochs derived from sleeves are not covered by these bounds; "
                         "exact-timestamp TWR is acceptance item #535."
                     ),
@@ -898,11 +1241,21 @@ def compose(
                     " Allocations whose declared funding events name account margin "
                     f"({len(margin)}): {listed}."
                 )
+            for event in margin:
+                text += _pool_inflow_before(event, by_source)
             text += _exit_proceeds(
                 sources,
                 product_sleeves=product_sleeves,
                 by_source=by_source,
                 margin_days=margin_days,
+            )
+            text += _other_margin_events(
+                sources,
+                product_sleeves=product_sleeves,
+                sleeve_accounts=sleeve_accounts,
+                parents={sleeve_accounts[a] for a in product_accounts},
+                by_source=by_source,
+                named=text,
             )
             parents = sorted({sleeve_accounts[a] for a in product_accounts})
             known = {
@@ -923,8 +1276,8 @@ def compose(
                 )
                 if capital[strategy] > paid_in:
                     text += (
-                        f" Gross capital {_usd(capital[strategy])} exceeds all external "
-                        f"capital paid into the account ({_usd(paid_in)}) by "
+                        f" Gross capital {_usd(capital[strategy])} exceeds all capital "
+                        f"paid into the account, opening value included ({_usd(paid_in)}), by "
                         f"{_usd(capital[strategy] - paid_in)}."
                     )
             predecessor = sources.get("predecessor")
@@ -1008,14 +1361,45 @@ def compose(
             and str(r.get("account_id")) in sleeve_accounts
         )
         if epochs:
+            parent_reconciliation = next(
+                (
+                    item
+                    for item in sources.get("account_reconciliation", [])
+                    if item["parent_account_id"] == sleeve_accounts.get(epochs[0][1])
+                ),
+                None,
+            )
+            no_member = ""
+            if parent_reconciliation is not None:
+                first_observed = date.fromisoformat(
+                    str(parent_reconciliation["anchor_day"])
+                ) + timedelta(days=1)
+                last_without = date.fromisoformat(epochs[0][0]) - timedelta(days=1)
+                if first_observed <= last_without:
+                    no_member = (
+                        f" The derived sleeve series for {strategy} carries no value "
+                        f"{first_observed.isoformat()}..{last_without.isoformat()}: its "
+                        f"parent account is observed from {parent_reconciliation['anchor_day']}"
+                        f" and the sleeve series begins {epochs[0][0]}. This describes the "
+                        "series only; the HWM membership of those days is the governed "
+                        "membership's, which this sentence does not state."
+                    )
             items.append(
                 {
                     "item": "HWM member series",
                     "value": (
                         f"The governed HWM member for {strategy} is the sleeve series "
                         f"{epochs[0][1]} from {epochs[0][0]}; the index carries this member from "
-                        "that date. "
-                        + _index_move(sources.get("predecessor"), hwm_current_index)
+                        "that date."
+                        + no_member
+                        + " "
+                        + _index_move(
+                            sources.get("predecessor"),
+                            hwm_current_index,
+                            hwm_index_path,
+                            derived_patches,
+                            {epochs[0][1], sleeve_accounts[epochs[0][1]]},
+                        )
                     ),
                 }
             )

@@ -2116,3 +2116,61 @@ def test_expected_record_count_negative_fails(tmp_path: Path) -> None:
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError, match="strictly positive"):
         build_generation(spec)
+
+
+def _web_snapshot_spec(tmp_path: Path, **snapshot_updates: object) -> Path:
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    snapshot_path = (
+        Path(document["roots"]["source"])
+        / document["current_snapshot"]["relative_path"]
+    )
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["schema_version"] = 2
+    snapshot["transport"] = "WEB_CONTRACT"
+    snapshot.update(snapshot_updates)
+    for position in snapshot["positions"]:
+        position["evidence_class"] = "WCH_CURRENT"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    payload = snapshot_path.read_bytes()
+    document["current_snapshot"]["expected_sha256"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    document["current_snapshot"]["expected_size_bytes"] = len(payload)
+    document["current_snapshot"]["schema_version"] = "2"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    return spec
+
+
+def test_catalog_position_snapshot_has_no_valuation_cutoff_when_absent(
+    tmp_path: Path,
+) -> None:
+    """Legacy snapshots: the catalog key set is unchanged."""
+
+    catalog, _, _ = build_generation(_web_snapshot_spec(tmp_path))
+    assert set(catalog["position_snapshot_as_of"]) == {"observed_at"}
+
+
+def test_valuation_cutoff_reaches_the_catalog_when_the_snapshot_declares_it(
+    tmp_path: Path,
+) -> None:
+    # the synthetic snapshot is observed 2026-07-31T20:00Z (New York 16:00 07-31)
+    catalog, _, _ = build_generation(
+        _web_snapshot_spec(tmp_path, valuation_cutoff="2026-07-30")
+    )
+    assert catalog["position_snapshot_as_of"] == {
+        "observed_at": "2026-07-31T20:00:00+00:00",
+        "valuation_cutoff": "2026-07-30",
+    }
+
+
+def test_valuation_cutoff_later_than_the_observation_is_refused(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(SchwabGenerationError, match="later than the observation"):
+        build_generation(_web_snapshot_spec(tmp_path, valuation_cutoff="2026-08-01"))
+
+
+def test_valuation_cutoff_must_be_a_canonical_iso_date(tmp_path: Path) -> None:
+    with pytest.raises(SchwabGenerationError, match="valuation_cutoff"):
+        build_generation(_web_snapshot_spec(tmp_path, valuation_cutoff="07/30/2026"))

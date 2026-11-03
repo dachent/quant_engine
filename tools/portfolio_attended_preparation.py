@@ -780,6 +780,39 @@ def _rebuild_layered_history(
     return rebuilt
 
 
+def selected_history_authorities(files: Mapping[str, object]) -> _HistoryAuthorities:
+    """Public entry for the release driver's pre-chain stage (release_pre_chain.py)."""
+
+    return _selected_history_authorities(files)
+
+
+def rebuild_layered_history(
+    selection: Mapping[str, object],
+    output_root: Path,
+    release_commit: str,
+    contract_path: Path,
+    authorities: _HistoryAuthorities,
+) -> Path:
+    """Public entry for the release driver's pre-chain stage (release_pre_chain.py)."""
+
+    return _rebuild_layered_history(
+        selection, output_root, release_commit, contract_path, authorities
+    )
+
+
+def verify_selected_layered_history(
+    generation_root: Path, contract_path: Path, authorities: _HistoryAuthorities
+) -> None:
+    """Public entry for the release driver's pre-chain stage (release_pre_chain.py)."""
+
+    import portfolio_target_series as history
+
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        history.verify_layered_history_generation(
+            generation_root, contract_path, require_mode=mode, **authorities
+        )
+
+
 def _validate_hwm_authority_inputs(config: Mapping[str, Any]) -> None:
     """Admit existing HWM policy/calendar bindings before preparation has effects."""
     import portfolio_invested_capital as capital
@@ -1484,6 +1517,21 @@ def _preparation_stage_inputs(
             "provider_ledger_generation_root": config[
                 "provider_ledger_generation_root"
             ],
+            **(
+                {"weekly_gap_fill_spec": config["weekly_gap_fill_spec"]}
+                if config.get("weekly_gap_fill_spec") is not None
+                else {}
+            ),
+            **(
+                {"vendor_gap_fills": config["vendor_gap_fills"]}
+                if config.get("vendor_gap_fills") is not None
+                else {}
+            ),
+            **(
+                {"model_vs_actual_input": config["model_vs_actual_input"]}
+                if config.get("model_vs_actual_input") is not None
+                else {}
+            ),
             "release_commit": release_commit,
             "strategy_attribution": config["retained_verified_generations"][
                 "attribution"
@@ -2102,6 +2150,21 @@ def _prepare_attended_inputs(
             strategy_attribution_generation_id=attribution_source.name,
             decomposition_plan_bundle=plan_roots["LIVE_ONLY"],
             hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"],
+            weekly_gap_fill_spec_path=(
+                _pin(config["weekly_gap_fill_spec"], "weekly gap fill spec")
+                if config.get("weekly_gap_fill_spec") is not None
+                else None
+            ),
+            vendor_gap_fills_path=(
+                _pin(config["vendor_gap_fills"], "vendor gap fills")
+                if config.get("vendor_gap_fills") is not None
+                else None
+            ),
+            model_vs_actual_input_path=(
+                _pin(config["model_vs_actual_input"], "model vs actual input")
+                if config.get("model_vs_actual_input") is not None
+                else None
+            ),
             correlation_source_root=dependence_root,
             legacy_panel=Path(str(config["legacy_panel_root"])),
             as_of_date=cutoff,
@@ -2288,6 +2351,21 @@ def _prepare_attended_inputs(
             strategy_attribution_generation_id=attribution_source.name,
             decomposition_plan_bundle=plan_roots["LIVE_ONLY"],
             hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"],
+            weekly_gap_fill_spec_path=(
+                _pin(config["weekly_gap_fill_spec"], "weekly gap fill spec")
+                if config.get("weekly_gap_fill_spec") is not None
+                else None
+            ),
+            vendor_gap_fills_path=(
+                _pin(config["vendor_gap_fills"], "vendor gap fills")
+                if config.get("vendor_gap_fills") is not None
+                else None
+            ),
+            model_vs_actual_input_path=(
+                _pin(config["model_vs_actual_input"], "model vs actual input")
+                if config.get("model_vs_actual_input") is not None
+                else None
+            ),
             correlation_source_root=dependence_root,
             legacy_panel=Path(str(config["legacy_panel_root"])),
             as_of_date=cutoff,

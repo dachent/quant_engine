@@ -31,6 +31,14 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_attended_preparation as preparation
 import portfolio_pipeline_materialize as materializer
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
 
 
 HISTORY_TEST_PATH = (
@@ -4611,8 +4619,9 @@ def _sleeve_section(tmp_path: Path) -> dict[str, object]:
     manifest = tmp_path / "sleeve-policy-manifest.json"
     # the manifest pins the governed tag map; the preparation reads the parents' first
     # sleeve days from it for the static-snapshot receipts and the recipe
-    tag_map = Path(__file__).resolve().parents[2] / (
-        "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+    tag_map = (
+        _RELEASE_INPUT_ROOT
+        / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
     )
     (tmp_path / "nested-strategy-tag-map.json").write_bytes(tag_map.read_bytes())
     manifest.write_bytes(
@@ -4632,6 +4641,7 @@ def _sleeve_section(tmp_path: Path) -> dict[str, object]:
     }
 
 
+@needs_release_inputs
 def test_a_sleeve_policy_manifest_without_the_tag_map_pin_is_refused(
     tmp_path: Path,
 ) -> None:
@@ -4645,6 +4655,7 @@ def test_a_sleeve_policy_manifest_without_the_tag_map_pin_is_refused(
         preparation._sleeve_tag_map_path(section)
 
 
+@needs_release_inputs
 def test_sleeve_facts_are_built_staged_replayed_and_checkpointed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4755,6 +4766,7 @@ def test_no_sleeve_configuration_selects_no_nested_strategies(
     assert hwm_inputs is not None
 
 
+@needs_release_inputs
 def test_a_refused_sleeve_build_stops_before_the_epoch_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4812,6 +4824,7 @@ def _ledger_dir(tmp_path: Path) -> Path:
     return directory
 
 
+@needs_release_inputs
 def test_selected_sleeve_facts_without_a_ledger_generation_are_refused(
     tmp_path: Path,
 ) -> None:
@@ -4834,6 +4847,7 @@ def test_selected_sleeve_facts_without_a_ledger_generation_are_refused(
         )
 
 
+@needs_release_inputs
 def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
     tmp_path: Path,
 ) -> None:
@@ -4900,6 +4914,7 @@ def test_disclosure_sources_are_written_from_the_pinned_policy_inputs(
         )
 
 
+@needs_release_inputs
 def test_disclosure_sources_read_the_pinned_declared_funding_events_or_refuse(
     tmp_path: Path,
 ) -> None:
@@ -4954,3 +4969,68 @@ def test_disclosure_sources_read_the_pinned_declared_funding_events_or_refuse(
             destination=tmp_path / "again",
             ledger_generation_dir=_ledger_dir(tmp_path),
         )
+
+
+class _AnyConfig(dict):  # type: ignore[type-arg]
+    """A config whose every required key resolves to a nested placeholder."""
+
+    def __missing__(self, key: str) -> "_AnyConfig":
+        return _AnyConfig()
+
+
+def test_ledger_stage_identity_binds_the_model_vs_actual_pin() -> None:
+    base = _AnyConfig()
+    without = preparation._preparation_stage_inputs(base, "c" * 40)["ledger"]
+    assert "model_vs_actual_input" not in without
+    pinned = _AnyConfig(model_vs_actual_input={"path": "a", "sha256": "1"})
+    changed = _AnyConfig(model_vs_actual_input={"path": "a", "sha256": "2"})
+    first = preparation._preparation_stage_inputs(pinned, "c" * 40)["ledger"]
+    second = preparation._preparation_stage_inputs(changed, "c" * 40)["ledger"]
+    assert first["model_vs_actual_input"] != second["model_vs_actual_input"]
+    assert first != without
+
+
+def test_the_model_vs_actual_pin_is_verified_by_the_specification_pin_check(
+    tmp_path: Path,
+) -> None:
+    audit = tmp_path / "audit-bridges.json"
+    audit.write_bytes(b'{"synthetic": true}')
+    good = {
+        "path": str(audit),
+        "sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+        "size_bytes": audit.stat().st_size,
+    }
+    spec = {"model_vs_actual_input": good}
+    preparation._pins(spec, "preparation specification")
+    assert preparation._pin(good, "model vs actual input") == audit.resolve()
+    with pytest.raises(preparation.AttendedPreparationError, match="pin differs"):
+        preparation._pins(
+            {"model_vs_actual_input": {**good, "sha256": "0" * 64}},
+            "preparation specification",
+        )
+    audit.unlink()
+    with pytest.raises(preparation.AttendedPreparationError, match="unavailable"):
+        preparation._pins(spec, "preparation specification")
+
+
+def test_ledger_stage_identity_binds_the_weekly_gap_fill_pin() -> None:
+    base = _AnyConfig()
+    without = preparation._preparation_stage_inputs(base, "c" * 40)["ledger"]
+    assert "weekly_gap_fill_spec" not in without
+    pinned = _AnyConfig(weekly_gap_fill_spec={"path": "a", "sha256": "1"})
+    changed = _AnyConfig(weekly_gap_fill_spec={"path": "a", "sha256": "2"})
+    first = preparation._preparation_stage_inputs(pinned, "c" * 40)["ledger"]
+    second = preparation._preparation_stage_inputs(changed, "c" * 40)["ledger"]
+    assert first["weekly_gap_fill_spec"] != second["weekly_gap_fill_spec"]
+
+
+def test_ledger_stage_identity_binds_the_vendor_gap_fills_pin() -> None:
+    without = preparation._preparation_stage_inputs(_AnyConfig(), "c" * 40)["ledger"]
+    assert "vendor_gap_fills" not in without
+    first = preparation._preparation_stage_inputs(
+        _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "1"}), "c" * 40
+    )["ledger"]
+    second = preparation._preparation_stage_inputs(
+        _AnyConfig(vendor_gap_fills={"path": "a", "sha256": "2"}), "c" * 40
+    )["ledger"]
+    assert first["vendor_gap_fills"] != second["vendor_gap_fills"]

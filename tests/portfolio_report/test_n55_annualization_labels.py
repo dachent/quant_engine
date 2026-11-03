@@ -455,7 +455,9 @@ def test_cagr_and_mwr_carry_their_basis_and_window_at_version_four(
         else:
             labelled += 1
             assert cagr["basis"] == "CALENDAR_DAYS_COMPOUNDED_OVER_365"
-            assert cagr["window_start"] == row["account_live_observed_start"]
+            # the window opens at the opening NAV date, the close before the first return
+            assert cagr["window_start"] == row["return_window_start"]
+            assert cagr["window_start"] < row["account_live_observed_start"]
             assert cagr["window_end"] == row["account_live_observed_end"]
             assert (
                 cagr["window_days"]
@@ -466,7 +468,12 @@ def test_cagr_and_mwr_carry_their_basis_and_window_at_version_four(
             )
             assert cagr["short_window"] is (cagr["window_days"] < 365)
             assert cagr["observations"] == row["account_live_return_observations"]
-            assert cagr["label"].startswith("annualized from ")
+            # V27-3: the CAGR exponent is calendar days, so the label says that and names the
+            # observation count as the daily returns, not as the scaling basis
+            assert cagr["label"].startswith(
+                f"annualized over {cagr['window_days']} calendar days "
+                f"({cagr['observations']} daily returns), "
+            )
             assert cagr["label"].endswith(
                 f"{cagr['window_start']}..{cagr['window_end']}"
                 + (" (<1 year)" if cagr["short_window"] else "")
@@ -515,6 +522,8 @@ def test_the_qsi_weekly_comparison_is_labelled_a_short_window(tmp_path: Path) ->
         "periods_per_year": 52,
         "short_window": True,
         "window_days": 182,
+        "window_days_basis": "EXCLUSIVE_END_MINUS_START",
+        "window_days_text": "182 days exclusive (end minus start)",
         "window_end": "2026-07-10",
         "window_start": "2026-01-09",
     }
@@ -619,3 +628,90 @@ def test_the_schema_admits_the_labels_at_four_only_and_closes_their_shape(
     target = next(r for r in extra if r["account_live_cagr_annualization"])
     target["account_live_cagr_annualization"]["note"] = "x"
     assert _summary_errors(5, extra)
+
+
+def test_cost_evidence_and_execution_cost_reach_the_merged_strategy_row() -> None:
+    """R2.1 Q1: declared basis, corroborating charges and execution cost are published."""
+
+    extra = {
+        "cost_class": "SUBSCRIPTION",
+        "corroboration": [{"kind": "CARD_FEED_OBSERVED_CHARGES"}],
+        "declared": {"amount": "50", "period": "MONTH"},
+        "execution_cost": {"status": "AVAILABLE", "usd_total": "2"},
+    }
+    retained = _retained_robuxio_rows()
+    retained["costs"][0].update(extra)
+
+    merged = reporter._merge_attribution([{"strategy_id": ROBUXIO}], retained)[0]
+    assert {key: merged[key] for key in reporter.COST_EVIDENCE_KEYS} == extra
+
+    plain = reporter._merge_attribution(
+        [{"strategy_id": ROBUXIO}], _retained_robuxio_rows()
+    )[0]
+    assert all(key not in plain for key in extra)
+
+
+def test_cost_components_are_structured_and_every_word_comes_from_data() -> None:
+    """R2.1 Q1 (renderer request R2): period, currency and labels ride the payload."""
+
+    retained = _retained_robuxio_rows()
+    retained["costs"][0].update(
+        annual_external_cost_usd="600",
+        cost_status="known_subscription_provider_declared",
+        corroboration=[
+            {
+                "feed_last_date": "2026-06-08",
+                "kind": "CARD_FEED_OBSERVED_CHARGES",
+                "observations": [
+                    {"amount": "-50", "currency": "USD", "date": "2025-09-30"},
+                    {"amount": "-50", "currency": "USD", "date": "2026-05-28"},
+                ],
+            }
+        ],
+        declared={
+            "amount": "50",
+            "basis": "PROVIDER_DECLARED",
+            "currency": "USD",
+            "period": "MONTH",
+        },
+        execution_cost={
+            "basis": "LEDGER_TRANSACTION_COMMISSIONS_NATIVE_CURRENCY",
+            "by_currency": [
+                {"amount": "172", "currency": "EUR", "record_count": 65},
+                {"amount": "96", "currency": "USD", "record_count": 68},
+            ],
+            "status": "AVAILABLE",
+            "window_end": "2026-09-02",
+            "window_start": "2025-11-27",
+        },
+    )
+    merged = reporter._merge_attribution([{"strategy_id": ROBUXIO}], retained)[0]
+    subscription, euro, dollar = merged["cost_components"]
+
+    assert subscription == {
+        "amount": "50",
+        "annual_equivalent_usd": "600",
+        "corroboration_label": (
+            "card feed observed charges 2025-09-30..2026-05-28 "
+            "(2 charges, feed through 2026-06-08)"
+        ),
+        "currency": "USD",
+        "kind": "SUBSCRIPTION",
+        "period": "MONTH",
+        "source_label": "provider declared",
+        "status": "known_subscription_provider_declared",
+        "window_end": None,
+        "window_start": None,
+    }
+    assert (euro["kind"], euro["currency"], euro["amount"]) == (
+        "EXECUTION",
+        "EUR",
+        "172",
+    )
+    assert (euro["period"], euro["annual_equivalent_usd"]) == ("PERIOD_TO_DATE", None)
+    assert (euro["window_start"], euro["window_end"]) == ("2025-11-27", "2026-09-02")
+    assert dollar["currency"] == "USD"
+    plain = reporter._merge_attribution(
+        [{"strategy_id": ROBUXIO}], _retained_robuxio_rows()
+    )[0]
+    assert "cost_components" not in plain

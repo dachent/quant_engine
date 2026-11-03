@@ -4639,13 +4639,13 @@ def _real_quantbase_ledger_anchors(
     )
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
-        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,\n"
-        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z\n"
-        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z\n"
-        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,\n"
-        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z\n"
-        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z\n",
+        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at,fund_title\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,,Volatis Strategy\n"
+        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z,\n"
+        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z,\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,,Volatis Strategy\n"
+        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z,\n"
+        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z,\n",
         encoding="utf-8-sig",
     )
     manifest = GenerationManifest.build(
@@ -4854,7 +4854,7 @@ def test_classified_flow_preserves_provider_decimal_precision(
                 "amount": {
                     "currency": "USD",
                     "status": "AVAILABLE",
-                    "value": "25027.43294966",
+                    "value": "19676.567785022692",
                 },
             }
         ],
@@ -4865,7 +4865,7 @@ def test_classified_flow_preserves_provider_decimal_precision(
             "source_record_id": "raw-flow-1",
             "account_id": "synthetic-account",
             "event_date": "2026-01-01",
-            "amount": "25027.43294966",
+            "amount": "19676.567785022692",
             "disposition": "EXTERNAL",
         }
     ]
@@ -4874,7 +4874,7 @@ def test_classified_flow_preserves_provider_decimal_precision(
         ledger, events, _flow_classification_rules()
     )
 
-    assert reconciled[0]["amount"] == manifest_module.Decimal("25027.43294966")
+    assert reconciled[0]["amount"] == manifest_module.Decimal("19676.567785022692")
 
 
 @pytest.mark.parametrize(

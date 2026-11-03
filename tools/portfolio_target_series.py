@@ -218,6 +218,39 @@ def _trusted_layered_history_code_identity() -> tuple[str, str]:
     return repository_sha, tool_sha256
 
 
+@lru_cache(maxsize=1)
+def _trusted_layered_history_tree_identity() -> str:
+    """Return ``HEAD^{tree}`` of the executing checkout (git-tree-v2 identity).
+
+    A tree-bound release (RELEASE-HASHTIME-001 cut 5) hands the builder the tree id
+    as ``repository_sha``. ``git show <tree>:<path>`` resolves the same bytes the
+    commit would, so the committed-dependency checks need no change; only the
+    "equals the executing checkout" test has to accept the tree too.
+    """
+    repository_root = Path(__file__).resolve().parents[1]
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository_root), "rev-parse", "HEAD^{tree}"],
+            capture_output=True,
+            check=False,
+            env=_clean_git_environment(),
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        raise TargetSeriesError(
+            "layered history repository identity is unavailable"
+        ) from exc
+    tree_sha = completed.stdout.strip()
+    if (
+        completed.returncode != 0
+        or len(tree_sha) != 40
+        or any(ch not in "0123456789abcdef" for ch in tree_sha)
+    ):
+        raise TargetSeriesError("layered history repository identity is unavailable")
+    return tree_sha
+
+
 @lru_cache(maxsize=16)
 def _committed_layered_history_dependency_sha256s(
     repository_sha: str | None = None,
@@ -4375,7 +4408,9 @@ def build_layered_history_generation(
     trusted_repository_sha, _trusted_tool_sha256 = (
         _trusted_layered_history_code_identity()
     )
-    if repository_sha != trusted_repository_sha:
+    if repository_sha != trusted_repository_sha and (
+        repository_sha != _trusted_layered_history_tree_identity()
+    ):
         raise TargetSeriesError("repository SHA differs from the executing checkout")
     try:
         accepted_as_of = date.fromisoformat(as_of_date)

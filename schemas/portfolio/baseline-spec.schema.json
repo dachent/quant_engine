@@ -54,6 +54,7 @@
         "combined-control-status": {"$ref": "#/$defs/source_ref"},
         "component-decision-table": {"$ref": "#/$defs/source_ref"},
         "cost-economics": {"$ref": "#/$defs/source_ref"},
+        "cost-evidence": {"$ref": "#/$defs/source_ref"},
         "current-portfolio-summary": {"$ref": "#/$defs/source_ref"},
         "data-coverage-matrix": {"$ref": "#/$defs/source_ref"},
         "evidence-layer-metrics": {"$ref": "#/$defs/source_ref"},

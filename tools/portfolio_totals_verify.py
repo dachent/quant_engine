@@ -166,6 +166,66 @@ def _check_perimeter_remainder(
         raise _fail("capital_reconciliation perimeter remainder unattributed differs")
 
 
+def _epoch_line(row: Mapping[str, Any]) -> dict[str, Any]:
+    gain, value = row.get("gain"), row.get("current_value")
+    return {
+        "account_id": row.get("account_id"),
+        "strategy_id": row.get("strategy_id"),
+        "effective_start": row.get("effective_start"),
+        "effective_end": row.get("effective_end"),
+        "status": row.get("status"),
+        "lifecycle_state": row.get("lifecycle_state"),
+        "gain_usd": None if gain is None else _text(_d(gain)),
+        "current_value_usd": None if value is None else _text(_d(value)),
+    }
+
+
+def _check_epoch_set(
+    block: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    manifest_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """The epoch-by-epoch account of the report's epochs against the manifest."""
+
+    published = block.get("epoch_set")
+    if not isinstance(published, Mapping):
+        raise _fail("capital_reconciliation.epoch_set is absent")
+    keys = {(r["account_id"], r["strategy_id"], r["effective_start"]) for r in rows}
+    inside = [_epoch_line(r) for r in rows]
+    outside = [
+        _epoch_line(r)
+        for r in manifest_rows
+        if (r.get("account_id"), r.get("strategy_id"), r.get("effective_start"))
+        not in keys
+    ]
+
+    def order(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            lines,
+            key=lambda x: (x["effective_start"], x["account_id"], x["strategy_id"]),
+        )
+
+    def gain(lines: list[dict[str, Any]]) -> str:
+        with localcontext() as context:
+            context.prec = PRECISION
+            return _text(
+                sum((_d(x["gain_usd"]) for x in lines if x["gain_usd"]), Decimal(0))
+            )
+
+    for field, expected in (
+        ("report_epoch_count", len(inside)),
+        ("manifest_row_count", len(inside) + len(outside)),
+        ("gain_of_report_epochs_usd", gain(inside)),
+        ("gain_of_outside_report_epochs_usd", gain(outside)),
+        ("report_epochs", order(inside)),
+        ("outside_report_epochs", order(outside)),
+    ):
+        if published.get(field) != expected:
+            raise _fail(f"capital_reconciliation.epoch_set.{field} differs")
+    if published["gain_of_report_epochs_usd"] != block["gain_of_all_epochs_usd"]:
+        raise _fail("epoch_set report gain differs from the gain of all epochs")
+
+
 def _check_capital(
     block: Mapping[str, Any],
     rows: Sequence[Mapping[str, Any]],
@@ -173,6 +233,7 @@ def _check_capital(
     cutoff: str,
     hwm_summary: Mapping[str, Any] | None = None,
     custody: Mapping[str, Any] | None = None,
+    manifest_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> None:
     if block.get("status") != "RECONCILED":
         # Only the producer's named unavailability reasons may stand in for a
@@ -219,6 +280,8 @@ def _check_capital(
         if block.get("residual_usd") != "0":
             raise _fail("capital_reconciliation residual is not zero")
         _check_perimeter_remainder(block, rows, hwm_summary or {}, custody, cutoff)
+        if manifest_rows is not None:
+            _check_epoch_set(block, rows, manifest_rows)
         if block.get("open_epoch_count") != sum(1 for r in rows if r["end"] == cutoff):
             raise _fail("capital_reconciliation open epoch count differs")
         if block.get("epoch_count") != len(rows):
@@ -561,6 +624,7 @@ def verify_portfolio_totals(
         cutoff,
         report.get("hwm_summary") or {},
         report.get("custody_current_capital"),
+        manifest.get("rows") if isinstance(manifest.get("rows"), list) else None,
     )
     _check_mwr(
         report["portfolio_mwr_annualised"],

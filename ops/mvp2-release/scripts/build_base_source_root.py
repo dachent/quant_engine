@@ -11,6 +11,7 @@ the base spec bound to the ledger the release actually publishes.
 All four of that function's returns are canonical bytes, not python objects.
 """
 
+import os
 import csv
 import hashlib
 import json
@@ -18,13 +19,12 @@ import sys
 from pathlib import Path
 
 REPO = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    r"/.codex-bootstrap/mvp2-execution/repo"
+    os.environ["QUANT_ENGINE_DATA_ROOT"] + r"/.codex-bootstrap/mvp2-execution/repo"
 )
 sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
 
 LEDGER = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio"
+    f"{os.environ['QUANT_ENGINE_DATA_ROOT']}/dataPortfolio"
     r"/rollforward/2026-09-10-mvp2-live-only/provider-ledger/generations"
     r"/26a5151085ee06873af48c9f4a0c3c9001ae2ba1bffceb5c5ee6635d8d8b5a79"
 )

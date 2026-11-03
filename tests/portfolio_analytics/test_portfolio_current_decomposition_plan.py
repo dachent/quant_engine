@@ -1103,7 +1103,7 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
     crypto_assignment = by_id["robuxio-crypto"]["assignments"]
     assert len(crypto_assignment) == 1
     assert crypto_assignment[0]["source_key"] == "multi-asset-style"
-    assert crypto_assignment[0]["constraint"] == "LONG_ONLY_SUM_TO_ONE"
+    assert crypto_assignment[0]["constraint"] == "UNCONSTRAINED"
     assert crypto_assignment[0]["factor_sets"] == [
         ["BTC-USD"],
         ["ETH-USD"],

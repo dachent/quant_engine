@@ -40,6 +40,18 @@ builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
 
 
+@pytest.fixture(autouse=True)
+def _weekly_span_manifest_check_is_covered_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """These stubs publish no weekly generation; the check has its own tests in
+    tests/portfolio_analytics/test_portfolio_weekly_returns.py."""
+
+    monkeypatch.setattr(
+        builder, "_verify_weekly_spans_against_manifest", lambda *_a, **_k: 0
+    )
+
+
 def _load_module(name: str, path: Path) -> object:
     """Load a fixture module without leaking or replacing a module registry entry."""
 
@@ -1247,6 +1259,8 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     output = tmp_path / "generated-recipe.json"
+    audit_input = tmp_path / "audit-bridges.json"
+    audit_input.write_text('{"synthetic": true}', encoding="utf-8")
 
     result = builder.create_recipe(
         provider_ledger_spec=provider,
@@ -1264,11 +1278,13 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
         pipeline_id="synthetic-vertical",
         release_commit="a" * 40,
         output=output,
+        model_vs_actual_input_path=audit_input,
     )
 
     assert result["recipe"] == str(output)
     accepted = builder._recipe(output)
     assert accepted["schema_version"] == 6
+    assert accepted["model_vs_actual_input"] == _file_definition(audit_input)
     assert accepted["hybrid_decomposition_plan_bundle"] == {
         "path": str(hybrid_plan.resolve()),
         **builder._directory_inventory(hybrid_plan.resolve()),
@@ -1818,6 +1834,7 @@ def _current_plan_bundle(
             "schema_name": "portfolio-canonical-strategy-returns",
             "schema_version": "1",
         },
+        "models": [{"periods_per_year": 252, "series_id": series_id}],
         "provenance_sources": [
             {
                 "expected_sha256": hashlib.sha256(provenance_content).hexdigest(),
@@ -2474,13 +2491,16 @@ def test_generation_id_requires_canonical_hash(value: object) -> None:
         (False, None, "UNKNOWN"),
     ),
 )
+@pytest.mark.parametrize("lens_workers", ("1", "4"))
 def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     include_hybrid: bool,
     reused: bool | None,
     expected_warm_status: str,
+    lens_workers: str,
 ) -> None:
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, lens_workers)
     recipe_root = tmp_path / "recipe-fixture"
     recipe_root.mkdir()
     recipe = _recipe(recipe_root)
@@ -2655,9 +2675,19 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
         and call[1] in {"stage", "publish"}
     ]
     operations = result["numerical_producer_evidence"]["operations"]
-    assert [(row["tool"], row["operation"]) for row in operations] == [
-        (call[0], call[1]) for call in numerical_calls
-    ]
+    recorded = [(row["tool"], row["operation"]) for row in operations]
+    executed = [(call[0], call[1]) for call in numerical_calls]
+    if lens_workers == "1":
+        assert recorded == executed
+    else:
+        # Concurrent lens builds interleave their calls; the recorded operations
+        # stay in declared order, each lens contributing its stage then publish.
+        assert sorted(recorded) == sorted(executed)
+        lens_operations = recorded[2:-2]
+        assert lens_operations == [
+            ("portfolio_decomposition.py", "stage"),
+            ("portfolio_decomposition.py", "publish"),
+        ] * (len(lens_operations) // 2)
     assert all(row["producer_result"].get("reused") is reused for row in operations)
     assert all(len(row["source_identity"]["spec_sha256"]) == 64 for row in operations)
     assert result["numerical_producer_evidence"]["warm_status"] == expected_warm_status
@@ -3815,6 +3845,106 @@ def test_legacy_release_composer_rejects_bundle_identity_rewrite() -> None:
         match="bundle identity differs",
     ):
         builder._legacy_release_plan_specs(manifest)
+
+
+def _model_vs_actual_recipe(tmp_path: Path) -> tuple[Path, Path, str]:
+    recipe_path = _recipe(tmp_path)
+    audit_input = tmp_path / "audit-bridges.json"
+    audit_input.write_text('{"synthetic": true}', encoding="utf-8")
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    recipe["model_vs_actual_input"] = _file_definition(audit_input)
+    recipe_path.write_bytes(canonical_json_bytes(recipe))
+    return (
+        recipe_path,
+        audit_input,
+        hashlib.sha256(audit_input.read_bytes()).hexdigest(),
+    )
+
+
+def _panel_stage_arguments(tmp_path: Path, recipe: Path) -> tuple[Any, ...]:
+    analytics = {
+        "decomposition_root": str(tmp_path / "decomposition"),
+        "decomposition_lenses_root": str(tmp_path / "lenses"),
+        "correlation_root": str(tmp_path / "correlation-out"),
+        "weekly_root": str(tmp_path / "weekly"),
+    }
+    return (
+        recipe,
+        tmp_path / "stages" / "report",
+        tmp_path / "stages" / "baseline",
+        tmp_path / "bundle",
+        analytics,
+        tmp_path / "freshness.json",
+    )
+
+
+def test_panel_invocations_carry_the_pinned_model_vs_actual_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, audit_input, sha = _model_vs_actual_recipe(tmp_path)
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "panel.html").write_text("candidate", encoding="utf-8")
+    qa = tmp_path / "qa"
+    qa.mkdir()
+    (qa / "browser.json").write_text("{}", encoding="utf-8")
+    base = _panel_stage_arguments(tmp_path, recipe)
+    builder.build_panel_candidate(*base, tmp_path / "stages" / "panel")
+    builder.publish_panel(*base, candidate, qa, tmp_path / "stages" / "panel")
+
+    panel_calls = [call for call in calls if call[1] != "qa"]
+    assert [call[1] for call in panel_calls] == ["build", "verify", "verify", "publish"]
+    for call in panel_calls:
+        assert call[call.index("--model-vs-actual-input") + 1] == str(audit_input)
+        assert call[call.index("--model-vs-actual-input-sha256") + 1] == sha
+
+
+def test_panel_invocations_omit_the_model_vs_actual_flags_when_the_recipe_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe = _recipe(tmp_path)
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        builder,
+        "_tool",
+        lambda *args, **_kwargs: calls.append(args) or {"candidate_dir": "x"},
+    )
+    builder.build_panel_candidate(
+        *_panel_stage_arguments(tmp_path, recipe), tmp_path / "stages" / "panel"
+    )
+    assert calls and all("--model-vs-actual-input" not in call for call in calls)
+
+
+def test_a_changed_or_absent_model_vs_actual_input_refuses_before_the_panel_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe, audit_input, _sha = _model_vs_actual_recipe(tmp_path)
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        builder, "_tool", lambda *args, **_kwargs: calls.append(args) or {}
+    )
+    panel_root = tmp_path / "stages" / "panel"
+    original = audit_input.read_bytes()
+    audit_input.write_bytes(original + b" ")
+    with pytest.raises(builder.VerticalBuildError, match="identity differs"):
+        builder.build_panel_candidate(
+            *_panel_stage_arguments(tmp_path, recipe), panel_root
+        )
+    with pytest.raises(builder.VerticalBuildError, match="identity differs"):
+        builder._recipe(recipe)
+    audit_input.unlink()
+    with pytest.raises(builder.VerticalBuildError):
+        builder.build_panel_candidate(
+            *_panel_stage_arguments(tmp_path, recipe), panel_root
+        )
+    assert calls == []
 
 
 def test_panel_invocations_carry_baseline_root(
@@ -5808,3 +5938,96 @@ def test_current_base_analytics_reads_factors_projected_to_the_spec_date(
     )
     # The retained input is untouched.
     assert retained.read_bytes() == _BASE_FACTORS
+
+
+def test_expected_model_annualisation_comes_from_the_base_spec_not_a_literal() -> None:
+    assert builder._declared_periods({"Strategy 0": 52}, "Strategy 0") == 52
+    with pytest.raises(builder.VerticalBuildError, match="periods_per_year"):
+        builder._declared_periods({"Strategy 0": 252}, "Strategy 1")
+
+
+def test_lens_builds_overlap_but_results_keep_declared_order() -> None:
+    import threading
+    import time
+
+    items = [
+        (Path(f"bundle-{index}"), {"sha256": f"{index:064x}"}) for index in range(6)
+    ]
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def build(bundle: Path, row: dict[str, str]) -> tuple[str, list[dict[str, object]]]:
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        # Later lenses finish first, so completion order is not declared order.
+        time.sleep(0.05 * (len(items) - int(row["sha256"], 16)))
+        with guard:
+            active -= 1
+        return bundle.name, [{"lens": bundle.name}]
+
+    results = list(builder._build_lenses(items, build, workers=3))
+    assert [name for name, _ in results] == [bundle.name for bundle, _ in items]
+    assert peak >= 2
+    assert list(builder._build_lenses(items, build, workers=1)) == results
+
+
+def test_lens_builds_with_the_same_spec_bytes_never_run_together() -> None:
+    import threading
+    import time
+
+    digest = "a" * 64
+    items = [
+        (Path("one"), {"sha256": digest}),
+        (Path("two"), {"sha256": digest}),
+        (Path("three"), {"sha256": "b" * 64}),
+    ]
+    running: set[str] = set()
+    overlapped = []
+    guard = threading.Lock()
+
+    def build(bundle: Path, row: dict[str, str]) -> tuple[str, list[dict[str, object]]]:
+        with guard:
+            if row["sha256"] in running:
+                overlapped.append(bundle.name)
+            running.add(row["sha256"])
+        time.sleep(0.05)
+        with guard:
+            running.discard(row["sha256"])
+        return bundle.name, []
+
+    list(builder._build_lenses(items, build, workers=3))
+    assert overlapped == []
+
+
+def test_lens_build_failure_stops_the_walk_and_propagates() -> None:
+    items = [
+        (Path(f"bundle-{index}"), {"sha256": f"{index:064x}"}) for index in range(5)
+    ]
+
+    def build(bundle: Path, row: dict[str, str]) -> tuple[str, list[dict[str, object]]]:
+        if bundle.name == "bundle-2":
+            raise builder.VerticalBuildError("lens failed")
+        return bundle.name, []
+
+    with pytest.raises(builder.VerticalBuildError, match="lens failed"):
+        list(builder._build_lenses(items, build, workers=3))
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "many", ""))
+def test_lens_worker_count_rejects_a_non_positive_setting(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, value)
+    with pytest.raises(builder.VerticalBuildError, match="positive integer"):
+        builder._lens_worker_count(5)
+
+
+def test_lens_worker_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, "64")
+    assert builder._lens_worker_count(26) == 8
+    assert builder._lens_worker_count(3) == 3
+    monkeypatch.setenv(builder._LENS_WORKERS_ENV, "1")
+    assert builder._lens_worker_count(26) == 1

@@ -398,10 +398,23 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
         && rendered.cells[2].secondary === `${row.effective_end || "open"} · ${blocker}`
         && rendered.cells.slice(3).every((cell) => cell.text === "—");
     }
+    // An account NAV the report declares derived (account_summary value_basis, same account and observation day)
+    // carries its basis label and the row's own date beside the Current value.
+    const derivedNote = (() => {
+      const summary = (dashboardData.account_summary || []).find((item) => item.account_id === row.account_id && item.value_basis
+        && String(item.as_of_date || "").slice(0, 10) === String(row.end || "").slice(0, 10));
+      if (!summary) return "";
+      // The one label the renderer prints (valueBasisLabel): basis, the as-of day, and the observed day only when different.
+      const longDay = (value) => new Date(`${String(value).slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+      const asOf = typeof summary.as_of_date === "string" && summary.as_of_date !== "" ? summary.as_of_date.slice(0, 10) : "";
+      const seen = typeof summary.capture_date === "string" && summary.capture_date !== "" ? summary.capture_date.slice(0, 10)
+        : typeof summary.observed_at === "string" ? summary.observed_at.slice(0, 10) : "";
+      return `Derived from official closes${asOf ? ` as of ${longDay(asOf)}` : ""}${seen && seen !== asOf ? ` (observed ${longDay(seen)})` : ""}`;
+    })();
     const expectedNumbers = [
       exactMoney(row.invested) + (row.opening_basis === "PROVIDER_CAPITAL_ANCHOR" ? "sleeve allocation" : ""),
       exactMoney(row.withdrawn), exactMoney(row.net_capital),
-      exactMoney(row.current_value),
+      exactMoney(row.current_value) + derivedNote,
       exactMoney(row.gain) + (row.post_liquidation_income != null ? `incl. post-liquidation income ${exactMoney(row.post_liquidation_income)}` : ""),
       exactPct(row.return_on_net_capital),
       exactPct(row.annualized_return_on_net_capital), exactPct(row.observation_linked_return),
@@ -1316,6 +1329,78 @@ checks.push(check(
   "Provider-custodied Robuxio account NAV is labeled account-live",
   robuxioEvidence?.includes("Account-live available") && !robuxioEvidence?.includes("Account-live unavailable"),
   robuxioEvidence,
+));
+// R2.1 renderer checks.  Each is applicable only when the payload carries the field it reads; a payload without the
+// field must still render an explicit state, which the same check records.
+await page.setViewportSize({ width: 1440, height: 900 });
+await page.locator('[data-nav="capital"]').click();
+const retainedNames = dashboardData.strategies.filter((strategy) => strategy.record_kind === "RETAINED_HISTORY_ONLY").map((strategy) => strategy.strategy_name);
+const registerText = await page.locator("#strategy-table tbody").textContent();
+const registerRows = await page.locator("#strategy-table tbody tr").count();
+checks.push(check(
+  "Retained-history records stay out of the strategy register",
+  registerRows === expectedCurrentStrategies && retainedNames.every((name) => !registerText?.includes(name)),
+  { rows: registerRows, expected: expectedCurrentStrategies, retained_in_register: retainedNames.filter((name) => registerText?.includes(name)) },
+));
+await page.locator('[data-nav="command"]').click();
+const implementationText = await page.locator("#portfolio-implementation-table tbody").textContent();
+const implementationRowCount = await page.locator("#portfolio-implementation-table tbody tr").count();
+checks.push(check(
+  "Retained-history records stay out of the implementation and cost table, and the cost label carries the amount",
+  implementationRowCount === expectedCurrentStrategies
+    && retainedNames.every((name) => !implementationText?.includes(name))
+    && /(per year|annual amount not published)/.test(implementationText || ""),
+  { rows: implementationRowCount, expected: expectedCurrentStrategies },
+));
+const hwmCandidate = dashboardData.advisory?.hwm_candidate;
+await page.locator('[data-nav="risk"]').click();
+const hwmKpi = (await page.locator("#risk-kpis .kpi-card", { hasText: "Systematic index, current" }).first().textContent()) || "";
+checks.push(check(
+  "Systematic HWM KPI shows the governed candidate labelled pending acceptance",
+  !hwmCandidate || (hwmKpi.includes(Number(hwmCandidate.current_index).toFixed(4)) && /pending/i.test(hwmKpi) && !/^Systematic HWMUnavailable/.test(hwmKpi) && (!hwmCandidate.current_hwm || hwmKpi.includes(`HWM ${Number(hwmCandidate.current_hwm).toFixed(4)}`))),
+  { applicable: Boolean(hwmCandidate), kpi: hwmKpi },
+));
+const alphaContextPublished = Object.values(dashboardData.decomposition_lenses?.modes || {}).some((lenses) => Array.isArray(lenses) && lenses.some((lens) => Object.values(lens.surfaces || {}).some((surface) => (surface.series || []).some((row) => row.alpha_context))));
+await page.locator('[data-nav="attribution"]').click();
+const alphaTiles = (await page.locator("#factor-detail").textContent()) || "";
+checks.push(check(
+  "Alpha tiles never print the fixed observed-basis suffix and carry window, observations and standard error or its reason",
+  !/ · observed basis/.test(alphaTiles)
+    && (!alphaContextPublished || (/\d+ days/.test(alphaTiles) && /\bn \d+/.test(alphaTiles) && /(annuali[sz]ed SE|no t-statistic)/.test(alphaTiles))),
+  { applicable: alphaContextPublished },
+));
+const performanceTab = dashboardData.performance_tab;
+await page.locator('[data-nav="performance"]').click();
+await page.locator('[data-perf-zoom="Max"]').click();
+const returnsMax = await page.evaluate(() => ({
+  lines: document.querySelectorAll("#perf-returns-chart polyline").length,
+  note: document.querySelector("#perf-returns-note")?.textContent || "",
+  axisLogPressed: document.querySelector('[data-perf-axis="log"]')?.getAttribute("aria-pressed"),
+}));
+const valuePanel = await page.evaluate(() => ({
+  legend: document.querySelector("#perf-value-legend")?.textContent || "",
+  trailing: document.querySelector("#perf-trailing-table")?.textContent || "",
+  dashed: document.querySelectorAll("#perf-value-chart polyline[stroke-dasharray]").length,
+}));
+const tabIsCurrent = performanceTab?.schema_version === 3;
+const benchmarkDollars = tabIsCurrent && Array.isArray(performanceTab.slices?.benchmarks) && performanceTab.slices.benchmarks.some((entry) => entry.status === "AVAILABLE");
+checks.push(check(
+  "Return chart reads the union grid: Max view is a log axis with each line rebased at its own start",
+  !tabIsCurrent || (returnsMax.lines > 0 && returnsMax.axisLogPressed === "true" && /own first week/.test(returnsMax.note)),
+  { applicable: tabIsCurrent, ...returnsMax },
+));
+checks.push(check(
+  "Value chart overlays the flow-matched benchmark dollars and fills the trailing table from the payload",
+  !tabIsCurrent || !benchmarkDollars || (valuePanel.dashed >= 1 && /same cash flows/.test(valuePanel.legend) && !/not in this snapshot/.test(valuePanel.trailing)),
+  { applicable: benchmarkDollars, ...valuePanel },
+));
+await page.locator('[data-nav="capital"]').click();
+const symbolRows = dashboardData.positions.filter((row) => row.symbol);
+const symbolText = (await page.locator("#position-table tbody").textContent()) || "";
+checks.push(check(
+  "Current positions print the payload symbol where one is published",
+  !symbolRows.length || symbolRows.some((row) => symbolText.includes(row.symbol)) || symbolRows.every((row) => row.position_class === "HISTORICAL"),
+  { applicable: symbolRows.length > 0 },
 ));
 checks.push(check("No console errors occur", consoleErrors.length === 0, consoleErrors));
 
