@@ -13,7 +13,7 @@ import pathlib
 import re
 import sys
 
-W = pathlib.Path("C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine")
+W = pathlib.Path(os.environ["QUANT_ENGINE_DATA_ROOT"])
 TREES = ["rollforward", "release-runs", "superseded-pipeline-runs", "repairs"]
 STORES = [
     "dataPortfolio",

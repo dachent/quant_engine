@@ -17,7 +17,7 @@ import pathlib
 import sys
 
 ROOTS = [
-    ("work", "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"),
+    ("work", os.environ["QUANT_ENGINE_DATA_ROOT"]),
     ("scratch", "C:/Dev/scratch/quant-engine"),
     ("scratch_", "C:/Dev/scratch/quant_engine"),
 ]

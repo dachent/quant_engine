@@ -17,8 +17,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .catalog import ENDPOINTS, Endpoint, catalog_rows, get_endpoint
-from .credentials import ApiCredentials, load_credentials
+from .credentials import ApiCredentials, load_credentials, plan_identity
 from .exporters import export_datasets, write_csv
+from .evidence import (
+    EvidenceGenerationError,
+    bound_cutoff,
+    capture_label,
+    cutoff_end_ms,
+)
 from .governance import authorize_live_read
 from .normalization import enrich_timestamps, normalize_rows
 from .pagination import DAY_MS, paginate_rfq_bisection, utc_time_windows
@@ -38,6 +44,114 @@ from .valuation import build_daily_valuation
 
 
 DEFAULT_CREDENTIAL_TARGET = "BIT.com-API"
+# Requests that take no time window (the catalog allowed_params has no time or date
+# key and _single passes none), so they return state at call time.
+SNAPSHOT_PATHS = (
+    "/mapi/v1/wallet/balance",
+    "/mapi/v1/wallet/currencies",
+    "/strategy/api/v2/user/holding",
+    "/strategy/api/v2/user/holding/volume",
+)
+
+
+def _credential_label(
+    credentials: ApiCredentials | None, credentials_config: Path | None
+) -> str:
+    """A non-secret label for where the run's credentials came from."""
+
+    if credentials_config is not None:
+        return "configured-credential-plan"
+    if credentials is not None:
+        return "injected-credentials"
+    return DEFAULT_CREDENTIAL_TARGET
+
+
+def _credential_identity(
+    credentials: ApiCredentials | None, credentials_config: Path | None
+) -> str:
+    """Non-secret identity a run is bound to (resume and verify must match it)."""
+
+    if credentials_config is None and credentials is not None:
+        return "injected-credentials"
+    return plan_identity(credentials_config)
+
+
+def recorded_cutoff(run: Mapping[str, Any]) -> str | None:
+    """The cutoff a run was bound to, or None for runs that predate it."""
+
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    value = stored.get("cutoff")
+    return str(value) if value else None
+
+
+SNAPSHOT_DATASETS = {
+    "wallet_balances": "/mapi/v1/wallet/balance",
+    "wallet_currencies": "/mapi/v1/wallet/currencies",
+    "holdings": "/strategy/api/v2/user/holding",
+    "portfolio_snapshots": "/strategy/api/v2/user/holding/volume",
+}
+
+
+def inherited_snapshot_captures(
+    run_dir: Path, run_id: str
+) -> list[tuple[str, str, int | None]]:
+    """Capture times of snapshot rows a run inherited from incremental base runs.
+
+    Returns ``(dataset, base_run_id, captured_at_ms)`` per base run that still
+    supplies a row of a current-state dataset; ``captured_at_ms`` is None when the
+    base run recorded no capture time for that request (or is gone).
+    """
+
+    found: list[tuple[str, str, int | None]] = []
+    with RunStorage(run_dir / "state" / DATABASE_NAME) as storage:
+        names = set(storage.dataset_names(run_id))
+        for dataset, path in SNAPSHOT_DATASETS.items():
+            if dataset not in names:
+                continue
+            bases = {
+                str(item["row"]["source_prior_run_id"])
+                for item in storage.iter_canonical_rows(run_id, dataset)
+                if item["row"].get("source_prior_run_id")
+            }
+            for base_id in sorted(bases):
+                database = run_dir.parent / base_id / "state" / DATABASE_NAME
+                captured: int | None = None
+                if database.is_file():
+                    with RunStorage(database) as base_storage:
+                        base_run = base_storage.get_run(base_id)
+                    if base_run is not None:
+                        captured = recorded_captures(base_run).get(path)
+                found.append((dataset, base_id, captured))
+    return found
+
+
+def recorded_capture_label(run: Mapping[str, Any]) -> str | None:
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    value = stored.get("captured_after_cutoff_label")
+    return str(value) if value else None
+
+
+def recorded_captures(run: Mapping[str, Any]) -> dict[str, int]:
+    """Path -> UTC ms at which each current-state request was captured."""
+
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    return {
+        str(path): int(item["captured_at_ms"])
+        for path, item in dict(stored.get("captures") or {}).items()
+    }
+
+
+def recorded_credential_identity(run: Mapping[str, Any]) -> str:
+    """The identity stored for a run; runs that predate it used the default."""
+
+    stored = json.loads(str(run.get("metadata_json") or "{}"))
+    return str(
+        stored.get("credential_identity")
+        or stored.get("credential_target")
+        or DEFAULT_CREDENTIAL_TARGET
+    )
+
+
 OUTPUT_FOLDER = "output"
 DATABASE_NAME = "matrixport.sqlite"
 OFFSET_PAGE_SIZE = 50
@@ -374,9 +488,13 @@ class MatrixportExtractor:
         run_id: str | None = None,
         resume: bool = False,
         credentials: ApiCredentials | None = None,
+        credentials_config: Path | None = None,
         transport: ReadOnlyTransport | None = None,
         governance_evidence: str | Path | None = None,
         live_operation: str = "extract",
+        cutoff: str | None = None,
+        captured_after_cutoff_label: str | None = None,
+        clock_ms: Callable[[], int] = utc_now_ms,
         reporter: Callable[[str], None] | None = None,
     ) -> None:
         if mode not in {"full", "incremental"}:
@@ -386,9 +504,26 @@ class MatrixportExtractor:
         self.run_id = validate_run_id(run_id) if run_id is not None else utc_run_id()
         self.run_dir = self.output_root / self.run_id
         governance = None
+        self.cutoff = cutoff
+        self.capture_label = captured_after_cutoff_label
+        self._clock_ms = clock_ms
         if transport is None:
             if governance_evidence is None:
                 raise ExtractionError("live-read governance evidence is required")
+            # checked before the evidence is consumed, so a refusal costs no approval
+            try:
+                bound_cutoff(
+                    governance_evidence,
+                    cutoff,
+                    operation=live_operation,
+                    mode=mode,
+                    now_ms=clock_ms(),
+                )
+                self.capture_label = capture_label(governance_evidence)
+            except EvidenceGenerationError as error:
+                raise ExtractionError(str(error)) from None
+            if resume:
+                self._require_resumable_binding()
             governance = authorize_live_read(
                 governance_evidence,
                 operation=live_operation,
@@ -415,17 +550,35 @@ class MatrixportExtractor:
                 )
             self.mode = str(existing["mode"])
             self.run_end_ms = int(existing["run_end_ms"])
+            if recorded_capture_label(existing) != self.capture_label:
+                raise ExtractionError(
+                    "Cannot resume a run with a different capture label"
+                )
+            if recorded_cutoff(existing) != cutoff:
+                raise ExtractionError("Cannot resume a run with a different cutoff")
             if str(existing["extractor_hash"]) != self.extractor_hash:
                 raise ExtractionError("Cannot resume a run with changed extractor code")
             if str(existing["config_hash"]) != self.config_hash:
                 raise ExtractionError(
                     "Cannot resume a run with a changed endpoint catalog"
                 )
+            if recorded_credential_identity(existing) != _credential_identity(
+                credentials, credentials_config
+            ):
+                raise ExtractionError(
+                    "Cannot resume a run with a different credential source"
+                )
         else:
             if existing is not None:
                 raise ExtractionError(f"Run already exists: {self.run_id}")
             self.mode = mode
-            self.run_end_ms = utc_now_ms()
+            if cutoff is None:
+                self.run_end_ms = clock_ms()
+            else:
+                try:
+                    self.run_end_ms = cutoff_end_ms(cutoff, clock_ms())
+                except EvidenceGenerationError as error:
+                    raise ExtractionError(str(error)) from None
             self.storage.create_run(
                 self.run_id,
                 mode=mode,
@@ -433,7 +586,15 @@ class MatrixportExtractor:
                 extractor_hash=self.extractor_hash,
                 config_hash=self.config_hash,
                 metadata={
-                    "credential_target": DEFAULT_CREDENTIAL_TARGET,
+                    "credential_target": _credential_label(
+                        credentials, credentials_config
+                    ),
+                    "credential_identity": _credential_identity(
+                        credentials, credentials_config
+                    ),
+                    "cutoff": cutoff,
+                    "captured_after_cutoff_label": self.capture_label,
+                    "captures": {},
                     "history_semantics": "all_api_reachable_history_to_frozen_run_end",
                     "timezone": "UTC",
                 },
@@ -442,7 +603,8 @@ class MatrixportExtractor:
             self.run_dir / "raw", storage=self.storage, run_id=self.run_id
         )
         self.transport = transport or ReadOnlyTransport(
-            credentials or load_credentials(), governance=governance
+            credentials or load_credentials(credentials_config),
+            governance=governance,
         )
         self.previous_run_dir, self._previous_end_ms = self._find_previous_completed()
         if self.mode == "incremental" and self.previous_run_dir is not None:
@@ -450,6 +612,20 @@ class MatrixportExtractor:
 
     def close(self) -> None:
         self.storage.close()
+
+    def _require_resumable_binding(self) -> None:
+        """Refuse a cutoff or label mismatch on resume before any approval is spent."""
+        database = self.run_dir / "state" / DATABASE_NAME
+        if not database.is_file():
+            return
+        with RunStorage(database) as storage:
+            row = storage.get_run(self.run_id)
+        if row is None:
+            return
+        if recorded_cutoff(row) != self.cutoff:
+            raise ExtractionError("Cannot resume a run with a different cutoff")
+        if recorded_capture_label(row) != self.capture_label:
+            raise ExtractionError("Cannot resume a run with a different capture label")
 
     def _find_previous_completed(self) -> tuple[Path | None, int | None]:
         previous: list[tuple[int, Path]] = []
@@ -469,7 +645,13 @@ class MatrixportExtractor:
             try:
                 with RunStorage(database) as storage:
                     row = storage.get_run(directory.name)
-                    if row and row["status"] == "COMPLETED":
+                    # a base that ends after this run's window would seed later
+                    # observations into an earlier cutoff
+                    if (
+                        row
+                        and row["status"] == "COMPLETED"
+                        and int(row["run_end_ms"]) <= self.run_end_ms
+                    ):
                         previous.append((int(row["run_end_ms"]), directory))
             except Exception:
                 continue
@@ -803,6 +985,8 @@ class MatrixportExtractor:
         call = self._safe_call(path, params, core=core)
         if call is None:
             return []
+        if path in SNAPSHOT_PATHS:
+            self._record_capture(path)
         rows = rows_from_payload(
             call.payload, candidates=candidates, mapping_key=mapping_key
         )
@@ -815,6 +999,26 @@ class MatrixportExtractor:
             details={"row_count": len(rows)},
         )
         return rows
+
+    def _record_capture(self, path: str) -> None:
+        """Record when a current-state request was captured (first capture wins).
+
+        Taken after the call returns, from the extractor clock, so the recorded
+        time is never earlier than the request. A cached response on resume keeps
+        the time already recorded.
+        """
+        run = self.storage.get_run(self.run_id) or {}
+        stored = json.loads(str(run.get("metadata_json") or "{}"))
+        captures = dict(stored.get("captures") or {})
+        if path in captures:
+            return
+        moment = self._clock_ms()
+        stamp = datetime.fromtimestamp(moment / 1000, timezone.utc)
+        captures[path] = {
+            "captured_at_ms": moment,
+            "captured_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        }
+        self.storage.merge_run_metadata(self.run_id, {"captures": captures})
 
     def _offset(
         self,
@@ -2105,6 +2309,7 @@ def live_auth_test(
     workspace: str | Path,
     governance_evidence: str | Path,
     credentials: ApiCredentials | None = None,
+    credentials_config: Path | None = None,
 ) -> dict[str, Any]:
     governance = authorize_live_read(
         governance_evidence,
@@ -2112,7 +2317,7 @@ def live_auth_test(
         mode=None,
     )
     transport = ReadOnlyTransport(
-        credentials or load_credentials(), governance=governance
+        credentials or load_credentials(credentials_config), governance=governance
     )
     response = transport.get("/mapi/v1/wallet/balance")
     payload = _json_loads(response.content)
@@ -2125,5 +2330,5 @@ def live_auth_test(
         "status_code": response.status_code,
         "request_id": response.request_id,
         "row_count": _row_count(payload),
-        "credential_target": DEFAULT_CREDENTIAL_TARGET,
+        "credential_target": _credential_label(credentials, credentials_config),
     }

@@ -1316,6 +1316,14 @@ def install_synthetic_financial_authority(
             monkeypatch.setattr(module, "load_contract", load_contract)
     monkeypatch.setattr(financial, "load_contract", load_contract)
     monkeypatch.setattr(capital, "load_contract", load_contract)
+    # The HWM tool holds the contract module instance that was registered when it
+    # was first imported. When a test module swapped in a fresh instance after
+    # that (collection order decides), patching only the registered instance
+    # leaves the HWM tool on the real loader, which rejects this synthetic world.
+    hwm_tool = sys.modules.get("portfolio_hwm_selected_inputs")
+    bound_contract = getattr(hwm_tool, "financial_contract", None)
+    if bound_contract is not None and bound_contract is not financial:
+        monkeypatch.setattr(bound_contract, "load_contract", load_contract)
 
     def financial_module() -> Any:
         return financial

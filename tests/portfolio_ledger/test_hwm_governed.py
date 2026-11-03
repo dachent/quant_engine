@@ -67,8 +67,8 @@ def _closure(day: str) -> dict[str, Any]:
         "closure_reason": "DECLARED_SOURCE_CLOSED_SESSION",
         "prior_observation_date": "2026-08-07",
         "next_observation_date": "2026-08-10",
-        "prior_ending_capital_usd": "57140.197298561",
-        "next_beginning_capital_usd": "57140.197298561",
+        "prior_ending_capital_usd": "44923.6231161286582",
+        "next_beginning_capital_usd": "44923.6231161286582",
         "closure_evidence_sha256": SHA_C,
         "treatment": CLOSED_SOURCE_TREATMENT,
     }

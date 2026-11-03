@@ -17,7 +17,7 @@ documented review establishes otherwise.
 | `PUBLIC` | Public project descriptions, public upstream citations, non-sensitive schemas | Repository or approved public destination | Allowed when the governing issue authorizes the write | Only to the destination and purpose named by the issue |
 | `INTERNAL` | Source code, architecture, tests, runbooks, wholly invented fixtures | Repository and approved local work areas | Allowed after repository-boundary checks | Only to approved engineering systems; minimize content |
 | `RESTRICTED_FINANCIAL` | Real research data, holdings, transactions, balances, NAV, allocations, reports, provider responses, external account identifiers and crosswalks | Governed external data roots, including `../dataPortfolio` beside the canonical repository, or another explicitly approved restricted store | Prohibited | No egress without a current issue naming destination, fields, purpose, retention, entitlement, and recovery |
-| `SECRET_AUTH` | Passwords, API/Flex tokens, private keys, authorization headers, cookies, browser storage, authenticated HAR/session material | Issue-approved operating-system credential store or restricted temporary quarantine outside Git | Prohibited | Only to the exact authorized provider authentication surface; never to models, logs, GitHub, CI, or reports |
+| `SECRET_AUTH` | Passwords, API/Flex tokens, private keys, authorization headers, cookies, browser storage, authenticated HAR/session material | Issue-approved credential store (operating-system credential store, Azure Key Vault or another approved secret manager, or the Bitwarden CLI with an operator-unlocked session) or restricted temporary quarantine outside Git | Prohibited | Only to the exact authorized provider authentication surface; never to models, logs, GitHub, CI, or reports |
 
 `SYNTHETIC` is a fixture provenance marker, not a fifth sensitivity class. A
 wholly invented repository fixture is normally `INTERNAL`; the allowlist field
@@ -92,9 +92,13 @@ the contract.
 
 1. Terms, entitlement, purpose, provider, capability, and semantic effect are
    approved before a credential reference is created or resolved.
-2. Persistent values live only in the approved operating-system credential
-   store. Code and configuration retain opaque references. No literal or
-   placeholder-that-works fallback is permitted.
+2. Persistent values live only in an approved credential store: the
+   operating-system credential store, an approved secret manager (Azure Key Vault
+   read through the sanctioned read-only helper) or the Bitwarden CLI with a
+   session the operator has already unlocked. Code and configuration retain
+   opaque references (a source id and a name). No literal or
+   placeholder-that-works fallback is permitted. A provider may declare several
+   sources in order; the first that resolves wins.
 3. Runtime retrieval is scoped to one provider operation, retained in memory
    only as long as needed, excluded from subprocess arguments and logs, then
    released. Errors use stable sanitized reason codes.
@@ -142,7 +146,8 @@ dimension, even when the path itself is bounded.
 
 The base decision is `DENY`. A route is eligible only when its semantic effect
 is `READ_ONLY`, its terms state is `APPROVED`, its provider entitlement is
-current, its credential class is exactly `NONE` or `OS_CREDENTIAL_REFERENCE`,
+current, its credential class is exactly `NONE`, `OS_CREDENTIAL_REFERENCE` or
+`SECRET_MANAGER_REFERENCE`,
 its matcher is bounded, and `approval_requirement = "GOVERNING_ISSUE"` names
 the controlling approval class. Unknown or misspelled credential and approval
 classes fail closed. Eligibility is not execution authority; all other gates

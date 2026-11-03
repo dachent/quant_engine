@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -915,13 +916,13 @@ def test_retained_p123_eu_position_transfers_project_exact_source_base_values() 
     it with a synthetic surrogate.
     """
 
-    retained_root = (
-        Path(__file__).resolve().parents[3]
-        / "dataIBKR"
-        / "source-runs"
-        / "legacy-20260731"
-        / "files"
-    )
+    configured_root = os.environ.get("QE_RETAINED_DATA_IBKR", "").strip()
+    if not configured_root:
+        pytest.skip(
+            "QE_RETAINED_DATA_IBKR does not name the retained dataIBKR root "
+            "(explicit opt-in; no sibling-folder probing)"
+        )
+    retained_root = Path(configured_root) / "source-runs" / "legacy-20260731" / "files"
     source_files = {
         "legacy/legacy-001.xml": (
             retained_root / "AllAccounts_Accounting_XML_20251231.xml",
@@ -932,8 +933,7 @@ def test_retained_p123_eu_position_transfers_project_exact_source_base_values() 
             "e74518339486f07bbab188387cffb5eccec50bf9e5c9de01fd32895d01e2e6ef",
         ),
     }
-    if not all(path.is_file() for path, _ in source_files.values()):
-        pytest.skip("retained governed IBKR Flex source is not mounted")
+    assert all(path.is_file() for path, _ in source_files.values()), retained_root
     assert {
         artifact_id: hashlib.sha256(path.read_bytes()).hexdigest()
         for artifact_id, (path, _) in source_files.items()

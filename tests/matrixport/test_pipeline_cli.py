@@ -16,9 +16,9 @@ from quant_engine.matrixport.verification import verify_run
 
 
 def test_field_value_honors_preferred_alias_order() -> None:
-    row = {"id": "order-14214", "product_id": "7361599360326447104"}
+    row = {"id": "order-14214", "product_id": "1111111111111111111"}
 
-    assert field_value(row, "product_id", "productId", "id") == "7361599360326447104"
+    assert field_value(row, "product_id", "productId", "id") == "1111111111111111111"
 
 
 def test_rows_from_payload_treats_null_collection_as_empty() -> None:

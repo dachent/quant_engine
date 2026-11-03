@@ -27,6 +27,19 @@ from .contracts import canonical_json_bytes
 from .run_storage import OVERLAY_MARKER
 
 PROVENANCE_KIND = "quant-engine-retained-cache-base"
+# First-level directories of a cold run's cache root that hold content-keyed entries. A
+# cold run (no base) writes its pipeline state and verification ledger beside them in
+# the same root; those describe that one run and must never seed another.
+COLD_CACHE_KINDS = frozenset(
+    {
+        ".correlation-index",
+        ".decomposition-index",
+        ".decomposition-training",
+        ".decomposition-training-evidence",
+        "candidates",
+        "financial-replay-receipts",
+    }
+)
 
 
 class CacheBaseError(RuntimeError):
@@ -99,15 +112,32 @@ def _remove(path: Path) -> None:
     os.rmdir(_long(path))
 
 
-def promote_cache_base(overlay: Path, base: Path, source_commit: str) -> dict[str, Any]:
+def promote_cache_base(
+    overlay: Path,
+    base: Path,
+    source_commit: str,
+    *,
+    cold_kinds: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Seal ``overlay`` into a new base.
+
+    ``cold_kinds`` is passed only for a cold run's plain cache root, which carries no
+    overlay marker; the caller must already have proved the root belongs to that run.
+    Only files under those first-level directories are linked.
+    """
+
     if len(source_commit) != 40 or any(
         c not in "0123456789abcdef" for c in source_commit
     ):
         raise CacheBaseError("source commit must be a 40-hex commit")
-    if not (overlay / OVERLAY_MARKER).is_file():
+    if cold_kinds is None and not (overlay / OVERLAY_MARKER).is_file():
         raise CacheBaseError(
             f"not a retained-cache overlay (no {OVERLAY_MARKER}): {overlay}"
         )
+    if cold_kinds is not None and not any(
+        rel.split("/", 1)[0] in cold_kinds for rel, _p, _i in iter_cache_files(overlay)
+    ):
+        raise CacheBaseError(f"cold cache root holds no cache entries: {overlay}")
     if base.exists():
         raise CacheBaseError(f"base already exists, promote to a new path: {base}")
     staging = base.with_name(f".{base.name}.building-{os.getpid()}")
@@ -115,6 +145,8 @@ def promote_cache_base(overlay: Path, base: Path, source_commit: str) -> dict[st
         os.makedirs(_long(staging))
         for rel, path, info in iter_cache_files(overlay):
             if rel == OVERLAY_MARKER:
+                continue
+            if cold_kinds is not None and rel.split("/", 1)[0] not in cold_kinds:
                 continue
             target = os.path.join(_long(staging), *rel.split("/"))
             os.makedirs(os.path.dirname(target), exist_ok=True)

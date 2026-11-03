@@ -309,7 +309,7 @@ def test_run_reuses_the_exact_credentials_that_signed_live_requests(
     extractor_credentials: list[ApiCredentials] = []
     verification_needles: list[bytes] = []
 
-    def sequential_credentials() -> ApiCredentials:
+    def sequential_credentials(_config: object = None) -> ApiCredentials:
         nonlocal credential_reads
         credential_reads += 1
         if credential_reads == 1:
@@ -350,7 +350,14 @@ def test_run_reuses_the_exact_credentials_that_signed_live_requests(
 
     assert (
         cli.main(
-            ["run", "--full", "--governance-evidence", str(tmp_path / "grant.json")]
+            [
+                "run",
+                "--full",
+                "--governance-evidence",
+                str(tmp_path / "grant.json"),
+                "--cutoff",
+                "2026-09-17",
+            ]
         )
         == 0
     )

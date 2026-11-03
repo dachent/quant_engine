@@ -5,15 +5,15 @@
 # so writing `qa/` inside it makes the panel stage reject its own candidate.
 set -euo pipefail
 
-REPO="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/.codex-bootstrap/mvp2-execution/repo"
-Q="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
+REPO="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}/.codex-bootstrap/mvp2-execution/repo"
+Q="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}"
 PY="C:/Dev/scratch/quant-engine/.venv-mvp2/Scripts/python.exe"
 W="C:/Dev/scratch/quant-engine/pl12"
 OUT="$W/proof2"
 CYCLE="$W/cycle2"
 QA="$W/qa2"
 export PLAYWRIGHT_MODULE="$Q/audit/coding/2026-09-03_kimi_w2-phasec/_qa-runtime/node_modules/playwright/index.mjs"
-export PLAYWRIGHT_EXECUTABLE_PATH="C:/Users/BorisVaisman/AppData/Local/ms-playwright/chromium-1237/chrome-win64/chrome.exe"
+export PLAYWRIGHT_EXECUTABLE_PATH="${PLAYWRIGHT_EXECUTABLE_PATH:?set PLAYWRIGHT_EXECUTABLE_PATH}"
 
 cd "$REPO"
 export PYTHONPATH=.

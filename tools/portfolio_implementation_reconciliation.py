@@ -9,6 +9,7 @@ are never emitted in the result.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -1175,6 +1176,132 @@ _TT_ENDPOINT_NAMES: Final = frozenset(
 )
 
 
+def with_truncated_row_fallbacks(
+    manifest: Mapping[str, Any], accepted_as_of: date
+) -> Mapping[str, Any]:
+    """Return the manifest with flagged TRUNCATED_ROW snapshots repaired.
+
+    The builder flags a dated holdings row whose missing mass is explained by a
+    dropped position and records where complete weights live.  The repair is
+    applied on a copy at the consumer's cutoff, never to the retained file:
+
+    * ``LAST_COMPLETE_ROW`` / ``NEXT_COMPLETE_ROW`` copy that row's weights; a
+      next-row source dated after ``accepted_as_of`` is refused (no post-cutoff
+      information in a historical calculation).
+    * ``LIVE_HOLDINGS_OVERRIDE`` replaces the component's latest row by the live
+      holdings when the row is dated the same day as the recorded last-rebalance
+      marker (the live holdings are the post-rebalance state).
+    * ``LIVE_PORTFOLIO_HOLDINGS`` only repairs the component's latest row and
+      keeps the published weight of every shared symbol (it must agree with the
+      live weight within the recorded explain tolerance); only symbols the row
+      lacks are filled from the live holdings.
+
+    A flag whose fallback is unusable fails closed.  Flags dated after the
+    cutoff are ignored (the row is outside the calculation).
+    """
+    provenance = manifest.get("capture_provenance")
+    validation = (
+        provenance.get("holdings_row_validation")
+        if isinstance(provenance, dict)
+        else None
+    )
+    flags = validation.get("flags") if isinstance(validation, dict) else None
+    if not flags:
+        return manifest
+    assert isinstance(validation, dict)
+    explain = float(validation.get("explain_tolerance", 0.0))
+    repaired = copy.deepcopy(dict(manifest))
+    by_slug = {str(row["slug"]): row for row in repaired["selected_components"]}
+
+    def refuse() -> ImplementationReconciliationError:
+        return ImplementationReconciliationError(
+            "TuringTrader truncated row has no usable fallback"
+        )
+
+    applied: list[dict[str, str]] = []
+    for flag in flags:
+        if not isinstance(flag, dict) or flag.get("flag") != "TRUNCATED_ROW":
+            continue
+        observed = str(flag.get("observed_date"))
+        if date.fromisoformat(observed) > accepted_as_of:
+            continue
+        component = by_slug.get(str(flag.get("slug")))
+        fallback = flag.get("fallback")
+        if component is None or not isinstance(fallback, dict):
+            raise refuse()
+        snapshots = component["dated_holdings"]["snapshots"]
+        target = next(
+            (s for s in snapshots if s.get("observed_date") == observed), None
+        )
+        if target is None:
+            raise refuse()
+        kind = fallback.get("kind")
+        weights: dict[str, Any] | None = None
+        if kind == "LIVE_HOLDINGS_OVERRIDE":
+            sources = fallback.get("sources")
+            marker = (
+                sources.get("last_rebalance_marker")
+                if isinstance(sources, dict)
+                else None
+            )
+            live = {
+                str(item["symbol"]): item["weight"]
+                for item in component.get("current_holdings", [])
+            }
+            if (
+                target is snapshots[-1]
+                and isinstance(marker, dict)
+                and marker.get("value") == observed
+                and live
+                and all(weight is not None for weight in live.values())
+                and set(target["weights"]) <= set(live)
+            ):
+                weights = dict(live)
+        elif kind == "LIVE_PORTFOLIO_HOLDINGS":
+            live = {
+                str(item["symbol"]): item["weight"]
+                for item in component.get("current_holdings", [])
+            }
+            published = dict(target["weights"])
+            if (
+                target is snapshots[-1]
+                and live
+                and all(weight is not None for weight in live.values())
+                and set(published) <= set(live)
+                and all(
+                    abs(float(live[k]) - float(published[k])) <= explain
+                    for k in published
+                )
+            ):
+                weights = {
+                    **{k: v for k, v in live.items() if k not in published},
+                    **published,
+                }
+        elif kind in {"LAST_COMPLETE_ROW", "NEXT_COMPLETE_ROW"}:
+            source_date = str(fallback.get("observed_date"))
+            source = next(
+                (s for s in snapshots if s.get("observed_date") == source_date), None
+            )
+            if (
+                source is not None
+                and source is not target
+                and date.fromisoformat(source_date) <= accepted_as_of
+            ):
+                weights = dict(source["weights"])
+        if not weights:
+            raise refuse()
+        target["weights"] = dict(sorted(weights.items()))
+        applied.append(
+            {
+                "fallback": str(kind),
+                "observed_date": observed,
+                "slug": str(flag["slug"]),
+            }
+        )
+    repaired["applied_truncated_row_fallbacks"] = applied
+    return repaired
+
+
 def _read_tt_source_manifest(
     path: Path,
     components: Sequence[str],
@@ -1876,6 +2003,7 @@ def _tt_allocation_events(
     accepted_as_of: date,
 ) -> tuple[list[TradeEvent], dict[str, dict[str, Decimal]]]:
     snapshots: dict[tuple[str, date], dict[str, Decimal]] = {}
+    source_manifest = with_truncated_row_fallbacks(source_manifest, accepted_as_of)
     selected = {
         str(row["slug"]): row
         for row in source_manifest["selected_components"]

@@ -30,6 +30,15 @@ import build_sleeve_facts_release as release
 import nested_strategy_tag_map as tag_map_module
 import test_build_quantbase_fund_facts as quantbase_world
 import test_build_sleeve_account_facts as ibkr_world
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
+
 
 IBKR_PROVIDER = "provider-a"
 QUANTBASE_PROVIDER = "provider-q"
@@ -360,11 +369,10 @@ def test_the_two_builders_are_the_ones_the_release_calls() -> None:
     assert release.QUANTBASE_FACTS_NAME.startswith(quantbase_builder.ARTIFACT_ID)
 
 
-GOVERNED_POLICY = (
-    Path(__file__).resolve().parents[2] / "ops" / "mvp2-release" / "inputs" / "sleeves"
-)
+GOVERNED_POLICY = _RELEASE_INPUT_ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
 
 
+@needs_release_inputs
 def test_the_committed_policy_is_pinned_valid_and_complete() -> None:
     manifest_path = GOVERNED_POLICY / "sleeve-policy-manifest.json"
     manifest = json.loads(manifest_path.read_bytes())

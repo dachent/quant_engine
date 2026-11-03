@@ -12,17 +12,32 @@ import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+import pytest
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
+
+pytestmark = needs_release_inputs
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-BASELINE_PATH = REPO_ROOT / "acceptance" / "expected-baseline.json"
+BASELINE_PATH = _RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json"
 HISTORICAL_V2_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-v2.json"
+    _RELEASE_INPUT_ROOT / "acceptance" / "baselines" / "expected-baseline-v2.json"
 )
 HISTORICAL_V2_SHA256 = (
     "b87ab5bfd638d0ceb7d4415c05b5c43a7df7c48517519ddee0d815f4b9c6ce91"
 )
 HISTORICAL_09F6_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-09f6-054ff579.json"
+    _RELEASE_INPUT_ROOT
+    / "acceptance"
+    / "baselines"
+    / "expected-baseline-09f6-054ff579.json"
 )
 HISTORICAL_09F6_SHA256 = (
     "054ff579f8a4e940055a9987869ed4353e8e86a613b98623a4001b40be91a2ec"
@@ -31,10 +46,16 @@ HISTORICAL_FC9A_SHA256 = (
     "1584761a58de8a69b51c2b3fabbdfc6c3ba2b62d0a0171aaf6de9f54982bde4b"
 )
 HISTORICAL_FC9A_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-fc9a-1584761a.json"
+    _RELEASE_INPUT_ROOT
+    / "acceptance"
+    / "baselines"
+    / "expected-baseline-fc9a-1584761a.json"
 )
 HISTORICAL_V3_PATH = (
-    REPO_ROOT / "acceptance" / "baselines" / "expected-baseline-v3-49df41d2.json"
+    _RELEASE_INPUT_ROOT
+    / "acceptance"
+    / "baselines"
+    / "expected-baseline-v3-49df41d2.json"
 )
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"

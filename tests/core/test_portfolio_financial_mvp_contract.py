@@ -27,6 +27,14 @@ from quant_engine.core import (
     stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1515,6 +1523,7 @@ def test_retired_funded_members_stay_outside_the_owner_perimeter_decision() -> N
         assert row["effective_product_interval"]["effective_end"] is not None
 
 
+@needs_release_inputs
 def test_every_tag_map_sleeve_has_a_funded_census_epoch_and_a_registry_row() -> None:
     """The governed tag maps and the census name the same derived epochs."""
 
@@ -1530,7 +1539,7 @@ def test_every_tag_map_sleeve_has_a_funded_census_epoch_and_a_registry_row() -> 
         for assignment in sleeve["assignments"]
         if assignment["status"] == "FUNDED_MEMBERSHIP"
     }
-    sleeve_root = ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
+    sleeve_root = _RELEASE_INPUT_ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
     seen: set[str] = set()
     for tag_map_path in (sleeve_root / "nested-strategy-tag-map.json",):
         tag_map = json.loads(tag_map_path.read_bytes())

@@ -11,6 +11,7 @@ interval's evidence hash is derived from its own bounds and the accepted
 calendar authority's identity, so the grid cannot be silently re-cut.
 """
 
+import os
 import hashlib
 import json
 import sys
@@ -18,8 +19,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 REPO = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    r"/.codex-bootstrap/mvp2-execution/repo"
+    os.environ["QUANT_ENGINE_DATA_ROOT"] + r"/.codex-bootstrap/mvp2-execution/repo"
 )
 sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
 

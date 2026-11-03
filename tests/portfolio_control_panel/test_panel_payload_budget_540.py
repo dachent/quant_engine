@@ -113,3 +113,22 @@ def test_cli_reports_blocks_and_fails_on_an_over_budget_generation(
     assert report["physical"]["index_html_bytes"] == 10
     assert len(report["findings"]) == 1
     assert size.main([str(tmp_path), "--out", str(out), "--no-check"]) == 0
+
+
+def test_every_raised_or_newly_listed_block_states_its_reason() -> None:
+    # #691: a budget entry's justification is data. Blocks whose figure moved after R2
+    # (and the block the checker used to flag as unlisted) must say why.
+    reasons = budget["justifications"]
+    assert set(reasons) <= set(budget["blocks"])
+    for name in ("strategies", "performance", "performance_tab", "weekly_returns"):
+        assert len(reasons[name].strip()) >= 80, name
+    assert all(isinstance(text, str) and text.strip() for text in reasons.values())
+
+
+def test_no_committed_block_above_the_unlisted_threshold_lacks_an_entry() -> None:
+    committed = budget["committed_bytes"]["blocks"]
+    assert "performance" in budget["blocks"]
+    assert _fits(dict(committed)) == []
+    # the block the checker flagged on every R2.1 generation now fits at its measured size
+    assert _fits({**committed, "performance": 54_055, "strategies": 131_808}) == []
+    assert _fits({**committed, "strategies": budget["blocks"]["strategies"] + 1}) != []

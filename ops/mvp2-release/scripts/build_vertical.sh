@@ -4,8 +4,8 @@
 # epoch manifest -> decomposition plan bundle -> schema-10 recipe -> report.
 set -euo pipefail
 
-REPO="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/.codex-bootstrap/mvp2-execution/repo"
-Q="C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
+REPO="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}/.codex-bootstrap/mvp2-execution/repo"
+Q="${QUANT_ENGINE_DATA_ROOT:?set QUANT_ENGINE_DATA_ROOT}"
 PY="C:/Dev/scratch/quant-engine/.venv-mvp2/Scripts/python.exe"
 W="C:/Dev/scratch/quant-engine/pl12"
 E="$W/epoch"
@@ -177,7 +177,7 @@ if [ "$REBUILD_HISTORY" = "1" ]; then
   P123_GEN="80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8"
   P123_TABLES="$P123/generations/$P123_GEN/tables"
   P123_HISTORY_TABLES="$P123/generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1/tables"
-  "$PY" tools/portfolio_target_series.py   --layered-history-generation   --financial-mvp-contract contracts/portfolio-financial-mvp-source-v1.json   --repository-sha "$LH_SHA"   --as-of-date 2026-09-04   --provider-ledger-current "$PINNED_LEDGER_ROOT/CURRENT.json"   --provider-ledger-manifest "$PINNED_LEDGER_GEN/generation.json"   --provider-ledger-catalog "$PINNED_LEDGER_GEN/provider-ledger.json"   --matrixport-current "$MX/CURRENT.json"   --manifest "$MX/generations/$MX_GEN/generation.json"   --nav "$MX_CSV/nav_daily.csv"   --holdings "$MX_CSV/holdings.csv"   --daily-holdings "$MX_CSV/daily_holdings.csv"   --subscriptions "$MX_CSV/subscription_details.csv"   --product-id 7361599360326447104   --quantbase-current "$QB/generations/$QB_GEN/CURRENT.json"   --quantbase-manifest "$QB/generations/$QB_GEN/generation.json"   --quantbase-history "$QB_CSV/dashboard_Volatis_Strategy_pricehistory.csv"   --quantbase-activity "$QB_CSV/account_activity.csv"   --quantbase-fund-id 107   --portfolio123-current "$P123/CURRENT.json"   --portfolio123-manifest "$P123/generations/$P123_GEN/generation.json"   --portfolio123-metadata "$P123_HISTORY_TABLES/har_managed_metadata.parquet"   --portfolio123-performance "$P123_HISTORY_TABLES/har_managed_performance.parquet"   --portfolio123-equity "$P123_HISTORY_TABLES/har_equity_curve.parquet"   --portfolio123-returns "$P123_TABLES/returns_daily.parquet"   --portfolio123-relationships "$P123_TABLES/strategy_relationships.parquet"   --portfolio-fx-rates-manifest "$Q/dataPortfolio/portfolio-fx-rates/generations/9812f2536a16da1b1e64f9030cca1bef22519333a4a8e19f3cb11ab32d39bc6e/generation.json"   --strategy-history-manifest "$HISTORY_BUNDLE/manifest.json"   --strategy-history-returns "$HISTORY_BUNDLE/returns.csv"   --strategy-backtests-generation "$BACKTESTS_GEN/generation.json"   --output-root "$LH_ROOT" > "$CYCLE/layered-history.json"
+  "$PY" tools/portfolio_target_series.py   --layered-history-generation   --financial-mvp-contract contracts/portfolio-financial-mvp-source-v1.json   --repository-sha "$LH_SHA"   --as-of-date 2026-09-04   --provider-ledger-current "$PINNED_LEDGER_ROOT/CURRENT.json"   --provider-ledger-manifest "$PINNED_LEDGER_GEN/generation.json"   --provider-ledger-catalog "$PINNED_LEDGER_GEN/provider-ledger.json"   --matrixport-current "$MX/CURRENT.json"   --manifest "$MX/generations/$MX_GEN/generation.json"   --nav "$MX_CSV/nav_daily.csv"   --holdings "$MX_CSV/holdings.csv"   --daily-holdings "$MX_CSV/daily_holdings.csv"   --subscriptions "$MX_CSV/subscription_details.csv"   --product-id "${MATRIXPORT_PRODUCT_ID:?set MATRIXPORT_PRODUCT_ID}"   --quantbase-current "$QB/generations/$QB_GEN/CURRENT.json"   --quantbase-manifest "$QB/generations/$QB_GEN/generation.json"   --quantbase-history "$QB_CSV/dashboard_Volatis_Strategy_pricehistory.csv"   --quantbase-activity "$QB_CSV/account_activity.csv"   --quantbase-fund-id 107   --portfolio123-current "$P123/CURRENT.json"   --portfolio123-manifest "$P123/generations/$P123_GEN/generation.json"   --portfolio123-metadata "$P123_HISTORY_TABLES/har_managed_metadata.parquet"   --portfolio123-performance "$P123_HISTORY_TABLES/har_managed_performance.parquet"   --portfolio123-equity "$P123_HISTORY_TABLES/har_equity_curve.parquet"   --portfolio123-returns "$P123_TABLES/returns_daily.parquet"   --portfolio123-relationships "$P123_TABLES/strategy_relationships.parquet"   --portfolio-fx-rates-manifest "$Q/dataPortfolio/portfolio-fx-rates/generations/9812f2536a16da1b1e64f9030cca1bef22519333a4a8e19f3cb11ab32d39bc6e/generation.json"   --strategy-history-manifest "$HISTORY_BUNDLE/manifest.json"   --strategy-history-returns "$HISTORY_BUNDLE/returns.csv"   --strategy-backtests-generation "$BACKTESTS_GEN/generation.json"   --output-root "$LH_ROOT" > "$CYCLE/layered-history.json"
   cat "$CYCLE/layered-history.json"
   HISTORY_ID="$(json_field "$CYCLE/layered-history.json" generation_id)"
 else
@@ -219,9 +219,17 @@ echo "== build the sleeve facts the epoch manifest selects =="
 : "${IBKR_GENERATION_ROOT:?the IBKR data root holding generations/<id> is required}"
 : "${QUANTBASE_SOURCE_DIR:?the admitted Quantbase csv directory is required}"
 SLEEVE_DIR="$E/sleeve-facts"
+# Default: the repo copy. With RELEASE_INPUTS_ROOT the policy comes from the pinned
+# release-inputs root outside Git; a missing or tampered file stops the script here.
+POLICY_MANIFEST=ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json
+if [ -n "${RELEASE_INPUTS_ROOT:-}" ]; then
+  : "${RELEASE_INPUTS_MANIFEST_SHA256:?the release-inputs manifest sha256 pin is required}"
+  POLICY_MANIFEST=$("$PY" tools/release_inputs.py path --root "$RELEASE_INPUTS_ROOT" \
+    --manifest-sha256 "$RELEASE_INPUTS_MANIFEST_SHA256" \n    --cutoff "${RELEASE_INPUTS_CUTOFF:?the cutoff this run is for is required with RELEASE_INPUTS_ROOT}" \n    --logical "$POLICY_MANIFEST")
+fi
 rm -rf "$SLEEVE_DIR"
 "$PY" tools/build_sleeve_facts_release.py \
-  --policy-manifest ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json \
+  --policy-manifest "$POLICY_MANIFEST" \
   --provider-ledger-generation "$LEDGER_GEN" \
   --ibkr-generation-root "$IBKR_GENERATION_ROOT" \
   --quantbase-source-dir "$QUANTBASE_SOURCE_DIR" \

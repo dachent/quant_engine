@@ -53,6 +53,8 @@ COST_EVIDENCE_KEYS: Final = (
     "declared",
     "execution_cost",
 )
+# Present only on a percent-based cost row (documented rates, no dollar amount).
+COST_RATE_KEYS: Final = ("fee_rates",)
 BUILDER_VERSION: Final = "1.2.1"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
@@ -1175,7 +1177,11 @@ def build_catalog(
                 # R2.1 Q1: the declared basis, corroborating observed charges and
                 # the separate execution cost ride with the amount when the
                 # baseline states them; absent keys stay absent.
-                **{key: cost[key] for key in COST_EVIDENCE_KEYS if key in cost},
+                **{
+                    key: cost[key]
+                    for key in (*COST_EVIDENCE_KEYS, *COST_RATE_KEYS)
+                    if key in cost
+                },
             }
         )
     catalog = {

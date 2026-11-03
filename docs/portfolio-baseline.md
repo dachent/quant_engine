@@ -72,6 +72,38 @@ facts ride on the row:
   with the record count and window.  It is never added to the subscription amount
   and never converted: `usd_total` exists only when every amount is USD.
 
+A percent-based cost (a fund or product that charges a percent of NAV or of profit,
+not a dollar subscription) is a `cost-evidence` row with `rates` in place of `declared`
+(`cost_class` `PERCENT_RATE`).  Its cost-economics row has a blank amount and the status
+`documented_rate_percent`, or `documented_rate_tier_unsettled` when the applicable fee
+tier is not settled; a dollar cost is never fabricated for it.  `rates.tier_table` holds
+every documented tier (management and performance rate as fractions, the high-water-mark
+text or null when the documentation does not state it, and for each rate its
+documentation source: artifact, sha256, page, field); `rates.tier` selects the tier that
+applies (or `TIER_UNSETTLED`, which claims no rate); `placement` is
+`INSIDE_VEHICLE_NAV`, `OUTSIDE_BILLED` or `NOT_STATED_IN_DOCUMENTATION` (a source is
+required exactly when it is stated), with optional `redemption` and `lock`.  The row is
+carried as `fee_rates`.  The fixed-amount `declared.basis` additionally admits
+`OWNER_DECLARED` (an amount the owner stated in his own words; its source cites that
+message).  An owner-declared row is a static input used exactly as supplied: its
+`corroboration` list is empty (nothing corroborates or overrides it), the annual amount
+is the declared amount times the periods per year, and its status must start with
+`known`.  A row that lists any corroboration is refused for this basis; every other
+basis keeps its corroboration rules unchanged.
+
+`rates.derivation` (optional) settles the selected tier from posted fee journals instead of
+leaving it to the documentation alone: `kind` `POSTED_FEE_CLOSURE`, `tier` (must be the
+selected tier), `periods_per_year`, `tolerance_usd` (at most 0.01), `performance_fee` and
+`hwm` (each `NONE_BILLED`, refused for a tier whose documentation states a performance
+rate), `evidence[]` (sources, same shape as a rate source) and `closure[]`, one
+`{date, fund_value, posted_fee}` per journal, bound by `closure_sha256` (SHA-256 of the
+canonical JSON of `closure`).  Every row is recomputed as the tier row's own management
+rate over `periods_per_year` times `fund_value`, rounded to the cent, and must agree with
+`posted_fee` to within the tolerance; one row that does not close refuses the record, and
+the rate is never read from the record.  The carried form keeps the row count, first and
+last date, worst residual, hash and `periodic_rate` (annual over periods, 7 places) but not
+the rows; the rows are input held in the governed evidence root, not in git.
+
 A position row whose provider captured it after the New York close of its as-of
 date but stores it under the later native UTC date (Schwab's holdings capture)
 carries `as_of_date` = the New York financial day, `capture_date` = the native

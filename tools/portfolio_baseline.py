@@ -117,7 +117,27 @@ POSITION_AS_OF_BASIS_CAPTURED_AFTER_CLOSE: Final = (
 )
 _COST_EVIDENCE_SOURCE_KEY: Final = "cost-evidence"
 COST_EVIDENCE_SCHEMA: Final = "portfolio-cost-evidence/1"
-_COST_EVIDENCE_BASES: Final = frozenset({"PROVIDER_DECLARED", "OBSERVED_CHARGES"})
+# OWNER_DECLARED: a fixed amount the owner stated in his own words; its declaration
+# source cites that message.
+_COST_EVIDENCE_BASES: Final = frozenset(
+    {"PROVIDER_DECLARED", "OBSERVED_CHARGES", "OWNER_DECLARED"}
+)
+# A percent-based cost row states documented rates, never a dollar cost: its amount is
+# null and its status says so, so it is not mistaken for a known cost or a cap.
+COST_CLASS_PERCENT_RATE: Final = "PERCENT_RATE"
+COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
+COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
+FEE_TIER_UNSETTLED: Final = "TIER_UNSETTLED"
+_FEE_PLACEMENTS: Final = frozenset(
+    {"INSIDE_VEHICLE_NAV", "OUTSIDE_BILLED", "NOT_STATED_IN_DOCUMENTATION"}
+)
+# A derivation record settles a fee tier from posted fee journals: every posted fee,
+# recomputed as the tier's own documented annual rate over the billing periods times
+# the fund value it was billed on, must close to within one cent of currency rounding.
+FEE_DERIVATION_POSTED_CLOSURE: Final = "POSTED_FEE_CLOSURE"
+FEE_NONE_BILLED: Final = "NONE_BILLED"
+_CENT: Final = Decimal("0.01")
+_PERIODIC_RATE_QUANTUM: Final = Decimal("0.0000001")
 _COST_CORROBORATION_ROLE: Final = "CORROBORATING_OBSERVED_EVIDENCE"
 # Billing periods per year: a calendar definition, not a cost figure.
 _PERIODS_PER_YEAR: Final = {"MONTH": 12, "QUARTER": 4, "YEAR": 1}
@@ -2072,6 +2092,20 @@ def _provider_ledger_facts(
                 financial_fact_date = observed_at.astimezone(
                     ZoneInfo("America/New_York")
                 ).date()
+                if item.get("valuation_cutoff") is not None:
+                    # An explicit valuation cutoff (a capture taken after the
+                    # cutoff day, observed_at being the real capture instant)
+                    # is the financial day; absent, the New York day above is
+                    # unchanged (legacy generations).
+                    valuation_cutoff = _date(
+                        item["valuation_cutoff"], "positions.valuation_cutoff"
+                    )
+                    if valuation_cutoff > financial_fact_date:
+                        raise BaselineValidationError(
+                            "Schwab current position valuation cutoff is later "
+                            "than its observation"
+                        )
+                    financial_fact_date = valuation_cutoff
             if financial_fact_date > baseline_as_of:
                 raise BaselineValidationError(
                     "provider-ledger fact is newer than baseline"
@@ -2345,6 +2379,7 @@ def _allocations_and_coverage(
         costs = _attach_cost_evidence(
             costs, evidence_path, strategy_aliases, publication_date
         )
+    _require_fee_rate_evidence(costs)
     # The audit snapshot is sealed: these totals are compared with the audit's reported
     # total and with the materializer's own sum, so they are added as the audit added
     # them (see ``_snapshot_sum``), never exactly.
@@ -2357,6 +2392,288 @@ def _allocations_and_coverage(
         systematic_total,
         nav_covered,
     )
+
+
+def _require_fee_rate_evidence(costs: Sequence[Mapping[str, Any]]) -> None:
+    """A documented-rate status claims rates exist: it needs its evidence row."""
+
+    for row in costs:
+        if row["cost_status"] == COST_STATUS_DOCUMENTED_RATE and not isinstance(
+            row.get("fee_rates"), dict
+        ):
+            raise BaselineValidationError(
+                f"documented-rate cost for {row['strategy_id']} "
+                "has no fee-rate evidence row"
+            )
+
+
+def _rate_source(value: object, name: str) -> dict[str, str]:
+    """A documentation source for one rate: the file, its hash, the page, the field."""
+
+    source = _object(value, name)
+    _strict_keys(source, {"artifact", "field", "page", "sha256"}, name)
+    if _SHA256.fullmatch(_text(source["sha256"], f"{name}.sha256")) is None:
+        raise BaselineValidationError(f"{name} sha256 is invalid")
+    return {
+        "artifact": _text(source["artifact"], f"{name}.artifact"),
+        "field": _text(source["field"], f"{name}.field"),
+        "page": _text(source["page"], f"{name}.page"),
+        "sha256": source["sha256"],
+    }
+
+
+def _rate(value: object, name: str) -> str | None:
+    """A documented rate as a fraction in [0, 1] (0.2 is 20%), or null when not stated."""
+
+    if value is None:
+        return None
+    parsed = _decimal(value, name)
+    assert parsed is not None
+    if parsed < 0 or parsed > 1:
+        raise BaselineValidationError(f"{name} must be a fraction between 0 and 1")
+    return decimal_text(parsed)
+
+
+def _optional_text(value: object, name: str) -> str | None:
+    return None if value is None else _text(value, name)
+
+
+def _fee_rates(value: object, name: str) -> dict[str, Any]:
+    """The documented percent rates of one strategy, every rate with its source.
+
+    ``tier`` selects the row of ``tier_table`` that applies, or is
+    ``TIER_UNSETTLED``, in which case no rate is claimed.  A rate that the
+    documentation does not state is null, never a default; placement is
+    ``NOT_STATED_IN_DOCUMENTATION`` when the documentation does not say.
+    """
+
+    rates = _object(value, name)
+    # ``derivation`` is optional: a row without one is carried exactly as before.
+    _strict_keys(
+        {key: item for key, item in rates.items() if key != "derivation"},
+        {
+            "lock",
+            "placement",
+            "placement_source",
+            "redemption",
+            "tier",
+            "tier_table",
+        },
+        name,
+    )
+    tier = _text(rates["tier"], f"{name}.tier")
+    table: list[dict[str, Any]] = []
+    for position, raw in enumerate(_objects(rates["tier_table"], f"{name}.tier_table")):
+        label = f"{name}.tier_table[{position}]"
+        _strict_keys(
+            raw,
+            {
+                "applies_to",
+                "label",
+                "management_rate",
+                "performance_mechanism",
+                "performance_rate",
+                "sources",
+                "tier",
+            },
+            label,
+        )
+        management = _rate(raw["management_rate"], f"{label}.management_rate")
+        performance = _rate(raw["performance_rate"], f"{label}.performance_rate")
+        sources = [
+            _rate_source(item, f"{label}.sources[{n}]")
+            for n, item in enumerate(_objects(raw["sources"], f"{label}.sources"))
+        ]
+        if (management is not None or performance is not None) and not sources:
+            raise BaselineValidationError(f"{label} states a rate without a source")
+        tier_id = _text(raw["tier"], f"{label}.tier")
+        if tier_id == FEE_TIER_UNSETTLED or any(
+            row["tier"] == tier_id for row in table
+        ):
+            raise BaselineValidationError(f"{label} tier id is reserved or repeated")
+        table.append(
+            {
+                "applies_to": _text(raw["applies_to"], f"{label}.applies_to"),
+                "label": _text(raw["label"], f"{label}.label"),
+                "management_rate": management,
+                "performance_mechanism": _optional_text(
+                    raw["performance_mechanism"], f"{label}.performance_mechanism"
+                ),
+                "performance_rate": performance,
+                "sources": sources,
+                "tier": tier_id,
+            }
+        )
+    if tier != FEE_TIER_UNSETTLED and all(row["tier"] != tier for row in table):
+        raise BaselineValidationError(f"{name}.tier is not in the tier table")
+    placement = rates["placement"]
+    if placement not in _FEE_PLACEMENTS:
+        raise BaselineValidationError(f"{name}.placement is not recognised")
+    placement_source = (
+        None
+        if rates["placement_source"] is None
+        else _rate_source(rates["placement_source"], f"{name}.placement_source")
+    )
+    if (placement == "NOT_STATED_IN_DOCUMENTATION") != (placement_source is None):
+        raise BaselineValidationError(
+            f"{name} placement and its source must both be stated or both absent"
+        )
+    redemption: dict[str, Any] | None = None
+    if rates["redemption"] is not None:
+        item = _object(rates["redemption"], f"{name}.redemption")
+        _strict_keys(item, {"placement", "rate", "source"}, f"{name}.redemption")
+        if item["placement"] not in _FEE_PLACEMENTS:
+            raise BaselineValidationError(f"{name}.redemption placement is invalid")
+        rate = _rate(item["rate"], f"{name}.redemption.rate")
+        if rate is None:
+            raise BaselineValidationError(f"{name}.redemption needs a rate")
+        redemption = {
+            "placement": item["placement"],
+            "rate": rate,
+            "source": _rate_source(item["source"], f"{name}.redemption.source"),
+        }
+    lock: dict[str, Any] | None = None
+    if rates["lock"] is not None:
+        item = _object(rates["lock"], f"{name}.lock")
+        _strict_keys(item, {"days", "source"}, f"{name}.lock")
+        days = item["days"]
+        if not isinstance(days, int) or isinstance(days, bool) or days <= 0:
+            raise BaselineValidationError(
+                f"{name}.lock.days must be a positive integer"
+            )
+        lock = {
+            "days": days,
+            "source": _rate_source(item["source"], f"{name}.lock.source"),
+        }
+    carried: dict[str, Any] = {
+        "lock": lock,
+        "placement": placement,
+        "placement_source": placement_source,
+        "redemption": redemption,
+        "tier": tier,
+        "tier_table": table,
+    }
+    if "derivation" in rates:
+        carried["derivation"] = _fee_derivation(
+            rates["derivation"], f"{name}.derivation", table, tier
+        )
+    return carried
+
+
+def _fee_derivation(
+    value: object, name: str, table: Sequence[Mapping[str, Any]], tier: str
+) -> dict[str, Any]:
+    """Settle a fee tier from posted fee journals, or refuse.
+
+    The record carries the posted fees and the fund values they were billed on
+    (``closure``, bound by ``closure_sha256``).  Every row is recomputed here as the
+    selected tier's documented management rate over ``periods_per_year`` times the
+    fund value, rounded to the cent, and must agree with the posted fee to within
+    ``tolerance_usd`` (at most one cent).  No rate is read from the record: the rate
+    is the tier row's own, so a record cannot supply the number it proves.  A tier
+    that documents a performance rate cannot claim that none was billed.  The
+    published form drops the rows and keeps their count, dates, worst residual and
+    hash.
+    """
+
+    item = _object(value, name)
+    _strict_keys(
+        item,
+        {
+            "closure",
+            "closure_sha256",
+            "evidence",
+            "hwm",
+            "kind",
+            "performance_fee",
+            "periods_per_year",
+            "tier",
+            "tolerance_usd",
+        },
+        name,
+    )
+    if item["kind"] != FEE_DERIVATION_POSTED_CLOSURE:
+        raise BaselineValidationError(f"{name}.kind is not recognised")
+    if tier == FEE_TIER_UNSETTLED or item["tier"] != tier:
+        raise BaselineValidationError(f"{name} must settle the selected tier")
+    row = next(entry for entry in table if entry["tier"] == tier)
+    annual = row["management_rate"]
+    if annual is None:
+        raise BaselineValidationError(f"{name} needs a documented management rate")
+    for field in ("performance_fee", "hwm"):
+        if item[field] != FEE_NONE_BILLED:
+            raise BaselineValidationError(f"{name}.{field} must be {FEE_NONE_BILLED}")
+    if row["performance_rate"] is not None:
+        raise BaselineValidationError(
+            f"{name} claims no performance fee for a tier that documents one"
+        )
+    periods = item["periods_per_year"]
+    if (
+        not isinstance(periods, int)
+        or isinstance(periods, bool)
+        or periods not in set(_PERIODS_PER_YEAR.values())
+    ):
+        raise BaselineValidationError(
+            f"{name}.periods_per_year is not a billing period"
+        )
+    tolerance = _decimal(item["tolerance_usd"], f"{name}.tolerance_usd")
+    assert tolerance is not None
+    if tolerance < 0 or tolerance > _CENT:
+        raise BaselineValidationError(f"{name}.tolerance_usd must be within one cent")
+    evidence = [
+        _rate_source(entry, f"{name}.evidence[{n}]")
+        for n, entry in enumerate(_objects(item["evidence"], f"{name}.evidence"))
+    ]
+    if not evidence:
+        raise BaselineValidationError(f"{name} states a derivation without evidence")
+    closure = _objects(item["closure"], f"{name}.closure")
+    if not closure:
+        raise BaselineValidationError(f"{name}.closure has no posted fee")
+    if (
+        hashlib.sha256(canonical_json_bytes(closure)).hexdigest()
+        != item["closure_sha256"]
+    ):
+        raise BaselineValidationError(f"{name}.closure does not match closure_sha256")
+    periodic = (Decimal(annual) / periods).quantize(_PERIODIC_RATE_QUANTUM)
+    worst = Decimal(0)
+    days: list[date] = []
+    for position, entry in enumerate(closure):
+        label = f"{name}.closure[{position}]"
+        _strict_keys(entry, {"date", "fund_value", "posted_fee"}, label)
+        day = _date(entry["date"], f"{label}.date")
+        if days and day <= days[-1]:
+            raise BaselineValidationError(f"{label}.date is not increasing")
+        days.append(day)
+        fund_value = _decimal(entry["fund_value"], f"{label}.fund_value")
+        posted = _decimal(entry["posted_fee"], f"{label}.posted_fee")
+        assert fund_value is not None and posted is not None
+        if fund_value <= 0 or posted < 0:
+            raise BaselineValidationError(f"{label} has a non-positive amount")
+        expected = (Decimal(annual) / periods * fund_value).quantize(
+            _CENT, rounding=ROUND_HALF_EVEN
+        )
+        residual = abs(posted - expected)
+        if residual > tolerance:
+            raise BaselineValidationError(
+                f"{label} does not close: posted fee differs from the "
+                "documented rate over the fund value by more than the tolerance"
+            )
+        worst = max(worst, residual)
+    return {
+        "closure_sha256": item["closure_sha256"],
+        "evidence": evidence,
+        "first_date": days[0].isoformat(),
+        "hwm": FEE_NONE_BILLED,
+        "kind": FEE_DERIVATION_POSTED_CLOSURE,
+        "last_date": days[-1].isoformat(),
+        "max_abs_residual_usd": decimal_text(worst),
+        "performance_fee": FEE_NONE_BILLED,
+        "periodic_rate": decimal_text(periodic),
+        "periods_per_year": periods,
+        "rows": len(closure),
+        "tier": tier,
+        "tolerance_usd": decimal_text(tolerance),
+    }
 
 
 def _evidence_source(value: object, name: str) -> dict[str, Any]:
@@ -2393,6 +2710,22 @@ def _attach_cost_evidence(
     evidence: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(_objects(document["rows"], "cost-evidence.rows")):
         name = f"cost-evidence.rows[{index}]"
+        if "rates" in raw:
+            _strict_keys(raw, {"component", "cost_class", "rates"}, name)
+            rate_strategy = _resolve_strategy(
+                strategy_aliases, _text(raw["component"], f"{name}.component")
+            )
+            if rate_strategy in evidence:
+                raise BaselineValidationError(f"{name} repeats a strategy")
+            if raw["cost_class"] != COST_CLASS_PERCENT_RATE:
+                raise BaselineValidationError(
+                    f"{name} rates require cost_class {COST_CLASS_PERCENT_RATE}"
+                )
+            evidence[rate_strategy] = {
+                "cost_class": COST_CLASS_PERCENT_RATE,
+                "fee_rates": _fee_rates(raw["rates"], f"{name}.rates"),
+            }
+            continue
         _strict_keys(
             raw, {"component", "corroboration", "cost_class", "declared"}, name
         )
@@ -2420,9 +2753,13 @@ def _attach_cost_evidence(
         if declared["period"] not in _PERIODS_PER_YEAR:
             raise BaselineValidationError(f"{name} declared period is not recognised")
         corroboration: list[dict[str, Any]] = []
-        for position, item in enumerate(
-            _objects(raw["corroboration"], f"{name}.corroboration")
-        ):
+        listed = _objects(raw["corroboration"], f"{name}.corroboration")
+        if declared["basis"] == "OWNER_DECLARED" and listed:
+            # A static input used as the owner supplied it: nothing corroborates it.
+            raise BaselineValidationError(
+                f"{name} an owner-declared cost carries no corroboration"
+            )
+        for position, item in enumerate(listed):
             label = f"{name}.corroboration[{position}]"
             _strict_keys(
                 item,
@@ -2491,7 +2828,24 @@ def _attach_cost_evidence(
     for row in costs:
         item = dict(row)
         found = evidence.pop(str(item["strategy_id"]), None)
-        if found is not None:
+        if found is not None and "fee_rates" in found:
+            expected_status = (
+                COST_STATUS_TIER_UNSETTLED
+                if found["fee_rates"]["tier"] == FEE_TIER_UNSETTLED
+                else COST_STATUS_DOCUMENTED_RATE
+            )
+            if item["annual_external_cost_usd"] is not None:
+                raise BaselineValidationError(
+                    "a percent-based cost row publishes no dollar amount "
+                    f"for {item['strategy_id']}"
+                )
+            if item["cost_status"] != expected_status:
+                raise BaselineValidationError(
+                    f"percent-based cost for {item['strategy_id']} must carry "
+                    f"status {expected_status}"
+                )
+            item.update(found)
+        elif found is not None:
             annual = item["annual_external_cost_usd"]
             declared = found["declared"]
             periods = _PERIODS_PER_YEAR[declared["period"]]
