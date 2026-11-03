@@ -32,6 +32,27 @@ DECLARATION = {
 }
 
 
+def sleeve_return_windows(figures: Any) -> dict[str, Any]:
+    """The two windows a restated row declares, written out by hand from the derived dates."""
+
+    first = figures.daily_returns[0][0]
+    end = figures.end_date
+
+    def window(start: Any, kind: str) -> dict[str, Any]:
+        return {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "days": (end - start).days,
+            "days_basis": "EXCLUSIVE_END_MINUS_START",
+            "start_kind": kind,
+        }
+
+    return {
+        "first_return": window(first, "FIRST_RETURN_DATE"),
+        "opening_nav": window(figures.opening_date, "OPENING_NAV_DATE"),
+    }
+
+
 def declaration_bytes(strategy_id: str = DECLARED) -> bytes:
     document = copy.deepcopy(DECLARATION)
     document["strategies"][0]["strategy_id"] = strategy_id

@@ -293,6 +293,7 @@ def _panel(
             "window_days": figures.window_days,
             "account_live_observed_start": figures.daily_returns[0][0].isoformat(),
             "account_live_observed_end": figures.end_date.isoformat(),
+            "sleeve_return_windows": synth.sleeve_return_windows(figures),
         }
     ]
     for name, value in capitals.items():
@@ -395,12 +396,21 @@ def _ledger(day: str) -> dict[str, Any]:
     }
 
 
-def _parent_panel(start: str, days: int) -> dict[str, Any]:
+def _parent_panel(
+    start: str, days: int, kind: str = "OPENING_NAV_DATE"
+) -> dict[str, Any]:
     return {
         "account_summary": [
             {
                 "account_id": synth.PARENT,
-                "account_basis": {"window": {"start": start, "days": days}},
+                "account_basis": {
+                    "window": {
+                        "start": start,
+                        "days": days,
+                        "days_basis": "EXCLUSIVE_END_MINUS_START",
+                        "start_kind": kind,
+                    }
+                },
             }
         ]
     }
@@ -428,6 +438,139 @@ def test_the_parent_lane_window_opens_at_the_ledgers_opening_anchor() -> None:
     )
     assert {f.json_path.rsplit(".", 1)[-1] for f in wrong} == {"start", "days"}
     assert all("PUBLISHED_PARENT_WINDOW_DIFFERS" in f.message for f in wrong)
+
+
+# ------------------------------------------------- declared date conventions (item 5)
+
+
+def _compare(panel: dict[str, Any]) -> list[Any]:
+    figures = _figures()
+    perimeter, weights = sleeve_basis.perimeter_and_weights(
+        [figures], synth.OTHER_STRATEGIES
+    )
+    return sleeve_basis.compare_published(
+        figures, perimeter, weights[synth.DECLARED], panel
+    )
+
+
+@pytest.mark.parametrize("window", ["first_return", "opening_nav"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("start", "2026-02-03"),
+        ("end", "2026-02-05"),
+        ("days", 1),
+        ("days_basis", "INCLUSIVE_OF_BOTH_ENDPOINTS"),
+        ("start_kind", "FIRST_RETURN_DATE"),
+    ],
+)
+def test_a_tampered_window_declaration_is_found_field_by_field(
+    window: str, field: str, value: Any
+) -> None:
+    panel = _panel({"synthetic-beta": "3000", "synthetic-gamma": "5000"})
+    assert _compare(panel) == []
+    declared = panel["strategies"][0]["sleeve_return_windows"][window]
+    if declared[field] == value:
+        value = "OPENING_NAV_DATE"
+    declared[field] = value
+    found = _compare(panel)
+    assert [f.code for f in found] == ["PUBLISHED_WINDOW_DECLARATION_DIFFERS"]
+    assert found[0].where.endswith(f"sleeve_return_windows.{window}.{field}")
+
+
+def test_a_restated_row_without_its_window_declaration_is_found() -> None:
+    panel = _panel({"synthetic-beta": "3000", "synthetic-gamma": "5000"})
+    del panel["strategies"][0]["sleeve_return_windows"]
+    assert {f.code for f in _compare(panel)} == {"PUBLISHED_WINDOW_DECLARATION_MISSING"}
+    assert len(_compare(panel)) == 2
+
+
+def test_the_two_windows_carry_the_two_conventions_derived_from_the_facts() -> None:
+    windows = synth.sleeve_return_windows(_figures())
+    assert windows["opening_nav"]["start"] == "2026-02-02"
+    assert windows["opening_nav"]["start_kind"] == "OPENING_NAV_DATE"
+    assert windows["first_return"]["start"] == "2026-02-03"
+    assert windows["first_return"]["start_kind"] == "FIRST_RETURN_DATE"
+    # the same series, two start dates: the day counts differ by the one-day gap
+    assert windows["opening_nav"]["days"] - windows["first_return"]["days"] == 1
+
+
+def test_the_parent_lane_window_declares_the_ledgers_convention() -> None:
+    figures = _figures()
+    context = _context(
+        panel=_parent_panel("2026-01-28", 9, "FIRST_RETURN_DATE"),
+        ledger=_ledger("2026-01-28"),
+    )
+    found = list(checks._parent_window_findings(context, figures))
+    assert [f.json_path.rsplit(".", 1)[-1] for f in found] == ["start_kind"]
+    panel = _parent_panel("2026-01-28", 9)
+    panel["account_summary"][0]["account_basis"]["window"]["days_basis"] = (
+        "INCLUSIVE_OF_BOTH_ENDPOINTS"
+    )
+    found = list(
+        checks._parent_window_findings(
+            _context(panel=panel, ledger=_ledger("2026-01-28")), figures
+        )
+    )
+    assert [f.json_path.rsplit(".", 1)[-1] for f in found] == ["days_basis"]
+
+
+def _bridge_panel() -> dict[str, Any]:
+    figures = _figures()
+    windows = synth.sleeve_return_windows(figures)
+    account = {
+        "start": "2026-01-28",
+        "end": figures.end_date.isoformat(),
+        "days": (figures.end_date - date(2026, 1, 28)).days,
+        "days_basis": "EXCLUSIVE_END_MINUS_START",
+        "start_kind": "OPENING_NAV_DATE",
+    }
+    return {
+        "account_summary": [
+            {"account_id": synth.PARENT, "account_basis": {"window": account}}
+        ],
+        "strategy_basis_disclosure": {
+            "strategies": [
+                {
+                    "strategy_id": synth.DECLARED,
+                    "bridges": {
+                        "account_to_sleeve": {
+                            "return": {
+                                "account_window": dict(account),
+                                "sleeve_window": dict(windows["opening_nav"]),
+                            }
+                        }
+                    },
+                }
+            ]
+        },
+    }
+
+
+def test_the_bridge_windows_are_the_derived_sleeve_window_and_the_account_window() -> (
+    None
+):
+    figures = _figures()
+    assert (
+        list(checks._bridge_window_findings(_context(panel=_bridge_panel()), figures))
+        == []
+    )
+    for path, field, value in (
+        (("sleeve_window",), "start_kind", "FIRST_RETURN_DATE"),
+        (("sleeve_window",), "days", 99),
+        (("account_window",), "start_kind", "FIRST_RETURN_DATE"),
+        (("account_window",), "days_basis", "INCLUSIVE_OF_BOTH_ENDPOINTS"),
+        (("account_window",), "start", "2026-01-29"),
+    ):
+        panel = _bridge_panel()
+        bridge = panel["strategy_basis_disclosure"]["strategies"][0]["bridges"]
+        bridge["account_to_sleeve"]["return"][path[0]][field] = value
+        found = list(checks._bridge_window_findings(_context(panel=panel), figures))
+        assert found, (path, field)
+        assert all(f.json_path.endswith(f"{path[0]}.{field}") for f in found), (
+            path,
+            field,
+        )
 
 
 # ------------------------------------------------------------------------ real bytes

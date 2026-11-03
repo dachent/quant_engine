@@ -224,6 +224,13 @@
       const at = token.indexOf(":");
       return `${token.slice(0, at).replaceAll("_", " ")}: ${token.slice(at + 1).replaceAll("_", " ")}`;
     });
+  // R2.2 item 5: a restated row's windows declare the convention their start date follows (opening NAV date or first
+  // return date) and how their days are counted; the text is spelled from the payload's own fields, none is typed here.
+  const startKindText = (window) => (window && typeof window === "object" && window.start_kind ? operatorText(window.start_kind) : "");
+  const windowConvention = (window) => {
+    const kind = startKindText(window);
+    return kind && window.days_basis ? `${kind}, days ${operatorText(window.days_basis)}` : kind;
+  };
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
   const renderKpis = (selector, items) => { $(selector).innerHTML = items.map((item) => kpi(...item)).join(""); };
@@ -1105,7 +1112,7 @@
         const window = basis.window || {};
         const annualized = figures.account_live_cagr_annualization && figures.account_live_cagr_annualization.label ? figures.account_live_cagr_annualization.label : "";
         accountRows.push(
-          `<tr><td colspan="2"><span class="cell-primary">${who} on ${safe(basis.label)}</span><span class="cell-secondary">${safe(formatDate(window.start))} to ${safe(formatDate(window.end))} · ${integer.format(basis.observations || 0)} observations · series ${safe(String((basis.series || {}).sha256 || "").slice(0, 8))}</span></td></tr>`,
+          `<tr><td colspan="2"><span class="cell-primary">${who} on ${safe(basis.label)}</span><span class="cell-secondary">${safe(formatDate(window.start))} to ${safe(formatDate(window.end))}${windowConvention(window) ? ` (${safe(windowConvention(window))})` : ""} · ${integer.format(basis.observations || 0)} observations · series ${safe(String((basis.series || {}).sha256 || "").slice(0, 8))}</span></td></tr>`,
           `<tr><td>Cumulative return</td><td class="numeric">${pct(figures.account_live_cumulative_return, 4)}</td></tr>`,
           `<tr><td>Annualized${annualized ? ` <span class="cell-secondary">${safe(annualized)}</span>` : ""}</td><td class="numeric">${pct(figures.account_live_cagr, 4)}</td></tr>`,
           `<tr><td>Maximum drawdown</td><td class="numeric">${pct(figures.account_live_max_drawdown, 4)}</td></tr>`,
@@ -1125,8 +1132,8 @@
           `<tr><td>Less the unallocated bucket (a debit adds)</td><td class="numeric">${currencyExact(value.unallocated_bucket_usd)}</td></tr>`,
           `<tr><td>Less the other live sleeves</td><td class="numeric">${currencyExact(value.other_live_sleeves_usd)}</td></tr>`,
           `<tr><td><strong>Sleeve value</strong></td><td class="numeric"><strong>${currencyExact(value.sleeve_value_usd)}</strong></td></tr>`,
-          `<tr><td>Account return ${safe(formatDate(aw.start))} to ${safe(formatDate(aw.end))}</td><td class="numeric">${pct(ret.account_cumulative_return, 4)}</td></tr>`,
-          `<tr><td>Sleeve return ${safe(formatDate(sw.start))} to ${safe(formatDate(sw.end))} (window opens ${integer.format(ret.window_start_difference_days || 0)} days later)</td><td class="numeric">${pct(ret.sleeve_cumulative_return, 4)}</td></tr>`,
+          `<tr><td>Account return ${safe(formatDate(aw.start))} to ${safe(formatDate(aw.end))}${windowConvention(aw) ? ` (${safe(windowConvention(aw))})` : ""}</td><td class="numeric">${pct(ret.account_cumulative_return, 4)}</td></tr>`,
+          `<tr><td>Sleeve return ${safe(formatDate(sw.start))} to ${safe(formatDate(sw.end))}${windowConvention(sw) ? ` (${safe(windowConvention(sw))})` : ""} (window opens ${integer.format(ret.window_start_difference_days || 0)} days later)</td><td class="numeric">${pct(ret.sleeve_cumulative_return, 4)}</td></tr>`,
           `<tr><td>Difference</td><td class="numeric">${pp(ret.difference)}</td></tr>`,
           ...(toSleeve.account_series_also_holds || []).map((other) => `<tr><td colspan="2" class="cell-secondary">The account series also holds sleeve ${safe(other.sleeve_id)} (${safe(other.strategy_id)}), ${safe(formatDate(other.first_day))} to ${safe(formatDate(other.last_day))}, at the cutoff it ${other.live_at_cutoff ? "holds a NAV" : "holds no NAV"}</td></tr>`),
         );
@@ -1801,7 +1808,19 @@
       return `<td class="numeric basis-cell">${render(row)}</td>`;
     };
     const withheldCell = () => `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
-    const windowNote = (row, kind) => (number(row[`return_${kind}_window_days`]) == null ? "" : `<span class="cell-secondary">${integer.format(row[`return_${kind}_window_days`])} day window</span>`);
+    // a restated row declares the start date of the window whose day count it prints (`sleeve_return_windows`)
+    const declaredWindow = (row, predicate) => Object.values(row.sleeve_return_windows && typeof row.sleeve_return_windows === "object" ? row.sleeve_return_windows : {}).find((entry) => entry && predicate(entry));
+    const windowNote = (row, kind) => {
+      const days = number(row[`return_${kind}_window_days`]);
+      if (days == null) return "";
+      const declared = declaredWindow(row, (entry) => entry.days === days);
+      return `<span class="cell-secondary">${integer.format(days)} day window${declared ? ` from ${safe(formatDate(declared.start))} (${safe(windowConvention(declared))})` : ""}</span>`;
+    };
+    const sinceKind = (row) => {
+      const start = accountWindowStart(row);
+      const declared = start ? declaredWindow(row, (entry) => entry.start === start) : null;
+      return declared ? ` · ${safe(startKindText(declared))}` : "";
+    };
     const basisCells = (row, kind) => {
       const field = (name) => row[`return_${kind}_${name}`];
       const cumulative = returnBasisCell(row, kind, () => `${pct(field("cumulative"), 2)}${windowNote(row, kind)}`);
@@ -1826,7 +1845,7 @@
       const mwrLabel = row.mwr_annualization?.label;
       const cumulativeCell = performanceLineageMismatch
         ? withheld
-        : `${pct(row.account_live_cumulative_return)}${accountWindowStart(row) ? `<span class="cell-secondary">since ${formatDateHtml(accountWindowStart(row))}</span>` : ""}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${annualizationSuffix(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${annualizationSuffix(mwrLabel)}</span>` : ""}`;
+        : `${pct(row.account_live_cumulative_return)}${accountWindowStart(row) ? `<span class="cell-secondary">since ${formatDateHtml(accountWindowStart(row))}${sinceKind(row)}</span>` : ""}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${annualizationSuffix(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${annualizationSuffix(mwrLabel)}</span>` : ""}`;
       const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
       return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td>${basisCells(row, "unlevered")}${basisCells(row, "levered")}${grossToEquityCell(row)}<td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });

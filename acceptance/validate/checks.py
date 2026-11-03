@@ -4614,6 +4614,17 @@ def _parent_window_findings(
     for name, shown, wanted in (
         ("window.start", window.get("start"), opened.isoformat()),
         ("window.days", window.get("days"), expected_days),
+        # the ledger's opening anchor is an opening NAV date: the window says so
+        (
+            "window.start_kind",
+            window.get("start_kind"),
+            sleeve_basis.START_KIND_OPENING_NAV,
+        ),
+        (
+            "window.days_basis",
+            window.get("days_basis"),
+            sleeve_basis.DAYS_BASIS_EXCLUSIVE,
+        ),
     ):
         if shown != wanted:
             yield _finding(
@@ -4628,6 +4639,74 @@ def _parent_window_findings(
                 "PUBLISHED_PARENT_WINDOW_DIFFERS: the account lane's window opens at the "
                 "ledger's opening anchor and runs to the end date",
             )
+
+
+def _bridge_window_findings(
+    ctx: Context, figures: sleeve_basis.SleeveFigures
+) -> Iterator[Finding]:
+    """The account-to-sleeve bridge's windows declare the convention of their start dates.
+
+    The sleeve window is re-derived from the sleeve facts; the account window must be the
+    ``account_basis`` block's own window (kind and day count included).
+    """
+
+    entries = node(ctx.panel, "strategy_basis_disclosure", "strategies")
+    entry = next(
+        (
+            item
+            for item in entries
+            if isinstance(item, Mapping)
+            and item.get("strategy_id") == figures.strategy_id
+        )
+        if isinstance(entries, list)
+        else iter(()),
+        None,
+    )
+    if entry is None:
+        return
+    ret = node(entry, "bridges", "account_to_sleeve", "return")
+    if not isinstance(ret, Mapping):
+        return
+    first_return = figures.daily_returns[0][0] if figures.daily_returns else None
+    where = f"$.strategy_basis_disclosure.strategies[{figures.strategy_id}].bridges.account_to_sleeve.return"
+    problems = sleeve_basis.window_declaration_findings(
+        ret.get("sleeve_window"),
+        start=figures.opening_date,
+        end=figures.end_date,
+        first_return=first_return,
+        where=f"{where}.sleeve_window",
+    )
+    block = _account_basis_blocks(ctx).get(figures.parent_account_id)
+    window = block.get("window") if isinstance(block, Mapping) else None
+    account_window = ret.get("account_window")
+    if isinstance(window, Mapping):
+        for name in ("start", "end", "days", "days_basis", "start_kind"):
+            if not isinstance(account_window, Mapping) or account_window.get(
+                name
+            ) != window.get(name):
+                problems.append(
+                    sleeve_basis.Finding(
+                        "PUBLISHED_WINDOW_DECLARATION_DIFFERS",
+                        f"{where}.account_window.{name}",
+                        window.get(name),
+                        None
+                        if not isinstance(account_window, Mapping)
+                        else account_window.get(name),
+                        "the bridge's account window is not the account-basis block's window",
+                    )
+                )
+    for finding in problems:
+        yield _finding(
+            "returns.sleeve_basis",
+            BLOCKER_INVARIANT,
+            figures.strategy_id,
+            finding.published,
+            finding.derived,
+            PANEL,
+            finding.where,
+            (),
+            f"{finding.code}: {finding.message}",
+        )
 
 
 def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
@@ -4752,6 +4831,7 @@ def check_sleeve_basis(ctx: Context) -> Iterator[Finding]:
     other_weights = {k: v for k, v in weights.items() if k in used}
     for item in figures:
         yield from _parent_window_findings(ctx, item)
+        yield from _bridge_window_findings(ctx, item)
         for finding in sleeve_basis.compare_published(
             item,
             perimeter,

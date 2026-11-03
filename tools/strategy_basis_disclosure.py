@@ -76,6 +76,15 @@ ACCOUNT_BASIS_FIELDS: Final = (
 )
 ACCOUNT_BASIS_FALLBACK: Final = "PARENT_ACCOUNT_LIVE_SERIES"
 
+# The date conventions a published window can follow (backlog item 5).  A window opens
+# either at the opening NAV date (the close before the series' first return) or at the
+# first return date; a day count is end minus start.  The kind is derived from the two
+# dates the series itself holds, never typed per window.
+START_KIND_OPENING_NAV: Final = "OPENING_NAV_DATE"
+START_KIND_FIRST_RETURN: Final = "FIRST_RETURN_DATE"
+START_KINDS: Final = (START_KIND_OPENING_NAV, START_KIND_FIRST_RETURN)
+DAYS_BASIS_EXCLUSIVE: Final = "EXCLUSIVE_END_MINUS_START"
+
 
 class DisclosureError(ValueError):
     """The facts, the trace and the ledger do not close; nothing is disclosed."""
@@ -374,6 +383,42 @@ def retired_sleeves(
     return sorted(result, key=lambda entry: (entry["first_day"], entry["sleeve_id"]))
 
 
+def window_start_kind(start: object, first_return: object, *, where: str) -> str:
+    """The convention a window's start follows, from the series' own first return date.
+
+    A window that opens before the first return opens at the opening NAV date; one that
+    opens at the first return follows that date.  Any other start follows neither, and
+    nothing is published for it.
+    """
+
+    if not isinstance(start, str) or not isinstance(first_return, str):
+        raise DisclosureError(f"{where}: the start or the first return date is missing")
+    if start == first_return:
+        return START_KIND_FIRST_RETURN
+    if start < first_return:
+        return START_KIND_OPENING_NAV
+    raise DisclosureError(
+        f"{where}: the window opens at {start}, after the first return {first_return}"
+    )
+
+
+def declared_window(
+    start: object, end: object, first_return: object, *, where: str
+) -> dict[str, Any]:
+    """A window with its day count, the day-count rule and the kind of its start date."""
+
+    kind = window_start_kind(start, first_return, where=where)
+    if not isinstance(end, str):
+        raise DisclosureError(f"{where}: the window has no end date")
+    return {
+        "start": start,
+        "end": end,
+        "days": _days_between(str(start), end),
+        "days_basis": DAYS_BASIS_EXCLUSIVE,
+        "start_kind": kind,
+    }
+
+
 def account_basis_block(
     row: Mapping[str, Any],
     *,
@@ -393,6 +438,9 @@ def account_basis_block(
     window_start = row.get("account_live_observed_start")
     window_end = row.get("account_live_observed_end")
     window_days = None
+    # the first return date is the row's own observed start; the annualization window opens
+    # at the opening NAV date, the close before it
+    first_return = row.get("account_live_observed_start")
     if isinstance(annualization, Mapping):
         window_start = annualization.get("window_start", window_start)
         window_end = annualization.get("window_end", window_end)
@@ -403,6 +451,11 @@ def account_basis_block(
         )
     if window_days is None:
         window_days = _days_between(str(window_start), str(window_end))
+    start_kind = window_start_kind(
+        str(window_start),
+        first_return,
+        where=f"the account-basis window of {strategy_id}",
+    )
     return {
         "basis": ACCOUNT_BASIS_FALLBACK,
         "label": label,
@@ -412,6 +465,8 @@ def account_basis_block(
             "start": str(window_start),
             "end": str(window_end),
             "days": window_days,
+            "days_basis": DAYS_BASIS_EXCLUSIVE,
+            "start_kind": start_kind,
         },
         "observations": row.get("account_live_return_observations"),
         "series": {
@@ -630,10 +685,15 @@ def account_to_sleeve_bridge(
     sleeve_value: Decimal,
     sleeve_return: Decimal,
     sleeve_opening_date: str,
+    sleeve_first_return_date: str,
     cutoff: str,
     ledger_account_value: Decimal,
 ) -> dict[str, Any]:
-    """The account basis to the sleeve basis: value, return and the two windows."""
+    """The account basis to the sleeve basis: value, return and the two windows.
+
+    Each window states its day count, the rule of that count and the kind of its start
+    date (the account window's first return is the account-basis row's own).
+    """
 
     figures = account_basis["figures"]
     account_value = _dec(figures["current_value_usd"], "account-basis value")
@@ -686,8 +746,18 @@ def account_to_sleeve_bridge(
             "account_cumulative_return": _text(account_return),
             "sleeve_cumulative_return": _text(sleeve_return),
             "difference": _text(difference),
-            "account_window": {"start": start, "end": str(window["end"])},
-            "sleeve_window": {"start": sleeve_opening_date, "end": cutoff},
+            "account_window": declared_window(
+                start,
+                str(window["end"]),
+                figures.get("account_live_observed_start"),
+                where="the account window of the account-to-sleeve bridge",
+            ),
+            "sleeve_window": declared_window(
+                sleeve_opening_date,
+                cutoff,
+                sleeve_first_return_date,
+                where="the sleeve window of the account-to-sleeve bridge",
+            ),
             "window_start_difference_days": gap_days,
         },
         "account_series_also_holds": retired_sleeves(

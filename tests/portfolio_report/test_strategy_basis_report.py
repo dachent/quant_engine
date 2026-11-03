@@ -264,3 +264,109 @@ def test_apply_return_scope_states_the_cost_rate_basis_of_a_restated_row() -> No
         none, rows, {"acct-s2": "acct"}, ["s"], {"s": restatement}
     )
     assert none["strategy_summary"][0]["cost_rate_reason"] is None
+
+
+def test_the_restated_windows_declare_their_start_date_convention(
+    full: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    off_report = _build(full, tmp_path, monkeypatch, tag_map=_tag_map())
+    assert "sleeve_return_windows" not in _row(off_report)
+    on_report = _build(
+        full,
+        tmp_path,
+        monkeypatch,
+        tag_map=_tag_map(),
+        strategy_basis=DECLARATION,
+        sleeve_facts=_facts(),
+    )
+    # the sleeve opens 2026-07-02 and its first return is the link ending 2026-07-30
+    windows = _row(on_report)["sleeve_return_windows"]
+    assert windows["first_return"] == {
+        "start": "2026-07-30",
+        "end": "2026-07-30",
+        "days": 0,
+        "days_basis": "EXCLUSIVE_END_MINUS_START",
+        "start_kind": "FIRST_RETURN_DATE",
+    }
+    assert windows["opening_nav"] == {
+        "start": "2026-07-02",
+        "end": "2026-07-30",
+        "days": 28,
+        "days_basis": "EXCLUSIVE_END_MINUS_START",
+        "start_kind": "OPENING_NAV_DATE",
+    }
+    # the account lane's window says how its days are counted and what its start is
+    (account,) = [
+        row for row in on_report["account_summary"] if row.get("account_basis")
+    ]
+    window = account["account_basis"]["window"]
+    assert window["days_basis"] == "EXCLUSIVE_END_MINUS_START"
+    assert window["start_kind"] in {"OPENING_NAV_DATE", "FIRST_RETURN_DATE"}
+    bridge = on_report["strategy_basis_disclosure"]["strategies"][0]["bridges"][
+        "account_to_sleeve"
+    ]["return"]
+    assert bridge["account_window"] == {**window}
+    assert bridge["sleeve_window"] == windows["opening_nav"]
+    assert off_report["account_summary"][0].get("account_basis") is None
+
+
+_SCHEMAS = ("report-data", "control-panel-data")
+
+
+def _def_validator(schema_name: str, definition: str) -> Any:
+    import json
+
+    import jsonschema
+
+    root = Path(__file__).resolve().parents[2] / "schemas" / "portfolio"
+    schema = json.loads((root / f"{schema_name}.schema.json").read_bytes())
+    return jsonschema.Draft202012Validator(
+        {"$ref": f"#/$defs/{definition}", "$defs": schema["$defs"]}
+    )
+
+
+@pytest.mark.parametrize("schema_name", _SCHEMAS)
+def test_both_closed_schemas_declare_the_window_conventions(schema_name: str) -> None:
+    window = {
+        "start": "2026-01-30",
+        "end": "2026-09-17",
+        "days": 230,
+        "days_basis": "EXCLUSIVE_END_MINUS_START",
+        "start_kind": "OPENING_NAV_DATE",
+    }
+    pair = {"first_return": window, "opening_nav": window}
+    assert not list(
+        _def_validator(schema_name, "window_declaration").iter_errors(window)
+    )
+    assert not list(
+        _def_validator(schema_name, "sleeve_return_windows").iter_errors(pair)
+    )
+    # tamper: a missing kind, a free-text kind, an unknown days rule and an extra key
+    for broken in (
+        {k: v for k, v in window.items() if k != "start_kind"},
+        {**window, "start_kind": "Opening NAV"},
+        {**window, "days_basis": "INCLUSIVE_OF_BOTH_ENDPOINTS"},
+        {**window, "note": "x"},
+    ):
+        assert list(
+            _def_validator(schema_name, "window_declaration").iter_errors(broken)
+        )
+    assert list(
+        _def_validator(schema_name, "sleeve_return_windows").iter_errors(
+            {"first_return": window}
+        )
+    )
+    # the account-basis window must now declare both
+    block = _def_validator(schema_name, "account_basis")
+    sample = {
+        "basis": "PARENT_ACCOUNT_LIVE_SERIES",
+        "label": "x",
+        "strategy_id": "s",
+        "account_id": "a",
+        "window": {k: window[k] for k in ("start", "end", "days")},
+        "observations": 1,
+        "series": {"schema": None, "sha256": None},
+        "figures": {},
+    }
+    messages = " ".join(e.message for e in block.iter_errors(sample))
+    assert "days_basis" in messages and "start_kind" in messages

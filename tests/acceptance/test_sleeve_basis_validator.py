@@ -399,6 +399,7 @@ def _published(figures: Any, perimeter: Decimal, weight: Decimal) -> dict[str, A
                 "window_days": figures.window_days,
                 "account_live_observed_start": figures.daily_returns[0][0].isoformat(),
                 "account_live_observed_end": figures.end_date.isoformat(),
+                "sleeve_return_windows": synth.sleeve_return_windows(figures),
             }
         ],
         "capital": {"systematic": format(perimeter, "f")},

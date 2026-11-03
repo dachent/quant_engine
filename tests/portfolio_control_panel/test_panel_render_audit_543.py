@@ -1276,6 +1276,112 @@ def test_F19_the_account_window_start_is_shown_beside_the_cumulative_return(
     )
 
 
+def _declared_window(start: str, days: int, kind: str) -> dict[str, Any]:
+    return {
+        "start": start,
+        "end": CUTOFF,
+        "days": days,
+        "days_basis": "EXCLUSIVE_END_MINUS_START",
+        "start_kind": kind,
+    }
+
+
+def _declared_row(first_kind: str = "FIRST_RETURN_DATE") -> dict[str, Any]:
+    return strategy(
+        "S",
+        account_live_cumulative_return="0.1",
+        return_unlevered_cumulative="0.1",
+        return_unlevered_window_days=230,
+        provider_evidence={
+            "account": {"observed_start": "2026-02-02", "observed_end": CUTOFF}
+        },
+        sleeve_return_windows={
+            "first_return": _declared_window("2026-02-02", 227, first_kind),
+            "opening_nav": _declared_window("2026-01-30", 230, "OPENING_NAV_DATE"),
+        },
+    )
+
+
+def test_the_signals_cells_print_the_date_convention_the_payload_declares(
+    tmp_path: Path,
+) -> None:
+    def cell(row: dict[str, Any]) -> str:
+        payload = base(strategies=[row], counts={**base()["counts"], "strategies": 1})
+        return text(run(tmp_path, payload, "renderSignals"), "#implementation-table")
+
+    shown = cell(_declared_row())
+    assert "since Feb 2, 2026 · first return date" in shown
+    assert (
+        "230 day window from Jan 30, 2026 (opening NAV date, days exclusive end minus start)"
+        in shown
+    )
+    # nothing is typed in the page: the words follow the payload's kind field
+    swapped = cell(_declared_row(first_kind="OPENING_NAV_DATE"))
+    assert "since Feb 2, 2026 · opening NAV date" in swapped
+    assert "first return date" not in swapped
+    # a row that declares nothing prints the plain cells it printed before
+    plain = _declared_row()
+    del plain["sleeve_return_windows"]
+    unlabelled = cell(plain)
+    assert (
+        "since Feb 2, 2026" in unlabelled and " · first return date" not in unlabelled
+    )
+    assert "230 day window" in unlabelled and "230 day window from" not in unlabelled
+
+
+def test_the_basis_disclosure_prints_the_declared_conventions_of_its_windows(
+    tmp_path: Path,
+) -> None:
+    account = _declared_window("2026-01-21", 239, "OPENING_NAV_DATE")
+    sleeve = _declared_window("2026-01-30", 230, "OPENING_NAV_DATE")
+    payload = base(
+        strategies=[strategy("S")],
+        counts={**base()["counts"], "strategies": 1},
+        account_summary=[
+            {
+                "account_id": "acct",
+                "account_basis": {
+                    "label": "whole account",
+                    "window": account,
+                    "observations": 171,
+                    "series": {"sha256": "a" * 64},
+                    "figures": {},
+                },
+            }
+        ],
+        strategy_basis_disclosure={
+            "strategies": [
+                {
+                    "strategy_id": "s-id",
+                    "strategy_name": "S",
+                    "parent_account_id": "acct",
+                    "sleeve_id": "sl",
+                    "opening_date": "2026-01-30",
+                    "cutoff_date": CUTOFF,
+                    "margin_liability": {},
+                    "bridges": {
+                        "account_to_sleeve": {
+                            "value": {},
+                            "return": {
+                                "account_window": account,
+                                "sleeve_window": sleeve,
+                                "window_start_difference_days": 9,
+                            },
+                        }
+                    },
+                }
+            ]
+        },
+    )
+    result = run(tmp_path, payload, "renderStrategyBasisDisclosure")
+    lane = text(result, "#account-basis-table")
+    bridge = text(result, "#strategy-basis-account-bridge-table")
+    kind = "(opening NAV date, days exclusive end minus start)"
+    assert f"Jan 21, 2026 to Sep 17, 2026 {kind}" in lane
+    assert f"Account return Jan 21, 2026 to Sep 17, 2026 {kind}" in bridge
+    assert f"Sleeve return Jan 30, 2026 to Sep 17, 2026 {kind}" in bridge
+
+
 def test_F44_the_cluster_column_is_named_for_what_it_holds(tmp_path: Path) -> None:
     table = html(
         run(tmp_path, _dependence_payload(), "renderDependence"),

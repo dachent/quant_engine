@@ -263,12 +263,20 @@ def test_the_account_basis_block_copies_the_rows_own_figures() -> None:
         "account_live_return_series_schema": "ordered-date-return/1",
         "account_live_return_series_sha256": "e" * 64,
         "account_live_return_observations": 171,
+        "account_live_observed_start": "2026-01-22",
         "benchmark_beta": "0.8",
     }
     block = disclosure.account_basis_block(
         row, strategy_id="strategy-1", account_id=PARENT, label="whole account"
     )
-    assert block["window"] == {"start": "2026-01-22", "end": "2026-09-17", "days": 238}
+    # the window opens at the first return: the block says so, and how its days are counted
+    assert block["window"] == {
+        "start": "2026-01-22",
+        "end": "2026-09-17",
+        "days": 238,
+        "days_basis": "EXCLUSIVE_END_MINUS_START",
+        "start_kind": "FIRST_RETURN_DATE",
+    }
     assert block["observations"] == 171
     assert block["series"]["sha256"] == "e" * 64
     # only the account-basis names, each exactly the row's value, nothing else
@@ -278,6 +286,50 @@ def test_the_account_basis_block_copies_the_rows_own_figures() -> None:
     with pytest.raises(disclosure.DisclosureError, match="no observed window"):
         disclosure.account_basis_block(
             {}, strategy_id="strategy-1", account_id=PARENT, label="x"
+        )
+
+
+def test_the_account_basis_window_declares_the_kind_of_its_start_date() -> None:
+    # the annualization window opens at the opening NAV date, the close before the first return
+    row = {
+        "account_live_cagr_annualization": {
+            "window_start": "2026-01-21",
+            "window_end": "2026-09-17",
+            "window_days": 239,
+        },
+        "account_live_observed_start": "2026-01-22",
+        "account_live_observed_end": "2026-09-17",
+    }
+    window = disclosure.account_basis_block(
+        row, strategy_id="s", account_id=PARENT, label="x"
+    )["window"]
+    assert window["start"] == "2026-01-21" and window["days"] == 239
+    assert window["start_kind"] == "OPENING_NAV_DATE"
+    assert window["days_basis"] == "EXCLUSIVE_END_MINUS_START"
+    # no annualization: the observed start and end are the window, counted end minus start
+    bare = disclosure.account_basis_block(
+        {k: v for k, v in row.items() if k != "account_live_cagr_annualization"},
+        strategy_id="s",
+        account_id=PARENT,
+        label="x",
+    )["window"]
+    assert (bare["start"], bare["days"], bare["start_kind"]) == (
+        "2026-01-22",
+        238,
+        "FIRST_RETURN_DATE",
+    )
+    # a window that opens after the first return follows neither convention: nothing is published
+    late = {**row, "account_live_observed_start": "2026-01-20"}
+    with pytest.raises(disclosure.DisclosureError, match="after the first return"):
+        disclosure.account_basis_block(
+            late, strategy_id="s", account_id=PARENT, label="x"
+        )
+    with pytest.raises(disclosure.DisclosureError, match="missing"):
+        disclosure.account_basis_block(
+            {k: v for k, v in row.items() if k != "account_live_observed_start"},
+            strategy_id="s",
+            account_id=PARENT,
+            label="x",
         )
 
 
@@ -392,6 +444,7 @@ def test_the_real_r2_facts_reproduce_the_figures_the_owner_quotes() -> None:
         "figures": {
             "current_value_usd": before["current_value_usd"],
             "account_live_cumulative_return": before["account_live_cumulative_return"],
+            "account_live_observed_start": before["account_live_observed_start"],
         },
         "window": {"start": before["account_live_observed_start"], "end": "2026-09-17"},
     }
@@ -402,9 +455,12 @@ def test_the_real_r2_facts_reproduce_the_figures_the_owner_quotes() -> None:
         sleeve_value=restated.value,
         sleeve_return=sleeve_return,
         sleeve_opening_date=restated.opening_date,
+        sleeve_first_return_date=str(restated.rows[0]["date"]),
         cutoff=restated.as_of_date,
         ledger_account_value=ledger,
     )
+    assert to_sleeve["return"]["sleeve_window"]["start_kind"] == "OPENING_NAV_DATE"
+    assert to_sleeve["return"]["account_window"]["start_kind"] == "FIRST_RETURN_DATE"
     assert _four(to_sleeve["return"]["account_cumulative_return"]) == Decimal("0.0245")
     assert to_sleeve["return"]["window_start_difference_days"] == 8
     assert Decimal(to_sleeve["value"]["unallocated_bucket_usd"]).quantize(

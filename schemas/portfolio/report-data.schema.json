@@ -205,7 +205,8 @@
           "weight_basis": {"const": "CURRENT_CUTOFF"},
           "benchmark_account_basis": {"$ref": "#/$defs/benchmark_account_basis"},
           "comparison_basis": {"$ref": "#/$defs/comparison_sleeve_basis"},
-          "provider_account_basis": {"$ref": "#/$defs/provider_account_basis"}
+          "provider_account_basis": {"$ref": "#/$defs/provider_account_basis"},
+          "sleeve_return_windows": { "$ref": "#/$defs/sleeve_return_windows" }
         }
       }
     },
@@ -670,6 +671,28 @@
       "type": "string",
       "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
     },
+    "window_declaration": {
+      "$comment": "A window with its day count, the rule of that count and the convention of its start date (R2.2 backlog item 5); published from the series the producer holds, only for a strategy restated onto its sleeve.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "days", "days_basis", "start_kind"],
+      "properties": {
+        "start": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "end": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "days": { "type": "integer", "minimum": 0 },
+        "days_basis": { "const": "EXCLUSIVE_END_MINUS_START" },
+        "start_kind": { "enum": ["OPENING_NAV_DATE", "FIRST_RETURN_DATE"] }
+      }
+    },
+    "sleeve_return_windows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first_return", "opening_nav"],
+      "properties": {
+        "first_return": { "$ref": "#/$defs/window_declaration" },
+        "opening_nav": { "$ref": "#/$defs/window_declaration" }
+      }
+    },
     "account_basis": {
       "type": "object",
       "additionalProperties": false,
@@ -713,7 +736,9 @@
           "required": [
             "start",
             "end",
-            "days"
+            "days",
+            "days_basis",
+            "start_kind"
           ],
           "properties": {
             "start": {
@@ -730,6 +755,12 @@
                 "null"
               ],
               "minimum": 0
+            },
+            "days_basis": {
+              "const": "EXCLUSIVE_END_MINUS_START"
+            },
+            "start_kind": {
+              "enum": ["OPENING_NAV_DATE", "FIRST_RETURN_DATE"]
             }
           }
         },
@@ -1349,42 +1380,8 @@
                           "difference": {
                             "$ref": "#/$defs/basis_decimal"
                           },
-                          "account_window": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": [
-                              "start",
-                              "end"
-                            ],
-                            "properties": {
-                              "start": {
-                                "type": "string",
-                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
-                              },
-                              "end": {
-                                "type": "string",
-                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
-                              }
-                            }
-                          },
-                          "sleeve_window": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": [
-                              "start",
-                              "end"
-                            ],
-                            "properties": {
-                              "start": {
-                                "type": "string",
-                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
-                              },
-                              "end": {
-                                "type": "string",
-                                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
-                              }
-                            }
-                          },
+                          "account_window": { "$ref": "#/$defs/window_declaration" },
+                          "sleeve_window": { "$ref": "#/$defs/window_declaration" },
                           "window_start_difference_days": {
                             "type": "integer"
                           }

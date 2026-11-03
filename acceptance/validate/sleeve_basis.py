@@ -52,6 +52,14 @@ USD_TOLERANCE = Decimal("0.01")
 HALF_CENT = Decimal("0.005")
 RATE_TOLERANCE = Decimal("1e-15")
 
+# The declared convention of a published window (R2.2 backlog item 5).  A window opens at
+# the opening NAV date or at the first return date, and its day count is end minus start;
+# the validator re-derives all three from the sleeve facts and never reads them from the
+# published block.
+START_KIND_OPENING_NAV = "OPENING_NAV_DATE"
+START_KIND_FIRST_RETURN = "FIRST_RETURN_DATE"
+DAYS_BASIS_EXCLUSIVE = "EXCLUSIVE_END_MINUS_START"
+
 # refusal codes
 DECLARATION_INVALID = "DECLARATION_INVALID"
 FACTS_INVALID = "FACTS_INVALID"
@@ -625,6 +633,58 @@ def _row(rows: Any, strategy_id: str) -> Mapping[str, Any] | None:
     return None
 
 
+def window_declaration_findings(
+    published: Any,
+    *,
+    start: date,
+    end: date,
+    first_return: date | None,
+    where: str,
+) -> list[Finding]:
+    """Findings where a published window declaration is not the derived one.
+
+    ``published`` must carry the start, end, day count (end minus start), the rule of
+    that count and the kind of its start date; each is compared with what the sleeve
+    facts give for the window, so a relabelled or re-dated window is found.
+    """
+
+    if not isinstance(published, Mapping):
+        return [
+            Finding(
+                "PUBLISHED_WINDOW_DECLARATION_MISSING",
+                where,
+                None,
+                None,
+                "the window does not declare its days basis and the kind of its start date",
+            )
+        ]
+    kind = (
+        START_KIND_OPENING_NAV
+        if first_return is not None and start < first_return
+        else START_KIND_FIRST_RETURN
+    )
+    found: list[Finding] = []
+    for name, derived in (
+        ("start", start.isoformat()),
+        ("end", end.isoformat()),
+        ("days", (end - start).days),
+        ("days_basis", DAYS_BASIS_EXCLUSIVE),
+        ("start_kind", kind),
+    ):
+        shown = published.get(name)
+        if shown != derived:
+            found.append(
+                Finding(
+                    "PUBLISHED_WINDOW_DECLARATION_DIFFERS",
+                    f"{where}.{name}",
+                    derived,
+                    shown,
+                    f"the window's {name} is not the one the sleeve facts give",
+                )
+            )
+    return found
+
+
 def compare_published(
     figures: SleeveFigures,
     perimeter: Decimal,
@@ -743,6 +803,22 @@ def compare_published(
                 figures.window_days,
                 row.get("window_days"),
                 "the window runs from the opening NAV date to the end date",
+            )
+        )
+    for name, window_start in (
+        ("first_return", first_return),
+        ("opening_nav", figures.opening_date),
+    ):
+        if window_start is None:
+            continue
+        windows = row.get("sleeve_return_windows")
+        found.extend(
+            window_declaration_findings(
+                windows.get(name) if isinstance(windows, Mapping) else None,
+                start=window_start,
+                end=figures.end_date,
+                first_return=first_return,
+                where=f"{where}.sleeve_return_windows.{name}",
             )
         )
     systematic = (

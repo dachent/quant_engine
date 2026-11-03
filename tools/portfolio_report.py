@@ -14026,6 +14026,7 @@ def _apply_strategy_basis_disclosure(
                 sleeve_value=restated.value,
                 sleeve_return=sleeve_return,
                 sleeve_opening_date=restated.opening_date,
+                sleeve_first_return_date=str(restated.rows[0]["date"]),
                 cutoff=cutoff,
                 ledger_account_value=ledger_value,
             ),
@@ -14069,6 +14070,24 @@ def _apply_strategy_basis_disclosure(
                     report.get("leverage_disclosures"), "leverage_disclosures"
                 ),
             )
+        # the two windows the restated row's cells quote, each with the convention of its
+        # start date: "since" is the first return, the day-count windows open at the
+        # opening NAV date; both come from the sleeve series the row stands on
+        first_return = str(restated.rows[0]["date"])
+        sleeve_return_windows = {
+            "first_return": disclosure.declared_window(
+                first_return,
+                summary_row.get("account_live_observed_end"),
+                first_return,
+                where="the restated row's first-return window",
+            ),
+            "opening_nav": disclosure.declared_window(
+                restated.opening_date,
+                summary_row.get("account_live_observed_end"),
+                first_return,
+                where="the restated row's opening-NAV window",
+            ),
+        }
         loan = max(Decimal(0), -bucket)
         basis["loan_usd"] = decimal_text(loan)
         basis["gross_to_equity_ratio"] = (
@@ -14079,6 +14098,7 @@ def _apply_strategy_basis_disclosure(
     except (disclosure.DisclosureError, ArithmeticError) as exc:
         raise ReportValidationError(str(exc)) from exc
     _apply_leverage_to_rows(report, strategy_id, leverage_fields)
+    summary_row["sleeve_return_windows"] = sleeve_return_windows
     report["leverage_disclosures"] = [
         *_objects(report.get("leverage_disclosures"), "leverage_disclosures"),
         *derived_rows,
