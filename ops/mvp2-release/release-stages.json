@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Release stages of RELEASE-DRIVER-001, selected inputs through the replica ceremony and the gated commit. Every id and path is derived from the run's own outputs by tools/release_driver.py.",
+  "description": "Release stages of RELEASE-DRIVER-001, cycle manifest resolution and the staging group (provenance, ledger, baseline) through selected inputs, the replica ceremony and the gated commit. Every id and path is derived from the run's own outputs by tools/release_driver.py.",
   "provider_roots": [
     "provider-alpaca",
     "provider-fidelity",
@@ -44,7 +44,15 @@
     "real_rehearsal": "{cycle}/post-commit/rehearsal",
     "real_clean_room": "{cycle}/post-commit/clean-room",
     "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
-    "replica_coordination_root": "{replica_workspace}/{coordination_rel}"
+    "replica_coordination_root": "{replica_workspace}/{coordination_rel}",
+    "prov": "{cycle}/prov",
+    "prov_generation": "{prov}/generations/{provenance_id}",
+    "ledger_spec": "{cycle}/ledger-spec.json",
+    "run_observation": "{cycle}/run-observation.json",
+    "ledger_out": "{cycle}/ledger",
+    "ledger_generation": "{ledger_out}/generations/{cycle_ledger_id}",
+    "baseline_spec": "{cycle}/baseline-spec.json",
+    "baseline_out": "{cycle}/baseline"
   },
   "derive": {
     "ledger_id": {
@@ -104,11 +112,299 @@
         "{coordination_root}",
         "{source_workspace}"
       ]
+    },
+    "provenance_id": {
+      "single_dir": "{prov}/generations"
+    },
+    "resolved_cycle_sha256": {
+      "file_sha256": "{resolved_cycle}"
     }
   },
   "stages": [
     {
+      "id": "cycle-resolve",
+      "inputs": [
+        "{cycle_manifest}",
+        "{cycle_roots_file}"
+      ],
+      "pinned_inputs": [
+        [
+          "{cycle_manifest}",
+          "{cycle_manifest_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{resolved_cycle}"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_cycle_manifest.py",
+        "resolve",
+        "--manifest",
+        "{cycle_manifest}",
+        "--manifest-sha256",
+        "{cycle_manifest_sha256}",
+        "--roots-file",
+        "{cycle_roots_file}",
+        "--out",
+        "{resolved_cycle}"
+      ],
+      "checks": [
+        {
+          "json": "{resolved_cycle}",
+          "path": "schema_version",
+          "equals": "qe-release-resolved-cycle/1"
+        },
+        {
+          "json": "{resolved_cycle}",
+          "path": "cycle_manifest_sha256",
+          "equals": "{cycle_manifest_sha256}"
+        },
+        {
+          "json": "{resolved_cycle}",
+          "path": "cutoff",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{resolved_cycle}",
+          "path": "evaluated_on",
+          "equals": "{evaluated_on}"
+        }
+      ]
+    },
+    {
+      "id": "provenance",
+      "requires": [
+        "cycle-resolve"
+      ],
+      "inputs": [
+        "{provenance_spec}"
+      ],
+      "pinned_inputs": [
+        [
+          "{provenance_spec}",
+          "{provenance_spec_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{prov}"
+      ],
+      "stdout_to": "{cycle}/logs/provenance-stage.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_provenance.py",
+        "stage",
+        "--spec",
+        "{provenance_spec}",
+        "--output-root",
+        "{prov}"
+      ],
+      "checks": [
+        {
+          "exists": "{prov_generation}/portfolio-provenance.json"
+        }
+      ]
+    },
+    {
+      "id": "ledger-spec",
+      "requires": [
+        "cycle-resolve",
+        "provenance"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{predecessor_ledger_spec}",
+        "{prov_generation}"
+      ],
+      "pinned_inputs": [
+        [
+          "{predecessor_ledger_spec}",
+          "{predecessor_ledger_spec_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{ledger_spec}",
+        "{run_observation}"
+      ],
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_ledger_spec.py",
+        "build",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--predecessor-spec",
+        "{predecessor_ledger_spec}",
+        "--out-root",
+        "{cycle}",
+        "--provenance-generation-dir",
+        "{prov_generation}",
+        "--repo-root",
+        "{repo_root}"
+      ],
+      "checks": [
+        {
+          "json": "{ledger_spec}",
+          "path": "as_of_date",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{ledger_spec}",
+          "path": "provenance.generation_id",
+          "equals": "{provenance_id}"
+        }
+      ]
+    },
+    {
+      "id": "ledger",
+      "requires": [
+        "ledger-spec"
+      ],
+      "inputs": [
+        "{ledger_spec}",
+        "{run_observation}"
+      ],
+      "bound_ids": [
+        [
+          "{ledger_spec}",
+          "{provenance_id}"
+        ]
+      ],
+      "outputs": [
+        "{ledger_out}"
+      ],
+      "stdout_to": "{cycle}/logs/ledger-stage.json",
+      "argv": [
+        "{python}",
+        "{tools}/provider_ledger.py",
+        "stage",
+        "--spec",
+        "{ledger_spec}",
+        "--output-root",
+        "{ledger_out}"
+      ],
+      "checks": [
+        {
+          "exists": "{ledger_generation}/provider-ledger.json"
+        }
+      ]
+    },
+    {
+      "id": "baseline-spec",
+      "requires": [
+        "ledger"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{prov_generation}",
+        "{ledger_generation}"
+      ],
+      "outputs": [
+        "{baseline_spec}"
+      ],
+      "stdout_to": "{cycle}/logs/baseline-spec.json",
+      "argv": [
+        "{python}",
+        "{tools}/release_baseline_spec.py",
+        "build",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--release-inputs-root",
+        "{release_inputs_root}",
+        "--release-inputs-manifest-sha256",
+        "{release_inputs_manifest_sha256}",
+        {
+          "if": "baseline_declared_inputs_path",
+          "args": [
+            "--declared-inputs-path",
+            "{baseline_declared_inputs_path}"
+          ]
+        },
+        {
+          "for_each": "baseline_roots",
+          "args": [
+            "--root",
+            "{each_key}={each_value}"
+          ]
+        },
+        {
+          "if": "baseline_cost_root_id",
+          "args": [
+            "--cost-root-id",
+            "{baseline_cost_root_id}"
+          ]
+        },
+        "--provenance-generation",
+        "{prov_generation}",
+        "--ledger-generation",
+        "{ledger_generation}",
+        "--repo-root",
+        "{repo_root}",
+        "--out",
+        "{baseline_spec}"
+      ],
+      "checks": [
+        {
+          "json": "{baseline_spec}",
+          "path": "as_of_date",
+          "equals": "{requested_as_of}"
+        },
+        {
+          "json": "{baseline_spec}",
+          "path": "provider_ledger.generation_id",
+          "equals": "{cycle_ledger_id}"
+        },
+        {
+          "json": "{baseline_spec}",
+          "path": "provenance.generation_id",
+          "equals": "{provenance_id}"
+        }
+      ]
+    },
+    {
+      "id": "baseline",
+      "requires": [
+        "baseline-spec"
+      ],
+      "inputs": [
+        "{baseline_spec}"
+      ],
+      "bound_ids": [
+        [
+          "{baseline_spec}",
+          "{cycle_ledger_id}"
+        ],
+        [
+          "{baseline_spec}",
+          "{provenance_id}"
+        ]
+      ],
+      "outputs": [
+        "{baseline_out}"
+      ],
+      "stdout_to": "{cycle}/logs/baseline-stage.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_baseline.py",
+        "stage",
+        "--spec",
+        "{baseline_spec}",
+        "--output-root",
+        "{baseline_out}"
+      ],
+      "checks": [
+        {
+          "exists": "{baseline_out}/generations/{baseline_id}/portfolio-baseline.json"
+        }
+      ]
+    },
+    {
       "id": "selected-inputs",
+      "requires": [
+        "baseline"
+      ],
       "builtin": "inputs_only",
       "inputs": [
         "{selected_inputs}",
@@ -161,6 +457,50 @@
         "{resolved_cycle}",
         "{cycle}/baseline/generations/{baseline_id}",
         "{cycle}/ledger/generations/{cycle_ledger_id}"
+      ]
+    },
+    {
+      "id": "calendar-authority",
+      "explicit": true,
+      "requires": [
+        "cycle-resolve"
+      ],
+      "inputs": [
+        "{calendar_attempt_spec}",
+        "{calendar_seed_authority}"
+      ],
+      "pinned_inputs": [
+        [
+          "{calendar_seed_authority}",
+          "{calendar_seed_authority_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{calendar_authority}",
+        "{calendar_authority}.receipt.json"
+      ],
+      "stdout_to": "{cycle}/logs/calendar-authority.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_hwm_calendar.py",
+        "author",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--resolved-cycle-sha256",
+        "{resolved_cycle_sha256}",
+        "--run",
+        "{calendar_attempt_run}",
+        "--spec",
+        "{calendar_attempt_spec}",
+        "--seed-authority",
+        "{calendar_seed_authority}",
+        "--out",
+        "{calendar_authority}",
+        "--repo-root",
+        "{repo_root}"
       ]
     },
     {
@@ -1205,6 +1545,27 @@
     },
     "qa": {
       "under": "{cycle}"
+    },
+    "cycle_manifest": {
+      "exists": true
+    },
+    "cycle_roots_file": {
+      "exists": true
+    },
+    "provenance_spec": {
+      "exists": true
+    },
+    "predecessor_ledger_spec": {
+      "exists": true
+    },
+    "calendar_attempt_run": {
+      "exists": true
+    },
+    "calendar_attempt_spec": {
+      "exists": true
+    },
+    "calendar_seed_authority": {
+      "exists": true
     }
   }
 }

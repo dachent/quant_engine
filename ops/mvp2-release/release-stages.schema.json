@@ -27,6 +27,7 @@
         "maxProperties": 1,
         "properties": {
           "single_dir": {"type": "string"},
+          "file_sha256": {"type": "string"},
           "relative_to": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
           "json_field": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
           "spec_root": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2},
@@ -47,6 +48,12 @@
           "additionalProperties": false,
           "required": ["if", "args"],
           "properties": {"if": {"type": "string"}, "equals": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["for_each", "args"],
+          "properties": {"for_each": {"type": "string"}, "args": {"type": "array", "items": {"type": "string"}}}
         }
       ]
     },

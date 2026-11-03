@@ -25,7 +25,7 @@ Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
 `cycle` (the scratch cycle directory that holds state, logs and production outputs),
 `run` (the attended run's output root), `qa`, `code_commit`, `pipeline_id`,
 `mode`, `live_workspace` (probe), `requested_as_of`, `history_store`, `expect_superseded`, `build_portfolio_root`,
-`portfolio_root`, `retained_cache_root`, `resolved_cycle` (the `qe-release-resolved-cycle/1` file of the cycle manifest; read by `post-commit-verify`), and `provider_sources` (root id to the provider
+`portfolio_root`, `retained_cache_root`, `resolved_cycle` (the `qe-release-resolved-cycle/1` file of the cycle manifest: the output path of stage `cycle-resolve`, read by the staging, `pre-chain` and `post-commit-verify` stages), and `provider_sources` (root id to the provider
 generation directory the release binds, or the string `from_ledger`, below). The epoch manifest
 generation comes from the run itself.
 
@@ -122,8 +122,10 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 
 | group | stages |
 |---|---|
-| inputs | `selected-inputs` (the hand-built selected-inputs and attribution spec must exist and are hash-bound) |
+| staging | `cycle-resolve`, `provenance`, `ledger-spec`, `ledger`, `baseline-spec`, `baseline` (below, "Staging group") |
+| inputs | `selected-inputs` (the hand-built selected-inputs and attribution spec must exist and are hash-bound; requires `baseline`) |
 | pre-chain | `pre-chain` (`tools/release_pre_chain.py`: layered history, dependence, attribution; reads the resolved cycle) |
+| calendar | `calendar-authority` (explicit: authors the HWM calendar authority from a first attempt; below) |
 | attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
 | tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
 | replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
@@ -134,6 +136,69 @@ single-stage diagnostics of the serial path (pass 21); the release path is `lane
 The attended preparation spec (`mk_prep_spec.py`) is a per-cycle input builder, not a stage: the
 driver refuses it unless it names this run's history, attribution, baseline and ledger
 generations (`bound_ids`).
+
+## Staging group (block B8)
+
+The graph starts with the committed replacements of the R2 staging hand scripts (`stage_p23.sh`: provenance,
+ledger, baseline) in the order pass 26 ran them. Each spec builder runs just before the stage tool that reads
+what it wrote; everything is written under `{cycle}` and in both ceremonies (no `only_ceremony`: nothing here
+touches a real root).
+
+| stage | tool | writes (create-only) | refuses when |
+|---|---|---|---|
+| `cycle-resolve` | `release_cycle_manifest.py resolve` | `{resolved_cycle}` | the manifest bytes differ from `cycle_manifest_sha256`; any pin, hash, generation or finality rule of the manifest fails; the resolved cutoff or evaluation date is not the run's `requested_as_of` / `evaluated_on` |
+| `provenance` | `portfolio_provenance.py stage` | `{cycle}/prov` | `provenance_spec` differs from `provenance_spec_sha256` |
+| `ledger-spec` | `release_ledger_spec.py build` | `{cycle}/ledger-spec.json`, `{cycle}/run-observation.json` | the predecessor spec differs from its pin; the builder's own self-check (the committed ledger validator) fails; the spec's cutoff or provenance generation is not this run's |
+| `ledger` | `provider_ledger.py stage` | `{cycle}/ledger` | the spec does not name this run's provenance generation (`bound_ids`); the stage passes `--output-root` itself so a spec cannot send it elsewhere |
+| `baseline-spec` | `release_baseline_spec.py build` | `{cycle}/baseline-spec.json` | release inputs missing, of another cutoff or not matching their pin; the spec's cutoff, ledger or provenance generation is not this run's |
+| `baseline` | `portfolio_baseline.py stage` | `{cycle}/baseline` | the spec does not name this run's ledger and provenance generations (`bound_ids`) |
+
+`ledger-spec` carries `resume.same_argv` (the builder accepts a pair of files it would write byte for byte and
+re-runs its check); the other staging stages have none, so a killed stage has its output moved aside and reruns.
+`selected-inputs` requires `baseline`, so `selected-inputs`, `pre-chain` and every later stage need the whole
+group finished with the bytes it recorded. Ids are derived from the outputs (`provenance_id`, `cycle_ledger_id`,
+`baseline_id`: the single generation under `{cycle}/prov`, `{cycle}/ledger`, `{cycle}/baseline`).
+
+New run configuration keys:
+
+| key | meaning |
+|---|---|
+| `cycle_manifest`, `cycle_manifest_sha256` | the cycle manifest (`docs/release-cycle-manifest.md`) and its pin; the pin is also passed to the tool |
+| `cycle_roots_file` | the `{root key: directory}` JSON the manifest's root keys resolve against (`--roots-file`) |
+| `provenance_spec`, `provenance_spec_sha256` | the provenance spec and its pin. No committed tool writes it (the R2 `rebase_prov.py` and `make_r2_provenance_spec.py` are not in the repository): it stays an operator input, hash-pinned |
+| `predecessor_ledger_spec`, `predecessor_ledger_spec_sha256` | the predecessor release's ledger spec as the builder reads it (carried blocks only), remapped to this cycle's roots, and its pin |
+| `release_inputs_root`, `release_inputs_manifest_sha256` | the pinned release-inputs root (outside Git). The driver already binds the expected baseline from it; `baseline-spec` reads the declared baseline inputs from the same root |
+| `baseline_roots` | optional object `{root id: directory}`: one `--root ID=DIR` per entry, in key order; it must name exactly the root ids the declared baseline sources use (templates such as `{cycle}/in/x` are expanded) |
+| `baseline_declared_inputs_path`, `baseline_cost_root_id` | optional: the tool's `--declared-inputs-path` and `--cost-root-id` (its defaults apply when absent) |
+| `calendar_attempt_run`, `calendar_attempt_spec` | `calendar-authority`: the first attempt's run directory and prepared spec |
+| `calendar_seed_authority`, `calendar_seed_authority_sha256` | `calendar-authority`: the predecessor's authority (policy id and owner decision text) and its pin |
+
+The graph's `config_paths` require the file-valued keys above to exist before any stage runs.
+
+Two driver features serve these stages and are part of the graph schema: an argv group `{"for_each": KEY, "args": [...]}`
+repeats its arguments for every entry of the run-config object KEY (`{each_key}`, `{each_value}` stand for the entry),
+and the derive rule `{"file_sha256": PATH}` yields the digest of a file an earlier stage wrote (the resolved-cycle pin
+the calendar tool authenticates its input with). Under `plan --offline` a configured `release_inputs_root` is not
+opened: the plan shows the baseline path in that root and binds no bytes.
+
+### Calendar authority (explicit stage)
+
+`calendar-authority` runs `release_hwm_calendar.py author` (two passes: calendar kinds and gaps from the first
+attempt's observed NAV dates, then the adapter's own interval returns) and writes `{calendar_authority}` and
+`{calendar_authority}.receipt.json`. It is explicit and nothing requires it: it needs a first attempt's staged run
+(`calendar_attempt_run`, a run directory other than this cycle's `run`), which a default run cannot have. Order of
+use: run the first attempt, `run --only calendar-authority`, set `calendar_authority_sha256` to the file's sha256
+(`attended` then refuses any other file, the carried-over authority included), and `rerecord --confirm-same-config`
+the completed stages. `release_hwm_calendar.py author --check` re-derives and refuses a differing file.
+
+The graph schema still accepts `pinned_script` for an operator script outside the repository; the shipped graph uses
+none (`pre-chain` runs the committed `release_pre_chain.py`).
+
+Not in the graph (no committed tool covers it, or it needs inputs a stage cannot yet name): the provenance spec
+builder, the IBKR generation staging (`ibkr_generation.py`; pass 26 reused the real-root generation), the
+selected-inputs and attended preparation spec builders (block B4), the public bundle and Quantbase source assemblers
+(`release_public_bundles.py`, `release_quantbase_sources.py`, block B7; they write under the bundle roots the manifest
+names, which lie outside the cycle) and the acceptance-input manifests (B9).
 
 ## Refusals seeded from R2's incidents
 
@@ -167,7 +232,10 @@ never touched. Every stage records `seconds`, `seconds_total` over its attempts,
 `plan --offline --ids ids.json --recorded cmds.json` prints every stage's command line from the
 configuration and graph alone (derived ids come from `ids.json`; nothing under the run is read)
 and compares each recorded command flag by flag. `tests/portfolio_operations/pass26_commands.py` builds the pass-26
-configuration, its ids and its recorded command lines; the plan reproduces all 16 recorded stages.
+configuration, its ids and its recorded command lines; the plan reproduces all 19 recorded stages (the 16 of
+pass 26 and the three staging tools of `stage_p23.sh`; the spec builders have no recorded command line and get no
+entry). A difference with a stated reason is listed under `known`: the ledger stage's explicit `--output-root`, and
+the baseline path of `lanes` (R3 reads it from the pinned release inputs).
 
 ## Commit gate and the replica receipt
 

@@ -216,6 +216,12 @@ class Run:
         pin = self.values.get("release_inputs_manifest_sha256")
         if pin is None:
             raise Refusal("release_inputs_root needs release_inputs_manifest_sha256")
+        if self.offline:
+            # an offline plan reads nothing: it shows where the baseline lies and binds no bytes
+            shown = str(Path(root) / BASELINE_INPUT)
+            self.values["expected_baseline"] = shown
+            self.values["expected_baseline_arg"] = shown
+            return
         try:
             inputs = self.release_inputs = load_release_inputs(root, pin)
             baseline = inputs.path(BASELINE_INPUT)
@@ -306,6 +312,12 @@ class Run:
             if not _inside(path, base):
                 raise Refusal(f"{name}: {path} is not inside {base}")
             value = path.resolve().relative_to(base.resolve()).as_posix()
+        elif "file_sha256" in rule:
+            # the digest of a file an earlier stage wrote (a tool that authenticates its input by hash)
+            file = Path(self.expand(rule["file_sha256"]))
+            if not file.is_file():
+                raise Refusal(f"{name}: {file} does not exist")
+            value = _file_sha(file)
         elif "spec_node_field" in rule:
             file_template, root_id, key = rule["spec_node_field"]
             file = Path(self.expand(file_template))
@@ -431,6 +443,25 @@ def stage_argv(
     for item in stage["argv"] if items is None else items:
         if isinstance(item, str):
             argv.append(run.expand(item))
+        elif "for_each" in item:
+            # one group of arguments per entry of a run-configuration map, in key order; the entry's key
+            # and value stand for {each_key} and {each_value} (a repeated ``--root ID=DIR``)
+            table = run.config.get(item["for_each"])
+            if table is None:
+                continue
+            if not isinstance(table, dict):
+                raise Refusal(
+                    f"run config {item['for_each']!r} must be an object of key to value"
+                )
+            for key in sorted(table):
+                argv.extend(
+                    run.expand(
+                        arg.replace("{each_key}", str(key)).replace(
+                            "{each_value}", str(table[key])
+                        )
+                    )
+                    for arg in item["args"]
+                )
         elif item["if"] in run.values and (
             "equals" not in item or run.values[item["if"]] == item["equals"]
         ):

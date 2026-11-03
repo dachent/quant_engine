@@ -5,8 +5,15 @@ run_attended.sh, qa_only.sh, resume.sh, t_tail1/2.sh, t_replica_copy/spec.sh, t_
 Built in code, not stored as tracked fixtures, because the data-boundary policy allows none.
 """
 
+import hashlib
 import json
 from pathlib import Path
+
+
+def _pin(label: str) -> str:
+    """A synthetic sha256 stand-in; the offline plan never reads the file it pins."""
+
+    return hashlib.sha256(f"pass26-fixture-{label}".encode()).hexdigest()
 
 
 def write(OUT: Path) -> None:
@@ -54,6 +61,26 @@ def write(OUT: Path) -> None:
         "playwright_executable": "C:/Users/BorisVaisman/AppData/Local/ms-playwright/chromium-1200/chrome-win64/chrome.exe",
         "evidence_dest": "C:/unused/evidence",
         "resolved_cycle": C + "/in/resolved-cycle.json",
+        # staging group (stage_p23.sh): the specs the staging tools read are inputs of the run; their
+        # pins are placeholders (this configuration is planned offline, nothing is read)
+        "cycle_manifest": C + "/in/cycle-manifest.json",
+        "cycle_manifest_sha256": _pin("cycle-manifest"),
+        "cycle_roots_file": C + "/in/cycle-roots.json",
+        "provenance_spec": C + "/prov-spec-r2.json",
+        "provenance_spec_sha256": _pin("provenance-spec"),
+        "predecessor_ledger_spec": C + "/in/predecessor-ledger-spec.json",
+        "predecessor_ledger_spec_sha256": _pin("predecessor-ledger-spec"),
+        "release_inputs_root": C + "/in/release-inputs",
+        "release_inputs_manifest_sha256": _pin("release-inputs-manifest"),
+        "baseline_roots": {
+            "baseline-sources": C + "/in/baseline-sources",
+        },
+        "calendar_attempt_run": C + "/attempt1/out",
+        "calendar_attempt_spec": C + "/attempt1/spec.json",
+        "calendar_seed_authority": C + "/in/calendar-seed-authority.json",
+        "calendar_seed_authority_sha256": _pin("calendar-seed-authority"),
+        "calendar_authority": C + "/in/calendar-authority.json",
+        "calendar_authority_sha256": _pin("calendar-authority"),
     }
     ids = {
         "ledger_id": LEDGER,
@@ -66,6 +93,9 @@ def write(OUT: Path) -> None:
         "panel_gid": PANEL,
         "spec_panel_gid": PANEL,
         "panel_root": Q + "/dataPortfolio/control-panel",
+        # not recorded by pass 26 (its ids.env names them, this fixture does not): synthetic placeholders
+        "provenance_id": _pin("provenance-generation"),
+        "resolved_cycle_sha256": _pin("resolved-cycle"),
     }
     (OUT / "pass26-run.json").write_text(
         json.dumps(config, indent=1) + "\n", encoding="utf-8"
@@ -124,6 +154,41 @@ def write(OUT: Path) -> None:
     QA_BASE = ["--expected-calculation-cutoff", "2026-09-17"]
     HTML = RUN + f"/stages/panel/candidates/{CAND}/index.html"
     rows = {
+        # stage_p23.sh: the three staging tools, after the hand scripts built their specs
+        "provenance": (
+            "stage_p23.sh (provenance stage)",
+            [
+                PY,
+                REPO + "/tools/portfolio_provenance.py",
+                "stage",
+                "--spec",
+                C + "/prov-spec-r2.json",
+                "--output-root",
+                C + "/prov",
+            ],
+        ),
+        "ledger": (
+            "stage_p23.sh (ledger stage)",
+            [
+                PY,
+                REPO + "/tools/provider_ledger.py",
+                "stage",
+                "--spec",
+                C + "/ledger-spec.json",
+            ],
+        ),
+        "baseline": (
+            "stage_p23.sh (baseline stage)",
+            [
+                PY,
+                REPO + "/tools/portfolio_baseline.py",
+                "stage",
+                "--spec",
+                C + "/baseline-spec.json",
+                "--output-root",
+                C + "/baseline",
+            ],
+        ),
         "pre-chain": (
             "chain_p26.sh/chain_a21.sh:12 (pre_chain.py <cycle> <selected> <BG> <evaluated-on> <sha>)"
             " replaced by B5 release_pre_chain.py; the evaluation date comes from the resolved cycle",
@@ -382,10 +447,27 @@ def write(OUT: Path) -> None:
             ],
         ),
     }
+    known = {
+        "lanes": [
+            {
+                "flag": "--expected",
+                "reason": "pass 26 read the expected baseline from the repository; R3 reads it from the "
+                "pinned release-inputs root, which the baseline spec stage also needs",
+            }
+        ],
+        "ledger": [
+            {
+                "flag": "--output-root",
+                "reason": "the driver names the ledger output root itself (the cycle's ledger directory, the "
+                "value the ledger spec carries) so a spec cannot send the stage elsewhere",
+            }
+        ],
+    }
     recorded = {
         "source": "evidence/releases/2026-10-26-r2/r26/scripts (pass 26: chain_p26.sh, run_attended.sh, qa_only.sh, resume.sh, t_tail1/2.sh, t_replica_copy/spec.sh, t_lanes.sh)",
         "stages": {
-            k: {"source": v[0], "argv": v[1], "known": []} for k, v in rows.items()
+            k: {"source": v[0], "argv": v[1], "known": known.get(k, [])}
+            for k, v in rows.items()
         },
     }
     (OUT / "pass26-commands.json").write_text(
