@@ -710,7 +710,7 @@ def test_selected_inputs_must_name_this_runs_ledger_generation_and_follow_its_bu
     ]
 
 
-def test_a_release_inputs_set_without_the_staging_files_is_refused_at_the_start(
+def test_a_stage_refuses_a_release_inputs_set_lacking_a_file_it_reads(
     world: dict[str, Any],  # noqa: F811
     tmp_path: Path,
 ) -> None:
@@ -727,5 +727,20 @@ def test_a_release_inputs_set_without_the_staging_files_is_refused_at_the_start(
         release_inputs_manifest_sha256=pin,
         requested_as_of="2026-09-17",
     )
-    with pytest.raises(driver.Refusal, match="lacks .*baseline-declared-inputs"):
-        driver.Run(config, {"paths": {}, "derive": {}, "stages": []})
+    run = driver.Run(config, {"paths": {}, "derive": {}, "stages": []})
+    stage = {"id": "prep-spec", "release_inputs": ["ops/mvp2-release/inputs/x.json"]}
+    with pytest.raises(driver.Refusal, match="prep-spec: .*lacks .*inputs/x.json"):
+        driver.check_release_inputs(run, stage)
+    driver.check_release_inputs(
+        run, {"id": "ok", "release_inputs": [driver.BASELINE_INPUT]}
+    )
+
+
+def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
+    graph = json.loads(driver.GRAPH_DEFAULT.read_bytes())
+    named = {s["id"]: s.get("release_inputs", []) for s in graph["stages"]}
+    assert (
+        "ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json"
+        in named["baseline-spec"]
+    )
+    assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]

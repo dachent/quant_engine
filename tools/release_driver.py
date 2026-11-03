@@ -67,14 +67,6 @@ SCHEMA_DEFAULT = GRAPH_DEFAULT.with_name("release-stages.schema.json")
 STATE_NAME = "release-driver-state.json"
 TIMING_NAME = "release-driver-timing.log"
 BASELINE_INPUT = "acceptance/expected-baseline.json"
-# files the staging stages read from the release-inputs set (they are not in Git); a set that lacks
-# one refuses at the start of the run, not at the stage that first needs it
-REQUIRED_RELEASE_INPUTS = (
-    BASELINE_INPUT,
-    "ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json",
-    "ops/mvp2-release/inputs/current-epoch-crosswalk.json",
-    "ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json",
-)
 COMMIT_SCHEME = "git-commit-v1"
 TREE_SCHEME = "git-tree-v2"
 FULL_CEREMONY = "full"
@@ -229,15 +221,6 @@ class Run:
         try:
             inputs = self.release_inputs = load_release_inputs(root, pin)
             baseline = inputs.path(BASELINE_INPUT)
-            missing = [
-                name for name in REQUIRED_RELEASE_INPUTS if name not in inputs.paths
-            ]
-            if missing:
-                raise ReleaseInputsError(
-                    "the set lacks "
-                    + ", ".join(missing)
-                    + " (the staging stages read them)"
-                )
         except ReleaseInputsError as exc:
             if not self.offline or Path(root).exists():
                 raise Refusal(f"release inputs: {exc}") from exc
@@ -909,6 +892,26 @@ def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None
         _verify_upstream(run, run.stage(required), seen)
 
 
+def check_release_inputs(run: Run, stage: Mapping[str, Any]) -> None:
+    """The release-inputs files a stage reads (they are not in Git) are in the pinned set."""
+
+    wanted = stage.get("release_inputs")
+    if not wanted:
+        return
+    inputs = run.release_inputs
+    if inputs is None:
+        if run.offline:
+            return
+        raise Refusal(
+            f"{stage['id']} reads release inputs: the run names no release_inputs_root"
+        )
+    missing = [name for name in wanted if name not in inputs.paths]
+    if missing:
+        raise Refusal(
+            f"{stage['id']}: the release-inputs set lacks " + ", ".join(missing)
+        )
+
+
 def check_ready(
     run: Run,
     stage: Mapping[str, Any],
@@ -925,6 +928,7 @@ def check_ready(
         check_script_in_repo(run, stage, stage_argv(run, stage))
     check_probe_guard(run, stage)
     check_commit_gate(run, stage)
+    check_release_inputs(run, stage)
     if "only_mode" in stage and run.values["mode"] != stage["only_mode"]:
         raise Refusal(f"{stage['id']} runs only in {stage['only_mode']} mode")
     state = run.state["stages"]

@@ -278,10 +278,11 @@ the replica spec, a prepared release and unmoved pointers.
 
 ## Refusals before staging and before the attended run
 
-Inputs that left Git with the release-inputs cutover are required by the run, not by the stage that first
-reads them: a run config naming `release_inputs_root` refuses at the start when the pinned set lacks the
-expected baseline, the baseline declared-inputs file (`ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json`),
-the epoch crosswalk or the sleeve policy manifest. `prep-spec` reads the crosswalk and policy through that set
+Inputs that left Git with the release-inputs cutover are named by the stages that read them (`release_inputs`
+in the graph): `baseline-spec` needs the baseline declared-inputs file, `prep-spec` the epoch crosswalk, the
+sleeve policy manifest and the sleeve inputs (sleeve declared inputs, nested strategy tag map, disclosure inputs,
+timestamp delta result, Quantbase declared inputs). A pinned set that lacks one refuses at that stage before it
+runs, naming the file. `prep-spec` reads the crosswalk and policy through that set
 (`--release-inputs-root`, `--release-inputs-manifest-sha256`). The cycle manifest's `public_bundles` name the
 bundle roots (the directories that hold the generations), never a generation directory. The disclosure inputs'
 `predecessor_comparison` is checked against the COMMITTED `CURRENT_RELEASE.json` and panel (below), so once

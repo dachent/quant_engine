@@ -294,6 +294,9 @@
     },
     {
       "id": "baseline-spec",
+      "release_inputs": [
+        "ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json"
+      ],
       "requires": [
         "ledger"
       ],
@@ -578,6 +581,15 @@
     },
     {
       "id": "prep-spec",
+      "release_inputs": [
+        "ops/mvp2-release/inputs/current-epoch-crosswalk.json",
+        "ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json",
+        "ops/mvp2-release/inputs/sleeves/sleeve-declared-inputs.json",
+        "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json",
+        "ops/mvp2-release/inputs/sleeves/disclosure-inputs.json",
+        "ops/mvp2-release/inputs/sleeves/timestamp-delta-result.txt",
+        "ops/mvp2-release/inputs/sleeves/quantbase/declared-inputs.json"
+      ],
       "requires": [
         "pre-chain"
       ],
