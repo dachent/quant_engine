@@ -554,3 +554,40 @@ def test_cli_refuses_another_cutoff(
         )
         == 1
     )
+
+
+# -- test/tool resolution through the environment ---------------------------------------------
+def test_release_input_root_follows_the_environment(tmp_path: Path) -> None:
+    from quant_engine.core.release_inputs import (
+        ENV_PIN,
+        ENV_ROOT,
+        release_input_root,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    root = tmp_path / "inputs"
+    root.mkdir()
+    pin = _write(root)[1]
+    assert release_input_root(repo, {}) == repo  # neither set: the checkout itself
+    assert release_input_root(repo, {ENV_ROOT: str(root), ENV_PIN: pin}) == root
+    with pytest.raises(ReleaseInputsError, match="both"):
+        release_input_root(repo, {ENV_ROOT: str(root)})
+    with pytest.raises(ReleaseInputsError, match="differs from its pin"):
+        release_input_root(repo, {ENV_ROOT: str(root), ENV_PIN: "0" * 64})
+
+
+def test_unmanifested_release_input_under_the_root_refused(
+    inputs: tuple[Path, str],
+) -> None:
+    root, pin = inputs
+    extra = root / "ops/mvp2-release/inputs/hwm/stale.json"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"{}")
+    with pytest.raises(ReleaseInputsError, match="not in the pinned manifest"):
+        load_release_inputs(root, pin)
+    extra.unlink()
+    (root / "notes.txt").write_bytes(
+        b"not a release input path"
+    )  # other files do not matter
+    load_release_inputs(root, pin)

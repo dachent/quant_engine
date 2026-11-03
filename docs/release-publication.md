@@ -193,5 +193,16 @@ resolves them from a **release-inputs root outside the repository** instead.
 * The registry (`REGISTRY` in `release_inputs.py`) classifies tracked paths: `release-input` (leaves
   Git), `code-bound` (embeds the cutoff but is read by code from a fixed repo path; moving it needs a
   code change, so it still moves the tool identity), `policy` (stays).
-* Git holds synthetic fixtures only. Removing the tracked real copies is a separate, owner-timed
-  step (the R2.1 path still reads them); until then the gate profile does not engage.
+* **Cutover.** The 34 `release-input` files are no longer tracked: the real bytes live in a
+  release-inputs root outside Git (extracted with `tools/release_inputs.py extract`, pinned by its
+  manifest sha256), so a new cutoff no longer moves the tool identity and the data-only gate profile
+  can engage. The run config (`release_inputs_root`, `release_inputs_manifest_sha256`) or, for
+  `build_vertical.sh`, `RELEASE_INPUTS_ROOT` / `_MANIFEST_SHA256` / `_CUTOFF` point the tools at it.
+* **Tests that read real values** (`test_expected_baseline`, the real-baseline checks in
+  `test_validate_alignment`, the governed-input tests in `test_sleeve_disclosures`,
+  `test_build_sleeve_facts_release`, `test_attended_preparation` and
+  `test_portfolio_financial_mvp_contract`) resolve their inputs through
+  `quant_engine.core.release_input_root`. With `QE_RELEASE_INPUTS_ROOT` and
+  `QE_RELEASE_INPUTS_MANIFEST_SHA256` set they run against the verified root (a bad pin or a tampered
+  file fails the run); without them they are skipped, so CI (which holds no real data) does not run
+  them. Run them where the root is present, for example before each release.

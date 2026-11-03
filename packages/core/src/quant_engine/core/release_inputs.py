@@ -245,4 +245,47 @@ def load_release_inputs(root: Path | str, manifest_sha256: str) -> ReleaseInputs
                 f"release input {relative} differs from the manifest (tampered or stale)"
             )
         entries[relative] = str(row["sha256"])
+    # a release input present under the root but absent from the pinned manifest is bytes the pin
+    # does not cover (stale, added or tampered): refuse, so the bare root is safe to read from
+    for item in base.rglob("*"):
+        if item.is_file() or item.is_symlink():
+            relative = item.relative_to(base).as_posix()
+            if (
+                relative != MANIFEST_NAME
+                and relative not in entries
+                and classify(relative) == RELEASE_INPUT
+            ):
+                raise ReleaseInputsError(
+                    f"release input {relative} is under the root but not in the pinned manifest"
+                )
     return ReleaseInputs(base, pin, cutoff, entries)
+
+
+ENV_ROOT: Final = "QE_RELEASE_INPUTS_ROOT"
+ENV_PIN: Final = "QE_RELEASE_INPUTS_MANIFEST_SHA256"
+_LOADED: dict[tuple[str, str], ReleaseInputs] = {}
+
+
+def release_input_root(
+    repo_root: Path, environ: Mapping[str, str] | None = None
+) -> Path:
+    """The directory holding the cutoff-dependent inputs at their repo-relative paths.
+
+    With ``QE_RELEASE_INPUTS_ROOT`` and ``QE_RELEASE_INPUTS_MANIFEST_SHA256`` set, the pinned root
+    (verified once per process; a bad pin or a tampered file raises, never falls back). Without
+    them, ``repo_root``: a checkout that still tracks the files, or one where they are absent
+    (callers then see the files missing and skip).
+    """
+
+    import os
+
+    env = os.environ if environ is None else environ
+    root, pin = env.get(ENV_ROOT), env.get(ENV_PIN)
+    if not root and not pin:
+        return repo_root
+    if not root or not pin:
+        raise ReleaseInputsError(f"set both {ENV_ROOT} and {ENV_PIN}, or neither")
+    key = (root, pin)
+    if key not in _LOADED:
+        _LOADED[key] = load_release_inputs(root, pin)
+    return _LOADED[key].root
