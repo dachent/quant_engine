@@ -15,14 +15,42 @@ Files:
 
 | Input | Where it comes from |
 |---|---|
-| Cycle dates `cutoff`, `evaluated_on`, `captured_at_utc` | the cycle manifest (never `now()`) |
+| Cycle dates `cutoff`, `evaluated_on`, `captured_at_utc` | the cycle manifest (never `now()`); see "Capture timestamp" below for the accepted `captured_at_utc` forms |
 | Provider generations: root and which generation | the cycle manifest, per provider; `single` (the one generation under the root) or `explicit` (named id); the manifest sha256 is always pinned |
 | Finality-evidence files | the cycle manifest, `providers.<id>.finality_evidence`, required for every provider whose `finality_source` is not `GENERATION_MANIFEST` (matrixport, quantbase, schwab: a native file; ibkr: the Flex statement, which B1 also requires to be a source artifact of the selected manifest) |
 | Qualification and finality date | `providers.<id>.qualification` (required; the ledger validator is the authority on what is admissible) and `finalized_through` (required with a finality-evidence file, refused otherwise: a finite provider's date is derived from its manifest by B1) |
 | Strategy evidence, cost inputs, epoch admission policy, public bundle roots | the cycle manifest, pinned by sha256 (bundle roots are directories, resolved but not hashed) |
-| Predecessor release | `predecessor.release_id` (+ optional `release_manifest_sha256`) |
-| Canonical scratch root | `scratch` is a `{root_key, relative}` pair; the directory behind the root key is a run argument |
+| Predecessor release | `predecessor.release_id` (a plain name token as the schema defines it, not required to be a 64-hex id) and optional `release_manifest_sha256`. Both are copied into the resolved file and NOT verified against anything; B1 reads neither (it takes the predecessor ledger spec as a separate file) |
+| Canonical scratch root | `scratch` is a `{root_key, relative}` pair; the directory behind the root key is a run argument. `relative` must be a non-empty plain path: `.` is refused (`PATH_ESCAPES_ROOT`), so the scratch root is always a named directory beneath the root key, never the root itself |
 | Root keys to directories | the run: `--root KEY=DIR` (repeatable) or `--roots-file file.json` (`{"key": "dir"}`). Roots are absolute existing directories. |
+
+### Capture timestamp
+
+`captured_at_utc` is ISO-8601 with seconds, optional fractional seconds and a mandatory offset:
+`YYYY-MM-DDTHH:MM:SS[.f{1,9}](Z|+HH:MM|-HH:MM)`. The resolver converts it to UTC and keeps every
+microsecond the capture recorded; nothing is truncated or rounded.
+
+| Input | Resolved `captured_at_utc` |
+|---|---|
+| `2026-09-19T09:19:17Z` | `2026-09-19T09:19:17Z` |
+| `2026-09-19T09:19:17.369302Z` | `2026-09-19T09:19:17.369302Z` |
+| `2026-09-19T09:19:17.369302+00:00` | `2026-09-19T09:19:17.369302+00:00` |
+| `2026-09-19T04:19:17.369302-05:00` | `2026-09-19T09:19:17.369302+00:00` |
+| `2026-09-19T09:19:17.5Z` | `2026-09-19T09:19:17.500000Z` |
+
+Rules: a `Z` suffix stays `Z`; any numeric offset is converted to UTC and written `+00:00`; a
+non-zero fraction is written with six digits; a zero fraction is dropped. The two UTC spellings are
+different bytes, so to reproduce an existing run observation byte for byte, write the manifest value
+in the spelling that run observation used (the retained hand-built files used `+00:00`).
+A naive timestamp (no offset) is refused (`SCHEMA` from `validate`/`resolve`); an impossible date,
+time or offset is `DATE_INVALID`.
+
+Why microseconds are kept: the provider ledger's run-observation validator
+(`provider_ledger._utc_timestamp`) accepts any timezone-aware UTC ISO-8601 text and stores it
+verbatim, so microsecond precision survives into the run observation and its hash. A value finer
+than a microsecond (more than six fractional digits with a non-zero tail) is refused with
+`DATE_PRECISION_LOST` instead of being truncated: a downstream that cannot hold the precision must
+never receive a shortened value. Trailing zeros beyond six digits are not precision and are accepted.
 
 Every path is `{root_key, relative}`: `relative` uses `/`, has no `..`, no empty part, no drive
 letter, no leading slash. No absolute string appears in a manifest.
@@ -113,7 +141,9 @@ Every refusal is `release-cycle-manifest: FAIL: <CODE>: <detail>` on stderr, exi
 
 | Code | Raised when |
 |---|---|
-| `SCHEMA` | the manifest does not match its schema (unknown key, missing provider, bad date) |
+| `SCHEMA` | the manifest does not match its schema (unknown key, missing provider, malformed date, a timestamp without an offset) |
+| `DATE_INVALID` | `cutoff`, `evaluated_on`, `finalized_through` or `captured_at_utc` is not a real date or timestamp (impossible calendar date, time or offset) |
+| `DATE_PRECISION_LOST` | `captured_at_utc` carries a non-zero fraction finer than a microsecond, which the ledger cannot hold |
 | `DATE_ORDER` | `cutoff` is after `evaluated_on` |
 | `PATH_ESCAPES_ROOT` | a `relative` is absolute, has `..`, backslash, drive letter, empty part, or resolves (symlink) outside its root |
 | `UNKNOWN_ROOT` | a root key is not bound by the run |
@@ -129,6 +159,19 @@ Every refusal is `release-cycle-manifest: FAIL: <CODE>: <detail>` on stderr, exi
 | `OUTPUT_EXISTS` | `resolve --out` target exists (outputs are create-only) |
 | `RESOLVED_SHAPE` | internal: the produced file fails its own schema |
 | `INPUT` | unreadable or non-JSON input |
+
+## Reading the resolved cycle
+
+- `roots`, `scratch` and every provider path in the resolved file (`root`, `generation_dir`,
+  `manifest_path`, `finality_evidence.path`) are absolute strings written with forward slashes
+  (`Path.as_posix()`), whatever the host. A file written by a hand script on Windows used
+  backslashes: compare paths after normalising separators, and expect different file bytes (hence
+  different sha256) for the same content.
+- The resolver verifies the `cost_inputs` and `epoch_admission_policy` hashes and resolves
+  `public_bundles`, but B1 does not read them (B3, B4, B6 and B7 do). A successful B1 run says
+  nothing about those pins; `validate` with roots does.
+- The cycle manifest pins everything except two CLI inputs of B1: the predecessor ledger spec and the
+  provenance generation directory (see `docs/release-ledger-spec.md`).
 
 ## What each later block reads
 

@@ -337,6 +337,62 @@ def test_dates_and_timestamps_must_be_real(
     _refused(cycle, "DATE_INVALID")
 
 
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("2026-09-19T09:19:17Z", "2026-09-19T09:19:17Z"),
+        ("2026-09-19T09:19:17.369302Z", "2026-09-19T09:19:17.369302Z"),
+        ("2026-09-19T09:19:17.369302+00:00", "2026-09-19T09:19:17.369302+00:00"),
+        ("2026-09-19T09:19:17+00:00", "2026-09-19T09:19:17+00:00"),
+        ("2026-09-19T04:19:17.369302-05:00", "2026-09-19T09:19:17.369302+00:00"),
+        ("2026-09-19T23:30:00-05:00", "2026-09-20T04:30:00+00:00"),
+        ("2026-09-19T09:19:17.5Z", "2026-09-19T09:19:17.500000Z"),
+        ("2026-09-19T09:19:17.123456000Z", "2026-09-19T09:19:17.123456Z"),
+        ("2026-09-19T09:19:17.000000Z", "2026-09-19T09:19:17Z"),
+    ],
+)
+def test_capture_timestamps_keep_their_microseconds_in_utc(
+    cycle: dict[str, Any], given: str, expected: str
+) -> None:
+    cycle["manifest"]["captured_at_utc"] = given
+    assert _resolve(cycle)["captured_at_utc"] == expected
+
+
+def test_a_naive_capture_timestamp_is_refused(cycle: dict[str, Any]) -> None:
+    cycle["manifest"]["captured_at_utc"] = "2026-09-19T09:19:17.369302"
+    _refused(cycle, "SCHEMA")
+    with pytest.raises(tool.CycleManifestError) as info:
+        tool.normalize_capture_timestamp("2026-09-19T09:19:17", "captured_at_utc")
+    assert info.value.code == "DATE_INVALID"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-09-19T09:19:17.1234567Z", "2026-09-19T09:19:17.123456789+00:00"],
+)
+def test_capture_precision_finer_than_a_microsecond_is_refused_not_truncated(
+    cycle: dict[str, Any], value: str
+) -> None:
+    cycle["manifest"]["captured_at_utc"] = value
+    _refused(cycle, "DATE_PRECISION_LOST")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-09-19T09:19:17.5+99:00",
+        "2026-09-19T09:19:17.5+01:60",
+        "2026-09-19T09:19:17.5-24:00",
+        "2026-02-30T09:19:17.5Z",
+    ],
+)
+def test_an_impossible_capture_timestamp_or_offset_is_refused(
+    cycle: dict[str, Any], value: str
+) -> None:
+    cycle["manifest"]["captured_at_utc"] = value
+    _refused(cycle, "DATE_INVALID")
+
+
 def test_a_declared_finality_date_must_be_a_real_date(cycle: dict[str, Any]) -> None:
     cycle["manifest"]["providers"]["schwab"]["finalized_through"] = "2026-13-01"
     _refused(cycle, "DATE_INVALID")
