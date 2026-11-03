@@ -245,6 +245,19 @@ def load_release_inputs(root: Path | str, manifest_sha256: str) -> ReleaseInputs
                 f"release input {relative} differs from the manifest (tampered or stale)"
             )
         entries[relative] = str(row["sha256"])
+    # a release input present under the root but absent from the pinned manifest is bytes the pin
+    # does not cover (stale, added or tampered): refuse, so the bare root is safe to read from
+    for item in base.rglob("*"):
+        if item.is_file() or item.is_symlink():
+            relative = item.relative_to(base).as_posix()
+            if (
+                relative != MANIFEST_NAME
+                and relative not in entries
+                and classify(relative) == RELEASE_INPUT
+            ):
+                raise ReleaseInputsError(
+                    f"release input {relative} is under the root but not in the pinned manifest"
+                )
     return ReleaseInputs(base, pin, cutoff, entries)
 
 

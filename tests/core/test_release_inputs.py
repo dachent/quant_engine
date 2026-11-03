@@ -568,3 +568,19 @@ def test_release_input_root_follows_the_environment(tmp_path: Path) -> None:
         release_input_root(repo, {ENV_ROOT: str(root)})
     with pytest.raises(ReleaseInputsError, match="differs from its pin"):
         release_input_root(repo, {ENV_ROOT: str(root), ENV_PIN: "0" * 64})
+
+
+def test_unmanifested_release_input_under_the_root_refused(
+    inputs: tuple[Path, str],
+) -> None:
+    root, pin = inputs
+    extra = root / "ops/mvp2-release/inputs/hwm/stale.json"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"{}")
+    with pytest.raises(ReleaseInputsError, match="not in the pinned manifest"):
+        load_release_inputs(root, pin)
+    extra.unlink()
+    (root / "notes.txt").write_bytes(
+        b"not a release input path"
+    )  # other files do not matter
+    load_release_inputs(root, pin)
