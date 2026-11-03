@@ -835,7 +835,7 @@ def test_the_spec_is_written_create_only_and_checked(world: World) -> None:
     seen, check = _calls()
     out = world.tmp / "out" / "prep-spec.json"
     result = tool.write_prep_spec(world.prep(), out, check)
-    assert seen == [(out, CUTOFF, EVALUATED)]
+    assert seen == [(out.with_name(out.name + ".candidate"), CUTOFF, EVALUATED)]
     assert result["sha256"] == _sha(out.read_bytes())
     assert out.read_bytes().endswith(b"\n") and b"\r" not in out.read_bytes()
     tool.write_prep_spec(world.prep(), out, check)  # an identical re-run is accepted
@@ -996,6 +996,8 @@ def test_cli_prep_spec_runs_the_attended_planning_path_and_renames_a_refused_spe
     code = tool.main(args)
     err = capsys.readouterr().err
     assert code == 1 and "SELF_CHECK" in err and "AttendedPreparationError" in err
+    # the consumer verified every pin of the spec and failed later, on the synthetic generations
+    assert "pin differs" not in err and "is unavailable" not in err
     assert not out.exists() and out.with_name(out.name + ".rejected").is_file()
     out.with_name(out.name + ".rejected").unlink()
     assert tool.main([*args, "--check", "none"]) == 0
@@ -1057,3 +1059,37 @@ def test_cli_prep_spec_accepts_the_named_inputs(
     )
     assert code == 0, capsys.readouterr().err
     assert json.loads(out.read_bytes())["vendor_gap_fills"] == _pin(gap)
+
+
+def test_the_resolved_policy_pin_is_verified_before_repinning(world: World) -> None:
+    (world.data / "epoch-policy.json").write_bytes(b"policy changed after resolve")
+    assert "epoch admission policy" in _refusal("HASH_MISMATCH", world.prep)
+
+
+def test_the_spec_is_not_published_until_its_check_passed(world: World) -> None:
+    out = world.tmp / "out" / "prep-spec.json"
+    seen: list[bool] = []
+
+    def check(path: Path, cutoff: str, evaluated_on: str) -> None:
+        seen.append(out.exists())
+        assert path.is_file() and path != out
+
+    tool.write_prep_spec(world.prep(), out, check)
+    assert seen == [False] and out.is_file()
+    assert not out.with_name(out.name + ".candidate").exists()
+
+
+def test_the_selected_inputs_are_read_by_the_real_attended_consumer(
+    world: World,
+) -> None:
+    import portfolio_attended_preparation as consumer
+
+    authorities = consumer.selected_history_authorities(world.selected()["files"])
+    assert set(authorities) == {
+        "provider_admission_receipt_path",
+        "financial_input_contract_path",
+        "provider_ledger_manifest_path",
+        "provider_ledger_catalog_path",
+        "portfolio123_version_evidence_path",
+    }
+    assert all(path.is_file() for path in authorities.values())

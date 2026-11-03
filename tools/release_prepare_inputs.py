@@ -877,6 +877,14 @@ def build_prep_spec(
     spec["epoch_admission_policy"] = _pin_file(
         roots, policy["path"], "epoch admission policy"
     )
+    if (
+        spec["epoch_admission_policy"]["sha256"] != policy["sha256"]
+        or spec["epoch_admission_policy"]["size_bytes"] != policy["size_bytes"]
+    ):
+        raise PrepareError(
+            "HASH_MISMATCH",
+            "epoch admission policy changed since the cycle was resolved",
+        )
     repo = Path(os.path.realpath(repo_root))
     spec["epoch_crosswalk_template"] = _pin_file(
         roots, (repo / CROSSWALK).as_posix(), "epoch crosswalk"
@@ -993,13 +1001,26 @@ def write_prep_spec(
     check: Callable[[Path, str, str], None] | None = _attended_plan_check,
 ) -> dict[str, Any]:
     data = _dumps(spec)
-    _put(out, data)
-    if check is not None:
-        try:
-            check(out, spec["financial_data_cutoff"], spec["evaluation_date"])
-        except Exception as exc:
-            os.replace(out, out.with_name(out.name + ".rejected"))
-            raise PrepareError("SELF_CHECK", f"{type(exc).__name__}: {exc}") from exc
+    if check is None:
+        _put(out, data)
+        return {"preparation_spec": out.as_posix(), "sha256": _sha256(data)}
+    if out.exists():
+        # an earlier complete run: it must be these bytes, and it is checked again in place
+        _put(out, data)
+        candidate = out
+    else:
+        # the final path appears only after the check passed, so a crash mid-check leaves no
+        # spec that looks validated
+        candidate = out.with_name(out.name + ".candidate")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_bytes(data)
+    try:
+        check(candidate, spec["financial_data_cutoff"], spec["evaluation_date"])
+    except Exception as exc:
+        os.replace(candidate, out.with_name(out.name + ".rejected"))
+        raise PrepareError("SELF_CHECK", f"{type(exc).__name__}: {exc}") from exc
+    if candidate != out:
+        os.replace(candidate, out)
     return {"preparation_spec": out.as_posix(), "sha256": _sha256(data)}
 
 
