@@ -46,21 +46,25 @@ class _HistoryAuthorities(TypedDict):
 # This is the executable preparation graph.  The controller graph derives its
 # preparation view from this declaration; do not maintain a second diagram.
 PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    "selected-history-normalization": (),
+    "sleeve-facts": (),
+    "selected-history-normalization": ("sleeve-facts",),
     "dependence": ("selected-history-normalization",),
     "plan-live-only": ("selected-history-normalization",),
     "plan-live-plus-backtest": ("selected-history-normalization",),
+    "history-control": ("sleeve-facts",),
     "ledger": ("dependence", "plan-live-only", "plan-live-plus-backtest"),
     "baseline": ("ledger",),
-    "epoch": ("ledger", "baseline"),
+    "epoch": ("ledger", "baseline", "sleeve-facts", "history-control"),
     "hwm": ("epoch", "ledger", "baseline"),
     "capital": ("epoch", "ledger"),
     "attribution": ("ledger", "plan-live-only", "baseline"),
     "final-handoff": (
+        "sleeve-facts",
         "selected-history-normalization",
         "dependence",
         "plan-live-only",
         "plan-live-plus-backtest",
+        "history-control",
         "ledger",
         "baseline",
         "epoch",
@@ -110,6 +114,7 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "provider_ledger": "tools/provider_ledger.py",
     "nested_tag_map": "tools/nested_strategy_tag_map.py",
     "sleeve_disclosures": "tools/sleeve_disclosures.py",
+    "strategy_basis": "tools/strategy_basis.py",
     "quantbase_fund_facts": "tools/build_quantbase_fund_facts.py",
     "rebind_current_epoch_crosswalk": "tools/rebind_current_epoch_crosswalk.py",
     "release_builder": "tools/portfolio_release_builder.py",
@@ -126,14 +131,33 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
 }
 
 _PREPARATION_STAGE_CODE = {
+    "sleeve-facts": (
+        "attended_preparation",
+        "sleeve_facts_release",
+        "sleeve_account_facts",
+        "quantbase_fund_facts",
+        "nested_tag_map",
+        "sleeve_inputs",
+        "sleeve_ledger",
+        "sleeve_nav",
+    ),
     "selected-history-normalization": (
         "attended_preparation",
         "target_series",
         "layered_history_repository_dependencies",
+        "strategy_basis",
+        "account_strategy_manifest",
     ),
     "dependence": ("attended_preparation", "current_dependence"),
     "plan-live-only": ("attended_preparation", "current_plan"),
     "plan-live-plus-backtest": ("attended_preparation", "current_plan"),
+    "history-control": (
+        "attended_preparation",
+        "target_series",
+        "layered_history_repository_dependencies",
+        "account_strategy_manifest",
+        "current_plan",
+    ),
     "ledger": (
         "attended_preparation",
         "release_builder",
@@ -165,6 +189,7 @@ _PREPARATION_STAGE_CODE = {
         "quantbase_fund_facts",
         "nested_tag_map",
         "sleeve_disclosures",
+        "strategy_basis",
         "sleeve_inputs",
         "sleeve_ledger",
         "sleeve_nav",
@@ -199,10 +224,12 @@ _PREPARATION_STAGE_CODE = {
 }
 
 _PREPARATION_STAGE_POLICY = {
+    "sleeve-facts": (),
     "selected-history-normalization": (),
     "dependence": ("dependence", "dependence_schema"),
     "plan-live-only": (),
     "plan-live-plus-backtest": (),
+    "history-control": (),
     "ledger": (),
     "baseline": ("hwm_legacy",),
     "epoch": ("flow_classification", "account_manifest_schema"),
@@ -213,10 +240,16 @@ _PREPARATION_STAGE_POLICY = {
 }
 
 _PREPARATION_STAGE_OUTPUTS = {
+    "sleeve-facts": ("sleeve_facts",),
     "selected-history-normalization": ("history_source",),
     "dependence": ("dependence_root", "selected_path"),
     "plan-live-only": ("plan_root",),
     "plan-live-plus-backtest": ("plan_root",),
+    "history-control": (
+        "control_history",
+        "control_plan_live_only",
+        "control_plan_live_plus_backtest",
+    ),
     "ledger": ("ledger_generation", "recipe_path", "stage_result"),
     "baseline": ("baseline_generation", "stage_result"),
     "epoch": (
@@ -693,10 +726,121 @@ def _require_executing_history_tool_matches_head(history: ModuleType) -> None:
         )
 
 
+def _strategy_basis_declaration_path(config: Mapping[str, Any]) -> Path | None:
+    """The pinned ``strategy-basis-declaration/1`` file, if the release declares one.
+
+    The declaration is the single switch of the #624 sleeve-basis restatement: absent, no
+    stage reads anything about it and every output is what it was before.  It is pinned
+    either by the release configuration (``strategy_basis_declaration``) or by the sleeve
+    policy manifest (``strategy-basis-declaration``); a release that names both must name
+    the same bytes.
+    """
+
+    pin = config.get("strategy_basis_declaration")
+    section = config.get("sleeve_facts")
+    configured: Path | None = None
+    if pin is not None:
+        if section is None:
+            raise AttendedPreparationError(
+                "a strategy basis declaration requires the sleeve facts configuration"
+            )
+        configured = _pin(pin, "strategy basis declaration")
+    policy: Path | None = None
+    if isinstance(section, Mapping) and "policy_manifest" in section:
+        policy = _policy_basis_declaration_path(section)
+    if configured is not None and policy is not None:
+        if configured.read_bytes() != policy.read_bytes():
+            raise AttendedPreparationError(
+                "the configured and the policy strategy basis declarations differ"
+            )
+    return configured if configured is not None else policy
+
+
+def _implementation_sleeve_basis_path(config: Mapping[str, Any]) -> Path | None:
+    """The pinned ``implementation-sleeve-basis/1`` contract, if the release carries one.
+
+    It is built from the declaration, the sleeve facts, the model capture and the retained
+    implementation contracts (``portfolio_implementation_sleeve_basis``), so a release that
+    names it must also declare the restatement it belongs to.  Absent, the report keeps the
+    account-basis implementation bridge as it was.
+    """
+
+    pin = config.get("implementation_sleeve_basis")
+    if pin is None:
+        return None
+    if _strategy_basis_declaration_path(config) is None:
+        raise AttendedPreparationError(
+            "an implementation sleeve basis requires a strategy basis declaration"
+        )
+    return _pin(pin, "implementation sleeve basis")
+
+
+def _strategy_basis_facts_path(
+    declaration_path: Path | None, facts_paths: Sequence[Path]
+) -> Path | None:
+    """The residual-parent sleeve facts a declaration restates from (exactly one)."""
+
+    if declaration_path is None:
+        return None
+    selected = []
+    for path in facts_paths:
+        try:
+            artifact = json.loads(path.read_bytes()).get("artifact_id")
+        except (OSError, ValueError, AttributeError) as exc:
+            raise AttendedPreparationError(
+                "selected sleeve facts are unreadable"
+            ) from exc
+        if artifact == "sleeve-account-facts":
+            selected.append(path)
+    if len(selected) != 1:
+        raise AttendedPreparationError(
+            "a strategy basis declaration needs exactly one residual-parent sleeve facts"
+        )
+    return selected[0]
+
+
+def _history_basis_block(history_root: Path) -> Mapping[str, Any] | None:
+    """The strategy-basis block a retained layered history records, if any."""
+
+    manifest_path = history_root / "generation.json"
+    if not manifest_path.is_file() and not manifest_path.is_symlink():
+        return None
+    manifest = _read(manifest_path, "retained history manifest")
+    block = manifest.get("strategy_basis_restatement")
+    if block is not None and not isinstance(block, Mapping):
+        raise AttendedPreparationError("retained history strategy basis differs")
+    return block
+
+
+def _history_basis_differs(
+    history_root: Path,
+    declaration_path: Path | None,
+    facts_path: Path | None,
+) -> bool:
+    """Whether the retained history is not the one this declaration and facts describe."""
+
+    block = _history_basis_block(history_root)
+    if declaration_path is None:
+        return block is not None
+    if block is None:
+        return True
+    declaration = hashlib.sha256(declaration_path.read_bytes()).hexdigest()
+    if block.get("declaration_sha256") != declaration:
+        return True
+    if facts_path is None:
+        # planning time: the facts are built by the run, which compares them again
+        return False
+    return bool(
+        block.get("sleeve_facts_sha256")
+        != hashlib.sha256(facts_path.read_bytes()).hexdigest()
+    )
+
+
 def _retained_history_requires_rebuild(
     history_root: Path,
     contract_path: Path,
     authorities: _HistoryAuthorities,
+    declaration_path: Path | None = None,
 ) -> bool:
     """Distinguish stale code- or ledger-bound derived history from invalid evidence.
 
@@ -735,6 +879,11 @@ def _retained_history_requires_rebuild(
             raise AttendedPreparationError(
                 "retained layered history is invalid"
             ) from exc
+    if _history_basis_differs(history_root, declaration_path, None):
+        # a history restated for another declaration (or none) is code-bound staleness
+        # in the same sense: rebuild it from the frozen selected bytes
+        _require_executing_history_tool_matches_head(history)
+        return True
     return False
 
 
@@ -744,6 +893,10 @@ def _rebuild_layered_history(
     release_commit: str,
     contract_path: Path,
     authorities: _HistoryAuthorities,
+    *,
+    declaration_path: Path | None = None,
+    sleeve_facts_path: Path | None = None,
+    tag_map_path: Path | None = None,
 ) -> Path:
     """Regenerate only stale code-bound history from the frozen selected bytes."""
 
@@ -764,6 +917,12 @@ def _rebuild_layered_history(
     if not isinstance(kwargs.get("as_of_date"), str):
         raise AttendedPreparationError("selected history cutoff differs")
     kwargs["repository_sha"] = release_commit
+    if declaration_path is not None:
+        # the sleeve live segment of every declared strategy replaces the parent
+        # account's in the rebuilt history (#624); without it the kwargs are unchanged
+        kwargs["strategy_basis_declaration_path"] = declaration_path
+        kwargs["sleeve_facts_path"] = sleeve_facts_path
+        kwargs["nested_tag_map_path"] = tag_map_path
 
     build_history = cast(
         Callable[..., tuple[dict[str, bytes], bytes]],
@@ -991,7 +1150,10 @@ def _validated_inputs(
         str(config["retained_verified_generations"]["history"]["root"])
     ).resolve()
     rebuild_required = _retained_history_requires_rebuild(
-        history_root, contract, history_authorities
+        history_root,
+        contract,
+        history_authorities,
+        _strategy_basis_declaration_path(config),
     )
     if not rebuild_required:
         for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
@@ -1328,6 +1490,54 @@ def _sleeve_tag_map_path(section: object) -> Path | None:
     return policy.parent / str(pin["tag_map"]["path"])
 
 
+def _policy_basis_declaration_path(section: object) -> Path | None:
+    """The declaration the sleeve policy manifest pins (branch P), restated to their sleeve basis.
+
+    None when the policy manifest pins none: the release then keeps every
+    strategy on its baseline basis, byte for byte.  A pinned declaration that
+    differs from its pin, or is not a valid declaration, is refused.
+    """
+
+    if section is None:
+        return None
+    if not _sleeve_section_shape_ok(section):
+        raise AttendedPreparationError("sleeve facts configuration differs")
+    assert isinstance(section, Mapping)
+    import strategy_basis
+
+    policy = _pin(section["policy_manifest"], "sleeve policy")
+    manifest = _read(policy, "sleeve policy manifest")
+    pin = manifest.get("strategy-basis-declaration")
+    if pin is None:
+        return None
+    if not isinstance(pin, Mapping) or set(pin) != {"path", "sha256", "size_bytes"}:
+        raise AttendedPreparationError("strategy basis declaration pin differs")
+    relative = pin.get("path")
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        raise AttendedPreparationError("strategy basis declaration pin differs")
+    path = (policy.parent / relative).resolve()
+    try:
+        path.relative_to(policy.parent.resolve())
+    except ValueError as exc:
+        raise AttendedPreparationError(
+            "strategy basis declaration escapes the sleeve policy directory"
+        ) from exc
+    content = path.read_bytes() if path.is_file() and not path.is_symlink() else b""
+    if hashlib.sha256(content).hexdigest() != pin.get("sha256") or len(
+        content
+    ) != pin.get("size_bytes"):
+        raise AttendedPreparationError(
+            "strategy basis declaration differs from its pin"
+        )
+    try:
+        strategy_basis.load_declaration(content)
+    except strategy_basis.StrategyBasisError as exc:
+        raise AttendedPreparationError(
+            f"strategy basis declaration is refused: {exc}"
+        ) from exc
+    return path
+
+
 def _build_sleeve_disclosure_sources(
     section: object,
     *,
@@ -1484,6 +1694,15 @@ def _preparation_input_identity(
     }
 
 
+def _strategy_basis_stage_input(section: object) -> dict[str, Any]:
+    """The pinned basis declaration's identity, when the sleeve policy pins one."""
+
+    if not isinstance(section, Mapping) or "policy_manifest" not in section:
+        return {}
+    path = _policy_basis_declaration_path(section)
+    return {} if path is None else {"strategy_basis_declaration": _definition(path)}
+
+
 def _preparation_stage_inputs(
     config: Mapping[str, Any], release_commit: str
 ) -> dict[str, dict[str, Any]]:
@@ -1492,9 +1711,25 @@ def _preparation_stage_inputs(
     common = {"source_selection": config["source_selection"]}
     plans = config["plans"]
     return {
+        "sleeve-facts": {
+            **(
+                {"sleeve_policy_manifest": config["sleeve_facts"]["policy_manifest"]}
+                if isinstance(config.get("sleeve_facts"), Mapping)
+                and "policy_manifest" in config["sleeve_facts"]
+                else {}
+            ),
+            "provider_ledger_generation_root": config[
+                "provider_ledger_generation_root"
+            ],
+        },
         "selected-history-normalization": {
             **common,
             "history": config["retained_verified_generations"]["history"],
+            **(
+                {"strategy_basis_declaration": config["strategy_basis_declaration"]}
+                if config.get("strategy_basis_declaration") is not None
+                else _strategy_basis_stage_input(config.get("sleeve_facts"))
+            ),
         },
         "dependence": {
             **common,
@@ -1502,6 +1737,16 @@ def _preparation_stage_inputs(
             "dependence_selection_template": config["dependence_selection_template"],
         },
         "plan-live-only": {**common, "plan": plans["LIVE_ONLY"]},
+        "history-control": {
+            **common,
+            "history": config["retained_verified_generations"]["history"],
+            "plans": {mode: plans[mode] for mode in sorted(plans)},
+            **(
+                {"strategy_basis_declaration": config["strategy_basis_declaration"]}
+                if config.get("strategy_basis_declaration") is not None
+                else _strategy_basis_stage_input(config.get("sleeve_facts"))
+            ),
+        },
         "plan-live-plus-backtest": {
             **common,
             "plan": plans["LIVE_PLUS_BACKTEST"],
@@ -1545,6 +1790,12 @@ def _preparation_stage_inputs(
                 {"sleeve_policy_manifest": config["sleeve_facts"]["policy_manifest"]}
                 if isinstance(config.get("sleeve_facts"), Mapping)
                 and "policy_manifest" in config["sleeve_facts"]
+                else {}
+            ),
+            **_strategy_basis_stage_input(config.get("sleeve_facts")),
+            **(
+                {"implementation_sleeve_basis": config["implementation_sleeve_basis"]}
+                if config.get("implementation_sleeve_basis") is not None
                 else {}
             ),
         },
@@ -1847,6 +2098,10 @@ def _preserve_uncheckpointed_stage(root: Path, stage: str) -> None:
     """Keep incomplete local producer bytes before a create-only retry."""
 
     paths = {
+        "sleeve-facts": (
+            root / "preparation" / "sleeve-facts",
+            root / "preparation" / "sleeve-facts-selection.json",
+        ),
         "selected-history-normalization": (root / "preparation" / "history",),
         "dependence": (
             root / "preparation" / "dependence",
@@ -1855,6 +2110,11 @@ def _preserve_uncheckpointed_stage(root: Path, stage: str) -> None:
         "plan-live-only": (root / "preparation" / "plans" / "live_only",),
         "plan-live-plus-backtest": (
             root / "preparation" / "plans" / "live_plus_backtest",
+        ),
+        "history-control": (
+            root / "preparation" / "history-control",
+            root / "preparation" / "plans-control",
+            root / "preparation" / "history-control-not-applicable.json",
         ),
         "ledger": (
             root / "preparation" / "staging-recipe.json",
@@ -2022,17 +2282,62 @@ def _prepare_attended_inputs(
     history_source = Path(
         str(config["retained_verified_generations"]["history"]["root"])
     ).resolve()
+    # The sleeve facts need only the selected provider-ledger generation, so they are
+    # built before the history, dependence and plans: a declared strategy's history
+    # must carry its sleeve's live segment (#624), which is derived from them.
+    sleeve_facts_root = root / "preparation" / "sleeve-facts"
+    sleeve_selection_path = root / "preparation" / "sleeve-facts-selection.json"
+    sleeve_checkpoint = reuse("sleeve-facts")
+    if sleeve_checkpoint is not None:
+        sleeve_facts_paths = tuple(
+            _pin(definition, "selected sleeve facts")
+            for definition in sleeve_checkpoint["sleeve_facts"]
+        )
+    else:
+        sleeve_facts_root.mkdir(parents=True, exist_ok=True)
+        sleeve_facts_paths = _build_sleeve_facts(
+            config.get("sleeve_facts"),
+            ledger_generation_dir=ledger_source,
+            destination=sleeve_facts_root,
+        )
+        sleeve_definitions = [_definition(path) for path in sleeve_facts_paths]
+        _write(
+            sleeve_selection_path,
+            {"schema_version": 1, "sleeve_facts": sleeve_definitions},
+        )
+        checkpoint(
+            "sleeve-facts",
+            {"sleeve_facts": sleeve_definitions},
+            {"sleeve_facts": sleeve_selection_path},
+        )
+    basis_declaration_path = _strategy_basis_declaration_path(config)
+    basis_facts_path = _strategy_basis_facts_path(
+        basis_declaration_path, sleeve_facts_paths
+    )
     history = reuse("selected-history-normalization")
     if history is not None:
         history_source = Path(str(history["history_source"])).resolve()
     else:
-        if plan["history_rebuild_required"]:
+        if plan["history_rebuild_required"] or _history_basis_differs(
+            history_source, basis_declaration_path, basis_facts_path
+        ):
             history_source = _rebuild_layered_history(
                 selection,
                 root / "preparation" / "history",
                 release_commit,
                 contract,
                 history_authorities,
+                **(
+                    {}
+                    if basis_declaration_path is None
+                    else {
+                        "declaration_path": basis_declaration_path,
+                        "sleeve_facts_path": basis_facts_path,
+                        "tag_map_path": _sleeve_tag_map_path(
+                            config.get("sleeve_facts")
+                        ),
+                    }
+                ),
             )
         checkpoint(
             "selected-history-normalization",
@@ -2081,13 +2386,12 @@ def _prepare_attended_inputs(
             {"dependence_root": dependence_root, "selected_path": selected_path},
         )
 
-    plan_roots: dict[str, Path] = {}
-    for mode, definition in config["plans"].items():
-        stage = "plan-live-only" if mode == "LIVE_ONLY" else "plan-live-plus-backtest"
-        plan_checkpoint = reuse(stage)
-        if plan_checkpoint is not None:
-            plan_roots[mode] = Path(str(plan_checkpoint["plan_root"])).resolve()
-            continue
+    def write_plan(
+        mode: str,
+        definition: Mapping[str, Any],
+        history_path: Path,
+        destination: Path,
+    ) -> Path:
         market = {
             key: _pin(definition[key], f"{mode} {key}")
             for key in (
@@ -2099,11 +2403,11 @@ def _prepare_attended_inputs(
             )
         }
         result = plans.write_bundle(
-            root / "preparation" / "plans" / mode.lower(),
+            destination,
             plan_path=_pin(definition["plan"], f"{mode} plan"),
             catalog_path=_pin(definition["catalog"], f"{mode} catalog"),
             financial_mvp_contract_path=contract,
-            layered_history_generation_path=history_source,
+            layered_history_generation_path=history_path,
             base_spec_path=_pin(definition["base_spec_template"], f"{mode} base spec"),
             base_source_root=Path(str(definition["base_source_template_root"])),
             market_paths=market,
@@ -2124,9 +2428,85 @@ def _prepare_attended_inputs(
             ),
             **history_authorities,
         )
-        plan_root = Path(str(result["destination"])).resolve()
+        return Path(str(result["destination"])).resolve()
+
+    plan_roots: dict[str, Path] = {}
+    for mode, definition in config["plans"].items():
+        stage = "plan-live-only" if mode == "LIVE_ONLY" else "plan-live-plus-backtest"
+        plan_checkpoint = reuse(stage)
+        if plan_checkpoint is not None:
+            plan_roots[mode] = Path(str(plan_checkpoint["plan_root"])).resolve()
+            continue
+        plan_root = write_plan(
+            mode,
+            definition,
+            history_source,
+            root / "preparation" / "plans" / mode.lower(),
+        )
         checkpoint(stage, {"plan_root": str(plan_root)}, {"plan_root": plan_root})
         plan_roots[mode] = plan_root
+
+    # The lens control (#624): the same plans over the declaration-free layered history,
+    # built here from the same ledger so the release can recompute its lens-moves table from
+    # its own roots.  Without a declaration the stage records that it does not apply.
+    control_plan_roots: dict[str, Path] = {}
+    control_checkpoint = reuse("history-control")
+    if control_checkpoint is not None:
+        control_plan_roots = {
+            str(mode): Path(str(path)).resolve()
+            for mode, path in dict(control_checkpoint.get("plan_roots", {})).items()
+        }
+    elif basis_declaration_path is None:
+        marker = root / "preparation" / "history-control-not-applicable.json"
+        _write(
+            marker,
+            {
+                "schema_version": 1,
+                "status": "NOT_APPLICABLE",
+                "reason": "no strategy basis declaration",
+            },
+        )
+        checkpoint(
+            "history-control",
+            {"plan_roots": {}},
+            {
+                "control_history": marker,
+                "control_plan_live_only": marker,
+                "control_plan_live_plus_backtest": marker,
+            },
+        )
+    else:
+        control_history = _rebuild_layered_history(
+            selection,
+            root / "preparation" / "history-control",
+            release_commit,
+            contract,
+            history_authorities,
+        )
+        control_plan_roots = {
+            mode: write_plan(
+                mode,
+                definition,
+                control_history,
+                root / "preparation" / "plans-control" / mode.lower(),
+            )
+            for mode, definition in config["plans"].items()
+        }
+        checkpoint(
+            "history-control",
+            {
+                "plan_roots": {
+                    mode: str(path) for mode, path in control_plan_roots.items()
+                }
+            },
+            {
+                "control_history": control_history,
+                "control_plan_live_only": control_plan_roots["LIVE_ONLY"],
+                "control_plan_live_plus_backtest": control_plan_roots[
+                    "LIVE_PLUS_BACKTEST"
+                ],
+            },
+        )
 
     recipe_path = root / "preparation" / "staging-recipe.json"
     ledger_checkpoint = reuse("ledger")
@@ -2285,17 +2665,8 @@ def _prepare_attended_inputs(
             )
             _write(path, receipt)
             receipt_paths[artifact_id] = path
-        sleeve_facts_root = root / "preparation" / "sleeve-facts"
-        sleeve_facts_root.mkdir(parents=True, exist_ok=True)
-        sleeve_facts_paths = _build_sleeve_facts(
-            config.get("sleeve_facts"),
-            ledger_generation_dir=root
-            / "stages"
-            / "ledger"
-            / "generations"
-            / str(ledger_result["generation_id"]),
-            destination=sleeve_facts_root,
-        )
+        # the facts were built before the history (same selected ledger generation);
+        # the epoch manifest binds them to the staged ledger's provider generations
         disclosure_sources_path = _build_sleeve_disclosure_sources(
             config.get("sleeve_facts"),
             facts_paths=sleeve_facts_paths,
@@ -2379,6 +2750,15 @@ def _prepare_attended_inputs(
             evaluated_on=evaluated_on,
             nested_tag_map_path=_sleeve_tag_map_path(config.get("sleeve_facts")),
             sleeve_disclosure_sources_path=disclosure_sources_path,
+            strategy_basis_path=_strategy_basis_declaration_path(config),
+            sleeve_facts_path=(
+                basis_facts_path if basis_declaration_path is not None else None
+            ),
+            implementation_sleeve_basis_path=_implementation_sleeve_basis_path(config),
+            decomposition_control_plan_bundle=control_plan_roots.get("LIVE_ONLY"),
+            hybrid_decomposition_control_plan_bundle=control_plan_roots.get(
+                "LIVE_PLUS_BACKTEST"
+            ),
         )
         checkpoint(
             "epoch",

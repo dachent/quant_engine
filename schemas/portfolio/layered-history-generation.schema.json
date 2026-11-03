@@ -68,6 +68,46 @@
         "financial_cutoff": {"type": "string", "format": "date"}
       }
     },
+    "strategy_basis_restatement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "declaration", "declaration_sha256", "sleeve_facts", "sleeve_facts_sha256", "strategies",
+        "tag_map", "parent_account_id", "parent_ledger_generation_id", "tag_map_sha256"
+      ],
+      "properties": {
+        "tag_map": {"type": "string", "minLength": 1},
+        "parent_account_id": {"type": "string", "minLength": 1},
+        "parent_ledger_generation_id": {"type": "string", "minLength": 1},
+        "tag_map_sha256": {"$ref": "#/$defs/sha256"},
+        "declaration": {"type": "string", "minLength": 1},
+        "declaration_sha256": {"$ref": "#/$defs/sha256"},
+        "sleeve_facts": {"type": "string", "minLength": 1},
+        "sleeve_facts_sha256": {"$ref": "#/$defs/sha256"},
+        "strategies": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "account_id", "observed_end", "observed_start", "opening_date",
+              "return_observations", "series_id", "series_sha256", "strategy_id"
+            ],
+            "properties": {
+              "account_id": {"type": "string", "minLength": 1},
+              "observed_end": {"type": "string", "format": "date"},
+              "observed_start": {"type": "string", "format": "date"},
+              "opening_date": {"type": "string", "format": "date"},
+              "return_observations": {"type": "integer", "minimum": 1},
+              "series_id": {"type": "string", "minLength": 1},
+              "series_sha256": {"$ref": "#/$defs/sha256"},
+              "strategy_id": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
     "current_source_admission": {
       "type": "object",
       "additionalProperties": false,
