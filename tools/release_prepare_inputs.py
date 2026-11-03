@@ -44,6 +44,7 @@ import re
 import sys
 from typing import Any
 
+from quant_engine.core import ReleaseInputsError, load_release_inputs
 import release_cycle_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -298,15 +299,46 @@ def load_resolved(path: Path, sha256: str | None = None) -> dict[str, Any]:
     return dict(value)
 
 
-def declared_roots(resolved: Mapping[str, Any], repo_root: Path) -> Roots:
+def declared_roots(
+    resolved: Mapping[str, Any],
+    repo_root: Path,
+    release_inputs_root: Path | None = None,
+) -> Roots:
     bases = [Path(p) for p in resolved["roots"].values()]
     bases += [Path(resolved["scratch"]), repo_root]
+    if release_inputs_root is not None:
+        bases.append(Path(os.path.realpath(release_inputs_root)))
     for base in bases:
         if not base.is_absolute() or not base.is_dir():
             raise PrepareError(
                 "ROOT_MISSING", f"declared root is not a directory: {base}"
             )
     return Roots(bases)
+
+
+def _release_inputs(root: Path | None, manifest_sha256: str | None) -> Any:
+    """The verified release-inputs set, or None when the checkout still carries the files."""
+
+    if root is None and manifest_sha256 is None:
+        return None
+    if root is None or manifest_sha256 is None:
+        raise PrepareError(
+            "RELEASE_INPUTS",
+            "--release-inputs-root and --release-inputs-manifest-sha256 go together",
+        )
+    try:
+        return load_release_inputs(root, manifest_sha256)
+    except ReleaseInputsError as exc:
+        raise PrepareError("RELEASE_INPUTS", str(exc)) from exc
+
+
+def _inputs_file(repo: Path, relative: str, inputs: Any) -> str:
+    if inputs is None:
+        return (repo / relative).as_posix()
+    try:
+        return str(inputs.path(relative).as_posix())
+    except ReleaseInputsError as exc:
+        raise PrepareError("RELEASE_INPUTS", str(exc)) from exc
 
 
 def _single_generation(directory: Path, explicit: str | None, what: str) -> Path:
@@ -718,6 +750,15 @@ def _apply_overrides(
                     "OVERRIDE_NOT_ALLOWED",
                     f"{flag} {dotted}: not a carried or per-cycle input of the spec",
                 )
+            is_dir = isinstance(parent.get(leaf), str) or (
+                len(parts) == 2 and leaf in SLEEVE_CARRIED_DIRS
+            )
+            if (flag == "--pin") == is_dir:
+                raise PrepareError(
+                    "OVERRIDE_SHAPE",
+                    f"{flag} {dotted}: the field is "
+                    + ("a directory, use --dir" if is_dir else "a file pin, use --pin"),
+                )
             if flag == "--pin":
                 parent[leaf] = _override_pin(roots, path, sha, f"--pin {dotted}")
             else:
@@ -748,6 +789,8 @@ def build_prep_spec(
     dirs: Sequence[str] = (),
     omit: Sequence[str] = (),
     rebind_cutoff: bool = False,
+    release_inputs_root: Path | None = None,
+    release_inputs_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     """The preparation spec; writes nothing."""
 
@@ -886,15 +929,16 @@ def build_prep_spec(
             "epoch admission policy changed since the cycle was resolved",
         )
     repo = Path(os.path.realpath(repo_root))
+    inputs = _release_inputs(release_inputs_root, release_inputs_manifest_sha256)
     spec["epoch_crosswalk_template"] = _pin_file(
-        roots, (repo / CROSSWALK).as_posix(), "epoch crosswalk"
+        roots, _inputs_file(repo, CROSSWALK, inputs), "epoch crosswalk"
     )
     spec["calendar_authority"] = _pin_of(calendar)
 
     spec["plans"] = _plans(resolved, roots, repo, plans_old, bundle_names, bundle_pick)
     sleeve: dict[str, Any] = dict(spec["sleeve_facts"])
     sleeve["policy_manifest"] = _pin_file(
-        roots, (repo / POLICY_MANIFEST).as_posix(), "sleeve policy manifest"
+        roots, _inputs_file(repo, POLICY_MANIFEST, inputs), "sleeve policy manifest"
     )
     for key in sleeve_old:
         if key.endswith(SLEEVE_PROVIDER_ROOT_SUFFIX):
@@ -1037,6 +1081,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--resolved-cycle", type=Path, required=True)
         command.add_argument("--resolved-cycle-sha256")
         command.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+        command.add_argument("--release-inputs-root", type=Path)
+        command.add_argument("--release-inputs-manifest-sha256")
         command.add_argument("--out", type=Path, required=True)
         command.add_argument("--ledger-generation-dir", type=Path)
         command.add_argument("--rebind-cutoff", action="store_true")
@@ -1078,7 +1124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         resolved = load_resolved(args.resolved_cycle, args.resolved_cycle_sha256)
-        roots = declared_roots(resolved, args.repo_root)
+        roots = declared_roots(resolved, args.repo_root, args.release_inputs_root)
         roots.locate(args.out.resolve().as_posix(), "--out", exists=False)
         ledger_dir = _ledger_generation(resolved, roots, args.ledger_generation_dir)
         predecessor_path = (
@@ -1125,6 +1171,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 dirs=args.dir,
                 omit=args.omit,
                 rebind_cutoff=args.rebind_cutoff,
+                release_inputs_root=args.release_inputs_root,
+                release_inputs_manifest_sha256=args.release_inputs_manifest_sha256,
             )
         if args.plan:
             print(

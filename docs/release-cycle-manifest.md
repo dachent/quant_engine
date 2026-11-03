@@ -290,8 +290,10 @@ Output: the `--preparation-spec` of `portfolio_pipeline_materialize.py attended`
   `implementation_return_attribution`, `legacy_panel_root`, `calendar_derivation_inputs`, `purpose`,
   `authority_notes`, `plans.*.base_spec_template`, `base_source_template_root`, `evidence_mode` and
   `sleeve_facts.quantbase_source_dir` and `predecessor_data_root`. `--pin KEY=ROOT_KEY:relative@sha256` and
-  `--dir KEY=ROOT_KEY:relative` replace a carried input (the sha256 is required; `KEY` may be
-  `sleeve_facts.quantbase_source_dir`).
+  `--dir KEY=ROOT_KEY:relative` replace a carried input (the sha256 is required for `--pin`; a directory
+  field such as `sleeve_facts.quantbase_source_dir` takes `--dir`, never `--pin`, which writes a file object).
+  `--release-inputs-root` with `--release-inputs-manifest-sha256` reads the epoch crosswalk and sleeve policy
+  manifest from the verified release-inputs set (they are no longer in Git); without them the checkout is used.
 - Per-cycle inputs `weekly_gap_fill_spec`, `vendor_gap_fills`, `model_vs_actual_input` are present only when
   named by `--pin`. A predecessor that carries one the run did not name is `STALE_CARRIED_INPUT`; `--omit KEY`
   declares the cycle has none (absent = key omitted).
