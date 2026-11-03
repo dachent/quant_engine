@@ -139,6 +139,9 @@ _PATH_STAGES = {
     # run reads; produces no delivery artifact.
     "packages/core/src/quant_engine/core/release_inputs.py": [],
     "tools/release_inputs.py": [],
+    # B7 builders: write input bundles/sources the release stages consume; no delivery artifact.
+    "tools/release_public_bundles.py": [],
+    "tools/release_quantbase_sources.py": [],
     "tools/release_cache_base.py": [],
     "tools/release_measurements.py": [],
     _CORRELATION: ["analytics", "report", "panel"],
@@ -189,8 +192,15 @@ _PATH_STAGES = {
     "tools/release_cycle_manifest.py": [],
     "tools/release_ledger_spec.py": [],
     "tools/release_spec_remap.py": [],
+    "tools/release_hwm_calendar.py": [],
+    "tools/release_post_commit.py": [],
+    # Layered history, dependence and attribution feed the attribution stage and every
+    # stage after it.
+    "tools/release_pre_chain.py": list(_STAGE_ORDER[2:]),
     "schemas/portfolio/release-cycle-manifest.schema.json": [],
     "schemas/portfolio/release-resolved-cycle.schema.json": [],
+    "tools/release_baseline_spec.py": [],
+    "schemas/portfolio/baseline-declared-inputs.schema.json": [],
     "tools/release_restore_world.py": [],
     "tools/release_evidence_pack.py": [],
     "tools/check_gitleaks_suppressions.py": [],

@@ -39,6 +39,10 @@
     "replica_provgens": "{cycle}/replica-provider-generations.json",
     "replica_rehearsal": "{cycle}/replica-rehearsal",
     "clean_room": "{cycle}/clean-room",
+    "post_commit": "{cycle}/post-commit",
+    "post_release_evidence": "{cycle}/production/post-release-evidence",
+    "real_rehearsal": "{cycle}/post-commit/rehearsal",
+    "real_clean_room": "{cycle}/post-commit/clean-room",
     "crosswalk": "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
     "replica_coordination_root": "{replica_workspace}/{coordination_rel}"
   },
@@ -141,18 +145,20 @@
       ],
       "argv": [
         "{python}",
-        "{pre_chain_script}",
+        "{tools}/release_pre_chain.py",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--cycle",
         "{cycle}",
+        "--selected-inputs",
         "{selected_inputs}",
+        "--baseline-id",
         "{baseline_id}",
-        "{evaluated_on}",
+        "--commit",
         "{code_commit}"
       ],
-      "pinned_script": [
-        "{pre_chain_script}",
-        "{pre_chain_sha256}"
-      ],
       "inputs": [
+        "{resolved_cycle}",
         "{cycle}/baseline/generations/{baseline_id}",
         "{cycle}/ledger/generations/{cycle_ledger_id}"
       ]
@@ -808,7 +814,7 @@
         "attest"
       ],
       "outputs": [
-        "{replica_workspace}"
+        "{replica_workspace}/.replica-root.json"
       ],
       "argv": [
         "{python}",
@@ -822,12 +828,25 @@
         "{replica_workspace}",
         "--allow-state-root",
         "{retained_cache_root}"
+      ],
+      "must_not_exist": [
+        "{replica_workspace}"
+      ]
+    },
+    {
+      "id": "replica-inventory",
+      "requires": [
+        "replica-copy"
+      ],
+      "builtin": "replica_inventory",
+      "outputs": [
+        "{cycle}/replica-inventory.json"
       ]
     },
     {
       "id": "replica-provider-generations",
       "requires": [
-        "replica-copy"
+        "replica-inventory"
       ],
       "builtin": "replica_provider_generations",
       "outputs": [
@@ -910,7 +929,14 @@
         "{ledger_receipt}",
         "--provider-generations",
         "{replica_provgens}"
-      ]
+      ],
+      "verify_inventory": {
+        "file": "{cycle}/replica-inventory.json",
+        "root": "{replica_workspace}",
+        "except": [
+          "{replica_coordination_root}/merge-attestation.json"
+        ]
+      }
     },
     {
       "id": "lanes",
@@ -1084,10 +1110,58 @@
       "only_ceremony": "full"
     },
     {
-      "id": "pack-evidence",
+      "id": "post-commit-verify",
       "explicit": true,
       "requires": [
         "commit"
+      ],
+      "only_mode": "release",
+      "argv": [
+        "{python}",
+        "{tools}/release_post_commit.py",
+        "verify",
+        "--resolved-cycle",
+        "{resolved_cycle}",
+        "--spec",
+        "{prod_spec}",
+        "--commit-result",
+        "{production}/execute-commit.json",
+        "--pre-pointers",
+        "{lane_real}/pointers-after-dry-run.json",
+        "--preflight-evidence-dir",
+        "{production}/evidence",
+        "--post-evidence-dir",
+        "{post_release_evidence}",
+        "--rehearsal-root",
+        "{real_rehearsal}",
+        "--clean-room",
+        "{real_clean_room}",
+        "--harness-code-commit",
+        "{code_commit}",
+        "--post-pointers",
+        "{post_commit}/post-commit-pointers.json",
+        "--log-dir",
+        "{post_commit}/logs",
+        "--out",
+        "{post_commit}/post-commit-verify.json"
+      ],
+      "outputs": [
+        "{post_commit}"
+      ],
+      "checks": [
+        {
+          "json": "{post_commit}/post-commit-verify.json",
+          "path": "schema_version",
+          "equals": "qe-post-commit-verify/1"
+        }
+      ],
+      "only_ceremony": "full"
+    },
+    {
+      "id": "pack-evidence",
+      "explicit": true,
+      "requires": [
+        "post-commit-verify"
       ],
       "only_mode": "release",
       "argv": [
@@ -1105,6 +1179,7 @@
         "provider-generations.json",
         "laneout",
         "replica-production",
+        "post-commit",
         "--exclude",
         "logs/pack-evidence.*",
         "production/state/*",

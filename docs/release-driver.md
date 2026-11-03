@@ -25,7 +25,7 @@ Exit 0 succeeded, 1 a stage failed, 2 a refusal or usage error.
 `cycle` (the scratch cycle directory that holds state, logs and production outputs),
 `run` (the attended run's output root), `qa`, `code_commit`, `pipeline_id`,
 `mode`, `live_workspace` (probe), `requested_as_of`, `history_store`, `expect_superseded`, `build_portfolio_root`,
-`portfolio_root`, `retained_cache_root`, and `provider_sources` (root id to the provider
+`portfolio_root`, `retained_cache_root`, `resolved_cycle` (the `qe-release-resolved-cycle/1` file of the cycle manifest; read by `post-commit-verify`), and `provider_sources` (root id to the provider
 generation directory the release binds, or the string `from_ledger`, below). The epoch manifest
 generation comes from the run itself.
 
@@ -123,7 +123,7 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 | group | stages |
 |---|---|
 | inputs | `selected-inputs` (the hand-built selected-inputs and attribution spec must exist and are hash-bound) |
-| pre-chain | `pre-chain` (`ops/mvp2-release/scripts/pre_chain.py`: layered history, dependence, attribution) |
+| pre-chain | `pre-chain` (`tools/release_pre_chain.py`: layered history, dependence, attribution; reads the resolved cycle) |
 | attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
 | tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
 | replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
@@ -154,7 +154,7 @@ generations (`bound_ids`).
 A stage whose process was killed is recorded `running` with the PID and start token the driver
 launched; the next `run` marks it `interrupted` when that process is gone (a live one blocks the
 run) and restarts only that stage: `resume.same_argv` reruns the same command over its partial
-output (the tool checkpoints itself, as `pre_chain.py` and the attended `--resume` do);
+output (the tool checkpoints itself, as `release_pre_chain.py` and the attended `--resume` do);
 `resume.argv` runs a different command; a stage without `resume` has its outputs moved aside and
 reruns alone. Completed stages are verified, not rerun. `stop` (and Ctrl-C) kills the process tree
 of recorded PIDs only, and only while the recorded start token still matches, so a reused PID is
@@ -190,9 +190,12 @@ Three stale inputs each cost R2 hours; the driver refuses them at the first stag
   to the run's inputs; the full invariant check remains the validator at the findings step.
 - **Calendar authority** (`attended`, `pinned_inputs`): `calendar_authority` must hash to the run's
   `calendar_authority_sha256`, so the previous pass's authority is refused before the 9-minute attended start.
-  The authority itself is re-authored from the cycle's epoch manifest with the retained
-  `mk_calendar2.py <first-attempt run dir> <authority.json>` (two passes), then its sha256 is pinned in the
-  run config. The driver does not derive it: that needs the epoch stage's output and the adapter internals.
+  The authority itself is re-authored from the first attempt's staged evidence with
+  `tools/release_hwm_calendar.py author --resolved-cycle <resolved.json> --resolved-cycle-sha256 <pin> --run <first-attempt run dir> --spec <spec.json>
+  --seed-authority <predecessor authority> --out <authority.json>` (two passes; create-only, with a receipt beside it;
+  `--check` re-derives and refuses a differing file), then its sha256 is pinned in the run config. The driver does not
+  derive it: that needs the epoch stage's output and the adapter internals. The policy id and owner decision text are
+  carried from the predecessor authority; every interval value is one the adapter derived.
 
 ## Ceremony: real roots or replica only
 
@@ -209,3 +212,24 @@ The run config must declare `ceremony`; a run without it is refused, so writing 
 
 `check`, `run` and `plan --offline` print which ceremony they are in. Switching the ceremony keeps completed stages (it is
 left out of the run binding); any other configuration change invalidates them.
+
+## Post-commit verification (real roots)
+
+Stage `post-commit-verify` (release mode, full ceremony, requires `commit`; `pack-evidence`
+requires it) runs `tools/release_post_commit.py verify`. It replaces the hand-run
+`t_post_real.sh` and the post-commit half of `t_commit_real.sh`:
+
+1. the commit result is `COMMITTED` for exactly this spec; `CURRENT_RELEASE` names the committed
+   release, which is not the cycle's predecessor; the predecessor's release directory is still
+   present; the only release directory added is the committed one; `CURRENT_RELEASE` moved;
+2. `portfolio_qc.py --profile post-release-verify` exits 0 and its receipt is PASS for this spec,
+   release and the single preflight receipt, with its authority digest equal to the
+   `CURRENT_RELEASE` pointer;
+3. `data_recovery_rehearsal.py` and `verify_release_restore.py` exit 0 against the same real spec,
+   each into a fresh root under `post-commit/`.
+
+The repository must be clean at `code_commit` before and after. The post-commit pointer snapshot
+(`post-commit-pointers.json`) and a create-only receipt `post-commit-verify.json`
+(`qe-post-commit-verify/1`: file digests and ids, no absolute paths) are written under
+`{cycle}/post-commit/`.
+
