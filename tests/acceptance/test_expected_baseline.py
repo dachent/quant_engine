@@ -60,21 +60,21 @@ HISTORICAL_V3_PATH = (
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
 )
-CURRENT_SUCCESSOR_HEAD = "9d9cac1edabe0dd98f8e7f3a0a0d1f9f3c86dd3d"
+CURRENT_SUCCESSOR_HEAD = "9ab637e56ec030296c46bc2bc5fa64c91c8f09d3"
 CURRENT_AGREE_COUNT = 165
 CURRENT_NOT_DERIVABLE_COUNT = 18
 CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "6c3ccb059ed1f1238925409f09fd01bd6c47d2a920a9fa58b6b938958bba22ec",
-    "b": "cce95d07704aec7105014b82e0be0d0313d02eeb19a0c9c09ffa0cad47e3e859",
+    "a": "3531848c11f15fe96de8a6662049dbbef782cf16def48fe2afeccc30a1658642",
+    "b": "7e0e28cb6f43adac6ade59eaddb8986974c64fb892eea4c3a0f063463261bbc1",
 }
 CURRENT_ORACLE_MANIFEST_SHA256 = {
-    # R2.1: both derivers read the same acceptance-inputs manifest (p24 manifest: Schwab 09-17 ledger 8c20b436).
-    "a": "4165a1d0e1c584ba8a0e79e07e3c1c2424a4f6598a700697c66a00c7e987b5b7",
-    "b": "4165a1d0e1c584ba8a0e79e07e3c1c2424a4f6598a700697c66a00c7e987b5b7",
+    # R2.2 (#468 repin): both derivers read the same acceptance-inputs manifest (p24 inputs, new contract bytes; evidence/releases/2026-10-26-r2/oracle-r2-2).
+    "a": "ad482fd447fdbcaf1131b3b50d07c3ee59524bf29c7ca992c89f224770c0dafa",
+    "b": "ad482fd447fdbcaf1131b3b50d07c3ee59524bf29c7ca992c89f224770c0dafa",
 }
 CURRENT_CONTRACT_POINTER = (
     "contracts/portfolio-financial-mvp-source-v1.json",
-    "5db45d3f6a1ff8c677628b5ab19ed9e7c222a6a89958a3ccc931168eb3f70f33",
+    "e0dd4a4bdcaca7fa3e73ea5e275a613786cf258bc7abe9bacd752314a9a06659",
 )
 CURRENT_AUDIT_AUTHORITY_POINTERS: frozenset[tuple[str, str]] = frozenset()
 
@@ -329,10 +329,10 @@ def test_current_successor_identity_and_authority_coverage() -> None:
         "75112945918983b311aff52a92a172fdfe7a3ca0348686e906933103898fe775"
     )
     assert doc["pointer_map_sha256"] == (
-        "efb9f694d8cf4f0444bf0eef6c3ad790d879f068b288b2d4383e5bbf3728b2ea"
+        "6b818f35d4f8917d1820189300aaf44ef39a91b0ffb61f9af9a359c2ef98c412"
     )
     assert doc["admission_decision_sha256"] == (
-        "267ddea1609a79618fa1cea2c71158dfe265e69d92b09d3278e76be765c8a34f"
+        "33582e3a75d91de0bc0fb5ff224395aa90b79a81a5f419785b0d5a6433170773"
     )
     assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
     assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
