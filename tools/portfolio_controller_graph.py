@@ -191,6 +191,7 @@ _PATH_STAGES = {
     "tools/release_driver.py": [],
     "tools/release_cycle_manifest.py": [],
     "tools/release_ledger_spec.py": [],
+    "tools/release_spec_remap.py": [],
     "tools/release_hwm_calendar.py": [],
     "tools/release_post_commit.py": [],
     # Layered history, dependence and attribution feed the attribution stage and every
