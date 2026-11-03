@@ -322,6 +322,41 @@ def test_cutoff_after_evaluation_date_is_refused(cycle: dict[str, Any]) -> None:
     _refused(cycle, "DATE_ORDER")
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("cutoff", "2026-02-30"),
+        ("evaluated_on", "2026-02-31"),
+        ("captured_at_utc", "2026-01-01T25:99:99Z"),
+    ],
+)
+def test_dates_and_timestamps_must_be_real(
+    cycle: dict[str, Any], key: str, value: str
+) -> None:
+    cycle["manifest"][key] = value
+    _refused(cycle, "DATE_INVALID")
+
+
+def test_a_declared_finality_date_must_be_a_real_date(cycle: dict[str, Any]) -> None:
+    cycle["manifest"]["providers"]["schwab"]["finalized_through"] = "2026-13-01"
+    _refused(cycle, "DATE_INVALID")
+
+
+def test_a_generation_directory_that_resolves_outside_its_root_is_refused(
+    cycle: dict[str, Any],
+) -> None:
+    data = cycle["roots"]["data"]
+    generations = data / "data-alpaca" / "generations"
+    real = next(generations.iterdir())
+    outside = cycle["tmp"] / "outside-generation"
+    real.rename(outside)
+    try:
+        real.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    _refused(cycle, "PATH_ESCAPES_ROOT")
+
+
 def test_schema_violations_are_refused(cycle: dict[str, Any]) -> None:
     bad = copy.deepcopy(cycle["manifest"])
     del bad["providers"]["schwab"]
