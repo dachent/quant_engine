@@ -16,6 +16,12 @@ import shutil
 import stat
 from typing import Any, Final
 
+from quant_engine.alpaca.native_activities import (
+    NativeActivitiesError,
+    NativePackage,
+    load_native_package,
+    window_dates,
+)
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -528,8 +534,15 @@ def create_plan(
     internal_account_id: str,
     as_of_date: date,
     expected_source_file_count: int = DEFAULT_SOURCE_FILE_COUNT,
+    native_activities: Path | None = None,
 ) -> dict[str, object]:
-    """Create one content-addressed, local-only Alpaca cutover plan."""
+    """Create one content-addressed, local-only Alpaca cutover plan.
+
+    ``native_activities`` optionally names an ingest package (see
+    ``quant_engine.alpaca.native_activities``).  Without it the plan, and so the
+    generation, is byte-identical to the legacy-only form: the block is added to
+    the plan only when one is supplied.
+    """
 
     source = _absolute_directory(source_root, "source_root", existing=True)
     destination = _absolute_directory(data_root, "data_root", existing=True)
@@ -591,6 +604,22 @@ def create_plan(
             "sha256": tracker_hash,
         },
     }
+    if native_activities is not None:
+        package = _native_package(
+            {
+                "directory": str(
+                    _absolute_directory(
+                        native_activities, "native_activities", existing=True
+                    )
+                )
+            }
+        )
+        payload["native_activities"] = {
+            "binding_sha256": package.binding_sha256,
+            "directory": str(package.directory),
+            "internal_account_id": package.internal_account_id,
+        }
+        _native_within_as_of(package, as_of_date)
     plan_id = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     run_id = f"legacy-{as_of_date.strftime('%Y%m%d')}-{plan_id[:12]}"
     plan = {**payload, "plan_id": plan_id, "run_id": run_id}
@@ -663,6 +692,89 @@ def _source_artifacts(
         )
     )
     return tuple(artifacts)
+
+
+def _native_package(block: Mapping[str, Any]) -> NativePackage:
+    """Load the plan's native activities package, re-validated from its bytes."""
+
+    pinned = block.get("binding_sha256")
+    try:
+        package = load_native_package(
+            _text(block.get("directory"), "native_activities.directory"),
+            binding_sha256=pinned if isinstance(pinned, str) else None,
+        )
+    except NativeActivitiesError as exc:
+        raise AlpacaGenerationError(str(exc)) from exc
+    declared = block.get("internal_account_id")
+    if declared is not None and declared != package.internal_account_id:
+        raise AlpacaGenerationError("native activities account differs from the plan")
+    return package
+
+
+def _native_within_as_of(native: NativePackage, as_of: date) -> None:
+    if window_dates(native.after, native.until)[1] > as_of:
+        raise AlpacaGenerationError(
+            "native activities window extends beyond the generation as-of date"
+        )
+
+
+def _native_transaction(account_id: str, row: Mapping[str, Any]) -> dict[str, object]:
+    """One ledger transaction for one native activity (cash leg as observed)."""
+
+    digest = str(row["activity_id_sha256"])
+    cash = row["cash_amount"]
+    amount = (
+        ObservedAmount.available(Decimal(str(cash)), "USD")
+        if cash is not None
+        else ObservedAmount.unavailable("USD")
+    )
+    symbol = row["symbol"]
+    transaction = Transaction(
+        record_id=_record_id(
+            "transaction", {"account_id": account_id, "source_id_hash": digest}
+        ),
+        account_id=account_id,
+        event_date=date.fromisoformat(str(row["event_date"])),
+        kind=f"ACTIVITY_{row['activity_type']}",
+        amount=amount,
+        mapping_status=MappingStatus.UNMAPPED,
+        security_id=_security_id(str(symbol).upper()) if symbol is not None else None,
+    ).to_dict()
+    transaction.update(
+        {
+            "activity_type": row["activity_type"],
+            "cash_amount_basis": row["cash_amount_basis"],
+            "category": row["category"],
+            "price": row["price"],
+            "quantity": row["quantity"],
+            "side": row["side"],
+            "source_activity_id_sha256": digest,
+        }
+    )
+    return transaction
+
+
+def _native_artifacts(
+    native: NativePackage, generation_as_of: date
+) -> tuple[SourceArtifact, ...]:
+    schema = {
+        "native-activities.jsonl": "alpaca-native-activities-jsonl",
+        "native-account.json": "alpaca-native-account-json",
+        "native-positions.json": "alpaca-native-positions-json",
+        "native-activities-spec.json": "alpaca-native-activities-spec",
+        "ingest-binding.json": "alpaca-native-ingest-binding",
+    }
+    return tuple(
+        SourceArtifact(
+            artifact_id=f"native/{item.name}",
+            sha256=item.sha256,
+            size_bytes=item.size_bytes,
+            as_of_date=generation_as_of,
+            schema_name=schema[item.name],
+            schema_version="1",
+        )
+        for item in native.files
+    )
 
 
 def _record_id(prefix: str, value: Mapping[str, object]) -> str:
@@ -782,6 +894,25 @@ def build_generation(
     normalized_orders.sort(
         key=lambda item: (str(item["created_at"]), str(item["order_id"]))
     )
+    native: NativePackage | None = None
+    native_block = plan.get("native_activities")
+    if native_block is not None:
+        native_object = _object(native_block, "native_activities")
+        if not isinstance(native_object.get("binding_sha256"), str):
+            raise AlpacaGenerationError("native activities binding is not pinned")
+        native = _native_package(native_object)
+        _native_within_as_of(native, generation_as_of)
+        used_ids = {str(item["record_id"]) for item in transactions}
+        for row in native.rows:
+            native_transaction = _native_transaction(native.internal_account_id, row)
+            record_id = str(native_transaction["record_id"])
+            if record_id in used_ids:
+                raise AlpacaGenerationError("native activity record id collides")
+            used_ids.add(record_id)
+            transactions.append(native_transaction)
+            event_dates.append(date.fromisoformat(str(row["event_date"])))
+            if row["symbol"] is not None:
+                symbols.add(str(row["symbol"]).upper())
     transactions.sort(
         key=lambda item: (str(item["event_date"]), str(item["record_id"]))
     )
@@ -818,6 +949,18 @@ def build_generation(
         "one 11-byte account JSON capture is truncated and retained only as failed evidence",
         "the tracker deposit remains tracker evidence and its withdrawal remains explicitly inferred",
     ]
+    if native is not None:
+        artifacts = (*artifacts, *_native_artifacts(native, generation_as_of))
+        out_of_boundary[0] = (
+            "account activities are published only for the native capture window "
+            f"{native.after} through {native.until} of the native account; the "
+            "legacy account has no provider-observed cash flows"
+        )
+        if native.positions is not None:
+            out_of_boundary[1] = (
+                "positions were not exported for the legacy account; the native "
+                "account carries one current positions snapshot in native_activities"
+            )
     catalog: dict[str, object] = {
         "account_snapshots": account_snapshots,
         "accounts": [
@@ -880,6 +1023,29 @@ def build_generation(
         },
         "filled_side_counts": dict(sorted(side_counts.items())),
     }
+    if native is not None:
+        accounts = catalog["accounts"]
+        assert isinstance(accounts, list)
+        if native.internal_account_id != account_id:
+            accounts.append(
+                {
+                    "account_id": native.internal_account_id,
+                    "base_currency": "USD",
+                    "provider": "ALPACA",
+                }
+            )
+        reconciliation = catalog["reconciliation"]
+        assert isinstance(reconciliation, dict)
+        reconciliation["native_activity_transaction_count"] = len(native.rows)
+        catalog["native_activities"] = {
+            "account_snapshot": native.account,
+            "binding_sha256": native.binding_sha256,
+            "internal_account_id": native.internal_account_id,
+            "positions": native.positions,
+            "source_run": native.spec["source_run"],
+            "summary": native.summary,
+            "window": {"after": native.after, "until": native.until},
+        }
     catalog_bytes = canonical_json_bytes(catalog)
     normalized_artifact = SourceArtifact(
         artifact_id="normalized/alpaca-generation.json",
@@ -889,23 +1055,39 @@ def build_generation(
         schema_name="alpaca-read-generation",
         schema_version=str(CATALOG_SCHEMA_VERSION),
     )
+    boundary = (
+        "23 hash-bound legacy Alpaca code/data artifacts plus exact "
+        "reconciliation to the accepted 122-row portfolio tracker slice"
+    )
+    fact_types = (
+        "account_snapshots",
+        "ledger_transactions",
+        "market_bars",
+        "nav_observations",
+        "orders",
+        "watchlist_metadata",
+    )
+    if native is not None:
+        boundary += (
+            f"; plus {len(native.rows)} hash-bound native account activities "
+            f"for {native.after} through {native.until}"
+        )
+        fact_types = tuple(
+            sorted(
+                {
+                    *fact_types,
+                    "account_activities",
+                    *(("positions_snapshot",) if native.positions is not None else ()),
+                }
+            )
+        )
     manifest = GenerationManifest.build(
         as_of_date=generation_as_of,
         adapter=AdapterIdentity("quant-engine-alpaca", ADAPTER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary=(
-                "23 hash-bound legacy Alpaca code/data artifacts plus exact "
-                "reconciliation to the accepted 122-row portfolio tracker slice"
-            ),
-            fact_types=(
-                "account_snapshots",
-                "ledger_transactions",
-                "market_bars",
-                "nav_observations",
-                "orders",
-                "watchlist_metadata",
-            ),
+            boundary=boundary,
+            fact_types=fact_types,
             observed_start=min(event_dates),
             observed_end=max(event_dates),
             known_gaps=(),

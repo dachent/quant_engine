@@ -11,9 +11,18 @@ from typing import Any
 import pytest
 
 import sleeve_disclosures as disclosures
+from quant_engine.core import release_input_root
+
+_RELEASE_INPUT_ROOT = release_input_root(Path(__file__).resolve().parents[2])
+needs_release_inputs = pytest.mark.skipif(
+    not (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").is_file(),
+    reason="cutoff-dependent release inputs are outside Git: set "
+    "QE_RELEASE_INPUTS_ROOT and QE_RELEASE_INPUTS_MANIFEST_SHA256",
+)
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-INPUTS_DIR = REPOSITORY_ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
+INPUTS_DIR = _RELEASE_INPUT_ROOT / "ops" / "mvp2-release" / "inputs" / "sleeves"
 PARENT = "account-1b44c987969b9e47"
 S2 = f"{PARENT}-s2"
 S1 = f"{PARENT}-s1"
@@ -33,6 +42,7 @@ def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+@needs_release_inputs
 def test_the_governed_evidence_file_parses_to_the_bounds_it_records() -> None:
     parsed = disclosures.parse_timestamp_evidence(
         (INPUTS_DIR / "timestamp-delta-result.txt").read_text(encoding="utf-8")
@@ -47,6 +57,7 @@ def test_the_governed_evidence_file_parses_to_the_bounds_it_records() -> None:
     assert (ai["b_all_lower_pt"], ai["b_all_upper_pt"]) == ("-0.187871", "+0.000000")
 
 
+@needs_release_inputs
 def test_the_pinned_disclosure_inputs_match_their_evidence_and_the_manifest_pin() -> (
     None
 ):
@@ -539,6 +550,7 @@ def _pinned_predecessor() -> dict[str, Any]:
     return dict(inputs["predecessor_comparison"])
 
 
+@needs_release_inputs
 def test_the_pinned_predecessor_must_be_the_committed_current_release_panel(
     tmp_path: Path,
 ) -> None:
@@ -591,6 +603,7 @@ def test_the_pinned_predecessor_must_be_the_committed_current_release_panel(
         ({"sha": "0" * 64}, "differs from its pointer"),
     ],
 )
+@needs_release_inputs
 def test_an_uncommitted_or_altered_release_authority_is_refused(
     tmp_path: Path, overrides: dict[str, str], message: str
 ) -> None:
@@ -605,6 +618,7 @@ def test_an_uncommitted_or_altered_release_authority_is_refused(
         disclosures.check_predecessor_is_current_release(pinned, tmp_path)
 
 
+@needs_release_inputs
 def test_a_data_root_without_a_published_release_authority_is_refused(
     tmp_path: Path,
 ) -> None:
@@ -662,6 +676,7 @@ def _generate(data_root: Path, out: Path, *flags: str) -> int:
     return result.returncode
 
 
+@needs_release_inputs
 def test_disclosure_inputs_and_sources_are_derived_from_and_bound_to_current_release(
     tmp_path: Path,
 ) -> None:
@@ -729,6 +744,7 @@ def test_disclosure_inputs_and_sources_are_derived_from_and_bound_to_current_rel
     assert _generate(tmp_path / "empty", out_dir / "other.json") == 1
 
 
+@needs_release_inputs
 @pytest.mark.parametrize("record", ["CURRENT_RELEASE.json", "release.json"])
 def test_a_symlinked_release_authority_record_is_refused(
     tmp_path: Path, record: str

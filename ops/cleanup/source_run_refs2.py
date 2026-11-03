@@ -15,9 +15,7 @@ import pathlib
 import re
 import sys
 
-PORTFOLIO = pathlib.Path(
-    "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-)
+PORTFOLIO = pathlib.Path(os.environ["QUANT_ENGINE_DATA_ROOT"])
 STORES = [
     "dataPortfolio",
     "dataPortfolio123",

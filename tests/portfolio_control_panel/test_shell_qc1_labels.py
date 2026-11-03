@@ -754,7 +754,7 @@ def test_snapshot_weight_names_the_recorded_perimeter_it_divides_by(
     payload["allocations"] = [
         {
             "as_of_date": "2026-08-16",
-            "current_value_usd": "56832.54",
+            "current_value_usd": "44681.742948",
             "scope": "SYSTEMATIC",
             "strategy_id": "grizzlybears-vtma",
             "strategy_name": "GrizzlyBears VTMA",
@@ -766,7 +766,7 @@ def test_snapshot_weight_names_the_recorded_perimeter_it_divides_by(
         },
         {
             "as_of_date": "2026-08-16",
-            "current_value_usd": "100043.62",
+            "current_value_usd": "78654.294044",
             "scope": "RESERVE",
             "strategy_id": None,
             "strategy_name": "Zero-risk reserve",
@@ -782,9 +782,9 @@ def test_snapshot_weight_names_the_recorded_perimeter_it_divides_by(
         "(9 components, $446,546), not of the current systematic perimeter"
     ) in table
     assert (
-        "1 of the 9 components are listed in the rows shown, totalling $56,833" in table
+        "1 of the 9 components are listed in the rows shown, totalling $44,682" in table
     )
-    assert "the other 8 ($389,714 of the perimeter) are not in the rows shown" in table
+    assert "the other 8 ($401,864 of the perimeter) are not in the rows shown" in table
     # The reserve row carries no weight and no perimeter note.
     assert table.count("perimeter recorded at") == 1
 

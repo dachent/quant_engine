@@ -119,12 +119,14 @@ def test_cost_components_are_printed_beside_the_status_and_annual_amount(
 def test_rows_without_components_print_only_the_status_and_amount(
     tmp_path: Path,
 ) -> None:
-    row = _cost_strategy(annual_external_cost_usd="3590", cost_status="known_gold_api")
+    row = _cost_strategy(
+        annual_external_cost_usd="2822.458", cost_status="known_gold_api"
+    )
     table = _flat(
         _run(tmp_path, _capital_payload(row), "renderCapital"), "#strategy-table"
     )
 
-    assert "Known (gold API) · $3,590.00 per year" in table
+    assert "Known (gold API) · $2,822.46 per year" in table
     assert "Subscription" not in table and "Execution" not in table
 
 

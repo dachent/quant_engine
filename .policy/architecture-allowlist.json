@@ -248,6 +248,10 @@
     },
     "tools/schwab_generation.py": {
       "quant_engine.schwab.generation._crosswalk": 1
+    },
+    "tools/tt_source_manifest_builder.py": {
+      "tools:portfolio_implementation_reconciliation._read_tt_source_manifest": 1,
+      "tools:portfolio_implementation_return_attribution._read_tt_source_manifest": 1
     }
   },
   "PROVIDER_NAME": {
@@ -324,10 +328,10 @@
       "alpaca": 2,
       "fidelity": 6,
       "ibkr": 16,
-      "matrixport": 37,
+      "matrixport": 28,
       "matrixport ": 2,
       "portfolio123": 10,
-      "quantbase": 32,
+      "quantbase": 27,
       "schwab": 19
     },
     "tools/provider_security_quarantine.py": {

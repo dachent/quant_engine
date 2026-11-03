@@ -1572,7 +1572,7 @@ _T0A_CUTOFF = date.fromisoformat("2026-09-17")
 _TT_START = "2025-11-25"
 _TT_END = "2026-01-04"
 _TT_ACCOUNT_1 = "account-38b653b91ff43a10"
-_TT_ACCOUNT_2 = "account-98f5986706ed53c5"
+_TT_ACCOUNT_2 = "account-4b0af91b8b321bea"
 
 # The real 13-row account-strategy-manifest, verbatim from the smoke9 run (panel
 # 07fe4351, report generation a839e452), read from
@@ -1582,7 +1582,7 @@ _TT_ACCOUNT_2 = "account-98f5986706ed53c5"
 # are kept.
 _SMOKE9_MANIFEST_ROWS = [
     {
-        "account_id": "account-1b44c987969b9e47",
+        "account_id": "account-fdc2ab079a1b528d",
         "strategy_id": "p123-ai-factor",
         "status": "OK",
         "admission_status": "FUNDED",
@@ -1663,7 +1663,7 @@ _SMOKE9_MANIFEST_ROWS = [
         "effective_end": None,
     },
     {
-        "account_id": "account-c63d2a487e019790",
+        "account_id": "account-4f916ac94694f24e",
         "strategy_id": "tt-portfolio",
         "status": "OK",
         "admission_status": "FUNDED",
@@ -1672,7 +1672,7 @@ _SMOKE9_MANIFEST_ROWS = [
         "effective_end": None,
     },
     {
-        "account_id": "account-cff10c44aedcf5e8",
+        "account_id": "account-723f83d32c51308c",
         "strategy_id": "tt-portfolio",
         "status": "OK",
         "admission_status": "FUNDED",
@@ -1690,7 +1690,7 @@ _SMOKE9_MANIFEST_ROWS = [
         "effective_end": None,
     },
     {
-        "account_id": "account-d69701da9143c430",
+        "account_id": "account-b1e024144369db48",
         "strategy_id": "p123-eu",
         "status": "OK",
         "admission_status": "FUNDED",
@@ -1810,7 +1810,7 @@ def test_bad_a2_a_blocked_row_on_a_funded_membership_tuple_refuses():
 
     rows = _smoke9_rows()
     for row in rows:
-        if row["account_id"] == "account-d69701da9143c430":
+        if row["account_id"] == "account-b1e024144369db48":
             row.update(
                 status="BLOCKED_ADMISSION",
                 admission_status="BLOCKED",
@@ -1954,7 +1954,7 @@ def test_bad_a9_a_row_exempt_only_by_blocking_reason_text_on_a_funded_tuple_refu
 
     rows = _smoke9_rows()
     for row in rows:
-        if row["account_id"] == "account-d69701da9143c430":
+        if row["account_id"] == "account-b1e024144369db48":
             row.update(
                 status="BLOCKED_ADMISSION",
                 admission_status="BLOCKED",

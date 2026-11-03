@@ -262,8 +262,14 @@ def test_the_perimeter_text_states_the_first_day_basis_and_closes_to_the_cent(
     assert "gain +15.00 USD in total (s1 +15.00)" in text
     assert "measured from each sleeve's first-day end-of-day NAV" in text
     assert "(s1 -3.00, s2 -1.00; total -4.00)" in text
-    assert "2026-01-21..2026-01-29 is +31.20 on 950.00 of external capital" in text
-    assert "opening NAV 900.00 plus 50.00 paid in later" in text
+    assert (
+        "2026-01-21..2026-01-29 is +31.20 on 950.00 of paid-in capital including the "
+        "opening value (the opening NAV on 2026-01-21, 900.00, plus 50.00 of inflows the "
+        "parent account's ledger recognises after that day, counted whatever their "
+        "provider classification)"
+    ) in text
+    assert "belong to no sleeve and lie outside every sleeve's TWR and MWR" in text
+    assert "external capital" not in text
     assert "the sleeves sum to +25.00; the +6.20 difference is the entry-day" in text
     assert "(-4.00) and +10.20 not attributed" in text
 
@@ -318,8 +324,8 @@ def test_gross_capital_above_the_capital_paid_in_is_stated_with_the_excess(
         i["value"] for i in result["items"] if i["item"] == "Sleeve capital basis"
     )
     assert (
-        "Gross capital 1,000.50 exceeds all external capital paid into the account "
-        "(950.00) by 50.50." in text
+        "Gross capital 1,000.50 exceeds all capital paid into the account, opening "
+        "value included (950.00), by 50.50." in text
     )
 
 
@@ -579,10 +585,10 @@ def test_every_parent_account_of_a_product_strategy_is_reconciled_or_named(
     text = next(
         i["value"] for i in result["items"] if i["item"] == "Sleeve capital basis"
     )
-    assert "exceeds all external capital" not in text
+    assert "exceeds all capital paid into the account" not in text
 
 
-def test_the_printed_parts_of_the_perimeter_sentence_foot() -> None:
+def test_the_printed_residual_is_the_source_rounded_once() -> None:
     reconciliation = {
         "sleeves": [
             {
@@ -605,28 +611,23 @@ def test_the_printed_parts_of_the_perimeter_sentence_foot() -> None:
     text = disclosures._perimeter_reconciliation(
         reconciliation, [{"account_id": "p", "gain": "2677.440211142"}]
     )
-    # The printed figures foot (-1,263.56 + 27.20 = -1,236.36); the source value 27.1924 is
-    # shown beside the remainder, rounded individually.
-    assert "and +27.20 not attributed" in text
-    assert "+27.19 not attributed" not in text
-    assert "(rounded individually; unrounded +27.1924)" in text
+    # The residual is the source amount rounded once (27.1924 -> 27.19), not the difference
+    # of the rounded figures (27.20); the cent that the printed parts then miss is stated.
+    assert "and +27.19 not attributed" in text
+    assert "+27.20" not in text
+    assert "rounded independently and may differ from their total by 0.01" in text
+    assert "+27.1924 not attributed" in text
+    assert "-1,236.3647 in total" in text
     import re
 
-    shown = re.search(
-        r"the (-?[\d,]+\.\d\d) difference is the entry-day differences \((-?[\d,]+\.\d\d)\) "
-        r"and (\+?-?[\d,]+\.\d\d) not attributed",
-        text,
-    )
+    shown = re.search(r"and (\+?-?[\d,]+\.\d\d) not attributed", text)
     assert shown is not None
-    difference, entries, remainder = (
-        Decimal(g.replace(",", "")) for g in shown.groups()
-    )
-    assert entries + remainder == difference
+    assert Decimal(shown.group(1).replace(",", "")) == Decimal(
+        reconciliation["unattributed"]
+    ).quantize(Decimal("0.01"))
 
 
-def test_no_rounding_note_is_printed_when_the_printed_parts_already_match_the_source() -> (
-    None
-):
+def test_no_rounding_note_is_printed_when_the_printed_parts_foot() -> None:
     reconciliation = {
         "sleeves": [
             {
@@ -650,4 +651,130 @@ def test_no_rounding_note_is_printed_when_the_printed_parts_already_match_the_so
         reconciliation, [{"account_id": "p", "gain": "100"}]
     )
     assert "and +35.00 not attributed" in text
-    assert "rounded individually" not in text
+    assert "rounded independently" not in text
+
+
+def test_the_timing_text_states_the_classification_the_external_only_bound_depends_on(
+    tmp_path: Path,
+) -> None:
+    sources = {
+        "facts": [],
+        "timestamp_bounds": {
+            "evidence": {"path": "e.txt", "sha256": "a" * 64, "size_bytes": 1},
+            "entries": [
+                {
+                    "strategy_id": "product",
+                    "account_id": PARENT,
+                    **disclosures.parse_timestamp_evidence(EVIDENCE)[
+                        ("product", PARENT)
+                    ],
+                }
+            ],
+        },
+    }
+    row = {
+        "account_id": PARENT,
+        "strategy_id": "product",
+        "end": "2026-01-29",
+        "observation_linked_return": "0.02453178",
+    }
+    text = next(
+        item["value"]
+        for item in disclosures.compose(
+            sources,
+            rows=[row],
+            invested_capital=None,
+            sleeve_accounts={},
+            product_strategies=[],
+        )["items"]
+        if item["item"] == "Flow timing bounds"
+    )
+    assert "(flows classified external only: -1.72 / +0.39)" in text
+    assert "depends on that classification" in text
+    assert "the all-flows bound instead" in text
+    assert "external flows only" not in text
+
+
+def test_the_hwm_member_text_names_the_days_the_sleeve_series_does_not_cover(
+    tmp_path: Path,
+) -> None:
+    sources = _sources(tmp_path, _facts(), _closing_ledger())
+    rows = _rows()
+    rows[0]["effective_start"] = "2026-01-30"
+    text = next(
+        i["value"]
+        for i in _compose(sources, rows)["items"]
+        if i["item"] == "HWM member series"
+    )
+    # the parent is observed from the day after its anchor (2026-01-21)
+    assert (
+        "The derived sleeve series for product carries no value 2026-01-22..2026-01-29: "
+        "its parent account is observed from 2026-01-21 and the sleeve series begins "
+        "2026-01-30. This describes the series only; the HWM membership of those days is "
+        "the governed membership's, which this sentence does not state."
+    ) in text
+    assert "has no HWM member" not in text
+    # no gap, no clause
+    rows[0]["effective_start"] = "2026-01-22"
+    text = next(
+        i["value"]
+        for i in _compose(sources, rows)["items"]
+        if i["item"] == "HWM member series"
+    )
+    assert "carries no value" not in text
+
+
+def test_the_pool_inflow_of_the_day_before_a_margin_allocation_is_named() -> None:
+    by_source = {
+        S2: {"2026-06-23": {S1: "379.24", UNALLOCATED: "9100.45"}},
+        UNALLOCATED: {"2026-06-22": {S1: "6717.57"}},
+    }
+    event = {"sleeve_id": "s2", "day": "2026-06-23", "kind": "IN", "note": "x"}
+    text = disclosures._pool_inflow_before(event, by_source)
+    assert (
+        "is not sized (the activity does not link cash to fund purchases); the pool had "
+        "received 6,717.57 from s1 on 2026-06-22."
+    ) in text
+    # an allocation not drawn on the pool, or a pool that received nothing, adds nothing
+    assert (
+        disclosures._pool_inflow_before({**event, "day": "2026-07-01"}, by_source) == ""
+    )
+    assert disclosures._pool_inflow_before(event, {S2: by_source[S2]}) == ""
+
+
+def test_margin_allocations_into_retained_sleeves_are_named_once() -> None:
+    sources = {
+        "margin_funding_events": [
+            {
+                "sleeve_id": "s1",
+                "day": "2026-01-26",
+                "kind": "IN",
+                "note": "224 margin",
+            },
+            {"sleeve_id": "s2", "day": "2026-06-23", "kind": "IN", "note": "product"},
+            {"sleeve_id": "s3", "day": "2026-06-23", "kind": "IN", "note": "top-up"},
+            {"sleeve_id": "s3", "day": "2026-06-24", "kind": "EXIT", "note": "closed"},
+        ]
+    }
+    by_source = {
+        S1: {"2026-01-26": {UNALLOCATED: "100"}},
+        S2: {"2026-06-23": {UNALLOCATED: "50"}},
+        S3: {"2026-06-23": {UNALLOCATED: "30"}},
+    }
+    kwargs: dict[str, Any] = {
+        "product_sleeves": {"s2": S2},
+        "sleeve_accounts": {S1: PARENT, S2: PARENT, S3: PARENT},
+        "parents": {PARENT},
+        "by_source": by_source,
+    }
+    text = disclosures._other_margin_events(sources, named="", **kwargs)
+    assert (
+        "outside the product's own capital (2): s1 100.00 on 2026-01-26 "
+        "(declared: 224 margin); s3 30.00 on 2026-06-23 (declared: top-up)."
+    ) in text
+    # an event the proceeds sentence already names is not repeated
+    text = disclosures._other_margin_events(
+        sources, named="entries (s3 30.00 on 2026-06-23)", **kwargs
+    )
+    assert "s3 30.00" not in text and "(1): s1 100.00" in text
+    assert disclosures._other_margin_events({}, named="", **kwargs) == ""

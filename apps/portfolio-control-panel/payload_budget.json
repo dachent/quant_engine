@@ -112,6 +112,12 @@
     "strategy_basis_disclosure": 8000,
     "vendor_gap_fills": 2000
   },
+  "justifications": {
+    "strategies": "R2 committed 121117 B, R2.1 131808 B (+10691 B). The growth is new per-strategy evidence, not per-observation duplication: cost_components +3978 B (5 rows), execution_cost +2241 B (7 rows), corroboration +2100 B and declared +647 B (2 rows), provider_annualization and provider-comparison disposition and window fields about +1600 B. Trimming was examined and declined: repeated long strings inside the new fields total about 1200 B (under 1% of the block) and source.artifact, sha256 and artifact paths are provenance that tests pin. Limit = committed + 3%, rounded up to 1000 B.",
+    "performance": "New top-level block (distinct from performance_tab) carried since R2: 54048 B on R2 b216a53e, 54055 B on R2.1. It was unlisted and sat 4 KB over the 50000 B unlisted-block threshold, so the checker flagged it on every generation. Within 7 B between R2 and R2.1. Limit = committed + 3%, rounded up to 1000 B.",
+    "performance_tab": "R2.1 re-measure 381004 B (schema 3: union grid, flow-matched benchmarks), against 375785 B on the r21-integration panel the previous limit was cut from. The limit is re-cut at committed + 3% (393000 B, was 388000 B at 98.2% of committed) so the block has the same headroom every other block has.",
+    "weekly_returns": "R2.1 re-measure 27773144 B against 27317555 B at R2 (+1.7%). Per-observation series are the block this budget exists to watch, so the limit is re-cut at committed + 3% (28607000 B, was 28138000 B at 97.4% of committed); further growth needs its own reason."
+  },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
   "physical": {

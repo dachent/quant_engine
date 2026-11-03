@@ -1,4 +1,4 @@
-"""Command line: ``python acceptance/derive_a --qe-root <dir> --out <file>``.
+"""Command line: ``python acceptance/derive_a --qe-root <dir> --out <file> --cutoff <date>``.
 
 ``--inputs <acceptance-inputs json>`` takes every input path and sha256 from that
 manifest (fail closed on any mismatch); without it the built-in v1 table is used.
@@ -17,7 +17,6 @@ from .derive import InputsManifest, derive, dumps, load_inputs_manifest
 from .sources import InputError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CUTOFF = "2026-09-17"
 DEFAULT_MODEL = "claude-opus-5-5"
 
 
@@ -45,7 +44,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qe-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--cutoff", default=DEFAULT_CUTOFF)
+    parser.add_argument(
+        "--cutoff",
+        required=True,
+        help="the cycle cutoff (YYYY-MM-DD); there is no default",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--code-commit")
     parser.add_argument("--inputs", type=Path, help="acceptance-inputs manifest")

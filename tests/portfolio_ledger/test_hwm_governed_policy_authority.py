@@ -46,8 +46,8 @@ def _authority(*, hwm_policy_sha256: str) -> dict[str, object]:
         "closure_reason": "DECLARED_SOURCE_CLOSED_SESSION",
         "prior_observation_date": "2026-08-07",
         "next_observation_date": "2026-08-09",
-        "prior_ending_capital_usd": "57140.197298561",
-        "next_beginning_capital_usd": "57140.197298561",
+        "prior_ending_capital_usd": "44923.6231161286582",
+        "next_beginning_capital_usd": "44923.6231161286582",
         "closure_evidence_sha256": SHA_C,
         "treatment": CLOSED_SOURCE_TREATMENT,
     }

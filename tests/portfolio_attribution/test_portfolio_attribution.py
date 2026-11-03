@@ -315,7 +315,7 @@ def test_a_contract_cap_is_an_upper_bound_not_evidenced_fees(tmp_path: Path) -> 
     baseline = _baseline(
         tmp_path,
         cost_rows={
-            1: ("3590", "known_gold_api"),
+            1: ("2822.458", "known_gold_api"),
             2: ("798", "known_fixed"),
             3: ("664.57", "conservative_1pct_contract_cap"),
             4: (None, "unknown_model_subscription_cost"),
@@ -1672,3 +1672,134 @@ def test_declared_basis_and_execution_cost_ride_the_cost_row(tmp_path: Path) -> 
     assert tuple(attribution.COST_EVIDENCE_KEYS) == tuple(
         __import__("portfolio_report").COST_EVIDENCE_KEYS
     )
+
+
+def test_percent_based_costs_are_rates_not_dollar_costs_or_caps(
+    tmp_path: Path,
+) -> None:
+    """A documented percent rate carries no amount and is neither evidenced nor a cap."""
+
+    docs_spec = importlib.util.spec_from_file_location(
+        "cost_rate_documents_attribution",
+        Path(__file__).resolve().parents[1] / "core" / "cost_rate_documents.py",
+    )
+    assert docs_spec is not None and docs_spec.loader is not None
+    docs = importlib.util.module_from_spec(docs_spec)
+    docs_spec.loader.exec_module(docs)
+    baseline = _baseline(
+        tmp_path,
+        cost_rows={
+            3: (None, "documented_rate_percent"),
+            4: (None, "documented_rate_tier_unsettled"),
+            5: (None, "documented_rate_percent"),
+        },
+        cost_extra={
+            3: {"cost_class": "PERCENT_RATE", "fee_rates": docs.volatis_rates()},
+            5: {"cost_class": "PERCENT_RATE", "fee_rates": docs.robuxio_rates()},
+        },
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    rows = {row["strategy_id"]: row for row in catalog["costs"]}
+    assert rows["strategy-3"]["fees_status"] == "DOCUMENTED_RATE_NOT_DOLLAR"
+    assert rows["strategy-3"]["annual_external_cost_usd"] is None
+    assert rows["strategy-3"]["annual_external_cost_rate_pre_tax"] is None
+    assert rows["strategy-3"]["fee_rates"]["tier"] == "QUALIFIED_0_1M"
+    assert rows["strategy-5"]["fee_rates"]["placement"] == "INSIDE_VEHICLE_NAV"
+    assert rows["strategy-4"]["fees_status"] == "UNAVAILABLE"
+    assert "fee_rates" not in rows["strategy-4"]
+
+
+def test_a_percent_status_with_a_dollar_amount_is_refused(tmp_path: Path) -> None:
+    baseline = _baseline(tmp_path, cost_rows={3: ("664.57", "documented_rate_percent")})
+    spec, _ = _inputs(tmp_path)
+
+    with pytest.raises(attribution.AttributionValidationError, match="neither"):
+        attribution.build_catalog(baseline, spec)
+
+
+def test_baseline_percent_output_flows_through_attribution_to_the_report_row(
+    tmp_path: Path,
+) -> None:
+    """End to end: the baseline producer's own percent rows, unedited, through the
+    attribution catalog and the report's cost projection, to the fields the panel prints."""
+
+    root = Path(__file__).resolve().parents[2]
+
+    def load(name: str, path: Path) -> Any:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    producer = load("pb_e2e_cost_rates", root / "tools" / "portfolio_baseline.py")
+    reporter = load("pr_e2e_cost_rates", root / "tools" / "portfolio_report.py")
+    docs = load("docs_e2e_cost_rates", root / "tests/core/cost_rate_documents.py")
+    evidence = tmp_path / "cost_evidence.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "rows": [
+                    docs.evidence_row("Volatis", docs.volatis_rates("QUALIFIED_0_1M")),
+                    docs.evidence_row("Robuxio", docs.robuxio_rates()),
+                ],
+                "schema": producer.COST_EVIDENCE_SCHEMA,
+            }
+        ),
+        encoding="utf-8",
+    )
+    produced = producer._attach_cost_evidence(
+        [
+            {
+                "annual_external_cost_usd": None,
+                "cost_status": "documented_rate_percent",
+                "strategy_id": "strategy-3",
+            },
+            {
+                "annual_external_cost_usd": None,
+                "cost_status": "documented_rate_percent",
+                "strategy_id": "strategy-5",
+            },
+        ],
+        evidence,
+        {"volatis": "strategy-3", "robuxio": "strategy-5"},
+        date(2026, 1, 3),
+    )
+    by_id = {row["strategy_id"]: row for row in produced}
+    keys = ("cost_class", "fee_rates")
+    baseline = _baseline(
+        tmp_path,
+        cost_rows={
+            3: (None, by_id["strategy-3"]["cost_status"]),
+            5: (None, by_id["strategy-5"]["cost_status"]),
+        },
+        cost_extra={
+            3: {key: by_id["strategy-3"][key] for key in keys},
+            5: {key: by_id["strategy-5"][key] for key in keys},
+        },
+    )
+    spec, _ = _inputs(tmp_path)
+
+    catalog, _, _ = attribution.build_catalog(baseline, spec)
+
+    for strategy_id, tier in (
+        ("strategy-3", "QUALIFIED_0_1M"),
+        ("strategy-5", "SINGLE_RATE"),
+    ):
+        cost = next(
+            row for row in catalog["costs"] if row["strategy_id"] == strategy_id
+        )
+        assert cost["fee_rates"]["tier"] == tier
+        projected = {
+            key: cost[key]
+            for key in (*reporter.COST_EVIDENCE_KEYS, *reporter.COST_RATE_KEYS)
+            if key in cost
+        }
+        assert projected["fee_rates"] == by_id[strategy_id]["fee_rates"]
+        sentence = reporter.cost_rate_disclosure(cost)
+        assert sentence is not None and sentence.startswith("Documented rates,")
+        assert cost["fees_status"] == "DOCUMENTED_RATE_NOT_DOLLAR"

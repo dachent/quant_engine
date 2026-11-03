@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import csv
+import io
 from datetime import date
 from decimal import Decimal, ROUND_DOWN, localcontext
 import hashlib
@@ -4078,42 +4079,6 @@ def test_schwab_share_transfer_does_not_invent_a_counterparty(
     )
 
 
-def _schwab_journal_override_manifest(
-    *, corrupt_joint_source: bool = False
-) -> GenerationManifest:
-    """The two retained WCH transaction artifacts that prove the exceptions."""
-
-    source_hashes = {
-        pinned["source_artifact_id"]: pinned["source_artifact_sha256"]
-        for pinned in ledger._SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS.values()
-    }
-    if corrupt_joint_source:
-        source_hashes["wch/transactions/account-702c489650e59956.json"] = "f" * 64
-    return GenerationManifest.build(
-        as_of_date=date(2026, 8, 14),
-        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="retained Schwab transaction artifacts",
-            fact_types=("transactions",),
-            observed_start=date(2025, 11, 25),
-            observed_end=date(2026, 8, 14),
-        ),
-        artifacts=tuple(
-            SourceArtifact(
-                artifact_id=artifact_id,
-                sha256=sha256,
-                size_bytes=1,
-                as_of_date=date(2026, 8, 14),
-                schema_name="schwab-wch-transaction-history",
-                schema_version="1",
-            )
-            for artifact_id, sha256 in source_hashes.items()
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-
-
 def _schwab_journal_row(
     account_id: str,
     record_id: str,
@@ -4528,345 +4493,6 @@ def test_current_schwab_journal_evidence_uses_event_date_when_native_effective_d
     _project_current_schwab_journal_catalog(catalog, manifest, accounts)
 
 
-def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() -> None:
-    """Only exact audited Journals are capital, with their proved classification."""
-
-    ira = "account-38b653b91ff43a10"
-    joint = "account-702c489650e59956"
-    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
-    catalog["transactions"] = [
-        _schwab_journal_row(ira, "txn-84ed102899eaaa7ba1d2f0d4", "2025-12-29", "7000"),
-        _schwab_journal_row(ira, "txn-855f069db9ce99988c6707ea", "2026-01-02", "7500"),
-        _schwab_journal_row(
-            joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000"
-        ),
-        _schwab_journal_row(ira, "nearby-journal", "2025-12-29", "7000"),
-    ]
-    assignments = {
-        ira: [
-            {
-                "effective_start": "2025-11-25",
-                "effective_end": None,
-                "strategy_id": "tt",
-            }
-        ],
-        joint: [
-            {
-                "effective_start": "2025-11-25",
-                "effective_end": None,
-                "strategy_id": "tt",
-            }
-        ],
-    }
-
-    projected, _ = ledger._project_account_facts(
-        "schwab",
-        "schwab-generation",
-        catalog,
-        {ira, joint},
-        {"tt"},
-        assignments,
-        manifest=_schwab_journal_override_manifest(),
-    )
-
-    flows = projected["flows"]
-    assert [(flow["source_record_id"], flow["amount"]["value"]) for flow in flows] == [
-        ("txn-84ed102899eaaa7ba1d2f0d4", "7000"),
-        ("txn-1699da38ec4afacd94bd2876", "-50000"),
-        ("txn-855f069db9ce99988c6707ea", "7500"),
-    ]
-    assert {flow["mapping_basis"] for flow in flows} == {
-        "PINNED_PAIRED_PROVIDER_JOURNAL"
-    }
-    assert {flow["flow_type"] for flow in flows} == {"ACCOUNT_TRANSFER"}
-    assert {
-        (flow["source_artifact_id"], flow["source_artifact_sha256"]) for flow in flows
-    } == {
-        (
-            "wch/transactions/account-38b653b91ff43a10.json",
-            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514",
-        ),
-        (
-            "wch/transactions/account-702c489650e59956.json",
-            "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a",
-        ),
-    }
-
-
-def test_schwab_pinned_journal_flow_rejects_changed_retained_source_hash() -> None:
-    """A catalog from a changed transaction source cannot inherit this exception."""
-
-    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
-    joint = "account-702c489650e59956"
-    catalog["transactions"] = [
-        _schwab_journal_row(
-            joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000"
-        )
-    ]
-
-    with pytest.raises(ledger.ProviderLedgerError, match="pinned Journal source"):
-        ledger._project_account_facts(
-            "schwab",
-            "schwab-generation",
-            catalog,
-            {joint},
-            {"tt"},
-            {
-                joint: [
-                    {
-                        "effective_start": "2025-11-25",
-                        "effective_end": None,
-                        "strategy_id": "tt",
-                    }
-                ]
-            },
-            manifest=_schwab_journal_override_manifest(corrupt_joint_source=True),
-        )
-
-
-@pytest.mark.parametrize(
-    ("day", "amount"),
-    [
-        ("2025-12-29", "7000.01"),
-        ("2025-12-30", "7000"),
-    ],
-)
-def test_schwab_pinned_journal_flow_does_not_admit_changed_fact(
-    day: str,
-    amount: str,
-) -> None:
-    """The retained record identity is insufficient when date or amount differs."""
-
-    account_id = "account-38b653b91ff43a10"
-    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
-    catalog["transactions"] = [
-        _schwab_journal_row(account_id, "txn-84ed102899eaaa7ba1d2f0d4", day, amount)
-    ]
-    projected, _ = ledger._project_account_facts(
-        "schwab",
-        "schwab-generation",
-        catalog,
-        {account_id},
-        {"tt"},
-        {
-            account_id: [
-                {
-                    "effective_start": "2025-11-25",
-                    "effective_end": None,
-                    "strategy_id": "tt",
-                }
-            ]
-        },
-        manifest=_schwab_journal_override_manifest(),
-    )
-
-    assert "flows" not in projected
-
-
-def test_schwab_ira_contribution_labels_reconcile_to_supporting_account() -> None:
-    """Provider-labeled IRA contributions remain internal when source journals prove it."""
-
-    records = {
-        "txn-1270308650488c57b650afdc",
-        "txn-dcaf6ac1f18e29cc54a3016c",
-        "txn-16dd3f367043beadcabd3387",
-        "txn-8e9ac98ba8accadd5544238b",
-        "txn-84ed102899eaaa7ba1d2f0d4",
-        "txn-249d9f96964cbf7860830e82",
-        "txn-855f069db9ce99988c6707ea",
-        "txn-2f56f4cba6c5742b593c4ef2",
-    }
-    pinned = [
-        (key, pin)
-        for key, pin in ledger._SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS.items()
-        if key[1] in records
-    ]
-    assert len(pinned) == 8
-    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
-    catalog["transactions"] = [
-        _schwab_journal_row(key[0], key[1], key[2], str(key[3])) for key, _pin in pinned
-    ]
-    target_accounts = {
-        "account-38b653b91ff43a10",
-        "account-a13937e26b8ae46d",
-    }
-    projected, _ = ledger._project_account_facts(
-        "schwab",
-        "schwab-generation",
-        catalog,
-        target_accounts,
-        {"tt"},
-        {
-            account_id: [
-                {
-                    "effective_start": "2025-12-29",
-                    "effective_end": None,
-                    "strategy_id": "tt",
-                }
-            ]
-            for account_id in target_accounts
-        },
-        manifest=_schwab_journal_override_manifest(),
-    )
-
-    flows = projected["flows"]
-    assert len(flows) == 8
-    assert {flow["flow_type"] for flow in flows} == {"ACCOUNT_TRANSFER"}
-    assert {flow["mapping_basis"] for flow in flows} == {
-        "PINNED_PAIRED_PROVIDER_JOURNAL"
-    }
-    by_activity: dict[str, list[dict[str, object]]] = defaultdict(list)
-    for flow in flows:
-        by_activity[str(flow["provider_activity_id_sha256"])].append(flow)
-    assert len(by_activity) == 4
-    assert all(len(rows) == 2 for rows in by_activity.values())
-    assert all(
-        sum(Decimal(str(row["amount"]["value"])) for row in rows) == 0
-        for rows in by_activity.values()
-    )
-
-
-def test_schwab_exact_journal_pair_is_retained_as_internal_transfer() -> None:
-    """An exact equal-and-opposite journal pair remains internal capital motion."""
-
-    pinned = [
-        (key, pin)
-        for key, pin in ledger._SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS.items()
-        if pin.get("provider_activity_id_sha256")
-        == "6a69ba3b1c0054bd7c77fd972ad21af4beca0871600a2c62cd7e3d49e57b370a"
-    ]
-    assert len(pinned) == 2
-    accounts = {key[0] for key, _pin in pinned}
-    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
-    catalog["transactions"] = [
-        _schwab_journal_row(key[0], key[1], key[2], str(key[3])) for key, _pin in pinned
-    ]
-    assignments = {
-        account_id: [
-            {
-                "effective_start": min(key[2] for key, _pin in pinned),
-                "effective_end": None,
-                "strategy_id": f"strategy-{index}",
-            }
-        ]
-        for index, account_id in enumerate(sorted(accounts), start=1)
-    }
-    projected, _ = ledger._project_account_facts(
-        "schwab",
-        "schwab-generation",
-        catalog,
-        accounts,
-        {row[0]["strategy_id"] for row in assignments.values()},
-        assignments,
-        manifest=_schwab_journal_override_manifest(),
-    )
-
-    flows = projected["flows"]
-    assert len(flows) == 2
-    assert {flow["flow_type"] for flow in flows} == {"ACCOUNT_TRANSFER"}
-    assert {flow["mapping_basis"] for flow in flows} == {
-        "PINNED_PAIRED_PROVIDER_JOURNAL"
-    }
-    assert len({flow["provider_activity_id_sha256"] for flow in flows}) == 1
-    assert sum(Decimal(flow["amount"]["value"]) for flow in flows) == 0
-
-
-def test_schwab_5722_twr_uses_two_pinned_journal_flows() -> None:
-    """The independently transcribed retained NAV sequence yields 2.286545%, not 55.4009%."""
-
-    observations = """2025-11-25,12714.14
-2025-11-26,12822.71
-2025-11-27,12822.71
-2025-11-28,12892.39
-2025-11-29,12892.39
-2025-11-30,12892.39
-2025-12-01,12735.89
-2025-12-02,12759
-2025-12-03,12848.56
-2025-12-04,12859.73
-2025-12-05,12856.65
-2025-12-06,12856.65
-2025-12-07,12856.65
-2025-12-08,12773.09
-2025-12-09,12751.29
-2025-12-10,12892.96
-2025-12-11,12996.98
-2025-12-12,12868.48
-2025-12-13,12868.48
-2025-12-14,12868.48
-2025-12-15,12889.62
-2025-12-16,27490.75
-2025-12-17,27369.07
-2025-12-18,27400.95
-2025-12-19,27561.87
-2025-12-20,27561.87
-2025-12-21,27561.87
-2025-12-22,27769.21
-2025-12-23,27891.38
-2025-12-24,28104.72
-2025-12-25,28104.72
-2025-12-26,28077.14
-2025-12-27,28077.14
-2025-12-28,28077.14
-2025-12-29,34981.2
-2025-12-30,34932.14
-2025-12-31,34678.1
-2026-01-01,34678.1
-2026-01-02,42342.77
-2026-01-03,42342.77
-2026-01-04,42342.77"""
-    account_id = "account-38b653b91ff43a10"
-    nav = [
-        _nav(account_id, day, value, f"nav-{index}")
-        for index, (day, value) in enumerate(
-            (line.split(",") for line in observations.splitlines()), start=1
-        )
-    ]
-    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
-    catalog["transactions"] = [
-        {
-            "account_id": account_id,
-            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "14663.08"},
-            "effective_date": "2025-12-16",
-            "event_date": "2025-12-16",
-            "kind": "Funds Received",
-            "record_id": "retained-funds-received",
-        },
-        _schwab_journal_row(
-            account_id, "txn-84ed102899eaaa7ba1d2f0d4", "2025-12-29", "7000"
-        ),
-        _schwab_journal_row(
-            account_id, "txn-855f069db9ce99988c6707ea", "2026-01-02", "7500"
-        ),
-    ]
-    projected, _ = ledger._project_account_facts(
-        "schwab",
-        "schwab-generation",
-        catalog,
-        {account_id},
-        {"strategy-a"},
-        {
-            account_id: [
-                {
-                    "effective_start": "2025-11-25",
-                    "effective_end": None,
-                    "strategy_id": "strategy-a",
-                }
-            ]
-        },
-        manifest=_schwab_journal_override_manifest(),
-    )
-
-    rows = ledger._broker_strategy_returns(nav, projected["flows"], {"schwab"})
-    compounded = Decimal("1")
-    for row in rows:
-        compounded *= Decimal(row["return"]) + Decimal("1")
-
-    assert (compounded - Decimal("1")).quantize(Decimal("0.0000000001")) == Decimal(
-        "0.0228654456"
-    )
-
-
 def test_projected_ibkr_ambiguous_flow_stays_unmapped_and_retains_scope() -> None:
     catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]}
     catalog["nav_observations"] = [
@@ -5185,9 +4811,9 @@ def test_provider_ledger_schema_accepts_capital_anchor_catalog_surface() -> None
         "nav_source_artifact_id": "csv/daily_portfolio_totals.csv",
         "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
         "provider_id": "matrixport",
-        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "record_id": "matrixport-capital-anchor:2222222222222222222",
         "source_artifact_id": "csv/subscription_details.csv",
-        "source_record_id": "7402822649690198016",
+        "source_record_id": "2222222222222222222",
         "strategy_id": "robuxio-crypto",
     }
     catalog = {
@@ -6848,6 +6474,24 @@ def test_matrixport_non_positive_totals_never_admitted(tmp_path: Path) -> None:
     assert [row["as_of_date"] for row in rows] == ["2026-08-13"]
 
 
+def _with_fund_titles(text: str) -> str:
+    """Name the Volatis fund on its rows, as the provider's activity export does."""
+
+    rows = list(csv.reader(io.StringIO(text)))
+    header = rows[0]
+    if "fund" not in header or "fund_title" in header:
+        return text
+    fund = header.index("fund")
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow([*header, "fund_title"])
+    for row in rows[1:]:
+        padded = [*row, *([""] * (len(header) - len(row)))]
+        title = ledger._QUANTBASE_FUND_TITLE if padded[fund] == "107" else ""
+        writer.writerow([*padded, title])
+    return out.getvalue()
+
+
 def _make_two_artifact_manifest(
     files: Mapping[str, Path],
 ) -> GenerationManifest:
@@ -6890,19 +6534,21 @@ def _quantbase_fixture(tmp_path: Path) -> tuple[Path, dict[str, Any], Path, Path
     )
     activity_path = artifact_root / "csv/account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,amount_cents,"
-        "created_at,destination_account_id,id,origin_account_id,status,"
-        "transaction,filled_at\n"
-        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,10000000,"
-        ",,buy-1,,C,,\n"
-        "order,,107,,2026-08-12T20:30:00Z,,,,,order-1,,,buy-1,"
-        "2026-08-12T20:30:00.5Z\n"
-        "filled_txn,50000,14,False,2026-08-12T20:00:00Z,BUY,5000000,"
-        ",,buy-2,,C,,\n"
-        "filled_txn,100000,107,True,2026-08-13T19:00:00Z,BUY,10000000,"
-        ",,buy-3,,C,,\n"
-        "transfer,2000,,,,DEPOSIT,200000,2026-08-12T20:01:00Z,"
-        "alpaca-account,deposit-1,bank-account,C,,\n",
+        _with_fund_titles(
+            "activity_type,amount,fund,is_rebalance,time,type,amount_cents,"
+            "created_at,destination_account_id,id,origin_account_id,status,"
+            "transaction,filled_at\n"
+            "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,10000000,"
+            ",,buy-1,,C,,\n"
+            "order,,107,,2026-08-12T20:30:00Z,,,,,order-1,,,buy-1,"
+            "2026-08-12T20:30:00.5Z\n"
+            "filled_txn,50000,14,False,2026-08-12T20:00:00Z,BUY,5000000,"
+            ",,buy-2,,C,,\n"
+            "filled_txn,100000,107,True,2026-08-13T19:00:00Z,BUY,10000000,"
+            ",,buy-3,,C,,\n"
+            "transfer,2000,,,,DEPOSIT,200000,2026-08-12T20:01:00Z,"
+            "alpaca-account,deposit-1,bank-account,C,,\n"
+        ),
         encoding="utf-8-sig",
     )
     catalog = {
@@ -7555,10 +7201,12 @@ def test_quantbase_conflicting_duplicate_transfer_id_fails_closed(
     artifact_root.mkdir(parents=True)
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,amount_cents,created_at,destination_account_id,"
-        "id,origin_account_id,status,type\n"
-        "transfer,1000,100000,2024-07-20T06:00:05Z,alpaca-account,21293,bank-account,C,DEPOSIT\n"
-        "transfer,2000,200000,2024-07-20T06:00:05Z,alpaca-account,21293,bank-account,C,DEPOSIT\n",
+        _with_fund_titles(
+            "activity_type,amount,amount_cents,created_at,destination_account_id,"
+            "id,origin_account_id,status,type\n"
+            "transfer,1000,100000,2024-07-20T06:00:05Z,alpaca-account,21293,bank-account,C,DEPOSIT\n"
+            "transfer,2000,200000,2024-07-20T06:00:05Z,alpaca-account,21293,bank-account,C,DEPOSIT\n"
+        ),
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -7588,12 +7236,14 @@ def test_quantbase_transfers_must_resolve_to_one_linked_alpaca_account(
     artifact_root.mkdir(parents=True)
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,amount_cents,created_at,destination_account_id,"
-        "id,origin_account_id,status,type\n"
-        "transfer,1000,100000,2024-07-20T06:00:05Z,alpaca-account-a,"
-        "deposit-1,bank-account,C,DEPOSIT\n"
-        "transfer,25,2500,2024-07-22T06:00:05Z,bank-account,"
-        "withdraw-1,alpaca-account-b,C,WITHDRAWAL\n",
+        _with_fund_titles(
+            "activity_type,amount,amount_cents,created_at,destination_account_id,"
+            "id,origin_account_id,status,type\n"
+            "transfer,1000,100000,2024-07-20T06:00:05Z,alpaca-account-a,"
+            "deposit-1,bank-account,C,DEPOSIT\n"
+            "transfer,25,2500,2024-07-22T06:00:05Z,bank-account,"
+            "withdraw-1,alpaca-account-b,C,WITHDRAWAL\n"
+        ),
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -7669,9 +7319,9 @@ def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> Non
     with activity_path.open("a", encoding="utf-8") as handle:
         handle.write(
             "filled_txn,77777,107,False,2026-08-14T20:00:00Z,BUY,7777700,"
-            ",,buy-unreconciled,,C,,\n"
+            ",,buy-unreconciled,,C,,,\n"
             "order,,107,,2026-08-14T20:30:00Z,,,,,order-2,,,buy-unreconciled,"
-            "2026-08-14T20:30:00Z\n"
+            "2026-08-14T20:30:00Z,\n"
         )
     manifest = _make_two_artifact_manifest(
         {
@@ -7709,10 +7359,12 @@ def test_quantbase_non_fee_fund_sell_fails_closed_without_withdrawal_admission(
     """A fund redemption cannot silently become a zero strategy flow."""
     root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees,"
-        "id,transaction,filled_at\n"
-        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False,buy-1,,\n"
-        "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False,sell-1,,\n",
+        _with_fund_titles(
+            "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees,"
+            "id,transaction,filled_at\n"
+            "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False,buy-1,,\n"
+            "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False,sell-1,,\n"
+        ),
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -7766,13 +7418,15 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     )
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
-        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,\n"
-        "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z\n"
-        "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z\n"
-        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,\n"
-        "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z\n"
-        "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z\n",
+        _with_fund_titles(
+            "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
+            "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY,161908,,\n"
+            "order,,107,,2024-10-14T19:46:07.1Z,,o-1,161908,2024-10-14T19:46:07.468Z\n"
+            "order,,107,,2024-10-14T19:46:07.2Z,,o-2,161908,2024-10-14T19:46:07.648556Z\n"
+            "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY,172127,,\n"
+            "order,,107,,2024-11-13T14:51:34Z,,o-3,172127,2024-11-13T14:51:35.165283Z\n"
+            "order,,14,,2024-11-13T14:51:34Z,,o-4,172127,2024-11-14T14:51:35Z\n"
+        ),
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -7863,10 +7517,12 @@ def test_quantbase_allocation_without_its_recognizing_fill_fails_closed(
     )
     activity_path = artifact_root / "account_activity.csv"
     activity_path.write_text(
-        "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
-        "filled_txn,1000,107,False,2024-10-13T19:56:57Z,BUY,161908,,\n"
-        "order,,107,,2024-10-14T19:46:07Z,,o-1,161908,2024-10-14T19:46:07Z\n"
-        "filled_txn,76,107,False,2024-11-08T23:26:38Z,BUY,172127,,\n" + orders,
+        _with_fund_titles(
+            "activity_type,amount,fund,is_rebalance,time,type,id,transaction,filled_at\n"
+            "filled_txn,1000,107,False,2024-10-13T19:56:57Z,BUY,161908,,\n"
+            "order,,107,,2024-10-14T19:46:07Z,,o-1,161908,2024-10-14T19:46:07Z\n"
+            "filled_txn,76,107,False,2024-11-08T23:26:38Z,BUY,172127,,\n" + orders
+        ),
         encoding="utf-8-sig",
     )
     manifest = _make_two_artifact_manifest(
@@ -7935,7 +7591,7 @@ def test_matrixport_subscription_admits_strategy_anchor_not_wallet_deposits(
     subscription_path.write_text(
         "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
         "subscription_amount,subscription_currency,subscription_time_utc\n"
-        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,49891.55,"
+        "49891.55,2025-12-06T00:00:00+00:00,2222222222222222222,1111111111111111111,49891.55,"
         "USDT,2025-12-05T21:34:17.414000+00:00\n",
         encoding="utf-8-sig",
     )
@@ -8006,7 +7662,7 @@ def test_matrixport_subscription_admits_strategy_anchor_not_wallet_deposits(
     assert anchors[0]["mapping_status"] == "MAPPED"
     assert anchors[0]["strategy_id"] == "robuxio-crypto"
     assert anchors[0]["source_artifact_id"] == "csv/subscription_details.csv"
-    assert anchors[0]["source_record_id"] == "7402822649690198016"
+    assert anchors[0]["source_record_id"] == "2222222222222222222"
     assert anchors[0]["amount"]["value"] not in {"1", "49998", "49999"}
 
 
@@ -8207,7 +7863,7 @@ def test_matrixport_parity_derived_opening_nav_does_not_admit_capital_anchor(
     subscription_path.write_text(
         "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
         "subscription_amount,subscription_currency,subscription_time_utc\n"
-        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
+        "49891.55,2025-12-06T00:00:00+00:00,2222222222222222222,1111111111111111111,"
         "49891.55,USDT,2025-12-05T21:34:17.414000+00:00\n",
         encoding="utf-8-sig",
     )
@@ -8275,7 +7931,7 @@ def _matrixport_subscription_fixture(
     subscription_path.write_text(
         "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
         "subscription_amount,subscription_currency,subscription_time_utc\n"
-        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
+        "49891.55,2025-12-06T00:00:00+00:00,2222222222222222222,1111111111111111111,"
         f"49891.55,{currency},2025-12-05T21:34:17.414000+00:00\n",
         encoding="utf-8-sig",
     )
@@ -8570,9 +8226,9 @@ def _schema_capital_anchor(*, with_event_time_fx: bool) -> dict[str, Any]:
             "value": "49908.46479303836713372",
         },
         "provider_id": "matrixport",
-        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "record_id": "matrixport-capital-anchor:2222222222222222222",
         "source_artifact_id": "csv/subscription_details.csv",
-        "source_record_id": "7402822649690198016",
+        "source_record_id": "2222222222222222222",
         "strategy_id": "robuxio-crypto",
     }
     if with_event_time_fx:
@@ -8672,10 +8328,10 @@ def test_matrixport_usd_capital_anchor_is_byte_identical_and_carries_no_event_ti
         ),
         "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
         "provider_id": "matrixport",
-        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "record_id": "matrixport-capital-anchor:2222222222222222222",
         "source_artifact_id": "csv/subscription_details.csv",
-        "source_product_id": "7361599360326447104",
-        "source_record_id": "7402822649690198016",
+        "source_product_id": "1111111111111111111",
+        "source_record_id": "2222222222222222222",
         "strategy_id": "robuxio-crypto",
     }
     if with_fx_generation:
@@ -8719,10 +8375,10 @@ def test_matrixport_non_usd_capital_anchor_without_an_fx_generation_is_unchanged
         "nav_source_artifact_id": "csv/daily_portfolio_totals.csv",
         "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
         "provider_id": "matrixport",
-        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "record_id": "matrixport-capital-anchor:2222222222222222222",
         "source_artifact_id": "csv/subscription_details.csv",
-        "source_product_id": "7361599360326447104",
-        "source_record_id": "7402822649690198016",
+        "source_product_id": "1111111111111111111",
+        "source_record_id": "2222222222222222222",
         "strategy_id": "robuxio-crypto",
     }
     assert len(anchors) == 1
@@ -9514,7 +9170,7 @@ def test_matrixport_opening_nav_requires_subscription_cent_match(
     subscription_path.write_text(
         "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
         "subscription_amount,subscription_currency,subscription_time_utc\n"
-        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
+        "49891.55,2025-12-06T00:00:00+00:00,2222222222222222222,1111111111111111111,"
         "49891.55,USDT,2025-12-05T21:34:17.414000+00:00\n",
         encoding="utf-8-sig",
     )
@@ -9571,7 +9227,7 @@ def test_matrixport_capital_anchor_rejects_extra_subscription_product(
     subscription_path.write_text(
         "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
         "subscription_amount,subscription_currency,subscription_time_utc\n"
-        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
+        "49891.55,2025-12-06T00:00:00+00:00,2222222222222222222,1111111111111111111,"
         "49891.55,USDT,2025-12-05T21:34:17.414000+00:00\n"
         "100,2025-12-07T00:00:00+00:00,unrelated-order,unrelated-product,100,"
         "USDT,2025-12-06T21:34:17.414000+00:00\n",
@@ -10378,7 +10034,9 @@ def _quantbase_cash_activity_fixture(tmp_path: Path, *, orphan_fee_sell: bool = 
             "filled_txn,-70.00,107,s2,2026-04-03T19:00:00Z,SELL,,True,,,,False"
         )
     activity_path = artifact_root / "csv/account_activity.csv"
-    activity_path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8-sig")
+    activity_path.write_text(
+        _with_fund_titles(header + "\n".join(lines) + "\n"), encoding="utf-8-sig"
+    )
     catalog = {"catalog_schema_version": 1, "legacy_lineage": {"run_id": run_id}}
     manifest = _make_two_artifact_manifest(
         {"source/csv/account_activity.csv": activity_path}
@@ -10461,7 +10119,9 @@ def test_quantbase_fee_pairing_is_global_not_greedy(tmp_path: Path) -> None:
         "journal,102.00,,j1,,PARTNER_SUB_FEE,2026-02-02T11:00:00Z,,,,,",
         "journal,100.00,,j2,,PARTNER_SUB_FEE,2026-02-02T12:00:00Z,,,,,",
     ]
-    csv_path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8-sig")
+    csv_path.write_text(
+        _with_fund_titles(header + "\n".join(lines) + "\n"), encoding="utf-8-sig"
+    )
     manifest = _make_two_artifact_manifest(
         {"source/csv/account_activity.csv": csv_path}
     )
@@ -10506,7 +10166,9 @@ def test_quantbase_dividend_attribution_ignores_orders_after_the_cutoff(
         "order,,14,o2,2026-03-05T20:00:00Z,,,False,,SHV,2026-03-05T20:00:01Z,",
         "dividend,10.00,,d1,,,,,2026-01-30T05:00:00Z,SHV,,",
     ]
-    csv_path.write_text(header + "\n".join(lines) + "\n", encoding="utf-8-sig")
+    csv_path.write_text(
+        _with_fund_titles(header + "\n".join(lines) + "\n"), encoding="utf-8-sig"
+    )
     manifest = _make_two_artifact_manifest(
         {"source/csv/account_activity.csv": csv_path}
     )

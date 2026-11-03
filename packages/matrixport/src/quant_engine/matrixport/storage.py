@@ -258,6 +258,18 @@ class RunStorage:
             )
         return self.get_run(run_id) or {}
 
+    def merge_run_metadata(self, run_id: str, updates: Mapping[str, Any]) -> None:
+        """Merge keys into a RUNNING run's metadata (read-modify-write)."""
+        self._assert_run_mutable(run_id)
+        row = self.get_run(run_id) or {}
+        merged = json.loads(str(row.get("metadata_json") or "{}"))
+        merged.update(dict(updates))
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE runs SET metadata_json=? WHERE run_id=?",
+                (canonical_json(merged), run_id),
+            )
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         row = self._connection.execute(
             "SELECT * FROM runs WHERE run_id=?", (run_id,)

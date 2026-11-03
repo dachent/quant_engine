@@ -18,6 +18,7 @@ import time
 from types import MappingProxyType, ModuleType
 from typing import Callable, Final, Mapping, Protocol, Sequence, cast
 
+from quant_engine.core import parallel_hash
 from quant_engine.core.contracts import (
     CoverageStatus,
     GenerationManifest,
@@ -1556,6 +1557,7 @@ def generation_inventory_sha256(root: Path, generation_id: str) -> str:
     if not generation_dir.is_dir() or generation_dir.is_symlink():
         raise GenerationConflictError("generation directory is missing or linked")
     files: list[dict[str, object]] = []
+    members: list[Path] = []
     for directory_name, directory_names, file_names in os.walk(
         generation_dir, followlinks=False
     ):
@@ -1578,20 +1580,19 @@ def generation_inventory_sha256(root: Path, generation_id: str) -> str:
                 raise GenerationConflictError(
                     _inventory_file_refusal(path, directory, name)
                 )
-            relative = path.relative_to(generation_dir).as_posix()
-            digest = hashlib.sha256()
-            size = 0
-            with path.open("rb") as handle:
-                while block := handle.read(1024 * 1024):
-                    digest.update(block)
-                    size += len(block)
-            files.append(
-                {
-                    "relative_path": relative,
-                    "sha256": digest.hexdigest(),
-                    "size_bytes": size,
-                }
-            )
+            members.append(path)
+    try:
+        hashed = parallel_hash.hash_files(members)
+    except parallel_hash.IrregularFileError as exc:
+        raise GenerationConflictError(str(exc)) from exc
+    for path, (digest, size) in zip(members, hashed):
+        files.append(
+            {
+                "relative_path": path.relative_to(generation_dir).as_posix(),
+                "sha256": digest,
+                "size_bytes": size,
+            }
+        )
     if "generation.json" not in {str(item["relative_path"]) for item in files}:
         raise GenerationConflictError("generation inventory lacks generation.json")
     files.sort(key=lambda item: str(item["relative_path"]))

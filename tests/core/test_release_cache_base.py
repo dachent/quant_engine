@@ -179,3 +179,130 @@ def test_producer_change_with_nothing_recomputed_is_suspicious(
     )
     assert rc == code
     assert bool(result["suspicious_reuse"]) == (code != 0)
+
+
+RUN_MARKER = "attended-run-root.json"
+
+
+def _cold_run(tmp: Path, *, base: str | None = None, cache: Path | None = None) -> Path:
+    """A PASSED run that started with no base: a plain cache root, no overlay marker."""
+
+    run = _run(tmp)
+    cache = cache or tmp / "cold-cache"
+    (run / RUN_MARKER).write_text(
+        json.dumps(
+            {
+                "kind": "quant-engine-attended-run-root",
+                "retained_cache_base": base,
+                "retained_cache_root": str(cache),
+                "run_root": str(run),
+                "schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    for rel, text in {
+        ".decomposition-index/k1.json": "1",
+        ".decomposition-training/m1.bin": "22",
+        "candidates/c1/generation.json": "4444",
+        "financial-replay-receipts/r1.json": "333",
+        # per-run state that sits beside the caches in a cold run's root
+        "pipelines/run-a/receipt.json": "state",
+        "financial-verification-ledger/led.json": "ledger",
+    }.items():
+        path = cache / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return run
+
+
+def _promote(tmp: Path, run: Path, base: Path) -> int:
+    return cb.main(
+        [
+            "promote",
+            "--overlay",
+            str(tmp / "cold-cache"),
+            "--base",
+            str(base),
+            "--run-root",
+            str(run),
+        ]
+    )
+
+
+def test_a_cold_runs_cache_seals_into_a_base_the_next_run_uses_warm(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from quant_engine.core import run_storage
+
+    run = _cold_run(tmp_path)
+    cold = tmp_path / "cold-cache"
+    before = {
+        rel: (cold / rel).read_bytes()
+        for rel in (
+            ".decomposition-index/k1.json",
+            "candidates/c1/generation.json",
+            "financial-replay-receipts/r1.json",
+        )
+    }
+    base = tmp_path / "base"
+    assert _promote(tmp_path, run, base) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["source_commit"] == COMMIT
+    assert set(out["cold_run_kinds_sealed"]) == set(core_base.COLD_CACHE_KINDS)
+    assert out["manifest"]["files"] == 4
+    # the run's own state and ledger are never sealed into the base
+    assert not (base / "pipelines").exists()
+    assert not (base / "financial-verification-ledger").exists()
+    assert core_base.verify_cache_base(base)["source_commit"] == COMMIT
+    # the next run starts warm from it: hard links, same bytes, nothing recomputed
+    overlay = tmp_path / "warm-cache"
+    run2 = tmp_path / "run2"
+    run2.mkdir()
+    run_storage.create_cache_overlay(base, overlay, run_root=run2)
+    for rel, content in before.items():
+        assert (overlay / rel).read_bytes() == content
+        assert os.path.samestat((overlay / rel).stat(), (base / rel).stat())
+    report = cb.reuse_report(base, overlay)
+    assert report["kinds"]
+    assert all(
+        row["new"] == 0 and row["inherited"] > 0 for row in report["kinds"].values()
+    )
+    assert core_base.verify_if_promoted(base) is not None
+
+
+def test_a_broken_or_foreign_cold_root_is_refused(tmp_path: Path) -> None:
+    run = _cold_run(tmp_path)
+    cold = tmp_path / "cold-cache"
+    # an overlay marker that exists but cannot be read is still a refusal
+    (cold / MARKER).write_text("{not json", encoding="utf-8")
+    with pytest.raises(core_base.CacheBaseError, match="overlay marker is unreadable"):
+        cb.source_commit_of(run, cold)
+    (cold / MARKER).unlink()
+    # the run marker must name this root
+    with pytest.raises(core_base.CacheBaseError, match="not this run's cold"):
+        cb.source_commit_of(run, tmp_path / "elsewhere")
+    # a run that was seeded from a base must have left an overlay marker
+    seeded = _cold_run(tmp_path / "s", base="/some/base", cache=tmp_path / "s" / "c")
+    with pytest.raises(core_base.CacheBaseError, match="seeded from a base"):
+        cb.source_commit_of(seeded, tmp_path / "s" / "c")
+    # no run marker at all
+    (run / RUN_MARKER).unlink()
+    with pytest.raises(core_base.CacheBaseError, match="run root marker is unreadable"):
+        cb.source_commit_of(run, cold)
+
+
+def test_a_cold_root_with_no_cache_entries_is_refused(tmp_path: Path) -> None:
+    run = _cold_run(tmp_path)
+    cold = tmp_path / "cold-cache"
+    for kind in core_base.COLD_CACHE_KINDS:
+        if (cold / kind).exists():
+            for item in sorted((cold / kind).rglob("*"), reverse=True):
+                item.unlink() if item.is_file() else item.rmdir()
+            (cold / kind).rmdir()
+    with pytest.raises(core_base.CacheBaseError, match="holds no cache entries"):
+        core_base.promote_cache_base(
+            cold, tmp_path / "b", COMMIT, cold_kinds=core_base.COLD_CACHE_KINDS
+        )
+    assert not (tmp_path / "b").exists()
+    assert _promote(tmp_path, run, tmp_path / "b2") == 1

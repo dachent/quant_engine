@@ -194,6 +194,13 @@
    "kinds": [
     "universal"
    ],
+   "text": "Documented percent rate (no dollar cost)"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "kinds": [
+    "universal"
+   ],
    "text": "Each dated path value is the beta available in that estimation state;"
   },
   {
@@ -1885,10 +1892,31 @@
   {
    "file": "tools/portfolio_report.py",
    "kinds": [
+    "universal"
+   ],
+   "text": "no dollar amount is published"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "no dollar cost is published."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
     "universal",
     "coverage"
    ],
    "text": "otherwise it remains unavailable with the row's status and reason."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "performance fee none billed, no high-water mark billed"
   },
   {
    "file": "tools/portfolio_report.py",
@@ -1909,7 +1937,21 @@
    "kinds": [
     "universal"
    ],
+   "text": "the fee tier is not settled, so no rate is claimed"
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
    "text": "the hybrid mode is the exact live-only path."
+  },
+  {
+   "file": "tools/portfolio_report.py",
+   "kinds": [
+    "universal"
+   ],
+   "text": "tier settled by {} posted fees ({} to {}) each within ${} of that rate over fund value"
   },
   {
    "file": "tools/portfolio_report.py",

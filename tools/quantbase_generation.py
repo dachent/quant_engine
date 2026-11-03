@@ -38,6 +38,10 @@ DEFAULT_FILE_COUNT: Final = 55
 DEFAULT_RECORD_COUNT: Final = 14901
 PLANNING_RECORD_COUNT: Final = 14981
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SNAPSHOT_LABEL_KEYS: Final = frozenset({"file", "captured_at", "gap_hours"})
+_SNAPSHOT_EXCEPTION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/#-]{0,119}$")
+_DECLARED_SCHEMA_NAME = re.compile(r"^quantbase-[a-z0-9-]{1,80}$")
+_DECLARED_SCHEMA_VERSION = re.compile(r"^[0-9a-z][0-9a-z.-]{0,31}$")
 _NATIVE_ARTIFACT_CONTRACTS: Final[tuple[dict[str, tuple[str, str]], ...]] = (
     {
         "har/quantbase_20260902_171237.har": (
@@ -364,6 +368,57 @@ def _source_layout(source_root: Path) -> tuple[list[Path], Path]:
     return files, runbook
 
 
+def _snapshot_plan_block(
+    datasets: Sequence[Mapping[str, object]],
+    labels: Sequence[Mapping[str, object]] | None,
+    exception: str | None,
+) -> dict[str, object]:
+    """Capture-time labels for undated snapshot datasets (absent for legacy plans)."""
+
+    if labels is None:
+        if exception is not None:
+            raise QuantbaseGenerationError("a snapshot exception needs snapshot labels")
+        return {}
+    paths = {str(item["relative_path"]) for item in datasets}
+    checked: list[dict[str, object]] = []
+    for label in labels:
+        if set(label) - _SNAPSHOT_LABEL_KEYS or not {"file", "captured_at"} <= set(
+            label
+        ):
+            raise QuantbaseGenerationError("snapshot label keys differ")
+        entry = {key: label[key] for key in sorted(label)}
+        if f"csv/{entry['file']}" not in paths:
+            raise QuantbaseGenerationError("snapshot label names an unplanned file")
+        captured = entry["captured_at"]
+        if not isinstance(captured, str) or not captured.endswith("Z"):
+            raise QuantbaseGenerationError("snapshot captured_at must be UTC text")
+        try:
+            datetime.fromisoformat(captured.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise QuantbaseGenerationError("snapshot captured_at is invalid") from exc
+        gap = entry.get("gap_hours")
+        if "gap_hours" in entry and (
+            isinstance(gap, bool) or not isinstance(gap, (int, float)) or gap <= 0
+        ):
+            raise QuantbaseGenerationError("snapshot gap_hours must be positive")
+        checked.append(entry)
+    if len({str(item["file"]) for item in checked}) != len(checked):
+        raise QuantbaseGenerationError("snapshot labels repeat a file")
+    late = any("gap_hours" in item for item in checked)
+    if late and exception is None:
+        raise QuantbaseGenerationError(
+            "a snapshot taken after the cutoff day end needs a labelled exception"
+        )
+    if exception is not None and (
+        _SNAPSHOT_EXCEPTION.fullmatch(exception) is None or not late
+    ):
+        raise QuantbaseGenerationError("snapshot exception label is invalid or unused")
+    return {
+        "snapshot_labels": sorted(checked, key=lambda item: str(item["file"])),
+        **({"snapshot_exception": exception} if exception is not None else {}),
+    }
+
+
 def create_plan(
     source_root: Path,
     data_root: Path,
@@ -374,6 +429,9 @@ def create_plan(
     expected_record_count: int = DEFAULT_RECORD_COUNT,
     planning_record_count: int = PLANNING_RECORD_COUNT,
     native_artifacts: Sequence[tuple[str, Path]] | None = None,
+    native_contract: Mapping[str, tuple[str, str]] | None = None,
+    snapshot_labels: Sequence[Mapping[str, object]] | None = None,
+    snapshot_exception: str | None = None,
 ) -> dict[str, object]:
     """Create one content-addressed, private cutover plan."""
 
@@ -393,6 +451,8 @@ def create_plan(
             "CSV record count differs from accepted baseline"
         )
     runbook_hash, runbook_size = hash_file(runbook)
+    if native_contract is not None and native_artifacts is None:
+        raise QuantbaseGenerationError("a native contract requires native artifacts")
     native_entries: list[dict[str, object]] = []
     if native_artifacts is not None:
         relative_paths: list[str] = []
@@ -422,7 +482,7 @@ def create_plan(
             )
         if len(source_paths) != len(set(source_paths)):
             raise QuantbaseGenerationError("native artifact sources must be unique")
-        contract = _native_artifact_contract(relative_paths)
+        contract = _native_artifact_contract(relative_paths, declared=native_contract)
         for relative, source_path in sorted(
             zip(relative_paths, source_paths, strict=True), key=lambda item: item[0]
         ):
@@ -460,9 +520,19 @@ def create_plan(
         **(
             {"native_artifacts": native_entries} if native_artifacts is not None else {}
         ),
+        **(
+            {
+                "native_contract": {
+                    key: list(value) for key, value in sorted(native_contract.items())
+                }
+            }
+            if native_contract is not None
+            else {}
+        ),
         "observed_end": max(observed).isoformat(),
         "observed_start": min(observed).isoformat(),
         "provider_id": "quantbase",
+        **_snapshot_plan_block(datasets, snapshot_labels, snapshot_exception),
         "quarantine_plan_id": quarantine_plan_id,
         "runbook": {
             "bytes": runbook_size,
@@ -556,7 +626,9 @@ def _native_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         raise QuantbaseGenerationError("native artifact relative paths must be unique")
     if len(source_paths) != len(set(source_paths)):
         raise QuantbaseGenerationError("native artifact sources must be unique")
-    contract = _native_artifact_contract(relative_paths)
+    contract = _native_artifact_contract(
+        relative_paths, declared=_declared_contract(plan.get("native_contract"))
+    )
     for item, relative in zip(native, relative_paths, strict=True):
         if (
             item.get("schema_name") != contract[relative][0]
@@ -566,9 +638,40 @@ def _native_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     return native
 
 
+def _declared_contract(value: object) -> dict[str, tuple[str, str]] | None:
+    """Validate a manifest-declared native contract; None selects the legacy set."""
+
+    if value is None:
+        return None
+    declared: dict[str, tuple[str, str]] = {}
+    for key, pair in _object(value, "native_contract").items():
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise QuantbaseGenerationError("native contract entry is malformed")
+        name, version = pair
+        if (
+            not isinstance(name, str)
+            or _DECLARED_SCHEMA_NAME.fullmatch(name) is None
+            or not isinstance(version, str)
+            or _DECLARED_SCHEMA_VERSION.fullmatch(version) is None
+        ):
+            raise QuantbaseGenerationError("native contract schema is invalid")
+        declared[key] = (name, version)
+    if not declared:
+        raise QuantbaseGenerationError("native contract must not be empty")
+    return declared
+
+
 def _native_artifact_contract(
     relative_paths: Sequence[str],
-) -> dict[str, tuple[str, str]]:
+    *,
+    declared: Mapping[str, tuple[str, str]] | None = None,
+) -> Mapping[str, tuple[str, str]]:
+    if declared is not None:
+        if set(relative_paths) != set(declared):
+            raise QuantbaseGenerationError(
+                "native artifacts differ from the declared native contract"
+            )
+        return declared
     for contract in _NATIVE_ARTIFACT_CONTRACTS:
         if set(relative_paths) == set(contract):
             return contract
@@ -691,6 +794,23 @@ def _copy_to_staging(plan: Mapping[str, Any]) -> Path:
     return staging
 
 
+def _snapshot_catalog_fields(
+    label: Mapping[str, object] | None, exception: object
+) -> dict[str, object]:
+    """Per-dataset capture-time fields; nothing for dated series or legacy plans."""
+
+    if label is None:
+        return {}
+    fields: dict[str, object] = {
+        "captured_at": label["captured_at"],
+        "snapshot_kind": "CAPTURE_TIME_SNAPSHOT",
+    }
+    if "gap_hours" in label:
+        fields["gap_hours_after_cutoff_end"] = label["gap_hours"]
+        fields["snapshot_exception"] = exception
+    return fields
+
+
 def build_generation(
     plan_path: Path, *, input_root: Path | None = None
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
@@ -714,6 +834,10 @@ def build_generation(
         )
     baseline = _object(plan["baseline"], "baseline")
     native_entries = _native_entries(plan)
+    snapshot_labels = {
+        str(item["file"]): item for item in plan.get("snapshot_labels", [])
+    }
+    snapshot_exception = plan.get("snapshot_exception")
     catalog: dict[str, object] = {
         "api_fallback": False,
         "as_of_date": as_of.isoformat(),
@@ -723,7 +847,12 @@ def build_generation(
             "observed_end": plan["observed_end"],
             "observed_start": plan["observed_start"],
             "out_of_boundary": [
-                "No freshness claim is made after the 2026-07-29 legacy capture.",
+                (
+                    "No freshness claim is made after the "
+                    f"{as_of.isoformat()} declared capture cutoff."
+                    if "native_contract" in plan
+                    else "No freshness claim is made after the 2026-07-29 legacy capture."
+                ),
                 "The producing source revision is unknown and remains LEGACY_UNKNOWN.",
                 "The captured runbook contains stale narrative counts; hash-bound CSV files govern.",
                 "Inherited wins fields cannot be independently recomputed from the available evidence.",
@@ -739,6 +868,12 @@ def build_generation(
                 "relative_path": item["relative_path"],
                 "row_count": item["row_count"],
                 "sha256": item["sha256"],
+                **_snapshot_catalog_fields(
+                    snapshot_labels.get(
+                        str(item["relative_path"]).removeprefix("csv/")
+                    ),
+                    snapshot_exception,
+                ),
             }
             for item in datasets
         ],
@@ -1000,6 +1135,213 @@ def cutover_source(plan_path: Path, generation_id: str) -> dict[str, object]:
     return result
 
 
+def _load_native_intake(
+    path: Path | None,
+) -> tuple[
+    list[tuple[str, Path]] | None, dict[str, tuple[str, str]] | None, date | None
+]:
+    """Re-derive the native declaration from a staged and parsed HAR intake.
+
+    The declaration is never read from a caller-authored file: every raw file is
+    re-hashed against the intake record, the staged manifest and the parse report
+    must agree with that record, and the schema contract is built here.
+    """
+
+    if path is None:
+        return None, None, None
+    root = _absolute_directory(str(path), "native intake", existing=True)
+
+    def load(name: str) -> tuple[bytes, dict[str, Any]]:
+        target = root / name
+        if target.is_symlink() or not target.is_file():
+            raise QuantbaseGenerationError(f"native intake lacks {name}")
+        raw = target.read_bytes()
+        try:
+            return raw, _object(json.loads(raw.decode("utf-8")), name)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise QuantbaseGenerationError(f"native intake {name} is invalid") from exc
+
+    manifest_bytes, manifest = load("manifest.json")
+    _, record = load("intake-manifest.json")
+    _, report = load("parse-report.json")
+    files = _objects(record.get("files"), "intake files")
+    if record.get("manifest_sha256") != hashlib.sha256(manifest_bytes).hexdigest():
+        raise QuantbaseGenerationError("native intake manifest differs from its record")
+    if (
+        report.get("manifest_sha256") != record.get("manifest_sha256")
+        or report.get("intake_id") != record.get("intake_id")
+        or report.get("files") != record.get("files")
+        or report.get("state") not in {"PARSED", "PARSED_WITH_FLAGS"}
+    ):
+        raise QuantbaseGenerationError("native intake parse report does not match")
+    raw_root = root / "raw"
+    if raw_root.is_symlink() or not raw_root.is_dir():
+        raise QuantbaseGenerationError("native intake raw directory is missing")
+    names = [_text(item.get("name"), "intake file name") for item in files]
+    if {item.name for item in raw_root.iterdir()} != set(names) or len(names) != len(
+        set(names)
+    ):
+        raise QuantbaseGenerationError("native intake raw inventory differs")
+    artifacts: list[tuple[str, Path]] = []
+    contract: dict[str, tuple[str, str]] = {}
+    for item in files:
+        name = str(item["name"])
+        raw_path = raw_root / name
+        if raw_path.is_symlink() or hash_file(raw_path) != (
+            item.get("sha256"),
+            item.get("bytes"),
+        ):
+            raise QuantbaseGenerationError(f"native intake raw file differs: {name}")
+        artifacts.append((f"har/{name}", raw_path))
+        contract[f"har/{name}"] = ("quantbase-native-har", "1")
+    artifacts.append(("capture/intake-manifest.json", root / "intake-manifest.json"))
+    contract["capture/intake-manifest.json"] = ("quantbase-har-intake-manifest", "1")
+    cutoff_text = _text(manifest.get("cutoff"), "intake cutoff")
+    return artifacts, contract, date.fromisoformat(cutoff_text)
+
+
+NATIVE_MANIFEST_SCHEMA_VERSION: Final = 1
+# Declared file roles: role -> (published directory, schema name, schema version,
+# fixed published file name or None to keep the source name). Fixed names keep the
+# consumers that resolve artifacts by canonical id (flow coverage) working.
+NATIVE_ROLES: Final[dict[str, tuple[str, str, str, str | None]]] = {
+    "native-har": ("har", "quantbase-native-har", "1", None),
+    "account-activity-response": (
+        "capture",
+        "quantbase-account-activity-response",
+        "1",
+        "account-activity-response.json",
+    ),
+    "account-activity-request-proof": (
+        "capture",
+        "quantbase-account-activity-request-proof",
+        "1",
+        "account-activity-request-proof.json",
+    ),
+    "har-intake-manifest": (
+        "capture",
+        "quantbase-har-intake-manifest",
+        "1",
+        "intake-manifest.json",
+    ),
+}
+_NATIVE_MANIFEST_KEYS: Final = frozenset({"schema_version", "cutoff", "files"})
+_NATIVE_MANIFEST_OPTIONAL: Final = frozenset({"snapshots", "snapshot_exception"})
+_NATIVE_FILE_KEYS: Final = frozenset({"role", "path", "sha256", "bytes"})
+_NATIVE_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def load_native_manifest(
+    path: Path,
+) -> tuple[list[tuple[str, Path]], dict[str, tuple[str, str]], date]:
+    """Build the native declaration from caller-declared roles and hashes.
+
+    A differently dated or differently named capture needs no code edit: the
+    manifest lists each file with its role and SHA-256 (and optionally its size).
+    Every file is re-hashed here and any mismatch, unknown key or role, duplicate
+    name, unsafe name, relative or linked path fails closed. The published
+    relative path and the schema contract are derived from the role, never taken
+    from the manifest, so a manifest cannot widen the contract.
+    """
+
+    manifest_path = Path(path)
+    if (
+        not manifest_path.is_absolute()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+    ):
+        raise QuantbaseGenerationError("native manifest must be a real absolute file")
+    try:
+        document = _object(
+            json.loads(manifest_path.read_text(encoding="utf-8")), "native manifest"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QuantbaseGenerationError("native manifest is not valid JSON") from exc
+    if set(document) - (_NATIVE_MANIFEST_KEYS | _NATIVE_MANIFEST_OPTIONAL) or not {
+        "schema_version",
+        "cutoff",
+        "files",
+    } <= set(document):
+        raise QuantbaseGenerationError("native manifest keys differ from the contract")
+    if document["schema_version"] != NATIVE_MANIFEST_SCHEMA_VERSION:
+        raise QuantbaseGenerationError("native manifest schema version is unsupported")
+    try:
+        cutoff = date.fromisoformat(_text(document["cutoff"], "native cutoff"))
+    except ValueError as exc:
+        raise QuantbaseGenerationError("native cutoff is not a date") from exc
+    items = _objects(document["files"], "native files")
+    if not items:
+        raise QuantbaseGenerationError("native manifest declares no files")
+    artifacts: list[tuple[str, Path]] = []
+    contract: dict[str, tuple[str, str]] = {}
+    seen_roles: Counter[str] = Counter()
+    for item in items:
+        if set(item) - _NATIVE_FILE_KEYS or not {"role", "path", "sha256"} <= set(item):
+            raise QuantbaseGenerationError("native file keys differ from the contract")
+        role = _text(item["role"], "native role")
+        if role not in NATIVE_ROLES:
+            raise QuantbaseGenerationError(f"native role is not allowed: {role}")
+        directory, schema_name, schema_version, fixed = NATIVE_ROLES[role]
+        file_path = Path(_text(item["path"], "native path"))
+        if not file_path.is_absolute() or file_path.is_symlink():
+            raise QuantbaseGenerationError(
+                "native file path must be absolute, unlinked"
+            )
+        if not file_path.is_file():
+            raise QuantbaseGenerationError(f"native file is missing: {file_path.name}")
+        if _NATIVE_FILE_NAME.fullmatch(file_path.name) is None:
+            raise QuantbaseGenerationError("native file name is unsafe")
+        digest = _text(item["sha256"], "native sha256")
+        if _SHA256.fullmatch(digest) is None:
+            raise QuantbaseGenerationError("native sha256 is malformed")
+        actual, size = hash_file(file_path)
+        if actual != digest or ("bytes" in item and item["bytes"] != size):
+            raise QuantbaseGenerationError(
+                f"native file differs from its declared hash: {file_path.name}"
+            )
+        relative = f"{directory}/{fixed or file_path.name}"
+        if relative in contract:
+            raise QuantbaseGenerationError("native file names must be unique")
+        artifacts.append((relative, file_path))
+        contract[relative] = (schema_name, schema_version)
+        seen_roles[role] += 1
+    if seen_roles["native-har"] < 1:
+        raise QuantbaseGenerationError("native manifest declares no native-har file")
+    for singleton in (
+        "account-activity-response",
+        "account-activity-request-proof",
+        "har-intake-manifest",
+    ):
+        if seen_roles[singleton] > 1:
+            raise QuantbaseGenerationError(f"native role repeats: {singleton}")
+    return artifacts, contract, cutoff
+
+
+def load_native_snapshots(
+    path: Path,
+) -> tuple[list[dict[str, object]] | None, str | None]:
+    """The optional capture-time snapshot labels of a native manifest.
+
+    ``(None, None)`` when the manifest declares none; ``plan`` validates them.
+    """
+
+    try:
+        document = _object(
+            json.loads(Path(path).read_text(encoding="utf-8")), "native manifest"
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QuantbaseGenerationError("native manifest is not valid JSON") from exc
+    labels = document.get("snapshots")
+    exception = document.get("snapshot_exception")
+    if labels is None:
+        if exception is not None:
+            raise QuantbaseGenerationError("a snapshot exception needs snapshot labels")
+        return None, None
+    if exception is not None and not isinstance(exception, str):
+        raise QuantbaseGenerationError("snapshot exception must be text")
+    return [dict(item) for item in _objects(labels, "native snapshots")], exception
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1013,6 +1355,9 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--planning-record-count", type=int, default=PLANNING_RECORD_COUNT
     )
+    native = plan.add_mutually_exclusive_group()
+    native.add_argument("--native-intake", type=Path)
+    native.add_argument("--native-manifest", type=Path)
     for command in ("build", "stage"):
         child = commands.add_parser(command)
         child.add_argument("plan", type=Path)
@@ -1027,6 +1372,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "plan":
+            declared = (
+                (load_native_manifest(args.native_manifest))
+                if args.native_manifest is not None
+                else _load_native_intake(args.native_intake)
+            )
+            native_artifacts, native_contract, intake_cutoff = declared
+            snapshot_labels, snapshot_exception = (
+                load_native_snapshots(args.native_manifest)
+                if args.native_manifest is not None
+                else (None, None)
+            )
+            if intake_cutoff is not None and args.as_of_date != intake_cutoff:
+                raise QuantbaseGenerationError(
+                    "as-of date must equal the intake manifest cutoff"
+                )
             result = create_plan(
                 args.source_root,
                 args.data_root,
@@ -1035,6 +1395,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_file_count=args.expected_file_count,
                 expected_record_count=args.expected_record_count,
                 planning_record_count=args.planning_record_count,
+                native_artifacts=native_artifacts,
+                native_contract=native_contract,
+                snapshot_labels=snapshot_labels,
+                snapshot_exception=snapshot_exception,
             )
         elif args.command == "build":
             catalog, manifest, catalog_bytes = build_generation(args.plan)

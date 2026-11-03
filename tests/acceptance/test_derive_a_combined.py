@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,14 @@ import test_derive_a as original
 from derive_a import combined
 from derive_a.sources import Assignment, Crosswalk, INCLUDED, InputError
 
-BASE = Path(__file__).resolve().parents[3]
+SEAT_ENV = "QE_ACCEPTANCE_SEAT_BASE"
+BASE = Path(os.environ.get(SEAT_ENV, "").strip() or "unset-seat-base")
 real_inputs = pytest.mark.skipif(
-    not (BASE / "inputs/sleeve-inputs.json").exists(),
-    reason="real R2 inputs are only present in the seat tree",
+    not os.environ.get(SEAT_ENV, "").strip(),
+    reason=(
+        f"{SEAT_ENV} does not name the seat tree holding the real R2 inputs "
+        "(explicit opt-in; no sibling-folder probing)"
+    ),
 )
 START = dt.date(2026, 1, 1)
 
@@ -115,6 +120,8 @@ def test_declared_duplicate_identity_cli(
     output = tmp_path / "result.json"
     status = cli.main(
         [
+            "--cutoff",
+            "2026-09-17",
             "--qe-root",
             str(BASE / "tree/qe-root"),
             "--out",
@@ -270,6 +277,8 @@ def test_real_cli_refuses_perimeter(
     assert (
         cli.main(
             [
+                "--cutoff",
+                "2026-09-17",
                 "--qe-root",
                 str(BASE / "tree/qe-root"),
                 "--out",

@@ -1,0 +1,22 @@
+{
+ "roots": [
+  {
+   "old": "C:\\Dev\\worktrees\\quant-engine-completion\\",
+   "key": "wt",
+   "archive": "evidence/codex-2026-09-source-staging.zip",
+   "archive_prefix": "worktrees/",
+   "only_prefixes": [
+    ".pt/",
+    ".codex-bootstrap/"
+   ],
+   "workspace_fallback": true
+  },
+  {
+   "old": "C:\\Dev\\q\\chain2\\",
+   "key": "chain2",
+   "archive": "evidence/releases/2026-10-13/inputs.zip",
+   "archive_prefix": "",
+   "only_prefixes": []
+  }
+ ]
+}

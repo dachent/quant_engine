@@ -1321,7 +1321,7 @@ def _current_capital_fixture(*, reserve_ready: bool = False) -> dict[str, object
     """Hand-written ``current_capital`` for the one-strategy synthetic baseline.
 
     strategy-1 is account-1's NAV 400000.5 @ AS_OF (the audit table below says
-    410272.39, so the two figures can never be confused).  The reserve account's
+    322556.153018, so the two figures can never be confused).  The reserve account's
     only NAV is a 2026-07-14 legacy row: it is capital authority only when
     ``reserve_ready`` admits it AUTHORITATIVE, otherwise the reserve is NOT_READY.
     """
@@ -1478,13 +1478,13 @@ def _fixture(
     ).hexdigest()
     allocations = [
         {
-            "current_value": {"value": "410272.39"},
+            "current_value": {"value": "322556.153018"},
             "pool_id": "systematic-capital",
             "strategy_id": "strategy-1",
             "systematic_weight": "1.00000000000000003060016",
         },
         {
-            "current_value": {"value": "100043.62"},
+            "current_value": {"value": "78654.294044"},
             "pool_id": "reserve-capital",
             "strategy_id": None,
             "systematic_weight": None,
@@ -1513,9 +1513,9 @@ def _fixture(
         },
     ]
     replay = {
-        "reserve_total_usd": "100043.62",
-        "systematic_total_usd": "410272.39",
-        "total_liquid_usd": "510316.01",
+        "reserve_total_usd": "78654.294044",
+        "systematic_total_usd": "322556.153018",
+        "total_liquid_usd": "401210.447062",
     }
     capital = _current_capital_fixture(reserve_ready=reserve_ready)
     baseline_payload = {
@@ -5058,9 +5058,9 @@ def test_semantic_labels_the_snapshot_historical_and_verifies_current_capital(
     snapshot = evidence["audit_snapshot"]
     assert snapshot["status"] == "HISTORICAL_REFERENCE"
     assert snapshot["as_of_date"] == "2026-07-25"
-    assert snapshot["systematic_total_usd"] == "410272.39"
-    assert snapshot["reserve_total_usd"] == "100043.62"
-    assert snapshot["total_liquid_usd"] == "510316.01"
+    assert snapshot["systematic_total_usd"] == "322556.153018"
+    assert snapshot["reserve_total_usd"] == "78654.294044"
+    assert snapshot["total_liquid_usd"] == "401210.447062"
     # The current block is recomputed from nav_observations x assignments.
     current = evidence["current_capital"]
     assert current["valuation_date"] == AS_OF.isoformat()
@@ -5110,7 +5110,7 @@ def _paint_the_audit_reserve(payload: dict[str, object]) -> None:
     capital = payload["current_capital"]
     assert isinstance(capital, dict)
     capital["reserve"]["status"] = "AVAILABLE"
-    capital["reserve"]["current_value"] = _cc_amount("100043.62")
+    capital["reserve"]["current_value"] = _cc_amount("78654.294044")
     capital["reserve"]["as_of_date"] = "2026-07-25"
 
 
@@ -5118,7 +5118,7 @@ def _paint_total_liquid(payload: dict[str, object]) -> None:
     capital = payload["current_capital"]
     assert isinstance(capital, dict)
     capital["total_liquid"]["status"] = "AVAILABLE"
-    capital["total_liquid"]["current_value"] = _cc_amount("510316.01")
+    capital["total_liquid"]["current_value"] = _cc_amount("401210.447062")
     capital["total_liquid"]["as_of_date"] = "2026-07-25"
 
 
@@ -5501,39 +5501,39 @@ def test_capital_gate_fails_closed_on_an_unreadable_registry(
 # generation): seven SYSTEMATIC strategies, their member NAVs, and the OWNER_318
 # derived custody cash lines the producer adds to robuxio-crypto and
 # volatis-strategy (portfolio_baseline._build_current_capital).  The published
-# strategy value is NAV + cash; the systematic total is 426101.61285957407210153065004
-# and the NAV-only sum is exactly the cash total (1973.918694572) lower.
+# strategy value is NAV + cash; the systematic total is 335001.088030197135486223397061448
+# and the NAV-only sum is exactly the cash total (1551.8948776725064) lower.
 _CUSTODY_BOOK: tuple[tuple[str, tuple[tuple[str, str], ...], str | None], ...] = (
-    ("grizzlybears-vtma", (("account-61092059d066f056", "51233.9"),), None),
-    ("p123-ai-factor", (("account-1b44c987969b9e47", "57200.875514128"),), None),
-    ("p123-eu", (("account-d69701da9143c430", "45464.686880028"),), None),
+    ("grizzlybears-vtma", (("account-61092059d066f056", "40280.09218"),), None),
+    ("p123-ai-factor", (("account-fdc2ab079a1b528d", "44971.3283292074336"),), None),
+    ("p123-eu", (("account-b1e024144369db48", "35744.3368250780136"),), None),
     (
         "qsi",
         (
-            ("account-38b653b91ff43a10", "48309.42"),
-            ("account-98f5986706ed53c5", "10628.97"),
+            ("account-38b653b91ff43a10", "37980.866004"),
+            ("account-4b0af91b8b321bea", "8356.496214"),
         ),
         None,
     ),
     (
         "robuxio-crypto",
-        (("account-d2e5821e608e25f1", "51126.09177084639756872065004"),),
-        "93.97474435567453281",
+        (("account-d2e5821e608e25f1", "40195.333350239437768528175061448"),),
+        "73.882944012431317695222",
     ),
     (
         "tt-portfolio",
         (
-            ("account-702c489650e59956", "3.81"),
-            ("account-a13937e26b8ae46d", "14520.86"),
-            ("account-c63d2a487e019790", "74492.29"),
-            ("account-cff10c44aedcf5e8", "12054.51"),
+            ("account-702c489650e59956", "2.995422"),
+            ("account-a13937e26b8ae46d", "11416.300132"),
+            ("account-4f916ac94694f24e", "58565.838398"),
+            ("account-723f83d32c51308c", "9477.255762"),
         ),
         None,
     ),
     (
         "volatis-strategy",
-        (("account-58e75e8d952fa1b8", "59092.28"),),
-        "1879.943950216",
+        (("account-58e75e8d952fa1b8", "46458.350536"),),
+        "1478.0119336598192",
     ),
 )
 # The weights baseline 347ed499 publishes, verbatim.
@@ -5546,8 +5546,8 @@ _CUSTODY_PUBLISHED_WEIGHTS = {
     "tt-portfolio": "0.2372003929337603452714571839230204",
     "volatis-strategy": "0.143093154567124318785452543586923",
 }
-_CUSTODY_SYSTEMATIC = "426101.61285957407210153065004"
-_CUSTODY_NAV_ONLY_SYSTEMATIC = "424127.69416500239756872065004"
+_CUSTODY_SYSTEMATIC = "335001.088030197135486223397061448"
+_CUSTODY_NAV_ONLY_SYSTEMATIC = "333449.193152524884968528175061448"
 
 
 def _custody_cash_line(account_id: str, value: str) -> dict[str, Any]:
@@ -5703,7 +5703,7 @@ def test_capital_gate_adds_the_owner_318_derived_custody_cash_lines() -> None:
     """The release tail's refusal, on its own numbers: the producer publishes each
     strategy at NAV + derived custody cash (OWNER_318), so the gate's recompute
     must add the same cash lines.  Unmodified, it recomputed NAV only and refused
-    426101.61285957407210153065004 against 424127.69416500239756872065004."""
+    335001.088030197135486223397061448 against 333449.193152524884968528175061448."""
 
     baseline = _custody_cash_baseline()
     assert (
@@ -5718,8 +5718,8 @@ def test_capital_gate_adds_the_owner_318_derived_custody_cash_lines() -> None:
     assert evidence["component_mismatches"] == []
     assert evidence["systematic_total_usd"] == _CUSTODY_SYSTEMATIC
     assert evidence["derived_cash_usd"] == {
-        "robuxio-crypto": "93.97474435567453281",
-        "volatis-strategy": "1879.943950216",
+        "robuxio-crypto": "73.882944012431317695222",
+        "volatis-strategy": "1478.0119336598192",
     }
     assert accepted is True
     assert evidence["identity_status"] == "NOT_READY"
@@ -5772,7 +5772,7 @@ def test_capital_gate_refuses_a_cash_line_its_own_events_do_not_sum_to() -> None
     honest = _custody_cash_baseline()
     tampered = copy.deepcopy(honest)
     line = _set_volatis_cash(tampered, "1979.943950216")
-    assert line["events"][0]["signed_usd"] == "1879.943950216"
+    assert line["events"][0]["signed_usd"] == "1478.0119336598192"
     capital = tampered["current_capital"]
     for row in capital["strategies"]:
         if row["strategy_id"] == "volatis-strategy":
@@ -7930,3 +7930,257 @@ def test_the_product_strategy_rule_is_one_shared_helper() -> None:
     assert lifecycle_fields.is_retained_history_only(rows[1])
     assert not lifecycle_fields.is_retained_history_only(rows[0])
     assert not lifecycle_fields.is_retained_history_only(rows[3])
+
+
+def test_release_identity_binds_commit_or_tree_and_refuses_anything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    head, tree = "a" * 40, "b" * 40
+    answers = {("rev-parse", "HEAD"): head, ("rev-parse", "HEAD^{tree}"): tree}
+    monkeypatch.setattr(
+        materializer, "_git", lambda _repo, *args: answers.get(args, "")
+    )
+    repo = Path(".")
+    assert materializer._release_identity(repo, head) == (head, "git-commit-v1")
+    assert materializer._release_identity(repo, tree) == (tree, "git-tree-v2")
+    for wrong in ("c" * 40, "", None):
+        with pytest.raises(materializer.MaterializationError):
+            materializer._release_identity(repo, wrong)
+    assert materializer._spec_identity_fields("git-commit-v1") == {}
+    assert materializer._spec_identity_fields("git-tree-v2") == {
+        "code_identity_scheme": "git-tree-v2"
+    }
+
+
+# -- promotion gate on the real production specification ----------------------------
+#
+# The production specification carries no `portfolio-orchestration-contract` gate, so
+# the git-tree-v2 promotion gate (tree, mandatory merge attestation, runtime lock,
+# executing-code identity) used to be skipped at `execute --commit`. These tests load
+# the specification the production producer really writes.
+
+
+def _gate_git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _gate_repo(tmp_path: Path) -> SimpleNamespace:
+    """A merged checkout: its HEAD tree is the tree the specification binds."""
+
+    root = tmp_path / "gate-repo"
+    root.mkdir()
+    _gate_git(root, "init", "-b", "main")
+    (root / "uv.lock").write_bytes(b"lock-v1\n")
+    _gate_git(root, "add", "uv.lock")
+    _gate_git(root, "commit", "-m", "base")
+    _gate_git(root, "checkout", "-b", "pr")
+    (root / "a.txt").write_bytes(b"fix\n")
+    _gate_git(root, "add", "a.txt")
+    _gate_git(root, "commit", "-m", "candidate")
+    candidate = _gate_git(root, "rev-parse", "HEAD")
+    _gate_git(root, "checkout", "main")
+    _gate_git(root, "merge", "--no-ff", "pr", "-m", "merge pr")
+    return SimpleNamespace(
+        root=root,
+        candidate=candidate,
+        tree=_gate_git(root, "rev-parse", "HEAD^{tree}"),
+        commit=_gate_git(root, "rev-parse", "HEAD"),
+    )
+
+
+def _real_production_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> PipelineSpec:
+    """The specification the production producer writes, loaded from its bytes."""
+
+    inputs = _production_spec_inputs(tmp_path, monkeypatch)
+    materializer.build_production_spec(
+        inputs.recipe_path,
+        inputs.prepared_root,
+        inputs.semantic_gate,
+        inputs.production_root,
+        inputs.state_root,
+        inputs.spec_path,
+        financial_artifacts_path=inputs.financial_artifacts,
+    )
+    spec = PipelineSpec.from_json_bytes(inputs.spec_path.read_bytes())
+    # The real shape: no orchestration contract, production rebind gate present.
+    assert core_pipeline._portfolio_contract(spec) is None
+    assert core_pipeline._requires_production_product(spec)
+    return spec
+
+
+def _production_gate_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[PipelineSpec, SimpleNamespace]:
+    """The real production specification, rebound to a tree-bound synthetic checkout."""
+
+    from quant_engine.core import code_identity
+
+    spec = _real_production_spec(tmp_path, monkeypatch)
+    repo = _gate_repo(tmp_path)
+    monkeypatch.setattr(
+        core_pipeline, "_executing_repo_root", lambda: repo.root, raising=False
+    )
+    monkeypatch.setattr(
+        core_pipeline,
+        "executing_code_files",
+        lambda: ((repo.root / "a.txt").resolve(),),
+    )
+    tree_spec = replace(
+        spec,
+        code_commit=repo.tree,
+        code_identity_scheme=code_identity.TREE_SCHEME,
+    )
+    return tree_spec, repo
+
+
+def test_production_spec_commit_refuses_a_tree_release_without_an_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_engine.core import code_identity
+
+    spec, repo = _production_gate_spec(tmp_path, monkeypatch)
+    # Plan/build bind the tree only: no merge attestation can exist yet.
+    core_pipeline._validate_portfolio_orchestration(spec, verify_runtime=True)
+    # ... but they do bind it, before any node runs: a different tree refuses.
+    with pytest.raises(core_pipeline.PipelineValidationError, match="differs"):
+        core_pipeline._validate_portfolio_orchestration(
+            replace(spec, code_commit="1" * 40), verify_runtime=True
+        )
+    with pytest.raises(core_pipeline.PipelineValidationError, match="mandatory"):
+        core_pipeline._validate_portfolio_orchestration(
+            spec, verify_runtime=True, promote=True
+        )
+    # Pipeline status never promotes.
+    core_pipeline._validate_portfolio_orchestration(spec, verify_runtime=False)
+    code_identity.write_merge_attestation(
+        repo.root,
+        candidate_commit=repo.candidate,
+        base_ref="main",
+        coordination_root=spec.coordination_root,
+    )
+    core_pipeline._validate_portfolio_orchestration(
+        spec, verify_runtime=True, promote=True
+    )
+
+
+def test_production_spec_commit_refuses_a_different_tree_or_runtime_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_engine.core import code_identity
+
+    spec, repo = _production_gate_spec(tmp_path, monkeypatch)
+    code_identity.write_merge_attestation(
+        repo.root,
+        candidate_commit=repo.candidate,
+        base_ref="main",
+        coordination_root=spec.coordination_root,
+    )
+    other_tree = replace(spec, code_commit="1" * 40)
+    with pytest.raises(core_pipeline.PipelineValidationError, match="tree differs"):
+        core_pipeline._validate_portfolio_orchestration(
+            other_tree, verify_runtime=True, promote=True
+        )
+    (repo.root / "uv.lock").write_bytes(b"lock-v2\n")
+    _gate_git(repo.root, "commit", "-am", "lock moved")
+    moved = replace(spec, code_commit=_gate_git(repo.root, "rev-parse", "HEAD^{tree}"))
+    with pytest.raises(core_pipeline.PipelineValidationError):
+        core_pipeline._validate_portfolio_orchestration(
+            moved, verify_runtime=True, promote=True
+        )
+
+
+def test_production_spec_commit_refuses_code_that_is_not_the_attested_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from quant_engine.core import code_identity
+
+    spec, repo = _production_gate_spec(tmp_path, monkeypatch)
+    code_identity.write_merge_attestation(
+        repo.root,
+        candidate_commit=repo.candidate,
+        base_ref="main",
+        coordination_root=spec.coordination_root,
+    )
+    core_pipeline._validate_portfolio_orchestration(
+        spec, verify_runtime=True, promote=True
+    )
+    # The executing-tree check: a modified running file is refused even though the
+    # checkout the specification names is clean.
+    other = tmp_path / "other-checkout"
+    shutil.copytree(repo.root, other)
+    (other / "a.txt").write_bytes(b"changed\n")
+    monkeypatch.setattr(
+        core_pipeline,
+        "executing_code_files",
+        lambda: ((other / "a.txt").resolve(),),
+    )
+    with pytest.raises(core_pipeline.PipelineValidationError, match="portfolio"):
+        core_pipeline._validate_portfolio_orchestration(
+            spec, verify_runtime=True, promote=True
+        )
+    # Fail closed on an identity scheme that is neither commit nor tree.
+    with pytest.raises(core_pipeline.PipelineValidationError):
+        core_pipeline._validate_portfolio_orchestration(
+            replace(spec, code_identity_scheme="git-unknown-v9"),
+            verify_runtime=True,
+            promote=True,
+        )
+
+
+def test_production_spec_git_commit_v1_commit_path_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1/R2/R2.1: git-commit-v1 never had this gate and must not gain one."""
+
+    from quant_engine.core import code_identity
+
+    spec = _real_production_spec(tmp_path, monkeypatch)
+    assert spec.code_identity_scheme == code_identity.COMMIT_SCHEME
+    assert "code_identity_scheme" not in spec.to_dict()
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("git-commit-v1 must not reach the tree promotion gate")
+
+    for name in (
+        "verify_promotion_identity",
+        "verify_executing_code",
+        "executing_code_files",
+    ):
+        monkeypatch.setattr(core_pipeline, name, forbidden)
+    monkeypatch.setattr(core_pipeline, "_executing_repo_root", forbidden, raising=False)
+    for promote in (False, True):
+        assert (
+            core_pipeline._validate_portfolio_orchestration(
+                spec, verify_runtime=True, promote=promote
+            )
+            is None
+        )
+
+
+def test_execute_pipeline_commit_path_promotes_through_the_orchestration_gate() -> None:
+    """The commit branch of `execute_pipeline` is the only caller that promotes."""
+
+    import inspect
+
+    source = inspect.getsource(core_pipeline.execute_pipeline)
+    call = "_validate_portfolio_orchestration(spec, verify_runtime=True, promote=True)"
+    assert call in source
+    assert source.index("if commit:") < source.index(call)

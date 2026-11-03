@@ -6,6 +6,7 @@ from dataclasses import replace
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Callable
@@ -16,12 +17,16 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA_ROOT = ROOT.parent / "dataQuantbase"
+RETAINED_ROOT_ENV = "QE_RETAINED_DATA_QUANTBASE"
+DATA_ROOT = Path(os.environ.get(RETAINED_ROOT_ENV, "").strip() or "unset-retained-root")
 MODULE_PATH = ROOT / "tools" / "quantbase_account_interval_receipt.py"
 
 pytestmark = pytest.mark.skipif(
-    not DATA_ROOT.is_dir(),
-    reason="retained sibling dataQuantbase evidence is not present",
+    not os.environ.get(RETAINED_ROOT_ENV, "").strip(),
+    reason=(
+        f"{RETAINED_ROOT_ENV} does not name the retained dataQuantbase root "
+        "(explicit opt-in; no sibling-folder probing)"
+    ),
 )
 
 SPEC = importlib.util.spec_from_file_location(

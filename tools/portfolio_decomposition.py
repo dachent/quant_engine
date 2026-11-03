@@ -2191,6 +2191,36 @@ def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
     )
 
 
+def _write_new_atomic(path: Path, content: bytes) -> bool:
+    """Create ``path`` with ``content`` so no reader ever sees partial bytes.
+
+    The retained cache is shared by concurrent lens builds, which can derive the
+    same training identity at once. The bytes are written aside and linked into
+    place, which fails if the name exists. Returns whether the file now holds
+    exactly ``content``; an existing file with other bytes is left untouched.
+    """
+    descriptor, name = tempfile.mkstemp(prefix=".new-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return not path.is_symlink() and path.read_bytes() == content
+        except OSError:
+            # No hard links on this volume: fall back to the exclusive create.
+            try:
+                _write_new(path, content)
+            except FileExistsError:
+                return not path.is_symlink() and path.read_bytes() == content
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _training_cache_path(cache_root: Path, training_identity: str) -> Path:
     return cache_root / ".decomposition-training" / f"{training_identity}.json"
 
@@ -2260,8 +2290,8 @@ def _write_training_cache(
             # The caller has just rebuilt from verified inputs, so it may stage
             # that result while leaving the untrusted retained bytes untouched.
             return
-    else:
-        _write_new(path, content)
+    elif not _write_new_atomic(path, content):
+        return
 
     evidence_path = _training_evidence_path(cache_root, training_identity)
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2274,7 +2304,8 @@ def _write_training_cache(
         if evidence_path.read_bytes() != evidence:
             raise DecompositionError("training evidence identity differs")
         return
-    _write_new(evidence_path, evidence)
+    if not _write_new_atomic(evidence_path, evidence):
+        raise DecompositionError("training evidence identity differs")
 
 
 def _cv_score(

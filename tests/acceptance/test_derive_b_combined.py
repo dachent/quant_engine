@@ -18,6 +18,7 @@ import re
 import sys
 from datetime import date
 from decimal import Decimal, getcontext, setcontext
+import os
 from pathlib import Path
 
 import pytest
@@ -27,8 +28,10 @@ import test_derive_b_sleeves as sleeve_tests
 MODULE_PATH = Path(__file__).parents[2] / "acceptance" / "derive_b" / "derive.py"
 TREE = Path(__file__).parents[2]
 QE_ROOT = TREE / "qe-root"
-INPUTS_MANIFEST = TREE.parent / "inputs" / "acceptance-inputs-manifest.json"
-SLEEVE_INPUTS = TREE.parent / "inputs" / "sleeve-inputs.json"
+SEAT_ENV = "QE_ACCEPTANCE_SEAT_BASE"
+SEAT_BASE = Path(os.environ.get(SEAT_ENV, "").strip() or "unset-seat-base")
+INPUTS_MANIFEST = SEAT_BASE / "inputs" / "acceptance-inputs-manifest.json"
+SLEEVE_INPUTS = SEAT_BASE / "inputs" / "sleeve-inputs.json"
 R2_ORACLE = QE_ROOT / "evidence" / "releases" / "2026-10-26-r2" / "oracle"
 
 PARENT = "account-1b44c987969b9e47"
@@ -81,8 +84,11 @@ def derivation():
 
 @pytest.fixture(scope="module")
 def real_inputs():
-    if not R2_ORACLE.exists():
-        pytest.skip("real R2 inputs are only present in the seat tree")
+    if not os.environ.get(SEAT_ENV, "").strip() or not R2_ORACLE.exists():
+        pytest.skip(
+            f"{SEAT_ENV} does not name the seat tree holding the real R2 inputs "
+            "(explicit opt-in; no sibling-folder probing)"
+        )
 
 
 @pytest.fixture(scope="module")

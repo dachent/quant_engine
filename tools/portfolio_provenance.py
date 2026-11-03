@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import io
@@ -33,6 +33,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio123 import CaptureRefusal, verify_confirmed_shape
 
 
 SPEC_SCHEMA_VERSION: Final = 2
@@ -126,6 +127,35 @@ _TARGET_FIELDS = (
     "cost",
 )
 _ACCEPTED_LIVE_VERSION_PREFIX = "accepted-live-path:"
+# A design slot may bind a Portfolio123 AI Factor design to a staged owner capture
+# (quant_engine.portfolio123.capture_intake).  The constants below mirror that
+# producer; tests/portfolio123/test_capture_admission.py pins them to it.
+_CAPTURE_DESIGN_VERSION_PREFIX = "p123-capture-design:"
+_CAPTURE_RUN_KIND = "p123-capture-run"
+_CAPTURE_REVIEWED_STATUS = "REVIEWED_SHAPES"
+_CAPTURE_RECORDS_NAME = "normalized/records.json"
+_CAPTURE_DESIGN_CAPABILITIES = ("aifactor.model", "aifactor.predictor")
+_CAPTURE_MANIFEST_KEYS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "run_id",
+        "form",
+        "catalog_sha256",
+        "evidence_status",
+        "scope",
+        "captured_at",
+        "session_expires_at",
+        "source",
+        "files",
+        "capabilities",
+        "inventory_totals",
+        "complete",
+        "allow_partial",
+        "raw_contains_session_material",
+        "restricted",
+    }
+)
 
 
 class ProvenanceValidationError(ValueError):
@@ -1061,6 +1091,275 @@ def _accepted_live_target_path(
     return matches[0]
 
 
+def _capture_design_ref(records: Sequence[Mapping[str, Any]]) -> str:
+    """Design version identity of a reviewed capture: the admitted AI Factor records.
+
+    The identity covers each AI Factor record's capability, request identity (the
+    id-bearing route, hashed) and sanitized response, and nothing else: not the
+    capture time, the run id, or any other capability in the same run.  The same
+    design captured twice therefore has one identity; a changed design has another.
+    """
+
+    selected = sorted(
+        (
+            {
+                "capability": record["capability"],
+                "request_sha256": record["request_sha256"],
+                "response": record["response"],
+            }
+            for record in records
+            if record["capability"] in _CAPTURE_DESIGN_CAPABILITIES
+        ),
+        key=lambda item: (str(item["capability"]), str(item["request_sha256"])),
+    )
+    return (
+        _CAPTURE_DESIGN_VERSION_PREFIX
+        + hashlib.sha256(_canonical_bytes({"records": selected})).hexdigest()
+    )
+
+
+def _read_canonical_object(data: bytes, name: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProvenanceValidationError(f"{name} is not UTF-8 JSON") from exc
+    document = _object(parsed, name)
+    if _canonical_bytes(document) != data:
+        raise ProvenanceValidationError(f"{name} is not canonical JSON")
+    return document
+
+
+def _revalidate_capture_shape(capability: str, response: object) -> None:
+    """Re-check a design record against the REVIEWED catalog shape, not the manifest.
+
+    The manifest and records are self-describing, so a consistently regenerated pair
+    could carry invented content. The shape comes from this repository's catalog and
+    the row must be CONFIRMED there; the admitted bytes must match it exactly.
+    """
+
+    try:
+        verify_confirmed_shape(capability, response)
+    except CaptureRefusal as exc:
+        if exc.code == "SHAPE_REFUSED":
+            raise ProvenanceValidationError(
+                "capture record differs from the reviewed catalog shape"
+            ) from exc
+        raise ProvenanceValidationError(
+            "the catalog does not yet review this AI Factor shape"
+        ) from exc
+
+
+def _verify_capture_design(
+    manifest_bytes: bytes, records_bytes: bytes, generation_as_of: date
+) -> str:
+    """Check a staged Portfolio123 capture run and return its design version ref.
+
+    Only the manifest and the normalized records are needed: both are hash-bound,
+    and the raw export (which holds browser session material) may already be gone.
+    Every refusal message is generic: no identifier or value is named.
+    """
+
+    manifest = _read_canonical_object(manifest_bytes, "capture manifest")
+    _strict_keys(manifest, set(_CAPTURE_MANIFEST_KEYS), "capture manifest")
+    if (
+        manifest["schema_version"] != 1
+        or manifest["kind"] != _CAPTURE_RUN_KIND
+        or manifest["form"] != "har"
+        or manifest["restricted"] is not True
+    ):
+        raise ProvenanceValidationError("capture manifest is not a staged HAR run")
+    if manifest["evidence_status"] != _CAPTURE_REVIEWED_STATUS:
+        raise ProvenanceValidationError(
+            "capture run was not parsed with reviewed shapes"
+        )
+    if manifest["complete"] is not True or manifest["allow_partial"] is not False:
+        raise ProvenanceValidationError("capture run is partial")
+    if _SHA256.fullmatch(str(manifest["catalog_sha256"])) is None:
+        raise ProvenanceValidationError("capture catalog identity is invalid")
+    scope = manifest["scope"]
+    if not isinstance(scope, list) or not set(_CAPTURE_DESIGN_CAPABILITIES) <= set(
+        scope
+    ):
+        raise ProvenanceValidationError(
+            "capture scope lacks the AI Factor predictor and model"
+        )
+    try:
+        captured = datetime.fromisoformat(str(manifest["captured_at"]))
+    except ValueError as exc:
+        raise ProvenanceValidationError("capture time is invalid") from exc
+    if captured.tzinfo is None or captured.astimezone(timezone.utc).date() > (
+        generation_as_of
+    ):
+        raise ProvenanceValidationError("capture time is invalid or after as_of_date")
+    files = manifest["files"]
+    declared = [
+        item
+        for item in (files if isinstance(files, list) else [])
+        if isinstance(item, dict) and item.get("path") == "normalized/records.json"
+    ]
+    if (
+        len(declared) != 1
+        or declared[0].get("sha256") != hashlib.sha256(records_bytes).hexdigest()
+        or declared[0].get("bytes") != len(records_bytes)
+    ):
+        raise ProvenanceValidationError("capture manifest does not bind the records")
+    summary = _object(manifest["capabilities"], "capture capabilities")
+    for capability in _CAPTURE_DESIGN_CAPABILITIES:
+        entry = _object(summary.get(capability), "capture capability")
+        records_seen = entry.get("records")
+        if (
+            entry.get("coverage") != "COMPLETE"
+            or isinstance(records_seen, bool)
+            or not isinstance(records_seen, int)
+            or records_seen < 1
+        ):
+            raise ProvenanceValidationError("capture capability coverage is incomplete")
+
+    document = _read_canonical_object(records_bytes, "capture records")
+    _strict_keys(document, {"records"}, "capture records")
+    records = _objects(document["records"], "capture records")
+    seen: set[str] = set()
+    for record in records:
+        _strict_keys(
+            record,
+            {"capability", "captured_at", "request_sha256", "response", "status"},
+            "capture record",
+        )
+        capability = _text(record["capability"], "capture record.capability")
+        status = record["status"]
+        if capability not in scope:
+            raise ProvenanceValidationError("capture record is outside the scope")
+        if _SHA256.fullmatch(str(record["request_sha256"])) is None:
+            raise ProvenanceValidationError("capture request identity is invalid")
+        if capability in _CAPTURE_DESIGN_CAPABILITIES:
+            if isinstance(status, bool) or not isinstance(status, int):
+                raise ProvenanceValidationError("capture record status is invalid")
+            if not 200 <= status < 300:
+                raise ProvenanceValidationError("capture record did not succeed")
+            if not isinstance(record["response"], dict) or not record["response"]:
+                raise ProvenanceValidationError("capture design record is empty")
+            _revalidate_capture_shape(capability, record["response"])
+            seen.add(capability)
+    if seen != set(_CAPTURE_DESIGN_CAPABILITIES):
+        raise ProvenanceValidationError("capture lacks a predictor or model record")
+    return _capture_design_ref(records)
+
+
+def _validate_capture_design_versions(
+    version_catalog: Mapping[str, Any],
+    *,
+    roots: Mapping[str, Path],
+    source_records: Sequence[Mapping[str, Any]],
+    source_groups: Sequence[Mapping[str, Any]],
+    generation_as_of: date,
+) -> None:
+    """Bind every ``p123-capture-design:`` design reference to a verified capture.
+
+    A design slot whose reference uses the prefix must be EVIDENCED, name the
+    admitted ``normalized/records.json`` of a staged capture run by hash, and carry
+    the reference recomputed from those bytes. The run's ``manifest.json`` must
+    sit beside it in the same admitted source group, and both files must carry an
+    owner-pinned entry in that group's ``expected_hashes`` (the independent
+    attestation: the owner confirms the hashes, the tool does not trust the run's own
+    claims). Each AI Factor response is re-checked against the reviewed catalog
+    shape. A label or a model container cannot produce such a reference.
+    """
+
+    sources = {str(item["source_id"]): item for item in source_records}
+    pinned = {
+        str(group["source_id"]): _object(group["expected_hashes"], "expected_hashes")
+        for group in source_groups
+    }
+    for row in _objects(version_catalog.get("strategies"), "strategy versions"):
+        design = _object(row.get("design"), "strategy version design")
+        reference = design.get("version_ref")
+        if not (
+            isinstance(reference, str)
+            and reference.startswith(_CAPTURE_DESIGN_VERSION_PREFIX)
+        ):
+            continue
+        if design.get("status") != "EVIDENCED":
+            raise ProvenanceValidationError(
+                "a capture design reference requires an EVIDENCED design slot"
+            )
+        records_sha = design.get("artifact_sha256")
+        if not isinstance(records_sha, str):
+            raise ProvenanceValidationError(
+                "a capture design reference requires the capture records hash"
+            )
+        located: list[tuple[Mapping[str, Any], str]] = []
+        for source_id in _strings(design.get("source_ids"), "design.source_ids"):
+            source = sources[source_id]
+            for file in _objects(source.get("files"), "source files"):
+                relative = str(file["relative_path"])
+                if file["sha256"] == records_sha and (
+                    relative == _CAPTURE_RECORDS_NAME
+                    or relative.endswith("/" + _CAPTURE_RECORDS_NAME)
+                ):
+                    located.append((source, relative))
+        if len(located) != 1:
+            raise ProvenanceValidationError(
+                "capture records are not admitted exactly once in the design sources"
+            )
+        source, relative = located[0]
+        manifest_relative = relative[: -len(_CAPTURE_RECORDS_NAME)] + "manifest.json"
+        if manifest_relative not in {
+            str(file["relative_path"])
+            for file in _objects(source.get("files"), "source files")
+        }:
+            raise ProvenanceValidationError(
+                "the capture manifest is not admitted beside the capture records"
+            )
+        owner_pins = pinned[str(source["source_id"])]
+        if not all(
+            isinstance(owner_pins.get(item), str)
+            for item in (relative, manifest_relative)
+        ):
+            raise ProvenanceValidationError(
+                "the capture files need owner-pinned expected hashes in their source group"
+            )
+        root = roots[str(source["root_id"])]
+        records_bytes = _source_path(root, relative).read_bytes()
+        manifest_bytes = _source_path(root, manifest_relative).read_bytes()
+        if hashlib.sha256(records_bytes).hexdigest() != records_sha:
+            raise ProvenanceValidationError(
+                "capture records differ from the admitted hash"
+            )
+        expected = _verify_capture_design(
+            manifest_bytes, records_bytes, generation_as_of
+        )
+        if reference != expected:
+            raise ProvenanceValidationError(
+                "design version differs from the admitted capture"
+            )
+
+
+def capture_design_reference(run_directory: Path) -> dict[str, str]:
+    """Operator helper: the design reference and records hash of a staged run.
+
+    ``run_directory`` is ``<staging-root>/p123-capture/<run-id>`` (or a copy of its
+    ``manifest.json`` and ``normalized/records.json``). The values are printed so
+    they can be written into the private specification; nothing is modified.
+    """
+
+    manifest_bytes = (run_directory / "manifest.json").read_bytes()
+    records_bytes = (run_directory / _CAPTURE_RECORDS_NAME).read_bytes()
+    manifest = _read_canonical_object(manifest_bytes, "capture manifest")
+    try:
+        captured = datetime.fromisoformat(str(manifest.get("captured_at")))
+    except ValueError as exc:
+        raise ProvenanceValidationError("capture time is invalid") from exc
+    if captured.tzinfo is None:
+        raise ProvenanceValidationError("capture time is invalid")
+    return {
+        "design_version_ref": _verify_capture_design(
+            manifest_bytes, records_bytes, captured.astimezone(timezone.utc).date()
+        ),
+        "records_sha256": hashlib.sha256(records_bytes).hexdigest(),
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+    }
+
+
 def _import_ref(
     value: object,
     field_name: str,
@@ -1432,6 +1731,13 @@ def build_catalog(
         source_hashes=source_hashes,
         strategies=strategies,
     )
+    _validate_capture_design_versions(
+        strategy_version_catalog,
+        roots=roots,
+        source_records=source_records,
+        source_groups=_objects(spec["source_groups"], "source_groups"),
+        generation_as_of=generation_as_of,
+    )
     if any(
         isinstance(item.get("version_ref"), str)
         and str(item["version_ref"]).startswith(_ACCEPTED_LIVE_VERSION_PREFIX)
@@ -1588,13 +1894,20 @@ def _parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--output-root", type=Path, required=True)
         if command == "publish":
             command_parser.add_argument("--generation-id", required=True)
+    reference = subparsers.add_parser(
+        "capture-design-ref",
+        help="print the design reference of a staged Portfolio123 capture run",
+    )
+    reference.add_argument("--run-dir", type=Path, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command == "stage":
+        if args.command == "capture-design-ref":
+            result = capture_design_reference(args.run_dir)
+        elif args.command == "stage":
             result = stage_catalog(args.spec, args.output_root)
         else:
             result = publish_catalog(args.spec, args.output_root, args.generation_id)

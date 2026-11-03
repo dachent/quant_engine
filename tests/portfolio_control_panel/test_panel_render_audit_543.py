@@ -278,7 +278,7 @@ def test_F03_the_producers_account_label_names_the_account(tmp_path: Path) -> No
         {
             "account_id": "z-hash",
             "provider": "SCHWAB",
-            "account_label": "Schwab •5722 — IRA (Boris)",
+            "account_label": "Schwab •2527 — IRA (Owner62)",
         },
         {"account_id": "a-hash", "provider": "SCHWAB"},
         {"account_id": "m-hash", "provider": "SCHWAB", "account_label": "  "},
@@ -287,7 +287,7 @@ def test_F03_the_producers_account_label_names_the_account(tmp_path: Path) -> No
         payload = base(account_summary=ordering)
         assert (
             call(tmp_path, payload, "accountLabel", "z-hash")
-            == "Schwab •5722 — IRA (Boris)"
+            == "Schwab •2527 — IRA (Owner62)"
         )
         # an account with no label keeps the numbered fallback, and an unknown id is unrecognized
         assert call(tmp_path, payload, "accountLabel", "a-hash") == "Schwab account 1"
@@ -315,7 +315,7 @@ def test_F04_leverage_rows_show_provider_account_and_strategy_names_not_ids(
             {
                 "account_id": "account-known",
                 "provider": "IBKR",
-                "account_label": "IBKR •6907",
+                "account_label": "IBKR •3101",
             }
         ],
         strategies=[strategy("AI Factor", strategy_id="p123-ai-factor")],
@@ -327,7 +327,7 @@ def test_F04_leverage_rows_show_provider_account_and_strategy_names_not_ids(
         ],
     )
     table = html(run(tmp_path, payload, "renderLeverageDisclosures"), "#leverage-table")
-    assert "IBKR •6907" in table
+    assert "IBKR •3101" in table
     assert "AI Factor" in table
     assert "IBKR · Unrecognized account" in table
     assert "John Hancock" in table
@@ -464,21 +464,21 @@ def _allocation_payload(**overrides: Any) -> dict[str, Any]:
         allocations=[
             {
                 **snapshot,
-                "current_value_usd": "104842.54",
+                "current_value_usd": "82427.204948",
                 "strategy_id": "tt-id",
                 "strategy_name": "TT",
                 "systematic_weight": "0.4",
             },
             {
                 **snapshot,
-                "current_value_usd": "44313.92",
+                "current_value_usd": "34839.603904",
                 "strategy_id": "eu-id",
                 "strategy_name": "EU",
                 "systematic_weight": "0.6",
             },
             {
                 **snapshot,
-                "current_value_usd": "100043.62",
+                "current_value_usd": "78654.294044",
                 "scope": "RESERVE",
                 "strategy_id": None,
                 "strategy_name": "Reserve",
@@ -486,8 +486,8 @@ def _allocation_payload(**overrides: Any) -> dict[str, Any]:
             },
         ],
         strategies=[
-            strategy("TT", current_value_usd="101071.47", systematic_weight="0.35"),
-            strategy("EU", current_value_usd="45464.69", systematic_weight="0.65"),
+            strategy("TT", current_value_usd="79462.389714", systematic_weight="0.35"),
+            strategy("EU", current_value_usd="35744.339278", systematic_weight="0.65"),
         ],
         capital_status={"reserve": "NOT_READY_AT_CUTOFF"},
     )
@@ -504,8 +504,8 @@ def test_F06_the_allocation_table_is_labelled_as_a_snapshot_and_adds_current_col
     assert "Snapshot weight (as of Aug 16, 2026)" in table
     assert "Current value (cutoff)" in table
     assert "Current weight" in table
-    assert "$101,071" in table and "$45,465" in table  # current values
-    assert "$104,843" in table  # snapshot value
+    assert "$79,462" in table and "$35,744" in table  # current values
+    assert "$82,427" in table  # snapshot value
     note = result["dom"]["#allocation-snapshot-note"]["textContent"]
     assert "Aug 16, 2026" in note and "32 days before the Sep 17, 2026 cutoff" in note
     assert "Actual value" not in table
@@ -569,10 +569,10 @@ def test_F20_the_allocation_footer_totals_only_the_additive_columns_from_the_row
     assert footer is not None
     cells = re.sub(r"<[^>]+>", "|", footer[1])
     assert "Total" in cells
-    assert "$249,200" in cells  # 104,842.54 + 44,313.92 + 100,043.62
+    assert "$195,921" in cells  # 82,427.20 + 34,839.60 + 78,654.29
     assert (
-        "$146,536" in cells
-    )  # 101,071.47 + 45,464.69; the not-ready reserve is excluded
+        "$115,207" in cells
+    )  # 79,462.39 + 35,744.34; the not-ready reserve is excluded
     assert "excludes 1 not ready" in cells
     assert "100.0%" in cells  # 0.4 + 0.6 and 0.35 + 0.65
     # a filter changes the rows shown and the totals with them
@@ -588,7 +588,7 @@ def test_F20_the_allocation_footer_totals_only_the_additive_columns_from_the_row
         ),
         "#allocation-table",
     )
-    assert "$149,156" in filtered  # 104,842.54 + 44,313.92
+    assert "$117,267" in filtered  # 82,427.20 + 34,839.60
 
 
 def test_F20_correlation_one_and_cluster_tables_carry_totals(tmp_path: Path) -> None:
@@ -888,11 +888,11 @@ def _manifest_payload(**row_fields: Any) -> dict[str, Any]:
         "account_id": "a0",
         "account_label": "Label a0",
         "annualized_return_on_net_capital": "0.1",
-        "current_value": "48120.06",
+        "current_value": "37831.991172",
         "end": CUTOFF,
         "gain": "0",
-        "invested": "48120.06",
-        "net_capital": "48120.06",
+        "invested": "37831.991172",
+        "net_capital": "37831.991172",
         "observation_linked_return": "0.05",
         "observed_hwm_index": "216.2325",
         "observed_max_drawdown": "0.3203",
@@ -924,7 +924,7 @@ def _manifest_payload(**row_fields: Any) -> dict[str, Any]:
         },
         invested_capital={
             "complete_through": CUTOFF,
-            "current_aggregate_usd": "378083.13",
+            "current_aggregate_usd": "297248.956806",
         },
         meta={
             **base()["meta"],
@@ -979,7 +979,7 @@ def test_F12_the_manifest_footer_shows_the_consolidated_net_invested_and_never_s
     footer = re.search(r"<tfoot>(.*?)</tfoot>", table, flags=re.S)
     assert footer is not None
     plain = re.sub(r"<[^>]+>", " ", footer[1])
-    assert "Net invested (consolidated)" in plain and "$378,083.13" in plain
+    assert "Net invested (consolidated)" in plain and "$297,248.96" in plain
     assert (
         "Rows are not additive in Capital in and Withdrawn: internal transfers appear in both"
         in plain

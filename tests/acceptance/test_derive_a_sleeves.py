@@ -51,6 +51,8 @@ def test_input_path_rejected_with_role_and_exit_2(
     assert (
         cli.main(
             [
+                "--cutoff",
+                "2026-09-17",
                 "--qe-root",
                 str(tmp_path),
                 "--out",
@@ -582,6 +584,8 @@ def test_cli_validation_fails_closed(
     assert (
         cli.main(
             [
+                "--cutoff",
+                "2026-09-17",
                 "--qe-root",
                 str(tmp_path),
                 "--out",
@@ -607,6 +611,8 @@ def test_cli_requires_inputs_without_git(
     assert (
         cli.main(
             [
+                "--cutoff",
+                "2026-09-17",
                 "--qe-root",
                 str(tmp_path),
                 "--out",
@@ -642,6 +648,8 @@ def test_cli_determinism_and_sleeves_only_skips_old_inputs(
         assert (
             cli.main(
                 [
+                    "--cutoff",
+                    "2026-09-17",
                     "--qe-root",
                     str(tmp_path),
                     "--out",
