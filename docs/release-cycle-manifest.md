@@ -180,3 +180,89 @@ release_baseline_spec.py declare --previous-spec FILE --out FILE --roots-out FIL
   (id and manifest sha256). The financial-MVP triple binds the contract, registry and schema of `--repo-root`.
 - Output is create-only, canonical bytes (sorted keys, compact, no trailing newline), checked against
   `baseline-spec.schema.json`. Refusals are `release-baseline-spec: FAIL: CODE: detail`, exit 1.
+
+## B4: selected-inputs and attended preparation spec builders
+
+`tools/release_prepare_inputs.py` builds the two per-cycle inputs the hand scripts `mk_selected.py`,
+`mk_prep_spec.py` and `mk_prep_spec_p23.py` produced. The predecessor file (the previous release's, as
+data) is carried only for the parts this cycle does not own; everything else is regenerated from the
+cycle's outputs. No id, pass number, worktree path or provider name is typed; every pin is recomputed
+from bytes. Tests: `tests/portfolio_operations/test_release_prepare_inputs.py` (synthetic fixtures
+built in test code).
+
+```
+release_prepare_inputs.py selected  --resolved-cycle R --predecessor FILE --commit SHA --out FILE
+    [--repo-root DIR] [--ledger-generation-dir DIR] [--resolved-cycle-sha256 H] [--rebind-cutoff]
+    [--file NAME=ROOT_KEY:relative@sha256 ...] [--plan]
+release_prepare_inputs.py prep-spec --resolved-cycle R --predecessor-spec FILE --out FILE
+    [--repo-root DIR] [--ledger-generation-dir DIR] [--resolved-cycle-sha256 H] [--rebind-cutoff]
+    [--selected-inputs FILE] [--calendar-authority FILE]
+    [--baseline-id ID] [--history-id ID] [--attribution-id ID]
+    [--factors-bundle NAME] [--sector-bundle NAME] [--style-bundle NAME] [--<kind>-bundle-id ID]
+    [--pin KEY=ROOT_KEY:relative@sha256 ...] [--dir KEY=ROOT_KEY:relative ...] [--omit KEY ...]
+    [--check attended-plan|none] [--plan]
+```
+
+Declared roots: every directory the resolved cycle's `roots` binds, its `scratch` and `--repo-root`.
+A path anywhere in a carried part of a predecessor that is outside them (or has a `..` part, or a
+symlink or junction on the way) is a refusal. A predecessor already remapped by
+`tools/release_spec_remap.py` (or authored under the declared roots) is accepted as is.
+
+### selected
+
+Output: `{builder_kwargs, files, financial_data_cutoff}`, written create-only (default location
+`<scratch>/in/selected-inputs.json`, read by `release_pre_chain.py` and the attended preparation).
+
+- Rebound from the cycle: `contract_path` and `financial_input_contract_path` (the repository contract),
+  `provider_admission_receipt_path`, `provider_ledger_catalog_path`, `provider_ledger_manifest_path` (the
+  built ledger generation: `--ledger-generation-dir`, or the one generation under `<scratch>/ledger/generations`)
+  and `repository_sha` (`--commit`, 40 hex characters, supplied by the driver and never read from git here).
+- Every other `files` entry is carried: its file must exist under the roots, its bytes must equal the
+  predecessor's pin, and its pin must name the path its builder argument names. Every entry of the output is
+  then re-pinned from the bytes (`{path, sha256, size_bytes}`, `/` separators, equal to the builder argument).
+- A native `<provider>_manifest_path` of a provider the cycle resolved must be that provider's manifest of this
+  cycle (sha256 equal), else `STALE_PREDECESSOR_GENERATION`.
+- The predecessor cutoff (`financial_data_cutoff`, `as_of_date`) must be the cycle's, else
+  `STALE_PREDECESSOR`; `--rebind-cutoff` rebinds it and `--file NAME=ROOT_KEY:relative@sha256` names the new
+  native file for a carried entry (the sha256 is required and checked against the bytes).
+
+### prep-spec
+
+Output: the `--preparation-spec` of `portfolio_pipeline_materialize.py attended`.
+
+- Regenerated: `financial_data_cutoff`, `evaluation_date` (resolved `evaluated_on`), the contract and census pins,
+  `provider_ledger_generation_root` and `provider_ledger_spec`, `baseline_spec_template`,
+  `attribution_spec_template`, `retained_verified_generations` (baseline, history, attribution),
+  `expected_staged_baseline` (generation id and the baseline catalog sha256), `source_selection`,
+  `dependence_selection_template`, `epoch_admission_policy` (the resolved cycle's file), the crosswalk,
+  `calendar_authority` (`--calendar-authority`, default `<scratch>/in/calendar-authority.json`: the seed for the
+  first attended attempt, B6's output for the second), `plans.*` (plan, catalog and the public factor, sector and
+  style files of the cycle's bundles) and `sleeve_facts` (the policy manifest, and each `<provider>_generation_root`
+  key of the predecessor set to that provider's resolved root).
+- Every generation id is the one generation under the cycle (`baseline/generations`, `pre/history`,
+  `attribution/generations`, `ledger/generations`, and the bundle roots `public_bundles.factors|sector|style`, or
+  the names given by `--<kind>-bundle`). Two candidates are `AMBIGUOUS_GENERATION`; `--*-id` only picks one.
+- Carried from the predecessor and re-verified (existing, under the roots, bytes equal to its pin):
+  `base_factor_file`, `capital_account_crosswalk`, `implementation_reconciliation`,
+  `implementation_return_attribution`, `legacy_panel_root`, `calendar_derivation_inputs`, `purpose`,
+  `authority_notes`, `plans.*.base_spec_template`, `base_source_template_root`, `evidence_mode` and
+  `sleeve_facts.quantbase_source_dir` and `predecessor_data_root`. `--pin KEY=ROOT_KEY:relative@sha256` and
+  `--dir KEY=ROOT_KEY:relative` replace a carried input (the sha256 is required; `KEY` may be
+  `sleeve_facts.quantbase_source_dir`).
+- Per-cycle inputs `weekly_gap_fill_spec`, `vendor_gap_fills`, `model_vs_actual_input` are present only when
+  named by `--pin`. A predecessor that carries one the run did not name is `STALE_CARRIED_INPUT`; `--omit KEY`
+  declares the cycle has none (absent = key omitted).
+- The files the spec binds are checked against the cycle before it is written: the ledger spec (cutoff, every
+  provider's generation id and manifest sha256, output root), the baseline spec cutoff and the selected inputs
+  (cutoff and ledger generation).
+- After the file is written (create-only), the committed attended preparation validates it through
+  `plan_attended_inputs`, the planning path `portfolio_pipeline_materialize.py attended` takes without
+  `--execute` (no writes). A refusal there renames the spec to `*.rejected` (`SELF_CHECK`); `--check none` skips
+  it. The driver's `bound_ids` refusal then also fires on any spec that names another pass's generation.
+
+Refusal codes (`release-prepare-inputs: FAIL: CODE: detail`, exit 1; 2 is a usage error):
+`PATH_OUTSIDE_ROOTS`, `PATH_ESCAPES_ROOT`, `MISSING`, `HASH_MISMATCH`, `PIN_PATH_MISMATCH`,
+`AMBIGUOUS_GENERATION`, `ID_MISMATCH`, `STALE_PREDECESSOR`, `STALE_PREDECESSOR_GENERATION`,
+`STALE_CARRIED_INPUT`, `STALE_LEDGER_SPEC`, `STALE_BASELINE_SPEC`, `STALE_SELECTED_INPUTS`,
+`PREDECESSOR_SHAPE`, `MISSING_KWARG`, `PROVIDER_UNKNOWN`, `OVERRIDE_NOT_ALLOWED`, `UNKNOWN_ROOT`, `USAGE`,
+`COMMIT`, `OUTPUT_EXISTS`, `SELF_CHECK`, `RESOLVED_VERSION`, `RESOLVED_SHAPE`, `INPUT`.
