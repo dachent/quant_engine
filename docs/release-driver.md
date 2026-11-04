@@ -215,6 +215,14 @@ opened because the directory is absent (not mounted) is not an error: the plan s
 
 ### Calendar authority (explicit stage)
 
+`calendar-seed` (explicit, requires only `cycle-resolve`) runs `release_hwm_calendar.py reissue` and writes
+`{calendar_seed_reissued}` (`{cycle}/calendar-seed-authority.json`): the predecessor authority (`calendar_seed_authority`, pinned) with
+`hwm_policy_sha256` rebound to the frozen repository's HWM policy and `authority_evidence_sha256` recomputed, every calendar, interval and
+value carried. The attended run validates the authority it is given against the repository's policy before it stages anything, so a seed
+carried from another head (the R3 rehearsal: `a01a9500` against `a6b85d7b`) is refused; the first attempt takes this file as its
+`calendar_authority`. `calendar-authority` itself derives the policy hash from the repository and takes only the policy id and the owner
+decision text from its seed, so it works on the same head with the original or the re-issued seed.
+
 `calendar-authority` runs `release_hwm_calendar.py author` (two passes: calendar kinds and gaps from the first
 attempt's observed NAV dates, then the adapter's own interval returns) and writes `{calendar_authority}` and
 `{calendar_authority}.receipt.json`. It is explicit and nothing requires it: it needs a first attempt's staged run
