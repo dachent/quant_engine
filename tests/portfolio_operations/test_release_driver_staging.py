@@ -45,6 +45,7 @@ TOOL_STAGES = (
     *STAGING,
     "selected-build",
     "pre-chain",
+    "calendar-seed",
     "calendar-authority",
     "prep-spec",
     "post-commit-verify",
@@ -193,6 +194,7 @@ def test_the_staging_group_comes_first_in_the_order_stage_p23_ran_it() -> None:
     assert ids[:9] == [*STAGING, "selected-build", "selected-inputs", "pre-chain"]
     # the calendar authority comes before the preparation spec that pins it, the spec before the run
     assert ids[ids.index("pre-chain") + 1 : ids.index("attended") + 1] == [
+        "calendar-seed",
         "calendar-authority",
         "prep-spec",
         "attended",
@@ -275,7 +277,13 @@ def test_staging_stages_write_only_under_the_cycle_and_in_every_ceremony(
     config = json.loads((pass26 / "pass26-run.json").read_text(encoding="utf-8"))
     run = driver.Run(config, _shipped(), offline=True)
     cycle = Path(config["cycle"])
-    for stage_id in (*STAGING, "selected-build", "prep-spec", "calendar-authority"):
+    for stage_id in (
+        *STAGING,
+        "selected-build",
+        "prep-spec",
+        "calendar-seed",
+        "calendar-authority",
+    ):
         stage = _stage(stage_id)
         assert "only_ceremony" not in stage and "only_mode" not in stage
         written = driver._claimed_outputs(run, stage)

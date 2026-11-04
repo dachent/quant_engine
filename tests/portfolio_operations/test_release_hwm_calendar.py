@@ -305,3 +305,81 @@ def test_the_module_names_no_date_id_or_workstation_path() -> None:
     text = Path(cal.__file__).read_text(encoding="utf-8")
     assert "C:\\" not in text and "C:/" not in text
     assert not any(part.isdigit() and len(part) == 4 for part in text.split('"'))
+
+
+def _stale_seed(path: Path) -> dict[str, Any]:
+    """A governed authority a predecessor head issued: valid for a policy hash that is not this head's."""
+
+    from quant_engine.portfolio_ledger import derive_governed_calendar_authority
+
+    authority = dict(
+        derive_governed_calendar_authority(
+            strategy_calendars=[
+                {
+                    "strategy_id": strategy,
+                    "calendar_kind": "ALWAYS_ON",
+                    "observed_dates": _days(5),
+                    "closing_capital_usd_by_date": {},
+                }
+                for strategy in _strategies()
+            ],
+            calendar_policy_id=_accepted_policy_id(),
+            owner_decision_evidence="synthetic owner decision text",
+            hwm_policy_sha256="f" * 64,
+        )
+    )
+    _write(path, authority)
+    return authority
+
+
+def _reissue(seed: Path, out: Path, *extra: str) -> int:
+    return cal.main(
+        ["reissue", "--seed-authority", str(seed), "--out", str(out), *extra]
+    )
+
+
+def test_reissue_rebinds_the_seed_to_this_heads_policy_and_carries_the_rest(
+    tmp_path: Path,
+) -> None:
+    from quant_engine.portfolio_ledger import derive_governed_calendar_authority
+
+    seed = tmp_path / "seed.json"
+    old = _stale_seed(seed)
+    out = tmp_path / "out" / "seed-authority.json"
+    assert _reissue(seed, out) == 0
+    _effective, policy_sha = cal.effective_policy_sha256(cal.REPO_ROOT)
+    new = json.loads(out.read_bytes())
+    assert new["hwm_policy_sha256"] == policy_sha != old["hwm_policy_sha256"]
+    # byte-identical to what the derivation itself writes for this head's policy
+    expected = derive_governed_calendar_authority(
+        strategy_calendars=[
+            {
+                "strategy_id": strategy,
+                "calendar_kind": "ALWAYS_ON",
+                "observed_dates": _days(5),
+                "closing_capital_usd_by_date": {},
+            }
+            for strategy in _strategies()
+        ],
+        calendar_policy_id=_accepted_policy_id(),
+        owner_decision_evidence="synthetic owner decision text",
+        hwm_policy_sha256=policy_sha,
+    )
+    assert out.read_bytes() == cal.render(expected)
+    assert _reissue(seed, out) == 0  # the same bytes complete
+    assert _reissue(seed, out, "--check") == 0
+
+
+def test_reissue_refuses_a_different_existing_file_and_a_seed_without_a_digest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed = tmp_path / "seed.json"
+    _stale_seed(seed)
+    out = tmp_path / "out.json"
+    out.write_bytes(b"{}")
+    assert _reissue(seed, out) == 1
+    assert "OUTPUT_EXISTS" in capsys.readouterr().err
+    assert _reissue(seed, out, "--check") == 1
+    broken = _write(tmp_path / "broken.json", {"calendar_policy_id": "x"})
+    assert _reissue(broken, tmp_path / "other.json") == 1
+    assert "SEED" in capsys.readouterr().err

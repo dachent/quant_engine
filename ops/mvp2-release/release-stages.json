@@ -18,6 +18,7 @@
     "tail": "{cycle}/tail",
     "ca": "{cycle}/tail/ca",
     "production": "{cycle}/production",
+    "calendar_seed_reissued": "{cycle}/calendar-seed-authority.json",
     "recipe_probe": "{cycle}/pipeline-recipe-probe.json",
     "recipe": "{cycle}/pipeline-recipe.json",
     "prod_spec": "{cycle}/production/production-spec.json",
@@ -533,6 +534,40 @@
         "{resolved_cycle}",
         "{cycle}/baseline/generations/{baseline_id}",
         "{cycle}/ledger/generations/{cycle_ledger_id}"
+      ]
+    },
+    {
+      "id": "calendar-seed",
+      "explicit": true,
+      "requires": [
+        "cycle-resolve"
+      ],
+      "inputs": [
+        "{calendar_seed_authority}"
+      ],
+      "pinned_inputs": [
+        [
+          "{calendar_seed_authority}",
+          "{calendar_seed_authority_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{calendar_seed_reissued}"
+      ],
+      "stdout_to": "{cycle}/logs/calendar-seed.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_hwm_calendar.py",
+        "reissue",
+        "--seed-authority",
+        "{calendar_seed_authority}",
+        "--out",
+        "{calendar_seed_reissued}",
+        "--repo-root",
+        "{repo_root}"
       ]
     },
     {

@@ -19,6 +19,10 @@ The calendar policy id and the owner decision text are carried from the predeces
 files: the resolved cycle (``release_cycle_manifest.py resolve``), the first attempt's run directory
 and the prepared spec.  No date, id or path lives in this module.
 
+``reissue`` rebind a predecessor authority to this head's HWM policy (the seed of a first attempt): the authority pins
+            ``hwm_policy_sha256``, so a seed carried from another head is refused by the attended run before it stages
+            anything. Every calendar, interval and value is carried; only the policy hash and the digest over it change.
+
 ``author``  write the authority create-only (``--out``) plus a receipt next to it; ``--check`` re-derives
             and refuses when the file at ``--out`` differs.
 
@@ -343,6 +347,84 @@ def derive_authority(
     return authority, facts
 
 
+def effective_policy_sha256(
+    repo_root: Path,
+    hwm_policy: str = DEFAULT_HWM_POLICY,
+    contract: str = DEFAULT_CONTRACT,
+) -> tuple[bytes, str]:
+    """The HWM policy bytes the attended run validates an authority against, and their digest."""
+
+    import portfolio_invested_capital as capital
+
+    policy_current = _file(repo_root / hwm_policy, "HWM policy").read_bytes()
+    contract_bytes = _file(repo_root / contract, "financial contract").read_bytes()
+    effective = capital.governed_hwm_input_policy(
+        policy_current, contract_bytes, _sha256(policy_current)
+    )
+    return effective, _sha256(effective)
+
+
+def reissue_authority(
+    seed: Mapping[str, Any], effective_policy: bytes, policy_sha: str
+) -> dict[str, Any]:
+    """The seed with ``hwm_policy_sha256`` rebound and ``authority_evidence_sha256`` recomputed."""
+
+    from quant_engine.portfolio_ledger import validate_governed_hwm_calendar_authority
+
+    if not isinstance(seed.get("authority_evidence_sha256"), str):
+        raise CalendarAuthorityError(
+            "SEED", "seed authority lacks authority_evidence_sha256"
+        )
+    candidate = {k: v for k, v in seed.items() if k != "authority_evidence_sha256"}
+    candidate["hwm_policy_sha256"] = policy_sha
+    # the digest the derivation writes: canonical JSON of every other field
+    candidate["authority_evidence_sha256"] = _sha256(
+        json.dumps(
+            candidate,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+    try:
+        validate_governed_hwm_calendar_authority(
+            candidate,
+            hwm_policy_bytes=effective_policy,
+            accepted_authority_sha256=str(candidate["authority_evidence_sha256"]),
+        )
+    except Exception as exc:  # the validator's own refusal text is the message
+        raise CalendarAuthorityError(
+            "SEED", f"re-issued seed is invalid: {exc}"
+        ) from exc
+    return candidate
+
+
+def reissue(args: argparse.Namespace) -> int:
+    seed = _read_json(_file(args.seed_authority, "seed authority"), "seed authority")
+    if not isinstance(seed, dict):
+        raise CalendarAuthorityError("SEED", "seed authority is not an object")
+    effective, policy_sha = effective_policy_sha256(
+        args.repo_root, args.hwm_policy, args.contract
+    )
+    data = render(reissue_authority(seed, effective, policy_sha))
+    if args.check:
+        if not args.out.is_file() or args.out.read_bytes() != data:
+            raise CalendarAuthorityError(
+                "DIFFERS", f"{args.out} is not what the head derives"
+            )
+    elif args.out.exists():
+        if args.out.read_bytes() != data:
+            raise CalendarAuthorityError("OUTPUT_EXISTS", str(args.out))
+    else:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        _write_create_only(args.out, data)
+    print(
+        json.dumps({"authority_sha256": _sha256(data), "hwm_policy_sha256": policy_sha})
+    )
+    return 0
+
+
 def _receipt(
     resolved: Mapping[str, Any],
     seed_bytes: bytes,
@@ -442,13 +524,22 @@ def build_parser() -> argparse.ArgumentParser:
     cmd.add_argument("--epoch-generation")
     cmd.add_argument("--ledger-generation")
     cmd.add_argument("--baseline-generation")
+    seed = commands.add_parser(
+        "reissue", help="rebind a predecessor authority to this head's HWM policy"
+    )
+    seed.add_argument("--seed-authority", type=Path, required=True)
+    seed.add_argument("--out", type=Path, required=True)
+    seed.add_argument("--check", action="store_true")
+    seed.add_argument("--repo-root", type=Path, default=REPO_ROOT)
+    seed.add_argument("--hwm-policy", default=DEFAULT_HWM_POLICY)
+    seed.add_argument("--contract", default=DEFAULT_CONTRACT)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return author(args)
+        return reissue(args) if args.command == "reissue" else author(args)
     except CalendarAuthorityError as exc:
         print(f"release-hwm-calendar: FAIL: {exc}", file=sys.stderr)
         return 1
