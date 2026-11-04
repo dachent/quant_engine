@@ -4531,6 +4531,10 @@ def _policy_constant_sensitivity(
     }
 
 
+# Public name for the release verifier, which must derive the same block the panel adds.
+policy_constant_sensitivity = _policy_constant_sensitivity
+
+
 def _report_panel_expectations(report: Mapping[str, Any]) -> dict[str, Any]:
     summary = _summary(report)
     counts = {

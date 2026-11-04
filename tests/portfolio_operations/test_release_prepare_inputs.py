@@ -602,13 +602,17 @@ def test_prep_spec_derives_every_id_and_repins_every_file(world: World) -> None:
 def test_prep_spec_pins_each_per_cycle_input_the_run_names(world: World) -> None:
     gap = _put(world.data / "gap" / "fills.json", "fills")
     audit = _put(world.data / "gap" / "audit.json", "audit")
+    perf = _put(world.data / "gap" / "perf.csv", "perf")
     pins = [
         f"vendor_gap_fills=data:gap/fills.json@{_sha(gap.read_bytes())}",
         f"model_vs_actual_input=data:gap/audit.json@{_sha(audit.read_bytes())}",
+        f"implementation_model_book_perf=data:gap/perf.csv@{_sha(perf.read_bytes())}",
     ]
     spec = world.prep(pins=pins)
     assert spec["vendor_gap_fills"] == _pin(gap)
     assert spec["model_vs_actual_input"] == _pin(audit)
+    assert spec["implementation_model_book_perf"] == _pin(perf)
+    assert "implementation_model_book_perf" not in world.prep()
     assert "weekly_gap_fill_spec" not in spec  # absent means the key is omitted
     _refusal(
         "HASH_MISMATCH",
