@@ -49,10 +49,20 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "sleeve-facts": (),
     "selected-history-normalization": ("sleeve-facts",),
     "dependence": ("selected-history-normalization",),
+    "basis-attribution": (
+        "sleeve-facts",
+        "selected-history-normalization",
+        "dependence",
+    ),
     "plan-live-only": ("selected-history-normalization",),
     "plan-live-plus-backtest": ("selected-history-normalization",),
     "history-control": ("sleeve-facts",),
-    "ledger": ("dependence", "plan-live-only", "plan-live-plus-backtest"),
+    "ledger": (
+        "dependence",
+        "basis-attribution",
+        "plan-live-only",
+        "plan-live-plus-backtest",
+    ),
     "baseline": ("ledger",),
     "epoch": ("ledger", "baseline", "sleeve-facts", "history-control"),
     "hwm": ("epoch", "ledger", "baseline"),
@@ -62,6 +72,7 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "sleeve-facts",
         "selected-history-normalization",
         "dependence",
+        "basis-attribution",
         "plan-live-only",
         "plan-live-plus-backtest",
         "history-control",
@@ -220,10 +231,15 @@ _PREPARATION_STAGE_CODE = {
         "release_builder",
         "attribution_baseline_reader",
     ),
+    # the attribution reader is not listed: a run is frozen at one release commit, which the
+    # run identity binds, and listing it would re-run the ledger and every stage after it
+    # whenever the reader's bytes change (the reader is already a code input of "attribution")
+    "basis-attribution": ("attended_preparation", "strategy_basis"),
     "final-handoff": ("attended_preparation",),
 }
 
 _PREPARATION_STAGE_POLICY = {
+    "basis-attribution": (),
     "sleeve-facts": (),
     "selected-history-normalization": (),
     "dependence": ("dependence", "dependence_schema"),
@@ -240,6 +256,7 @@ _PREPARATION_STAGE_POLICY = {
 }
 
 _PREPARATION_STAGE_OUTPUTS = {
+    "basis-attribution": ("attribution_source",),
     "sleeve-facts": ("sleeve_facts",),
     "selected-history-normalization": ("history_source",),
     "dependence": ("dependence_root", "selected_path"),
@@ -834,6 +851,94 @@ def _history_basis_differs(
         block.get("sleeve_facts_sha256")
         != hashlib.sha256(facts_path.read_bytes()).hexdigest()
     )
+
+
+def _attribution_basis_differs(
+    attribution_root: Path, declaration_path: Path, facts_path: Path | None
+) -> bool:
+    """Whether the retained attribution is not the one this declaration and facts describe.
+
+    The retained attribution is built before the sleeve facts exist, so it carries no
+    ``strategy_basis`` block (or one over other bytes); the report then refuses it because
+    its sleeve comparisons differ from the restatement.
+    """
+
+    catalog = attribution_root / "strategy-attribution.json"
+    if not catalog.is_file():
+        return True
+    block = _read(catalog, "retained attribution catalog").get("strategy_basis")
+    if not isinstance(block, Mapping):
+        return True
+    if (
+        block.get("declaration_sha256")
+        != hashlib.sha256(declaration_path.read_bytes()).hexdigest()
+    ):
+        return True
+    return facts_path is not None and bool(
+        block.get("sleeve_facts_sha256")
+        != hashlib.sha256(facts_path.read_bytes()).hexdigest()
+    )
+
+
+def _expected_baseline_generation(baseline_source: Path, expected: object) -> Path:
+    """The staged baseline generation the attribution must name, under the retained baseline root.
+
+    The retained baseline entry is the allocation authority handed to dependence; the attribution
+    binds the separately pinned expected staged baseline (identity and catalog digest), so that
+    one is the baseline it is built from, and only when its bytes are the pinned ones.
+    """
+
+    if not isinstance(expected, Mapping):
+        raise AttendedPreparationError("expected staged baseline identity is required")
+    generation = (
+        baseline_source.parents[1] / "generations" / str(expected.get("generation_id"))
+    )
+    catalog = generation / "portfolio-baseline.json"
+    if not catalog.is_file() or hashlib.sha256(
+        catalog.read_bytes()
+    ).hexdigest() != expected.get("catalog_sha256"):
+        raise AttendedPreparationError(
+            "the expected staged baseline is not under the retained baseline root"
+        )
+    return generation
+
+
+def _stage_basis_attribution(
+    *,
+    spec_path: Path,
+    baseline_generation: Path,
+    destination: Path,
+    dependence_root: Path,
+    dependence_selected_inputs: Path,
+    declaration_path: Path,
+    facts_path: Path,
+) -> Path:
+    """Stage the attribution once more with the strategy basis restated onto the sleeve.
+
+    Built here, after the sleeve facts, the basis history and its dependence exist, from the
+    same spec and baseline the retained attribution was built from.  A rerun finds the
+    generation it staged and keeps it.
+    """
+
+    import portfolio_attribution as attribution
+
+    generations = destination / "generations"
+    try:
+        staged = attribution.stage_catalog(
+            baseline_generation.parents[1],
+            spec_path,
+            destination,
+            baseline_generation_id=baseline_generation.name,
+            dependence_source_root=dependence_root,
+            dependence_selected_inputs=dependence_selected_inputs,
+            strategy_basis_declaration=declaration_path,
+            sleeve_facts=facts_path,
+        )
+    except (attribution.AttributionValidationError, OSError, ValueError) as exc:
+        raise AttendedPreparationError(
+            f"strategy basis attribution is refused: {exc}"
+        ) from exc
+    return (generations / str(staged["generation_id"])).resolve()
 
 
 def _retained_history_requires_rebuild(
@@ -1736,6 +1841,26 @@ def _preparation_stage_inputs(
             "baseline": config["retained_verified_generations"]["baseline"],
             "dependence_selection_template": config["dependence_selection_template"],
         },
+        "basis-attribution": {
+            **common,
+            "baseline": config["retained_verified_generations"]["baseline"],
+            "attribution": config["retained_verified_generations"]["attribution"],
+            **(
+                {"attribution_spec_template": config["attribution_spec_template"]}
+                if config.get("attribution_spec_template") is not None
+                else {}
+            ),
+            **(
+                {"expected_staged_baseline": config["expected_staged_baseline"]}
+                if config.get("expected_staged_baseline") is not None
+                else {}
+            ),
+            **(
+                {"strategy_basis_declaration": config["strategy_basis_declaration"]}
+                if config.get("strategy_basis_declaration") is not None
+                else _strategy_basis_stage_input(config.get("sleeve_facts"))
+            ),
+        },
         "plan-live-only": {**common, "plan": plans["LIVE_ONLY"]},
         "history-control": {
             **common,
@@ -2103,6 +2228,7 @@ def _preserve_uncheckpointed_stage(root: Path, stage: str) -> None:
             root / "preparation" / "sleeve-facts-selection.json",
         ),
         "selected-history-normalization": (root / "preparation" / "history",),
+        "basis-attribution": (root / "preparation" / "attribution",),
         "dependence": (
             root / "preparation" / "dependence",
             root / "preparation" / "dependence-selected-inputs.json",
@@ -2384,6 +2510,38 @@ def _prepare_attended_inputs(
                 "selected_path": str(selected_path),
             },
             {"dependence_root": dependence_root, "selected_path": selected_path},
+        )
+
+    attribution_checkpoint = reuse("basis-attribution")
+    if attribution_checkpoint is not None:
+        attribution_source = Path(
+            str(attribution_checkpoint["attribution_source"])
+        ).resolve()
+    else:
+        if (
+            basis_declaration_path is not None
+            and basis_facts_path is not None
+            and _attribution_basis_differs(
+                attribution_source, basis_declaration_path, basis_facts_path
+            )
+        ):
+            # a declared restatement needs the attribution to carry the sleeve lanes the
+            # report compares against; the retained one predates the sleeve facts
+            attribution_source = _stage_basis_attribution(
+                spec_path=_pin(config["attribution_spec_template"], "attribution spec"),
+                baseline_generation=_expected_baseline_generation(
+                    baseline_source, config.get("expected_staged_baseline")
+                ),
+                destination=root / "preparation" / "attribution",
+                dependence_root=dependence_root,
+                dependence_selected_inputs=selected_path,
+                declaration_path=basis_declaration_path,
+                facts_path=basis_facts_path,
+            )
+        checkpoint(
+            "basis-attribution",
+            {"attribution_source": str(attribution_source)},
+            {"attribution_source": attribution_source},
         )
 
     def write_plan(

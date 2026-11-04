@@ -5341,6 +5341,137 @@ def test_a_retained_history_is_current_only_for_its_own_declaration_and_facts(
     assert differs(restated, declaration, None) is True
 
 
+def test_a_retained_attribution_is_current_only_for_its_own_declaration_and_facts(
+    tmp_path: Path,
+) -> None:
+    declaration = tmp_path / "declaration.json"
+    declaration.write_bytes(b"declaration")
+    facts = tmp_path / "facts.json"
+    facts.write_bytes(b"facts")
+    differs = preparation._attribution_basis_differs
+
+    def attribution(name: str, catalog: dict[str, object] | None) -> Path:
+        root = tmp_path / name
+        root.mkdir()
+        if catalog is not None:
+            (root / "strategy-attribution.json").write_bytes(
+                canonical_json_bytes(catalog)
+            )
+        return root
+
+    stamped = {
+        "strategy_basis": {
+            "declaration_sha256": hashlib.sha256(b"declaration").hexdigest(),
+            "sleeve_facts_sha256": hashlib.sha256(b"facts").hexdigest(),
+        }
+    }
+    # built before the sleeve facts existed: no block (or no catalog) is never current
+    assert differs(attribution("none", None), declaration, facts) is True
+    assert differs(attribution("plain", {}), declaration, facts) is True
+    current = attribution("current", stamped)
+    assert differs(current, declaration, facts) is False
+    assert differs(current, declaration, None) is False
+    facts.write_bytes(b"other facts")
+    assert differs(current, declaration, facts) is True
+    facts.write_bytes(b"facts")
+    declaration.write_bytes(b"other declaration")
+    assert differs(current, declaration, facts) is True
+
+
+def test_the_basis_attribution_is_staged_from_the_cycle_spec_and_the_runs_own_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_attribution as attribution
+
+    seen: dict[str, Any] = {}
+
+    def stage(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        seen["args"], seen["kwargs"] = args, kwargs
+        return {"generation_id": "g" * 64}
+
+    monkeypatch.setattr(attribution, "stage_catalog", stage)
+    baseline = tmp_path / "baseline" / "generations" / "b"
+    destination = tmp_path / "preparation" / "attribution"
+    got = preparation._stage_basis_attribution(
+        spec_path=tmp_path / "spec.json",
+        baseline_generation=baseline,
+        destination=destination,
+        dependence_root=tmp_path / "dependence",
+        dependence_selected_inputs=tmp_path / "selected.json",
+        declaration_path=tmp_path / "declaration.json",
+        facts_path=tmp_path / "facts.json",
+    )
+    assert got == (destination / "generations" / ("g" * 64)).resolve()
+    assert seen["args"] == (
+        baseline.parents[1],
+        tmp_path / "spec.json",
+        destination,
+    )
+    assert seen["kwargs"] == {
+        "baseline_generation_id": "b",
+        "dependence_source_root": tmp_path / "dependence",
+        "dependence_selected_inputs": tmp_path / "selected.json",
+        "strategy_basis_declaration": tmp_path / "declaration.json",
+        "sleeve_facts": tmp_path / "facts.json",
+    }
+
+    def refuse(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise attribution.AttributionValidationError("synthetic")
+
+    monkeypatch.setattr(attribution, "stage_catalog", refuse)
+    with pytest.raises(preparation.AttendedPreparationError, match="synthetic"):
+        preparation._stage_basis_attribution(
+            spec_path=tmp_path / "spec.json",
+            baseline_generation=baseline,
+            destination=destination,
+            dependence_root=tmp_path / "dependence",
+            dependence_selected_inputs=tmp_path / "selected.json",
+            declaration_path=tmp_path / "declaration.json",
+            facts_path=tmp_path / "facts.json",
+        )
+
+
+def test_the_basis_attribution_is_built_from_the_expected_staged_baseline(
+    tmp_path: Path,
+) -> None:
+    retained = tmp_path / "baseline" / "generations" / "allocation"
+    retained.mkdir(parents=True)
+    staged = tmp_path / "baseline" / "generations" / "staged"
+    staged.mkdir()
+    (staged / "portfolio-baseline.json").write_bytes(b"catalog")
+    expected = {
+        "generation_id": "staged",
+        "catalog_sha256": hashlib.sha256(b"catalog").hexdigest(),
+    }
+    # the allocation authority and the staged baseline are different generations: the
+    # attribution is built from the one the release pinned
+    assert preparation._expected_baseline_generation(retained, expected) == staged
+    for refused in (
+        None,
+        {**expected, "catalog_sha256": "0" * 64},
+        {**expected, "generation_id": "other"},
+    ):
+        with pytest.raises(preparation.AttendedPreparationError):
+            preparation._expected_baseline_generation(retained, refused)
+
+
+def test_the_basis_attribution_is_a_checkpointed_preparation_stage() -> None:
+    graph = preparation.PREPARATION_STAGE_DEPENDENCIES
+    # built after the sleeve facts, the basis history and its dependence; the recipe and the
+    # handoff come after it, so a resume reuses it instead of recomputing the attribution
+    assert set(graph["basis-attribution"]) == {
+        "sleeve-facts",
+        "selected-history-normalization",
+        "dependence",
+    }
+    assert "basis-attribution" in graph["ledger"]
+    assert "basis-attribution" in graph["final-handoff"]
+    assert preparation._PREPARATION_STAGE_OUTPUTS["basis-attribution"] == (
+        "attribution_source",
+    )
+    assert "strategy_basis" in preparation._PREPARATION_STAGE_CODE["basis-attribution"]
+
+
 _BASIS_DECLARATION = {
     "schema": "strategy-basis-declaration/1",
     "strategies": [{"strategy_id": "synthetic-strategy", "basis": "SLEEVE_EPOCH"}],
