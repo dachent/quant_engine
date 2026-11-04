@@ -33,6 +33,7 @@ from test_release_ledger_spec_e2e import real_cycle  # noqa: E402
 
 SHIPPED = REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json"
 STAGING = (
+    "cycle-seeds",
     "cycle-resolve",
     "provenance-spec",
     "provenance",
@@ -40,10 +41,14 @@ STAGING = (
     "ledger",
     "baseline-spec",
     "baseline",
+    "attribution-spec",
 )
+# the implementation builders run after the ledger they bind and before the preparation spec that pins them
+IMPLEMENTATION = ("implementation-reconciliation", "implementation-return-attribution")
 # stages whose tool and flags are checked against the tool's own --help
 TOOL_STAGES = (
     *STAGING,
+    *IMPLEMENTATION,
     "selected-build",
     "pre-chain",
     "calendar-seed",
@@ -51,12 +56,8 @@ TOOL_STAGES = (
     "prep-spec",
     "post-commit-verify",
 )
-# per-cycle files no committed tool writes: the first stage refuses a cycle that lacks one
-CYCLE_SEEDS = (
-    "attribution-spec.json",
-    "in/implementation-reconciliation.json",
-    "in/implementation-return-attribution.json",
-)
+# what the first stage writes under the cycle: the carried seeds and the spec template
+CYCLE_SEEDS = ("attribution-spec-template.json",)
 NEW_CONFIG_KEYS = (
     "predecessor_selected_inputs",
     "predecessor_selected_inputs_sha256",
@@ -74,6 +75,8 @@ NEW_CONFIG_KEYS = (
     "vendor_gap_fills",
     "model_vs_actual_input",
     "prep_pins",
+    "prep_pin_root_key",
+    "prep_pin_root",
     "prep_dirs",
     "prep_omit",
     "cycle_manifest",
@@ -196,9 +199,20 @@ def _closure(stage_id: str) -> set[str]:
 
 def test_the_staging_group_comes_first_in_the_order_stage_p23_ran_it() -> None:
     ids = [s["id"] for s in _shipped()["stages"]]
+    # the builders of the ledger-bound implementation seeds sit between the ledger and the baseline spec
+    at = ids.index("ledger") + 1
+    assert ids[at : at + 2] == list(IMPLEMENTATION)
+    for builder in IMPLEMENTATION:
+        assert "ledger" in _closure(builder) and builder in _closure("prep-spec")
+    ids = [i for i in ids if i not in IMPLEMENTATION]
     # stage_p23.sh: provenance, ledger, baseline, then selected inputs and the pre-chain; each spec
     # builder runs just before the stage tool that reads its output
-    assert ids[:10] == [*STAGING, "selected-build", "selected-inputs", "pre-chain"]
+    assert ids[: len(STAGING) + 3] == [
+        *STAGING,
+        "selected-build",
+        "selected-inputs",
+        "pre-chain",
+    ]
     # the calendar authority comes before the preparation spec that pins it, the spec before the run
     assert ids[ids.index("pre-chain") + 1 : ids.index("attended") + 1] == [
         "calendar-seed",
@@ -508,13 +522,22 @@ def staged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]
     )
     prov_spec = base / "provenance-seed-spec.json"
     prov_spec.write_text("{}", encoding="utf-8")
-    for seed in CYCLE_SEEDS:  # per-cycle operator seeds the first stage requires
-        (cycle / seed).parent.mkdir(parents=True, exist_ok=True)
-        (cycle / seed).write_text("{}", encoding="utf-8")
     graph = _shipped()
     # the provenance stage reads a hand-made spec (no committed builder): stand in for the staging
     # tool by placing the generation the ledger-spec fixture staged, where the stage's output lies
     for stage in graph["stages"]:
+        if stage["id"] == "cycle-seeds":
+            # release_cycle_seeds.py has its own tests; this fixture has no release-inputs root
+            stage.pop("release_inputs")
+            stage["argv"] = [
+                "{python}",
+                "-c",
+                "import sys,pathlib;c=pathlib.Path(sys.argv[1]);"
+                "[((c/n).parent.mkdir(parents=True,exist_ok=True),(c/n).write_text('{}'))"
+                " for n in sys.argv[2:]]",
+                "{cycle}",
+                *CYCLE_SEEDS,
+            ]
         if stage["id"] == "provenance":
             stage["argv"] = [
                 "{python}",
@@ -716,7 +739,7 @@ def test_selected_inputs_must_name_this_runs_ledger_generation_and_follow_its_bu
     None
 ):
     stage = _stage("selected-inputs")
-    assert stage["requires"] == ["selected-build"]
+    assert stage["requires"] == ["selected-build", "attribution-spec"]
     assert ["{selected_inputs}", "{cycle_ledger_id}"] in stage["bound_ids"]
     assert _stage("selected-build")["outputs"] == ["{selected_inputs}"]
     assert _stage("prep-spec")["outputs"] == ["{preparation_spec}"]
@@ -834,6 +857,19 @@ def test_a_cycle_without_a_per_cycle_seed_is_refused_before_any_stage_runs(
     assert "does not exist" in err or "vanished" in err
 
 
+def test_the_first_stage_writes_the_per_cycle_seeds_every_later_stage_reads() -> None:
+    graph = {s["id"]: s for s in _shipped()["stages"]}
+    seeds = graph["cycle-seeds"]
+    assert "requires" not in seeds
+    assert {Path(item).name for item in seeds["outputs"]} == {
+        Path(name).name for name in CYCLE_SEEDS
+    }
+    assert graph["cycle-resolve"]["requires"] == ["cycle-seeds"]
+    # the spec is derived from the cycle's own baseline, before the stages that read it
+    assert graph["attribution-spec"]["requires"] == ["baseline"]
+    assert "attribution-spec" in graph["selected-inputs"]["requires"]
+
+
 def test_prep_spec_records_the_per_cycle_seeds_whose_pins_it_carries() -> None:
     # a seed that changes after prep-spec succeeded must refuse the kept prep-spec and
     # everything downstream: the consuming stage records the files, not only cycle-resolve
@@ -844,3 +880,49 @@ def test_prep_spec_records_the_per_cycle_seeds_whose_pins_it_carries() -> None:
         "in/implementation-return-attribution.json",
     ):
         assert "{cycle}/" + name in stage["inputs"], name
+
+
+def test_prep_spec_repins_the_staged_implementation_seeds_when_a_root_is_named(
+    tmp_path: Path,
+) -> None:
+    # the prep spec carries the two implementation files of the predecessor; a cycle whose seeds were
+    # staged (or rebuilt) has other bytes, so prep-spec re-pins them from the files the cycle holds
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stage = next(s for s in graph["stages"] if s["id"] == "prep-spec")
+    world_root = tmp_path / "world"
+    cycle = world_root / "c"
+    (cycle / "in").mkdir(parents=True)
+    recon = cycle / "in" / "implementation-reconciliation.json"
+    attr = cycle / "in" / "implementation-return-attribution.json"
+    recon.write_bytes(b'{"r": 1}\n')
+    attr.write_bytes(b'{"a": 2}\n')
+    config = {
+        "repo_root": "R",
+        "python": "py",
+        "cycle": cycle.as_posix(),
+        "run": (cycle / "run").as_posix(),
+        "code_commit": "c" * 40,
+        "mode": "release",
+        "requested_as_of": "2026-09-17",
+        "ceremony": "full",
+    }
+    group = [
+        item
+        for item in stage["argv"]
+        if isinstance(item, dict) and item.get("if") == "prep_pin_root_key"
+    ]
+    assert len(group) == 1
+    # without the key the group adds nothing: the default command line is unchanged
+    assert (
+        driver.stage_argv(driver.Run(config, graph, offline=True), stage, group) == []
+    )
+
+    config["prep_pin_root_key"] = "world"
+    config["prep_pin_root"] = world_root.as_posix()
+    argv = driver.stage_argv(driver.Run(config, graph, offline=False), stage, group)
+    pins = [argv[i + 1] for i, token in enumerate(argv) if token == "--pin"]
+    sha = hashlib.sha256
+    assert pins == [
+        f"implementation_reconciliation=world:c/in/implementation-reconciliation.json@{sha(recon.read_bytes()).hexdigest()}",
+        f"implementation_return_attribution=world:c/in/implementation-return-attribution.json@{sha(attr.read_bytes()).hexdigest()}",
+    ]
