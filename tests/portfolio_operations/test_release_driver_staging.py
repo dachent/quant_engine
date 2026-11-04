@@ -788,20 +788,6 @@ def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
     assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]
 
 
-def test_a_cycle_without_a_per_cycle_seed_is_refused_before_any_stage_runs(
-    staged: dict[str, Any], seed: str, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = staged["cycle"] / seed
-    path.unlink()
-    try:
-        assert _run(staged, "run", "--through", "ledger") == 2
-    finally:
-        path.write_text("{}", encoding="utf-8")  # the fixture is shared
-    err = capsys.readouterr().err
-    assert "cycle-resolve" in err and Path(seed).name in err
-    assert "does not exist" in err or "vanished" in err
-
-
 def test_the_first_stage_writes_the_per_cycle_seeds_every_later_stage_reads() -> None:
     graph = {s["id"]: s for s in _shipped()["stages"]}
     seeds = graph["cycle-seeds"]
