@@ -198,6 +198,13 @@ resolves them from a **release-inputs root outside the repository** instead.
   manifest sha256), so a new cutoff no longer moves the tool identity and the data-only gate profile
   can engage. The run config (`release_inputs_root`, `release_inputs_manifest_sha256`) or, for
   `build_vertical.sh`, `RELEASE_INPUTS_ROOT` / `_MANIFEST_SHA256` / `_CUTOFF` point the tools at it.
+* **Readers.** A tool that needs one of the removed files calls
+  `quant_engine.core.resolve_release_input(repo_root, relative, root=, manifest_sha256=, cutoff=)`
+  (or loads the set with `load_release_inputs`): the pinned root when configured, never a repo copy,
+  and a refusal when the file is absent. `release_prepare_inputs.py prep-spec` and
+  `release_acceptance_inputs.py sleeve-inputs` take `--release-inputs-root` and
+  `--release-inputs-manifest-sha256`; the stage graph passes them. `tests/core/test_release_input_readers.py`
+  fails when any tool, derivation or release script names a removed path without the loader.
 * **Tests that read real values** (`test_expected_baseline`, the real-baseline checks in
   `test_validate_alignment`, the governed-input tests in `test_sleeve_disclosures`,
   `test_build_sleeve_facts_release`, `test_attended_preparation` and

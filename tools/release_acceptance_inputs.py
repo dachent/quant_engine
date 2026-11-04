@@ -51,6 +51,8 @@ import re
 import sys
 from typing import Any, BinaryIO
 
+from quant_engine.core import ReleaseInputsError, resolve_release_input
+
 import release_cycle_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1079,6 +1081,24 @@ def _selection_evidence(
 # ----------------------------------------------------------------------------- sleeve inputs
 
 
+def _release_input(
+    repo: Path,
+    relative: str,
+    release_inputs: tuple[Path, str] | None,
+    cutoff: str,
+    role: str,
+) -> Path:
+    """A cutoff-dependent default input from the pinned release-inputs root, never a repo copy."""
+
+    root, pin = release_inputs if release_inputs else (None, None)
+    try:
+        return resolve_release_input(
+            repo, relative, root=root, manifest_sha256=pin, cutoff=cutoff
+        )
+    except ReleaseInputsError as exc:
+        raise AcceptanceInputsError("RELEASE_INPUTS", f"{role}: {exc}") from exc
+
+
 def build_sleeve_inputs(
     *,
     resolved: Mapping[str, Any],
@@ -1086,6 +1106,7 @@ def build_sleeve_inputs(
     placer: Placer,
     files: Mapping[str, Path],
     artifact_dirs: Mapping[str, Path],
+    release_inputs: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
     cutoff = resolved["cutoff"]
     inputs: dict[str, dict[str, str]] = {}
@@ -1107,7 +1128,9 @@ def build_sleeve_inputs(
         root_name, relative = placer.place(path, sha, stage_parts, allow_repo=True)
         inputs[role] = {"path": relative, "root": root_name, "sha256": sha}
     for role, default in SLEEVE_FILE_DEFAULTS.items():
-        path = files.get(role) or resolve_ref((REPO_KEY, default), roots, role)
+        path = files.get(role) or _release_input(
+            roots[REPO_KEY], default, release_inputs, cutoff, role
+        )
         sha, _ = _pinned(path, role)
         document = _object(_read_json(path, role), role)
         if role == "quantbase_declared_inputs":
@@ -1225,6 +1248,7 @@ def _run(args: argparse.Namespace) -> int:
             placer=placer,
             files=files,
             artifact_dirs=artifact_dirs,
+            release_inputs=_release_inputs_arg(args),
         )
     placer.check_outputs()
     data = dumps(document)
@@ -1255,6 +1279,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--resolved-cycle-sha256")
         command.add_argument("--qe-root", required=True)
         command.add_argument("--repo-root", required=True)
+        command.add_argument("--release-inputs-root", type=Path)
+        command.add_argument("--release-inputs-manifest-sha256")
         command.add_argument("--root", action="append", default=[], metavar="KEY=DIR")
         command.add_argument(
             "--file", action="append", default=[], metavar="NAME=KEY:REL"
@@ -1270,6 +1296,19 @@ def _parser() -> argparse.ArgumentParser:
     accept.add_argument("--baseline-pointers", type=Path)
     accept.add_argument("--ledger-generation", required=True, metavar="KEY:REL")
     return parser
+
+
+def _release_inputs_arg(args: argparse.Namespace) -> tuple[Path, str] | None:
+    if (args.release_inputs_root is None) != (
+        args.release_inputs_manifest_sha256 is None
+    ):
+        raise AcceptanceInputsError(
+            "RELEASE_INPUTS",
+            "give --release-inputs-root with --release-inputs-manifest-sha256",
+        )
+    if args.release_inputs_root is None:
+        return None
+    return args.release_inputs_root, args.release_inputs_manifest_sha256
 
 
 def main(argv: Sequence[str] | None = None) -> int:
