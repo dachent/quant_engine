@@ -755,6 +755,7 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         and "only_scheme" not in _stage(i)
         and _stage(i).get("only_ceremony", "full") == "full"
     ] == [
+        "cycle-seeds",
         "cycle-resolve",
         "provenance-spec",
         "provenance",
@@ -762,6 +763,7 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         "ledger",
         "baseline-spec",
         "baseline",
+        "attribution-spec",
         "selected-build",
         "selected-inputs",
         *pass26[pass26.index("pre-chain") : pass26.index("replica-copy") + 1],

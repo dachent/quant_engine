@@ -125,11 +125,51 @@
   },
   "stages": [
     {
+      "id": "cycle-seeds",
+      "inputs": [
+        "{cycle_roots_file}"
+      ],
+      "release_inputs": [
+        "ops/mvp2-release/inputs/seeds/implementation-reconciliation.json",
+        "ops/mvp2-release/inputs/seeds/implementation-return-attribution.json",
+        "ops/mvp2-release/inputs/seeds/attribution-spec-template.json"
+      ],
+      "outputs": [
+        "{cycle}/in/implementation-reconciliation.json",
+        "{cycle}/in/implementation-return-attribution.json",
+        "{cycle}/attribution-spec-template.json"
+      ],
+      "stdout_to": "{cycle}/logs/cycle-seeds.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_cycle_seeds.py",
+        "stage",
+        "--release-inputs-root",
+        "{release_inputs_root}",
+        "--release-inputs-manifest-sha256",
+        "{release_inputs_manifest_sha256}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--roots-file",
+        "{cycle_roots_file}",
+        "--cycle",
+        "{cycle}",
+        "--repo-root",
+        "{repo_root}"
+      ]
+    },
+    {
       "id": "cycle-resolve",
+      "requires": [
+        "cycle-seeds"
+      ],
       "inputs": [
         "{cycle_manifest}",
         "{cycle_roots_file}",
-        "{cycle}/attribution-spec.json",
+        "{cycle}/attribution-spec-template.json",
         "{cycle}/in/implementation-reconciliation.json",
         "{cycle}/in/implementation-return-attribution.json"
       ],
@@ -437,6 +477,37 @@
       ]
     },
     {
+      "id": "attribution-spec",
+      "requires": [
+        "baseline"
+      ],
+      "inputs": [
+        "{cycle}/attribution-spec-template.json"
+      ],
+      "outputs": [
+        "{cycle}/attribution-spec.json"
+      ],
+      "stdout_to": "{cycle}/logs/attribution-spec.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_cycle_seeds.py",
+        "derive-attribution-spec",
+        "--template",
+        "{cycle}/attribution-spec-template.json",
+        "--baseline-root",
+        "{cycle}/baseline",
+        "--baseline-generation-id",
+        "{baseline_id}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--out",
+        "{cycle}/attribution-spec.json"
+      ]
+    },
+    {
       "id": "selected-build",
       "requires": [
         "baseline"
@@ -505,7 +576,8 @@
     {
       "id": "selected-inputs",
       "requires": [
-        "selected-build"
+        "selected-build",
+        "attribution-spec"
       ],
       "builtin": "inputs_only",
       "inputs": [

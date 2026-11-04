@@ -33,6 +33,7 @@ from test_release_ledger_spec_e2e import real_cycle  # noqa: E402
 
 SHIPPED = REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json"
 STAGING = (
+    "cycle-seeds",
     "cycle-resolve",
     "provenance-spec",
     "provenance",
@@ -40,6 +41,7 @@ STAGING = (
     "ledger",
     "baseline-spec",
     "baseline",
+    "attribution-spec",
 )
 # stages whose tool and flags are checked against the tool's own --help
 TOOL_STAGES = (
@@ -51,9 +53,9 @@ TOOL_STAGES = (
     "prep-spec",
     "post-commit-verify",
 )
-# per-cycle files no committed tool writes: the first stage refuses a cycle that lacks one
+# what the first stage writes under the cycle: the carried seeds and the spec template
 CYCLE_SEEDS = (
-    "attribution-spec.json",
+    "attribution-spec-template.json",
     "in/implementation-reconciliation.json",
     "in/implementation-return-attribution.json",
 )
@@ -198,7 +200,12 @@ def test_the_staging_group_comes_first_in_the_order_stage_p23_ran_it() -> None:
     ids = [s["id"] for s in _shipped()["stages"]]
     # stage_p23.sh: provenance, ledger, baseline, then selected inputs and the pre-chain; each spec
     # builder runs just before the stage tool that reads its output
-    assert ids[:10] == [*STAGING, "selected-build", "selected-inputs", "pre-chain"]
+    assert ids[: len(STAGING) + 3] == [
+        *STAGING,
+        "selected-build",
+        "selected-inputs",
+        "pre-chain",
+    ]
     # the calendar authority comes before the preparation spec that pins it, the spec before the run
     assert ids[ids.index("pre-chain") + 1 : ids.index("attended") + 1] == [
         "calendar-seed",
@@ -508,13 +515,22 @@ def staged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]
     )
     prov_spec = base / "provenance-seed-spec.json"
     prov_spec.write_text("{}", encoding="utf-8")
-    for seed in CYCLE_SEEDS:  # per-cycle operator seeds the first stage requires
-        (cycle / seed).parent.mkdir(parents=True, exist_ok=True)
-        (cycle / seed).write_text("{}", encoding="utf-8")
     graph = _shipped()
     # the provenance stage reads a hand-made spec (no committed builder): stand in for the staging
     # tool by placing the generation the ledger-spec fixture staged, where the stage's output lies
     for stage in graph["stages"]:
+        if stage["id"] == "cycle-seeds":
+            # release_cycle_seeds.py has its own tests; this fixture has no release-inputs root
+            stage.pop("release_inputs")
+            stage["argv"] = [
+                "{python}",
+                "-c",
+                "import sys,pathlib;c=pathlib.Path(sys.argv[1]);"
+                "[((c/n).parent.mkdir(parents=True,exist_ok=True),(c/n).write_text('{}'))"
+                " for n in sys.argv[2:]]",
+                "{cycle}",
+                *CYCLE_SEEDS,
+            ]
         if stage["id"] == "provenance":
             stage["argv"] = [
                 "{python}",
@@ -716,7 +732,7 @@ def test_selected_inputs_must_name_this_runs_ledger_generation_and_follow_its_bu
     None
 ):
     stage = _stage("selected-inputs")
-    assert stage["requires"] == ["selected-build"]
+    assert stage["requires"] == ["selected-build", "attribution-spec"]
     assert ["{selected_inputs}", "{cycle_ledger_id}"] in stage["bound_ids"]
     assert _stage("selected-build")["outputs"] == ["{selected_inputs}"]
     assert _stage("prep-spec")["outputs"] == ["{preparation_spec}"]
@@ -764,16 +780,14 @@ def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
     assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]
 
 
-@pytest.mark.parametrize("seed", CYCLE_SEEDS)
-def test_a_cycle_without_a_per_cycle_seed_is_refused_before_any_stage_runs(
-    staged: dict[str, Any], seed: str, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = staged["cycle"] / seed
-    path.unlink()
-    try:
-        assert _run(staged, "run", "--through", "ledger") == 2
-    finally:
-        path.write_text("{}", encoding="utf-8")  # the fixture is shared
-    err = capsys.readouterr().err
-    assert "cycle-resolve" in err and Path(seed).name in err
-    assert "does not exist" in err or "vanished" in err
+def test_the_first_stage_writes_the_per_cycle_seeds_every_later_stage_reads() -> None:
+    graph = {s["id"]: s for s in _shipped()["stages"]}
+    seeds = graph["cycle-seeds"]
+    assert "requires" not in seeds
+    assert {Path(item).name for item in seeds["outputs"]} == {
+        Path(name).name for name in CYCLE_SEEDS
+    }
+    assert graph["cycle-resolve"]["requires"] == ["cycle-seeds"]
+    # the spec is derived from the cycle's own baseline, before the stages that read it
+    assert graph["attribution-spec"]["requires"] == ["baseline"]
+    assert "attribution-spec" in graph["selected-inputs"]["requires"]
