@@ -469,8 +469,11 @@ def stage_argv(
                     )
                     for arg in item["args"]
                 )
-        elif item["if"] in run.values and (
-            "equals" not in item or run.values[item["if"]] == item["equals"]
+        elif (
+            item["if"] in run.values
+            and ("equals" not in item or run.values[item["if"]] == item["equals"])
+            and item.get("unless") not in run.values
+            and ("if_file" not in item or Path(run.expand(item["if_file"])).is_file())
         ):
             argv.extend(run.expand(arg) for arg in item["args"])
     return argv

@@ -859,6 +859,28 @@ def test_a_spec_the_attended_check_refuses_is_renamed(world: World) -> None:
     assert not out.exists() and out.with_name(out.name + ".rejected").is_file()
 
 
+def test_the_release_inputs_root_is_a_pin_root(world: World, tmp_path: Path) -> None:
+    inputs = tmp_path / "ri"
+    perf = _put(inputs / "impl" / "perf.csv", "perf")
+    resolved = copy.deepcopy(world.resolved)
+    tool.bind_release_inputs_root(resolved, None)
+    assert "release_inputs" not in resolved["roots"]
+    tool.bind_release_inputs_root(resolved, inputs)
+    key, path, sha = tool._located_override(
+        f"implementation_model_book_perf=release_inputs:impl/perf.csv@{_sha(perf.read_bytes())}",
+        resolved,
+        "--pin",
+    )
+    assert (key, path, sha) == (
+        "implementation_model_book_perf",
+        Path(os.path.realpath(inputs)) / "impl" / "perf.csv",
+        _sha(perf.read_bytes()),
+    )
+    resolved["roots"]["release_inputs"] = "elsewhere"
+    tool.bind_release_inputs_root(resolved, inputs)
+    assert resolved["roots"]["release_inputs"] == "elsewhere"
+
+
 def _cli(world: World, *args: str) -> list[str]:
     return [
         args[0],
