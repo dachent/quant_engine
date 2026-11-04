@@ -357,6 +357,42 @@ def b_not_a_remainder(payload: Payload) -> None:
     payload.report["capital_reconciliation"]["residual_usd"] = "5"
 
 
+PERFORMANCE_TAB_PY = "tools/portfolio_performance_tab.py"
+
+
+def _residual_fixture(payload: Payload) -> None:
+    _restated_fixture(payload)
+    payload.panel["performance_tab"] = {
+        "slices": {
+            "reconciliation": {"residual_cents": 381},
+            "flows": {
+                "residual_treatment": (
+                    "it is the value of closed epochs that no plotted slice holds "
+                    "(3.81 at the cutoff)"
+                )
+            },
+        }
+    }
+
+
+def p_residual_treatment(payload: Payload) -> Result:
+    if not _restated_rows(payload):
+        return skip("no restated strategy")
+    slices = (payload.panel.get("performance_tab") or {}).get("slices") or {}
+    cents = (slices.get("reconciliation") or {}).get("residual_cents")
+    text = (slices.get("flows") or {}).get("residual_treatment")
+    if not isinstance(cents, int) or not isinstance(text, str):
+        return skip("no residual or no treatment text")
+    quoted = f"({Decimal(cents) / 100:,.2f} at the cutoff)"
+    if quoted not in text:
+        return bad(f"residual_cents {cents} but the treatment text does not quote {quoted}")
+    return ok(f"the treatment text quotes the residual {quoted} (residual_cents {cents})")
+
+
+def b_residual_treatment(payload: Payload) -> None:
+    payload.panel["performance_tab"]["slices"]["reconciliation"]["residual_cents"] = 999
+
+
 SLEEVE_ROWS: tuple[Row, ...] = (
     Row(
         "R22-1",
@@ -446,5 +482,16 @@ SLEEVE_ROWS: tuple[Row, ...] = (
         p_not_a_remainder,
         b_not_a_remainder,
         pass_fixture=_restated_fixture,
+    ),
+    Row(
+        "R22-8",
+        "epoch",
+        "Performance tab",
+        PERFORMANCE_TAB_PY,
+        (r"\"The residual against systematic capital is not a flow: it is the value of ",),
+        "a restated panel's residual against systematic capital is the closed epochs' value, quoted at the residual the slices reconcile to",
+        p_residual_treatment,
+        b_residual_treatment,
+        pass_fixture=_residual_fixture,
     ),
 )

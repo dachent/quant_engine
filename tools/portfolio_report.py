@@ -1706,10 +1706,20 @@ def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "currency": item.get("currency"),
                     "kind": "EXECUTION",
                     "period": "PERIOD_TO_DATE",
-                    "source_label": _plain_words(execution.get("basis")),
+                    "source_label": (
+                        "parent account "
+                        if execution.get("scope") == "PARENT_ACCOUNT_LIVE_SERIES"
+                        else ""
+                    )
+                    + _plain_words(execution.get("basis")),
                     "status": execution.get("status"),
                     "window_end": execution.get("window_end"),
                     "window_start": execution.get("window_start"),
+                    **(
+                        {"scope": execution["scope"]}
+                        if "scope" in execution
+                        else {}
+                    ),
                 }
             )
     return components
@@ -2803,6 +2813,8 @@ def _merge_attribution(
                 }
         benchmark_comparison = benchmark_comparisons.get(strategy_id, {})
         cost = costs[strategy_id]
+        if basis_restatements and strategy_id in basis_restatements:
+            cost = strategy_basis.tag_parent_execution_cost(cost)
         metrics_value = comparison.get("metrics")
         metrics = (
             {}

@@ -1314,6 +1314,20 @@ def apply_to_rows(
                 if key not in moved
             },
             **common,
+            # the retained summary is the parent account's own live series, which
+            # opens before the sleeve does: it stays, named as the parent's
+            **(
+                {
+                    "account_live_return_summary": {
+                        **reconciliation_row["account_live_return_summary"],
+                        "basis": strategy_basis.BASIS_PARENT_ACCOUNT,
+                    }
+                }
+                if isinstance(
+                    reconciliation_row.get("account_live_return_summary"), Mapping
+                )
+                else {}
+            ),
             "account_basis": {
                 **_account_label(reference, "reconciliation"),
                 **{
