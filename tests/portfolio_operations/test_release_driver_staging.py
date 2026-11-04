@@ -744,3 +744,30 @@ def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
         in named["baseline-spec"]
     )
     assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]
+
+
+def test_the_validating_stages_pass_the_basis_inputs_the_attended_run_used() -> None:
+    # the findings the ceremony and the lanes gate on must be the attended run's: without the
+    # declaration, facts, ledger, ibkr root and tag map a sleeve row has nothing to be checked against
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    paths, derive = graph["paths"], graph["derive"]
+    assert paths["strategy_basis"].endswith("/sleeves/strategy-basis-declaration.json")
+    assert paths["tag_map"].endswith("/sleeves/nested-strategy-tag-map.json")
+    assert paths["sleeve_facts"].endswith("/input/sleeve-account-facts.json")
+    assert derive["ibkr_root"]["json_field"][1] == "sleeve_facts.ibkr_generation_root"
+    expected = {
+        "--strategy-basis": "{strategy_basis}",
+        "--sleeve-facts": "{sleeve_facts}",
+        "--provider-ledger": "{ledger_catalog}",
+        "--ibkr-root": "{ibkr_root}",
+        "--tag-map": "{tag_map}",
+    }
+    stages = {s["id"]: s for s in graph["stages"]}
+    for stage_id in ("findings-panel", "ceremony", "lanes"):
+        argv = stages[stage_id]["argv"]
+        for flag, value in expected.items():
+            assert argv[argv.index(flag) + 1] == value, (stage_id, flag)
+        assert {
+            "ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json",
+            "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json",
+        } <= set(stages[stage_id]["release_inputs"])

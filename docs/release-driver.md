@@ -343,3 +343,13 @@ The repository must be clean at `code_commit` before and after. The post-commit 
 (`qe-post-commit-verify/1`: file digests and ids, no absolute paths) are written under
 `{cycle}/post-commit/`.
 
+
+### Findings inputs
+
+The findings step of `findings-panel`, `lanes` and `ceremony` runs `validate_generation.py` with the inputs the attended
+run used, so a sleeve row is checked against the declaration it was restated from (#624): `--strategy-basis` and
+`--tag-map` (the pinned release inputs `sleeves/strategy-basis-declaration.json` and `sleeves/nested-strategy-tag-map.json`),
+`--sleeve-facts` (the run's `stages/report` generation input), `--provider-ledger` (the run's ledger catalog) and
+`--ibkr-root` (the preparation spec's `sleeve_facts.ibkr_generation_root`). `release_replica.py` takes the same five as
+optional flags and adds them to the validator only when given. Without them the declaration-dependent items
+(`returns.sleeve_basis` and its invariants) are not evaluated and the ceremony reports different findings than the run.

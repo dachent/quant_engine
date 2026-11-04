@@ -53,9 +53,21 @@
     "ledger_out": "{cycle}/ledger",
     "ledger_generation": "{ledger_out}/generations/{cycle_ledger_id}",
     "baseline_spec": "{cycle}/baseline-spec.json",
-    "baseline_out": "{cycle}/baseline"
+    "baseline_out": "{cycle}/baseline",
+    "strategy_basis": "{release_inputs_root}/ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json",
+    "tag_map": "{release_inputs_root}/ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json",
+    "sleeve_facts": "{run}/stages/report/generations/{report_id}/input/sleeve-account-facts.json"
   },
   "derive": {
+    "report_id": {
+      "single_dir": "{run}/stages/report/generations"
+    },
+    "ibkr_root": {
+      "json_field": [
+        "{preparation_spec}",
+        "sleeve_facts.ibkr_generation_root"
+      ]
+    },
     "ledger_id": {
       "single_dir": "{run}/stages/ledger/generations"
     },
@@ -1322,6 +1334,10 @@
     },
     {
       "id": "findings-panel",
+      "release_inputs": [
+        "ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json",
+        "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+      ],
       "guard_spec": "{prod_spec}",
       "requires": [
         "dry-run"
@@ -1347,6 +1363,16 @@
         "{requested_as_of}",
         "--crosswalk",
         "{run}/stages/epoch/generations/{epoch_id}/authority/account-assignment-crosswalk.json",
+        "--strategy-basis",
+        "{strategy_basis}",
+        "--sleeve-facts",
+        "{sleeve_facts}",
+        "--provider-ledger",
+        "{ledger_catalog}",
+        "--ibkr-root",
+        "{ibkr_root}",
+        "--tag-map",
+        "{tag_map}",
         "--details-out",
         "{production}/panel-findings-details.json"
       ],
@@ -1535,6 +1561,10 @@
     },
     {
       "id": "lanes",
+      "release_inputs": [
+        "ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json",
+        "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+      ],
       "requires": [
         "replica-spec"
       ],
@@ -1571,6 +1601,16 @@
         "{requested_as_of}",
         "--crosswalk",
         "{crosswalk}",
+        "--strategy-basis",
+        "{strategy_basis}",
+        "--sleeve-facts",
+        "{sleeve_facts}",
+        "--provider-ledger",
+        "{ledger_catalog}",
+        "--ibkr-root",
+        "{ibkr_root}",
+        "--tag-map",
+        "{tag_map}",
         "--harness-code-commit",
         "{code_commit}",
         "--rehearsal-root",
@@ -1583,6 +1623,10 @@
     },
     {
       "id": "ceremony",
+      "release_inputs": [
+        "ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json",
+        "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+      ],
       "only_ceremony": "replica-only",
       "requires": [
         "replica-spec"
@@ -1609,6 +1653,16 @@
         "{requested_as_of}",
         "--crosswalk",
         "{crosswalk}",
+        "--strategy-basis",
+        "{strategy_basis}",
+        "--sleeve-facts",
+        "{sleeve_facts}",
+        "--provider-ledger",
+        "{ledger_catalog}",
+        "--ibkr-root",
+        "{ibkr_root}",
+        "--tag-map",
+        "{tag_map}",
         "--harness-code-commit",
         "{code_commit}",
         "--rehearsal-root",

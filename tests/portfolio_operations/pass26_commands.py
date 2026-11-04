@@ -99,6 +99,8 @@ def write(OUT: Path) -> None:
         "panel_root": Q + "/dataPortfolio/control-panel",
         # not recorded by pass 26 (its ids.env names them, this fixture does not): synthetic placeholders
         "provenance_id": _pin("provenance-generation"),
+        "report_id": _pin("report-generation"),
+        "ibkr_root": Q + "/dataIBKR/generations/synthetic",
         "resolved_cycle_sha256": _pin("resolved-cycle"),
     }
     (OUT / "pass26-run.json").write_text(
@@ -458,6 +460,21 @@ def write(OUT: Path) -> None:
                 "reason": "pass 26 read the expected baseline from the repository; R3 reads it from the "
                 "pinned release-inputs root, which the baseline spec stage also needs",
             }
+        ]
+        + [
+            {
+                "flag": flag,
+                "reason": "pass 26 validated the panel without the basis inputs the attended run used, so a "
+                "p123-ai-factor sleeve row had no declaration to be checked against; the driver passes the "
+                "run's own declaration, sleeve facts, provider ledger, ibkr root and tag map",
+            }
+            for flag in (
+                "--strategy-basis",
+                "--sleeve-facts",
+                "--provider-ledger",
+                "--ibkr-root",
+                "--tag-map",
+            )
         ],
         "ledger": [
             {

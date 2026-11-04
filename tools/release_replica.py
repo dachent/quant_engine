@@ -312,6 +312,27 @@ def _release_id(stdout_log: Path) -> str:
     return value
 
 
+# validate_generation inputs the attended run used (sleeve basis restatement, #624); with
+# none of them the sleeve rows have no declaration to be checked against and the findings
+# differ from the attended run's (a clean ceremony then proves less than the run did)
+BASIS_ARGS = (
+    ("strategy_basis", "--strategy-basis"),
+    ("sleeve_facts", "--sleeve-facts"),
+    ("provider_ledger", "--provider-ledger"),
+    ("ibkr_root", "--ibkr-root"),
+    ("tag_map", "--tag-map"),
+)
+
+
+def _basis_flags(a: argparse.Namespace) -> list[str]:
+    flags: list[str] = []
+    for attr, flag in BASIS_ARGS:
+        value = getattr(a, attr, None)
+        if value is not None:
+            flags += [flag, str(value)]
+    return flags
+
+
 def _findings_commands(
     spec: Path, panel_dir: Path, release_id: str, a: argparse.Namespace
 ) -> list[list[str]]:
@@ -325,6 +346,7 @@ def _findings_commands(
             a.cutoff,
             "--crosswalk",
             str(a.crosswalk),
+            *_basis_flags(a),
         ),
         _py(
             "validate_release_targets.py",
@@ -650,6 +672,8 @@ def _parser() -> argparse.ArgumentParser:
         cmd.add_argument("--expected", type=Path, required=True)
         cmd.add_argument("--cutoff", required=True)
         cmd.add_argument("--crosswalk", type=Path, required=True)
+        for attr, flag in BASIS_ARGS:
+            cmd.add_argument(flag, type=Path, dest=attr)
         cmd.add_argument("--harness-code-commit", required=True)
         cmd.add_argument("--rehearsal-root", type=Path, required=True)
         cmd.add_argument("--clean-room", type=Path, required=True)
