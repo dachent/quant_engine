@@ -744,3 +744,58 @@ def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
         in named["baseline-spec"]
     )
     assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]
+
+
+def test_the_validating_stages_pass_the_basis_inputs_the_attended_run_used() -> None:
+    # the findings the ceremony and the lanes gate on must be the attended run's: without the
+    # declaration, facts, ledger, ibkr root and tag map a sleeve row has nothing to be checked against.
+    # One optional group, present only when the run names a release-inputs root, so a run without
+    # one keeps the repository-default command lines byte for byte.
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    paths, derive = graph["paths"], graph["derive"]
+    assert paths["release_inputs_strategy_basis"].endswith(
+        "/sleeves/strategy-basis-declaration.json"
+    )
+    assert paths["release_inputs_tag_map"].endswith(
+        "/sleeves/nested-strategy-tag-map.json"
+    )
+    assert paths["sleeve_facts"].endswith("/input/sleeve-account-facts.json")
+    assert derive["ibkr_root"]["json_field"][1] == "sleeve_facts.ibkr_generation_root"
+    expected = {
+        "--strategy-basis": "{release_inputs_strategy_basis}",
+        "--sleeve-facts": "{sleeve_facts}",
+        "--provider-ledger": "{ledger_catalog}",
+        "--ibkr-root": "{ibkr_root}",
+        "--tag-map": "{release_inputs_tag_map}",
+    }
+    stages = {s["id"]: s for s in graph["stages"]}
+    for stage_id in ("findings-panel", "ceremony", "lanes"):
+        groups = [
+            item
+            for item in stages[stage_id]["argv"]
+            if isinstance(item, dict) and item.get("if") == "release_inputs_root"
+        ]
+        assert len(groups) == 1, stage_id
+        args = groups[0]["args"]
+        for flag, value in expected.items():
+            assert args[args.index(flag) + 1] == value, (stage_id, flag)
+        assert "release_inputs" not in stages[stage_id]
+
+
+def test_the_basis_group_is_absent_without_a_release_inputs_root() -> None:
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stage = next(s for s in graph["stages"] if s["id"] == "findings-panel")
+    config = {
+        "repo_root": "R",
+        "python": "py",
+        "cycle": "C",
+        "run": "C/run",
+        "code_commit": "c" * 40,
+        "mode": "release",
+        "requested_as_of": "2026-09-17",
+        "ceremony": "full",
+    }
+    run = driver.Run(config, graph, offline=True)
+    argv = driver.stage_argv(run, stage)
+    assert "--strategy-basis" not in argv and "--tag-map" not in argv
+    assert "--crosswalk" in argv

@@ -136,6 +136,56 @@ def test_ceremony_runs_every_step_in_order_and_issues_a_valid_receipt(
     )
 
 
+BASIS = {
+    "strategy_basis": "--strategy-basis",
+    "sleeve_facts": "--sleeve-facts",
+    "provider_ledger": "--provider-ledger",
+    "ibkr_root": "--ibkr-root",
+    "tag_map": "--tag-map",
+}
+
+
+def _validator_call(runner: FakeRunner) -> list[str]:
+    return next(c for c in runner.calls if Path(c[1]).name == "validate_generation.py")
+
+
+def test_ceremony_findings_carry_the_basis_inputs_the_attended_run_used(
+    tmp_path: Path, specs: Any
+) -> None:
+    args = _args(tmp_path)
+    for attr in BASIS:
+        setattr(args, attr, tmp_path / f"{attr}.json")
+    runner = FakeRunner()
+    assert rr.replica_ceremony(args, runner) == 0
+    call = _validator_call(runner)
+    for attr, flag in BASIS.items():
+        assert call[call.index(flag) + 1] == str(tmp_path / f"{attr}.json")
+
+
+def test_ceremony_findings_without_basis_inputs_add_no_flags(
+    tmp_path: Path, specs: Any
+) -> None:
+    runner = FakeRunner()
+    assert rr.replica_ceremony(_args(tmp_path), runner) == 0
+    assert not set(BASIS.values()) & set(_validator_call(runner))
+
+
+def test_the_parser_takes_the_basis_inputs_on_ceremony_and_lanes() -> None:
+    for name in ("ceremony", "lanes"):
+        argv = [
+            name, "--real-spec", "r", "--replica-spec", "p", "--out-dir", "o",
+            "--replica-panel-dir", "d", "--expected", "e", "--cutoff", "2026-09-17",
+            "--crosswalk", "c", "--harness-code-commit", "h", "--rehearsal-root", "x",
+            "--clean-room", "z",
+            *[v for a, f in BASIS.items() for v in (f, f"{a}.json")],
+        ]  # fmt: skip
+        if name == "lanes":
+            argv += ["--real-panel-dir", "q"]
+        parsed = rr._parser().parse_args(argv)
+        for attr, flag in BASIS.items():
+            assert getattr(parsed, attr) == Path(f"{attr}.json")
+
+
 @pytest.mark.parametrize(
     "failing",
     [
