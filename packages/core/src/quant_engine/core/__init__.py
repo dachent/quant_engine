@@ -60,6 +60,7 @@ from quant_engine.core.release_inputs import (
     classify as classify_release_input,
     load_release_inputs,
     release_input_root,
+    resolve_release_input,
 )
 from quant_engine.core.gate_profile import (
     APPROVAL_KIND as GATE_PROFILE_APPROVAL_KIND,
@@ -223,6 +224,7 @@ __all__ = [
     "ReleaseInputsError",
     "load_release_inputs",
     "release_input_root",
+    "resolve_release_input",
     "GATE_PROFILE_APPROVAL_KIND",
     "GATE_PROFILE_ID",
     "GATE_PROFILE_SCHEMA_VERSION",

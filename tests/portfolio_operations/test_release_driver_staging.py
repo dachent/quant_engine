@@ -708,3 +708,39 @@ def test_selected_inputs_must_name_this_runs_ledger_generation_and_follow_its_bu
     assert ("{calendar_authority}", "{calendar_authority_sha256}") in [
         tuple(item) for item in _stage("attended")["pinned_inputs"]
     ]
+
+
+def test_a_stage_refuses_a_release_inputs_set_lacking_a_file_it_reads(
+    world: dict[str, Any],  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    from quant_engine.core.release_inputs import build_manifest
+
+    root = tmp_path / "ri"
+    baseline = root / driver.BASELINE_INPUT
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("{}\n", encoding="utf-8")
+    config = json.loads(world["config"].read_text(encoding="utf-8"))
+    _, pin = build_manifest(root, [driver.BASELINE_INPUT], cutoff="2026-09-17")
+    config.update(
+        release_inputs_root=str(root),
+        release_inputs_manifest_sha256=pin,
+        requested_as_of="2026-09-17",
+    )
+    run = driver.Run(config, {"paths": {}, "derive": {}, "stages": []})
+    stage = {"id": "prep-spec", "release_inputs": ["ops/mvp2-release/inputs/x.json"]}
+    with pytest.raises(driver.Refusal, match="prep-spec: .*lacks .*inputs/x.json"):
+        driver.check_release_inputs(run, stage)
+    driver.check_release_inputs(
+        run, {"id": "ok", "release_inputs": [driver.BASELINE_INPUT]}
+    )
+
+
+def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
+    graph = json.loads(driver.GRAPH_DEFAULT.read_bytes())
+    named = {s["id"]: s.get("release_inputs", []) for s in graph["stages"]}
+    assert (
+        "ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json"
+        in named["baseline-spec"]
+    )
+    assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]
