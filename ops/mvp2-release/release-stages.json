@@ -2100,7 +2100,7 @@
         "--pre-pointers",
         "{lane_real}/pointers-after-dry-run.json",
         "--preflight-evidence-dir",
-        "{production}/evidence",
+        "{lane_real}/evidence",
         "--post-evidence-dir",
         "{post_release_evidence}",
         "--rehearsal-root",

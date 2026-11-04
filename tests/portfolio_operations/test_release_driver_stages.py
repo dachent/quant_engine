@@ -931,6 +931,7 @@ def _early_world(world: dict[str, Any]) -> dict[str, Any]:  # noqa: F811
     )
     return {
         "graph": _graph(world, [stage]),
+        "stage": stage,
         "disclosure": disclosure,
         "baseline": baseline,
         "calendar": calendar,
@@ -1138,6 +1139,45 @@ def test_a_kept_stage_rechecks_its_guarded_inputs_on_resume(
     assert (
         _drive(world, early["graph"]) == 2
     )  # the predecessor is no longer the committed release
+
+
+def test_the_stages_after_the_commit_do_not_recheck_the_moved_predecessor(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # R2.2: post-commit-verify refused ("predecessor pin names release 91c77c1b, CURRENT_RELEASE is
+    # fe87d42d"): the commit moves CURRENT_RELEASE to the run's own release, so the pin of the release it
+    # replaced can no longer match, and the upstream stages' recorded checks must not insist that it does
+    early = _early_world(world)
+    stages = [
+        early["stage"],
+        {
+            "id": "commit",
+            "requires": ["early"],
+            "outputs": ["{cycle}/commit.txt"],
+            "argv": _write_stage("{cycle}/commit.txt"),
+        },
+        {
+            "id": "after",
+            "requires": ["commit"],
+            "outputs": ["{cycle}/after.txt"],
+            "argv": _write_stage("{cycle}/after.txt"),
+        },
+    ]
+    graph = _graph(world, stages)
+    assert _drive(world, graph, "--only", "early") == 0
+    assert _drive(world, graph, "--only", "commit") == 0
+    # the commit moved the pointer
+    (early["coordination"] / "CURRENT_RELEASE.json").write_text(
+        json.dumps({"release_id": "fe87d42d" + "0" * 56, "state": "COMMITTED"}),
+        encoding="utf-8",
+    )
+    assert _drive(world, graph, "--only", "after") == 0
+    assert (world["cycle"] / "after.txt").is_file()
+    # before the commit the same moved pointer is still refused
+    other = _graph(
+        world, [stages[0], {**stages[2], "id": "later", "requires": ["early"]}]
+    )
+    assert _drive(world, other, "--only", "later") == 2
 
 
 def test_a_stage_that_archives_the_state_gets_it_without_itself_running(
@@ -1875,3 +1915,10 @@ def test_rerecord_refuses_while_a_stage_of_the_run_is_live(
     finally:
         sleeper.kill()
         sleeper.wait()
+
+
+def test_post_commit_verify_reads_the_preflight_receipt_of_the_real_lane() -> None:
+    # the receipt the commit authorization came from is the real lane's (laneout/real/evidence), not a
+    # production/evidence directory a lanes run never writes
+    argv = _stage("post-commit-verify")["argv"]
+    assert argv[argv.index("--preflight-evidence-dir") + 1] == "{lane_real}/evidence"
