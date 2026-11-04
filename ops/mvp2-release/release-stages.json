@@ -735,7 +735,10 @@
         "{resolved_cycle}",
         "{predecessor_prep_spec}",
         "{selected_inputs}",
-        "{calendar_authority}"
+        "{calendar_authority}",
+        "{cycle}/attribution-spec.json",
+        "{cycle}/in/implementation-reconciliation.json",
+        "{cycle}/in/implementation-return-attribution.json"
       ],
       "pinned_inputs": [
         [

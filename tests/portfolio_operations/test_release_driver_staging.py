@@ -791,3 +791,15 @@ def test_the_first_stage_writes_the_per_cycle_seeds_every_later_stage_reads() ->
     # the spec is derived from the cycle's own baseline, before the stages that read it
     assert graph["attribution-spec"]["requires"] == ["baseline"]
     assert "attribution-spec" in graph["selected-inputs"]["requires"]
+
+
+def test_prep_spec_records_the_per_cycle_seeds_whose_pins_it_carries() -> None:
+    # a seed that changes after prep-spec succeeded must refuse the kept prep-spec and
+    # everything downstream: the consuming stage records the files, not only cycle-resolve
+    stage = next(s for s in _shipped()["stages"] if s["id"] == "prep-spec")
+    for name in (
+        "attribution-spec.json",
+        "in/implementation-reconciliation.json",
+        "in/implementation-return-attribution.json",
+    ):
+        assert "{cycle}/" + name in stage["inputs"], name
