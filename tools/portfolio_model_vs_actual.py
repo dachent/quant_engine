@@ -643,6 +643,18 @@ def _as_of(panel: Mapping[str, Any]) -> str:
     raise ModelVsActualError("the panel carries no as-of date for model_vs_actual")
 
 
+PARENT_ACCOUNT_BASIS: Final = "PARENT_ACCOUNT_LIVE_SERIES"
+
+
+def _restated_parent_accounts(strategy: Mapping[str, Any] | None) -> list[str]:
+    """The parent accounts of a strategy restated onto a sleeve; empty when it is not."""
+
+    scope = (strategy or {}).get("return_scope")
+    if not isinstance(scope, Mapping) or scope.get("basis") != "SLEEVE_EPOCH":
+        return []
+    return [str(account) for account in scope.get("parent_account_ids") or []]
+
+
 def _portfolio_bridge(strategies: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     included: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
@@ -674,6 +686,7 @@ def _portfolio_bridge(strategies: Sequence[Mapping[str, Any]]) -> dict[str, Any]
                 "start": primary["start"],
                 "end": primary["end"],
                 "account_gap_usd": primary["account_gap_usd"],
+                **({"basis": primary["basis"]} if "basis" in primary else {}),
             }
         )
         gap_total += primary["account_gap_usd"]
@@ -733,6 +746,16 @@ def build_model_vs_actual(
     for item in audit["strategies"]:
         sid = _text(item.get("strategy_id"), "strategy_id")
         built = [_build_window(panel, sid, w, tolerance) for w in item["windows"]]
+        parent_ids = _restated_parent_accounts(panel_strategies.get(sid))
+        if parent_ids:
+            # the audit input measures the whole parent account, which a restated
+            # strategy's sleeve is a part of, so every window says whose figure it is
+            for w in built:
+                w["basis"] = PARENT_ACCOUNT_BASIS
+                w["basis_label"] = (
+                    f"parent account {', '.join(parent_ids)}, not restated onto the "
+                    f"sleeve (capital base {w['capital_base_basis']})"
+                )
         primary_id: str | None = _text(
             item.get("primary_window_id"), "primary_window_id"
         )

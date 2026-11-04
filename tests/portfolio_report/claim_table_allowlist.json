@@ -120,6 +120,11 @@
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^Computed from the sleeve facts, not observed at the source: \\{\\} with an amount",
    "justification": "the Derived measures tile subtitle: its count is the number of DERIVED rows with an amount, computed in the same function from the same rows as the tile value; S03 checks the tiles partition the rows"
+  },
+  {
+   "file": "tools/portfolio_model_vs_actual.py",
+   "pattern": "^parent account \\{\\}, not restated onto the sleeve \\(capital base \\{\\}\\)$",
+   "justification": "the basis label of a restated strategy's model-versus-actual windows: it names the parent account the audit input measures and the capital base the window itself carries, both inserted from the same row; it states a basis, not a quantity"
   }
  ]
 }

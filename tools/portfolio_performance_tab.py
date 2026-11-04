@@ -872,6 +872,10 @@ def _build_flows(
             "internal_in_cents": _cents(internal_in),
             "internal_out_cents": _cents(internal_out),
             "net_cents": _cents(net_internal),
+            # in, out and net are each rounded once from the exact amounts, so the
+            # whole-cent difference closes in - out = net as it does for the daily flows
+            "rounding_cents": _cents(net_internal)
+            - (_cents(internal_in) - _cents(internal_out)),
             "treatment": "FLOWS_CROSSING_THE_SLICE_PERIMETER_ARE_CONTRIBUTIONS",
         },
         "residual_treatment": SLICE_RESIDUAL_TREATMENT,
@@ -2285,6 +2289,8 @@ def _verify_flows(
         cancel["internal_in_cents"] != cents(internal_in)
         or cancel["internal_out_cents"] != cents(internal_out)
         or cancel["net_cents"] != cents(net_internal)
+        or cancel["rounding_cents"]
+        != cents(net_internal) - (cents(internal_in) - cents(internal_out))
         or cancel["status"]
         != (
             "CANCELS_EXACTLY"
