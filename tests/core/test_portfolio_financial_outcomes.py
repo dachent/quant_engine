@@ -1097,6 +1097,9 @@ def _consumer_world(
     cutoff=True,
     report_edit=None,
     panel_carries="file",
+    dashboard_edit=None,
+    panel_series=None,
+    panel_projection=None,
 ):
     """One report, its correlation generation and the selected ledger, ending at ``end``.
 
@@ -1252,8 +1255,16 @@ def _consumer_world(
         },
     )
     monkeypatch.setattr(
-        panel_producer, "_dependence_analysis", lambda *a, **k: PANEL_MARKER
+        panel_producer,
+        "_dependence_analysis",
+        lambda *a, **k: (
+            PANEL_MARKER
+            if panel_projection is None
+            else copy.deepcopy(panel_projection)
+        ),
     )
+    if dashboard_edit is not None:
+        dashboard_edit(epochs["dashboard"])
     monkeypatch.setattr(outcomes, "_verify_decomposition_consumers", lambda *a, **k: {})
 
     def call():
@@ -1265,7 +1276,7 @@ def _consumer_world(
             hwm_bytes,
             {"financial-outcome-dependence-live-only": correlation_node},
             {("DEPENDENCE", correlation_node.path.resolve()): {}},
-            {},
+            panel_series or {},
             {},
             {},
             {},
@@ -2420,3 +2431,119 @@ def test_epoch_replay_refuses_a_perimeter_that_derived_sleeves_do_not_explain(
 
     with pytest.raises(outcomes.FinancialOutcomeError, match=message):
         outcomes._rebuild_selected_epochs(spec, baseline, selected)
+
+
+# --- panel dependence parity on the restated (sleeve) strategy basis ------------------
+
+_SLEEVE_NAMES = ("alpha", "beta")
+
+
+def _sleeve_projection():
+    """The smallest dependence payload the policy-constant sensitivity reads."""
+
+    return {
+        "central_case": {
+            "components": [
+                {
+                    "series_id": name,
+                    "allocation_weight": weight,
+                    "adverse_loss_fraction": "0.2",
+                }
+                for name, weight in zip(_SLEEVE_NAMES, ("0.5", "0.5"))
+            ],
+            "dependence_matrix": {"values": [[1.0, 0.3], [0.3, 1.0]]},
+        },
+        "correlation_one": {
+            "components": [
+                {"series_id": name, "conservative_loss_fraction": "0.3"}
+                for name in _SLEEVE_NAMES
+            ]
+        },
+    }
+
+
+def _sleeve_strategy_rows(*, restated):
+    return [
+        {
+            "strategy_name": name,
+            "systematic_weight": weight,
+            **(
+                {"return_scope": {"basis": "SLEEVE_EPOCH"}}
+                if restated and name == "alpha"
+                else {}
+            ),
+        }
+        for name, weight in zip(_SLEEVE_NAMES, ("0.8", "0.2"))
+    ]
+
+
+def _panel_with_sensitivity(restated):
+    panel_producer = importlib.import_module("portfolio_control_panel")
+    projection = _sleeve_projection()
+    rows = _sleeve_strategy_rows(restated=restated)
+    block = panel_producer._policy_constant_sensitivity(
+        projection, rows, set(_SLEEVE_NAMES)
+    )
+    return projection, rows, block
+
+
+def _sleeve_world(tmp_path, monkeypatch, *, restated, panel_adds_block):
+    projection, rows, block = _panel_with_sensitivity(restated)
+
+    def edit(dashboard):
+        dashboard["strategies"] = rows
+        modes = dashboard["dependence_modes"]
+        for mode in list(modes):
+            modes[mode] = (
+                {**projection, "policy_constant_sensitivity": block}
+                if panel_adds_block and block is not None
+                else copy.deepcopy(projection)
+            )
+
+    return block, _consumer_world(
+        tmp_path,
+        monkeypatch,
+        end=FX_END,
+        dashboard_edit=edit,
+        panel_series={name: name for name in _SLEEVE_NAMES},
+        panel_projection=projection,
+    )
+
+
+def test_verifier_projects_the_policy_constant_sensitivity_of_a_restated_panel(
+    tmp_path, monkeypatch
+):
+    """Fail-before: a panel on the sleeve basis carries ``policy_constant_sensitivity``
+    in each dependence mode, the verifier's projection did not, and the pipeline
+    refused ``panel dependence values differ: LIVE_ONLY``."""
+
+    block, world = _sleeve_world(
+        tmp_path, monkeypatch, restated=True, panel_adds_block=True
+    )
+
+    assert block is not None
+    assert world.call()["report_sha256"]
+
+
+def test_verifier_still_refuses_a_restated_panel_missing_the_sensitivity(
+    tmp_path, monkeypatch
+):
+    _block, world = _sleeve_world(
+        tmp_path, monkeypatch, restated=True, panel_adds_block=False
+    )
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError, match="panel dependence values differ"
+    ):
+        world.call()
+
+
+def test_verifier_projection_is_unchanged_without_a_restated_strategy(
+    tmp_path, monkeypatch
+):
+    block, world = _sleeve_world(
+        tmp_path, monkeypatch, restated=False, panel_adds_block=True
+    )
+
+    assert block is None
+    assert world.call()["report_sha256"]

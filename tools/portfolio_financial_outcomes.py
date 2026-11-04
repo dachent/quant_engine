@@ -2139,6 +2139,18 @@ def _verify_consumers(
             dependence_payload=correlation["dependence_modes"][mode],
             evidence_mode=mode,
         )
+        # A panel with a declared SLEEVE_EPOCH strategy carries, beside each mode's
+        # owner-approved policy constants, the restated-weight sensitivity the producer
+        # derives from the panel's own strategy rows; absent a restated strategy the
+        # producer adds nothing and the projection stays byte-identical.
+        try:
+            sensitivity = panel_producer.policy_constant_sensitivity(
+                projection, dashboard.get("strategies", []), set(series.values())
+            )
+        except panel_producer.ControlPanelValidationError as exc:
+            raise FinancialOutcomeError(str(exc)) from exc
+        if sensitivity is not None:
+            projection = {**projection, "policy_constant_sensitivity": sensitivity}
         if dashboard.get("dependence_modes", {}).get(mode) != projection:
             raise FinancialOutcomeError(f"panel dependence values differ: {mode}")
     return {
