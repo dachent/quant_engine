@@ -873,7 +873,8 @@ def test_prep_spec_pins_the_model_book_export_from_the_release_inputs_root(
     group = [
         item
         for item in stage["argv"]
-        if isinstance(item, dict) and item.get("unless") == "implementation_model_book_perf"
+        if isinstance(item, dict)
+        and item.get("unless") == "implementation_model_book_perf"
     ]
     assert len(group) == 1
     config = {
@@ -893,7 +894,9 @@ def test_prep_spec_pins_the_model_book_export_from_the_release_inputs_root(
             graph,
             offline=False,
         )
-        if "release_inputs_root" in config:  # the manifest check is not what is tested here
+        if (
+            "release_inputs_root" in config
+        ):  # the manifest check is not what is tested here
             run.values["release_inputs_root"] = config["release_inputs_root"]
         return driver.stage_argv(run, stage, group)
 
