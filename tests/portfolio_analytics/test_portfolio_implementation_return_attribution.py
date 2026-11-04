@@ -1192,3 +1192,48 @@ def test_policy_unavailable_bridge_keeps_its_closed_key_set() -> None:
     assert (
         bound["account_leg"]["cumulative_return"] == bound["bridge"]["account_return"]
     )
+
+
+_HASHSEED_PROBE = """
+import importlib.util, json, sys
+from datetime import date
+sys.path.insert(0, sys.argv[2])
+spec = importlib.util.spec_from_file_location("ra", sys.argv[1])
+ra = importlib.util.module_from_spec(spec)
+sys.modules["ra"] = ra
+spec.loader.exec_module(ra)
+accounts = [f"acct-{n}" for n in range(12)]
+# holdings whose per-account price P&L differ by many orders of magnitude, so the float sum
+# changes in the last digits with the order the accounts are added in
+holdings = [
+    {"account_id": account, "symbol": "SPY", "kind": "Buy", "quantity": 10.0 ** (n % 7) * (1.0 + n / 7.0),
+     "execution_price": 100.0, "event_date": "2026-01-02", "record_id": f"r{n}"}
+    for n, account in enumerate(accounts)
+]
+rows = [{"date": "2026-01-05", "beginning_capital": 1.0e6, "component_account_ids": accounts}]
+prices = {"SPY": {date(2026, 1, 2): {"Close": 100.1}, date(2026, 1, 5): {"Close": 100.37}}}
+result, close, fill = ra._tt_actual_holdings_return(
+    schwab={"transactions": holdings}, broker_rows=rows, prices=prices,
+    start=date(2026, 1, 5), end=date(2026, 1, 5),
+)
+print(json.dumps([result, close, fill]))
+"""
+
+
+def test_tt_holdings_return_does_not_depend_on_the_hash_seed() -> None:
+    import os
+    import subprocess
+
+    outputs = set()
+    for seed in range(8):
+        env = {**os.environ, "PYTHONHASHSEED": str(seed)}
+        done = subprocess.run(
+            [sys.executable, "-c", _HASHSEED_PROBE, str(MODULE_PATH), str(TOOLS_ROOT)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert done.returncode == 0, done.stderr
+        outputs.add(done.stdout)
+    assert len(outputs) == 1
