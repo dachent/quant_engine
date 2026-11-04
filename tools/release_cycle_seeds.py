@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """The per-cycle seed files of a release, from the release-inputs root and the cycle's own baseline.
 
-Three files used to be operator inputs that no committed tool wrote:
+The attribution spec used to be an operator input that no committed tool wrote:
 
 ``stage`` (before ``cycle-resolve``)
-    copies ``in/implementation-reconciliation.json`` and ``in/implementation-return-attribution.json`` byte
-    for byte from the pinned release-inputs root, and writes ``attribution-spec-template.json``: the root's
-    attribution spec with its ``return_source`` resolved from the run's root keys, the return source and its
-    manifest re-hashed against the pins the spec carries. The loader refuses a root of another cutoff, an
-    unlisted file and a changed byte, so a seed that does not belong to this cycle never reaches a stage.
+    writes ``attribution-spec-template.json``: the pinned root's attribution spec with its ``return_source``
+    resolved from the run's root keys, the return source and its manifest re-hashed against the pins the spec
+    carries. The loader refuses a root of another cutoff, an unlisted file and a changed byte, so a template
+    that does not belong to this cycle never reaches a stage.
+
+    The implementation files (``in/implementation-reconciliation.json``, ``in/implementation-return-attribution.json``)
+    are not seeds: their policy evidence embeds the run's own ledger generation, which does not exist before the
+    ``ledger`` stage, so the committed builders produce them after it and no root can carry them.
 
 ``derive-attribution-spec`` (after ``baseline``, before ``selected-inputs``)
     writes ``attribution-spec.json``: the template with ``as_of_date`` set to the cutoff and every available
@@ -38,11 +41,6 @@ from release_cycle_manifest import CycleManifestError, parse_roots, refuse_links
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SEEDS = "ops/mvp2-release/inputs/seeds"
-# release-input path -> the file name the stage graph reads under the cycle directory
-CARRIED = {
-    f"{SEEDS}/implementation-reconciliation.json": "in/implementation-reconciliation.json",
-    f"{SEEDS}/implementation-return-attribution.json": "in/implementation-return-attribution.json",
-}
 TEMPLATE_SOURCE = f"{SEEDS}/attribution-spec-template.json"
 TEMPLATE_NAME = "attribution-spec-template.json"
 SPEC_NAME = "attribution-spec.json"
@@ -190,9 +188,6 @@ def stage(
         )
 
     results: dict[str, str] = {}
-    for relative, target in CARRIED.items():
-        data = pinned(relative).read_bytes()
-        results[target] = f"{_write_create_only(cycle / target, data)} {_sha256(data)}"
     template = _load_object(
         pinned(TEMPLATE_SOURCE).read_bytes(), "attribution spec template"
     )
@@ -354,9 +349,7 @@ def _single_generation(root: Path) -> str:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    staged = commands.add_parser(
-        "stage", help="stage the carried seeds and the attribution spec template"
-    )
+    staged = commands.add_parser("stage", help="stage the attribution spec template")
     staged.add_argument("--release-inputs-root", type=Path)
     staged.add_argument("--release-inputs-manifest-sha256")
     staged.add_argument("--cutoff", required=True)

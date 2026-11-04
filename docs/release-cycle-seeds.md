@@ -1,9 +1,10 @@
 # Per-cycle seeds
 
-Three files of a release cycle used to be operator inputs that no committed tool wrote:
-`in/implementation-reconciliation.json`, `in/implementation-return-attribution.json` and
-`attribution-spec.json`. `tools/release_cycle_seeds.py` produces them from the pinned
-release-inputs root (`docs/release-publication.md`) and from the cycle's own baseline.
+The cycle's `attribution-spec.json` used to be an operator input that no committed tool wrote.
+`tools/release_cycle_seeds.py` produces it from the pinned release-inputs root
+(`docs/release-publication.md`) and from the cycle's own baseline. The two implementation files
+(`in/implementation-reconciliation.json`, `in/implementation-return-attribution.json`) are not seeds: see
+"What stays outside Git".
 
 ## `stage` (before `cycle-resolve`)
 
@@ -12,11 +13,8 @@ release_cycle_seeds.py stage --release-inputs-root R --release-inputs-manifest-s
   --cutoff D --roots-file F --cycle C
 ```
 
-- Reads `ops/mvp2-release/inputs/seeds/implementation-reconciliation.json`,
-  `.../implementation-return-attribution.json` and `.../attribution-spec-template.json` through
-  `resolve_release_input`: the root is verified against its pin, a root of another cutoff, an unlisted file or a
-  changed byte refuses.
-- Copies the two implementation files byte for byte to `C/in/`.
+- Reads `ops/mvp2-release/inputs/seeds/attribution-spec-template.json` through `resolve_release_input`: the
+  root is verified against its pin, a root of another cutoff, an unlisted file or a changed byte refuses.
 - Writes `C/attribution-spec-template.json`: the root's spec with `return_source` resolved from the run's root
   keys. The template names the return source as `{root_key, relative, expected_sha256, source_manifest_relative,
   source_manifest_expected_sha256}`; both files are re-hashed against those pins. The template's `as_of_date`
@@ -48,8 +46,14 @@ Reproduction on real bytes (2026-11-03): the R2.1 template and the retained base
 
 ## What stays outside Git
 
-The three seed files and the return source are cutoff inputs, so they live in the release-inputs root and its
-manifest lists them. The implementation files are builder outputs
-(`tools/portfolio_implementation_reconciliation.py`, `tools/portfolio_implementation_return_attribution.py`) on the
-cycle's refreshed data; a cycle whose cutoff moved builds them again and the preparation spec takes the new pins
-with `--pin`.
+The attribution spec template and the return source are cutoff inputs, so they live in the release-inputs root
+and its manifest lists them.
+
+The implementation files are not root inputs. They are builder outputs
+(`tools/portfolio_implementation_reconciliation.py`, `tools/portfolio_implementation_return_attribution.py`), and
+the AI Factor row's `policy_evidence` embeds the run's ledger generation id and receipt hash; the report requires it
+to equal the policy recomputed from the ledger generation the baseline selects
+(`portfolio_report._selected_implementation_policy_evidence`). The ledger generation does not exist before the
+`ledger` stage, so the builders run after it, in the graph, against that generation. The same holds for the
+sleeve-basis contract (`tools/portfolio_implementation_sleeve_basis.py`), which pins the retained digests and the
+receipt hash and needs the sleeve facts.
