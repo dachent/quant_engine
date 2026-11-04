@@ -29,6 +29,8 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
+from quant_engine.core import ReleaseInputsError, load_release_inputs
+
 # create-only outputs of a pass, relative to the cycle directory
 CREATE_ONLY: Final = (
     "production",
@@ -48,6 +50,7 @@ REFRESHED_PINS: Final = (
     ("calendar_authority_sha256", "calendar_authority"),
 )
 SLEEVES_RELATIVE: Final = "ops/mvp2-release/inputs/sleeves"
+BASELINE_RELATIVE: Final = "acceptance/expected-baseline.json"
 SLEEVE_ROOT_ID: Final = "sleeve-policy"
 
 
@@ -67,6 +70,22 @@ def _json(path: Path, what: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorldError(f"{what} is not a JSON object: {path}")
     return value
+
+
+def _inputs(root: Path, manifest_sha256: str) -> Any:
+    """The release-inputs set, verified against its pinned manifest digest (never read by repo path)."""
+
+    try:
+        return load_release_inputs(root, manifest_sha256)
+    except ReleaseInputsError as exc:
+        raise WorldError(f"release inputs: {exc}") from exc
+
+
+def _input_path(inputs: Any, relative: str) -> Path:
+    try:
+        return Path(inputs.path(relative))
+    except ReleaseInputsError as exc:
+        raise WorldError(f"release inputs: {exc}") from exc
 
 
 def _inside(path: Path, base: Path) -> bool:
@@ -94,15 +113,14 @@ def _dump(value: Mapping[str, Any]) -> bytes:
 # -- provenance seed -------------------------------------------------------------------------------
 
 
-def provenance_seed(seed: Path, release_inputs_root: Path, out: Path) -> dict[str, str]:
+def provenance_seed(
+    seed: Path, release_inputs_root: Path, manifest_sha256: str, out: Path
+) -> dict[str, str]:
     spec = _json(seed, "provenance seed")
-    sleeves = release_inputs_root / SLEEVES_RELATIVE
-    if not sleeves.is_dir():
-        raise WorldError(f"the release inputs hold no {SLEEVES_RELATIVE}: {sleeves}")
+    inputs = _inputs(release_inputs_root, manifest_sha256)
     roots = spec.get("roots")
     if not isinstance(roots, dict) or SLEEVE_ROOT_ID not in roots:
         raise WorldError(f"the provenance seed has no {SLEEVE_ROOT_ID!r} root")
-    roots[SLEEVE_ROOT_ID] = sleeves.as_posix()
     groups = [
         group
         for group in spec.get("source_groups", [])
@@ -112,13 +130,17 @@ def provenance_seed(seed: Path, release_inputs_root: Path, out: Path) -> dict[st
         raise WorldError(
             f"the provenance seed has no source group on {SLEEVE_ROOT_ID!r}"
         )
+    sleeves: Path | None = None
     for group in groups:
         hashes = group.setdefault("expected_hashes", {})
         for relative in group.get("relative_paths", []):
-            file = sleeves.joinpath(*str(relative).split("/"))
-            if not file.is_file():
-                raise WorldError(f"the release inputs lack {relative}: {file}")
+            parts = str(relative).split("/")
+            file = _input_path(inputs, f"{SLEEVES_RELATIVE}/{relative}")
+            sleeves = file.parents[len(parts) - 1]
             hashes[str(relative)] = _sha(file)
+    if sleeves is None:
+        raise WorldError(f"the source group of {SLEEVE_ROOT_ID!r} names no file")
+    roots[SLEEVE_ROOT_ID] = sleeves.as_posix()
     state = _create_only(out, _dump(spec))
     return {"state": state, "out": str(out), "sha256": _sha(out)}
 
@@ -143,23 +165,23 @@ def config(
     candidate_commit: str,
     code_commit: str,
     release_inputs_root: Path | None = None,
+    release_inputs_manifest_sha256: str | None = None,
     sets: Sequence[str] = (),
     require_calendar: bool = False,
 ) -> dict[str, Any]:
     cfg = _json(previous, "previous run configuration")
     if release_inputs_root is not None:
-        manifest = release_inputs_root / "release-inputs.manifest.json"
-        if not manifest.is_file():
-            raise WorldError(f"no release inputs manifest under {release_inputs_root}")
+        if release_inputs_manifest_sha256 is None:
+            raise WorldError("a release-inputs root needs its manifest sha256 pin")
+        inputs = _inputs(release_inputs_root, release_inputs_manifest_sha256)
         old = cfg.get("release_inputs_root")
         new = release_inputs_root.as_posix()
         if isinstance(old, str) and old != new:
             cfg = _replace(cfg, old, new)
         cfg["release_inputs_root"] = new
-        cfg["release_inputs_manifest_sha256"] = _sha(manifest)
-        baseline = release_inputs_root / "acceptance" / "expected-baseline.json"
-        if "expected_baseline_sha256" in cfg and baseline.is_file():
-            cfg["expected_baseline_sha256"] = _sha(baseline)
+        cfg["release_inputs_manifest_sha256"] = release_inputs_manifest_sha256
+        if "expected_baseline_sha256" in cfg:
+            cfg["expected_baseline_sha256"] = inputs.sha256(BASELINE_RELATIVE)
     cfg["candidate_commit"] = candidate_commit
     cfg["code_commit"] = code_commit
     for item in sets:
@@ -295,6 +317,7 @@ def _parser() -> argparse.ArgumentParser:
     seed = commands.add_parser("provenance-seed")
     seed.add_argument("--seed", type=Path, required=True)
     seed.add_argument("--release-inputs-root", type=Path, required=True)
+    seed.add_argument("--release-inputs-manifest-sha256", required=True)
     seed.add_argument("--out", type=Path, required=True)
     cfg = commands.add_parser("config")
     cfg.add_argument("--previous", type=Path, required=True)
@@ -302,6 +325,7 @@ def _parser() -> argparse.ArgumentParser:
     cfg.add_argument("--candidate-commit", required=True)
     cfg.add_argument("--code-commit", required=True)
     cfg.add_argument("--release-inputs-root", type=Path)
+    cfg.add_argument("--release-inputs-manifest-sha256")
     cfg.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     cfg.add_argument("--require-calendar", action="store_true")
     aside = commands.add_parser("move-aside")
@@ -330,7 +354,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "provenance-seed":
-            result: Any = provenance_seed(args.seed, args.release_inputs_root, args.out)
+            result: Any = provenance_seed(
+                args.seed,
+                args.release_inputs_root,
+                args.release_inputs_manifest_sha256,
+                args.out,
+            )
         elif args.command == "config":
             result = config(
                 args.previous,
@@ -338,6 +367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 candidate_commit=args.candidate_commit,
                 code_commit=args.code_commit,
                 release_inputs_root=args.release_inputs_root,
+                release_inputs_manifest_sha256=args.release_inputs_manifest_sha256,
                 sets=args.set,
                 require_calendar=args.require_calendar,
             )

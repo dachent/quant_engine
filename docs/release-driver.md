@@ -386,13 +386,13 @@ Three steps of a re-run are operator steps by design, not graph gaps:
 Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or idempotent, never deleting; `move-aside` and
 `carry-over` print what they would do unless `--apply` is given):
 
-1. `provenance-seed --seed <previous seed> --release-inputs-root <ri> --out <new seed>`: the seed's `sleeve-policy` root now
+1. `provenance-seed --seed <previous seed> --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin> --out <new seed>`: the seed's `sleeve-policy` root now
    names this pass's inputs and its source group's hashes are re-read from them. The printed sha256 is the new
    `provenance_spec_sha256`.
-2. `config --previous <previous run json> --out <run json> --candidate-commit C --code-commit T --release-inputs-root <ri>
+2. `config --previous <previous run json> --out <run json> --candidate-commit C --code-commit T --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin>
    --set provenance_spec=<new seed> --set prep_pin_root_key=world --set prep_pin_root=<world> [--set run=... --set qa=...
-   --set evidence_dest=...]`: repoints every occurrence of the old inputs root, recomputes the release-inputs manifest, expected
-   baseline and provenance seed pins from their files, and drops the calendar authority's pin (it is never carried). Predecessor
+   --set evidence_dest=...]`: repoints every occurrence of the old inputs root, verifies the inputs against the pin (never by repo path), takes the expected
+   baseline pin from the verified set and recomputes the provenance seed pin from its file, and drops the calendar authority's pin (it is never carried). Predecessor
    pins are never touched.
 3. `move-aside --config <run json> [--apply]`: the previous pass's `production`, `replica-production`, `replica-rehearsal`,
    `clean-room`, `pre-chain-cycle.json` and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` get an

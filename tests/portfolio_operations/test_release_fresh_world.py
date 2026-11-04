@@ -12,6 +12,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 
 import release_fresh_world as tool  # noqa: E402
+from quant_engine.core.release_inputs import build_manifest  # noqa: E402
+
+CUTOFF = "2026-09-17"
+SLEEVES = "ops/mvp2-release/inputs/sleeves"
 
 
 def _sha(raw: bytes) -> str:
@@ -24,14 +28,23 @@ def _put(path: Path, raw: bytes | str) -> Path:
     return path
 
 
-def _inputs(tmp_path: Path, name: str = "ri") -> Path:
+def _inputs(
+    tmp_path: Path, name: str = "ri", tag_map: str = "tag-map"
+) -> tuple[Path, str]:
     root = tmp_path / name
-    sleeves = root / "ops" / "mvp2-release" / "inputs" / "sleeves"
-    _put(sleeves / "nested-strategy-tag-map.json", "tag-map")
-    _put(sleeves / "quantbase" / "declared-inputs.json", "quantbase")
-    _put(root / "release-inputs.manifest.json", "manifest")
+    _put(root / SLEEVES / "nested-strategy-tag-map.json", tag_map)
+    _put(root / SLEEVES / "quantbase" / "declared-inputs.json", "quantbase")
     _put(root / "acceptance" / "expected-baseline.json", "baseline")
-    return root
+    _, digest = build_manifest(
+        root,
+        [
+            f"{SLEEVES}/nested-strategy-tag-map.json",
+            f"{SLEEVES}/quantbase/declared-inputs.json",
+            "acceptance/expected-baseline.json",
+        ],
+        cutoff=CUTOFF,
+    )
+    return root, digest
 
 
 def _seed(tmp_path: Path) -> Path:
@@ -60,14 +73,11 @@ def _seed(tmp_path: Path) -> Path:
 
 
 def test_the_provenance_seed_follows_the_release_inputs(tmp_path: Path) -> None:
-    ri = _inputs(tmp_path)
+    ri, pin = _inputs(tmp_path)
     out = tmp_path / "new-seed.json"
-    first = tool.provenance_seed(_seed(tmp_path), ri, out)
+    first = tool.provenance_seed(_seed(tmp_path), ri, pin, out)
     spec = json.loads(out.read_bytes())
-    assert (
-        spec["roots"]["sleeve-policy"]
-        == (ri / "ops/mvp2-release/inputs/sleeves").as_posix()
-    )
+    assert spec["roots"]["sleeve-policy"] == (ri / SLEEVES).as_posix()
     assert spec["roots"]["tracker"] == "T"
     assert spec["source_groups"][0]["expected_hashes"] == {"a": "0" * 64}
     assert spec["source_groups"][1]["expected_hashes"] == {
@@ -75,17 +85,15 @@ def test_the_provenance_seed_follows_the_release_inputs(tmp_path: Path) -> None:
         "quantbase/declared-inputs.json": _sha(b"quantbase"),
     }
     assert first["sha256"] == _sha(out.read_bytes())
-    assert tool.provenance_seed(_seed(tmp_path), ri, out)["state"] == "unchanged"
-    other = _inputs(tmp_path, "ri2")
-    _put(
-        other / "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json",
-        "changed",
-    )
+    assert tool.provenance_seed(_seed(tmp_path), ri, pin, out)["state"] == "unchanged"
+    other, other_pin = _inputs(tmp_path, "ri2", tag_map="changed")
     with pytest.raises(tool.WorldError, match="create-only"):
-        tool.provenance_seed(_seed(tmp_path), other, out)
-    _put(tmp_path / "empty" / "x", "x")
-    with pytest.raises(tool.WorldError, match="hold no"):
-        tool.provenance_seed(_seed(tmp_path), tmp_path / "empty", tmp_path / "o2.json")
+        tool.provenance_seed(_seed(tmp_path), other, other_pin, out)
+    with pytest.raises(tool.WorldError, match="release inputs"):
+        tool.provenance_seed(_seed(tmp_path), ri, "0" * 64, tmp_path / "o2.json")
+    _put(ri / SLEEVES / "nested-strategy-tag-map.json", "tampered")
+    with pytest.raises(tool.WorldError, match="release inputs"):
+        tool.provenance_seed(_seed(tmp_path), ri, pin, tmp_path / "o3.json")
 
 
 def _previous(tmp_path: Path) -> Path:
@@ -107,7 +115,7 @@ def _previous(tmp_path: Path) -> Path:
 def test_the_configuration_is_repointed_and_pins_recomputed_from_their_files(
     tmp_path: Path,
 ) -> None:
-    ri = _inputs(tmp_path)
+    ri, pin = _inputs(tmp_path)
     out = tmp_path / "run.json"
     result = tool.config(
         _previous(tmp_path),
@@ -115,12 +123,13 @@ def test_the_configuration_is_repointed_and_pins_recomputed_from_their_files(
         candidate_commit="c" * 40,
         code_commit="d" * 40,
         release_inputs_root=ri,
+        release_inputs_manifest_sha256=pin,
         sets=["prep_pin_root_key=world"],
     )
     cfg = json.loads(out.read_bytes())
     assert cfg["release_inputs_root"] == ri.as_posix()
     assert cfg["disclosure_inputs"] == ri.as_posix() + "/ops/x.json"
-    assert cfg["release_inputs_manifest_sha256"] == _sha(b"manifest")
+    assert cfg["release_inputs_manifest_sha256"] == pin
     assert cfg["expected_baseline_sha256"] == _sha(b"baseline")
     assert cfg["provenance_spec_sha256"] == _sha(b"prov")
     assert (cfg["candidate_commit"], cfg["code_commit"]) == ("c" * 40, "d" * 40)
@@ -133,12 +142,13 @@ def test_the_configuration_is_repointed_and_pins_recomputed_from_their_files(
 
 
 def test_the_calendar_pin_is_added_once_the_authority_exists(tmp_path: Path) -> None:
-    ri = _inputs(tmp_path)
+    ri, pin = _inputs(tmp_path)
     out = tmp_path / "run.json"
     args = {
         "candidate_commit": "c" * 40,
         "code_commit": "d" * 40,
         "release_inputs_root": ri,
+        "release_inputs_manifest_sha256": pin,
     }
     with pytest.raises(tool.WorldError, match="calendar-seed"):
         tool.config(
@@ -155,6 +165,18 @@ def test_the_calendar_pin_is_added_once_the_authority_exists(tmp_path: Path) -> 
     assert tool.config(_previous(tmp_path), out, **args)["state"] == "unchanged"
     with pytest.raises(tool.WorldError, match="create-only"):
         tool.config(_previous(tmp_path), out, **{**args, "code_commit": "e" * 40})
+
+
+def test_a_release_inputs_root_needs_its_pin(tmp_path: Path) -> None:
+    ri, _ = _inputs(tmp_path)
+    with pytest.raises(tool.WorldError, match="manifest sha256 pin"):
+        tool.config(
+            _previous(tmp_path),
+            tmp_path / "x.json",
+            candidate_commit="c" * 40,
+            code_commit="d" * 40,
+            release_inputs_root=ri,
+        )
 
 
 def _world(tmp_path: Path) -> dict[str, str]:
@@ -241,6 +263,8 @@ def test_the_command_line_reports_a_refusal_with_exit_one(
             str(tmp_path / "no.json"),
             "--release-inputs-root",
             str(tmp_path),
+            "--release-inputs-manifest-sha256",
+            "0" * 64,
             "--out",
             str(tmp_path / "o.json"),
         ]
