@@ -140,7 +140,10 @@
       "id": "cycle-resolve",
       "inputs": [
         "{cycle_manifest}",
-        "{cycle_roots_file}"
+        "{cycle_roots_file}",
+        "{cycle}/attribution-spec.json",
+        "{cycle}/in/implementation-reconciliation.json",
+        "{cycle}/in/implementation-return-attribution.json"
       ],
       "pinned_inputs": [
         [
@@ -672,7 +675,10 @@
         "{resolved_cycle}",
         "{predecessor_prep_spec}",
         "{selected_inputs}",
-        "{calendar_authority}"
+        "{calendar_authority}",
+        "{cycle}/attribution-spec.json",
+        "{cycle}/in/implementation-reconciliation.json",
+        "{cycle}/in/implementation-return-attribution.json"
       ],
       "pinned_inputs": [
         [
