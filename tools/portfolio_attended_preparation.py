@@ -836,6 +836,71 @@ def _history_basis_differs(
     )
 
 
+def _attribution_basis_differs(
+    attribution_root: Path, declaration_path: Path, facts_path: Path | None
+) -> bool:
+    """Whether the retained attribution is not the one this declaration and facts describe.
+
+    The retained attribution is built before the sleeve facts exist, so it carries no
+    ``strategy_basis`` block (or one over other bytes); the report then refuses it because
+    its sleeve comparisons differ from the restatement.
+    """
+
+    catalog = attribution_root / "strategy-attribution.json"
+    if not catalog.is_file():
+        return True
+    block = _read(catalog, "retained attribution catalog").get("strategy_basis")
+    if not isinstance(block, Mapping):
+        return True
+    if (
+        block.get("declaration_sha256")
+        != hashlib.sha256(declaration_path.read_bytes()).hexdigest()
+    ):
+        return True
+    return facts_path is not None and bool(
+        block.get("sleeve_facts_sha256")
+        != hashlib.sha256(facts_path.read_bytes()).hexdigest()
+    )
+
+
+def _stage_basis_attribution(
+    *,
+    spec_path: Path,
+    baseline_generation: Path,
+    destination: Path,
+    dependence_root: Path,
+    dependence_selected_inputs: Path,
+    declaration_path: Path,
+    facts_path: Path,
+) -> Path:
+    """Stage the attribution once more with the strategy basis restated onto the sleeve.
+
+    Built here, after the sleeve facts, the basis history and its dependence exist, from the
+    same spec and baseline the retained attribution was built from.  A rerun finds the
+    generation it staged and keeps it.
+    """
+
+    import portfolio_attribution as attribution
+
+    generations = destination / "generations"
+    try:
+        staged = attribution.stage_catalog(
+            baseline_generation.parents[1],
+            spec_path,
+            destination,
+            baseline_generation_id=baseline_generation.name,
+            dependence_source_root=dependence_root,
+            dependence_selected_inputs=dependence_selected_inputs,
+            strategy_basis_declaration=declaration_path,
+            sleeve_facts=facts_path,
+        )
+    except (attribution.AttributionValidationError, OSError, ValueError) as exc:
+        raise AttendedPreparationError(
+            f"strategy basis attribution is refused: {exc}"
+        ) from exc
+    return (generations / str(staged["generation_id"])).resolve()
+
+
 def _retained_history_requires_rebuild(
     history_root: Path,
     contract_path: Path,
@@ -2384,6 +2449,25 @@ def _prepare_attended_inputs(
                 "selected_path": str(selected_path),
             },
             {"dependence_root": dependence_root, "selected_path": selected_path},
+        )
+
+    if (
+        basis_declaration_path is not None
+        and basis_facts_path is not None
+        and _attribution_basis_differs(
+            attribution_source, basis_declaration_path, basis_facts_path
+        )
+    ):
+        # a declared restatement needs the attribution to carry the sleeve lanes the
+        # report compares against; the retained one predates the sleeve facts
+        attribution_source = _stage_basis_attribution(
+            spec_path=_pin(config["attribution_spec_template"], "attribution spec"),
+            baseline_generation=baseline_source,
+            destination=root / "preparation" / "attribution",
+            dependence_root=dependence_root,
+            dependence_selected_inputs=selected_path,
+            declaration_path=basis_declaration_path,
+            facts_path=basis_facts_path,
         )
 
     def write_plan(
