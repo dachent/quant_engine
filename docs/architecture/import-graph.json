@@ -629,6 +629,16 @@
       1
     ],
     [
+      "release_cycle_seeds",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "release_cycle_seeds",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "release_driver",
       "release_cycle_manifest",
       1

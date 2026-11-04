@@ -33,10 +33,8 @@ from typing import Any, Mapping, Sequence
 
 from quant_engine.core import ReleaseInputsError, resolve_release_input
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import portfolio_attribution as attribution  # noqa: E402
-from release_cycle_manifest import CycleManifestError, parse_roots  # noqa: E402
+import portfolio_attribution as attribution
+from release_cycle_manifest import CycleManifestError, parse_roots
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SEEDS = "ops/mvp2-release/inputs/seeds"
@@ -290,16 +288,16 @@ def derive_attribution_spec(
             raise SeedError(f"{what}: no file at {source.get(path_key)}")
         _checked(Path(str(source[path_key])), source.get(sha_key), what)
     try:
-        baseline, *_ = attribution._baseline(baseline_root, baseline_generation_id)
+        baseline, *_ = attribution.read_baseline(baseline_root, baseline_generation_id)
     except attribution.AttributionValidationError as exc:
         raise SeedError(f"baseline: {exc}") from exc
     if baseline.get("as_of_date") != cutoff:
         raise SeedError(
             f"baseline is for {baseline.get('as_of_date')!r}, the cycle cutoff is {cutoff}"
         )
-    references, _ = attribution._rows(csv_path)
+    references, _ = attribution.read_return_rows(csv_path)
     spec, report = derive_windows(
-        template, attribution._account_live_series(baseline), references, cutoff
+        template, attribution.account_live_series(baseline), references, cutoff
     )
     _write_create_only(out, _canonical(spec))
     return report
