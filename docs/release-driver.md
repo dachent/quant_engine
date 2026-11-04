@@ -208,6 +208,8 @@ aside).
 
 The graph's `config_paths` require the file-valued keys above to exist before any stage runs.
 
+A release that declares a strategy basis (`strategy-basis-declaration`, pinned by the sleeve policy manifest) needs the attribution catalog to carry the `strategy_basis` block and the sleeve comparison lanes, or the report refuses it ("attribution sleeve comparisons differ from the report's strategy basis restatement"). `pre-chain` stages the cycle attribution before the sleeve facts exist, so the attended preparation stages it once more, after the sleeve facts, the basis history and its dependence, from the same `attribution_spec_template` and baseline (`preparation/attribution`); the recipe then names that generation, as it already does for the rebuilt history. The attribution id the preparation spec carries (and `attended` binds) stays the `pre-chain` one; it is not the id the recipe uses when a basis is declared. A release without a declaration is unchanged.
+
 Two driver features serve these stages and are part of the graph schema: an argv group `{"for_each": KEY, "args": [...]}`
 repeats its arguments for every entry of the run-config object (or list) KEY (`{each_key}`, `{each_value}` stand for the entry),
 and the derive rule `{"file_sha256": PATH}` yields the digest of a file an earlier stage wrote (the resolved-cycle pin
