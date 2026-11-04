@@ -2141,11 +2141,13 @@ def _verify_consumers(
         )
         # A panel with a declared SLEEVE_EPOCH strategy carries, beside each mode's
         # owner-approved policy constants, the restated-weight sensitivity the producer
-        # derives from the panel's own strategy rows; absent a restated strategy the
-        # producer adds nothing and the projection stays byte-identical.
+        # derives from the report's strategy rows.  The expected block is derived here
+        # from the verified report, never from the consumer payload under test; absent
+        # a restated strategy the producer adds nothing and the projection stays
+        # byte-identical.
         try:
             sensitivity = panel_producer.policy_constant_sensitivity(
-                projection, dashboard.get("strategies", []), set(series.values())
+                projection, report.get("strategy_summary") or [], set(series.values())
             )
         except panel_producer.ControlPanelValidationError as exc:
             raise FinancialOutcomeError(str(exc)) from exc

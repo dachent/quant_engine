@@ -2477,73 +2477,126 @@ def _sleeve_strategy_rows(*, restated):
     ]
 
 
-def _panel_with_sensitivity(restated):
+def _panel_block(rows):
+    """What the panel producer adds to each dependence mode for these strategy rows."""
+
     panel_producer = importlib.import_module("portfolio_control_panel")
-    projection = _sleeve_projection()
-    rows = _sleeve_strategy_rows(restated=restated)
-    block = panel_producer._policy_constant_sensitivity(
-        projection, rows, set(_SLEEVE_NAMES)
+    return panel_producer._policy_constant_sensitivity(
+        _sleeve_projection(), rows, set(_SLEEVE_NAMES)
     )
-    return projection, rows, block
 
 
-def _sleeve_world(tmp_path, monkeypatch, *, restated, panel_adds_block):
-    projection, rows, block = _panel_with_sensitivity(restated)
+def _sleeve_world(
+    tmp_path,
+    monkeypatch,
+    *,
+    report_restated,
+    panel_rows=None,
+    panel_block="honest",
+):
+    """A report whose strategy rows are restated or not, and the panel built from it.
 
-    def edit(dashboard):
+    ``panel_rows`` are the strategy rows the panel believes (default: the report's) and
+    ``panel_block`` is "honest" (the producer's block for those rows), "absent" or a
+    block.  The sensitivity function is the producer's own; only the dependence payload
+    projection is a small stand-in.
+    """
+
+    report_rows = _sleeve_strategy_rows(restated=report_restated)
+    rows = report_rows if panel_rows is None else panel_rows
+    projection = _sleeve_projection()
+    block = _panel_block(rows) if panel_block == "honest" else panel_block
+
+    def edit_report(report):
+        report["strategy_summary"] = report_rows
+
+    def edit_dashboard(dashboard):
         dashboard["strategies"] = rows
         modes = dashboard["dependence_modes"]
         for mode in list(modes):
             modes[mode] = (
                 {**projection, "policy_constant_sensitivity": block}
-                if panel_adds_block and block is not None
+                if block not in (None, "absent")
                 else copy.deepcopy(projection)
             )
 
-    return block, _consumer_world(
+    return _consumer_world(
         tmp_path,
         monkeypatch,
         end=FX_END,
-        dashboard_edit=edit,
+        report_edit=edit_report,
+        dashboard_edit=edit_dashboard,
         panel_series={name: name for name in _SLEEVE_NAMES},
         panel_projection=projection,
     )
 
 
-def test_verifier_projects_the_policy_constant_sensitivity_of_a_restated_panel(
-    tmp_path, monkeypatch
-):
-    """Fail-before: a panel on the sleeve basis carries ``policy_constant_sensitivity``
-    in each dependence mode, the verifier's projection did not, and the pipeline
-    refused ``panel dependence values differ: LIVE_ONLY``."""
-
-    block, world = _sleeve_world(
-        tmp_path, monkeypatch, restated=True, panel_adds_block=True
-    )
-
-    assert block is not None
-    assert world.call()["report_sha256"]
-
-
-def test_verifier_still_refuses_a_restated_panel_missing_the_sensitivity(
-    tmp_path, monkeypatch
-):
-    _block, world = _sleeve_world(
-        tmp_path, monkeypatch, restated=True, panel_adds_block=False
-    )
-
+def _refuses(world):
     with pytest.raises(
         outcomes.FinancialOutcomeError, match="panel dependence values differ"
     ):
         world.call()
 
 
-def test_verifier_projection_is_unchanged_without_a_restated_strategy(
+def test_honest_restated_panel_is_accepted(tmp_path, monkeypatch):
+    """Fail-before (75fd46ce): a panel on the sleeve basis carries the sensitivity in
+    each dependence mode, the verifier projected none, and the pipeline refused
+    ``panel dependence values differ: LIVE_ONLY``."""
+
+    world = _sleeve_world(tmp_path, monkeypatch, report_restated=True)
+
+    assert world.call()["report_sha256"]
+
+
+def test_restated_report_with_a_panel_that_has_no_sensitivity_is_refused(
     tmp_path, monkeypatch
 ):
-    block, world = _sleeve_world(
-        tmp_path, monkeypatch, restated=False, panel_adds_block=True
+    _refuses(
+        _sleeve_world(tmp_path, monkeypatch, report_restated=True, panel_block="absent")
     )
 
-    assert block is None
+
+def test_panel_that_drops_return_scope_and_the_sensitivity_is_refused(
+    tmp_path, monkeypatch
+):
+    _refuses(
+        _sleeve_world(
+            tmp_path,
+            monkeypatch,
+            report_restated=True,
+            panel_rows=_sleeve_strategy_rows(restated=False),
+            panel_block="absent",
+        )
+    )
+
+
+def test_forged_weights_with_a_self_consistent_forged_sensitivity_are_refused(
+    tmp_path, monkeypatch
+):
+    forged = [
+        {**row, "systematic_weight": weight}
+        for row, weight in zip(_sleeve_strategy_rows(restated=True), ("0.3", "0.7"))
+    ]
+
+    _refuses(
+        _sleeve_world(tmp_path, monkeypatch, report_restated=True, panel_rows=forged)
+    )
+
+
+def test_forged_return_scope_on_an_unrestated_report_is_refused(tmp_path, monkeypatch):
+    _refuses(
+        _sleeve_world(
+            tmp_path,
+            monkeypatch,
+            report_restated=False,
+            panel_rows=_sleeve_strategy_rows(restated=True),
+        )
+    )
+
+
+def test_unrestated_report_and_panel_are_unchanged(tmp_path, monkeypatch):
+    world = _sleeve_world(
+        tmp_path, monkeypatch, report_restated=False, panel_block="absent"
+    )
+
     assert world.call()["report_sha256"]
