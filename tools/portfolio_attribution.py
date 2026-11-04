@@ -572,6 +572,10 @@ def _retained_account_history(
     return retained_series[account_series_id]
 
 
+reference_only_account_history = _reference_only_account_history
+retained_account_history = _retained_account_history
+
+
 def _compound_to_reference_periods(
     account: Mapping[date, Decimal],
     reference: Mapping[date, Decimal],

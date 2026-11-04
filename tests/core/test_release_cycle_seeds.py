@@ -26,7 +26,7 @@ import release_cycle_seeds as seeds  # noqa: E402
 CUTOFF = "2000-01-14"
 AVAILABLE = "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED"
 CSV = b"series_id,date,return,evidence_layer,version_ref,source_artifact_id\n"
-MANIFEST = b'{"verification": "VERIFIED"}\n'
+MANIFEST = b'{"verification": "VERIFIED", "as_of_date": "2000-01-14"}\n'
 
 
 def _sha(data: bytes) -> str:
@@ -215,14 +215,110 @@ def test_an_available_row_with_nothing_to_compare_refuses() -> None:
         "provider:alpha": _days("2001-01-01", 3),
         "benchmark:b": _days("2000-01-03", 3),
     }
-    with pytest.raises(seeds.SeedError, match="share no date"):
+    with pytest.raises(seeds.SeedError, match="share 0 observation"):
         seeds.derive_windows(
             _template(), {"alpha": _days("2000-01-03", 5)}, references, CUTOFF
         )
-    with pytest.raises(seeds.SeedError, match="holds an account series"):
+    with pytest.raises(seeds.SeedError, match="holds no ACCOUNT_LIVE series"):
         seeds.derive_windows(_template(), {}, references, CUTOFF)
     with pytest.raises(seeds.SeedError, match="not in the return source"):
         seeds.derive_windows(_template(), {"alpha": _days("2000-01-03", 5)}, {}, CUTOFF)
+
+
+def test_a_single_shared_observation_is_not_a_comparison() -> None:
+    references = {
+        "provider:alpha": {date(2000, 1, 5): Decimal("0.01")},
+        "benchmark:b": _days("2000-01-03", 5),
+    }
+    with pytest.raises(seeds.SeedError, match="share 1 observation"):
+        seeds.derive_windows(
+            _template(), {"alpha": _days("2000-01-03", 20)}, references, CUTOFF
+        )
+
+
+def test_retained_history_is_used_only_when_the_consumer_authenticates_it() -> None:
+    references = {
+        "provider:alpha": _days("2000-01-05", 6),
+        "benchmark:b": _days("2000-01-03", 5),
+    }
+
+    def accepted(strategy: str, account_id: str) -> dict[date, Decimal]:
+        assert (strategy, account_id) == ("alpha", "account:alpha")
+        return _days("2000-01-04", 10)
+
+    spec, _ = seeds.derive_windows(_template(), {}, references, CUTOFF, accepted)
+    assert spec["comparisons"][0]["observed_start"] == "2000-01-05"
+
+    def refused(strategy: str, account_id: str) -> dict[date, Decimal]:
+        raise seeds.attribution.AttributionValidationError(
+            "retained account history identity differs"
+        )
+
+    with pytest.raises(seeds.SeedError, match="retained account history refused"):
+        seeds.derive_windows(_template(), {}, references, CUTOFF, refused)
+
+
+def test_stage_refuses_a_source_manifest_that_is_not_verified(world: dict) -> None:
+    manifest = world["roots"]["data"] / "returns/source-manifest.json"
+    for body in (
+        b'{"verification": "PENDING", "as_of_date": "2000-01-14"}\n',
+        b'{"verification": "VERIFIED"}\n',
+        b"[]\n",
+    ):
+        manifest.write_bytes(body)
+        template = _template()
+        template["return_source"]["source_manifest_expected_sha256"] = _sha(body)
+        with pytest.raises(seeds.SeedError, match="return source manifest"):
+            seeds.resolve_template(template, world["roots"])
+
+
+def test_stage_refuses_a_path_that_leaves_the_root_through_a_link(
+    world: dict, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.csv").write_bytes(CSV)
+    link = world["roots"]["data"] / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    template = _template()
+    template["return_source"]["relative"] = "linked/x.csv"
+    with pytest.raises(Exception, match="linked|symlink|link"):
+        seeds.resolve_template(template, world["roots"])
+    for relative in ("C:/x.csv", "a\\b.csv"):
+        template["return_source"]["relative"] = relative
+        with pytest.raises(seeds.SeedError, match="safe relative path"):
+            seeds.resolve_template(template, world["roots"])
+
+
+def test_an_attribution_validation_error_is_a_cli_refusal(
+    tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(**_: object) -> None:
+        raise seeds.attribution.AttributionValidationError("return source is invalid")
+
+    monkeypatch.setattr(seeds, "derive_attribution_spec", broken)
+    code = seeds.main(
+        [
+            "derive-attribution-spec",
+            "--template",
+            str(tmp_path / "t.json"),
+            "--baseline-root",
+            str(tmp_path),
+            "--baseline-generation-id",
+            "0" * 64,
+            "--cutoff",
+            CUTOFF,
+            "--out",
+            str(tmp_path / "out.json"),
+        ]
+    )
+    assert code == 1
+    assert (
+        "release-cycle-seeds: FAIL: return source is invalid" in capsys.readouterr().err
+    )
 
 
 def test_the_cli_reports_a_refusal_without_a_traceback(
