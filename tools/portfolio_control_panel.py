@@ -8251,7 +8251,9 @@ def _restated_account_lanes(
             "label": _text(block.get("label"), "account basis label"),
             "basis": block.get("basis"),
             "account_id": block.get("account_id"),
-            "observed_start": window.get("start"),
+            # the first return date: the window opens a day earlier, at the opening NAV
+            "observed_start": figures.get("account_live_observed_start")
+            or window.get("start"),
             "observed_end": window.get("end"),
             "observations": block.get("observations"),
             "series_sha256": series.get("sha256"),
