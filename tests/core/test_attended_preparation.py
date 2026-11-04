@@ -5431,6 +5431,47 @@ def test_the_basis_attribution_is_staged_from_the_cycle_spec_and_the_runs_own_in
         )
 
 
+def test_the_basis_attribution_is_built_from_the_expected_staged_baseline(
+    tmp_path: Path,
+) -> None:
+    retained = tmp_path / "baseline" / "generations" / "allocation"
+    retained.mkdir(parents=True)
+    staged = tmp_path / "baseline" / "generations" / "staged"
+    staged.mkdir()
+    (staged / "portfolio-baseline.json").write_bytes(b"catalog")
+    expected = {
+        "generation_id": "staged",
+        "catalog_sha256": hashlib.sha256(b"catalog").hexdigest(),
+    }
+    # the allocation authority and the staged baseline are different generations: the
+    # attribution is built from the one the release pinned
+    assert preparation._expected_baseline_generation(retained, expected) == staged
+    for refused in (
+        None,
+        {**expected, "catalog_sha256": "0" * 64},
+        {**expected, "generation_id": "other"},
+    ):
+        with pytest.raises(preparation.AttendedPreparationError):
+            preparation._expected_baseline_generation(retained, refused)
+
+
+def test_the_basis_attribution_is_a_checkpointed_preparation_stage() -> None:
+    graph = preparation.PREPARATION_STAGE_DEPENDENCIES
+    # built after the sleeve facts, the basis history and its dependence; the recipe and the
+    # handoff come after it, so a resume reuses it instead of recomputing the attribution
+    assert set(graph["basis-attribution"]) == {
+        "sleeve-facts",
+        "selected-history-normalization",
+        "dependence",
+    }
+    assert "basis-attribution" in graph["ledger"]
+    assert "basis-attribution" in graph["final-handoff"]
+    assert preparation._PREPARATION_STAGE_OUTPUTS["basis-attribution"] == (
+        "attribution_source",
+    )
+    assert "strategy_basis" in preparation._PREPARATION_STAGE_CODE["basis-attribution"]
+
+
 _BASIS_DECLARATION = {
     "schema": "strategy-basis-declaration/1",
     "strategies": [{"strategy_id": "synthetic-strategy", "basis": "SLEEVE_EPOCH"}],
