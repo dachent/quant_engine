@@ -1267,6 +1267,44 @@ def _account_label(reference: Mapping[str, Any], kind: str) -> dict[str, Any]:
     }
 
 
+# The retained reconciliation measures the parent account's ledger and broker records, which
+# no sleeve fact re-derives: the blocks stay, named as the parent's.
+_PARENT_FLAT_BLOCKS: Final = (
+    "costs",
+    "broker_execution_join",
+    "trade_reconciliation_union",
+)
+_PARENT_OTHER_BLOCKS: Final = (
+    "trade_classification",
+    "trade_reconciliation_by_book",
+    "model_book_inventory",
+)
+
+
+def _tag_parent_blocks(row: dict[str, Any]) -> None:
+    for key in _PARENT_FLAT_BLOCKS:
+        if isinstance(row.get(key), Mapping):
+            row[key] = {**row[key], "basis": strategy_basis.BASIS_PARENT_ACCOUNT}
+    row["parent_account_blocks"] = {
+        "basis": strategy_basis.BASIS_PARENT_ACCOUNT,
+        "blocks": [
+            key for key in (*_PARENT_FLAT_BLOCKS, *_PARENT_OTHER_BLOCKS) if key in row
+        ],
+    }
+    if isinstance(row.get("root_causes"), list):
+        row["root_causes"] = [
+            {
+                **cause,
+                "evidence": cause["evidence"].replace(
+                    "broker events remain", "parent-account broker events remain"
+                ),
+            }
+            if isinstance(cause, Mapping) and isinstance(cause.get("evidence"), str)
+            else cause
+            for cause in row["root_causes"]
+        ]
+
+
 def apply_to_rows(
     block: Mapping[str, Any],
     attribution_row: Mapping[str, Any] | None,
@@ -1338,6 +1376,7 @@ def apply_to_rows(
             },
             "return_reconciliation": block["return_reconciliation"],
         }
+        _tag_parent_blocks(reconciled)
     return attribution, reconciled
 
 

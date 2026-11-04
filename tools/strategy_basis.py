@@ -40,7 +40,11 @@ _WEIGHT_PRECISION: Final = 34
 # comparisons, the implementation bridge, dependence, correlation, the decomposition
 # lenses, the allocation history and the HWM numerical envelope follow the restated
 # basis and are not listed.
-NOT_RESTATED: Final[tuple[str, ...]] = ("execution_cost",)
+NOT_RESTATED: Final[tuple[str, ...]] = (
+    "execution_cost",
+    "model_vs_actual",
+    "implementation_reconciliation_trades",
+)
 # Owner-approved policy inputs (PORT-DEPENDENCE-1) are static owner inputs, not
 # measurements: the dependence allocation weight and the conservative loss fractions of
 # the stress bound.  They are never restated; the dependence payload carries a data
@@ -51,6 +55,11 @@ POLICY_CONSTANTS: Final = (
 )
 _NAMES: Final = {
     "execution_cost": "the execution cost (the parent account's ledger commissions)",
+    "model_vs_actual": "the model-versus-actual windows, epochs and portfolio bridge",
+    "implementation_reconciliation_trades": (
+        "the implementation reconciliation's commissions, broker execution join and "
+        "trade reconciliation"
+    ),
     "hwm_numerical_envelope": "the HWM numerical envelope",
     "dependence_policy_weight": "the dependence policy weight",
     "dependence_conservative_loss_bound": "the dependence conservative loss bound",

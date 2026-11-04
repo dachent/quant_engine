@@ -999,6 +999,7 @@ def test_flow_matched_dollars_without_an_admitted_benchmark_are_unavailable() ->
         _tamper(["slices", "benchmarks", 0, "trailing", "1w"], "0.5"),
         _tamper(["slices", "flows", "net_flow_cents", 0], 1),
         _tamper(["slices", "flows", "internal_cancellation", "net_cents"], 1),
+        _tamper(["slices", "flows", "internal_cancellation", "rounding_cents"], 5),
         _tamper(["modes", "LIVE_PLUS_BACKTEST", "group_anchor_index"], 0),
         _tamper(["modes", "LIVE_PLUS_BACKTEST", "lines", 1, "segments"], [[0, 7]]),
         _tamper(["benchmarks", 0, "daily", "last_date"], "2020-01-01"),

@@ -6244,6 +6244,24 @@ def _accepted_pre_live_observations(
     return _accepted_pre_live(history, strategy_version)[0]
 
 
+def _accepted_pre_live_end(
+    history: Mapping[str, Any], strategy_version: str
+) -> str | None:
+    """Last date of the admitted prehistory that precedes the account-live start."""
+    _, live_start = _accepted_pre_live(history, strategy_version)
+    if live_start is None:
+        return None
+    ends = [
+        segment["observed_end"]
+        for segment in _objects(history.get("segments"), "history segments")
+        if segment.get("evidence_layer") == "BACKTEST"
+        and segment.get("mode_admission") == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+        and segment.get("strategy_version") == strategy_version
+        and segment["observed_end"] < live_start
+    ]
+    return max(ends) if ends else None
+
+
 def _accepted_pre_live_account_live_start(
     history: Mapping[str, Any], strategy_version: str
 ) -> str | None:
@@ -6327,6 +6345,9 @@ def _history_contract(
                     {
                         "account_live_start": account_live_start,
                         "backtest_observations": observations,
+                        "prehistory_observed_end": _accepted_pre_live_end(
+                            history, target["strategy_version"]
+                        ),
                         "compatibility_basis": (
                             "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE"
                         ),
@@ -7310,6 +7331,29 @@ def _implementation_status(
     return "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
 
 
+def _restated_layer_inventory(
+    layers: Sequence[Mapping[str, Any]],
+    *,
+    start: Any,
+    end: Any,
+    series_sha256: Any,
+    backtest_end: Any,
+) -> list[dict[str, Any]]:
+    """The evidence layers of a restated strategy, dated by its sleeve's series."""
+
+    restated = [dict(layer) for layer in layers]
+    for layer in restated:
+        if layer.get("evidence_layer") == "ACCOUNT_LIVE":
+            layer["observed_start"], layer["observed_end"] = start, end
+            if isinstance(series_sha256, str):
+                layer["artifact_sha256"] = series_sha256
+        elif layer.get("evidence_layer") == "BACKTEST" and isinstance(
+            backtest_end, str
+        ):
+            layer["observed_end"] = backtest_end
+    return restated
+
+
 def _strategies(
     catalog: Mapping[str, Any],
     performance: Sequence[Mapping[str, Any]],
@@ -7557,6 +7601,24 @@ def _strategies(
             if version
             else []
         )
+        live_boundary_basis: dict[str, str] = {}
+        if strategy_id in set(catalog.get("strategy_basis_restated", ())):
+            # a restated strategy's live layer is its sleeve's path, so the layer dates are
+            # the sleeve's, and the prehistory ends where the sleeve's path begins
+            layer_inventory = _restated_layer_inventory(
+                layer_inventory,
+                start=observed_start,
+                end=observed_end,
+                series_sha256=account_metrics.get("return_series_sha256"),
+                backtest_end=(history_contract or {})
+                .get(str(strategy.get("name")), {})
+                .get("prehistory_observed_end"),
+            )
+            # the live boundary stays the hash-pinned identity window of the version
+            # (the parent account's), so it says whose window it is
+            live_boundary_basis = {
+                "live_boundary_basis": strategy_basis.BASIS_PARENT_ACCOUNT
+            }
         compatibility_status = version.get("compatibility_status", "UNRESOLVED")
         compatibility_reason = version.get(
             "compatibility_reason",
@@ -7869,6 +7931,7 @@ def _strategies(
                 "live_boundary_status": live_boundary.get("status", "UNAVAILABLE"),
                 "live_boundary_observed_start": live_boundary.get("observed_start"),
                 "live_boundary_observed_end": live_boundary.get("observed_end"),
+                **live_boundary_basis,
                 "cost_evidence_status": version_costs.get("status", "UNAVAILABLE"),
                 "benchmark_evidence_status": benchmark.get("status", "UNAVAILABLE"),
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
@@ -13695,6 +13758,7 @@ def _restated_catalog(
                 _object(catalog.get("current_capital"), "current_capital"),
                 restatements,
             ),
+            "strategy_basis_restated": sorted(restatements),
         }
     except strategy_basis.StrategyBasisError as exc:
         raise ReportValidationError(str(exc)) from exc
