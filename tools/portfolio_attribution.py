@@ -498,6 +498,13 @@ def _account_live_series(
     return result
 
 
+# The three readers ``release_cycle_seeds.py`` derives its windows with: the stage's own, so a window can
+# never be derived from a series the stage would not pair.
+read_baseline = _baseline
+read_return_rows = _rows
+account_live_series = _account_live_series
+
+
 def _reference_only_account_history(
     baseline: Mapping[str, Any],
 ) -> dict[str, str]:
