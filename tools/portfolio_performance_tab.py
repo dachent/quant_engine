@@ -726,6 +726,11 @@ def _build_slices(
         )
     totals = [sum(nav_rows[s][i] for s in strategies) for i in range(len(days))]
     reference = _systematic_cents(capital)
+    flows["residual_treatment"] = _residual_treatment(
+        bool(sleeve_links),
+        None if reference is None else reference - totals[-1],
+        restated,
+    )
     return {
         "status": "AVAILABLE",
         "scope": SCOPE,
@@ -772,6 +777,30 @@ SLICE_RESIDUAL_TREATMENT: Final = (
     "compared with the slice total; the difference to systematic capital is "
     "published separately."
 )
+
+
+def _residual_treatment(
+    sleeves: bool, residual_cents: int | None, restated: bool = False
+) -> str:
+    """What the residual against systematic capital is, from the same facts as its label.
+
+    A strategy restated onto its sleeve is valued at the gross sleeve NAV, so the parent
+    account's unallocated cash and margin is no part of the systematic capital and the
+    residual is the closed epochs' cash; the sentence quotes that amount from the data.
+    """
+
+    if not (restated and sleeves and residual_cents is not None):
+        return SLICE_RESIDUAL_TREATMENT
+    residual = Decimal(residual_cents) / 100
+    return (
+        "The residual against systematic capital is not a flow: it is the value of "
+        f"closed epochs that no plotted slice holds ({residual:,.2f} at the cutoff); "
+        "the restated strategy is valued at its gross sleeve NAV, so the parent "
+        "account's unallocated cash and margin is the liability line of "
+        "strategy_basis_disclosure, not this residual.  Benchmark dollars are "
+        "compared with the slice total; the difference to systematic capital is "
+        "published separately."
+    )
 
 
 def _build_flows(
@@ -2034,6 +2063,12 @@ def _verify_slices(block: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
         if reconciliation["residual_cents"] != reference - totals[-1]:
             raise _fail("residual differs from capital minus the slice total")
     _verify_flows(block["flows"], manifest, traces, days, totals, cents)
+    if block["flows"]["residual_treatment"] != _residual_treatment(
+        any(row["sleeve_id"] is not None for row in block["rows"]),
+        reconciliation["residual_cents"],
+        _restated_strategies(panel),
+    ):
+        raise _fail("flows residual treatment differs from the residual")
     cross = block["flows"]["report_crosscheck"]
     recon = _mapping(panel.get("capital_reconciliation"))
     if recon.get("status") != "RECONCILED":
@@ -2241,7 +2276,6 @@ def _verify_flows(
         flows["total_contributed_cents"] != contributed
         or flows["implied_pnl_cents"] != totals[-1] - contributed
         or flows["definition"] != SLICE_PERIMETER_FLOW_DEFINITION
-        or flows["residual_treatment"] != SLICE_RESIDUAL_TREATMENT
         or flows["unit"] != "USD_CENTS"
     ):
         raise _fail("flows totals or definitions differ")

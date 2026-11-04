@@ -40,7 +40,7 @@ _WEIGHT_PRECISION: Final = 34
 # comparisons, the implementation bridge, dependence, correlation, the decomposition
 # lenses, the allocation history and the HWM numerical envelope follow the restated
 # basis and are not listed.
-NOT_RESTATED: Final[tuple[str, ...]] = ()
+NOT_RESTATED: Final[tuple[str, ...]] = ("execution_cost",)
 # Owner-approved policy inputs (PORT-DEPENDENCE-1) are static owner inputs, not
 # measurements: the dependence allocation weight and the conservative loss fractions of
 # the stress bound.  They are never restated; the dependence payload carries a data
@@ -50,6 +50,7 @@ POLICY_CONSTANTS: Final = (
     "dependence_conservative_loss_bound",
 )
 _NAMES: Final = {
+    "execution_cost": "the execution cost (the parent account's ledger commissions)",
     "hwm_numerical_envelope": "the HWM numerical envelope",
     "dependence_policy_weight": "the dependence policy weight",
     "dependence_conservative_loss_bound": "the dependence conservative loss bound",
@@ -265,6 +266,10 @@ def restate_provider_evidence(
                     }
                 ],
             }
+            # the overlap of the parent account's live series with the provider's: it
+            # opens before the sleeve does, so it is the parent's figure, named as such
+            if isinstance(row.get("overlap"), Mapping):
+                row["overlap"] = {**row["overlap"], "basis": BASIS_PARENT_ACCOUNT}
         result.append(row)
     return result
 
@@ -411,6 +416,33 @@ def label_recorded_allocations(
             }
         result.append(row)
     return result
+
+
+def tag_parent_execution_cost(cost: Mapping[str, Any]) -> dict[str, Any]:
+    """The cost row with its execution cost named as the parent account's.
+
+    The execution cost is the sum of the commissions of the parent account's ledger
+    transactions over the parent's own window; no sleeve commission series sits behind
+    it, so on a restated row it is published as what it is, never as the sleeve's.
+    """
+
+    execution = cost.get("execution_cost")
+    if not isinstance(execution, Mapping) or execution.get("status") != "AVAILABLE":
+        return dict(cost)
+    return {
+        **cost,
+        "execution_cost": {
+            **execution,
+            "scope": BASIS_PARENT_ACCOUNT,
+            "scope_label": (
+                f"Commissions of the parent account's ledger transactions "
+                f"({execution.get('record_count')} records, "
+                f"{execution.get('window_start')}..{execution.get('window_end')}), "
+                "not restated to the sleeve; the sleeve's own commissions are in "
+                "implementation_return_attribution.cost_usd."
+            ),
+        },
+    }
 
 
 def cost_rate_basis_note(

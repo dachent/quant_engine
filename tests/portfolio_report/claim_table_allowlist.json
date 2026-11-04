@@ -103,6 +103,11 @@
   },
   {
    "file": "tools/portfolio_performance_tab.py",
+   "pattern": "^the restated strategy is valued at its gross sleeve NAV, so the parent account's unallocated cash and margin is the liability line of strategy_basis_disclosure, not this residual",
+   "justification": "states why a restated residual excludes the parent account's unallocated cash and margin: it follows from the restated strategy's value (gross sleeve NAV), whose amount row R22-6 asserts as sleeve value minus parent value; the residual amount itself is row R22-8"
+  },
+  {
+   "file": "tools/portfolio_performance_tab.py",
    "pattern": "^the restated strategy is valued at its gross sleeve NAV, so the residual parent account's unallocated cash and margin is not in this residual",
    "justification": "states why a residual excludes the parent account's unallocated cash and margin: it follows from the restated strategy's value (gross sleeve NAV), whose amount row R22-6 asserts as sleeve value minus parent value"
   },
