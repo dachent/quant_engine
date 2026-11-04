@@ -382,3 +382,29 @@ Three steps of a re-run are operator steps by design, not graph gaps:
 - `implementation_model_book_perf` needs no key when the run names a `release_inputs_root` holding the export (see the run
   configuration table): without the export the attended preparation builds no sleeve-basis contract and the published
   implementation row stays on the account basis (finding `returns.implementation_account_legs`, N66).
+
+Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or idempotent, never deleting; `move-aside` and
+`carry-over` print what they would do unless `--apply` is given):
+
+1. `provenance-seed --seed <previous seed> --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin> --out <new seed>`: the seed's `sleeve-policy` root now
+   names this pass's inputs and its source group's hashes are re-read from them. The printed sha256 is the new
+   `provenance_spec_sha256`.
+2. `config --previous <previous run json> --out <run json> --candidate-commit C --code-commit T --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin>
+   --set provenance_spec=<new seed> --set prep_pin_root_key=world --set prep_pin_root=<world> [--set run=... --set qa=...
+   --set evidence_dest=...]`: repoints every occurrence of the old inputs root, verifies the inputs against the pin (never by repo path), takes the expected
+   baseline pin from the verified set and recomputes the provenance seed pin from its file, and drops the calendar authority's pin (it is never carried). Predecessor
+   pins are never touched.
+3. `move-aside --config <run json> [--apply]`: the previous pass's `production`, `replica-production`, `replica-rehearsal`,
+   `clean-room`, `pre-chain-cycle.json` and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` get an
+   `.aside-<UTC time>` name. Only paths inside the world are moved; an existing aside name is refused.
+4. `carry-over --from-cycle <previous cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
+   `in/epoch-admission-policy.json` and each further file or directory named with `--carry` (the IBKR generation directory
+   `ibkr/`, when the carried preparation spec still names it). The retained cache is not copied: point `retained_cache_root` at the cache to reuse.
+5. `run --only cycle-seeds`, `--only cycle-resolve`, `--only calendar-seed`, then `config ... --require-calendar` again with the
+   same arguments: it adds `calendar_authority_sha256` from `calendar_authority` (`{calendar_seed_reissued}`) and refuses to
+   run before that file exists.
+6. `run` (full).
+
+The calendar authority's pin stays a deliberate trust pin: the operator running the pass sets it (step 5) and records its
+sha256 in the pass evidence, where the release owner's direct hash confirmation at commit covers it. It is never derived by the
+driver, which would accept whatever file the run was handed.
