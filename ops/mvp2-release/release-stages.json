@@ -55,9 +55,39 @@
     "ledger_out": "{cycle}/ledger",
     "ledger_generation": "{ledger_out}/generations/{cycle_ledger_id}",
     "baseline_spec": "{cycle}/baseline-spec.json",
-    "baseline_out": "{cycle}/baseline"
+    "baseline_out": "{cycle}/baseline",
+    "release_inputs_impl": "{release_inputs_root}/ops/mvp2-release/inputs/implementation",
+    "impl_reconciliation": "{cycle}/in/implementation-reconciliation.json",
+    "impl_return_attribution": "{cycle}/in/implementation-return-attribution.json",
+    "release_inputs_impl_ibkr_xml_root": "{release_inputs_impl}/ibkr-xml/root",
+    "release_inputs_impl_ibkr_current_xml": "{release_inputs_impl}/ibkr-xml/current-increment.xml",
+    "release_inputs_impl_spxl": "{release_inputs_impl}/spxl-market-data.json",
+    "release_inputs_impl_tt_workbook": "{release_inputs_impl}/tt-workbook.xlsx",
+    "release_inputs_impl_tt_manifest": "{release_inputs_impl}/tt-source-manifest.json",
+    "release_inputs_impl_tt_tape": "{release_inputs_impl}/tt-price-tape.json",
+    "release_inputs_impl_grizzly_signals": "{release_inputs_impl}/grizzly-signals.csv",
+    "release_inputs_impl_grizzly_blended": "{release_inputs_impl}/grizzly-blended-history.csv",
+    "schwab_catalog": "{schwab_generation}/schwab-generation.json"
   },
   "derive": {
+    "implementation_reconciliation_sha256": {
+      "file_sha256": "{cycle}/in/implementation-reconciliation.json"
+    },
+    "implementation_return_attribution_sha256": {
+      "file_sha256": "{cycle}/in/implementation-return-attribution.json"
+    },
+    "implementation_reconciliation_rel": {
+      "relative_to": [
+        "{cycle}/in/implementation-reconciliation.json",
+        "{prep_pin_root}"
+      ]
+    },
+    "implementation_return_attribution_rel": {
+      "relative_to": [
+        "{cycle}/in/implementation-return-attribution.json",
+        "{prep_pin_root}"
+      ]
+    },
     "ledger_id": {
       "single_dir": "{run}/stages/ledger/generations"
     },
@@ -121,6 +151,24 @@
     },
     "resolved_cycle_sha256": {
       "file_sha256": "{resolved_cycle}"
+    },
+    "p123_generation": {
+      "json_field": [
+        "{resolved_cycle}",
+        "providers.portfolio123.generation_dir"
+      ]
+    },
+    "ibkr_generation": {
+      "json_field": [
+        "{resolved_cycle}",
+        "providers.ibkr.generation_dir"
+      ]
+    },
+    "schwab_generation": {
+      "json_field": [
+        "{resolved_cycle}",
+        "providers.schwab.generation_dir"
+      ]
     }
   },
   "stages": [
@@ -130,13 +178,9 @@
         "{cycle_roots_file}"
       ],
       "release_inputs": [
-        "ops/mvp2-release/inputs/seeds/implementation-reconciliation.json",
-        "ops/mvp2-release/inputs/seeds/implementation-return-attribution.json",
         "ops/mvp2-release/inputs/seeds/attribution-spec-template.json"
       ],
       "outputs": [
-        "{cycle}/in/implementation-reconciliation.json",
-        "{cycle}/in/implementation-return-attribution.json",
         "{cycle}/attribution-spec-template.json"
       ],
       "stdout_to": "{cycle}/logs/cycle-seeds.json",
@@ -169,9 +213,7 @@
       "inputs": [
         "{cycle_manifest}",
         "{cycle_roots_file}",
-        "{cycle}/attribution-spec-template.json",
-        "{cycle}/in/implementation-reconciliation.json",
-        "{cycle}/in/implementation-return-attribution.json"
+        "{cycle}/attribution-spec-template.json"
       ],
       "pinned_inputs": [
         [
@@ -362,6 +404,112 @@
         {
           "exists": "{ledger_generation}/provider-ledger.json"
         }
+      ]
+    },
+    {
+      "id": "implementation-reconciliation",
+      "requires": [
+        "ledger"
+      ],
+      "release_inputs": [
+        "ops/mvp2-release/inputs/implementation/ibkr-xml/current-increment.xml",
+        "ops/mvp2-release/inputs/implementation/spxl-market-data.json",
+        "ops/mvp2-release/inputs/implementation/tt-workbook.xlsx",
+        "ops/mvp2-release/inputs/implementation/tt-source-manifest.json",
+        "ops/mvp2-release/inputs/implementation/tt-price-tape.json",
+        "ops/mvp2-release/inputs/implementation/grizzly-signals.csv",
+        "ops/mvp2-release/inputs/implementation/grizzly-blended-history.csv"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{ledger_generation}/provider-ledger.json"
+      ],
+      "outputs": [
+        "{impl_reconciliation}"
+      ],
+      "stdout_to": "{cycle}/logs/implementation-reconciliation.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_implementation_reconciliation.py",
+        "--p123-generation-root",
+        "{p123_generation}",
+        "--ibkr-generation-root",
+        "{ibkr_generation}",
+        "--ibkr-xml-root",
+        "{release_inputs_impl_ibkr_xml_root}",
+        "--ibkr-current-xml",
+        "{release_inputs_impl_ibkr_current_xml}",
+        "--schwab-catalog",
+        "{schwab_catalog}",
+        "--provider-ledger-root",
+        "{ledger_generation}",
+        "--tt-workbook",
+        "{release_inputs_impl_tt_workbook}",
+        "--tt-source-manifest",
+        "{release_inputs_impl_tt_manifest}",
+        "--grizzly-signals",
+        "{release_inputs_impl_grizzly_signals}",
+        "--grizzly-blended-history",
+        "{release_inputs_impl_grizzly_blended}",
+        "--spxl-market-data",
+        "{release_inputs_impl_spxl}",
+        "--as-of-date",
+        "{requested_as_of}",
+        "--output",
+        "{impl_reconciliation}"
+      ]
+    },
+    {
+      "id": "implementation-return-attribution",
+      "requires": [
+        "ledger"
+      ],
+      "release_inputs": [
+        "ops/mvp2-release/inputs/implementation/ibkr-xml/current-increment.xml",
+        "ops/mvp2-release/inputs/implementation/spxl-market-data.json",
+        "ops/mvp2-release/inputs/implementation/tt-workbook.xlsx",
+        "ops/mvp2-release/inputs/implementation/tt-source-manifest.json",
+        "ops/mvp2-release/inputs/implementation/tt-price-tape.json",
+        "ops/mvp2-release/inputs/implementation/grizzly-signals.csv",
+        "ops/mvp2-release/inputs/implementation/grizzly-blended-history.csv"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{ledger_generation}/provider-ledger.json"
+      ],
+      "outputs": [
+        "{impl_return_attribution}"
+      ],
+      "stdout_to": "{cycle}/logs/implementation-return-attribution.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_implementation_return_attribution.py",
+        "--provider-ledger-root",
+        "{ledger_generation}",
+        "--schwab-catalog",
+        "{schwab_catalog}",
+        "--p123-generation-root",
+        "{p123_generation}",
+        "--ibkr-generation-root",
+        "{ibkr_generation}",
+        "--ibkr-xml-root",
+        "{release_inputs_impl_ibkr_xml_root}",
+        "--ibkr-current-xml",
+        "{release_inputs_impl_ibkr_current_xml}",
+        "--grizzly-signals",
+        "{release_inputs_impl_grizzly_signals}",
+        "--grizzly-market-data",
+        "{release_inputs_impl_spxl}",
+        "--tt-workbook",
+        "{release_inputs_impl_tt_workbook}",
+        "--tt-source-manifest",
+        "{release_inputs_impl_tt_manifest}",
+        "--tt-market-data",
+        "{release_inputs_impl_tt_tape}",
+        "--as-of-date",
+        "{requested_as_of}",
+        "--output",
+        "{impl_return_attribution}"
       ]
     },
     {
@@ -729,7 +877,9 @@
         "ops/mvp2-release/inputs/sleeves/quantbase/declared-inputs.json"
       ],
       "requires": [
-        "pre-chain"
+        "pre-chain",
+        "implementation-reconciliation",
+        "implementation-return-attribution"
       ],
       "inputs": [
         "{resolved_cycle}",
@@ -850,6 +1000,15 @@
           "args": [
             "--pin",
             "model_vs_actual_input={model_vs_actual_input}"
+          ]
+        },
+        {
+          "if": "prep_pin_root_key",
+          "args": [
+            "--pin",
+            "implementation_reconciliation={prep_pin_root_key}:{implementation_reconciliation_rel}@{implementation_reconciliation_sha256}",
+            "--pin",
+            "implementation_return_attribution={prep_pin_root_key}:{implementation_return_attribution_rel}@{implementation_return_attribution_sha256}"
           ]
         },
         {

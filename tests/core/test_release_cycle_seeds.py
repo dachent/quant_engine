@@ -1,6 +1,6 @@
 """The per-cycle seeds come from the pinned release-inputs root and the cycle's baseline, never by hand.
 
-Synthetic fixtures only: a throwaway root holding three seed files, a return-source CSV, and series
+Synthetic fixtures only: a throwaway root holding the template, a return-source CSV, and series
 dictionaries standing in for the baseline's ACCOUNT_LIVE rows.
 """
 
@@ -76,8 +76,6 @@ def world(tmp_path: Path) -> dict:
     (data / "returns" / "source-manifest.json").write_bytes(MANIFEST)
     inputs = tmp_path / "inputs"
     files = {
-        f"{seeds.SEEDS}/implementation-reconciliation.json": b'{"as_of_date": "1999-12-01"}\n',
-        f"{seeds.SEEDS}/implementation-return-attribution.json": b'{"as_of_date": "1999-12-02"}\n',
         seeds.TEMPLATE_SOURCE: json.dumps(_template()).encode(),
     }
     for relative, body in files.items():
@@ -107,12 +105,12 @@ def _stage(world: dict, **override) -> dict:
     return seeds.stage(**kwargs)
 
 
-def test_stage_copies_the_carried_seeds_byte_for_byte_and_resolves_the_template(
+def test_stage_resolves_the_template_and_stages_no_implementation_file(
     world: dict,
 ) -> None:
     result = _stage(world)
-    for relative, target in seeds.CARRIED.items():
-        assert (world["cycle"] / target).read_bytes() == world["files"][relative]
+    assert set(result) == {seeds.TEMPLATE_NAME}
+    assert not (world["cycle"] / "in").exists()
     spec = json.loads((world["cycle"] / seeds.TEMPLATE_NAME).read_bytes())
     source = spec["return_source"]
     assert (
@@ -134,7 +132,7 @@ def test_stage_copies_the_carried_seeds_byte_for_byte_and_resolves_the_template(
 
 def test_stage_is_create_only(world: dict) -> None:
     _stage(world)
-    target = world["cycle"] / "in/implementation-reconciliation.json"
+    target = world["cycle"] / seeds.TEMPLATE_NAME
     target.write_bytes(b"{}\n")
     with pytest.raises(seeds.SeedError, match="create-only"):
         _stage(world)

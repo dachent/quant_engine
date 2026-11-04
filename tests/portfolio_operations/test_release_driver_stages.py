@@ -761,6 +761,8 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         "provenance",
         "ledger-spec",
         "ledger",
+        "implementation-reconciliation",
+        "implementation-return-attribution",
         "baseline-spec",
         "baseline",
         "attribution-spec",
