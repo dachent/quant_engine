@@ -35,8 +35,9 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 assert _SPEC is not None and _SPEC.loader is not None
 planner = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = planner
-_SPEC.loader.exec_module(planner)
+with pytest.MonkeyPatch.context() as _registry:
+    _registry.setitem(sys.modules, _SPEC.name, planner)
+    _SPEC.loader.exec_module(planner)
 
 
 def _release() -> dict[str, Any]:

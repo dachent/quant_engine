@@ -242,7 +242,7 @@ def test_no_account_lane_figure_is_absent_after_restatement(
 
 
 def test_the_panel_binds_a_table_and_refuses_findings_or_a_changed_sentence(
-    lanes: dict[str, Any], tmp_path: Path
+    lanes: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = importlib.util.spec_from_file_location(
         "portfolio_control_panel_for_lens_moves",
@@ -250,7 +250,7 @@ def test_the_panel_binds_a_table_and_refuses_findings_or_a_changed_sentence(
     )
     assert spec is not None and spec.loader is not None
     panel = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = panel
+    monkeypatch.setitem(sys.modules, spec.name, panel)
     spec.loader.exec_module(panel)
     table = moves.build_table(lanes["sleeve"], lanes["account"], series_id=SERIES)
     path = tmp_path / "strategy-basis-lens-moves.json"
