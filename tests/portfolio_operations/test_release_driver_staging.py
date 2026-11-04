@@ -34,6 +34,7 @@ from test_release_ledger_spec_e2e import real_cycle  # noqa: E402
 SHIPPED = REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json"
 STAGING = (
     "cycle-resolve",
+    "provenance-spec",
     "provenance",
     "ledger-spec",
     "ledger",
@@ -190,7 +191,7 @@ def test_the_staging_group_comes_first_in_the_order_stage_p23_ran_it() -> None:
     ids = [s["id"] for s in _shipped()["stages"]]
     # stage_p23.sh: provenance, ledger, baseline, then selected inputs and the pre-chain; each spec
     # builder runs just before the stage tool that reads its output
-    assert ids[:9] == [*STAGING, "selected-build", "selected-inputs", "pre-chain"]
+    assert ids[:10] == [*STAGING, "selected-build", "selected-inputs", "pre-chain"]
     # the calendar authority comes before the preparation spec that pins it, the spec before the run
     assert ids[ids.index("pre-chain") + 1 : ids.index("attended") + 1] == [
         "calendar-authority",
@@ -491,7 +492,7 @@ def staged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]
         json.dumps({key: str(path) for key, path in cycle_world["roots"].items()}),
         encoding="utf-8",
     )
-    prov_spec = base / "provenance-spec.json"
+    prov_spec = base / "provenance-seed-spec.json"
     prov_spec.write_text("{}", encoding="utf-8")
     graph = _shipped()
     # the provenance stage reads a hand-made spec (no committed builder): stand in for the staging

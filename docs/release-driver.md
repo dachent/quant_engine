@@ -126,7 +126,7 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 
 | group | stages |
 |---|---|
-| staging | `cycle-resolve`, `provenance`, `ledger-spec`, `ledger`, `baseline-spec`, `baseline` (below, "Staging group") |
+| staging | `cycle-resolve`, `provenance-spec`, `provenance`, `ledger-spec`, `ledger`, `baseline-spec`, `baseline` (below, "Staging group") |
 | inputs | `selected-build` (`release_prepare_inputs.py selected`), then `selected-inputs` (the selected-inputs file and the hand-built attribution spec must exist and are hash-bound; the file must name this run's ledger generation) |
 | pre-chain | `pre-chain` (`tools/release_pre_chain.py`: layered history, dependence, attribution; reads the resolved cycle) |
 | calendar | `calendar-authority` (explicit: authors the HWM calendar authority from a first attempt; below) |
@@ -152,7 +152,8 @@ touches a real root).
 | stage | tool | writes (create-only) | refuses when |
 |---|---|---|---|
 | `cycle-resolve` | `release_cycle_manifest.py resolve` | `{resolved_cycle}` | the manifest bytes differ from `cycle_manifest_sha256`; any pin, hash, generation or finality rule of the manifest fails; the resolved cutoff or evaluation date is not the run's `requested_as_of` / `evaluated_on` |
-| `provenance` | `portfolio_provenance.py stage` | `{cycle}/prov` | `provenance_spec` differs from `provenance_spec_sha256` |
+| `provenance-spec` | `release_provenance_spec.py refresh` | `{cycle}/provenance-spec.json` | the seed `provenance_spec` differs from `provenance_spec_sha256`; a contract, registry or schema named by the seed has no file in the repository |
+| `provenance` | `portfolio_provenance.py stage` | `{cycle}/prov` | the derived spec differs from what `provenance-spec` recorded |
 | `ledger-spec` | `release_ledger_spec.py build` | `{cycle}/ledger-spec.json`, `{cycle}/run-observation.json` | the predecessor spec differs from its pin; the builder's own self-check (the committed ledger validator) fails; the spec's cutoff or provenance generation is not this run's |
 | `ledger` | `provider_ledger.py stage` | `{cycle}/ledger` | the spec does not name this run's provenance generation (`bound_ids`); the stage passes `--output-root` itself so a spec cannot send it elsewhere |
 | `baseline-spec` | `release_baseline_spec.py build` | `{cycle}/baseline-spec.json` | release inputs missing, of another cutoff or not matching their pin; the spec's cutoff, ledger or provenance generation is not this run's |
@@ -170,7 +171,7 @@ New run configuration keys:
 |---|---|
 | `cycle_manifest`, `cycle_manifest_sha256` | the cycle manifest (`docs/release-cycle-manifest.md`) and its pin; the pin is also passed to the tool |
 | `cycle_roots_file` | the `{root key: directory}` JSON the manifest's root keys resolve against (`--roots-file`) |
-| `provenance_spec`, `provenance_spec_sha256` | the provenance spec and its pin. No committed tool writes it (the R2 `rebase_prov.py` and `make_r2_provenance_spec.py` are not in the repository): it stays an operator input, hash-pinned |
+| `provenance_spec`, `provenance_spec_sha256` | the provenance spec seed and its pin. No committed tool writes the seed (the R2 `rebase_prov.py` and `make_r2_provenance_spec.py` are not in the repository): it stays an operator input, hash-pinned. `provenance-spec` copies it to `{cycle}/provenance-spec.json` with `financial_mvp` bound to the contract, registry and schema bytes of the frozen repository, so a contract change between cycles never leaves a stale `contract_sha256`; every other key is carried |
 | `predecessor_ledger_spec`, `predecessor_ledger_spec_sha256` | the predecessor release's ledger spec as the builder reads it (carried blocks only), remapped to this cycle's roots, and its pin |
 | `release_inputs_root`, `release_inputs_manifest_sha256` | the pinned release-inputs root (outside Git). The driver already binds the expected baseline from it; `baseline-spec` reads the declared baseline inputs from the same root |
 | `baseline_roots` | optional object `{root id: directory}`: one `--root ID=DIR` per entry, in key order; it must name exactly the root ids the declared baseline sources use (templates such as `{cycle}/in/x` are expanded) |

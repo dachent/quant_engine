@@ -756,6 +756,7 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         and _stage(i).get("only_ceremony", "full") == "full"
     ] == [
         "cycle-resolve",
+        "provenance-spec",
         "provenance",
         "ledger-spec",
         "ledger",

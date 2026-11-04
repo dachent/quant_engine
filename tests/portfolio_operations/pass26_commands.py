@@ -66,7 +66,7 @@ def write(OUT: Path) -> None:
         "cycle_manifest": C + "/in/cycle-manifest.json",
         "cycle_manifest_sha256": _pin("cycle-manifest"),
         "cycle_roots_file": C + "/in/cycle-roots.json",
-        "provenance_spec": C + "/prov-spec-r2.json",
+        "provenance_spec": C + "/in/provenance-seed-spec.json",
         "provenance_spec_sha256": _pin("provenance-spec"),
         "predecessor_ledger_spec": C + "/in/predecessor-ledger-spec.json",
         "predecessor_ledger_spec_sha256": _pin("predecessor-ledger-spec"),
@@ -168,7 +168,7 @@ def write(OUT: Path) -> None:
                 REPO + "/tools/portfolio_provenance.py",
                 "stage",
                 "--spec",
-                C + "/prov-spec-r2.json",
+                C + "/provenance-spec.json",  # derived by provenance-spec from the seed
                 "--output-root",
                 C + "/prov",
             ],

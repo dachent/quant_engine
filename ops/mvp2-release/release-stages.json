@@ -18,6 +18,7 @@
     "tail": "{cycle}/tail",
     "ca": "{cycle}/tail/ca",
     "production": "{cycle}/production",
+    "provenance_spec_derived": "{cycle}/provenance-spec.json",
     "recipe_probe": "{cycle}/pipeline-recipe-probe.json",
     "recipe": "{cycle}/pipeline-recipe.json",
     "prod_spec": "{cycle}/production/production-spec.json",
@@ -186,7 +187,7 @@
       ]
     },
     {
-      "id": "provenance",
+      "id": "provenance-spec",
       "requires": [
         "cycle-resolve"
       ],
@@ -200,6 +201,33 @@
         ]
       ],
       "outputs": [
+        "{provenance_spec_derived}"
+      ],
+      "stdout_to": "{cycle}/logs/provenance-spec.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_provenance_spec.py",
+        "refresh",
+        "--seed-spec",
+        "{provenance_spec}",
+        "--out",
+        "{provenance_spec_derived}",
+        "--repo-root",
+        "{repo_root}"
+      ]
+    },
+    {
+      "id": "provenance",
+      "requires": [
+        "provenance-spec"
+      ],
+      "inputs": [
+        "{provenance_spec_derived}"
+      ],
+      "outputs": [
         "{prov}"
       ],
       "stdout_to": "{cycle}/logs/provenance-stage.json",
@@ -208,7 +236,7 @@
         "{tools}/portfolio_provenance.py",
         "stage",
         "--spec",
-        "{provenance_spec}",
+        "{provenance_spec_derived}",
         "--output-root",
         "{prov}"
       ],
