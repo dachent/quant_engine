@@ -3502,6 +3502,8 @@
         "account_gap_usd": { "$ref": "#/$defs/mva_number_or_null" },
         "capital_base_usd": { "$ref": "#/$defs/mva_number_or_null" },
         "capital_base_basis": { "type": ["string", "null"] },
+        "basis": { "type": "string", "enum": ["PARENT_ACCOUNT_LIVE_SERIES"] },
+        "basis_label": { "type": "string", "minLength": 1 },
         "leverage_neutral_gap_pp": { "type": "number" },
         "gap_neutral_of_leverage_and_fx_pp": { "type": "number" },
         "bridge": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/mva_component" } },
@@ -3586,7 +3588,9 @@
               "window_id": { "type": "string" },
               "start": { "type": "string", "format": "date" },
               "end": { "type": "string", "format": "date" },
-              "account_gap_usd": { "type": "number" }
+              "account_gap_usd": { "type": "number" },
+              "basis": { "type": "string", "enum": ["PARENT_ACCOUNT_LIVE_SERIES"] },
+              "basis_label": { "type": "string", "minLength": 1 }
             }
           }
         },
@@ -3905,12 +3909,13 @@
         "internal_cancellation": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["status", "internal_in_cents", "internal_out_cents", "net_cents", "treatment"],
+          "required": ["status", "internal_in_cents", "internal_out_cents", "net_cents", "rounding_cents", "treatment"],
           "properties": {
             "status": { "enum": ["CANCELS_EXACTLY", "NET_INTERNAL_FLOW_CROSSES_PERIMETER"] },
             "internal_in_cents": { "type": "integer" },
             "internal_out_cents": { "type": "integer" },
             "net_cents": { "type": "integer" },
+            "rounding_cents": { "type": "integer" },
             "treatment": { "type": "string", "minLength": 1 }
           }
         },

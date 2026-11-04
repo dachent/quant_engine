@@ -21,7 +21,7 @@
       "performance_tab": 381820,
       "orthogonal_risk_attribution": 168763,
       "strategy_underwriting": 73615,
-      "model_vs_actual": 138128,
+      "model_vs_actual": 140025,
       "account_summary": 7602,
       "advisory": 2432,
       "allocations": 4316,
@@ -75,7 +75,7 @@
     "performance_tab": 386000,
     "orthogonal_risk_attribution": 171000,
     "strategy_underwriting": 75000,
-    "model_vs_actual": 140000,
+    "model_vs_actual": 142000,
     "account_summary": 8000,
     "advisory": 3000,
     "allocations": 5000,
@@ -118,7 +118,8 @@
     "performance": "New top-level block (distinct from performance_tab) carried since R2: 54048 B on R2 b216a53e, 54055 B on R2.1. It was unlisted and sat 4 KB over the 50000 B unlisted-block threshold, so the checker flagged it on every generation. Within 7 B between R2 and R2.1. Limit = committed + 3%, rounded up to 1000 B.",
     "performance_tab": "R2.1 re-measure 381004 B (schema 3: union grid, flow-matched benchmarks), against 375785 B on the r21-integration panel the previous limit was cut from. The limit is re-cut at committed + 3% (393000 B, was 388000 B at 98.2% of committed) so the block has the same headroom every other block has.",
     "weekly_returns": "R2.1 re-measure 27773144 B against 27317555 B at R2 (+1.7%). Per-observation series are the block this budget exists to watch, so the limit is re-cut at committed + 3% (28607000 B, was 28138000 B at 97.4% of committed); further growth needs its own reason.",
-    "strategy_underwriting": "R2.2 d7d26c09 measured 73615 B against 64495 B committed (+9120 B, +14.1%). The block holds seven rows and the growth is one layer: evidence_layers.implementation_reconciliation, which mirrors the strategy's implementation_reconciliation row and now carries the account-basis legs for the strategies whose implementation is bridged (grizzlybears-vtma 3054 to 7742 B, tt-portfolio 5849 to 10279 B on the 4dcb46c1 panel), while p123-ai-factor's layer is the sleeve bridge and falls from 14250 to 560 B. The mirror of the strategies row is existing design, not new duplication; trimming was declined because the layer is the disclosure the underwriting row stands on. The basis statements of R2.2 do not change this block. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block strategy_underwriting."
+    "strategy_underwriting": "R2.2 d7d26c09 measured 73615 B against 64495 B committed (+9120 B, +14.1%). The block holds seven rows and the growth is one layer: evidence_layers.implementation_reconciliation, which mirrors the strategy's implementation_reconciliation row and now carries the account-basis legs for the strategies whose implementation is bridged (grizzlybears-vtma 3054 to 7742 B, tt-portfolio 5849 to 10279 B on the 4dcb46c1 panel), while p123-ai-factor's layer is the sleeve bridge and falls from 14250 to 560 B. The mirror of the strategies row is existing design, not new duplication; trimming was declined because the layer is the disclosure the underwriting row stands on. The basis statements of R2.2 do not change this block. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block strategy_underwriting.",
+    "model_vs_actual": "R2.2 bae512c5 measured 138438 B and +1587 B more with the final-seat basis statements: the p123-ai-factor windows and epochs (10 rows, each +basis and basis_label, about 150 B) and its portfolio-bridge line now say they are the parent account's figures (the audit input measures the whole parent account, not the restated sleeve): 140025 B. No window, epoch or component is added or duplicated; the sleeve comparison stays in governed_reference. Trimming was declined because the label is the statement the owner's basis ruling requires. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block model_vs_actual; to be confirmed on the final build."
   },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
@@ -1114,6 +1115,19 @@
           "after": 73615,
           "previous_limit": 66000,
           "limit": 75000
+        }
+      }
+    },
+    {
+      "generation": "bae512c551bcc30d530826c30bc05b4468bb90a11204d54c3a10c2596ee756ec+R2.2-final-seat-fixes (simulated: bae512c5 measured, model_vs_actual +1587 B from the basis tags on the seat packet)",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "blocks": {
+        "model_vs_actual": {
+          "before": 138128,
+          "after": 140025,
+          "previous_limit": 140000,
+          "limit": 142000
         }
       }
     }

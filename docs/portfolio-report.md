@@ -232,6 +232,14 @@ what stays on the parent basis (`return_scope.not_restated`): the execution cost
 which is the parent account's ledger commissions over the parent's window and is
 tagged `PARENT_ACCOUNT_LIVE_SERIES` on the row and its EXECUTION component (the
 sleeve's own commissions are in `implementation_return_attribution.cost_usd`). The
+model-versus-actual windows, epochs and portfolio-bridge line of the strategy (the audit
+input measures the whole parent account) carry the same tag and a `basis_label`, and so do
+the implementation reconciliation's `costs`, `broker_execution_join` and
+`trade_reconciliation_union` (listed in `parent_account_blocks` with the trade
+classification, the per-book reconciliation and the model-book inventory). The restated
+strategy's evidence layers carry the sleeve series' dates, and the prehistory ends where it
+begins; its live boundary stays the version's hash-pinned (parent) window and says so in
+`live_boundary_basis`. The
 parent's live-series summary and provider overlap that the row still carries are
 tagged the same way. The weekly-returns and
 dependence inputs are separate artifacts built from the baseline return rows; a

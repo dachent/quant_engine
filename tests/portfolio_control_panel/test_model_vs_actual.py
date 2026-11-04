@@ -548,3 +548,37 @@ def test_a_window_ending_after_the_cutoff_is_withheld_not_published() -> None:
     assert "s1" in excluded
     assert _errors(block) == []
     mva.verify_model_vs_actual(block, _panel(), raw, sha)
+
+
+def test_a_restated_strategys_parent_account_windows_name_their_basis() -> None:
+    audit = _audit()
+    raw, sha = _raw(audit)
+    panel = _panel()
+    panel["strategies"][0]["return_scope"] = {
+        "basis": "SLEEVE_EPOCH",
+        "parent_account_ids": ["acct-969b9e47"],
+    }
+    block = mva.build_model_vs_actual(panel, raw, sha)
+    assert _errors(block) == []
+    mva.verify_model_vs_actual(block, panel, raw, sha)
+    restated, plain = block["strategies"][0], block["strategies"][1]
+    for window in [*restated["windows"], *restated["epochs"]]:
+        assert window["basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
+        assert (
+            "parent account acct-969b9e47, not restated onto the sleeve"
+            in (window["basis_label"])
+        )
+    for window in [*plain["windows"], *plain["epochs"]]:
+        assert "basis" not in window and "basis_label" not in window
+    tagged = {
+        item["strategy_id"]: item.get("basis")
+        for item in block["portfolio_bridge"]["strategies_included"]
+    }
+    assert tagged.get("s1") == "PARENT_ACCOUNT_LIVE_SERIES"
+    included = {
+        item["strategy_id"]: item
+        for item in block["portfolio_bridge"]["strategies_included"]
+    }
+    assert included["s1"]["basis_label"].startswith("parent account acct-969b9e47, ")
+    assert "basis_label" not in included["s2"]
+    assert tagged.get("s2") is None
