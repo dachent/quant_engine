@@ -8689,3 +8689,29 @@ def test_freshness_assessments_schema_three_still_accepts_an_absent_identity(
 
     assert assessments == [{"evaluated_on": "2026-08-07"}]
     assert as_of == date(2026, 8, 7)
+
+
+def test_a_restated_strategys_live_boundary_stays_the_pinned_window_and_names_its_basis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary pairs with the registry's version_ref, so only its basis is named."""
+
+    original = reporter._strategies
+    monkeypatch.setattr(
+        reporter,
+        "_strategies",
+        lambda catalog, *args, **kwargs: original(
+            {**catalog, "strategy_basis_restated": ["strategy-1"]}, *args, **kwargs
+        ),
+    )
+    rows = _report_with_history(
+        tmp_path,
+        monkeypatch,
+        _unresolved_version_catalog(),
+        {"Synthetic Strategy 1": _accepted_history_row("Synthetic Strategy 1")},
+    )
+    first = rows["strategy-1"]
+    assert first["live_boundary_observed_start"] == "2026-01-01"
+    assert first["live_boundary_observed_end"] == "2026-01-03"
+    assert first["live_boundary_basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
+    assert "live_boundary_basis" not in rows["strategy-2"]

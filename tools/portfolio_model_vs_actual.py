@@ -686,7 +686,11 @@ def _portfolio_bridge(strategies: Sequence[Mapping[str, Any]]) -> dict[str, Any]
                 "start": primary["start"],
                 "end": primary["end"],
                 "account_gap_usd": primary["account_gap_usd"],
-                **({"basis": primary["basis"]} if "basis" in primary else {}),
+                **(
+                    {"basis": primary["basis"], "basis_label": primary["basis_label"]}
+                    if "basis" in primary
+                    else {}
+                ),
             }
         )
         gap_total += primary["account_gap_usd"]

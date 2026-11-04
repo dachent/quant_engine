@@ -3589,7 +3589,8 @@
               "start": { "type": "string", "format": "date" },
               "end": { "type": "string", "format": "date" },
               "account_gap_usd": { "type": "number" },
-              "basis": { "type": "string", "enum": ["PARENT_ACCOUNT_LIVE_SERIES"] }
+              "basis": { "type": "string", "enum": ["PARENT_ACCOUNT_LIVE_SERIES"] },
+              "basis_label": { "type": "string", "minLength": 1 }
             }
           }
         },

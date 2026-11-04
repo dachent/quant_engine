@@ -7601,8 +7601,7 @@ def _strategies(
             if version
             else []
         )
-        live_boundary_start = live_boundary.get("observed_start")
-        live_boundary_end = live_boundary.get("observed_end")
+        live_boundary_basis: dict[str, str] = {}
         if strategy_id in set(catalog.get("strategy_basis_restated", ())):
             # a restated strategy's live layer is its sleeve's path, so the layer dates are
             # the sleeve's, and the prehistory ends where the sleeve's path begins
@@ -7615,7 +7614,11 @@ def _strategies(
                 .get(str(strategy.get("name")), {})
                 .get("prehistory_observed_end"),
             )
-            live_boundary_start, live_boundary_end = observed_start, observed_end
+            # the live boundary stays the hash-pinned identity window of the version
+            # (the parent account's), so it says whose window it is
+            live_boundary_basis = {
+                "live_boundary_basis": strategy_basis.BASIS_PARENT_ACCOUNT
+            }
         compatibility_status = version.get("compatibility_status", "UNRESOLVED")
         compatibility_reason = version.get(
             "compatibility_reason",
@@ -7926,8 +7929,9 @@ def _strategies(
                 "backtest_status": backtest_slot_status,
                 "backtest_version_ref": backtest_slot_version_ref,
                 "live_boundary_status": live_boundary.get("status", "UNAVAILABLE"),
-                "live_boundary_observed_start": live_boundary_start,
-                "live_boundary_observed_end": live_boundary_end,
+                "live_boundary_observed_start": live_boundary.get("observed_start"),
+                "live_boundary_observed_end": live_boundary.get("observed_end"),
+                **live_boundary_basis,
                 "cost_evidence_status": version_costs.get("status", "UNAVAILABLE"),
                 "benchmark_evidence_status": benchmark.get("status", "UNAVAILABLE"),
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),

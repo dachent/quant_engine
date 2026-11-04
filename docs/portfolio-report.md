@@ -238,7 +238,8 @@ the implementation reconciliation's `costs`, `broker_execution_join` and
 `trade_reconciliation_union` (listed in `parent_account_blocks` with the trade
 classification, the per-book reconciliation and the model-book inventory). The restated
 strategy's evidence layers carry the sleeve series' dates, and the prehistory ends where it
-begins. The
+begins; its live boundary stays the version's hash-pinned (parent) window and says so in
+`live_boundary_basis`. The
 parent's live-series summary and provider overlap that the row still carries are
 tagged the same way. The weekly-returns and
 dependence inputs are separate artifacts built from the baseline return rows; a

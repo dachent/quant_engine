@@ -575,4 +575,10 @@ def test_a_restated_strategys_parent_account_windows_name_their_basis() -> None:
         for item in block["portfolio_bridge"]["strategies_included"]
     }
     assert tagged.get("s1") == "PARENT_ACCOUNT_LIVE_SERIES"
+    included = {
+        item["strategy_id"]: item
+        for item in block["portfolio_bridge"]["strategies_included"]
+    }
+    assert included["s1"]["basis_label"].startswith("parent account acct-969b9e47, ")
+    assert "basis_label" not in included["s2"]
     assert tagged.get("s2") is None
