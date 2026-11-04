@@ -68,6 +68,7 @@
     "release_inputs_impl_tt_workbook": "{release_inputs_impl}/tt-workbook.xlsx",
     "release_inputs_impl_tt_manifest": "{release_inputs_impl}/tt-source-manifest.json",
     "release_inputs_impl_tt_tape": "{release_inputs_impl}/yahoo-tt-adjusted-full-live.json",
+    "release_inputs_impl_model_book_perf": "{release_inputs_impl}/model-book-perf.csv",
     "release_inputs_impl_grizzly_signals": "{release_inputs_impl}/grizzly-signals.csv",
     "release_inputs_impl_grizzly_blended": "{release_inputs_impl}/grizzly-blended-history.csv",
     "schwab_catalog": "{schwab_generation}/schwab-generation.json"
@@ -151,6 +152,9 @@
     },
     "implementation_return_attribution_sha256": {
       "file_sha256": "{cycle}/in/implementation-return-attribution.json"
+    },
+    "release_inputs_impl_model_book_perf_sha256": {
+      "file_sha256": "{release_inputs_impl_model_book_perf}"
     },
     "implementation_reconciliation_rel": {
       "relative_to": [
@@ -1019,6 +1023,15 @@
           "args": [
             "--pin",
             "implementation_model_book_perf={implementation_model_book_perf}"
+          ]
+        },
+        {
+          "if": "release_inputs_root",
+          "unless": "implementation_model_book_perf",
+          "if_file": "{release_inputs_impl_model_book_perf}",
+          "args": [
+            "--pin",
+            "implementation_model_book_perf=release_inputs:ops/mvp2-release/inputs/implementation/model-book-perf.csv@{release_inputs_impl_model_book_perf_sha256}"
           ]
         },
         {

@@ -859,6 +859,59 @@ def test_prep_spec_repins_the_staged_implementation_seeds_when_a_root_is_named(
     ]
 
 
+def test_prep_spec_pins_the_model_book_export_from_the_release_inputs_root(
+    tmp_path: Path,
+) -> None:
+    # the model book export decides whether the attended run builds the sleeve-basis contract (without
+    # it the published implementation row stays on the account basis, N66), so it must not depend on a
+    # hand-set run-configuration key: the release inputs hold it
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stage = next(s for s in graph["stages"] if s["id"] == "prep-spec")
+    inputs = tmp_path / "ri"
+    impl = inputs / "ops" / "mvp2-release" / "inputs" / "implementation"
+    impl.mkdir(parents=True)
+    group = [
+        item
+        for item in stage["argv"]
+        if isinstance(item, dict) and item.get("unless") == "implementation_model_book_perf"
+    ]
+    assert len(group) == 1
+    config = {
+        "repo_root": "R",
+        "python": "py",
+        "cycle": "C",
+        "run": "C/run",
+        "code_commit": "c" * 40,
+        "mode": "release",
+        "requested_as_of": "2026-09-17",
+        "ceremony": "full",
+    }
+
+    def argv() -> list[str]:
+        run = driver.Run(
+            {k: v for k, v in config.items() if k != "release_inputs_root"},
+            graph,
+            offline=False,
+        )
+        if "release_inputs_root" in config:  # the manifest check is not what is tested here
+            run.values["release_inputs_root"] = config["release_inputs_root"]
+        return driver.stage_argv(run, stage, group)
+
+    assert argv() == []  # no release inputs: the default command line is unchanged
+    config["release_inputs_root"] = inputs.as_posix()
+    assert argv() == []  # a root without the export: nothing to pin
+    perf = impl / "model-book-perf.csv"
+    perf.write_bytes(b"date,value\n")
+    sha = hashlib.sha256(perf.read_bytes()).hexdigest()
+    assert argv() == [
+        "--pin",
+        "implementation_model_book_perf=release_inputs:"
+        f"ops/mvp2-release/inputs/implementation/model-book-perf.csv@{sha}",
+    ]
+    config["implementation_model_book_perf"] = "world:x@" + "0" * 64
+    assert argv() == []  # an explicit pin wins; the group never doubles it
+
+
 def test_the_validating_stages_pass_the_basis_inputs_the_attended_run_used() -> None:
     # the findings the ceremony and the lanes gate on must be the attended run's: without the
     # declaration, facts, ledger, ibkr root and tag map a sleeve row has nothing to be checked against.

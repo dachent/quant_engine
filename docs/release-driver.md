@@ -202,7 +202,7 @@ aside).
 | `selected_files` | optional object `NAME: "ROOT_KEY:relative@sha256"`: one `--file` per entry (the new native file of a carried entry) |
 | `factors_bundle`, `sector_bundle`, `style_bundle` | optional public bundle names (`--<kind>-bundle`); the default is the bundle roots the resolved cycle names |
 | `factors_bundle_id`, `sector_bundle_id`, `style_bundle_id` | optional: choose one generation of a bundle root that holds two (`--<kind>-bundle-id`) |
-| `implementation_model_book_perf` | optional `"ROOT_KEY:relative@sha256"` (the model book performance export of the declared sleeve, passed as `--pin`). Present, the attended preparation builds the `implementation-sleeve-basis/1` contract itself in a checkpointed stage after `sleeve-facts` (declaration, facts, this export, the retained attribution and reconciliation, the ledger's admission receipt); absent, an optional pinned `implementation_sleeve_basis` is used as before. Naming both is refused |
+| `implementation_model_book_perf` | optional `"ROOT_KEY:relative@sha256"` (the model book performance export of the declared sleeve, passed as `--pin`). A run that names a `release_inputs_root` needs no key: when the inputs hold `model-book-perf.csv` under `ops/mvp2-release/inputs/implementation/`, prep-spec pins it itself (root key `release_inputs`, which the preparer binds to `--release-inputs-root`), unless this key is set. A run that hand-pins `implementation_sleeve_basis` through `prep_pins` must use inputs without the export (the two are refused together). Present, the attended preparation builds the `implementation-sleeve-basis/1` contract itself in a checkpointed stage after `sleeve-facts` (declaration, facts, this export, the retained attribution and reconciliation, the ledger's admission receipt); absent, an optional pinned `implementation_sleeve_basis` is used as before. Naming both is refused |
 | `weekly_gap_fill_spec`, `vendor_gap_fills`, `model_vs_actual_input` | optional per-cycle inputs, each `"ROOT_KEY:relative@sha256"`, passed as `--pin KEY=...`; absent means the key is omitted from the spec |
 | `prep_pin_root_key`, `prep_pin_root` | optional: a root key of the resolved cycle (such as `world`) and the directory it names. Present, `prep-spec` re-pins `implementation_reconciliation` and `implementation_return_attribution` from `{cycle}/in/implementation-*.json` (`--pin KEY=ROOT_KEY:relative@sha256`, the digest and the path relative to `prep_pin_root` derived from the files the cycle holds), so a cycle whose seeds differ from the predecessor's no longer refuses with `HASH_MISMATCH`. Absent, the command line is unchanged |
 | `prep_pins`, `prep_dirs` | optional objects `KEY: "ROOT_KEY:relative@sha256"` / `KEY: "ROOT_KEY:relative"`: `--pin` / `--dir` replacements of carried inputs. A directory-valued field (such as `sleeve_facts.quantbase_source_dir`) belongs in `prep_dirs`: a pin writes a `{path, sha256, size_bytes}` object where the attended preparation reads a path |
@@ -369,3 +369,16 @@ run used, so a sleeve row is checked against the declaration it was restated fro
 `--ibkr-root` (the preparation spec's `sleeve_facts.ibkr_generation_root`). `release_replica.py` takes the same five as
 optional flags and adds them to the validator only when given. Without them the declaration-dependent items
 (`returns.sleeve_basis` and its invariants) are not evaluated and the ceremony reports different findings than the run.
+
+## Re-running a pass on a fresh world
+
+Three steps of a re-run are operator steps by design, not graph gaps:
+
+- `calendar_seed_authority_sha256` is a trust pin the operator supplies (`sha256sum` of the seed file the owner pinned); the
+  stages refuse any other bytes, so the graph does not compute it from the file it checks. `calendar-seed` is explicit: name it
+  (`run --only calendar-seed`) after `cycle-resolve`, then point `calendar_authority` at `{calendar_seed_reissued}`.
+- `replica-copy` is create-only (`must_not_exist {replica_workspace}`). A second pass over the same `replica_workspace` is refused
+  by design; give each pass its own `replica_workspace` or move the earlier replica aside first (retire it after archiving).
+- `implementation_model_book_perf` needs no key when the run names a `release_inputs_root` holding the export (see the run
+  configuration table): without the export the attended preparation builds no sleeve-basis contract and the published
+  implementation row stays on the account basis (finding `returns.implementation_account_legs`, N66).

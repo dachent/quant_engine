@@ -5789,3 +5789,40 @@ def test_the_contract_is_built_from_the_runs_own_files_and_is_create_only(
             admission_receipt_path=files["receipt.json"],
             destination=destination,
         )
+
+
+def test_a_restated_strategy_needs_a_named_sleeve_basis_source(tmp_path: Path) -> None:
+    check = preparation._require_implementation_sleeve_basis_source
+    restated = json.dumps(
+        {
+            "schema": "strategy-basis-declaration/1",
+            "strategies": [{"basis": "SLEEVE_EPOCH", "strategy_id": "p123-ai-factor"}],
+        }
+    ).encode()
+    plain = json.dumps(
+        {
+            "schema": "strategy-basis-declaration/1",
+            "strategies": [{"basis": "ACCOUNT", "strategy_id": "x"}],
+        }
+    ).encode()
+    perf = _file_pin(tmp_path / "perf.csv", b"date,value\n")
+    contract = _file_pin(tmp_path / "contract.json", b"{}")
+
+    def config(content: bytes | None, **extra: object) -> dict[str, object]:
+        base: dict[str, object] = {**extra}
+        if content is not None:
+            base["strategy_basis_declaration"] = _file_pin(
+                tmp_path / "declaration.json", content
+            )
+            base["sleeve_facts"] = {}
+        return base
+
+    check(config(None))  # no declaration: nothing restated
+    check(config(plain))
+    check(config(restated, implementation_model_book_perf=perf))
+    check(config(restated, implementation_sleeve_basis=contract))
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="p123-ai-factor.*implementation_model_book_perf",
+    ):
+        check(config(restated))

@@ -824,6 +824,36 @@ def _implementation_model_book_perf_path(config: Mapping[str, Any]) -> Path | No
     return _pin(pin, "implementation model book performance")
 
 
+def _require_implementation_sleeve_basis_source(config: Mapping[str, Any]) -> None:
+    """A release that restates a strategy to its sleeve must say where the contract comes from.
+
+    Without the contract the published implementation row stays on the account basis, which the
+    validator refuses only after the whole run (``returns.implementation_account_legs``).
+    """
+
+    declaration = _strategy_basis_declaration_path(config)
+    if declaration is None:
+        return
+    try:
+        rows = json.loads(declaration.read_bytes()).get("strategies", [])
+    except (ValueError, AttributeError) as exc:
+        raise AttendedPreparationError(
+            "the strategy basis declaration is unreadable"
+        ) from exc
+    restated = sorted(
+        str(row.get("strategy_id"))
+        for row in rows
+        if isinstance(row, Mapping) and row.get("basis") == "SLEEVE_EPOCH"
+    )
+    if restated and config.get("implementation_model_book_perf") is None:
+        if config.get("implementation_sleeve_basis") is None:
+            raise AttendedPreparationError(
+                f"the declaration restates {', '.join(restated)} to its sleeve: name "
+                "implementation_model_book_perf (the model book export the contract is "
+                "built from) or a pinned implementation_sleeve_basis"
+            )
+
+
 def _model_provider_id(receipt: bytes) -> str:
     """The provider whose live returns the ledger excludes: the declared sleeve's model book.
 
@@ -1350,6 +1380,7 @@ def _validated_inputs(
             config["financial_input_contract"], "financial input contract"
         ),
     )
+    _require_implementation_sleeve_basis_source(config)
     # Replay the retained history and every public-plan boundary before this
     # function returns.  The caller creates its output root only afterwards.
     import portfolio_current_decomposition_plan as plans
