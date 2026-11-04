@@ -364,6 +364,18 @@ def effective_policy_sha256(
     return effective, _sha256(effective)
 
 
+def _evidence_digest(fields: Mapping[str, Any]) -> str:
+    return _sha256(
+        json.dumps(
+            fields,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
 def reissue_authority(
     seed: Mapping[str, Any], effective_policy: bytes, policy_sha: str
 ) -> dict[str, Any]:
@@ -376,17 +388,13 @@ def reissue_authority(
             "SEED", "seed authority lacks authority_evidence_sha256"
         )
     candidate = {k: v for k, v in seed.items() if k != "authority_evidence_sha256"}
-    candidate["hwm_policy_sha256"] = policy_sha
     # the digest the derivation writes: canonical JSON of every other field
-    candidate["authority_evidence_sha256"] = _sha256(
-        json.dumps(
-            candidate,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
-    )
+    if _evidence_digest(candidate) != seed["authority_evidence_sha256"]:
+        raise CalendarAuthorityError(
+            "SEED", "seed authority_evidence_sha256 does not match its own content"
+        )
+    candidate["hwm_policy_sha256"] = policy_sha
+    candidate["authority_evidence_sha256"] = _evidence_digest(candidate)
     try:
         validate_governed_hwm_calendar_authority(
             candidate,
