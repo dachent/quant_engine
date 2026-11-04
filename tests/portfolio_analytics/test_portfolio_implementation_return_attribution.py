@@ -1237,3 +1237,36 @@ def test_tt_holdings_return_does_not_depend_on_the_hash_seed() -> None:
         assert done.returncode == 0, done.stderr
         outputs.add(done.stdout)
     assert len(outputs) == 1
+
+
+def _tape_binding(path: Path) -> dict[str, object]:
+    raw = path.read_bytes()
+    return {
+        "filename": path.name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+
+
+def test_the_price_tape_must_be_the_manifest_bound_artifact(tmp_path: Path) -> None:
+    tape = tmp_path / "yahoo-tt-adjusted-full-live.json"
+    tape.write_bytes(b'{"rows": []}')
+    binding = _tape_binding(tape)
+    attribution._require_price_tape_binding(tape, binding)
+
+    renamed = tmp_path / "tt-price-tape.json"
+    renamed.write_bytes(tape.read_bytes())
+    with pytest.raises(attribution.ReturnAttributionError) as excinfo:
+        attribution._require_price_tape_binding(renamed, binding)
+    message = str(excinfo.value)
+    assert "'tt-price-tape.json'" in message
+    assert "'yahoo-tt-adjusted-full-live.json'" in message
+    assert "sha256" not in message  # the bytes match: only the name differs
+
+    tape.write_bytes(b'{"rows": [1]}')
+    with pytest.raises(attribution.ReturnAttributionError) as tampered:
+        attribution._require_price_tape_binding(tape, binding)
+    assert "sha256" in str(tampered.value) and "size_bytes" in str(tampered.value)
+
+    with pytest.raises(attribution.ReturnAttributionError):
+        attribution._require_price_tape_binding(tape, "c" * 64)  # not the identity form

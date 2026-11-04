@@ -99,11 +99,11 @@ def write(OUT: Path) -> None:
         "panel_root": Q + "/dataPortfolio/control-panel",
         # not recorded by pass 26 (its ids.env names them, this fixture does not): synthetic placeholders
         "provenance_id": _pin("provenance-generation"),
-        "report_id": _pin("report-generation"),
-        "ibkr_root": Q + "/dataIBKR/generations/synthetic",
         "p123_generation": Q + "/dataPortfolio123/generations/synthetic",
         "ibkr_generation": Q + "/dataIBKR/generations/synthetic",
         "schwab_generation": Q + "/dataSchwab/generations/synthetic",
+        "report_id": _pin("report-generation"),
+        "ibkr_root": Q + "/dataIBKR/generations/synthetic",
         "resolved_cycle_sha256": _pin("resolved-cycle"),
     }
     (OUT / "pass26-run.json").write_text(

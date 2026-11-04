@@ -18,8 +18,6 @@
     "tail": "{cycle}/tail",
     "ca": "{cycle}/tail/ca",
     "production": "{cycle}/production",
-    "provenance_spec_derived": "{cycle}/provenance-spec.json",
-    "calendar_seed_reissued": "{cycle}/calendar-seed-authority.json",
     "recipe_probe": "{cycle}/pipeline-recipe-probe.json",
     "recipe": "{cycle}/pipeline-recipe.json",
     "prod_spec": "{cycle}/production/production-spec.json",
@@ -59,6 +57,8 @@
     "release_inputs_strategy_basis": "{release_inputs_root}/ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json",
     "release_inputs_tag_map": "{release_inputs_root}/ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json",
     "sleeve_facts": "{run}/stages/report/generations/{report_id}/input/sleeve-account-facts.json",
+    "provenance_spec_derived": "{cycle}/provenance-spec.json",
+    "calendar_seed_reissued": "{cycle}/calendar-seed-authority.json",
     "release_inputs_impl": "{release_inputs_root}/ops/mvp2-release/inputs/implementation",
     "impl_reconciliation": "{cycle}/in/implementation-reconciliation.json",
     "impl_return_attribution": "{cycle}/in/implementation-return-attribution.json",
@@ -67,7 +67,7 @@
     "release_inputs_impl_spxl": "{release_inputs_impl}/spxl-market-data.json",
     "release_inputs_impl_tt_workbook": "{release_inputs_impl}/tt-workbook.xlsx",
     "release_inputs_impl_tt_manifest": "{release_inputs_impl}/tt-source-manifest.json",
-    "release_inputs_impl_tt_tape": "{release_inputs_impl}/tt-price-tape.json",
+    "release_inputs_impl_tt_tape": "{release_inputs_impl}/yahoo-tt-adjusted-full-live.json",
     "release_inputs_impl_grizzly_signals": "{release_inputs_impl}/grizzly-signals.csv",
     "release_inputs_impl_grizzly_blended": "{release_inputs_impl}/grizzly-blended-history.csv",
     "schwab_catalog": "{schwab_generation}/schwab-generation.json"
@@ -80,24 +80,6 @@
       "json_field": [
         "{preparation_spec}",
         "sleeve_facts.ibkr_generation_root"
-      ]
-    },
-    "implementation_reconciliation_sha256": {
-      "file_sha256": "{cycle}/in/implementation-reconciliation.json"
-    },
-    "implementation_return_attribution_sha256": {
-      "file_sha256": "{cycle}/in/implementation-return-attribution.json"
-    },
-    "implementation_reconciliation_rel": {
-      "relative_to": [
-        "{cycle}/in/implementation-reconciliation.json",
-        "{prep_pin_root}"
-      ]
-    },
-    "implementation_return_attribution_rel": {
-      "relative_to": [
-        "{cycle}/in/implementation-return-attribution.json",
-        "{prep_pin_root}"
       ]
     },
     "ledger_id": {
@@ -163,6 +145,24 @@
     },
     "resolved_cycle_sha256": {
       "file_sha256": "{resolved_cycle}"
+    },
+    "implementation_reconciliation_sha256": {
+      "file_sha256": "{cycle}/in/implementation-reconciliation.json"
+    },
+    "implementation_return_attribution_sha256": {
+      "file_sha256": "{cycle}/in/implementation-return-attribution.json"
+    },
+    "implementation_reconciliation_rel": {
+      "relative_to": [
+        "{cycle}/in/implementation-reconciliation.json",
+        "{prep_pin_root}"
+      ]
+    },
+    "implementation_return_attribution_rel": {
+      "relative_to": [
+        "{cycle}/in/implementation-return-attribution.json",
+        "{prep_pin_root}"
+      ]
     },
     "p123_generation": {
       "json_field": [
@@ -428,7 +428,7 @@
         "ops/mvp2-release/inputs/implementation/spxl-market-data.json",
         "ops/mvp2-release/inputs/implementation/tt-workbook.xlsx",
         "ops/mvp2-release/inputs/implementation/tt-source-manifest.json",
-        "ops/mvp2-release/inputs/implementation/tt-price-tape.json",
+        "ops/mvp2-release/inputs/implementation/yahoo-tt-adjusted-full-live.json",
         "ops/mvp2-release/inputs/implementation/grizzly-signals.csv",
         "ops/mvp2-release/inputs/implementation/grizzly-blended-history.csv"
       ],
@@ -481,7 +481,7 @@
         "ops/mvp2-release/inputs/implementation/spxl-market-data.json",
         "ops/mvp2-release/inputs/implementation/tt-workbook.xlsx",
         "ops/mvp2-release/inputs/implementation/tt-source-manifest.json",
-        "ops/mvp2-release/inputs/implementation/tt-price-tape.json",
+        "ops/mvp2-release/inputs/implementation/yahoo-tt-adjusted-full-live.json",
         "ops/mvp2-release/inputs/implementation/grizzly-signals.csv",
         "ops/mvp2-release/inputs/implementation/grizzly-blended-history.csv"
       ],
@@ -1012,6 +1012,13 @@
           "args": [
             "--pin",
             "model_vs_actual_input={model_vs_actual_input}"
+          ]
+        },
+        {
+          "if": "implementation_model_book_perf",
+          "args": [
+            "--pin",
+            "implementation_model_book_perf={implementation_model_book_perf}"
           ]
         },
         {

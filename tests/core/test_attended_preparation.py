@@ -2799,6 +2799,7 @@ def _preparation_function_fixture(
                 "sleeve_ledger",
                 "sleeve_nav",
                 "strategy_basis",
+                "implementation_sleeve_basis",
             )
         },
         "financial_data_cutoff": "2026-09-17",
@@ -5664,3 +5665,127 @@ def test_without_a_declaration_the_control_stage_does_not_apply(
         output / "preparation" / "history-control-not-applicable.json", "marker"
     )
     assert marker["status"] == "NOT_APPLICABLE"
+
+
+def _file_pin(path: Path, content: bytes) -> dict[str, object]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
+
+
+def test_the_implementation_sleeve_basis_is_a_checkpointed_stage_after_the_sleeve_facts() -> (
+    None
+):
+    stage = "implementation-sleeve-basis"
+    assert preparation.PREPARATION_STAGE_DEPENDENCIES[stage] == ("sleeve-facts",)
+    for later in ("epoch", "final-handoff"):
+        assert stage in preparation.PREPARATION_STAGE_DEPENDENCIES[later]
+    assert preparation._PREPARATION_STAGE_OUTPUTS[stage] == ("stage_receipt",)
+    assert "implementation_sleeve_basis" in preparation._PREPARATION_STAGE_CODE[stage]
+
+
+def test_the_model_book_pin_selects_building_and_refuses_a_second_source(
+    tmp_path: Path,
+) -> None:
+    perf = _file_pin(tmp_path / "perf.csv", b"date,value\n")
+    assert preparation._implementation_model_book_perf_path({}) is None
+    with pytest.raises(preparation.AttendedPreparationError, match="declaration"):
+        preparation._implementation_model_book_perf_path(
+            {"implementation_model_book_perf": perf}
+        )
+    declaration = _file_pin(tmp_path / "declaration.json", b"{}")
+    with pytest.raises(preparation.AttendedPreparationError, match="not both"):
+        preparation._implementation_model_book_perf_path(
+            {
+                "implementation_model_book_perf": perf,
+                "implementation_sleeve_basis": declaration,
+                "strategy_basis_declaration": declaration,
+            }
+        )
+
+
+def test_the_contract_is_built_from_the_runs_own_files_and_is_create_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_implementation_sleeve_basis as sleeve_basis
+
+    files = {
+        name: tmp_path / name
+        for name in (
+            "declaration.json",
+            "facts.json",
+            "perf.csv",
+            "attribution.json",
+            "reconciliation.json",
+            "receipt.json",
+        )
+    }
+    for path in files.values():
+        path.write_bytes(path.name.encode())
+    files["receipt.json"].write_text(
+        json.dumps(
+            {
+                "dispositions": [
+                    {
+                        "provider_id": "model-provider",
+                        "item_kind": "PRODUCT_DATA_CLASS",
+                        "data_class": "PROVIDER_LIVE_RETURN",
+                        "action": "EXCLUDE",
+                    },
+                    {
+                        "provider_id": "other",
+                        "item_kind": "PRODUCT_DATA_CLASS",
+                        "data_class": "NAV",
+                        "action": "ADMIT",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def build_contract(**kwargs: object) -> bytes:
+        seen.update(kwargs)
+        return b'{"contract_id": "c"}\n'
+
+    monkeypatch.setattr(sleeve_basis, "build_contract", build_contract)
+    destination = tmp_path / "out" / "contract.json"
+    built = preparation._stage_implementation_sleeve_basis(
+        declaration_path=files["declaration.json"],
+        facts_path=files["facts.json"],
+        model_book_perf_path=files["perf.csv"],
+        retained_attribution_path=files["attribution.json"],
+        retained_reconciliation_path=files["reconciliation.json"],
+        admission_receipt_path=files["receipt.json"],
+        destination=destination,
+    )
+    assert (
+        built == destination and destination.read_bytes() == b'{"contract_id": "c"}\n'
+    )
+    assert seen["model_provider_id"] == "model-provider"
+    assert seen["declaration"] == b"declaration.json"
+    assert seen["retained_attribution"] == b"attribution.json"
+    assert seen["provider_admission_receipt"] == files["receipt.json"].read_bytes()
+    assert seen["filenames"] == {
+        "declaration": "declaration.json",
+        "sleeve_facts": "facts.json",
+        "model_book_perf": "perf.csv",
+        "retained_attribution": "attribution.json",
+        "retained_reconciliation": "reconciliation.json",
+        "provider_admission_receipt": "receipt.json",
+    }
+    with pytest.raises(FileExistsError):
+        preparation._stage_implementation_sleeve_basis(
+            declaration_path=files["declaration.json"],
+            facts_path=files["facts.json"],
+            model_book_perf_path=files["perf.csv"],
+            retained_attribution_path=files["attribution.json"],
+            retained_reconciliation_path=files["reconciliation.json"],
+            admission_receipt_path=files["receipt.json"],
+            destination=destination,
+        )
