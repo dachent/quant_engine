@@ -43,7 +43,7 @@
       "hwm_summary": 556,
       "hybrid_mode_gate": 2984,
       "lifecycle_schema_version": 1,
-      "limitations": 11121,
+      "limitations": 12677,
       "meta": 6561,
       "observation_windows": 3957,
       "panel_schema_version": 2,
@@ -97,7 +97,7 @@
     "hwm_summary": 1000,
     "hybrid_mode_gate": 4000,
     "lifecycle_schema_version": 1000,
-    "limitations": 12000,
+    "limitations": 13000,
     "meta": 7000,
     "observation_windows": 4000,
     "panel_schema_version": 1000,
@@ -113,6 +113,7 @@
     "vendor_gap_fills": 2000
   },
   "justifications": {
+    "limitations": "R2.2 e78cb9f2 measured 12677 B against 11121 B at the B-integration measure (+1556 B) and 11056 B on the R2.1 panel. All growth is four existing limitation entries that now state the sleeve basis of p123-ai-factor, no entry is added and none is duplicated: flow timing bounds +527 B (the parent-account series its row is restated from), HWM member series +330 B (the sleeve series start and the days it carries no value), product perimeter +303 B (sleeve gains and entry-day differences), sleeve capital basis +461 B (gross allocations and margin-funded allocations). These disclose what changed under the restatement; trimming was declined. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block limitations.",
     "strategies": "R2 committed 121117 B, R2.1 131808 B (+10691 B). The growth is new per-strategy evidence, not per-observation duplication: cost_components +3978 B (5 rows), execution_cost +2241 B (7 rows), corroboration +2100 B and declared +647 B (2 rows), provider_annualization and provider-comparison disposition and window fields about +1600 B. Trimming was examined and declined: repeated long strings inside the new fields total about 1200 B (under 1% of the block) and source.artifact, sha256 and artifact paths are provenance that tests pin. Limit = committed + 3%, rounded up to 1000 B.",
     "performance": "New top-level block (distinct from performance_tab) carried since R2: 54048 B on R2 b216a53e, 54055 B on R2.1. It was unlisted and sat 4 KB over the 50000 B unlisted-block threshold, so the checker flagged it on every generation. Within 7 B between R2 and R2.1. Limit = committed + 3%, rounded up to 1000 B.",
     "performance_tab": "R2.1 re-measure 381004 B (schema 3: union grid, flow-matched benchmarks), against 375785 B on the r21-integration panel the previous limit was cut from. The limit is re-cut at committed + 3% (393000 B, was 388000 B at 98.2% of committed) so the block has the same headroom every other block has.",
@@ -1080,6 +1081,19 @@
           "after": 27773403,
           "previous_limit": 28052000,
           "limit": 28052000
+        }
+      }
+    },
+    {
+      "generation": "e78cb9f2f6b1c77658d3c7dd16711a5cdd1f2b7dc9bc1a39aed4eda2f5bf9b5b",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "blocks": {
+        "limitations": {
+          "before": 11121,
+          "after": 12677,
+          "previous_limit": 12000,
+          "limit": 13000
         }
       }
     }
