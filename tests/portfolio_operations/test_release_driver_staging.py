@@ -768,3 +768,15 @@ def test_a_cycle_without_a_per_cycle_seed_is_refused_before_any_stage_runs(
     err = capsys.readouterr().err
     assert "cycle-resolve" in err and Path(seed).name in err
     assert "does not exist" in err or "vanished" in err
+
+
+def test_prep_spec_records_the_per_cycle_seeds_whose_pins_it_carries() -> None:
+    # a seed that changes after prep-spec succeeded must refuse the kept prep-spec and
+    # everything downstream: the consuming stage records the files, not only cycle-resolve
+    stage = next(s for s in _shipped()["stages"] if s["id"] == "prep-spec")
+    for name in (
+        "attribution-spec.json",
+        "in/implementation-reconciliation.json",
+        "in/implementation-return-attribution.json",
+    ):
+        assert "{cycle}/" + name in stage["inputs"], name
