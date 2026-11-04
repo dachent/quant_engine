@@ -170,6 +170,7 @@ New run configuration keys:
 |---|---|
 | `cycle_manifest`, `cycle_manifest_sha256` | the cycle manifest (`docs/release-cycle-manifest.md`) and its pin; the pin is also passed to the tool |
 | `cycle_roots_file` | the `{root key: directory}` JSON the manifest's root keys resolve against (`--roots-file`) |
+| per-cycle seed files under `cycle` | `attribution-spec.json` (read by `selected-inputs` and `pre-chain`), `in/implementation-reconciliation.json` and `in/implementation-return-attribution.json` (carried pins of the predecessor preparation spec, re-verified by `prep-spec`). No committed tool writes them; they are operator inputs. They are listed as inputs of `cycle-resolve`, so a cycle that lacks one is refused before any stage runs, with the file named, instead of at the stage that first reads it (R3 rehearsal: `selected-inputs`, then `prep-spec`) |
 | `provenance_spec`, `provenance_spec_sha256` | the provenance spec and its pin. No committed tool writes it (the R2 `rebase_prov.py` and `make_r2_provenance_spec.py` are not in the repository): it stays an operator input, hash-pinned |
 | `predecessor_ledger_spec`, `predecessor_ledger_spec_sha256` | the predecessor release's ledger spec as the builder reads it (carried blocks only), remapped to this cycle's roots, and its pin |
 | `release_inputs_root`, `release_inputs_manifest_sha256` | the pinned release-inputs root (outside Git). The driver already binds the expected baseline from it; `baseline-spec` reads the declared baseline inputs from the same root |

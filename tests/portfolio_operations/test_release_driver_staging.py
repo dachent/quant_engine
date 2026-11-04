@@ -49,6 +49,12 @@ TOOL_STAGES = (
     "prep-spec",
     "post-commit-verify",
 )
+# per-cycle files no committed tool writes: the first stage refuses a cycle that lacks one
+CYCLE_SEEDS = (
+    "attribution-spec.json",
+    "in/implementation-reconciliation.json",
+    "in/implementation-return-attribution.json",
+)
 NEW_CONFIG_KEYS = (
     "predecessor_selected_inputs",
     "predecessor_selected_inputs_sha256",
@@ -493,6 +499,9 @@ def staged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]
     )
     prov_spec = base / "provenance-spec.json"
     prov_spec.write_text("{}", encoding="utf-8")
+    for seed in CYCLE_SEEDS:  # per-cycle operator seeds the first stage requires
+        (cycle / seed).parent.mkdir(parents=True, exist_ok=True)
+        (cycle / seed).write_text("{}", encoding="utf-8")
     graph = _shipped()
     # the provenance stage reads a hand-made spec (no committed builder): stand in for the staging
     # tool by placing the generation the ledger-spec fixture staged, where the stage's output lies
@@ -744,3 +753,18 @@ def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
         in named["baseline-spec"]
     )
     assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]
+
+
+@pytest.mark.parametrize("seed", CYCLE_SEEDS)
+def test_a_cycle_without_a_per_cycle_seed_is_refused_before_any_stage_runs(
+    staged: dict[str, Any], seed: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = staged["cycle"] / seed
+    path.unlink()
+    try:
+        assert _run(staged, "run", "--through", "ledger") == 2
+    finally:
+        path.write_text("{}", encoding="utf-8")  # the fixture is shared
+    err = capsys.readouterr().err
+    assert "cycle-resolve" in err and Path(seed).name in err
+    assert "does not exist" in err or "vanished" in err
