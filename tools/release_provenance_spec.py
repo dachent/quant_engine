@@ -55,9 +55,12 @@ def _in_repo(seed_path: str, repo_root: Path, name: str) -> Path:
 
 
 def refresh_spec(seed: Mapping[str, Any], repo_root: Path) -> dict[str, Any]:
-    section = seed.get(SECTION)
+    if SECTION not in seed:
+        # the section is optional in a provenance spec: nothing to bind
+        return dict(seed)
+    section = seed[SECTION]
     if not isinstance(section, Mapping):
-        raise ProvenanceSpecError("SEED", f"the seed spec has no {SECTION} object")
+        raise ProvenanceSpecError("SEED", f"{SECTION} is not an object")
     updated = dict(section)
     for name in NAMES:
         key = f"{name}_path"

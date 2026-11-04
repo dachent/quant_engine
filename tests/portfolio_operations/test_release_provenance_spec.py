@@ -97,4 +97,8 @@ def test_a_missing_repository_file_or_section_is_refused(
     assert _run(tmp_path, repo) == 1
     assert "MISSING" in capsys.readouterr().err
     with pytest.raises(tool.ProvenanceSpecError, match="SEED"):
-        tool.refresh_spec({"acquisition_date": "2026-09-17"}, repo)
+        tool.refresh_spec({"financial_mvp": []}, repo)
+    # a spec without the optional section is carried unchanged
+    assert tool.refresh_spec({"acquisition_date": "2026-09-17"}, repo) == {
+        "acquisition_date": "2026-09-17"
+    }
