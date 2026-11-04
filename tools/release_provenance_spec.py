@@ -18,6 +18,7 @@ import argparse
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -98,8 +99,10 @@ def refresh(args: argparse.Namespace) -> int:
             raise ProvenanceSpecError("OUTPUT_EXISTS", str(args.out))
     else:
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        with args.out.open("xb") as handle:
-            handle.write(data)
+        # atomic: an interrupted write leaves only the temporary file, which a rerun overwrites
+        partial = args.out.with_name(args.out.name + ".partial")
+        partial.write_bytes(data)
+        os.replace(partial, args.out)
     print(json.dumps({"spec_sha256": hashlib.sha256(data).hexdigest()}))
     return 0
 

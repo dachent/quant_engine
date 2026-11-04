@@ -102,3 +102,15 @@ def test_a_missing_repository_file_or_section_is_refused(
     assert tool.refresh_spec({"acquisition_date": "2026-09-17"}, repo) == {
         "acquisition_date": "2026-09-17"
     }
+
+
+def test_an_interrupted_write_leaves_no_partial_output_and_a_rerun_completes(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    # what an interrupted run leaves: the temporary file only, never a truncated output
+    (tmp_path / "out.json.partial").write_bytes(b'{"acq')
+    assert not (tmp_path / "out.json").exists()
+    assert _run(tmp_path, repo) == 0
+    assert json.loads((tmp_path / "out.json").read_bytes())["financial_mvp"]
+    assert not (tmp_path / "out.json.partial").exists()
