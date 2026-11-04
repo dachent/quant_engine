@@ -1715,11 +1715,7 @@ def cost_components(cost: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "status": execution.get("status"),
                     "window_end": execution.get("window_end"),
                     "window_start": execution.get("window_start"),
-                    **(
-                        {"scope": execution["scope"]}
-                        if "scope" in execution
-                        else {}
-                    ),
+                    **({"scope": execution["scope"]} if "scope" in execution else {}),
                 }
             )
     return components

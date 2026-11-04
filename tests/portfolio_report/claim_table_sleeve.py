@@ -385,8 +385,12 @@ def p_residual_treatment(payload: Payload) -> Result:
         return skip("no residual or no treatment text")
     quoted = f"({Decimal(cents) / 100:,.2f} at the cutoff)"
     if quoted not in text:
-        return bad(f"residual_cents {cents} but the treatment text does not quote {quoted}")
-    return ok(f"the treatment text quotes the residual {quoted} (residual_cents {cents})")
+        return bad(
+            f"residual_cents {cents} but the treatment text does not quote {quoted}"
+        )
+    return ok(
+        f"the treatment text quotes the residual {quoted} (residual_cents {cents})"
+    )
 
 
 def b_residual_treatment(payload: Payload) -> None:
@@ -488,7 +492,9 @@ SLEEVE_ROWS: tuple[Row, ...] = (
         "epoch",
         "Performance tab",
         PERFORMANCE_TAB_PY,
-        (r"\"The residual against systematic capital is not a flow: it is the value of ",),
+        (
+            r"\"The residual against systematic capital is not a flow: it is the value of ",
+        ),
         "a restated panel's residual against systematic capital is the closed epochs' value, quoted at the residual the slices reconcile to",
         p_residual_treatment,
         b_residual_treatment,

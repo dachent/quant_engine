@@ -103,7 +103,9 @@ def test_the_lane_is_read_from_the_account_block_the_reference_names() -> None:
 def test_the_lane_opens_on_the_first_return_date_not_the_opening_nav_date() -> None:
     # the window opens a day before the first return (OPENING_NAV_DATE); the panel's
     # account summary names the first return date for the same series
-    account = _account_row(window={"start": "2026-01-21", "end": "2026-09-17", "days": 239})
+    account = _account_row(
+        window={"start": "2026-01-21", "end": "2026-09-17", "days": 239}
+    )
     account["account_basis"]["figures"]["account_live_observed_start"] = "2026-01-22"
     lane = panel._restated_account_lanes([_strategy()], [account])[SID]
     assert lane["observed_start"] == "2026-01-22" and lane["observations"] == 171

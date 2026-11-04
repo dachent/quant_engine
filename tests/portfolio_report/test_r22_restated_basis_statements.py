@@ -16,9 +16,14 @@ import strategy_basis
 PARENT = strategy_basis.BASIS_PARENT_ACCOUNT
 
 
-def test_b1_a_restated_residual_is_the_closed_epochs_cash_quoted_from_the_data() -> None:
+def test_b1_a_restated_residual_is_the_closed_epochs_cash_quoted_from_the_data() -> (
+    None
+):
     text = perf._residual_treatment(True, 381, True)
-    assert "value of closed epochs that no plotted slice holds (3.81 at the cutoff)" in text
+    assert (
+        "value of closed epochs that no plotted slice holds (3.81 at the cutoff)"
+        in text
+    )
     assert "liability line of strategy_basis_disclosure" in text
     # the old sentence called the residual the parent's unallocated cash and margin
     assert "value outside the plotted epochs" not in text
@@ -26,7 +31,11 @@ def test_b1_a_restated_residual_is_the_closed_epochs_cash_quoted_from_the_data()
 
 
 def test_b1_the_unrestated_text_is_unchanged() -> None:
-    for sleeves, cents, restated in ((True, 381, False), (False, 381, True), (True, None, True)):
+    for sleeves, cents, restated in (
+        (True, 381, False),
+        (False, 381, True),
+        (True, None, True),
+    ):
         assert (
             perf._residual_treatment(sleeves, cents, restated)
             == perf.SLICE_RESIDUAL_TREATMENT
@@ -37,7 +46,9 @@ def _cost() -> dict[str, Any]:
     return {
         "execution_cost": {
             "basis": "LEDGER_TRANSACTION_COMMISSIONS_NATIVE_CURRENCY",
-            "by_currency": [{"amount": "2227.51", "currency": "USD", "record_count": 4117}],
+            "by_currency": [
+                {"amount": "2227.51", "currency": "USD", "record_count": 4117}
+            ],
             "record_count": 4117,
             "status": "AVAILABLE",
             "window_end": "2026-09-14",
@@ -82,7 +93,11 @@ def test_b3_the_parent_live_summary_and_overlap_carry_their_basis() -> None:
         "strategy_id": "s",
         "return_reconciliation": {"status": "AVAILABLE"},
     }
-    summary = {"cumulative_return": 0.0245, "observations": 171, "observed_start": "2026-01-22"}
+    summary = {
+        "cumulative_return": 0.0245,
+        "observations": 171,
+        "observed_start": "2026-01-22",
+    }
     _, reconciled = sbm.apply_to_rows(
         block,
         None,
@@ -115,7 +130,10 @@ def test_b3_the_provider_overlap_of_a_restated_row_is_named_the_parents() -> Non
             }
         ],
     )
-    overlap = {"account_cumulative_return": "0.001976", "status": "TESTED_EXACT_DATE_PATHS"}
+    overlap = {
+        "account_cumulative_return": "0.001976",
+        "status": "TESTED_EXACT_DATE_PATHS",
+    }
     evidence = [
         {
             "strategy_id": "s",
