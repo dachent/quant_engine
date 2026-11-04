@@ -1683,7 +1683,8 @@ def _tt_actual_holdings_return(
             str(item) for item in broker.get("component_account_ids", [])
         }
         price_pnl = 0.0
-        for account in active_accounts:
+        # sorted: the float sum below must not depend on the process hash seed
+        for account in sorted(active_accounts):
             for symbol, quantity in holdings[account].items():
                 if abs(quantity) < 1e-9:
                     continue
