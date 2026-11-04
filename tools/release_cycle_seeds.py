@@ -29,12 +29,12 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from quant_engine.core import ReleaseInputsError, resolve_release_input
 
 import portfolio_attribution as attribution
-from release_cycle_manifest import CycleManifestError, parse_roots
+from release_cycle_manifest import CycleManifestError, parse_roots, refuse_links
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SEEDS = "ops/mvp2-release/inputs/seeds"
@@ -102,13 +102,31 @@ def _located(roots: Mapping[str, Path], key: str, relative: str, what: str) -> P
     if (
         not relative
         or relative.startswith("/")
+        or "\\" in relative
+        or ":" in relative
         or any(p in ("", ".", "..") for p in parts)
     ):
         raise SeedError(f"{what}: {relative!r} is not a safe relative path")
-    path = (base / relative).resolve()
+    refuse_links(base, parts, what)
+    path = base.joinpath(*parts).resolve()
+    if base not in path.parents:
+        raise SeedError(f"{what}: {relative!r} leaves root {key!r}")
     if not path.is_file():
         raise SeedError(f"{what}: no file at {path}")
     return path
+
+
+def _verified_manifest(path: Path, what: str) -> None:
+    """The consumer's own admission of a return-source manifest (``build_catalog``): verified, dated."""
+
+    manifest = _load_object(path.read_bytes(), what)
+    if manifest.get("verification") != "VERIFIED":
+        raise SeedError(f"{what} is not verified")
+    as_of = manifest.get("as_of_date")
+    try:
+        date.fromisoformat(as_of if isinstance(as_of, str) else "")
+    except ValueError as exc:
+        raise SeedError(f"{what} as-of date is invalid") from exc
 
 
 def _checked(path: Path, expected: object, what: str) -> None:
@@ -142,6 +160,7 @@ def resolve_template(
         source["source_manifest_expected_sha256"],
         "return source manifest",
     )
+    _verified_manifest(manifest_path, "return source manifest")
     spec = copy.deepcopy(dict(template))
     spec["return_source"] = {
         "expected_sha256": source["expected_sha256"],
@@ -204,10 +223,11 @@ def _window(
         # account's history spans
         first, last = min(account), min(max(account), cutoff)
         shared = sorted(d for d in reference if first <= d <= last)
-    if not shared:
+    if len(shared) < 2:
+        # portfolio_attribution._comparison_metrics needs at least two paired observations
         raise SeedError(
             f"{row.get('strategy_id')}: the account series and {row.get('reference_series_id')} "
-            f"share no date up to {cutoff}"
+            f"share {len(shared)} observation(s) up to {cutoff}, a comparison needs at least 2"
         )
     return shared[0], shared[-1]
 
@@ -217,8 +237,13 @@ def derive_windows(
     account_live: Mapping[str, Mapping[date, Any]],
     references: Mapping[str, Mapping[date, Any]],
     cutoff: str,
+    retained_history: Callable[[str, str], Mapping[date, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """The spec for ``cutoff``: ``as_of_date`` set, every available row's window derived from the data."""
+    """The spec for ``cutoff``: ``as_of_date`` set, every available row's window derived from the data.
+
+    ``retained_history(strategy_id, account_series_id)`` authenticates the retained series of a strategy the
+    baseline holds no live series for (the attribution stage's own rule); without it such a row refuses.
+    """
 
     day = date.fromisoformat(cutoff)
     spec = copy.deepcopy(dict(template))
@@ -235,14 +260,18 @@ def derive_windows(
             reference_id = row.get("reference_series_id")
             account = account_live.get(strategy)
             if not account:
-                # a strategy the baseline keeps as history only reads its retained series by id, as the
-                # attribution stage does (portfolio_attribution._retained_account_history)
-                account = references.get(str(row.get("account_series_id")))
-            if not account:
-                raise SeedError(
-                    f"{strategy}: {name} row is available but neither the baseline nor the return source "
-                    f"holds an account series for it"
-                )
+                if retained_history is None:
+                    raise SeedError(
+                        f"{strategy}: {name} row is available but the baseline holds no ACCOUNT_LIVE series for it"
+                    )
+                try:
+                    account = retained_history(
+                        str(strategy), str(row.get("account_series_id"))
+                    )
+                except attribution.AttributionValidationError as exc:
+                    raise SeedError(
+                        f"{strategy}: retained account history refused: {exc}"
+                    ) from exc
             if reference_id not in references:
                 raise SeedError(
                     f"{strategy}: reference series {reference_id!r} is not in the return source"
@@ -295,9 +324,19 @@ def derive_attribution_spec(
         raise SeedError(
             f"baseline is for {baseline.get('as_of_date')!r}, the cycle cutoff is {cutoff}"
         )
-    references, _ = attribution.read_return_rows(csv_path)
+    _verified_manifest(
+        Path(str(source["source_manifest_path"])), "return source manifest"
+    )
+    references, identities = attribution.read_return_rows(csv_path)
+    history_only = attribution.reference_only_account_history(baseline)
     spec, report = derive_windows(
-        template, attribution.account_live_series(baseline), references, cutoff
+        template,
+        attribution.account_live_series(baseline),
+        references,
+        cutoff,
+        lambda strategy, account_id: attribution.retained_account_history(
+            strategy, account_id, history_only, references, identities
+        ),
     )
     _write_create_only(out, _canonical(spec))
     return report
@@ -358,7 +397,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cutoff=args.cutoff,
                 out=args.out,
             )
-    except (SeedError, ReleaseInputsError, CycleManifestError) as exc:
+    except (
+        SeedError,
+        ReleaseInputsError,
+        CycleManifestError,
+        attribution.AttributionValidationError,
+    ) as exc:
         print(f"release-cycle-seeds: FAIL: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
