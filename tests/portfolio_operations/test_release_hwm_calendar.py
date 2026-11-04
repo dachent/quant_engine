@@ -383,3 +383,16 @@ def test_reissue_refuses_a_different_existing_file_and_a_seed_without_a_digest(
     broken = _write(tmp_path / "broken.json", {"calendar_policy_id": "x"})
     assert _reissue(broken, tmp_path / "other.json") == 1
     assert "SEED" in capsys.readouterr().err
+
+
+def test_reissue_refuses_a_seed_whose_content_no_longer_matches_its_digest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed = tmp_path / "seed.json"
+    authority = _stale_seed(seed)
+    # an edited predecessor: a calendar changed, the old digest kept
+    authority["owner_decision_evidence"] = "edited decision text"
+    _write(seed, authority)
+    assert _reissue(seed, tmp_path / "out.json") == 1
+    assert "does not match its own content" in capsys.readouterr().err
+    assert not (tmp_path / "out.json").exists()
