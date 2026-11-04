@@ -892,6 +892,26 @@ def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None
         _verify_upstream(run, run.stage(required), seen)
 
 
+def check_release_inputs(run: Run, stage: Mapping[str, Any]) -> None:
+    """The release-inputs files a stage reads (they are not in Git) are in the pinned set."""
+
+    wanted = stage.get("release_inputs")
+    if not wanted:
+        return
+    inputs = run.release_inputs
+    if inputs is None:
+        if run.offline:
+            return
+        raise Refusal(
+            f"{stage['id']} reads release inputs: the run names no release_inputs_root"
+        )
+    missing = [name for name in wanted if name not in inputs.paths]
+    if missing:
+        raise Refusal(
+            f"{stage['id']}: the release-inputs set lacks " + ", ".join(missing)
+        )
+
+
 def check_ready(
     run: Run,
     stage: Mapping[str, Any],
@@ -908,6 +928,7 @@ def check_ready(
         check_script_in_repo(run, stage, stage_argv(run, stage))
     check_probe_guard(run, stage)
     check_commit_gate(run, stage)
+    check_release_inputs(run, stage)
     if "only_mode" in stage and run.values["mode"] != stage["only_mode"]:
         raise Refusal(f"{stage['id']} runs only in {stage['only_mode']} mode")
     state = run.state["stages"]

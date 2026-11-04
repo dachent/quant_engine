@@ -89,6 +89,7 @@
         "only_scheme": {"enum": ["git-commit-v1", "git-tree-v2"]},
         "verify_inventory": {"type": "object", "additionalProperties": false, "required": ["file", "root"], "properties": {"file": {"type": "string"}, "root": {"type": "string"}, "except": {"type": "array", "items": {"type": "string"}}}},
         "replica_spec_guard": {"type": "string"},
+        "release_inputs": {"$ref": "#/$defs/strings"},
         "only_ceremony": {"enum": ["full", "replica-only"]},
         "needs_attestation": {"type": ["boolean", "string"]},
         "state_snapshot_to": {"type": "string"},
