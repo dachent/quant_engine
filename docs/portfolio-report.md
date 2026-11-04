@@ -228,9 +228,12 @@ verified observation trace (one row per link, the manifest member's own path), i
 every weight are recomputed from the rows, `return_scope.basis` is `SLEEVE_EPOCH`
 and the label is generated from the sleeve and window. The portfolio perimeter then
 equals the open epochs' value, so the portfolio MWR is computable. The row names
-what stays on the parent basis (`return_scope.not_restated`): benchmark and provider
-comparisons, the implementation bridge, dependence and the decomposition lenses,
-the legacy HWM envelope and the dated allocation snapshot. The weekly-returns and
+what stays on the parent basis (`return_scope.not_restated`): the execution cost,
+which is the parent account's ledger commissions over the parent's window and is
+tagged `PARENT_ACCOUNT_LIVE_SERIES` on the row and its EXECUTION component (the
+sleeve's own commissions are in `implementation_return_attribution.cost_usd`). The
+parent's live-series summary and provider overlap that the row still carries are
+tagged the same way. The weekly-returns and
 dependence inputs are separate artifacts built from the baseline return rows; a
 panel built from a restated report fails its report/dependence series parity gate
 until those inputs are restated the same way.
