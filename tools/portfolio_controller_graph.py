@@ -191,6 +191,7 @@ _PATH_STAGES = {
     "tools/verify_release_restore.py": [],
     "tools/release_driver.py": [],
     "tools/release_cycle_manifest.py": [],
+    "tools/release_cycle_seeds.py": [],
     "tools/release_ledger_spec.py": [],
     "tools/release_prepare_inputs.py": [],
     "tools/release_spec_remap.py": [],
