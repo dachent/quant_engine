@@ -898,12 +898,7 @@ def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None
             raise Refusal(
                 f"{required} ran at {record['code_commit'][:12]}, not the run's code identity"
             )
-        verify_kept(
-            run,
-            run.stage(required),
-            record,
-            predecessor=not _committed(run),
-        )
+        verify_kept(run, run.stage(required), record)
         _verify_upstream(run, run.stage(required), seen)
 
 
@@ -1251,16 +1246,19 @@ def verify_kept(
     record: Mapping[str, Any],
     *,
     check_binding: bool = True,
-    predecessor: bool = True,
+    predecessor: bool | None = None,
 ) -> None:
     """A completed stage is reusable only if the run, the code and its bytes are still what it recorded.
 
-    ``predecessor`` is off for the stages after the commit: the predecessor pin names the release the run
+    ``predecessor`` defaults to on until the run's ``commit`` stage has completed and is off from then on, for
+    every kept stage however it is reached (upstream of a selected stage, or selected itself): the predecessor pin names the release the run
     replaced, and ``CURRENT_RELEASE`` is the run's own release from then on, so the pin can no longer match
     it; the stages before the commit already checked it, at the moment it was true.
     """
 
     run.require_frozen_repo()
+    if predecessor is None:
+        predecessor = not _committed(run)
     if check_binding and record.get("binding") != run.stage_binding(stage["id"]):
         raise Refusal(
             f"{stage['id']} was produced under a different run configuration or stage graph; rerun it with --only {stage['id']}"

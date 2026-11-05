@@ -1173,6 +1173,10 @@ def test_the_stages_after_the_commit_do_not_recheck_the_moved_predecessor(
     )
     assert _drive(world, graph, "--only", "after") == 0
     assert (world["cycle"] / "after.txt").is_file()
+    # a stage selected directly is a kept stage too: the whole graph (every stage kept) resumes, it does not
+    # refuse at the kept stage that carries the predecessor rule
+    assert _drive(world, graph) == 0
+    assert _drive(world, graph, "--through", "after") == 0
     # before the commit the same moved pointer is still refused
     other = _graph(
         world, [stages[0], {**stages[2], "id": "later", "requires": ["early"]}]
