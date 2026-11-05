@@ -325,3 +325,53 @@ def test_the_command_line_reports_a_refusal_with_exit_one(
     cfg = _put(tmp_path / "cfg.json", json.dumps(_world(tmp_path)))
     assert tool.main(["move-aside", "--config", str(cfg), "--stamp", "S"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["to"].endswith(".aside-S")
+
+
+def test_a_stage_only_path_inside_the_cycle_that_goes_aside_is_dropped(
+    tmp_path: Path,
+) -> None:
+    # config runs before move-aside: a path that exists now inside the cycle is gone after it, and the
+    # driver would refuse every stage for it
+    ri, pin = _inputs(tmp_path)
+    cycle = tmp_path / "world" / "c"
+    inside = _put(cycle / "attempt" / "spec.json", "{}")
+    outside = _put(tmp_path / "other-cycle" / "spec.json", "{}")
+    cfg = json.loads(_previous(tmp_path).read_bytes())
+    cfg.update(
+        cycle=str(cycle),
+        calendar_attempt_run=str(inside.parent),
+        calendar_attempt_spec=str(outside),
+    )
+    previous = _put(tmp_path / "prev6.json", json.dumps(cfg))
+    result = tool.config(
+        previous,
+        tmp_path / "run6.json",
+        candidate_commit="c" * 40,
+        code_commit="d" * 40,
+        release_inputs_root=ri,
+        release_inputs_manifest_sha256=pin,
+    )
+    assert result["dropped"] == ["calendar_attempt_run"]
+    written = json.loads((tmp_path / "run6.json").read_bytes())
+    assert written["calendar_attempt_spec"] == str(
+        outside
+    )  # an existing path outside it stays
+    tool.move_aside({**written, "prep_pin_root": str(tmp_path / "world")}, apply=True)
+    assert not inside.exists()  # the key it named is no longer in the configuration
+
+
+def test_an_interrupted_cache_restore_is_finished_by_the_next_run(
+    tmp_path: Path,
+) -> None:
+    cfg = _world(tmp_path)
+    cycle = Path(cfg["cycle"])
+    # the cycle went aside, then the run stopped before the cache went back
+    tool.move_aside(cfg, apply=True, stamp="S")
+    assert not cycle.exists()
+    planned = tool.move_aside(cfg, apply=False, stamp="S2", keep_cache=True)
+    assert [next(iter(a)) for a in planned] == ["restore"]
+    tool.move_aside(cfg, apply=True, stamp="S2", keep_cache=True)
+    assert (cycle / "cache2" / "entry").read_text() == "cached"
+    assert not (cycle.with_name("c.aside-S") / "cache2").exists()
+    # finished: nothing more to do
+    assert tool.move_aside(cfg, apply=True, stamp="S3", keep_cache=True) == []

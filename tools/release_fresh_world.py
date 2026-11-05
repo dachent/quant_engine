@@ -185,10 +185,16 @@ def config(
         if not (sep and key):
             raise WorldError(f"--set expects KEY=VALUE, got {item!r}")
         cfg[key] = value
+    # a path that is gone, or that lies inside the cycle ``move-aside`` is about to move away, is stale
+    cycle = Path(str(cfg["cycle"])) if cfg.get("cycle") else None
     dropped = [
         key
         for key in STAGE_ONLY_PATHS
-        if isinstance(cfg.get(key), str) and not Path(str(cfg[key])).exists()
+        if isinstance(cfg.get(key), str)
+        and (
+            not Path(str(cfg[key])).exists()
+            or (cycle is not None and _inside(Path(str(cfg[key])), cycle))
+        )
     ]
     for key in dropped:
         del cfg[key]
@@ -275,11 +281,23 @@ def move_aside(
     )
     keep = cache if keep_cache and cache is not None and _inside(cache, cycle) else None
     targets = [] if _cycle_is_fresh(cycle, keep) else [cycle]
+    actions: list[dict[str, str]] = []
+    if keep is not None and not targets and not keep.exists():
+        # an earlier run moved the cycle and stopped before the cache went back: finish that restore
+        relative = keep.relative_to(cycle)
+        stranded = [
+            aside / relative
+            for aside in sorted(
+                cycle.parent.glob(f"{cycle.name}.aside-*"), reverse=True
+            )
+            if (aside / relative).exists()
+        ]
+        if stranded:
+            actions.append({"restore": str(stranded[0]), "to": str(keep)})
     for key in CONFIGURED_OUTPUTS:
         path = Path(str(cfg[key])) if cfg.get(key) else None
         if path is not None and not _inside(path, cycle):
             targets.append(path)
-    actions: list[dict[str, str]] = []
     for target in targets:
         if not _inside(target, world):
             raise WorldError(f"{target} lies outside the world {world}: not moved")
