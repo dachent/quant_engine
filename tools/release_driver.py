@@ -922,6 +922,17 @@ def check_release_inputs(run: Run, stage: Mapping[str, Any]) -> None:
         )
 
 
+def check_needs_config(run: Run, stage: Mapping[str, Any]) -> None:
+    """The run configuration keys only this stage reads are set (other stages run without them)."""
+
+    missing = [key for key in stage.get("needs_config", []) if key not in run.values]
+    if missing:
+        raise Refusal(
+            f"{stage['id']} needs the run configuration key(s) {', '.join(missing)}, which this "
+            "configuration does not set"
+        )
+
+
 def check_ready(
     run: Run,
     stage: Mapping[str, Any],
@@ -931,6 +942,7 @@ def check_ready(
 ) -> None:
     """Every refusal that applies before ``stage`` runs. Raises ``Refusal``; changes nothing."""
 
+    check_needs_config(run, stage)
     run.require_frozen_repo()
     check_config_paths(run)
     check_no_live_stage(run)

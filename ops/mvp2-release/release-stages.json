@@ -839,6 +839,10 @@
     {
       "id": "calendar-authority",
       "explicit": true,
+      "needs_config": [
+        "calendar_attempt_run",
+        "calendar_attempt_spec"
+      ],
       "requires": [
         "cycle-resolve"
       ],

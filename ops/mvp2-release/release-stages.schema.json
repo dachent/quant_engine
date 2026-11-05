@@ -91,6 +91,7 @@
         "replica_spec_guard": {"type": "string"},
         "release_inputs": {"$ref": "#/$defs/strings"},
         "only_ceremony": {"enum": ["full", "replica-only"]},
+        "needs_config": {"$ref": "#/$defs/strings"},
         "needs_attestation": {"type": ["boolean", "string"]},
         "state_snapshot_to": {"type": "string"},
         "pinned_inputs": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},

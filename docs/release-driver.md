@@ -405,14 +405,18 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
 2. `config --previous <previous run json> --out <run json> --candidate-commit C --code-commit T --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin>
    --set provenance_spec=<new seed> --set prep_pin_root_key=world --set prep_pin_root=<world> [--set run=... --set qa=...
    --set evidence_dest=...]`: repoints every occurrence of the old inputs root, verifies the inputs against the pin (never by repo path), takes the expected
-   baseline pin from the verified set and recomputes the provenance seed pin from its file, and drops the calendar authority's pin (it is never carried). Predecessor
+   baseline pin from the verified set and recomputes the provenance seed pin from its file, drops the calendar authority's pin (it is never carried) and drops `calendar_attempt_run` / `calendar_attempt_spec` when they point into a removed world (only the explicit `calendar-authority` stage reads them; it declares `needs_config` and refuses, naming the keys, when it is selected without them). Predecessor
    pins are never touched.
-3. `move-aside --config <run json> [--apply]`: the previous pass's `production`, `replica-production`, `replica-rehearsal`,
-   `clean-room`, `pre-chain-cycle.json` and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` get an
-   `.aside-<UTC time>` name. Only paths inside the world are moved; an existing aside name is refused.
-4. `carry-over --from-cycle <previous cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
+3. `move-aside --config <run json> [--keep-cache] [--apply]`: the whole previous cycle directory (`prov`, `ledger`,
+   `baseline`, `production`, the stage receipts and the rest: every stage records the run configuration it was produced under, so
+   a leftover output refuses the next pass) and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` that lie
+   outside it get an `.aside-<UTC time>` name; nothing is deleted. `--keep-cache` moves the retained cache (`retained_cache_root`,
+   inside the cycle) from the aside directory back into the fresh cycle, so a cache worth reusing is not rebuilt; a cycle that
+   holds only that cache is already fresh and a second run moves nothing. Only paths inside the world are moved; an existing aside
+   name is refused; the output lists each move (and the cache restore) with the aside name `carry-over` reads from.
+4. `carry-over --from-cycle <the aside cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
    `in/epoch-admission-policy.json` and each further file or directory named with `--carry` (the IBKR generation directory
-   `ibkr/`, when the carried preparation spec still names it). The retained cache is not copied: point `retained_cache_root` at the cache to reuse.
+   `ibkr/`, when the carried preparation spec still names it). The retained cache is not copied (see `--keep-cache`).
 5. `run --only cycle-seeds`, `--only cycle-resolve`, `--only calendar-seed`, then `config ... --require-calendar` again with the
    same arguments: it adds `calendar_authority_sha256` from `calendar_authority` (`{calendar_seed_reissued}`) and refuses to
    run before that file exists.
