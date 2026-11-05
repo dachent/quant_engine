@@ -806,6 +806,9 @@
     {
       "id": "calendar-seed",
       "explicit": true,
+      "needs_config": [
+        "calendar_authority_sha256"
+      ],
       "requires": [
         "cycle-resolve"
       ],
@@ -825,6 +828,12 @@
       "resume": {
         "same_argv": true
       },
+      "checks": [
+        {
+          "sha256_of": "{calendar_seed_reissued}",
+          "equals": "{calendar_authority_sha256}"
+        }
+      ],
       "argv": [
         "{python}",
         "{tools}/release_hwm_calendar.py",
@@ -840,6 +849,10 @@
     {
       "id": "calendar-authority",
       "explicit": true,
+      "needs_config": [
+        "calendar_attempt_run",
+        "calendar_attempt_spec"
+      ],
       "requires": [
         "cycle-resolve"
       ],
@@ -2101,7 +2114,7 @@
         "--pre-pointers",
         "{lane_real}/pointers-after-dry-run.json",
         "--preflight-evidence-dir",
-        "{production}/evidence",
+        "{lane_real}/evidence",
         "--post-evidence-dir",
         "{post_release_evidence}",
         "--rehearsal-root",

@@ -644,6 +644,25 @@ def test_a_per_cycle_input_carried_from_the_predecessor_must_be_redeclared(
     _refusal("OVERRIDE_NOT_ALLOWED", world.prep, pred, omit=["base_factor_file"])
 
 
+def test_a_predecessor_with_a_hand_pinned_sleeve_basis_is_accepted_and_not_carried(
+    world: World,
+) -> None:
+    # R2.2 added implementation_sleeve_basis (the v9 contract pin) to its preparation spec by hand: the next
+    # cycle's shape check refused it ("PREDECESSOR_SHAPE: unknown keys ['implementation_sleeve_basis']").
+    # The contract binds the previous release's receipt, so it is not carried: the attended preparation
+    # builds this cycle's own (carrying it would also be refused there: built and pinned are exclusive).
+    pred = copy.deepcopy(world.prep_pred)
+    contract = _put(world.old / "implementation-sleeve-basis.json", "r22 contract")
+    pred["implementation_sleeve_basis"] = _pin(contract)
+    spec = world.prep(pred)
+    assert "implementation_sleeve_basis" not in spec
+    # the rest of the carried spec is what an R2.1-shaped predecessor (no such key) yields
+    assert spec == world.prep(copy.deepcopy(world.prep_pred))
+    # unknown keys are still refused
+    pred["something_else"] = 1
+    assert "something_else" in _refusal("PREDECESSOR_SHAPE", world.prep, pred)
+
+
 def test_two_candidates_for_a_generation_id_are_refused(world: World) -> None:
     other = world.cycle / "baseline" / "generations" / ("c" * 64)
     _put(other / "generation.json", {"generation_id": "c" * 64})

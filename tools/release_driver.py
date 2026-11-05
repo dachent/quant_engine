@@ -919,6 +919,13 @@ def _claimed_outputs(run: Run, stage: Mapping[str, Any]) -> list[Path]:
     ]
 
 
+def _committed(run: Run) -> bool:
+    """The run's release has been committed (its ``commit`` stage completed)."""
+
+    record = run.state["stages"].get("commit")
+    return bool(record) and record.get("status") == "ok"
+
+
 def _verify_upstream(run: Run, stage: Mapping[str, Any], seen: set[str]) -> None:
     """Every stage this one requires, and theirs in turn, completed and still has the bytes it recorded.
 
@@ -963,6 +970,17 @@ def check_release_inputs(run: Run, stage: Mapping[str, Any]) -> None:
         )
 
 
+def check_needs_config(run: Run, stage: Mapping[str, Any]) -> None:
+    """The run configuration keys only this stage reads are set (other stages run without them)."""
+
+    missing = [key for key in stage.get("needs_config", []) if key not in run.values]
+    if missing:
+        raise Refusal(
+            f"{stage['id']} needs the run configuration key(s) {', '.join(missing)}, which this "
+            "configuration does not set"
+        )
+
+
 def check_ready(
     run: Run,
     stage: Mapping[str, Any],
@@ -972,6 +990,7 @@ def check_ready(
 ) -> None:
     """Every refusal that applies before ``stage`` runs. Raises ``Refusal``; changes nothing."""
 
+    check_needs_config(run, stage)
     check_interpreter(run, stage)
     run.require_frozen_repo()
     check_config_paths(run)
@@ -1045,6 +1064,15 @@ def run_checks(run: Run, stage: Mapping[str, Any]) -> list[str]:
             target = Path(run.expand(check["exists"]))
             if not target.exists():
                 failures.append(f"{target} does not exist")
+            continue
+        if "sha256_of" in check:
+            target = Path(run.expand(check["sha256_of"]))
+            expected = run.expand(check["equals"])
+            if not target.is_file() or _file_sha(target) != expected:
+                failures.append(
+                    f"{target} does not hash to the pinned {expected[:12]} "
+                    "(the run configuration pins another file)"
+                )
             continue
         file = Path(run.expand(check["json"]))
         try:
@@ -1288,10 +1316,19 @@ def verify_kept(
     record: Mapping[str, Any],
     *,
     check_binding: bool = True,
+    predecessor: bool | None = None,
 ) -> None:
-    """A completed stage is reusable only if the run, the code and its bytes are still what it recorded."""
+    """A completed stage is reusable only if the run, the code and its bytes are still what it recorded.
+
+    ``predecessor`` defaults to on until the run's ``commit`` stage has completed and is off from then on, for
+    every kept stage however it is reached (upstream of a selected stage, or selected itself): the predecessor pin names the release the run
+    replaced, and ``CURRENT_RELEASE`` is the run's own release from then on, so the pin can no longer match
+    it; the stages before the commit already checked it, at the moment it was true.
+    """
 
     run.require_frozen_repo()
+    if predecessor is None:
+        predecessor = not _committed(run)
     if check_binding and record.get("binding") != run.stage_binding(stage["id"]):
         raise Refusal(
             f"{stage['id']} was produced under a different run configuration or stage graph; rerun it with --only {stage['id']}"
@@ -1309,7 +1346,8 @@ def verify_kept(
     check_bound_ids(run, stage)
     run.recheck_release_inputs()
     check_pinned_inputs(run, stage)
-    check_predecessor(run, stage)
+    if predecessor:
+        check_predecessor(run, stage)
     check_expected_baseline(run, stage)
 
 

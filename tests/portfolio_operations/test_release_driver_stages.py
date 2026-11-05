@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -931,6 +932,7 @@ def _early_world(world: dict[str, Any]) -> dict[str, Any]:  # noqa: F811
     )
     return {
         "graph": _graph(world, [stage]),
+        "stage": stage,
         "disclosure": disclosure,
         "baseline": baseline,
         "calendar": calendar,
@@ -1138,6 +1140,49 @@ def test_a_kept_stage_rechecks_its_guarded_inputs_on_resume(
     assert (
         _drive(world, early["graph"]) == 2
     )  # the predecessor is no longer the committed release
+
+
+def test_the_stages_after_the_commit_do_not_recheck_the_moved_predecessor(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # R2.2: post-commit-verify refused ("predecessor pin names release 91c77c1b, CURRENT_RELEASE is
+    # fe87d42d"): the commit moves CURRENT_RELEASE to the run's own release, so the pin of the release it
+    # replaced can no longer match, and the upstream stages' recorded checks must not insist that it does
+    early = _early_world(world)
+    stages = [
+        early["stage"],
+        {
+            "id": "commit",
+            "requires": ["early"],
+            "outputs": ["{cycle}/commit.txt"],
+            "argv": _write_stage("{cycle}/commit.txt"),
+        },
+        {
+            "id": "after",
+            "requires": ["commit"],
+            "outputs": ["{cycle}/after.txt"],
+            "argv": _write_stage("{cycle}/after.txt"),
+        },
+    ]
+    graph = _graph(world, stages)
+    assert _drive(world, graph, "--only", "early") == 0
+    assert _drive(world, graph, "--only", "commit") == 0
+    # the commit moved the pointer
+    (early["coordination"] / "CURRENT_RELEASE.json").write_text(
+        json.dumps({"release_id": "fe87d42d" + "0" * 56, "state": "COMMITTED"}),
+        encoding="utf-8",
+    )
+    assert _drive(world, graph, "--only", "after") == 0
+    assert (world["cycle"] / "after.txt").is_file()
+    # a stage selected directly is a kept stage too: the whole graph (every stage kept) resumes, it does not
+    # refuse at the kept stage that carries the predecessor rule
+    assert _drive(world, graph) == 0
+    assert _drive(world, graph, "--through", "after") == 0
+    # before the commit the same moved pointer is still refused
+    other = _graph(
+        world, [stages[0], {**stages[2], "id": "later", "requires": ["early"]}]
+    )
+    assert _drive(world, other, "--only", "later") == 2
 
 
 def test_a_stage_that_archives_the_state_gets_it_without_itself_running(
@@ -1893,3 +1938,60 @@ def test_a_stage_that_runs_another_python_than_the_graph_requires_is_refused(
     assert not (world["cycle"] / "out.txt").exists()
     assert _drive(world, _graph(world, [stage], required_python=here)) == 0
     assert (world["cycle"] / "out.txt").is_file()
+
+
+def test_post_commit_verify_reads_the_preflight_receipt_of_the_real_lane() -> None:
+    # the receipt the commit authorization came from is the real lane's (laneout/real/evidence), not a
+    # production/evidence directory a lanes run never writes
+    argv = _stage("post-commit-verify")["argv"]
+    assert argv[argv.index("--preflight-evidence-dir") + 1] == "{lane_real}/evidence"
+
+
+def test_a_stage_that_needs_run_configuration_keys_is_refused_by_name_without_them(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # R3 pass 6: calendar_attempt_run/spec are read only by the explicit calendar-authority stage; a
+    # configuration without them runs every other stage, and that stage refuses naming the keys
+    assert _stage("calendar-authority")["needs_config"] == [
+        "calendar_attempt_run",
+        "calendar_attempt_spec",
+    ]
+    needing = {
+        "id": "needs",
+        "needs_config": ["only_for_needs"],
+        "outputs": ["{cycle}/needs.txt"],
+        "argv": _write_stage("{cycle}/needs.txt"),
+    }
+    graph = _graph(world, [CHAIN[0], needing])
+    assert (
+        _drive(world, graph, "--only", "one") == 0
+    )  # other stages do not need the key
+    assert _drive(world, graph, "--only", "needs") == 2
+    assert not (world["cycle"] / "needs.txt").exists()
+    _config(world, only_for_needs="x")
+    assert _drive(world, graph, "--only", "needs") == 0
+
+
+def test_the_calendar_seed_stage_must_reproduce_the_pinned_bytes(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # the pin is derived before the stage runs; a file that hashes to anything else is refused
+    stage = _stage("calendar-seed")
+    assert stage["checks"] == [
+        {
+            "sha256_of": "{calendar_seed_reissued}",
+            "equals": "{calendar_authority_sha256}",
+        }
+    ]
+    assert stage["needs_config"] == ["calendar_authority_sha256"]
+    writing = {
+        "id": "writes",
+        "outputs": ["{cycle}/out.txt"],
+        "argv": _write_stage("{cycle}/out.txt"),
+        "checks": [{"sha256_of": "{cycle}/out.txt", "equals": "{pin}"}],
+    }
+    graph = _graph(world, [writing])
+    _config(world, pin="0" * 64)
+    assert _drive(world, graph) != 0  # the file hashes to something else
+    _config(world, pin=hashlib.sha256(b"x").hexdigest())
+    assert _drive(world, graph, "--replace") == 0

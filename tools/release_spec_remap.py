@@ -400,6 +400,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     command.add_argument("--out", type=Path, required=True)
     command.add_argument("--carried-only", action="store_true")
     command.add_argument(
+        "--expect-rewritten",
+        type=int,
+        help="refuse unless exactly this many paths are rewritten (the count of the previous pass)",
+    )
+    command.add_argument(
         "--plan", action="store_true", help="check and print, write nothing"
     )
     args = parser.parse_args(argv)
@@ -414,6 +419,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             bound,
             args.carried_only,
         )
+        if args.expect_rewritten is not None and (
+            len(outcome.rewritten) != args.expect_rewritten
+        ):
+            raise SpecRemapError(
+                "COUNT",
+                f"{len(outcome.rewritten)} path(s) rewritten, expected {args.expect_rewritten}",
+            )
         data = dumps(outcome.document)
         if not args.plan:
             _put(args.out, data)
