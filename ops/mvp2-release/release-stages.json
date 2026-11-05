@@ -805,6 +805,9 @@
     {
       "id": "calendar-seed",
       "explicit": true,
+      "needs_config": [
+        "calendar_authority_sha256"
+      ],
       "requires": [
         "cycle-resolve"
       ],
@@ -824,6 +827,12 @@
       "resume": {
         "same_argv": true
       },
+      "checks": [
+        {
+          "sha256_of": "{calendar_seed_reissued}",
+          "equals": "{calendar_authority_sha256}"
+        }
+      ],
       "argv": [
         "{python}",
         "{tools}/release_hwm_calendar.py",

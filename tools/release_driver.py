@@ -1016,6 +1016,15 @@ def run_checks(run: Run, stage: Mapping[str, Any]) -> list[str]:
             if not target.exists():
                 failures.append(f"{target} does not exist")
             continue
+        if "sha256_of" in check:
+            target = Path(run.expand(check["sha256_of"]))
+            expected = run.expand(check["equals"])
+            if not target.is_file() or _file_sha(target) != expected:
+                failures.append(
+                    f"{target} does not hash to the pinned {expected[:12]} "
+                    "(the run configuration pins another file)"
+                )
+            continue
         file = Path(run.expand(check["json"]))
         try:
             actual = _json_path(_read_json(file), check["path"])

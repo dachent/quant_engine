@@ -48,6 +48,8 @@ REFRESHED_PINS: Final = (
 SLEEVES_RELATIVE: Final = "ops/mvp2-release/inputs/sleeves"
 BASELINE_RELATIVE: Final = "acceptance/expected-baseline.json"
 SLEEVE_ROOT_ID: Final = "sleeve-policy"
+# where the calendar-seed stage writes the reissued authority, relative to the cycle (the graph's calendar_seed_reissued)
+CALENDAR_SEED_OUTPUT: Final = "calendar-seed-authority.json"
 
 
 class WorldError(Exception):
@@ -198,21 +200,90 @@ def config(
     ]
     for key in dropped:
         del cfg[key]
+    # the authority the ``calendar-seed`` stage writes: a file at that path now is the previous pass's (config
+    # runs before move-aside) and is never what gets pinned; its pin comes from the pinned seed
+    seed_output = cycle / CALENDAR_SEED_OUTPUT if cycle is not None else None
+    authority = cfg.get("calendar_authority")
+    from_seed = (
+        _calendar_pin_from_seed(cfg)
+        if isinstance(authority, str)
+        and seed_output is not None
+        and Path(authority).as_posix() == seed_output.as_posix()
+        else None
+    )
     pending: list[str] = []
+    calendar_pin = "from the authority file"
     for pin, file_key in REFRESHED_PINS:
         file = cfg.get(file_key)
-        if isinstance(file, str) and Path(file).is_file():
+        if pin == "calendar_authority_sha256" and from_seed is not None:
+            cfg[pin] = from_seed
+            calendar_pin = "derived from the pinned seed"
+        elif isinstance(file, str) and Path(file).is_file():
             cfg[pin] = _sha(Path(file))
         else:
             cfg.pop(pin, None)
             pending.append(pin)
+    if "calendar_authority_sha256" in pending:
+        calendar_pin = "pending"
+        derived = _calendar_pin_from_seed(cfg)
+        if derived is not None:
+            cfg["calendar_authority_sha256"] = derived
+            pending.remove("calendar_authority_sha256")
+            calendar_pin = "derived from the pinned seed"
     if require_calendar and "calendar_authority_sha256" in pending:
         raise WorldError(
             "the calendar authority file does not exist yet: run --only cycle-seeds, "
             "cycle-resolve and calendar-seed first, then write the configuration again"
         )
     state = _write_config(out, cfg)
-    return {"state": state, "out": str(out), "pending": pending, "dropped": dropped}
+    return {
+        "state": state,
+        "out": str(out),
+        "pending": pending,
+        "dropped": dropped,
+        "calendar_authority_sha256": cfg.get("calendar_authority_sha256"),
+        "calendar_pin": calendar_pin,
+    }
+
+
+def _calendar_pin_from_seed(cfg: Mapping[str, Any]) -> str | None:
+    """The sha256 the ``calendar-seed`` stage will write, derived from the pinned seed (or None).
+
+    The seed is the authority the previous committed release pinned (``calendar_seed_authority``
+    with its ``calendar_seed_authority_sha256``): it must hash to that pin, never be a file the run was
+    handed. ``release_hwm_calendar reissue`` is deterministic in the seed and the frozen repository's
+    HWM policy, so the pin is known before any stage runs and the stage must reproduce it (it refuses a
+    file that hashes to anything else). A pin from another cycle's configuration is never carried.
+    """
+
+    seed_path, seed_pin = (
+        cfg.get("calendar_seed_authority"),
+        cfg.get("calendar_seed_authority_sha256"),
+    )
+    repo = cfg.get("repo_root")
+    if not (
+        isinstance(seed_path, str)
+        and isinstance(seed_pin, str)
+        and isinstance(repo, str)
+    ):
+        return None
+    seed_file = Path(seed_path)
+    if not seed_file.is_file() or _sha(seed_file) != seed_pin:
+        raise WorldError(
+            "the calendar seed authority is not the file pinned by calendar_seed_authority_sha256"
+        )
+    import release_hwm_calendar as calendar
+
+    try:
+        effective, policy_sha = calendar.effective_policy_sha256(Path(repo))
+        data = calendar.render(
+            calendar.reissue_authority(
+                _json(seed_file, "calendar seed"), effective, policy_sha
+            )
+        )
+    except calendar.CalendarAuthorityError as exc:
+        raise WorldError(f"the calendar seed cannot be reissued: {exc}") from exc
+    return hashlib.sha256(data).hexdigest()
 
 
 def _write_config(out: Path, cfg: Mapping[str, Any]) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1951,3 +1952,28 @@ def test_a_stage_that_needs_run_configuration_keys_is_refused_by_name_without_th
     assert not (world["cycle"] / "needs.txt").exists()
     _config(world, only_for_needs="x")
     assert _drive(world, graph, "--only", "needs") == 0
+
+
+def test_the_calendar_seed_stage_must_reproduce_the_pinned_bytes(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # the pin is derived before the stage runs; a file that hashes to anything else is refused
+    stage = _stage("calendar-seed")
+    assert stage["checks"] == [
+        {
+            "sha256_of": "{calendar_seed_reissued}",
+            "equals": "{calendar_authority_sha256}",
+        }
+    ]
+    assert stage["needs_config"] == ["calendar_authority_sha256"]
+    writing = {
+        "id": "writes",
+        "outputs": ["{cycle}/out.txt"],
+        "argv": _write_stage("{cycle}/out.txt"),
+        "checks": [{"sha256_of": "{cycle}/out.txt", "equals": "{pin}"}],
+    }
+    graph = _graph(world, [writing])
+    _config(world, pin="0" * 64)
+    assert _drive(world, graph) != 0  # the file hashes to something else
+    _config(world, pin=hashlib.sha256(b"x").hexdigest())
+    assert _drive(world, graph, "--replace") == 0

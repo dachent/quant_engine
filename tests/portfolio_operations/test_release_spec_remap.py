@@ -417,6 +417,19 @@ def test_the_command_writes_the_remapped_spec_atomically_and_create_only(
     assert out.read_bytes() == data
 
 
+def test_the_command_refuses_a_rewritten_count_other_than_the_one_expected(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # a predecessor selected-inputs or preparation spec is remapped with the same command; the count of the
+    # previous pass (42 and 44 for the R2.2 files) makes a mapping that matched too few or too many refuse
+    out = world["tmp"] / "pred.json"
+    assert _cli(world, out, "--expect-rewritten", "4", "--plan") == 1
+    assert "COUNT: 5 path(s) rewritten, expected 4" in capsys.readouterr().err
+    assert not out.exists()
+    assert _cli(world, out, "--expect-rewritten", "5") == 0
+    assert out.is_file()
+
+
 def test_a_partial_temporary_file_from_an_interrupted_run_does_not_block_the_output(
     world: dict[str, Any],
 ) -> None:

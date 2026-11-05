@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from typing import Any
 
 import pytest
 
@@ -375,3 +376,129 @@ def test_an_interrupted_cache_restore_is_finished_by_the_next_run(
     assert not (cycle.with_name("c.aside-S") / "cache2").exists()
     # finished: nothing more to do
     assert tool.move_aside(cfg, apply=True, stamp="S3", keep_cache=True) == []
+
+
+class _FakeCalendar:
+    """release_hwm_calendar without the ledger package: the reissue is deterministic in seed and policy."""
+
+    class CalendarAuthorityError(Exception):
+        pass
+
+    @staticmethod
+    def effective_policy_sha256(repo_root: Path) -> tuple[bytes, str]:
+        policy = (repo_root / "policy").read_bytes()
+        return policy, _sha(policy)
+
+    @staticmethod
+    def reissue_authority(
+        seed: dict[str, Any], effective: bytes, sha: str
+    ) -> dict[str, Any]:
+        return {**seed, "hwm_policy_sha256": sha}
+
+    @staticmethod
+    def render(authority: dict[str, Any]) -> bytes:
+        return json.dumps(authority, indent=1, sort_keys=True).encode()
+
+
+def _seeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, bytes]:
+    monkeypatch.setitem(sys.modules, "release_hwm_calendar", _FakeCalendar)
+    repo = tmp_path / "repo"
+    _put(repo / "policy", "policy-bytes")
+    seed = _put(tmp_path / "seed.json", json.dumps({"calendars": [1]}))
+    cfg = json.loads(_previous(tmp_path).read_bytes())
+    cfg.update(
+        repo_root=str(repo),
+        calendar_seed_authority=str(seed),
+        calendar_seed_authority_sha256=_sha(seed.read_bytes()),
+    )
+    expected = _FakeCalendar.render(
+        _FakeCalendar.reissue_authority(
+            {"calendars": [1]}, b"policy-bytes", _sha(b"policy-bytes")
+        )
+    )
+    return _put(tmp_path / "prev3.json", json.dumps(cfg)), expected
+
+
+def test_the_calendar_pin_is_derived_from_the_pinned_seed_before_any_stage_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # R3 pass 6: the pin was added after the pre stages ran, which changed their binding and forced a
+    # rerun. One configuration write carries it: the reissue is deterministic in the pinned seed and the
+    # frozen repository's HWM policy, and the calendar-seed stage must reproduce exactly these bytes.
+    previous, expected = _seeded(tmp_path, monkeypatch)
+    result = tool.config(
+        previous, tmp_path / "run.json", candidate_commit="c" * 40, code_commit="d" * 40
+    )
+    written = json.loads((tmp_path / "run.json").read_bytes())
+    assert result["calendar_pin"] == "derived from the pinned seed"
+    assert (
+        written["calendar_authority_sha256"]
+        == _sha(expected)
+        == result["calendar_authority_sha256"]
+    )
+    assert result["pending"] == []
+    # the stale pin the previous configuration carried ("4" * 64) is not what is written
+    assert written["calendar_authority_sha256"] != "4" * 64
+
+
+def test_a_seed_that_is_not_the_pinned_file_gives_no_calendar_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    previous, _ = _seeded(tmp_path, monkeypatch)
+    cfg = json.loads(previous.read_bytes())
+    Path(cfg["calendar_seed_authority"]).write_text("{}")  # not the pinned bytes
+    previous = _put(tmp_path / "prev4.json", json.dumps(cfg))
+    with pytest.raises(tool.WorldError, match="not the file pinned"):
+        tool.config(
+            previous,
+            tmp_path / "run4.json",
+            candidate_commit="c" * 40,
+            code_commit="d" * 40,
+        )
+    assert not (tmp_path / "run4.json").exists()
+    # without seed keys nothing is derived and the pin stays pending (never carried)
+    plain = tool.config(
+        _previous(tmp_path),
+        tmp_path / "run5.json",
+        candidate_commit="c" * 40,
+        code_commit="d" * 40,
+    )
+    assert plain["pending"] == ["calendar_authority_sha256"]
+    assert "calendar_authority_sha256" not in json.loads(
+        (tmp_path / "run5.json").read_bytes()
+    )
+
+
+def test_a_previous_authority_at_the_seed_output_path_is_not_what_gets_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # config runs before move-aside, so the previous pass's reissued authority still sits where the calendar-seed
+    # stage will write: pinning its hash would bind the old policy and the stage's different bytes would then fail
+    previous, expected = _seeded(tmp_path, monkeypatch)
+    cfg = json.loads(previous.read_bytes())
+    cycle = tmp_path / "world" / "c"
+    old_authority = _put(
+        cycle / tool.CALENDAR_SEED_OUTPUT, "the previous pass's authority"
+    )
+    cfg.update(cycle=str(cycle), calendar_authority=str(old_authority))
+    previous = _put(tmp_path / "prev7.json", json.dumps(cfg))
+    result = tool.config(
+        previous,
+        tmp_path / "run7.json",
+        candidate_commit="c" * 40,
+        code_commit="d" * 40,
+    )
+    written = json.loads((tmp_path / "run7.json").read_bytes())
+    assert result["calendar_pin"] == "derived from the pinned seed"
+    assert written["calendar_authority_sha256"] == _sha(expected)
+    assert written["calendar_authority_sha256"] != _sha(old_authority.read_bytes())
+    # an authored authority elsewhere (a later calendar-authority attempt) is still pinned from its own file
+    authored = _put(tmp_path / "authored.json", "authored authority")
+    cfg["calendar_authority"] = str(authored)
+    other = _put(tmp_path / "prev8.json", json.dumps(cfg))
+    tool.config(
+        other, tmp_path / "run8.json", candidate_commit="c" * 40, code_commit="d" * 40
+    )
+    assert json.loads((tmp_path / "run8.json").read_bytes())[
+        "calendar_authority_sha256"
+    ] == _sha(authored.read_bytes())

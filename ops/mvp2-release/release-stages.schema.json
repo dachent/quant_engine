@@ -63,11 +63,13 @@
       "additionalProperties": false,
       "oneOf": [
         {"required": ["exists"]},
+        {"required": ["sha256_of", "equals"]},
         {"required": ["json", "path", "equals"]},
         {"required": ["json", "path", "one_of"]}
       ],
       "properties": {
         "exists": {"type": "string"},
+        "sha256_of": {"type": "string"},
         "json": {"type": "string"},
         "path": {"type": "string"},
         "equals": {},
