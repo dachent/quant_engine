@@ -664,6 +664,11 @@
       2
     ],
     [
+      "release_inputs",
+      "sleeve_disclosures",
+      1
+    ],
+    [
       "release_ledger_spec",
       "provider_ledger",
       1
