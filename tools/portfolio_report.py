@@ -6460,6 +6460,22 @@ def _history_contract(
     }
 
 
+# the reconciliation's workbook parity row when no workbook was supplied: the desktop workbook is on permanent
+# hold and no input of the release, so nothing was compared and the row names no observed window
+_UNSUPPLIED_PARITY_STATUS: Final = "NOT_SUPPLIED_DERIVATION_SELFSUFFICIENT"
+
+
+def _is_unsupplied_parity_row(value: Mapping[str, Any]) -> bool:
+    """That row, exactly: its status, no observation, and no window (absent or null, never a half-window)."""
+
+    return (
+        value.get("status") == _UNSUPPLIED_PARITY_STATUS
+        and value.get("observations") == 0
+        and value.get("observed_start") is None
+        and value.get("observed_end") is None
+    )
+
+
 def _validate_implementation_observed_intervals(
     value: object,
     *,
@@ -6467,6 +6483,8 @@ def _validate_implementation_observed_intervals(
     field_path: str,
 ) -> None:
     if isinstance(value, Mapping):
+        if _is_unsupplied_parity_row(value):
+            return
         start = (
             _date(value["observed_start"], f"{field_path}.observed_start")
             if "observed_start" in value
