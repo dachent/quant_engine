@@ -70,6 +70,7 @@ def test_the_shipped_graph_matches_its_schema() -> None:
         lambda g: g["stages"][0].update(id="Bad Id"),
         lambda g: g["stages"][1].update(expect_rc="1"),
         lambda g: g.update(schema_version=2),
+        lambda g: g.pop("required_python"),
         lambda g: g["stages"][1].update(checks=[{"json": "a", "path": "b"}]),
     ],
 )

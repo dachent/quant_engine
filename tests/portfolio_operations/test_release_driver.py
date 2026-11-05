@@ -70,7 +70,14 @@ def _write_stage(out: str, text: str = "x") -> list[str]:
 
 
 def _graph(world: dict[str, Any], stages: list[dict[str, Any]], **extra: Any) -> Path:
-    graph = {"schema_version": 1, "paths": {}, "derive": {}, "stages": stages, **extra}
+    graph = {
+        "schema_version": 1,
+        "required_python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "paths": {},
+        "derive": {},
+        "stages": stages,
+        **extra,
+    }
     path = world["tmp"] / "graph.json"
     path.write_text(json.dumps(graph), encoding="utf-8")
     return path
