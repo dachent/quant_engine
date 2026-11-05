@@ -40,6 +40,20 @@ CARRIED: Final = ("in/epoch-admission-policy.json",)
 # run configuration keys only the explicit calendar-authority stage reads: kept when their files exist, dropped
 # when they point into a removed world (the stage refuses, naming them, if it is selected without them)
 STAGE_ONLY_PATHS: Final = ("calendar_attempt_run", "calendar_attempt_spec")
+# run configuration keys that name a file or directory the pass READS: when one lies inside the cycle that
+# move-aside moves away, the fresh input would go aside with the old outputs
+CONFIG_BOUND_INPUTS: Final = (
+    "provenance_spec",
+    "release_inputs_root",
+    "cycle_manifest",
+    "cycle_roots_file",
+    "calendar_seed_authority",
+    "predecessor_ledger_spec",
+    "predecessor_selected_inputs",
+    "predecessor_prep_spec",
+    "expected_baseline",
+    "disclosure_inputs",
+)
 # pins this tool may recompute: (config key, config key of the file it pins)
 REFRESHED_PINS: Final = (
     ("provenance_spec_sha256", "provenance_spec"),
@@ -352,6 +366,17 @@ def move_aside(
     )
     keep = cache if keep_cache and cache is not None and _inside(cache, cycle) else None
     targets = [] if _cycle_is_fresh(cycle, keep) else [cycle]
+    if cycle in targets:
+        bound = sorted(
+            key
+            for key in CONFIG_BOUND_INPUTS
+            if cfg.get(key) and _inside(Path(str(cfg[key])), cycle)
+        )
+        if bound:
+            raise WorldError(
+                f"the configuration reads {', '.join(bound)} from inside the cycle {cycle}, which goes "
+                "aside whole: keep them outside the cycle (a fresh input would be moved with the old outputs)"
+            )
     actions: list[dict[str, str]] = []
     if keep is not None and not targets and not keep.exists():
         # an earlier run moved the cycle and stopped before the cache went back: finish that restore

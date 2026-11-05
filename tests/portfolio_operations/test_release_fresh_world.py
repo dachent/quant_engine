@@ -502,3 +502,21 @@ def test_a_previous_authority_at_the_seed_output_path_is_not_what_gets_pinned(
     assert json.loads((tmp_path / "run8.json").read_bytes())[
         "calendar_authority_sha256"
     ] == _sha(authored.read_bytes())
+
+
+def test_a_fresh_input_inside_the_cycle_is_refused_not_moved_aside(
+    tmp_path: Path,
+) -> None:
+    # the whole cycle goes aside: a configuration-bound input prepared beneath it (the established layout puts the
+    # provenance seed and the release inputs under cycle/in) would be moved with the old outputs and the run would fail
+    cfg = _world(tmp_path)
+    cycle = Path(cfg["cycle"])
+    seed = _put(cycle / "in" / "provenance-spec.json", "fresh seed")
+    for key in ("provenance_spec", "release_inputs_root"):
+        bad = {**cfg, key: str(seed if key == "provenance_spec" else cycle / "in")}
+        with pytest.raises(tool.WorldError, match=f"reads {key} from inside the cycle"):
+            tool.move_aside(bad, apply=True, stamp="S")
+        assert seed.is_file() and (cycle / "prov" / "marker").is_file()  # nothing moved
+    outside = _put(tmp_path / "cyc" / "provenance-spec.json", "fresh seed")
+    tool.move_aside({**cfg, "provenance_spec": str(outside)}, apply=True, stamp="S")
+    assert outside.is_file() and not cycle.exists()

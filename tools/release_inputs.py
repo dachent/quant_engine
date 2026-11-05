@@ -210,6 +210,12 @@ def _rebind_predecessor(args: argparse.Namespace) -> int:
     out = args.out
     if out.exists() and any(out.iterdir()):
         raise ReleaseInputsError(f"rebind target is not empty: {out}")
+    source = loaded.root.resolve()
+    target = out.resolve()
+    if target == source or source in target.parents or target in source.parents:
+        raise ReleaseInputsError(
+            "the new root must be a separate directory: it lies inside (or contains) the source root"
+        )
     inside = REPO_ROOT.resolve()
     if out.resolve() == inside or inside in out.resolve().parents:
         raise ReleaseInputsError(
