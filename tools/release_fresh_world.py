@@ -206,13 +206,67 @@ def config(
         else:
             cfg.pop(pin, None)
             pending.append(pin)
+    calendar_pin = "from the authority file" if not pending else "pending"
+    if "calendar_authority_sha256" in pending:
+        derived = _calendar_pin_from_seed(cfg)
+        if derived is not None:
+            cfg["calendar_authority_sha256"] = derived
+            pending.remove("calendar_authority_sha256")
+            calendar_pin = "derived from the pinned seed"
     if require_calendar and "calendar_authority_sha256" in pending:
         raise WorldError(
             "the calendar authority file does not exist yet: run --only cycle-seeds, "
             "cycle-resolve and calendar-seed first, then write the configuration again"
         )
     state = _write_config(out, cfg)
-    return {"state": state, "out": str(out), "pending": pending, "dropped": dropped}
+    return {
+        "state": state,
+        "out": str(out),
+        "pending": pending,
+        "dropped": dropped,
+        "calendar_authority_sha256": cfg.get("calendar_authority_sha256"),
+        "calendar_pin": calendar_pin,
+    }
+
+
+def _calendar_pin_from_seed(cfg: Mapping[str, Any]) -> str | None:
+    """The sha256 the ``calendar-seed`` stage will write, derived from the pinned seed (or None).
+
+    The seed is the authority the previous committed release pinned (``calendar_seed_authority``
+    with its ``calendar_seed_authority_sha256``): it must hash to that pin, never be a file the run was
+    handed. ``release_hwm_calendar reissue`` is deterministic in the seed and the frozen repository's
+    HWM policy, so the pin is known before any stage runs and the stage must reproduce it (it refuses a
+    file that hashes to anything else). A pin from another cycle's configuration is never carried.
+    """
+
+    seed_path, seed_pin = (
+        cfg.get("calendar_seed_authority"),
+        cfg.get("calendar_seed_authority_sha256"),
+    )
+    repo = cfg.get("repo_root")
+    if not (
+        isinstance(seed_path, str)
+        and isinstance(seed_pin, str)
+        and isinstance(repo, str)
+    ):
+        return None
+    seed_file = Path(seed_path)
+    if not seed_file.is_file() or _sha(seed_file) != seed_pin:
+        raise WorldError(
+            "the calendar seed authority is not the file pinned by calendar_seed_authority_sha256"
+        )
+    import release_hwm_calendar as calendar
+
+    try:
+        effective, policy_sha = calendar.effective_policy_sha256(Path(repo))
+        data = calendar.render(
+            calendar.reissue_authority(
+                _json(seed_file, "calendar seed"), effective, policy_sha
+            )
+        )
+    except calendar.CalendarAuthorityError as exc:
+        raise WorldError(f"the calendar seed cannot be reissued: {exc}") from exc
+    return hashlib.sha256(data).hexdigest()
 
 
 def _write_config(out: Path, cfg: Mapping[str, Any]) -> str:
