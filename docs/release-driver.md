@@ -357,6 +357,11 @@ The repository must be clean at `code_commit` before and after. The post-commit 
 (`qe-post-commit-verify/1`: file digests and ids, no absolute paths) are written under
 `{cycle}/post-commit/`.
 
+The single preflight receipt is the real lane's (`{lane_real}/evidence`, the dry run the commit authorization came from).
+After the commit the stages before it are re-verified for their recorded bytes but no longer against the predecessor pin:
+the pin names the release the run replaced and `CURRENT_RELEASE` is now the run's own, so a pin check would refuse every
+post-commit stage by construction. The pin was checked, when it was true, by the stages that carry the rule.
+
 
 Neither implementation stage takes the desktop workbook: it is on permanent hold (AGENTS.md), so the shipped graph passes no
 `--tt-workbook` and lists no `tt-workbook.xlsx` among the stages' release inputs. The reconciliation never needed it (its
