@@ -127,6 +127,10 @@ PER_CYCLE_OPTIONAL = frozenset(
         "weekly_gap_fill_spec",
     }
 )
+# keys a predecessor may carry that the next cycle's spec never does: R2.2's hand-pinned
+# ``implementation_sleeve_basis`` (the contract binds that release's provider receipt and generation ids, which
+# bind the repository sha), where the next cycle's attended preparation builds its own from the model book export
+PREDECESSOR_ONLY = frozenset({"implementation_sleeve_basis"})
 PLAN_REGENERATED = frozenset(
     {
         "catalog",
@@ -822,7 +826,13 @@ def build_prep_spec(
         **(bundles or {}),
     }
     bundle_pick = dict(bundle_ids or {})
-    known = REGENERATED | CARRIED_REQUIRED | CARRIED_OPTIONAL | PER_CYCLE_OPTIONAL
+    known = (
+        REGENERATED
+        | CARRIED_REQUIRED
+        | CARRIED_OPTIONAL
+        | PER_CYCLE_OPTIONAL
+        | PREDECESSOR_ONLY
+    )
     unknown = sorted(set(predecessor) - known)
     missing = sorted(CARRIED_REQUIRED - set(predecessor))
     if unknown or missing or predecessor.get("schema_version") != 1:
@@ -853,7 +863,9 @@ def build_prep_spec(
     _check_cycle_binding(resolved, cycle, ledger_spec, baseline_spec, selected)
 
     carried: dict[str, Any] = {
-        k: copy.deepcopy(v) for k, v in predecessor.items() if k not in REGENERATED
+        k: copy.deepcopy(v)
+        for k, v in predecessor.items()
+        if k not in REGENERATED and k not in PREDECESSOR_ONLY
     }
     sleeve_old = predecessor["sleeve_facts"]
     plans_old = predecessor["plans"]

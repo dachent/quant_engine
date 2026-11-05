@@ -189,6 +189,7 @@ resolves them from a **release-inputs root outside the repository** instead.
   repo copy once a root is configured.
 * `tools/release_inputs.py`: `census` (tracked files by disposition), `extract` (copy a commit's
   release-input blobs into a new root outside the repo and write the manifest; prints the pin),
+  `rebind-predecessor` (build the next root whose disclosure predecessor is the committed release, derived from its bytes; prints the new pin; see `docs/release-driver.md`),
   `verify`, `path` (both take `--cutoff` and refuse a set for another one). The driver re-hashes the pinned baseline at every stage start and every kept-stage check; `stop`/`status` never load the root.
 * The registry (`REGISTRY` in `release_inputs.py`) classifies tracked paths: `release-input` (leaves
   Git), `code-bound` (embeds the cutoff but is read by code from a fixed repo path; moving it needs a

@@ -654,6 +654,11 @@
       1
     ],
     [
+      "release_fresh_world",
+      "release_hwm_calendar",
+      1
+    ],
+    [
       "release_hwm_calendar",
       "portfolio_hwm_selected_inputs",
       1
@@ -662,6 +667,11 @@
       "release_hwm_calendar",
       "portfolio_invested_capital",
       2
+    ],
+    [
+      "release_inputs",
+      "sleeve_disclosures",
+      1
     ],
     [
       "release_ledger_spec",

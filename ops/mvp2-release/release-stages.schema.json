@@ -63,11 +63,13 @@
       "additionalProperties": false,
       "oneOf": [
         {"required": ["exists"]},
+        {"required": ["sha256_of", "equals"]},
         {"required": ["json", "path", "equals"]},
         {"required": ["json", "path", "one_of"]}
       ],
       "properties": {
         "exists": {"type": "string"},
+        "sha256_of": {"type": "string"},
         "json": {"type": "string"},
         "path": {"type": "string"},
         "equals": {},
@@ -91,6 +93,7 @@
         "replica_spec_guard": {"type": "string"},
         "release_inputs": {"$ref": "#/$defs/strings"},
         "only_ceremony": {"enum": ["full", "replica-only"]},
+        "needs_config": {"$ref": "#/$defs/strings"},
         "needs_attestation": {"type": ["boolean", "string"]},
         "state_snapshot_to": {"type": "string"},
         "pinned_inputs": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 2}},

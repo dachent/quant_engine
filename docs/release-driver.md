@@ -300,8 +300,15 @@ runs, naming the file. `prep-spec` reads the crosswalk and policy through that s
 (`--release-inputs-root`, `--release-inputs-manifest-sha256`). The cycle manifest's `public_bundles` name the
 bundle roots (the directories that hold the generations), never a generation directory. The disclosure inputs'
 `predecessor_comparison` is checked against the COMMITTED `CURRENT_RELEASE.json` and panel (below), so once
-R2.1 commits it must be rebound to R2.1 (`91c77c1b`) in the release-inputs set before the next run; a pin still
-naming R2 refuses at `selected-inputs`.
+a release commits, the next cycle needs a release-inputs root whose comparison names it; a pin still naming the release before
+refuses at `selected-inputs`. `tools/release_inputs.py rebind-predecessor --root <root> --manifest-sha256 <pin> --data-root <workspace>
+--out <new root>` builds that root: the release id, panel generation and dashboard data file (id and sha256) are derived from the
+committed release in the workspace, never typed; only the authored `pointers` are kept, the sleeve policy manifest's pin of the
+disclosure inputs and the root's manifest are rebuilt, and the new manifest sha256 (the pin the run configuration takes) is printed.
+It refuses a non-empty target, a release that is not committed, a disclosure file in another format, and any other file in the root
+that still names the old release or panel (`--allow-stale-references` lists them and goes on). A root that already names the committed
+release is reported `already_current` and nothing is written. The predecessor set files (`predecessor_selected_inputs`,
+`predecessor_prep_spec`, `predecessor_ledger_spec`) are a separate input: the previous cycle's own seeds, not compared with `CURRENT_RELEASE`.
 
 Three stale inputs each cost R2 hours; the driver refuses them at the first stage that could use them:
 
@@ -357,6 +364,11 @@ The repository must be clean at `code_commit` before and after. The post-commit 
 (`qe-post-commit-verify/1`: file digests and ids, no absolute paths) are written under
 `{cycle}/post-commit/`.
 
+The single preflight receipt is the real lane's (`{lane_real}/evidence`, the dry run the commit authorization came from).
+After the commit the stages before it are re-verified for their recorded bytes but no longer against the predecessor pin:
+the pin names the release the run replaced and `CURRENT_RELEASE` is now the run's own, so a pin check would refuse every
+post-commit stage by construction. The pin was checked, when it was true, by the stages that carry the rule.
+
 
 Neither implementation stage takes the desktop workbook: it is on permanent hold (AGENTS.md), so the shipped graph passes no
 `--tt-workbook` and lists no `tt-workbook.xlsx` among the stages' release inputs. The reconciliation never needed it (its
@@ -400,19 +412,34 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
 2. `config --previous <previous run json> --out <run json> --candidate-commit C --code-commit T --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin>
    --set provenance_spec=<new seed> --set prep_pin_root_key=world --set prep_pin_root=<world> [--set run=... --set qa=...
    --set evidence_dest=...]`: repoints every occurrence of the old inputs root, verifies the inputs against the pin (never by repo path), takes the expected
-   baseline pin from the verified set and recomputes the provenance seed pin from its file, and drops the calendar authority's pin (it is never carried). Predecessor
+   baseline pin from the verified set and recomputes the provenance seed pin from its file, derives the calendar authority's pin from the pinned seed (a pin of the previous pass is never carried) and drops `calendar_attempt_run` / `calendar_attempt_spec` when they point into a removed world (only the explicit `calendar-authority` stage reads them; it declares `needs_config` and refuses, naming the keys, when it is selected without them). Predecessor
    pins are never touched.
-3. `move-aside --config <run json> [--apply]`: the previous pass's `production`, `replica-production`, `replica-rehearsal`,
-   `clean-room`, `pre-chain-cycle.json` and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` get an
-   `.aside-<UTC time>` name. Only paths inside the world are moved; an existing aside name is refused.
-4. `carry-over --from-cycle <previous cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
+3. `move-aside --config <run json> [--keep-cache] [--apply]`: the whole previous cycle directory (`prov`, `ledger`,
+   `baseline`, `production`, the stage receipts and the rest: every stage records the run configuration it was produced under, so
+   a leftover output refuses the next pass) and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` that lie
+   outside it get an `.aside-<UTC time>` name; nothing is deleted. `--keep-cache` moves the retained cache (`retained_cache_root`,
+   inside the cycle) from the aside directory back into the fresh cycle, so a cache worth reusing is not rebuilt; a cycle that
+   holds only that cache is already fresh and a second run moves nothing. A configuration-bound input inside the cycle (`provenance_spec`, `release_inputs_root`, `cycle_manifest`, `cycle_roots_file`, `calendar_seed_authority`, the `predecessor_*` files, `expected_baseline`, `disclosure_inputs`) is refused, since it would go aside with the old outputs: keep the fresh inputs outside the cycle. Only paths inside the world are moved; an existing aside
+   name is refused; the output lists each move (and the cache restore) with the aside name `carry-over` reads from.
+4. `carry-over --from-cycle <the aside cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
    `in/epoch-admission-policy.json` and each further file or directory named with `--carry` (the IBKR generation directory
-   `ibkr/`, when the carried preparation spec still names it). The retained cache is not copied: point `retained_cache_root` at the cache to reuse.
-5. `run --only cycle-seeds`, `--only cycle-resolve`, `--only calendar-seed`, then `config ... --require-calendar` again with the
-   same arguments: it adds `calendar_authority_sha256` from `calendar_authority` (`{calendar_seed_reissued}`) and refuses to
-   run before that file exists.
-6. `run` (full).
+   `ibkr/`, when the carried preparation spec still names it). The retained cache is not copied (see `--keep-cache`).
+5. If the previous pass's `selected-inputs.json` and preparation spec (the predecessor set) still name its world, remap them with
+   the same command as the ledger spec: `release_spec_remap.py remap --manifest <cycle manifest> --roots-file <roots> --mapping <map>
+   --spec <original file> --out <remapped file> --expect-rewritten <N>`, the mapping naming the WHOLE old world prefix
+   (`old_prefix`, `root_key`). It is create-only and fail-closed (a foreign absolute path or a missing carried target is refused) and
+   `--expect-rewritten` refuses a mapping that matched another number of paths than the previous pass (42 in the R2.2 selected
+   inputs, 44 in its preparation spec). The output is serialized canonically, so the `predecessor_*_sha256` pins are taken from
+   the tool's output (`sha256` in its summary), not from the original file.
+6. `run` (full). Nothing needs rerunning after `config`: the calendar authority's pin is already in the configuration (see
+   below), so the pre stages (`cycle-seeds`, `cycle-resolve`, `calendar-seed`) keep the binding they were run under.
 
-The calendar authority's pin stays a deliberate trust pin: the operator running the pass sets it (step 5) and records its
-sha256 in the pass evidence, where the release owner's direct hash confirmation at commit covers it. It is never derived by the
-driver, which would accept whatever file the run was handed.
+The calendar authority's pin is a deliberate trust pin, now derived rather than typed: `config` takes the seed the previous
+committed release pinned (`calendar_seed_authority` with its `calendar_seed_authority_sha256`; any other bytes refuse), runs the
+deterministic reissue against the frozen repository's HWM policy (`repo_root`) and writes the sha256 of the result as
+`calendar_authority_sha256`, so one configuration write carries every pin before any stage runs. The `calendar-seed` stage
+declares that pin and checks its output against it (`sha256_of`): a stage that writes any other bytes fails. A pin left in the
+previous pass's configuration is never carried (it is dropped and re-derived), and a seed that is not the pinned file is refused.
+The operator records the pin the command prints (`calendar_authority_sha256`) in the pass evidence, where the release owner's
+direct hash confirmation at commit covers it. Without the seed keys there is no pin, and the `calendar-seed` stage refuses (it needs `calendar_authority_sha256`);
+`config --require-calendar` still writes the pin from an existing authority file for the later `calendar-authority` attempts.

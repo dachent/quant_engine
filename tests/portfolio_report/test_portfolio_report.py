@@ -8715,3 +8715,59 @@ def test_a_restated_strategys_live_boundary_stays_the_pinned_window_and_names_it
     assert first["live_boundary_observed_end"] == "2026-01-03"
     assert first["live_boundary_basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
     assert "live_boundary_basis" not in rows["strategy-2"]
+
+
+def test_the_unsupplied_workbook_parity_row_passes_the_observed_interval_check_and_nothing_else_does() -> (
+    None
+):
+    # the workbook is on hold and no input of the release: the reconciliation's workbook_parity row then names no
+    # window (observed_start/observed_end null, no observation). The report's interval check accepts exactly that
+    # row; a null window under any other status, or a half window, or an observation, is still refused.
+    import portfolio_implementation_reconciliation as implementation
+
+    boundary = date(2026, 9, 17)
+    path = "implementation reconciliation strategy tt-portfolio"
+    parity = implementation._tt_workbook_return_parity(
+        None, {}, [], accepted_as_of=boundary
+    )
+    assert parity["status"] == "NOT_SUPPLIED_DERIVATION_SELFSUFFICIENT"
+
+    def check(row: dict[str, Any]) -> None:
+        reporter._validate_implementation_observed_intervals(
+            {
+                "workbook_parity": row,
+                "return_reconciliation": {
+                    "observed_start": "2026-01-22",
+                    "observed_end": "2026-09-17",
+                },
+            },
+            boundary=boundary,
+            field_path=path,
+        )
+
+    check(parity)
+    check({k: v for k, v in parity.items() if not k.startswith("observed_")})
+    for refused in (
+        {**parity, "status": "MATCHED_DIRECT_SOURCE_TO_INDEPENDENT_WORKBOOK"},
+        {**parity, "status": "DIAGNOSTIC_DIRECT_SOURCE_AND_WORKBOOK_DIFFER"},
+        {**parity, "status": "SOMETHING_ELSE"},
+        {**parity, "observations": 3},
+        {**parity, "observed_start": "2026-01-22"},
+        {**parity, "observed_end": "2026-09-17"},
+    ):
+        with pytest.raises(reporter.ReportValidationError):
+            check(refused)
+    # a supplied row keeps its full check: a future-dated or reversed window is refused
+    supplied = {
+        "status": "MATCHED_DIRECT_SOURCE_TO_INDEPENDENT_WORKBOOK",
+        "observations": 5,
+        "observed_start": "2026-01-22",
+        "observed_end": "2026-09-17",
+    }
+    check(supplied)
+    with pytest.raises(reporter.ReportValidationError):
+        check({**supplied, "observed_end": "2026-10-01"})
+    with pytest.raises(reporter.ReportValidationError):
+        check(
+            {**supplied, "observed_start": "2026-09-30", "observed_end": "2026-09-17"}
+        )
