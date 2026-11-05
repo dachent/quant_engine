@@ -437,7 +437,7 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
 The calendar authority's pin is a deliberate trust pin, now derived rather than typed: `config` takes the seed the previous
 committed release pinned (`calendar_seed_authority` with its `calendar_seed_authority_sha256`; any other bytes refuse), runs the
 deterministic reissue against the frozen repository's HWM policy (`repo_root`) and writes the sha256 of the result as
-`calendar_authority_sha256`, so one configuration write carries every pin before any stage runs. The `calendar-seed` stage
+`calendar_authority_sha256` (only when `calendar_authority` is the file the `calendar-seed` stage writes, `{cycle}/calendar-seed-authority.json`; any other authority, such as a later `calendar-authority` attempt, is pinned from its own file once it exists and stays pending until then), so one configuration write carries every pin before any stage runs. The `calendar-seed` stage
 declares that pin and checks its output against it (`sha256_of`): a stage that writes any other bytes fails. A pin left in the
 previous pass's configuration is never carried (it is dropped and re-derived), and a seed that is not the pinned file is refused.
 The operator records the pin the command prints (`calendar_authority_sha256`) in the pass evidence, where the release owner's

@@ -416,6 +416,12 @@ def _seeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, byte
             {"calendars": [1]}, b"policy-bytes", _sha(b"policy-bytes")
         )
     )
+    # the configured authority is the file the calendar-seed stage writes
+    cycle = tmp_path / "world" / "c"
+    cfg.update(
+        cycle=str(cycle),
+        calendar_authority=str(cycle / tool.CALENDAR_SEED_OUTPUT),
+    )
     return _put(tmp_path / "prev3.json", json.dumps(cfg)), expected
 
 
@@ -562,3 +568,38 @@ def test_the_aside_move_and_the_carry_over_never_nest_a_directory_in_itself(
         with pytest.raises(tool.WorldError, match="separate directories"):
             tool.carry_over(src, Path(str(src).swapcase()), apply=True)
     assert not (src / "new").exists()
+
+
+def test_a_pin_is_derived_from_the_seed_only_for_the_authority_the_seed_stage_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # an authored authority (a later calendar-authority attempt) that does not exist yet is NOT the reissued seed: a pin
+    # derived from the seed would not match it, and --require-calendar must not succeed with that pin
+    previous, _ = _seeded(tmp_path, monkeypatch)
+    cfg = json.loads(previous.read_bytes())
+    cfg["calendar_authority"] = str(
+        tmp_path / "world" / "c" / "calendar-authority.json"
+    )  # not created yet
+    authored = _put(tmp_path / "prev9.json", json.dumps(cfg))
+    result = tool.config(
+        authored,
+        tmp_path / "run9.json",
+        candidate_commit="c" * 40,
+        code_commit="d" * 40,
+    )
+    assert (
+        result["pending"] == ["calendar_authority_sha256"]
+        and result["calendar_pin"] == "pending"
+    )
+    assert "calendar_authority_sha256" not in json.loads(
+        (tmp_path / "run9.json").read_bytes()
+    )
+    with pytest.raises(tool.WorldError, match="calendar-seed"):
+        tool.config(
+            authored,
+            tmp_path / "run10.json",
+            candidate_commit="c" * 40,
+            code_commit="d" * 40,
+            require_calendar=True,
+        )
+    assert not (tmp_path / "run10.json").exists()

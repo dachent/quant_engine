@@ -244,7 +244,8 @@ def config(
         _calendar_pin_from_seed(cfg)
         if isinstance(authority, str)
         and seed_output is not None
-        and Path(authority).as_posix() == seed_output.as_posix()
+        and _inside(Path(authority), seed_output)
+        and _inside(seed_output, Path(authority))
         else None
     )
     pending: list[str] = []
@@ -260,12 +261,9 @@ def config(
             cfg.pop(pin, None)
             pending.append(pin)
     if "calendar_authority_sha256" in pending:
+        # an authority that is not the seed stage's output (a later calendar-authority attempt, not authored yet) has a
+        # pin only once its file exists: the reissued seed would not hash like it
         calendar_pin = "pending"
-        derived = _calendar_pin_from_seed(cfg)
-        if derived is not None:
-            cfg["calendar_authority_sha256"] = derived
-            pending.remove("calendar_authority_sha256")
-            calendar_pin = "derived from the pinned seed"
     if require_calendar and "calendar_authority_sha256" in pending:
         raise WorldError(
             "the calendar authority file does not exist yet: run --only cycle-seeds, "
