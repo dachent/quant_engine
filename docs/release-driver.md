@@ -41,6 +41,29 @@ another root is declared that way in the cycle manifest; the former config key `
 and any run configuration that still has it is refused. In this mode the stage records the ledger spec, the
 resolved cycle and the ledger catalog as inputs (graph key `config_inputs`), so a kept stage is refused when one changed. See `docs/release-ledger-spec.md`. A test fails if the graph starts using a key this list does not name.
 
+## Interpreter
+
+Everything the release hashes into a pin, a seed or a generation id (the implementation reconciliation and return attribution
+seeds, the sleeve-basis contract, the TuringTrader source manifest, the report and every later generation) is computed in floating
+point, and CPython 3.12 made the built-in `sum()` of floats compensated: the same inputs give other last digits there (R3 pass 6e: an
+attribution built on 3.13 differed from the 3.11 one in five fields, e.g. `0.9795932641808844` against `...839`). So **pin-feeding
+builds run under the 3.11 venv only**; the tooling venv of the release-inputs work (3.13) must not build seeds or anything pinned.
+
+`requires-python` admits 3.11 to 3.13 for development, `.python-version` only picks uv's default and CI proves the tests pass on 3.11:
+none of them constrains the interpreter a run or an operator uses, so the guard is explicit
+(`quant_engine.core.interpreter`, one required version, a refusal that names the interpreter found and the one required):
+
+- the graph names it (`required_python`, `3.11`): before any stage that runs `{python}` the driver probes that interpreter once and
+  refuses a stage on another (offline plans do not probe);
+- the tools that compute numbers refuse on another interpreter at their entry point, exit 2: the implementation reconciliation, the
+  implementation return attribution, the implementation sleeve basis, the TuringTrader source manifest builder (`build`, `verify`)
+  and the release builder (`build`);
+- the attended run records the interpreter it probes (`_runtime_identity`) and refuses one that is not 3.11.
+
+No guard is needed in the tools that only hash, copy or compare files and never compute a figure: `release_inputs.py` (including
+`rebind-predecessor`), `release_cycle_seeds`, `release_prepare_inputs`, the baseline, ledger and provenance spec builders,
+`release_hwm_calendar` and `release_fresh_world`.
+
 ## Probe and release mode
 
 `mode` is required and is `probe` or `release`. A probe runs on a scratch copy of the real

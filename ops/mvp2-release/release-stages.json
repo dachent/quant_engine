@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "required_python": "3.11",
   "description": "Release stages of RELEASE-DRIVER-001, cycle manifest resolution and the staging group (provenance, ledger, baseline) through selected inputs, the replica ceremony and the gated commit. Every id and path is derived from the run's own outputs by tools/release_driver.py.",
   "provider_roots": [
     "provider-alpaca",

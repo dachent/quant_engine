@@ -9,6 +9,7 @@ are never emitted in the result.
 from __future__ import annotations
 
 import argparse
+import sys
 import copy
 import csv
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from xml.etree import ElementTree
 
 import pyarrow.parquet as parquet  # type: ignore[import-untyped]
 
+from quant_engine.core import interpreter
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
@@ -3007,6 +3009,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    try:
+        interpreter.require_current("the implementation reconciliation")
+    except interpreter.InterpreterRefusal as exc:
+        print(f"portfolio-implementation-reconciliation: FAIL: {exc}", file=sys.stderr)
+        return 2
     try:
         content = build_reconciliation(
             p123_generation_root=args.p123_generation_root,
