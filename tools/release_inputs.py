@@ -126,6 +126,19 @@ def _path(args: argparse.Namespace) -> int:
     return 0
 
 
+def _canonical_path(path: Path) -> str:
+    """Links resolved (also for a path that does not exist yet) and the case Windows ignores folded."""
+
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _nested(path: Path, base: Path) -> bool:
+    """``path`` is ``base`` or lies below it, on canonical spellings."""
+
+    inner, outer = _canonical_path(path), _canonical_path(base)
+    return inner == outer or inner.startswith(outer.rstrip(os.sep) + os.sep)
+
+
 def _canonical(value: Any) -> bytes:
     """The formatting of the committed disclosure files: indent 2, sorted keys, final newline."""
 
@@ -208,14 +221,12 @@ def _rebind_predecessor(args: argparse.Namespace) -> int:
         )
         return 0
     out = args.out
+    if _nested(out, loaded.root) or _nested(loaded.root, out):
+        raise ReleaseInputsError(
+            "the new root must be a separate directory: it is, lies inside or contains the source root"
+        )
     if out.exists() and any(out.iterdir()):
         raise ReleaseInputsError(f"rebind target is not empty: {out}")
-    source = loaded.root.resolve()
-    target = out.resolve()
-    if target == source or source in target.parents or target in source.parents:
-        raise ReleaseInputsError(
-            "the new root must be a separate directory: it lies inside (or contains) the source root"
-        )
     inside = REPO_ROOT.resolve()
     if out.resolve() == inside or inside in out.resolve().parents:
         raise ReleaseInputsError(

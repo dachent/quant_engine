@@ -40,6 +40,7 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import inventory_identity
+from quant_engine.core import InterpreterRefusal, require_current_interpreter
 from portfolio_counted_producer import (
     COUNTED_PRODUCERS,
     COUNTER_ENV,
@@ -7461,6 +7462,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command in ("build", "stage"):
+        try:
+            require_current_interpreter(f"the release builder {args.command}")
+        except InterpreterRefusal as exc:
+            print(f"portfolio-release-builder: FAIL: {exc}", file=sys.stderr)
+            return 2
     try:
         if args.command == "build":
             result = build_all(

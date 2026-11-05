@@ -101,6 +101,7 @@ _PATH_STAGES = {
     # materializer imports it and it can refuse or fail any stage, so it carries the
     # controller's impact; it writes no delivery artifact itself.
     "packages/core/src/quant_engine/core/run_storage.py": list(_STAGE_ORDER),
+    "packages/core/src/quant_engine/core/interpreter.py": list(_STAGE_ORDER),
     # Verifies a promoted retained-cache base before the runner links an overlay to it; it
     # can refuse any stage's run, like run_storage.
     "packages/core/src/quant_engine/core/retained_cache_base.py": list(_STAGE_ORDER),
@@ -220,6 +221,10 @@ _PATH_STAGES = {
     # Stages an unpublished derived-return candidate from retained bytes; the weekly
     # builder reads only the pinned generation it is handed, never this tool.
     "tools/portfolio_grizzly_signal_replay.py": [],
+    # Not imported by a producer, no stage reads them; the interpreter guard is their production change
+    "tools/portfolio_diligence_rubric.py": [],
+    "tools/portfolio_driver_map.py": [],
+    "tools/portfolio_replication.py": [],
     # Passive CDP listener for one attended Portfolio123 sitting; writes a
     # create-only run directory and a draft catalog diff, no stage reads it.
     "tools/p123_cdp_recorder.py": [],

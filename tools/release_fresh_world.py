@@ -101,8 +101,28 @@ def _input_path(inputs: Any, relative: str) -> Path:
 
 
 def _inside(path: Path, base: Path) -> bool:
-    resolved, root = path.resolve(), base.resolve()
-    return resolved == root or root in resolved.parents
+    """``path`` is ``base`` or lies below it, on canonical spellings (links resolved, Windows case folded)."""
+
+    inner = os.path.normcase(os.path.realpath(path))
+    outer = os.path.normcase(os.path.realpath(base))
+    return inner == outer or inner.startswith(outer.rstrip(os.sep) + os.sep)
+
+
+def _bound_inputs_inside(cfg: Mapping[str, Any], cycle: Path) -> list[str]:
+    return sorted(
+        key
+        for key in CONFIG_BOUND_INPUTS
+        if cfg.get(key) and _inside(Path(str(cfg[key])), cycle)
+    )
+
+
+def _refuse_inputs_inside(cfg: Mapping[str, Any], cycle: Path) -> None:
+    bound = _bound_inputs_inside(cfg, cycle)
+    if bound:
+        raise WorldError(
+            f"the configuration reads {', '.join(bound)} from inside the cycle {cycle}, which goes aside "
+            "whole: keep them outside the cycle (a fresh input would be moved with the old outputs)"
+        )
 
 
 def _create_only(path: Path, content: bytes) -> str:
@@ -203,6 +223,8 @@ def config(
         cfg[key] = value
     # a path that is gone, or that lies inside the cycle ``move-aside`` is about to move away, is stale
     cycle = Path(str(cfg["cycle"])) if cfg.get("cycle") else None
+    if cycle is not None:
+        _refuse_inputs_inside(cfg, cycle)
     dropped = [
         key
         for key in STAGE_ONLY_PATHS
@@ -222,7 +244,8 @@ def config(
         _calendar_pin_from_seed(cfg)
         if isinstance(authority, str)
         and seed_output is not None
-        and Path(authority).as_posix() == seed_output.as_posix()
+        and _inside(Path(authority), seed_output)
+        and _inside(seed_output, Path(authority))
         else None
     )
     pending: list[str] = []
@@ -238,12 +261,9 @@ def config(
             cfg.pop(pin, None)
             pending.append(pin)
     if "calendar_authority_sha256" in pending:
+        # an authority that is not the seed stage's output (a later calendar-authority attempt, not authored yet) has a
+        # pin only once its file exists: the reissued seed would not hash like it
         calendar_pin = "pending"
-        derived = _calendar_pin_from_seed(cfg)
-        if derived is not None:
-            cfg["calendar_authority_sha256"] = derived
-            pending.remove("calendar_authority_sha256")
-            calendar_pin = "derived from the pinned seed"
     if require_calendar and "calendar_authority_sha256" in pending:
         raise WorldError(
             "the calendar authority file does not exist yet: run --only cycle-seeds, "
@@ -367,16 +387,7 @@ def move_aside(
     keep = cache if keep_cache and cache is not None and _inside(cache, cycle) else None
     targets = [] if _cycle_is_fresh(cycle, keep) else [cycle]
     if cycle in targets:
-        bound = sorted(
-            key
-            for key in CONFIG_BOUND_INPUTS
-            if cfg.get(key) and _inside(Path(str(cfg[key])), cycle)
-        )
-        if bound:
-            raise WorldError(
-                f"the configuration reads {', '.join(bound)} from inside the cycle {cycle}, which goes "
-                "aside whole: keep them outside the cycle (a fresh input would be moved with the old outputs)"
-            )
+        _refuse_inputs_inside(cfg, cycle)
     actions: list[dict[str, str]] = []
     if keep is not None and not targets and not keep.exists():
         # an earlier run moved the cycle and stopped before the cache went back: finish that restore
@@ -392,6 +403,10 @@ def move_aside(
             actions.append({"restore": str(stranded[0]), "to": str(keep)})
     for key in CONFIGURED_OUTPUTS:
         path = Path(str(cfg[key])) if cfg.get(key) else None
+        if path is not None and _inside(cycle, path):
+            raise WorldError(
+                f"the configured {key} {path} is, or contains, the cycle {cycle}: it cannot be moved aside"
+            )
         if path is not None and not _inside(path, cycle):
             targets.append(path)
     for target in targets:
@@ -436,6 +451,10 @@ def _tree(path: Path) -> dict[str, str]:
 def carry_over(
     from_cycle: Path, to_cycle: Path, *, apply: bool, extra: Sequence[str] = ()
 ) -> list[dict[str, str]]:
+    if _inside(to_cycle, from_cycle) or _inside(from_cycle, to_cycle):
+        raise WorldError(
+            f"the two cycles must be separate directories: {from_cycle} and {to_cycle} are, or lie inside, one another"
+        )
     actions: list[dict[str, str]] = []
     for relative in (*CARRIED, *extra):
         parts = relative.split("/")

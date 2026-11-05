@@ -3,9 +3,10 @@
   "title": "release stage graph (RELEASE-DRIVER-001)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "paths", "derive", "stages"],
+  "required": ["schema_version", "required_python", "paths", "derive", "stages"],
   "properties": {
     "schema_version": {"const": 1},
+    "required_python": {"type": "string", "pattern": "^[0-9]+[.][0-9]+$", "description": "The Python major.minor every stage that runs {python} must run on: the figures hashed into pins are reproducible only there."},
     "description": {"type": "string"},
     "provider_roots": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
     "provider_run_sources": {"type": "object", "additionalProperties": {"type": "string"}},

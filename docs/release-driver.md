@@ -41,6 +41,32 @@ another root is declared that way in the cycle manifest; the former config key `
 and any run configuration that still has it is refused. In this mode the stage records the ledger spec, the
 resolved cycle and the ledger catalog as inputs (graph key `config_inputs`), so a kept stage is refused when one changed. See `docs/release-ledger-spec.md`. A test fails if the graph starts using a key this list does not name.
 
+## Interpreter
+
+Everything the release hashes into a pin, a seed or a generation id (the implementation reconciliation and return attribution
+seeds, the sleeve-basis contract, the TuringTrader source manifest, the report and every later generation) is computed in floating
+point, and CPython 3.12 made the built-in `sum()` of floats compensated: the same inputs give other last digits there (R3 pass 6e: an
+attribution built on 3.13 differed from the 3.11 one in five fields, e.g. `0.9795932641808844` against `...839`). So **pin-feeding
+builds run under the 3.11 venv only**; the tooling venv of the release-inputs work (3.13) must not build seeds or anything pinned.
+
+`requires-python` admits 3.11 to 3.13 for development, `.python-version` only picks uv's default and CI proves the tests pass on 3.11:
+none of them constrains the interpreter a run or an operator uses, so the guard is explicit
+(`quant_engine.core.interpreter`, one required version, a refusal that names the interpreter found and the one required):
+
+- the graph names it (`required_python`, `3.11`, required by the schema and part of every stage binding, so a kept receipt from another contract is not reused): before any stage that runs `{python}` the driver probes that interpreter once and
+  refuses a stage on another (offline plans do not probe);
+- the tools that compute numbers refuse on another interpreter at their entry point, exit 2: the implementation reconciliation, the
+  implementation return attribution, the implementation sleeve basis, the TuringTrader source manifest builder (every command: `build`, `verify`, `read-compat`)
+  the release builder (`build` and `stage`: `recipe` and `inventory` only hash files), and every other pipeline tool that does float
+  arithmetic, on every subcommand: attribution, correlation, decomposition, diligence rubric, driver map, Grizzly signal replay, replication,
+  report, strategy history, target series, control panel and provider ledger (`tests/core/test_interpreter_guard.py` lists each
+  subcommand and fails for a new tool that computes figures and is neither guarded nor excused with a reason);
+- the attended run records the interpreter it probes (`_runtime_identity`) and refuses one that is not 3.11.
+
+No guard is needed in the tools that only hash, copy or compare files and never compute a figure: `release_inputs.py` (including
+`rebind-predecessor`), `release_cycle_seeds`, `release_prepare_inputs`, the baseline, ledger and provenance spec builders,
+`release_hwm_calendar` and `release_fresh_world`.
+
 ## Probe and release mode
 
 `mode` is required and is `probe` or `release`. A probe runs on a scratch copy of the real
@@ -404,7 +430,7 @@ Three steps of a re-run are operator steps by design, not graph gaps:
   implementation row stays on the account basis (finding `returns.implementation_account_legs`, N66).
 
 Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or idempotent, never deleting; `move-aside` and
-`carry-over` print what they would do unless `--apply` is given):
+`carry-over` print what they would do unless `--apply` is given). **Every command of the pass that builds a pin-feeding number (the stages, the seed builders, the attended run) runs under the 3.11 venv only** (see "Interpreter" above): the release-inputs tooling venv (3.13) must not run them, and the tools and the driver refuse another interpreter:
 
 1. `provenance-seed --seed <previous seed> --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin> --out <new seed>`: the seed's `sleeve-policy` root now
    names this pass's inputs and its source group's hashes are re-read from them. The printed sha256 is the new
@@ -419,7 +445,7 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
    a leftover output refuses the next pass) and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` that lie
    outside it get an `.aside-<UTC time>` name; nothing is deleted. `--keep-cache` moves the retained cache (`retained_cache_root`,
    inside the cycle) from the aside directory back into the fresh cycle, so a cache worth reusing is not rebuilt; a cycle that
-   holds only that cache is already fresh and a second run moves nothing. A configuration-bound input inside the cycle (`provenance_spec`, `release_inputs_root`, `cycle_manifest`, `cycle_roots_file`, `calendar_seed_authority`, the `predecessor_*` files, `expected_baseline`, `disclosure_inputs`) is refused, since it would go aside with the old outputs: keep the fresh inputs outside the cycle. Only paths inside the world are moved; an existing aside
+   holds only that cache is already fresh and a second run moves nothing. A configuration-bound input inside the cycle (`provenance_spec`, `release_inputs_root`, `cycle_manifest`, `cycle_roots_file`, `calendar_seed_authority`, the `predecessor_*` files, `expected_baseline`, `disclosure_inputs`) is refused by `config` and by `move-aside` before anything is written or moved, because it would go aside with the old outputs: keep the fresh seed and the release inputs outside the cycle (a sibling of it, as `cyc/` is). A configured `run`/`qa`/`evidence_dest`/`replica_workspace` that is or contains the cycle, and two cycles that are or lie inside one another (`carry-over`), are refused too. Only paths inside the world are moved; an existing aside
    name is refused; the output lists each move (and the cache restore) with the aside name `carry-over` reads from.
 4. `carry-over --from-cycle <the aside cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
    `in/epoch-admission-policy.json` and each further file or directory named with `--carry` (the IBKR generation directory
@@ -437,7 +463,7 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
 The calendar authority's pin is a deliberate trust pin, now derived rather than typed: `config` takes the seed the previous
 committed release pinned (`calendar_seed_authority` with its `calendar_seed_authority_sha256`; any other bytes refuse), runs the
 deterministic reissue against the frozen repository's HWM policy (`repo_root`) and writes the sha256 of the result as
-`calendar_authority_sha256`, so one configuration write carries every pin before any stage runs. The `calendar-seed` stage
+`calendar_authority_sha256` (only when `calendar_authority` is the file the `calendar-seed` stage writes, `{cycle}/calendar-seed-authority.json`; any other authority, such as a later `calendar-authority` attempt, is pinned from its own file once it exists and stays pending until then), so one configuration write carries every pin before any stage runs. The `calendar-seed` stage
 declares that pin and checks its output against it (`sha256_of`): a stage that writes any other bytes fails. A pin left in the
 previous pass's configuration is never carried (it is dropped and re-derived), and a seed that is not the pinned file is refused.
 The operator records the pin the command prints (`calendar_authority_sha256`) in the pass evidence, where the release owner's

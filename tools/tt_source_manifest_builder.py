@@ -32,6 +32,7 @@ import shutil
 import sys
 from typing import Any, Final, Mapping, Sequence
 
+from quant_engine.core import InterpreterRefusal, require_current_interpreter
 from quant_engine.turingtrader import SourceManifestError, build_source_manifest
 
 
@@ -1117,6 +1118,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    try:
+        require_current_interpreter("the TuringTrader source manifest")
+    except InterpreterRefusal as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     try:
         if args.command == "build":
             report = build(args)

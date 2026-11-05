@@ -514,3 +514,26 @@ def test_ordinary_text_is_not_mistaken_for_an_embedded_path(
         "plain",
     ]
     _remap(world)
+
+
+def test_the_old_prefix_is_counted_in_both_slash_styles_and_must_equal_the_rewritten_count(
+    world: dict[str, Any],
+) -> None:
+    # R2.2 predecessor files: 42 and 44 occurrences, in the plain and the JSON-escaped backslash form; a mapping
+    # that rewrites fewer paths than the prefix occurs leaves an old path in the new spec
+    rules = tool.build_rules(
+        world["mapping"], tool.declared_roots(world["manifest"], world["roots"])
+    )
+    assert (
+        tool.count_old_prefix_occurrences(world["spec"], rules) == 5
+    )  # 4 backslash paths + 1 d:/ path
+    outcome, _ = _remap(world)
+    assert len(outcome.rewritten) == 5
+    # a key is never rewritten: the occurrence in it is found and the remap refuses
+    keyed = copy.deepcopy(world["spec"])
+    keyed["strategy_inputs"]["D:\\legacy\\src\\old-key"] = "value"
+    assert "5 path(s) were rewritten" in _refused(world, "COUNT_FOUND", spec=keyed)
+    # a sibling directory with a common name prefix is not the old prefix
+    sibling = copy.deepcopy(world["spec"])
+    sibling["note"] = "see D:\\legacy\\srcX\\file"
+    assert tool.count_old_prefix_occurrences(sibling, rules) == 5

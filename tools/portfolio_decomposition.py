@@ -20,6 +20,7 @@ from typing import Any, Final, Mapping, Sequence, cast
 import numpy as np
 import numpy.typing as npt
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -4856,6 +4857,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter(
+        "the decomposition analytics", "portfolio-decomposition"
+    )
+    if refused is not None:
+        return refused
     if args.command == "build":
         result = _summary(args.spec, args.source_root)
     elif args.command == "stage":

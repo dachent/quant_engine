@@ -29,6 +29,7 @@ from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -10937,6 +10938,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    refused = check_entry_interpreter("the provider ledger", "provider-ledger")
+    if refused is not None:
+        return refused
     result = (
         stage_candidate(args.spec, args.output_root)
         if args.command == "stage"

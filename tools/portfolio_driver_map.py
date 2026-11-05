@@ -16,6 +16,7 @@ from pathlib import Path
 from statistics import fmean
 from typing import Any, Final, Mapping, Sequence, cast
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core.contracts import canonical_json_bytes
 
 from portfolio_diligence_rubric import _leave_one_out, _with_cluster_budget
@@ -540,6 +541,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter("the driver map", "portfolio-driver-map")
+    if refused is not None:
+        return refused
     try:
         if args.command == "build":
             result = build(

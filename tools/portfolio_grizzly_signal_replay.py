@@ -33,6 +33,7 @@ from typing import Any, Final, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from portfolio_strategy_history import excel_cell_date, xlsx_sheet_rows
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -662,6 +663,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter(
+        "the Grizzly signal replay", "portfolio-grizzly-signal-replay"
+    )
+    if refused is not None:
+        return refused
     try:
         result = stage_candidate(
             args.output_root,

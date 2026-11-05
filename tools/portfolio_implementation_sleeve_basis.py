@@ -37,6 +37,7 @@ visible in the ``account_basis`` sub-block.
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Mapping, Sequence
 import csv
 from datetime import date
@@ -51,6 +52,7 @@ from typing import Any, Final
 from xml.etree import ElementTree
 
 from quant_engine.core import canonical_json_bytes
+from quant_engine.core import InterpreterRefusal, require_current_interpreter
 
 import portfolio_implementation_reconciliation as reconciliation
 import strategy_basis
@@ -1399,6 +1401,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    try:
+        require_current_interpreter("the implementation sleeve basis")
+    except InterpreterRefusal as exc:
+        print(f"portfolio-implementation-sleeve-basis: FAIL: {exc}", file=sys.stderr)
+        return 2
     paths = {
         "declaration": args.declaration,
         "sleeve_facts": args.sleeve_facts,
