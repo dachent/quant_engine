@@ -27,6 +27,7 @@ import time
 import zlib
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping, Sequence, cast
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -16251,6 +16252,11 @@ def _invested_capital_cli_values(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter(
+        "the control panel build", "portfolio-control-panel"
+    )
+    if refused is not None:
+        return refused
     try:
         if args.command == "build":
             if (args.report_root is None) == (args.report_candidate is None):

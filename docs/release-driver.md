@@ -57,7 +57,10 @@ none of them constrains the interpreter a run or an operator uses, so the guard 
   refuses a stage on another (offline plans do not probe);
 - the tools that compute numbers refuse on another interpreter at their entry point, exit 2: the implementation reconciliation, the
   implementation return attribution, the implementation sleeve basis, the TuringTrader source manifest builder (every command: `build`, `verify`, `read-compat`)
-  and the release builder (`build` and `stage`: `recipe` and `inventory` only hash files);
+  the release builder (`build` and `stage`: `recipe` and `inventory` only hash files), and every other pipeline tool that does float
+  arithmetic, on every subcommand: attribution, correlation, decomposition, diligence rubric, driver map, Grizzly signal replay, replication,
+  report, strategy history, target series, control panel and provider ledger (`tests/core/test_interpreter_guard.py` lists each
+  subcommand and fails for a new tool that computes figures and is neither guarded nor excused with a reason);
 - the attended run records the interpreter it probes (`_runtime_identity`) and refuses one that is not 3.11.
 
 No guard is needed in the tools that only hash, copy or compare files and never compute a figure: `release_inputs.py` (including

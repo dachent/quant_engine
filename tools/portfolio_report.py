@@ -32,6 +32,7 @@ from jsonschema import (  # type: ignore[import-untyped]
     ValidationError as JsonSchemaValidationError,
 )
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -18494,6 +18495,9 @@ def _invested_capital_cli_values(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter("the report", "portfolio-report")
+    if refused is not None:
+        return refused
     try:
         if args.command == "build":
             result = build_candidate(

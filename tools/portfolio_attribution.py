@@ -16,6 +16,7 @@ import statistics
 import sys
 from typing import Any, Final, Mapping, Sequence
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -1680,6 +1681,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter(
+        "the strategy attribution", "portfolio-attribution"
+    )
+    if refused is not None:
+        return refused
     try:
         if args.command == "stage":
             result = stage_catalog(

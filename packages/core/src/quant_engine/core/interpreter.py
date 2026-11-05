@@ -44,3 +44,17 @@ def require_current(what: str) -> None:
     """Refuse unless the running interpreter is the required one."""
 
     require(tuple(sys.version_info[:3]), what=what, executable=sys.executable)
+
+
+def check_entry_interpreter(what: str, tool: str) -> int | None:
+    """The exit code (2) of a tool whose entry point must not run on this interpreter, else ``None``.
+
+    A tool's ``main`` calls it right after parsing its arguments, so ``--help`` still works.
+    """
+
+    try:
+        require_current(what)
+    except InterpreterRefusal as exc:
+        print(f"{tool}: FAIL: {exc}", file=sys.stderr)
+        return 2
+    return None
