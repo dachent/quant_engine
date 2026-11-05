@@ -327,6 +327,21 @@ def remap_document(
     return out
 
 
+def count_old_prefix_occurrences(spec: Any, rules: Sequence[Rule]) -> int:
+    """How often the old prefixes occur in the spec, in either slash style (a JSON backslash is escaped)."""
+
+    text = json.dumps(spec, ensure_ascii=False)
+    total = 0
+    for rule in rules:
+        parts = [re.escape(part) for part in rule.old.split("/") if part]
+        lead = r"(?:\\\\|\\|/)+" if rule.old.startswith("/") else ""
+        pattern = (
+            r"(?<![\w.])" + lead + r"(?:\\\\|\\|/)+".join(parts) + r'(?=\\\\|\\|/|")'
+        )
+        total += len(re.findall(pattern, text, flags=re.IGNORECASE))
+    return total
+
+
 def remap_spec(
     spec: Any,
     mapping: Any,
@@ -352,6 +367,13 @@ def remap_spec(
         raise SpecRemapError(
             "FOREIGN_PATH",
             f"{len(outcome.foreign)} absolute path(s) remain outside the declared roots: {shown}",
+        )
+    found = count_old_prefix_occurrences(spec, rules)
+    if found != len(outcome.rewritten):
+        raise SpecRemapError(
+            "COUNT_FOUND",
+            f"the old prefix occurs {found} time(s) in the spec but {len(outcome.rewritten)} path(s) were "
+            "rewritten (an occurrence in a key or inside a longer string is not rewritten)",
         )
     missing = [
         f"{pointer} = {new}"
