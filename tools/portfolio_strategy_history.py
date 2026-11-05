@@ -25,6 +25,7 @@ from typing import Any, Final, Iterable, Mapping, Sequence, cast
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -3046,6 +3047,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    refused = check_entry_interpreter(
+        "the strategy history", "portfolio-strategy-history"
+    )
+    if refused is not None:
+        return refused
     full_only = (
         "grizzly_workbook",
         "grizzly_original_design_workbook",

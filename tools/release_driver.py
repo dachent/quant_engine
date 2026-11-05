@@ -58,6 +58,7 @@ from quant_engine.core import (
     process_started,
 )
 
+from quant_engine.core import InterpreterRefusal, require_interpreter
 import release_cycle_manifest
 
 GRAPH_DEFAULT = (
@@ -343,6 +344,29 @@ class Run:
         return value
 
     # -- bindings ----------------------------------------------------------------------
+    def interpreter_version(self, python: str) -> tuple[int, ...]:
+        """The (major, minor, micro) of ``python``, probed once per run."""
+
+        cache: dict[str, tuple[int, ...]] = self.__dict__.setdefault(
+            "_interpreters", {}
+        )
+        if python not in cache:
+            try:
+                probe = subprocess.run(
+                    [python, "-I", "-c", "import sys; print(*sys.version_info[:3])"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                version = tuple(int(part) for part in probe.stdout.split())
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                raise Refusal(f"cannot probe the run's Python {python}: {exc}") from exc
+            if len(version) != 3:
+                raise Refusal(f"cannot read the version of the run's Python {python}")
+            cache[python] = version
+        return cache[python]
+
     def stage_binding(self, stage_id: str) -> str:
         """What a stage's result depends on: the run configuration, its own definition, the definitions of
         every stage it requires, and the shared path and derive entries those definitions use.
@@ -617,6 +641,30 @@ def check_scheme(run: Run, stage: Mapping[str, Any]) -> None:
         raise Refusal(f"{stage['id']}: merge attestation names another tree")
     if attestation.get("merged_commit") != run.repo_identity()["commit"]:
         raise Refusal(f"{stage['id']}: merge attestation names another merged commit")
+
+
+def check_interpreter(run: Run, stage: Mapping[str, Any]) -> None:
+    """A stage that runs the run's Python runs the one the graph requires (``required_python``).
+
+    Every figure the stages hash into pins and generation ids is floating point, and CPython 3.12 changed the
+    last digits of ``sum()``: an interpreter other than the required one yields other bytes.
+    """
+
+    required = run.graph.get("required_python")
+    argv = stage.get("argv") or []
+    if not required or run.offline or not argv or argv[0] != "{python}":
+        return
+    python = run.expand(argv[0])
+    wanted = tuple(int(part) for part in str(required).split("."))
+    try:
+        require_interpreter(
+            run.interpreter_version(python),
+            what=f"stage {stage['id']}",
+            executable=python,
+            required=(wanted[0], wanted[1]),
+        )
+    except InterpreterRefusal as exc:
+        raise Refusal(str(exc)) from exc
 
 
 def check_pinned_inputs(run: Run, stage: Mapping[str, Any]) -> None:
@@ -943,6 +991,7 @@ def check_ready(
     """Every refusal that applies before ``stage`` runs. Raises ``Refusal``; changes nothing."""
 
     check_needs_config(run, stage)
+    check_interpreter(run, stage)
     run.require_frozen_repo()
     check_config_paths(run)
     check_no_live_stage(run)

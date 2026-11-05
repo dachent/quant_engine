@@ -15,6 +15,7 @@ import shutil
 import sys
 from typing import Any, Final, Mapping, Sequence
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -922,6 +923,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter(
+        "the replication candidate", "portfolio-replication"
+    )
+    if refused is not None:
+        return refused
     try:
         if args.command == "build":
             result = stage_candidate(args.spec, args.source_root, args.output_root)

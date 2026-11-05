@@ -169,6 +169,12 @@ from quant_engine.core.credentials import (
 )
 from quant_engine.core.directory_identity import inventory_identity
 from quant_engine.core.run_storage import process_alive, process_started
+from quant_engine.core.interpreter import (
+    InterpreterRefusal,
+    check_entry_interpreter,
+    require as require_interpreter,
+    require_current as require_current_interpreter,
+)
 from quant_engine.core.providers import (
     AdapterCapabilities,
     ProviderCapability,
@@ -240,6 +246,10 @@ __all__ = [
     "replica_anchor",
     "verify_replica_receipt",
     "inventory_identity",
+    "InterpreterRefusal",
+    "check_entry_interpreter",
+    "require_current_interpreter",
+    "require_interpreter",
     "AdapterCapabilities",
     "ProviderCapability",
     "ProviderContractError",

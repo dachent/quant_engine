@@ -17,6 +17,7 @@ from typing import Any, Final, Mapping, Sequence, cast
 import numpy as np
 import numpy.typing as npt
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -1283,6 +1284,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    refused = check_entry_interpreter(
+        "the diligence rubric", "portfolio-diligence-rubric"
+    )
+    if refused is not None:
+        return refused
     try:
         if args.command == "build":
             result = build(args.dependence, args.candidate_evidence, args.output)

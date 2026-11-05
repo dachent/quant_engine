@@ -29,6 +29,7 @@ import subprocess
 import sys
 from typing import Any, Callable, Collection, Final, Mapping, Sequence, cast
 
+from quant_engine.core import check_entry_interpreter
 from quant_engine.core.contracts import (
     GenerationManifest,
     ManifestValidationError,
@@ -9843,6 +9844,9 @@ def _required(args: argparse.Namespace, names: Sequence[str], mode: str) -> None
 
 def main() -> int:
     args = _parser().parse_args()
+    refused = check_entry_interpreter("the target series", "portfolio-target-series")
+    if refused is not None:
+        return refused
     try:
         if args.layered_history_generation and args.verify_layered_history is not None:
             raise TargetSeriesError(

@@ -1922,6 +1922,24 @@ def test_rerecord_refuses_while_a_stage_of_the_run_is_live(
         sleeper.wait()
 
 
+def test_a_stage_that_runs_another_python_than_the_graph_requires_is_refused(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # the figures hashed into pins are reproducible only on the required Python (3.12 made float sum() compensated)
+    assert _shipped()["required_python"] == "3.11"
+    here = f"{sys.version_info.major}.{sys.version_info.minor}"
+    other = "3.99"
+    stage = {
+        "id": "computes",
+        "outputs": ["{cycle}/out.txt"],
+        "argv": _write_stage("{cycle}/out.txt"),
+    }
+    assert _drive(world, _graph(world, [stage], required_python=other)) == 2
+    assert not (world["cycle"] / "out.txt").exists()
+    assert _drive(world, _graph(world, [stage], required_python=here)) == 0
+    assert (world["cycle"] / "out.txt").is_file()
+
+
 def test_post_commit_verify_reads_the_preflight_receipt_of_the_real_lane() -> None:
     # the receipt the commit authorization came from is the real lane's (laneout/real/evidence), not a
     # production/evidence directory a lanes run never writes
