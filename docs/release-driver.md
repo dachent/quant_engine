@@ -53,7 +53,7 @@ builds run under the 3.11 venv only**; the tooling venv of the release-inputs wo
 none of them constrains the interpreter a run or an operator uses, so the guard is explicit
 (`quant_engine.core.interpreter`, one required version, a refusal that names the interpreter found and the one required):
 
-- the graph names it (`required_python`, `3.11`): before any stage that runs `{python}` the driver probes that interpreter once and
+- the graph names it (`required_python`, `3.11`, required by the schema and part of every stage binding, so a kept receipt from another contract is not reused): before any stage that runs `{python}` the driver probes that interpreter once and
   refuses a stage on another (offline plans do not probe);
 - the tools that compute numbers refuse on another interpreter at their entry point, exit 2: the implementation reconciliation, the
   implementation return attribution, the implementation sleeve basis, the TuringTrader source manifest builder (every command: `build`, `verify`, `read-compat`)

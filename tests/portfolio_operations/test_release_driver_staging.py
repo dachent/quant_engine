@@ -293,6 +293,19 @@ def test_the_calendar_authority_is_an_explicit_stage_nothing_requires() -> None:
     assert "{calendar_authority}.receipt.json" in stage["outputs"]
 
 
+def test_a_change_of_the_required_interpreter_invalidates_every_stage_binding(
+    pass26: Path,
+) -> None:
+    # a receipt kept from a run under another interpreter contract must not verify under this one
+    config = json.loads((pass26 / "pass26-run.json").read_text(encoding="utf-8"))
+    graph = _shipped()
+    changed = {**graph, "required_python": "3.13"}
+    stage = graph["stages"][0]["id"]
+    before = driver.Run(config, graph, offline=True).stage_binding(stage)
+    after = driver.Run(config, changed, offline=True).stage_binding(stage)
+    assert before != after
+
+
 def test_staging_stages_write_only_under_the_cycle_and_in_every_ceremony(
     pass26: Path,
 ) -> None:

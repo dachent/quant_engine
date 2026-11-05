@@ -396,7 +396,12 @@ class Run:
                     pending.extend(
                         _PLACEHOLDER.findall(json.dumps(self.graph[table][name]))
                     )
-        for key in ("provider_roots", "provider_run_sources", "config_paths"):
+        for key in (
+            "provider_roots",
+            "provider_run_sources",
+            "config_paths",
+            "required_python",
+        ):
             shared[key] = self.graph.get(key)
         digest = hashlib.sha256(
             json.dumps(
