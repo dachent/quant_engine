@@ -7462,9 +7462,9 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "build":
+    if args.command in ("build", "stage"):
         try:
-            require_current_interpreter("the release build")
+            require_current_interpreter(f"the release builder {args.command}")
         except InterpreterRefusal as exc:
             print(f"portfolio-release-builder: FAIL: {exc}", file=sys.stderr)
             return 2

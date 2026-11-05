@@ -68,8 +68,10 @@ def _argv(parser: argparse.ArgumentParser, command: str | None) -> list[str]:
         ("portfolio_implementation_return_attribution", None),
         ("portfolio_implementation_sleeve_basis", None),
         ("portfolio_release_builder", "build"),
+        ("portfolio_release_builder", "stage"),
         ("tt_source_manifest_builder", "build"),
         ("tt_source_manifest_builder", "verify"),
+        ("tt_source_manifest_builder", "read-compat"),
     ],
 )
 def test_every_tool_that_computes_pinned_numbers_refuses_another_interpreter(

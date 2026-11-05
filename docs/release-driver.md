@@ -56,8 +56,8 @@ none of them constrains the interpreter a run or an operator uses, so the guard 
 - the graph names it (`required_python`, `3.11`): before any stage that runs `{python}` the driver probes that interpreter once and
   refuses a stage on another (offline plans do not probe);
 - the tools that compute numbers refuse on another interpreter at their entry point, exit 2: the implementation reconciliation, the
-  implementation return attribution, the implementation sleeve basis, the TuringTrader source manifest builder (`build`, `verify`)
-  and the release builder (`build`);
+  implementation return attribution, the implementation sleeve basis, the TuringTrader source manifest builder (every command: `build`, `verify`, `read-compat`)
+  and the release builder (`build` and `stage`: `recipe` and `inventory` only hash files);
 - the attended run records the interpreter it probes (`_runtime_identity`) and refuses one that is not 3.11.
 
 No guard is needed in the tools that only hash, copy or compare files and never compute a figure: `release_inputs.py` (including

@@ -1118,12 +1118,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command in ("build", "verify"):
-        try:
-            require_current_interpreter("the TuringTrader source manifest")
-        except InterpreterRefusal as exc:
-            print(f"REFUSED: {exc}", file=sys.stderr)
-            return 2
+    try:
+        require_current_interpreter("the TuringTrader source manifest")
+    except InterpreterRefusal as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     try:
         if args.command == "build":
             report = build(args)
