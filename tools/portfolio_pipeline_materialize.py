@@ -28,7 +28,8 @@ from quant_engine.core import (
 )
 from quant_engine.core import (
     CacheBaseError,
-    interpreter,
+    InterpreterRefusal,
+    require_interpreter,
     run_storage,
     verify_if_promoted,
 )
@@ -6457,8 +6458,8 @@ def _runtime_identity(python: Path, repo_root: Path) -> dict[str, object]:
     ):
         raise MaterializationError("attended configured Python identity differs")
     try:
-        interpreter.require(version, what="the attended run", executable=executable)
-    except interpreter.InterpreterRefusal as exc:
+        require_interpreter(version, what="the attended run", executable=executable)
+    except InterpreterRefusal as exc:
         raise MaterializationError(str(exc)) from exc
     return {
         "environment_sha256": runtime_environment_sha256(python),

@@ -58,7 +58,7 @@ from quant_engine.core import (
     process_started,
 )
 
-from quant_engine.core import interpreter
+from quant_engine.core import InterpreterRefusal, require_interpreter
 import release_cycle_manifest
 
 GRAPH_DEFAULT = (
@@ -657,13 +657,13 @@ def check_interpreter(run: Run, stage: Mapping[str, Any]) -> None:
     python = run.expand(argv[0])
     wanted = tuple(int(part) for part in str(required).split("."))
     try:
-        interpreter.require(
+        require_interpreter(
             run.interpreter_version(python),
             what=f"stage {stage['id']}",
             executable=python,
             required=(wanted[0], wanted[1]),
         )
-    except interpreter.InterpreterRefusal as exc:
+    except InterpreterRefusal as exc:
         raise Refusal(str(exc)) from exc
 
 

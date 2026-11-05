@@ -32,7 +32,7 @@ import shutil
 import sys
 from typing import Any, Final, Mapping, Sequence
 
-from quant_engine.core import interpreter
+from quant_engine.core import InterpreterRefusal, require_current_interpreter
 from quant_engine.turingtrader import SourceManifestError, build_source_manifest
 
 
@@ -1120,8 +1120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command in ("build", "verify"):
         try:
-            interpreter.require_current("the TuringTrader source manifest")
-        except interpreter.InterpreterRefusal as exc:
+            require_current_interpreter("the TuringTrader source manifest")
+        except InterpreterRefusal as exc:
             print(f"REFUSED: {exc}", file=sys.stderr)
             return 2
     try:

@@ -25,7 +25,7 @@ from xml.etree import ElementTree
 
 import pyarrow.parquet as parquet  # type: ignore[import-untyped]
 
-from quant_engine.core import interpreter
+from quant_engine.core import InterpreterRefusal, require_current_interpreter
 from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_implementation_reconciliation as reconciliation
@@ -2511,8 +2511,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        interpreter.require_current("the implementation return attribution")
-    except interpreter.InterpreterRefusal as exc:
+        require_current_interpreter("the implementation return attribution")
+    except InterpreterRefusal as exc:
         print(
             f"portfolio-implementation-return-attribution: FAIL: {exc}", file=sys.stderr
         )

@@ -101,6 +101,7 @@ _PATH_STAGES = {
     # materializer imports it and it can refuse or fail any stage, so it carries the
     # controller's impact; it writes no delivery artifact itself.
     "packages/core/src/quant_engine/core/run_storage.py": list(_STAGE_ORDER),
+    "packages/core/src/quant_engine/core/interpreter.py": list(_STAGE_ORDER),
     # Verifies a promoted retained-cache base before the runner links an overlay to it; it
     # can refuse any stage's run, like run_storage.
     "packages/core/src/quant_engine/core/retained_cache_base.py": list(_STAGE_ORDER),
