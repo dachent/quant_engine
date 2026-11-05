@@ -65,6 +65,27 @@ def _sha256(path: Path) -> dict[str, object]:
     return {"filename": path.name, "sha256": digest.hexdigest(), "size_bytes": size}
 
 
+def _require_price_tape_binding(path: Path, binding: object) -> None:
+    """The tape is the manifest's artifact: same file name, size and digest.
+
+    The name is part of the governed identity, so a tape staged under another name is refused;
+    the message names both files so a renamed input is found in one read.
+    """
+
+    actual = _sha256(path)
+    if actual == binding:
+        return
+    bound = binding if isinstance(binding, Mapping) else {}
+    differing = [key for key in actual if actual[key] != bound.get(key)]
+    detail = ", ".join(
+        f"{key} {actual[key]!r} != manifest-bound {bound.get(key)!r}"
+        for key in differing
+    )
+    raise ReturnAttributionError(
+        "TT adjusted price tape differs from the governed source manifest: " + detail
+    )
+
+
 def _read_tt_source_manifest(
     path: Path,
     components: Sequence[str],
@@ -1683,7 +1704,8 @@ def _tt_actual_holdings_return(
             str(item) for item in broker.get("component_account_ids", [])
         }
         price_pnl = 0.0
-        for account in active_accounts:
+        # sorted: the float sum below must not depend on the process hash seed
+        for account in sorted(active_accounts):
             for symbol, quantity in holdings[account].items():
                 if abs(quantity) < 1e-9:
                     continue
@@ -1799,23 +1821,33 @@ def _tt_broker_returns(
 
 def _tt_attribution(
     *,
-    workbook: Path,
+    workbook: Path | None,
     source_manifest_path: Path,
     market_data: Sequence[Path],
     schwab: Mapping[str, Any],
     ledger: Mapping[str, Any],
     accepted_as_of: date,
 ) -> dict[str, Any]:
-    component_weights = reconciliation._tt_component_weights(workbook)
+    if workbook is None:
+        # the six components and their weights are the governed source manifest's (owner ruling
+        # 2026-10-10: the mix has not changed since inception); the desktop workbook is on hold
+        # and no input of the release
+        component_weights = reconciliation.tt_manifest_component_weights(
+            _read_tt_source_manifest(source_manifest_path, ())
+        )
+    else:
+        component_weights = reconciliation._tt_component_weights(workbook)
     components = list(component_weights)
     source_manifest = _read_tt_source_manifest(
         source_manifest_path, components, component_weights
     )
-    price_binding = source_manifest["price_tape"]["artifact"]
-    if len(market_data) != 1 or _sha256(market_data[0]) != price_binding:
+    if len(market_data) != 1:
         raise ReturnAttributionError(
             "TT adjusted price tape differs from the governed source manifest"
         )
+    _require_price_tape_binding(
+        market_data[0], source_manifest["price_tape"]["artifact"]
+    )
     snapshots = _tt_target_snapshots(
         source_manifest, components, accepted_as_of=accepted_as_of
     )
@@ -2280,7 +2312,7 @@ def grizzly_attribution(
 
 def tt_attribution(
     *,
-    workbook: Path,
+    workbook: Path | None,
     source_manifest_path: Path,
     market_data: Sequence[Path],
     schwab: Mapping[str, Any],
@@ -2313,10 +2345,10 @@ def build_attribution(
     ibkr_current_xml: Path,
     grizzly_signals: Path,
     grizzly_market_data: Path,
-    tt_workbook: Path,
     tt_source_manifest: Path,
     tt_market_data: Sequence[Path],
     as_of_date: str,
+    tt_workbook: Path | None = None,
 ) -> bytes:
     accepted_as_of = date.fromisoformat(as_of_date)
     ledger = _json(provider_ledger_root / "provider-ledger.json", "provider ledger")
@@ -2418,7 +2450,11 @@ def build_attribution(
             },
             {**_sha256(grizzly_signals), "source_id": "grizzly-signals"},
             {**_sha256(grizzly_market_data), "source_id": "grizzly-market-data"},
-            {**_sha256(tt_workbook), "source_id": "tt-workbook"},
+            *(
+                [{**_sha256(tt_workbook), "source_id": "tt-workbook"}]
+                if tt_workbook is not None
+                else []
+            ),
             {
                 **_sha256(tt_source_manifest),
                 "source_id": "turingtrader-source-manifest",
@@ -2462,7 +2498,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ibkr-current-xml", type=Path, required=True)
     parser.add_argument("--grizzly-signals", type=Path, required=True)
     parser.add_argument("--grizzly-market-data", type=Path, required=True)
-    parser.add_argument("--tt-workbook", type=Path, required=True)
+    parser.add_argument("--tt-workbook", type=Path)
     parser.add_argument("--tt-source-manifest", type=Path, required=True)
     parser.add_argument("--tt-market-data", type=Path, action="append", required=True)
     parser.add_argument("--as-of-date", required=True)

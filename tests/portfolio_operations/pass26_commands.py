@@ -66,7 +66,7 @@ def write(OUT: Path) -> None:
         "cycle_manifest": C + "/in/cycle-manifest.json",
         "cycle_manifest_sha256": _pin("cycle-manifest"),
         "cycle_roots_file": C + "/in/cycle-roots.json",
-        "provenance_spec": C + "/prov-spec-r2.json",
+        "provenance_spec": C + "/in/provenance-seed-spec.json",
         "provenance_spec_sha256": _pin("provenance-spec"),
         "predecessor_ledger_spec": C + "/in/predecessor-ledger-spec.json",
         "predecessor_ledger_spec_sha256": _pin("predecessor-ledger-spec"),
@@ -99,6 +99,9 @@ def write(OUT: Path) -> None:
         "panel_root": Q + "/dataPortfolio/control-panel",
         # not recorded by pass 26 (its ids.env names them, this fixture does not): synthetic placeholders
         "provenance_id": _pin("provenance-generation"),
+        "p123_generation": Q + "/dataPortfolio123/generations/synthetic",
+        "ibkr_generation": Q + "/dataIBKR/generations/synthetic",
+        "schwab_generation": Q + "/dataSchwab/generations/synthetic",
         "report_id": _pin("report-generation"),
         "ibkr_root": Q + "/dataIBKR/generations/synthetic",
         "resolved_cycle_sha256": _pin("resolved-cycle"),
@@ -168,7 +171,7 @@ def write(OUT: Path) -> None:
                 REPO + "/tools/portfolio_provenance.py",
                 "stage",
                 "--spec",
-                C + "/prov-spec-r2.json",
+                C + "/provenance-spec.json",  # derived by provenance-spec from the seed
                 "--output-root",
                 C + "/prov",
             ],

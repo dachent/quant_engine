@@ -794,7 +794,10 @@ def test_the_shipped_graph_is_self_consistent() -> None:
         "weekly_gap_fill_spec",
         "vendor_gap_fills",
         "model_vs_actual_input",
+        "implementation_model_book_perf",
         "prep_pins",
+        "prep_pin_root_key",
+        "prep_pin_root",
         "prep_dirs",
         "prep_omit",
     }

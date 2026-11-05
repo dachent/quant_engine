@@ -56,7 +56,21 @@
     "baseline_out": "{cycle}/baseline",
     "release_inputs_strategy_basis": "{release_inputs_root}/ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json",
     "release_inputs_tag_map": "{release_inputs_root}/ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json",
-    "sleeve_facts": "{run}/stages/report/generations/{report_id}/input/sleeve-account-facts.json"
+    "sleeve_facts": "{run}/stages/report/generations/{report_id}/input/sleeve-account-facts.json",
+    "provenance_spec_derived": "{cycle}/provenance-spec.json",
+    "calendar_seed_reissued": "{cycle}/calendar-seed-authority.json",
+    "release_inputs_impl": "{release_inputs_root}/ops/mvp2-release/inputs/implementation",
+    "impl_reconciliation": "{cycle}/in/implementation-reconciliation.json",
+    "impl_return_attribution": "{cycle}/in/implementation-return-attribution.json",
+    "release_inputs_impl_ibkr_xml_root": "{release_inputs_impl}/ibkr-xml/root",
+    "release_inputs_impl_ibkr_current_xml": "{release_inputs_impl}/ibkr-xml/current-increment.xml",
+    "release_inputs_impl_spxl": "{release_inputs_impl}/spxl-market-data.json",
+    "release_inputs_impl_tt_manifest": "{release_inputs_impl}/tt-source-manifest.json",
+    "release_inputs_impl_tt_tape": "{release_inputs_impl}/yahoo-tt-adjusted-full-live.json",
+    "release_inputs_impl_model_book_perf": "{release_inputs_impl}/model-book-perf.csv",
+    "release_inputs_impl_grizzly_signals": "{release_inputs_impl}/grizzly-signals.csv",
+    "release_inputs_impl_grizzly_blended": "{release_inputs_impl}/grizzly-blended-history.csv",
+    "schwab_catalog": "{schwab_generation}/schwab-generation.json"
   },
   "derive": {
     "report_id": {
@@ -131,14 +145,90 @@
     },
     "resolved_cycle_sha256": {
       "file_sha256": "{resolved_cycle}"
+    },
+    "implementation_reconciliation_sha256": {
+      "file_sha256": "{cycle}/in/implementation-reconciliation.json"
+    },
+    "implementation_return_attribution_sha256": {
+      "file_sha256": "{cycle}/in/implementation-return-attribution.json"
+    },
+    "release_inputs_impl_model_book_perf_sha256": {
+      "file_sha256": "{release_inputs_impl_model_book_perf}"
+    },
+    "implementation_reconciliation_rel": {
+      "relative_to": [
+        "{cycle}/in/implementation-reconciliation.json",
+        "{prep_pin_root}"
+      ]
+    },
+    "implementation_return_attribution_rel": {
+      "relative_to": [
+        "{cycle}/in/implementation-return-attribution.json",
+        "{prep_pin_root}"
+      ]
+    },
+    "p123_generation": {
+      "json_field": [
+        "{resolved_cycle}",
+        "providers.portfolio123.generation_dir"
+      ]
+    },
+    "ibkr_generation": {
+      "json_field": [
+        "{resolved_cycle}",
+        "providers.ibkr.generation_dir"
+      ]
+    },
+    "schwab_generation": {
+      "json_field": [
+        "{resolved_cycle}",
+        "providers.schwab.generation_dir"
+      ]
     }
   },
   "stages": [
     {
+      "id": "cycle-seeds",
+      "inputs": [
+        "{cycle_roots_file}"
+      ],
+      "release_inputs": [
+        "ops/mvp2-release/inputs/seeds/attribution-spec-template.json"
+      ],
+      "outputs": [
+        "{cycle}/attribution-spec-template.json"
+      ],
+      "stdout_to": "{cycle}/logs/cycle-seeds.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_cycle_seeds.py",
+        "stage",
+        "--release-inputs-root",
+        "{release_inputs_root}",
+        "--release-inputs-manifest-sha256",
+        "{release_inputs_manifest_sha256}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--roots-file",
+        "{cycle_roots_file}",
+        "--cycle",
+        "{cycle}",
+        "--repo-root",
+        "{repo_root}"
+      ]
+    },
+    {
       "id": "cycle-resolve",
+      "requires": [
+        "cycle-seeds"
+      ],
       "inputs": [
         "{cycle_manifest}",
-        "{cycle_roots_file}"
+        "{cycle_roots_file}",
+        "{cycle}/attribution-spec-template.json"
       ],
       "pinned_inputs": [
         [
@@ -186,7 +276,7 @@
       ]
     },
     {
-      "id": "provenance",
+      "id": "provenance-spec",
       "requires": [
         "cycle-resolve"
       ],
@@ -200,6 +290,33 @@
         ]
       ],
       "outputs": [
+        "{provenance_spec_derived}"
+      ],
+      "stdout_to": "{cycle}/logs/provenance-spec.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_provenance_spec.py",
+        "refresh",
+        "--seed-spec",
+        "{provenance_spec}",
+        "--out",
+        "{provenance_spec_derived}",
+        "--repo-root",
+        "{repo_root}"
+      ]
+    },
+    {
+      "id": "provenance",
+      "requires": [
+        "provenance-spec"
+      ],
+      "inputs": [
+        "{provenance_spec_derived}"
+      ],
+      "outputs": [
         "{prov}"
       ],
       "stdout_to": "{cycle}/logs/provenance-stage.json",
@@ -208,7 +325,7 @@
         "{tools}/portfolio_provenance.py",
         "stage",
         "--spec",
-        "{provenance_spec}",
+        "{provenance_spec_derived}",
         "--output-root",
         "{prov}"
       ],
@@ -302,6 +419,112 @@
         {
           "exists": "{ledger_generation}/provider-ledger.json"
         }
+      ]
+    },
+    {
+      "id": "implementation-reconciliation",
+      "requires": [
+        "ledger"
+      ],
+      "release_inputs": [
+        "ops/mvp2-release/inputs/implementation/ibkr-xml/current-increment.xml",
+        "ops/mvp2-release/inputs/implementation/spxl-market-data.json",
+        "ops/mvp2-release/inputs/implementation/tt-source-manifest.json",
+        "ops/mvp2-release/inputs/implementation/yahoo-tt-adjusted-full-live.json",
+        "ops/mvp2-release/inputs/implementation/grizzly-signals.csv",
+        "ops/mvp2-release/inputs/implementation/grizzly-blended-history.csv"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{ledger_generation}/provider-ledger.json",
+        "{p123_generation}",
+        "{ibkr_generation}",
+        "{schwab_catalog}"
+      ],
+      "outputs": [
+        "{impl_reconciliation}"
+      ],
+      "stdout_to": "{cycle}/logs/implementation-reconciliation.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_implementation_reconciliation.py",
+        "--p123-generation-root",
+        "{p123_generation}",
+        "--ibkr-generation-root",
+        "{ibkr_generation}",
+        "--ibkr-xml-root",
+        "{release_inputs_impl_ibkr_xml_root}",
+        "--ibkr-current-xml",
+        "{release_inputs_impl_ibkr_current_xml}",
+        "--schwab-catalog",
+        "{schwab_catalog}",
+        "--provider-ledger-root",
+        "{ledger_generation}",
+        "--tt-source-manifest",
+        "{release_inputs_impl_tt_manifest}",
+        "--grizzly-signals",
+        "{release_inputs_impl_grizzly_signals}",
+        "--grizzly-blended-history",
+        "{release_inputs_impl_grizzly_blended}",
+        "--spxl-market-data",
+        "{release_inputs_impl_spxl}",
+        "--as-of-date",
+        "{requested_as_of}",
+        "--output",
+        "{impl_reconciliation}"
+      ]
+    },
+    {
+      "id": "implementation-return-attribution",
+      "requires": [
+        "ledger"
+      ],
+      "release_inputs": [
+        "ops/mvp2-release/inputs/implementation/ibkr-xml/current-increment.xml",
+        "ops/mvp2-release/inputs/implementation/spxl-market-data.json",
+        "ops/mvp2-release/inputs/implementation/tt-source-manifest.json",
+        "ops/mvp2-release/inputs/implementation/yahoo-tt-adjusted-full-live.json",
+        "ops/mvp2-release/inputs/implementation/grizzly-signals.csv",
+        "ops/mvp2-release/inputs/implementation/grizzly-blended-history.csv"
+      ],
+      "inputs": [
+        "{resolved_cycle}",
+        "{ledger_generation}/provider-ledger.json",
+        "{p123_generation}",
+        "{ibkr_generation}",
+        "{schwab_catalog}"
+      ],
+      "outputs": [
+        "{impl_return_attribution}"
+      ],
+      "stdout_to": "{cycle}/logs/implementation-return-attribution.json",
+      "argv": [
+        "{python}",
+        "{tools}/portfolio_implementation_return_attribution.py",
+        "--provider-ledger-root",
+        "{ledger_generation}",
+        "--schwab-catalog",
+        "{schwab_catalog}",
+        "--p123-generation-root",
+        "{p123_generation}",
+        "--ibkr-generation-root",
+        "{ibkr_generation}",
+        "--ibkr-xml-root",
+        "{release_inputs_impl_ibkr_xml_root}",
+        "--ibkr-current-xml",
+        "{release_inputs_impl_ibkr_current_xml}",
+        "--grizzly-signals",
+        "{release_inputs_impl_grizzly_signals}",
+        "--grizzly-market-data",
+        "{release_inputs_impl_spxl}",
+        "--tt-source-manifest",
+        "{release_inputs_impl_tt_manifest}",
+        "--tt-market-data",
+        "{release_inputs_impl_tt_tape}",
+        "--as-of-date",
+        "{requested_as_of}",
+        "--output",
+        "{impl_return_attribution}"
       ]
     },
     {
@@ -417,6 +640,37 @@
       ]
     },
     {
+      "id": "attribution-spec",
+      "requires": [
+        "baseline"
+      ],
+      "inputs": [
+        "{cycle}/attribution-spec-template.json"
+      ],
+      "outputs": [
+        "{cycle}/attribution-spec.json"
+      ],
+      "stdout_to": "{cycle}/logs/attribution-spec.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_cycle_seeds.py",
+        "derive-attribution-spec",
+        "--template",
+        "{cycle}/attribution-spec-template.json",
+        "--baseline-root",
+        "{cycle}/baseline",
+        "--baseline-generation-id",
+        "{baseline_id}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--out",
+        "{cycle}/attribution-spec.json"
+      ]
+    },
+    {
       "id": "selected-build",
       "requires": [
         "baseline"
@@ -485,7 +739,8 @@
     {
       "id": "selected-inputs",
       "requires": [
-        "selected-build"
+        "selected-build",
+        "attribution-spec"
       ],
       "builtin": "inputs_only",
       "inputs": [
@@ -548,6 +803,40 @@
       ]
     },
     {
+      "id": "calendar-seed",
+      "explicit": true,
+      "requires": [
+        "cycle-resolve"
+      ],
+      "inputs": [
+        "{calendar_seed_authority}"
+      ],
+      "pinned_inputs": [
+        [
+          "{calendar_seed_authority}",
+          "{calendar_seed_authority_sha256}"
+        ]
+      ],
+      "outputs": [
+        "{calendar_seed_reissued}"
+      ],
+      "stdout_to": "{cycle}/logs/calendar-seed.json",
+      "resume": {
+        "same_argv": true
+      },
+      "argv": [
+        "{python}",
+        "{tools}/release_hwm_calendar.py",
+        "reissue",
+        "--seed-authority",
+        "{calendar_seed_authority}",
+        "--out",
+        "{calendar_seed_reissued}",
+        "--repo-root",
+        "{repo_root}"
+      ]
+    },
+    {
       "id": "calendar-authority",
       "explicit": true,
       "requires": [
@@ -603,13 +892,18 @@
         "ops/mvp2-release/inputs/sleeves/quantbase/declared-inputs.json"
       ],
       "requires": [
-        "pre-chain"
+        "pre-chain",
+        "implementation-reconciliation",
+        "implementation-return-attribution"
       ],
       "inputs": [
         "{resolved_cycle}",
         "{predecessor_prep_spec}",
         "{selected_inputs}",
-        "{calendar_authority}"
+        "{calendar_authority}",
+        "{cycle}/attribution-spec.json",
+        "{cycle}/in/implementation-reconciliation.json",
+        "{cycle}/in/implementation-return-attribution.json"
       ],
       "pinned_inputs": [
         [
@@ -721,6 +1015,31 @@
           "args": [
             "--pin",
             "model_vs_actual_input={model_vs_actual_input}"
+          ]
+        },
+        {
+          "if": "implementation_model_book_perf",
+          "args": [
+            "--pin",
+            "implementation_model_book_perf={implementation_model_book_perf}"
+          ]
+        },
+        {
+          "if": "release_inputs_root",
+          "unless": "implementation_model_book_perf",
+          "if_file": "{release_inputs_impl_model_book_perf}",
+          "args": [
+            "--pin",
+            "implementation_model_book_perf=release_inputs:ops/mvp2-release/inputs/implementation/model-book-perf.csv@{release_inputs_impl_model_book_perf_sha256}"
+          ]
+        },
+        {
+          "if": "prep_pin_root_key",
+          "args": [
+            "--pin",
+            "implementation_reconciliation={prep_pin_root_key}:{implementation_reconciliation_rel}@{implementation_reconciliation_sha256}",
+            "--pin",
+            "implementation_return_attribution={prep_pin_root_key}:{implementation_return_attribution_rel}@{implementation_return_attribution_sha256}"
           ]
         },
         {

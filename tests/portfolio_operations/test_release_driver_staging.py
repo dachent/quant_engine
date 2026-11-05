@@ -33,22 +33,31 @@ from test_release_ledger_spec_e2e import real_cycle  # noqa: E402
 
 SHIPPED = REPO_ROOT / "ops" / "mvp2-release" / "release-stages.json"
 STAGING = (
+    "cycle-seeds",
     "cycle-resolve",
+    "provenance-spec",
     "provenance",
     "ledger-spec",
     "ledger",
     "baseline-spec",
     "baseline",
+    "attribution-spec",
 )
+# the implementation builders run after the ledger they bind and before the preparation spec that pins them
+IMPLEMENTATION = ("implementation-reconciliation", "implementation-return-attribution")
 # stages whose tool and flags are checked against the tool's own --help
 TOOL_STAGES = (
     *STAGING,
+    *IMPLEMENTATION,
     "selected-build",
     "pre-chain",
+    "calendar-seed",
     "calendar-authority",
     "prep-spec",
     "post-commit-verify",
 )
+# what the first stage writes under the cycle: the carried seeds and the spec template
+CYCLE_SEEDS = ("attribution-spec-template.json",)
 NEW_CONFIG_KEYS = (
     "predecessor_selected_inputs",
     "predecessor_selected_inputs_sha256",
@@ -65,7 +74,10 @@ NEW_CONFIG_KEYS = (
     "weekly_gap_fill_spec",
     "vendor_gap_fills",
     "model_vs_actual_input",
+    "implementation_model_book_perf",
     "prep_pins",
+    "prep_pin_root_key",
+    "prep_pin_root",
     "prep_dirs",
     "prep_omit",
     "cycle_manifest",
@@ -188,11 +200,23 @@ def _closure(stage_id: str) -> set[str]:
 
 def test_the_staging_group_comes_first_in_the_order_stage_p23_ran_it() -> None:
     ids = [s["id"] for s in _shipped()["stages"]]
+    # the builders of the ledger-bound implementation seeds sit between the ledger and the baseline spec
+    at = ids.index("ledger") + 1
+    assert ids[at : at + 2] == list(IMPLEMENTATION)
+    for builder in IMPLEMENTATION:
+        assert "ledger" in _closure(builder) and builder in _closure("prep-spec")
+    ids = [i for i in ids if i not in IMPLEMENTATION]
     # stage_p23.sh: provenance, ledger, baseline, then selected inputs and the pre-chain; each spec
     # builder runs just before the stage tool that reads its output
-    assert ids[:9] == [*STAGING, "selected-build", "selected-inputs", "pre-chain"]
+    assert ids[: len(STAGING) + 3] == [
+        *STAGING,
+        "selected-build",
+        "selected-inputs",
+        "pre-chain",
+    ]
     # the calendar authority comes before the preparation spec that pins it, the spec before the run
     assert ids[ids.index("pre-chain") + 1 : ids.index("attended") + 1] == [
+        "calendar-seed",
         "calendar-authority",
         "prep-spec",
         "attended",
@@ -275,7 +299,13 @@ def test_staging_stages_write_only_under_the_cycle_and_in_every_ceremony(
     config = json.loads((pass26 / "pass26-run.json").read_text(encoding="utf-8"))
     run = driver.Run(config, _shipped(), offline=True)
     cycle = Path(config["cycle"])
-    for stage_id in (*STAGING, "selected-build", "prep-spec", "calendar-authority"):
+    for stage_id in (
+        *STAGING,
+        "selected-build",
+        "prep-spec",
+        "calendar-seed",
+        "calendar-authority",
+    ):
         stage = _stage(stage_id)
         assert "only_ceremony" not in stage and "only_mode" not in stage
         written = driver._claimed_outputs(run, stage)
@@ -491,12 +521,24 @@ def staged(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]
         json.dumps({key: str(path) for key, path in cycle_world["roots"].items()}),
         encoding="utf-8",
     )
-    prov_spec = base / "provenance-spec.json"
+    prov_spec = base / "provenance-seed-spec.json"
     prov_spec.write_text("{}", encoding="utf-8")
     graph = _shipped()
     # the provenance stage reads a hand-made spec (no committed builder): stand in for the staging
     # tool by placing the generation the ledger-spec fixture staged, where the stage's output lies
     for stage in graph["stages"]:
+        if stage["id"] == "cycle-seeds":
+            # release_cycle_seeds.py has its own tests; this fixture has no release-inputs root
+            stage.pop("release_inputs")
+            stage["argv"] = [
+                "{python}",
+                "-c",
+                "import sys,pathlib;c=pathlib.Path(sys.argv[1]);"
+                "[((c/n).parent.mkdir(parents=True,exist_ok=True),(c/n).write_text('{}'))"
+                " for n in sys.argv[2:]]",
+                "{cycle}",
+                *CYCLE_SEEDS,
+            ]
         if stage["id"] == "provenance":
             stage["argv"] = [
                 "{python}",
@@ -698,7 +740,7 @@ def test_selected_inputs_must_name_this_runs_ledger_generation_and_follow_its_bu
     None
 ):
     stage = _stage("selected-inputs")
-    assert stage["requires"] == ["selected-build"]
+    assert stage["requires"] == ["selected-build", "attribution-spec"]
     assert ["{selected_inputs}", "{cycle_ledger_id}"] in stage["bound_ids"]
     assert _stage("selected-build")["outputs"] == ["{selected_inputs}"]
     assert _stage("prep-spec")["outputs"] == ["{preparation_spec}"]
@@ -744,6 +786,168 @@ def test_the_shipped_staging_stages_name_the_release_inputs_they_read() -> None:
         in named["baseline-spec"]
     )
     assert "ops/mvp2-release/inputs/current-epoch-crosswalk.json" in named["prep-spec"]
+
+
+def test_the_first_stage_writes_the_per_cycle_seeds_every_later_stage_reads() -> None:
+    graph = {s["id"]: s for s in _shipped()["stages"]}
+    seeds = graph["cycle-seeds"]
+    assert "requires" not in seeds
+    assert {Path(item).name for item in seeds["outputs"]} == {
+        Path(name).name for name in CYCLE_SEEDS
+    }
+    assert graph["cycle-resolve"]["requires"] == ["cycle-seeds"]
+    # the spec is derived from the cycle's own baseline, before the stages that read it
+    assert graph["attribution-spec"]["requires"] == ["baseline"]
+    assert "attribution-spec" in graph["selected-inputs"]["requires"]
+
+
+def test_prep_spec_records_the_per_cycle_seeds_whose_pins_it_carries() -> None:
+    # a seed that changes after prep-spec succeeded must refuse the kept prep-spec and
+    # everything downstream: the consuming stage records the files, not only cycle-resolve
+    stage = next(s for s in _shipped()["stages"] if s["id"] == "prep-spec")
+    for name in (
+        "attribution-spec.json",
+        "in/implementation-reconciliation.json",
+        "in/implementation-return-attribution.json",
+    ):
+        assert "{cycle}/" + name in stage["inputs"], name
+
+
+def test_prep_spec_repins_the_staged_implementation_seeds_when_a_root_is_named(
+    tmp_path: Path,
+) -> None:
+    # the prep spec carries the two implementation files of the predecessor; a cycle whose seeds were
+    # staged (or rebuilt) has other bytes, so prep-spec re-pins them from the files the cycle holds
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stage = next(s for s in graph["stages"] if s["id"] == "prep-spec")
+    world_root = tmp_path / "world"
+    cycle = world_root / "c"
+    (cycle / "in").mkdir(parents=True)
+    recon = cycle / "in" / "implementation-reconciliation.json"
+    attr = cycle / "in" / "implementation-return-attribution.json"
+    recon.write_bytes(b'{"r": 1}\n')
+    attr.write_bytes(b'{"a": 2}\n')
+    config = {
+        "repo_root": "R",
+        "python": "py",
+        "cycle": cycle.as_posix(),
+        "run": (cycle / "run").as_posix(),
+        "code_commit": "c" * 40,
+        "mode": "release",
+        "requested_as_of": "2026-09-17",
+        "ceremony": "full",
+    }
+    group = [
+        item
+        for item in stage["argv"]
+        if isinstance(item, dict) and item.get("if") == "prep_pin_root_key"
+    ]
+    assert len(group) == 1
+    # without the key the group adds nothing: the default command line is unchanged
+    assert (
+        driver.stage_argv(driver.Run(config, graph, offline=True), stage, group) == []
+    )
+
+    config["prep_pin_root_key"] = "world"
+    config["prep_pin_root"] = world_root.as_posix()
+    argv = driver.stage_argv(driver.Run(config, graph, offline=False), stage, group)
+    pins = [argv[i + 1] for i, token in enumerate(argv) if token == "--pin"]
+    sha = hashlib.sha256
+    assert pins == [
+        f"implementation_reconciliation=world:c/in/implementation-reconciliation.json@{sha(recon.read_bytes()).hexdigest()}",
+        f"implementation_return_attribution=world:c/in/implementation-return-attribution.json@{sha(attr.read_bytes()).hexdigest()}",
+    ]
+
+
+IMPLEMENTATION_STAGES = (
+    "implementation-reconciliation",
+    "implementation-return-attribution",
+)
+
+
+def test_the_implementation_stages_take_no_desktop_workbook() -> None:
+    # the workbook is on permanent hold (AGENTS.md): a release-inputs set without one must be complete, so
+    # neither stage lists it among its release inputs or hands it to its builder
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stages = {s["id"]: s for s in graph["stages"]}
+    assert not [key for key in graph["paths"] if "workbook" in key]
+    for stage_id in IMPLEMENTATION_STAGES:
+        stage = stages[stage_id]
+        assert not [i for i in stage["release_inputs"] if "workbook" in i], stage_id
+        assert "--tt-workbook" not in stage["argv"], stage_id
+        assert not [a for a in stage["argv"] if "workbook" in str(a)], stage_id
+
+
+def test_the_implementation_stages_record_the_provider_generations_they_read() -> None:
+    # a P123 or IBKR generation directory or the Schwab catalog changed in place after the stage ran
+    # must fail the resume check: they are inputs of the stage, as the arguments that name them are
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stages = {s["id"]: s for s in graph["stages"]}
+    for stage_id in IMPLEMENTATION_STAGES:
+        stage = stages[stage_id]
+        for placeholder, flag in (
+            ("{p123_generation}", "--p123-generation-root"),
+            ("{ibkr_generation}", "--ibkr-generation-root"),
+            ("{schwab_catalog}", "--schwab-catalog"),
+        ):
+            assert stage["argv"][stage["argv"].index(flag) + 1] == placeholder
+            assert placeholder in stage["inputs"], (stage_id, placeholder)
+
+
+def test_prep_spec_pins_the_model_book_export_from_the_release_inputs_root(
+    tmp_path: Path,
+) -> None:
+    # the model book export decides whether the attended run builds the sleeve-basis contract (without
+    # it the published implementation row stays on the account basis, N66), so it must not depend on a
+    # hand-set run-configuration key: the release inputs hold it
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stage = next(s for s in graph["stages"] if s["id"] == "prep-spec")
+    inputs = tmp_path / "ri"
+    impl = inputs / "ops" / "mvp2-release" / "inputs" / "implementation"
+    impl.mkdir(parents=True)
+    group = [
+        item
+        for item in stage["argv"]
+        if isinstance(item, dict)
+        and item.get("unless") == "implementation_model_book_perf"
+    ]
+    assert len(group) == 1
+    config = {
+        "repo_root": "R",
+        "python": "py",
+        "cycle": "C",
+        "run": "C/run",
+        "code_commit": "c" * 40,
+        "mode": "release",
+        "requested_as_of": "2026-09-17",
+        "ceremony": "full",
+    }
+
+    def argv() -> list[str]:
+        run = driver.Run(
+            {k: v for k, v in config.items() if k != "release_inputs_root"},
+            graph,
+            offline=False,
+        )
+        if (
+            "release_inputs_root" in config
+        ):  # the manifest check is not what is tested here
+            run.values["release_inputs_root"] = config["release_inputs_root"]
+        return driver.stage_argv(run, stage, group)
+
+    assert argv() == []  # no release inputs: the default command line is unchanged
+    config["release_inputs_root"] = inputs.as_posix()
+    assert argv() == []  # a root without the export: nothing to pin
+    perf = impl / "model-book-perf.csv"
+    perf.write_bytes(b"date,value\n")
+    sha = hashlib.sha256(perf.read_bytes()).hexdigest()
+    assert argv() == [
+        "--pin",
+        "implementation_model_book_perf=release_inputs:"
+        f"ops/mvp2-release/inputs/implementation/model-book-perf.csv@{sha}",
+    ]
+    config["implementation_model_book_perf"] = "world:x@" + "0" * 64
+    assert argv() == []  # an explicit pin wins; the group never doubles it
 
 
 def test_the_validating_stages_pass_the_basis_inputs_the_attended_run_used() -> None:

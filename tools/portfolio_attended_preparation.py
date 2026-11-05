@@ -49,12 +49,29 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "sleeve-facts": (),
     "selected-history-normalization": ("sleeve-facts",),
     "dependence": ("selected-history-normalization",),
+    "basis-attribution": (
+        "sleeve-facts",
+        "selected-history-normalization",
+        "dependence",
+    ),
+    "implementation-sleeve-basis": ("sleeve-facts",),
     "plan-live-only": ("selected-history-normalization",),
     "plan-live-plus-backtest": ("selected-history-normalization",),
     "history-control": ("sleeve-facts",),
-    "ledger": ("dependence", "plan-live-only", "plan-live-plus-backtest"),
+    "ledger": (
+        "dependence",
+        "basis-attribution",
+        "plan-live-only",
+        "plan-live-plus-backtest",
+    ),
     "baseline": ("ledger",),
-    "epoch": ("ledger", "baseline", "sleeve-facts", "history-control"),
+    "epoch": (
+        "ledger",
+        "baseline",
+        "sleeve-facts",
+        "history-control",
+        "implementation-sleeve-basis",
+    ),
     "hwm": ("epoch", "ledger", "baseline"),
     "capital": ("epoch", "ledger"),
     "attribution": ("ledger", "plan-live-only", "baseline"),
@@ -62,6 +79,8 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "sleeve-facts",
         "selected-history-normalization",
         "dependence",
+        "basis-attribution",
+        "implementation-sleeve-basis",
         "plan-live-only",
         "plan-live-plus-backtest",
         "history-control",
@@ -83,6 +102,7 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "account_manifest_schema": "schemas/portfolio/account-strategy-manifest.schema.json",
     "account_strategy_manifest": "tools/account_strategy_manifest.py",
     "attended_preparation": "tools/portfolio_attended_preparation.py",
+    "implementation_sleeve_basis": "tools/portfolio_implementation_sleeve_basis.py",
     "baseline_producer": "tools/portfolio_baseline.py",
     "capital_input": "ops/mvp2-release/scripts/build_capital_input.py",
     "core_authority": "packages/core/src/quant_engine/core/authority.py",
@@ -220,10 +240,20 @@ _PREPARATION_STAGE_CODE = {
         "release_builder",
         "attribution_baseline_reader",
     ),
+    # the attribution reader is not listed: a run is frozen at one release commit, which the
+    # run identity binds, and listing it would re-run the ledger and every stage after it
+    # whenever the reader's bytes change (the reader is already a code input of "attribution")
+    "basis-attribution": ("attended_preparation", "strategy_basis"),
+    "implementation-sleeve-basis": (
+        "attended_preparation",
+        "implementation_sleeve_basis",
+    ),
     "final-handoff": ("attended_preparation",),
 }
 
 _PREPARATION_STAGE_POLICY = {
+    "basis-attribution": (),
+    "implementation-sleeve-basis": (),
     "sleeve-facts": (),
     "selected-history-normalization": (),
     "dependence": ("dependence", "dependence_schema"),
@@ -240,6 +270,8 @@ _PREPARATION_STAGE_POLICY = {
 }
 
 _PREPARATION_STAGE_OUTPUTS = {
+    "basis-attribution": ("attribution_source",),
+    "implementation-sleeve-basis": ("stage_receipt",),
     "sleeve-facts": ("sleeve_facts",),
     "selected-history-normalization": ("history_source",),
     "dependence": ("dependence_root", "selected_path"),
@@ -775,6 +807,125 @@ def _implementation_sleeve_basis_path(config: Mapping[str, Any]) -> Path | None:
     return _pin(pin, "implementation sleeve basis")
 
 
+def _implementation_model_book_perf_path(config: Mapping[str, Any]) -> Path | None:
+    """The pinned model book performance export the sleeve basis contract is built from."""
+
+    pin = config.get("implementation_model_book_perf")
+    if pin is None:
+        return None
+    if config.get("implementation_sleeve_basis") is not None:
+        raise AttendedPreparationError(
+            "the implementation sleeve basis is either pinned or built, not both"
+        )
+    if _strategy_basis_declaration_path(config) is None:
+        raise AttendedPreparationError(
+            "building an implementation sleeve basis requires a strategy basis declaration"
+        )
+    return _pin(pin, "implementation model book performance")
+
+
+def _require_implementation_sleeve_basis_source(config: Mapping[str, Any]) -> None:
+    """A release that restates a strategy to its sleeve must say where the contract comes from.
+
+    Without the contract the published implementation row stays on the account basis, which the
+    validator refuses only after the whole run (``returns.implementation_account_legs``).
+    """
+
+    declaration = _strategy_basis_declaration_path(config)
+    if declaration is None:
+        return
+    try:
+        rows = json.loads(declaration.read_bytes()).get("strategies", [])
+    except (ValueError, AttributeError) as exc:
+        raise AttendedPreparationError(
+            "the strategy basis declaration is unreadable"
+        ) from exc
+    restated = sorted(
+        str(row.get("strategy_id"))
+        for row in rows
+        if isinstance(row, Mapping) and row.get("basis") == "SLEEVE_EPOCH"
+    )
+    if restated and config.get("implementation_model_book_perf") is None:
+        if config.get("implementation_sleeve_basis") is None:
+            raise AttendedPreparationError(
+                f"the declaration restates {', '.join(restated)} to its sleeve: name "
+                "implementation_model_book_perf (the model book export the contract is "
+                "built from) or a pinned implementation_sleeve_basis"
+            )
+
+
+def _model_provider_id(receipt: bytes) -> str:
+    """The provider whose live returns the ledger excludes: the declared sleeve's model book.
+
+    Read from the admission receipt (its one ``PROVIDER_LIVE_RETURN`` exclusion), not typed here.
+    """
+
+    try:
+        dispositions = json.loads(receipt)["dispositions"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AttendedPreparationError(
+            "the provider admission receipt is unreadable"
+        ) from exc
+    providers = {
+        str(row["provider_id"])
+        for row in dispositions
+        if isinstance(row, Mapping)
+        and row.get("item_kind") == "PRODUCT_DATA_CLASS"
+        and row.get("data_class") == "PROVIDER_LIVE_RETURN"
+        and row.get("action") == "EXCLUDE"
+        and row.get("provider_id")
+    }
+    if len(providers) != 1:
+        raise AttendedPreparationError(
+            "the provider admission receipt does not name exactly one excluded "
+            "live-return provider"
+        )
+    return next(iter(providers))
+
+
+def _stage_implementation_sleeve_basis(
+    *,
+    declaration_path: Path,
+    facts_path: Path,
+    model_book_perf_path: Path,
+    retained_attribution_path: Path,
+    retained_reconciliation_path: Path,
+    admission_receipt_path: Path,
+    destination: Path,
+) -> Path:
+    """Build the ``implementation-sleeve-basis/1`` contract from this run's own inputs.
+
+    The contract pins the retained attribution and reconciliation digests and the provider
+    admission receipt of the run's ledger, so it can only exist once those do (never as a
+    pinned seed of the release-inputs root).
+    """
+
+    import portfolio_implementation_sleeve_basis as sleeve_basis
+
+    paths = {
+        "declaration": declaration_path,
+        "sleeve_facts": facts_path,
+        "model_book_perf": model_book_perf_path,
+        "retained_attribution": retained_attribution_path,
+        "retained_reconciliation": retained_reconciliation_path,
+        "provider_admission_receipt": admission_receipt_path,
+    }
+    content = sleeve_basis.build_contract(
+        declaration=declaration_path.read_bytes(),
+        sleeve_facts=facts_path.read_bytes(),
+        model_book_perf=model_book_perf_path.read_bytes(),
+        retained_attribution=retained_attribution_path.read_bytes(),
+        retained_reconciliation=retained_reconciliation_path.read_bytes(),
+        provider_admission_receipt=admission_receipt_path.read_bytes(),
+        model_provider_id=_model_provider_id(admission_receipt_path.read_bytes()),
+        filenames={key: path.name for key, path in paths.items()},
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("xb") as handle:
+        handle.write(content)
+    return destination
+
+
 def _strategy_basis_facts_path(
     declaration_path: Path | None, facts_paths: Sequence[Path]
 ) -> Path | None:
@@ -834,6 +985,94 @@ def _history_basis_differs(
         block.get("sleeve_facts_sha256")
         != hashlib.sha256(facts_path.read_bytes()).hexdigest()
     )
+
+
+def _attribution_basis_differs(
+    attribution_root: Path, declaration_path: Path, facts_path: Path | None
+) -> bool:
+    """Whether the retained attribution is not the one this declaration and facts describe.
+
+    The retained attribution is built before the sleeve facts exist, so it carries no
+    ``strategy_basis`` block (or one over other bytes); the report then refuses it because
+    its sleeve comparisons differ from the restatement.
+    """
+
+    catalog = attribution_root / "strategy-attribution.json"
+    if not catalog.is_file():
+        return True
+    block = _read(catalog, "retained attribution catalog").get("strategy_basis")
+    if not isinstance(block, Mapping):
+        return True
+    if (
+        block.get("declaration_sha256")
+        != hashlib.sha256(declaration_path.read_bytes()).hexdigest()
+    ):
+        return True
+    return facts_path is not None and bool(
+        block.get("sleeve_facts_sha256")
+        != hashlib.sha256(facts_path.read_bytes()).hexdigest()
+    )
+
+
+def _expected_baseline_generation(baseline_source: Path, expected: object) -> Path:
+    """The staged baseline generation the attribution must name, under the retained baseline root.
+
+    The retained baseline entry is the allocation authority handed to dependence; the attribution
+    binds the separately pinned expected staged baseline (identity and catalog digest), so that
+    one is the baseline it is built from, and only when its bytes are the pinned ones.
+    """
+
+    if not isinstance(expected, Mapping):
+        raise AttendedPreparationError("expected staged baseline identity is required")
+    generation = (
+        baseline_source.parents[1] / "generations" / str(expected.get("generation_id"))
+    )
+    catalog = generation / "portfolio-baseline.json"
+    if not catalog.is_file() or hashlib.sha256(
+        catalog.read_bytes()
+    ).hexdigest() != expected.get("catalog_sha256"):
+        raise AttendedPreparationError(
+            "the expected staged baseline is not under the retained baseline root"
+        )
+    return generation
+
+
+def _stage_basis_attribution(
+    *,
+    spec_path: Path,
+    baseline_generation: Path,
+    destination: Path,
+    dependence_root: Path,
+    dependence_selected_inputs: Path,
+    declaration_path: Path,
+    facts_path: Path,
+) -> Path:
+    """Stage the attribution once more with the strategy basis restated onto the sleeve.
+
+    Built here, after the sleeve facts, the basis history and its dependence exist, from the
+    same spec and baseline the retained attribution was built from.  A rerun finds the
+    generation it staged and keeps it.
+    """
+
+    import portfolio_attribution as attribution
+
+    generations = destination / "generations"
+    try:
+        staged = attribution.stage_catalog(
+            baseline_generation.parents[1],
+            spec_path,
+            destination,
+            baseline_generation_id=baseline_generation.name,
+            dependence_source_root=dependence_root,
+            dependence_selected_inputs=dependence_selected_inputs,
+            strategy_basis_declaration=declaration_path,
+            sleeve_facts=facts_path,
+        )
+    except (attribution.AttributionValidationError, OSError, ValueError) as exc:
+        raise AttendedPreparationError(
+            f"strategy basis attribution is refused: {exc}"
+        ) from exc
+    return (generations / str(staged["generation_id"])).resolve()
 
 
 def _retained_history_requires_rebuild(
@@ -1141,6 +1380,7 @@ def _validated_inputs(
             config["financial_input_contract"], "financial input contract"
         ),
     )
+    _require_implementation_sleeve_basis_source(config)
     # Replay the retained history and every public-plan boundary before this
     # function returns.  The caller creates its output root only afterwards.
     import portfolio_current_decomposition_plan as plans
@@ -1736,6 +1976,46 @@ def _preparation_stage_inputs(
             "baseline": config["retained_verified_generations"]["baseline"],
             "dependence_selection_template": config["dependence_selection_template"],
         },
+        "implementation-sleeve-basis": {
+            "provider_ledger_generation_root": config[
+                "provider_ledger_generation_root"
+            ],
+            **{
+                key: config[key]
+                for key in (
+                    "implementation_model_book_perf",
+                    "implementation_reconciliation",
+                    "implementation_return_attribution",
+                    "strategy_basis_declaration",
+                )
+                if config.get(key) is not None
+            },
+            **(
+                _strategy_basis_stage_input(config.get("sleeve_facts"))
+                if config.get("strategy_basis_declaration") is None
+                else {}
+            ),
+        },
+        "basis-attribution": {
+            **common,
+            "baseline": config["retained_verified_generations"]["baseline"],
+            "attribution": config["retained_verified_generations"]["attribution"],
+            **(
+                {"attribution_spec_template": config["attribution_spec_template"]}
+                if config.get("attribution_spec_template") is not None
+                else {}
+            ),
+            **(
+                {"expected_staged_baseline": config["expected_staged_baseline"]}
+                if config.get("expected_staged_baseline") is not None
+                else {}
+            ),
+            **(
+                {"strategy_basis_declaration": config["strategy_basis_declaration"]}
+                if config.get("strategy_basis_declaration") is not None
+                else _strategy_basis_stage_input(config.get("sleeve_facts"))
+            ),
+        },
         "plan-live-only": {**common, "plan": plans["LIVE_ONLY"]},
         "history-control": {
             **common,
@@ -2103,6 +2383,11 @@ def _preserve_uncheckpointed_stage(root: Path, stage: str) -> None:
             root / "preparation" / "sleeve-facts-selection.json",
         ),
         "selected-history-normalization": (root / "preparation" / "history",),
+        "basis-attribution": (root / "preparation" / "attribution",),
+        "implementation-sleeve-basis": (
+            root / "preparation" / "implementation-sleeve-basis.json",
+            root / "preparation" / "implementation-sleeve-basis-stage.json",
+        ),
         "dependence": (
             root / "preparation" / "dependence",
             root / "preparation" / "dependence-selected-inputs.json",
@@ -2384,6 +2669,94 @@ def _prepare_attended_inputs(
                 "selected_path": str(selected_path),
             },
             {"dependence_root": dependence_root, "selected_path": selected_path},
+        )
+
+    attribution_checkpoint = reuse("basis-attribution")
+    if attribution_checkpoint is not None:
+        attribution_source = Path(
+            str(attribution_checkpoint["attribution_source"])
+        ).resolve()
+    else:
+        if (
+            basis_declaration_path is not None
+            and basis_facts_path is not None
+            and _attribution_basis_differs(
+                attribution_source, basis_declaration_path, basis_facts_path
+            )
+        ):
+            # a declared restatement needs the attribution to carry the sleeve lanes the
+            # report compares against; the retained one predates the sleeve facts
+            attribution_source = _stage_basis_attribution(
+                spec_path=_pin(config["attribution_spec_template"], "attribution spec"),
+                baseline_generation=_expected_baseline_generation(
+                    baseline_source, config.get("expected_staged_baseline")
+                ),
+                destination=root / "preparation" / "attribution",
+                dependence_root=dependence_root,
+                dependence_selected_inputs=selected_path,
+                declaration_path=basis_declaration_path,
+                facts_path=basis_facts_path,
+            )
+        checkpoint(
+            "basis-attribution",
+            {"attribution_source": str(attribution_source)},
+            {"attribution_source": attribution_source},
+        )
+
+    # the implementation sleeve basis: built here when the release names the model book, else
+    # the (optional) pinned contract of the release configuration is used as before
+    sleeve_basis_checkpoint = reuse("implementation-sleeve-basis")
+    sleeve_basis_receipt = (
+        root / "preparation" / "implementation-sleeve-basis-stage.json"
+    )
+    if sleeve_basis_checkpoint is not None:
+        built_text = sleeve_basis_checkpoint["contract_path"]
+        built_sleeve_basis = None if built_text is None else Path(str(built_text))
+    else:
+        perf_path = _implementation_model_book_perf_path(config)
+        built_sleeve_basis = None
+        if perf_path is not None:
+            if basis_declaration_path is None or basis_facts_path is None:
+                raise AttendedPreparationError(
+                    "building an implementation sleeve basis requires the declaration "
+                    "and the residual-parent sleeve facts"
+                )
+            built_sleeve_basis = _stage_implementation_sleeve_basis(
+                declaration_path=basis_declaration_path,
+                facts_path=basis_facts_path,
+                model_book_perf_path=perf_path,
+                retained_attribution_path=_pin(
+                    config["implementation_return_attribution"],
+                    "implementation return attribution",
+                ),
+                retained_reconciliation_path=_pin(
+                    config["implementation_reconciliation"],
+                    "implementation reconciliation",
+                ),
+                admission_receipt_path=(
+                    Path(str(config["provider_ledger_generation_root"])).resolve()
+                    / "admit-or-declare-receipt.json"
+                ),
+                destination=root / "preparation" / "implementation-sleeve-basis.json",
+            )
+        _write(
+            sleeve_basis_receipt,
+            {
+                "built": built_sleeve_basis is not None,
+                "contract_path": (
+                    None if built_sleeve_basis is None else str(built_sleeve_basis)
+                ),
+                "schema_version": 1,
+            },
+        )
+        checkpoint(
+            "implementation-sleeve-basis",
+            {
+                "contract_path": (
+                    None if built_sleeve_basis is None else str(built_sleeve_basis)
+                )
+            },
+            {"stage_receipt": sleeve_basis_receipt},
         )
 
     def write_plan(
@@ -2754,7 +3127,11 @@ def _prepare_attended_inputs(
             sleeve_facts_path=(
                 basis_facts_path if basis_declaration_path is not None else None
             ),
-            implementation_sleeve_basis_path=_implementation_sleeve_basis_path(config),
+            implementation_sleeve_basis_path=(
+                built_sleeve_basis
+                if built_sleeve_basis is not None
+                else _implementation_sleeve_basis_path(config)
+            ),
             decomposition_control_plan_bundle=control_plan_roots.get("LIVE_ONLY"),
             hybrid_decomposition_control_plan_bundle=control_plan_roots.get(
                 "LIVE_PLUS_BACKTEST"

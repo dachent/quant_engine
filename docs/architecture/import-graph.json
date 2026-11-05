@@ -145,6 +145,11 @@
     ],
     [
       "portfolio_attended_preparation",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "portfolio_attended_preparation",
       "portfolio_current_decomposition_plan",
       2
     ],
@@ -166,6 +171,11 @@
     [
       "portfolio_attended_preparation",
       "portfolio_hwm_selected_inputs",
+      1
+    ],
+    [
+      "portfolio_attended_preparation",
+      "portfolio_implementation_sleeve_basis",
       1
     ],
     [
@@ -629,6 +639,16 @@
       1
     ],
     [
+      "release_cycle_seeds",
+      "portfolio_attribution",
+      1
+    ],
+    [
+      "release_cycle_seeds",
+      "release_cycle_manifest",
+      1
+    ],
+    [
       "release_driver",
       "release_cycle_manifest",
       1
@@ -641,7 +661,7 @@
     [
       "release_hwm_calendar",
       "portfolio_invested_capital",
-      1
+      2
     ],
     [
       "release_ledger_spec",

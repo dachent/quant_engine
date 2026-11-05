@@ -43,8 +43,9 @@ def _numeric_leaves(value: object) -> list[int | float]:
     return []
 
 
+@pytest.mark.parametrize("with_workbook", [True, False])
 def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, with_workbook: bool
 ) -> None:
     """Closure-matrix B2: the TT account leg is the governed ACCOUNT_LIVE
     series, not the broker NAV/flow recomputation.
@@ -94,8 +95,14 @@ def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
     market.write_bytes(b"{}")
 
     day0, day1 = date(2026, 1, 5), date(2026, 1, 6)
+
+    def workbook_weights(_path: Path) -> dict[str, int]:
+        if not with_workbook:
+            raise AssertionError("the desktop workbook was read")
+        return {"A": 1}
+
     monkeypatch.setattr(
-        attribution.reconciliation, "_tt_component_weights", lambda _p: {"A": 1}
+        attribution.reconciliation, "_tt_component_weights", workbook_weights
     )
     monkeypatch.setattr(
         attribution,
@@ -104,6 +111,10 @@ def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
             "portfolio": {},
             "source_manifest_id": "m",
             "price_tape": {"artifact": attribution._sha256(market)},
+            "selected_components": [
+                {"slug": f"c{index}", "portfolio_weight": "0.1666666666666667"}
+                for index in range(6)
+            ],
         },
     )
     monkeypatch.setattr(
@@ -145,7 +156,7 @@ def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
     )
 
     row = attribution._tt_attribution(
-        workbook=workbook,
+        workbook=workbook if with_workbook else None,
         source_manifest_path=manifest,
         market_data=[market],
         schwab={},
@@ -1192,3 +1203,81 @@ def test_policy_unavailable_bridge_keeps_its_closed_key_set() -> None:
     assert (
         bound["account_leg"]["cumulative_return"] == bound["bridge"]["account_return"]
     )
+
+
+_HASHSEED_PROBE = """
+import importlib.util, json, sys
+from datetime import date
+sys.path.insert(0, sys.argv[2])
+spec = importlib.util.spec_from_file_location("ra", sys.argv[1])
+ra = importlib.util.module_from_spec(spec)
+sys.modules["ra"] = ra
+spec.loader.exec_module(ra)
+accounts = [f"acct-{n}" for n in range(12)]
+# holdings whose per-account price P&L differ by many orders of magnitude, so the float sum
+# changes in the last digits with the order the accounts are added in
+holdings = [
+    {"account_id": account, "symbol": "SPY", "kind": "Buy", "quantity": 10.0 ** (n % 7) * (1.0 + n / 7.0),
+     "execution_price": 100.0, "event_date": "2026-01-02", "record_id": f"r{n}"}
+    for n, account in enumerate(accounts)
+]
+rows = [{"date": "2026-01-05", "beginning_capital": 1.0e6, "component_account_ids": accounts}]
+prices = {"SPY": {date(2026, 1, 2): {"Close": 100.1}, date(2026, 1, 5): {"Close": 100.37}}}
+result, close, fill = ra._tt_actual_holdings_return(
+    schwab={"transactions": holdings}, broker_rows=rows, prices=prices,
+    start=date(2026, 1, 5), end=date(2026, 1, 5),
+)
+print(json.dumps([result, close, fill]))
+"""
+
+
+def test_tt_holdings_return_does_not_depend_on_the_hash_seed() -> None:
+    import os
+    import subprocess
+
+    outputs = set()
+    for seed in range(8):
+        env = {**os.environ, "PYTHONHASHSEED": str(seed)}
+        done = subprocess.run(
+            [sys.executable, "-c", _HASHSEED_PROBE, str(MODULE_PATH), str(TOOLS_ROOT)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert done.returncode == 0, done.stderr
+        outputs.add(done.stdout)
+    assert len(outputs) == 1
+
+
+def _tape_binding(path: Path) -> dict[str, object]:
+    raw = path.read_bytes()
+    return {
+        "filename": path.name,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+
+
+def test_the_price_tape_must_be_the_manifest_bound_artifact(tmp_path: Path) -> None:
+    tape = tmp_path / "yahoo-tt-adjusted-full-live.json"
+    tape.write_bytes(b'{"rows": []}')
+    binding = _tape_binding(tape)
+    attribution._require_price_tape_binding(tape, binding)
+
+    renamed = tmp_path / "tt-price-tape.json"
+    renamed.write_bytes(tape.read_bytes())
+    with pytest.raises(attribution.ReturnAttributionError) as excinfo:
+        attribution._require_price_tape_binding(renamed, binding)
+    message = str(excinfo.value)
+    assert "'tt-price-tape.json'" in message
+    assert "'yahoo-tt-adjusted-full-live.json'" in message
+    assert "sha256" not in message  # the bytes match: only the name differs
+
+    tape.write_bytes(b'{"rows": [1]}')
+    with pytest.raises(attribution.ReturnAttributionError) as tampered:
+        attribution._require_price_tape_binding(tape, binding)
+    assert "sha256" in str(tampered.value) and "size_bytes" in str(tampered.value)
+
+    with pytest.raises(attribution.ReturnAttributionError):
+        attribution._require_price_tape_binding(tape, "c" * 64)  # not the identity form

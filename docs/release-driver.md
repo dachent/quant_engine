@@ -126,7 +126,7 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 
 | group | stages |
 |---|---|
-| staging | `cycle-resolve`, `provenance`, `ledger-spec`, `ledger`, `baseline-spec`, `baseline` (below, "Staging group") |
+| staging | `cycle-seeds`, `cycle-resolve`, `provenance-spec`, `provenance`, `ledger-spec`, `ledger`, `implementation-reconciliation`, `implementation-return-attribution`, `baseline-spec`, `baseline` (below, "Staging group") |
 | inputs | `selected-build` (`release_prepare_inputs.py selected`), then `selected-inputs` (the selected-inputs file and the hand-built attribution spec must exist and are hash-bound; the file must name this run's ledger generation) |
 | pre-chain | `pre-chain` (`tools/release_pre_chain.py`: layered history, dependence, attribution; reads the resolved cycle) |
 | calendar | `calendar-authority` (explicit: authors the HWM calendar authority from a first attempt; below) |
@@ -152,7 +152,8 @@ touches a real root).
 | stage | tool | writes (create-only) | refuses when |
 |---|---|---|---|
 | `cycle-resolve` | `release_cycle_manifest.py resolve` | `{resolved_cycle}` | the manifest bytes differ from `cycle_manifest_sha256`; any pin, hash, generation or finality rule of the manifest fails; the resolved cutoff or evaluation date is not the run's `requested_as_of` / `evaluated_on` |
-| `provenance` | `portfolio_provenance.py stage` | `{cycle}/prov` | `provenance_spec` differs from `provenance_spec_sha256` |
+| `provenance-spec` | `release_provenance_spec.py refresh` | `{cycle}/provenance-spec.json` | the seed `provenance_spec` differs from `provenance_spec_sha256`; a contract, registry or schema named by the seed has no file in the repository |
+| `provenance` | `portfolio_provenance.py stage` | `{cycle}/prov` | the derived spec differs from what `provenance-spec` recorded |
 | `ledger-spec` | `release_ledger_spec.py build` | `{cycle}/ledger-spec.json`, `{cycle}/run-observation.json` | the predecessor spec differs from its pin; the builder's own self-check (the committed ledger validator) fails; the spec's cutoff or provenance generation is not this run's |
 | `ledger` | `provider_ledger.py stage` | `{cycle}/ledger` | the spec does not name this run's provenance generation (`bound_ids`); the stage passes `--output-root` itself so a spec cannot send it elsewhere |
 | `baseline-spec` | `release_baseline_spec.py build` | `{cycle}/baseline-spec.json` | release inputs missing, of another cutoff or not matching their pin; the spec's cutoff, ledger or provenance generation is not this run's |
@@ -170,7 +171,8 @@ New run configuration keys:
 |---|---|
 | `cycle_manifest`, `cycle_manifest_sha256` | the cycle manifest (`docs/release-cycle-manifest.md`) and its pin; the pin is also passed to the tool |
 | `cycle_roots_file` | the `{root key: directory}` JSON the manifest's root keys resolve against (`--roots-file`) |
-| `provenance_spec`, `provenance_spec_sha256` | the provenance spec and its pin. No committed tool writes it (the R2 `rebase_prov.py` and `make_r2_provenance_spec.py` are not in the repository): it stays an operator input, hash-pinned |
+| `provenance_spec`, `provenance_spec_sha256` | the provenance spec seed and its pin. No committed tool writes the seed (the R2 `rebase_prov.py` and `make_r2_provenance_spec.py` are not in the repository): it stays an operator input, hash-pinned. `provenance-spec` copies it to `{cycle}/provenance-spec.json` with `financial_mvp` bound to the contract, registry and schema bytes of the frozen repository, so a contract change between cycles never leaves a stale `contract_sha256`; every other key is carried |
+| per-cycle seed files under `cycle` | the first stage `cycle-seeds` (`release_cycle_seeds.py stage`, see `docs/release-cycle-seeds.md`) stages only `attribution-spec-template.json` from the pinned release-inputs root; the stage `attribution-spec` (after `baseline`, before `selected-inputs`) derives `attribution-spec.json` from the template and the cycle's own baseline (`release_cycle_seeds.py derive-attribution-spec`). `in/implementation-reconciliation.json` and `in/implementation-return-attribution.json` are NOT seeds: the policy evidence of the AI Factor implementation row embeds the run's ledger generation id and receipt digest, and generation ids bind the repository sha, so they are built by the stages `implementation-reconciliation` and `implementation-return-attribution` (committed builders, `requires` `ledger`, run between `ledger` and `baseline-spec`) against this cycle's ledger generation. Their provider inputs come from the resolved cycle (`providers.<id>.generation_dir`, `providers.schwab.manifest_path`); the non-repository files (IBKR Flex XML root and current increment, SPXL market data, TT workbook, source manifest and price tape, Grizzly signal and blended histories) are release inputs under `ops/mvp2-release/inputs/implementation/` (`ibkr-xml/root/`, `ibkr-xml/current-increment.xml`, `spxl-market-data.json`, `tt-source-manifest.json`, `yahoo-tt-adjusted-full-live.json` (the name the governed TT source manifest binds: the builder compares filename, size and digest), `grizzly-signals.csv`, `grizzly-blended-history.csv`). `prep-spec` requires both stages and re-pins them (`prep_pin_root_key`, below). The builders are deterministic only with the TT sum ordered (PR 808); a root built from an older build differs in the last digits |
 | `predecessor_ledger_spec`, `predecessor_ledger_spec_sha256` | the predecessor release's ledger spec as the builder reads it (carried blocks only), remapped to this cycle's roots, and its pin |
 | `release_inputs_root`, `release_inputs_manifest_sha256` | the pinned release-inputs root (outside Git). The driver already binds the expected baseline from it; `baseline-spec` reads the declared baseline inputs from the same root |
 | `baseline_roots` | optional object `{root id: directory}`: one `--root ID=DIR` per entry, in key order; it must name exactly the root ids the declared baseline sources use (templates such as `{cycle}/in/x` are expanded) |
@@ -200,11 +202,15 @@ aside).
 | `selected_files` | optional object `NAME: "ROOT_KEY:relative@sha256"`: one `--file` per entry (the new native file of a carried entry) |
 | `factors_bundle`, `sector_bundle`, `style_bundle` | optional public bundle names (`--<kind>-bundle`); the default is the bundle roots the resolved cycle names |
 | `factors_bundle_id`, `sector_bundle_id`, `style_bundle_id` | optional: choose one generation of a bundle root that holds two (`--<kind>-bundle-id`) |
+| `implementation_model_book_perf` | optional `"ROOT_KEY:relative@sha256"` (the model book performance export of the declared sleeve, passed as `--pin`). A run that names a `release_inputs_root` needs no key: when the inputs hold `model-book-perf.csv` under `ops/mvp2-release/inputs/implementation/`, prep-spec pins it itself (root key `release_inputs`, which the preparer binds to `--release-inputs-root`), unless this key is set. A run that hand-pins `implementation_sleeve_basis` through `prep_pins` must use inputs without the export (the two are refused together). Present, the attended preparation builds the `implementation-sleeve-basis/1` contract itself in a checkpointed stage after `sleeve-facts` (declaration, facts, this export, the retained attribution and reconciliation, the ledger's admission receipt); absent, an optional pinned `implementation_sleeve_basis` is used as before. Naming both is refused |
 | `weekly_gap_fill_spec`, `vendor_gap_fills`, `model_vs_actual_input` | optional per-cycle inputs, each `"ROOT_KEY:relative@sha256"`, passed as `--pin KEY=...`; absent means the key is omitted from the spec |
+| `prep_pin_root_key`, `prep_pin_root` | optional: a root key of the resolved cycle (such as `world`) and the directory it names. Present, `prep-spec` re-pins `implementation_reconciliation` and `implementation_return_attribution` from `{cycle}/in/implementation-*.json` (`--pin KEY=ROOT_KEY:relative@sha256`, the digest and the path relative to `prep_pin_root` derived from the files the cycle holds), so a cycle whose seeds differ from the predecessor's no longer refuses with `HASH_MISMATCH`. Absent, the command line is unchanged |
 | `prep_pins`, `prep_dirs` | optional objects `KEY: "ROOT_KEY:relative@sha256"` / `KEY: "ROOT_KEY:relative"`: `--pin` / `--dir` replacements of carried inputs. A directory-valued field (such as `sleeve_facts.quantbase_source_dir`) belongs in `prep_dirs`: a pin writes a `{path, sha256, size_bytes}` object where the attended preparation reads a path |
 | `prep_omit` | optional list of spec keys the cycle declares it has none of (`--omit`) |
 
 The graph's `config_paths` require the file-valued keys above to exist before any stage runs.
+
+A release that declares a strategy basis (`strategy-basis-declaration`, pinned by the sleeve policy manifest) needs the attribution catalog to carry the `strategy_basis` block and the sleeve comparison lanes, or the report refuses it ("attribution sleeve comparisons differ from the report's strategy basis restatement"). `pre-chain` stages the cycle attribution before the sleeve facts exist, so the attended preparation stages it once more, after the sleeve facts, the basis history and its dependence, from the same `attribution_spec_template` and baseline (`preparation/attribution`); the recipe then names that generation, as it already does for the rebuilt history. The attribution id the preparation spec carries (and `attended` binds) stays the `pre-chain` one; it is not the id the recipe uses when a basis is declared. A release without a declaration is unchanged.
 
 Two driver features serve these stages and are part of the graph schema: an argv group `{"for_each": KEY, "args": [...]}`
 repeats its arguments for every entry of the run-config object (or list) KEY (`{each_key}`, `{each_value}` stand for the entry),
@@ -213,6 +219,14 @@ the calendar tool authenticates its input with). Under `plan --offline` a config
 opened because the directory is absent (not mounted) is not an error: the plan shows the baseline path in that root and binds no bytes.
 
 ### Calendar authority (explicit stage)
+
+`calendar-seed` (explicit, requires only `cycle-resolve`) runs `release_hwm_calendar.py reissue` and writes
+`{calendar_seed_reissued}` (`{cycle}/calendar-seed-authority.json`): the predecessor authority (`calendar_seed_authority`, pinned) with
+`hwm_policy_sha256` rebound to the frozen repository's HWM policy and `authority_evidence_sha256` recomputed, every calendar, interval and
+value carried. The attended run validates the authority it is given against the repository's policy before it stages anything, so a seed
+carried from another head (the R3 rehearsal: `a01a9500` against `a6b85d7b`) is refused; the first attempt takes this file as its
+`calendar_authority`. `calendar-authority` itself derives the policy hash from the repository and takes only the policy id and the owner
+decision text from its seed, so it works on the same head with the original or the re-issued seed.
 
 `calendar-authority` runs `release_hwm_calendar.py author` (two passes: calendar kinds and gaps from the first
 attempt's observed NAV dates, then the adapter's own interval returns) and writes `{calendar_authority}` and
@@ -344,6 +358,14 @@ The repository must be clean at `code_commit` before and after. The post-commit 
 `{cycle}/post-commit/`.
 
 
+Neither implementation stage takes the desktop workbook: it is on permanent hold (AGENTS.md), so the shipped graph passes no
+`--tt-workbook` and lists no `tt-workbook.xlsx` among the stages' release inputs. The reconciliation never needed it (its
+workbook is an optional diagnostic); the return attribution takes the six TuringTrader components and their weights from the
+governed source manifest (owner ruling 2026-10-10, constant mix since inception) when no workbook is given. A release-inputs
+set that holds no workbook is therefore complete. Both stages record the P123 and IBKR generation directories and the Schwab
+catalog they read as inputs, so a change in place after the stage ran fails the resume check instead of passing it.
+
+
 ### Findings inputs
 
 Only when the run names a `release_inputs_root` (one optional argument group); a run without one keeps the repository-default command lines.
@@ -355,3 +377,42 @@ run used, so a sleeve row is checked against the declaration it was restated fro
 `--ibkr-root` (the preparation spec's `sleeve_facts.ibkr_generation_root`). `release_replica.py` takes the same five as
 optional flags and adds them to the validator only when given. Without them the declaration-dependent items
 (`returns.sleeve_basis` and its invariants) are not evaluated and the ceremony reports different findings than the run.
+
+## Re-running a pass on a fresh world
+
+Three steps of a re-run are operator steps by design, not graph gaps:
+
+- `calendar_seed_authority_sha256` is a trust pin the operator supplies (`sha256sum` of the seed file the owner pinned); the
+  stages refuse any other bytes, so the graph does not compute it from the file it checks. `calendar-seed` is explicit: name it
+  (`run --only calendar-seed`) after `cycle-resolve`, then point `calendar_authority` at `{calendar_seed_reissued}`.
+- `replica-copy` is create-only (`must_not_exist {replica_workspace}`). A second pass over the same `replica_workspace` is refused
+  by design; give each pass its own `replica_workspace` or move the earlier replica aside first (retire it after archiving).
+- `implementation_model_book_perf` needs no key when the run names a `release_inputs_root` holding the export (see the run
+  configuration table): without the export the attended preparation builds no sleeve-basis contract and the published
+  implementation row stays on the account basis (finding `returns.implementation_account_legs`, N66).
+
+Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or idempotent, never deleting; `move-aside` and
+`carry-over` print what they would do unless `--apply` is given):
+
+1. `provenance-seed --seed <previous seed> --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin> --out <new seed>`: the seed's `sleeve-policy` root now
+   names this pass's inputs and its source group's hashes are re-read from them. The printed sha256 is the new
+   `provenance_spec_sha256`.
+2. `config --previous <previous run json> --out <run json> --candidate-commit C --code-commit T --release-inputs-root <ri> --release-inputs-manifest-sha256 <pin>
+   --set provenance_spec=<new seed> --set prep_pin_root_key=world --set prep_pin_root=<world> [--set run=... --set qa=...
+   --set evidence_dest=...]`: repoints every occurrence of the old inputs root, verifies the inputs against the pin (never by repo path), takes the expected
+   baseline pin from the verified set and recomputes the provenance seed pin from its file, and drops the calendar authority's pin (it is never carried). Predecessor
+   pins are never touched.
+3. `move-aside --config <run json> [--apply]`: the previous pass's `production`, `replica-production`, `replica-rehearsal`,
+   `clean-room`, `pre-chain-cycle.json` and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` get an
+   `.aside-<UTC time>` name. Only paths inside the world are moved; an existing aside name is refused.
+4. `carry-over --from-cycle <previous cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
+   `in/epoch-admission-policy.json` and each further file or directory named with `--carry` (the IBKR generation directory
+   `ibkr/`, when the carried preparation spec still names it). The retained cache is not copied: point `retained_cache_root` at the cache to reuse.
+5. `run --only cycle-seeds`, `--only cycle-resolve`, `--only calendar-seed`, then `config ... --require-calendar` again with the
+   same arguments: it adds `calendar_authority_sha256` from `calendar_authority` (`{calendar_seed_reissued}`) and refuses to
+   run before that file exists.
+6. `run` (full).
+
+The calendar authority's pin stays a deliberate trust pin: the operator running the pass sets it (step 5) and records its
+sha256 in the pass evidence, where the release owner's direct hash confirmation at commit covers it. It is never derived by the
+driver, which would accept whatever file the run was handed.

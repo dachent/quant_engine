@@ -502,7 +502,8 @@ def _holdings_validation(
                     if (
                         dropped
                         and symbols < set(base)
-                        and abs(shortfall - sum(base[k] for k in dropped)) <= explain
+                        and abs(shortfall - sum(base[k] for k in sorted(dropped)))
+                        <= explain
                     ):
                         if after_ev is None:
                             cls = CLASS_UNRESOLVED_DROP
@@ -528,7 +529,8 @@ def _holdings_validation(
                 elif cls == CLASS_ROUNDING_OR_CASH and latest and live_ok:
                     absent = set(live) - symbols
                     if absent and (
-                        abs(shortfall - sum(float(live[k]) for k in absent)) <= explain
+                        abs(shortfall - sum(float(live[k]) for k in sorted(absent)))
+                        <= explain
                     ):
                         cls = CLASS_LIVE_SYMBOL_MISSING
             corroborated = False

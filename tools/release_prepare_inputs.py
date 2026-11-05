@@ -120,7 +120,12 @@ CARRIED_OPTIONAL = frozenset(
 )
 # inputs of one cycle only: never carried; absent unless the run names them (``--pin``)
 PER_CYCLE_OPTIONAL = frozenset(
-    {"model_vs_actual_input", "vendor_gap_fills", "weekly_gap_fill_spec"}
+    {
+        "implementation_model_book_perf",
+        "model_vs_actual_input",
+        "vendor_gap_fills",
+        "weekly_gap_fill_spec",
+    }
 )
 PLAN_REGENERATED = frozenset(
     {
@@ -297,6 +302,16 @@ def load_resolved(path: Path, sha256: str | None = None) -> dict[str, Any]:
     if problems:
         raise PrepareError("RESOLVED_SHAPE", "; ".join(problems[:4]))
     return dict(value)
+
+
+def bind_release_inputs_root(resolved: dict[str, Any], root: Path | None) -> None:
+    """Name the manifest-pinned inputs root ``release_inputs`` for ``--file``/``--pin``/``--dir``.
+
+    It lies outside the cycle's own roots; a cycle that binds the key itself keeps its binding.
+    """
+
+    if root is not None:
+        resolved["roots"].setdefault("release_inputs", os.path.realpath(root))
 
 
 def declared_roots(
@@ -1132,6 +1147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         resolved = load_resolved(args.resolved_cycle, args.resolved_cycle_sha256)
+        bind_release_inputs_root(resolved, args.release_inputs_root)
         roots = declared_roots(resolved, args.repo_root, args.release_inputs_root)
         roots.locate(args.out.resolve().as_posix(), "--out", exists=False)
         ledger_dir = _ledger_generation(resolved, roots, args.ledger_generation_dir)

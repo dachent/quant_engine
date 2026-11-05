@@ -602,13 +602,17 @@ def test_prep_spec_derives_every_id_and_repins_every_file(world: World) -> None:
 def test_prep_spec_pins_each_per_cycle_input_the_run_names(world: World) -> None:
     gap = _put(world.data / "gap" / "fills.json", "fills")
     audit = _put(world.data / "gap" / "audit.json", "audit")
+    perf = _put(world.data / "gap" / "perf.csv", "perf")
     pins = [
         f"vendor_gap_fills=data:gap/fills.json@{_sha(gap.read_bytes())}",
         f"model_vs_actual_input=data:gap/audit.json@{_sha(audit.read_bytes())}",
+        f"implementation_model_book_perf=data:gap/perf.csv@{_sha(perf.read_bytes())}",
     ]
     spec = world.prep(pins=pins)
     assert spec["vendor_gap_fills"] == _pin(gap)
     assert spec["model_vs_actual_input"] == _pin(audit)
+    assert spec["implementation_model_book_perf"] == _pin(perf)
+    assert "implementation_model_book_perf" not in world.prep()
     assert "weekly_gap_fill_spec" not in spec  # absent means the key is omitted
     _refusal(
         "HASH_MISMATCH",
@@ -853,6 +857,28 @@ def test_a_spec_the_attended_check_refuses_is_renamed(world: World) -> None:
     message = _refusal("SELF_CHECK", tool.write_prep_spec, world.prep(), out, check)
     assert "ValueError" in message and "replay differs" in message
     assert not out.exists() and out.with_name(out.name + ".rejected").is_file()
+
+
+def test_the_release_inputs_root_is_a_pin_root(world: World, tmp_path: Path) -> None:
+    inputs = tmp_path / "ri"
+    perf = _put(inputs / "impl" / "perf.csv", "perf")
+    resolved = copy.deepcopy(world.resolved)
+    tool.bind_release_inputs_root(resolved, None)
+    assert "release_inputs" not in resolved["roots"]
+    tool.bind_release_inputs_root(resolved, inputs)
+    key, path, sha = tool._located_override(
+        f"implementation_model_book_perf=release_inputs:impl/perf.csv@{_sha(perf.read_bytes())}",
+        resolved,
+        "--pin",
+    )
+    assert (key, path, sha) == (
+        "implementation_model_book_perf",
+        Path(os.path.realpath(inputs)) / "impl" / "perf.csv",
+        _sha(perf.read_bytes()),
+    )
+    resolved["roots"]["release_inputs"] = "elsewhere"
+    tool.bind_release_inputs_root(resolved, inputs)
+    assert resolved["roots"]["release_inputs"] == "elsewhere"
 
 
 def _cli(world: World, *args: str) -> list[str]:

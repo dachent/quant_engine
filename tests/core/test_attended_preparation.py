@@ -2799,6 +2799,7 @@ def _preparation_function_fixture(
                 "sleeve_ledger",
                 "sleeve_nav",
                 "strategy_basis",
+                "implementation_sleeve_basis",
             )
         },
         "financial_data_cutoff": "2026-09-17",
@@ -5341,6 +5342,137 @@ def test_a_retained_history_is_current_only_for_its_own_declaration_and_facts(
     assert differs(restated, declaration, None) is True
 
 
+def test_a_retained_attribution_is_current_only_for_its_own_declaration_and_facts(
+    tmp_path: Path,
+) -> None:
+    declaration = tmp_path / "declaration.json"
+    declaration.write_bytes(b"declaration")
+    facts = tmp_path / "facts.json"
+    facts.write_bytes(b"facts")
+    differs = preparation._attribution_basis_differs
+
+    def attribution(name: str, catalog: dict[str, object] | None) -> Path:
+        root = tmp_path / name
+        root.mkdir()
+        if catalog is not None:
+            (root / "strategy-attribution.json").write_bytes(
+                canonical_json_bytes(catalog)
+            )
+        return root
+
+    stamped = {
+        "strategy_basis": {
+            "declaration_sha256": hashlib.sha256(b"declaration").hexdigest(),
+            "sleeve_facts_sha256": hashlib.sha256(b"facts").hexdigest(),
+        }
+    }
+    # built before the sleeve facts existed: no block (or no catalog) is never current
+    assert differs(attribution("none", None), declaration, facts) is True
+    assert differs(attribution("plain", {}), declaration, facts) is True
+    current = attribution("current", stamped)
+    assert differs(current, declaration, facts) is False
+    assert differs(current, declaration, None) is False
+    facts.write_bytes(b"other facts")
+    assert differs(current, declaration, facts) is True
+    facts.write_bytes(b"facts")
+    declaration.write_bytes(b"other declaration")
+    assert differs(current, declaration, facts) is True
+
+
+def test_the_basis_attribution_is_staged_from_the_cycle_spec_and_the_runs_own_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_attribution as attribution
+
+    seen: dict[str, Any] = {}
+
+    def stage(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        seen["args"], seen["kwargs"] = args, kwargs
+        return {"generation_id": "g" * 64}
+
+    monkeypatch.setattr(attribution, "stage_catalog", stage)
+    baseline = tmp_path / "baseline" / "generations" / "b"
+    destination = tmp_path / "preparation" / "attribution"
+    got = preparation._stage_basis_attribution(
+        spec_path=tmp_path / "spec.json",
+        baseline_generation=baseline,
+        destination=destination,
+        dependence_root=tmp_path / "dependence",
+        dependence_selected_inputs=tmp_path / "selected.json",
+        declaration_path=tmp_path / "declaration.json",
+        facts_path=tmp_path / "facts.json",
+    )
+    assert got == (destination / "generations" / ("g" * 64)).resolve()
+    assert seen["args"] == (
+        baseline.parents[1],
+        tmp_path / "spec.json",
+        destination,
+    )
+    assert seen["kwargs"] == {
+        "baseline_generation_id": "b",
+        "dependence_source_root": tmp_path / "dependence",
+        "dependence_selected_inputs": tmp_path / "selected.json",
+        "strategy_basis_declaration": tmp_path / "declaration.json",
+        "sleeve_facts": tmp_path / "facts.json",
+    }
+
+    def refuse(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise attribution.AttributionValidationError("synthetic")
+
+    monkeypatch.setattr(attribution, "stage_catalog", refuse)
+    with pytest.raises(preparation.AttendedPreparationError, match="synthetic"):
+        preparation._stage_basis_attribution(
+            spec_path=tmp_path / "spec.json",
+            baseline_generation=baseline,
+            destination=destination,
+            dependence_root=tmp_path / "dependence",
+            dependence_selected_inputs=tmp_path / "selected.json",
+            declaration_path=tmp_path / "declaration.json",
+            facts_path=tmp_path / "facts.json",
+        )
+
+
+def test_the_basis_attribution_is_built_from_the_expected_staged_baseline(
+    tmp_path: Path,
+) -> None:
+    retained = tmp_path / "baseline" / "generations" / "allocation"
+    retained.mkdir(parents=True)
+    staged = tmp_path / "baseline" / "generations" / "staged"
+    staged.mkdir()
+    (staged / "portfolio-baseline.json").write_bytes(b"catalog")
+    expected = {
+        "generation_id": "staged",
+        "catalog_sha256": hashlib.sha256(b"catalog").hexdigest(),
+    }
+    # the allocation authority and the staged baseline are different generations: the
+    # attribution is built from the one the release pinned
+    assert preparation._expected_baseline_generation(retained, expected) == staged
+    for refused in (
+        None,
+        {**expected, "catalog_sha256": "0" * 64},
+        {**expected, "generation_id": "other"},
+    ):
+        with pytest.raises(preparation.AttendedPreparationError):
+            preparation._expected_baseline_generation(retained, refused)
+
+
+def test_the_basis_attribution_is_a_checkpointed_preparation_stage() -> None:
+    graph = preparation.PREPARATION_STAGE_DEPENDENCIES
+    # built after the sleeve facts, the basis history and its dependence; the recipe and the
+    # handoff come after it, so a resume reuses it instead of recomputing the attribution
+    assert set(graph["basis-attribution"]) == {
+        "sleeve-facts",
+        "selected-history-normalization",
+        "dependence",
+    }
+    assert "basis-attribution" in graph["ledger"]
+    assert "basis-attribution" in graph["final-handoff"]
+    assert preparation._PREPARATION_STAGE_OUTPUTS["basis-attribution"] == (
+        "attribution_source",
+    )
+    assert "strategy_basis" in preparation._PREPARATION_STAGE_CODE["basis-attribution"]
+
+
 _BASIS_DECLARATION = {
     "schema": "strategy-basis-declaration/1",
     "strategies": [{"strategy_id": "synthetic-strategy", "basis": "SLEEVE_EPOCH"}],
@@ -5533,3 +5665,164 @@ def test_without_a_declaration_the_control_stage_does_not_apply(
         output / "preparation" / "history-control-not-applicable.json", "marker"
     )
     assert marker["status"] == "NOT_APPLICABLE"
+
+
+def _file_pin(path: Path, content: bytes) -> dict[str, object]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "size_bytes": len(content),
+    }
+
+
+def test_the_implementation_sleeve_basis_is_a_checkpointed_stage_after_the_sleeve_facts() -> (
+    None
+):
+    stage = "implementation-sleeve-basis"
+    assert preparation.PREPARATION_STAGE_DEPENDENCIES[stage] == ("sleeve-facts",)
+    for later in ("epoch", "final-handoff"):
+        assert stage in preparation.PREPARATION_STAGE_DEPENDENCIES[later]
+    assert preparation._PREPARATION_STAGE_OUTPUTS[stage] == ("stage_receipt",)
+    assert "implementation_sleeve_basis" in preparation._PREPARATION_STAGE_CODE[stage]
+
+
+def test_the_model_book_pin_selects_building_and_refuses_a_second_source(
+    tmp_path: Path,
+) -> None:
+    perf = _file_pin(tmp_path / "perf.csv", b"date,value\n")
+    assert preparation._implementation_model_book_perf_path({}) is None
+    with pytest.raises(preparation.AttendedPreparationError, match="declaration"):
+        preparation._implementation_model_book_perf_path(
+            {"implementation_model_book_perf": perf}
+        )
+    declaration = _file_pin(tmp_path / "declaration.json", b"{}")
+    with pytest.raises(preparation.AttendedPreparationError, match="not both"):
+        preparation._implementation_model_book_perf_path(
+            {
+                "implementation_model_book_perf": perf,
+                "implementation_sleeve_basis": declaration,
+                "strategy_basis_declaration": declaration,
+            }
+        )
+
+
+def test_the_contract_is_built_from_the_runs_own_files_and_is_create_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import portfolio_implementation_sleeve_basis as sleeve_basis
+
+    files = {
+        name: tmp_path / name
+        for name in (
+            "declaration.json",
+            "facts.json",
+            "perf.csv",
+            "attribution.json",
+            "reconciliation.json",
+            "receipt.json",
+        )
+    }
+    for path in files.values():
+        path.write_bytes(path.name.encode())
+    files["receipt.json"].write_text(
+        json.dumps(
+            {
+                "dispositions": [
+                    {
+                        "provider_id": "model-provider",
+                        "item_kind": "PRODUCT_DATA_CLASS",
+                        "data_class": "PROVIDER_LIVE_RETURN",
+                        "action": "EXCLUDE",
+                    },
+                    {
+                        "provider_id": "other",
+                        "item_kind": "PRODUCT_DATA_CLASS",
+                        "data_class": "NAV",
+                        "action": "ADMIT",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def build_contract(**kwargs: object) -> bytes:
+        seen.update(kwargs)
+        return b'{"contract_id": "c"}\n'
+
+    monkeypatch.setattr(sleeve_basis, "build_contract", build_contract)
+    destination = tmp_path / "out" / "contract.json"
+    built = preparation._stage_implementation_sleeve_basis(
+        declaration_path=files["declaration.json"],
+        facts_path=files["facts.json"],
+        model_book_perf_path=files["perf.csv"],
+        retained_attribution_path=files["attribution.json"],
+        retained_reconciliation_path=files["reconciliation.json"],
+        admission_receipt_path=files["receipt.json"],
+        destination=destination,
+    )
+    assert (
+        built == destination and destination.read_bytes() == b'{"contract_id": "c"}\n'
+    )
+    assert seen["model_provider_id"] == "model-provider"
+    assert seen["declaration"] == b"declaration.json"
+    assert seen["retained_attribution"] == b"attribution.json"
+    assert seen["provider_admission_receipt"] == files["receipt.json"].read_bytes()
+    assert seen["filenames"] == {
+        "declaration": "declaration.json",
+        "sleeve_facts": "facts.json",
+        "model_book_perf": "perf.csv",
+        "retained_attribution": "attribution.json",
+        "retained_reconciliation": "reconciliation.json",
+        "provider_admission_receipt": "receipt.json",
+    }
+    with pytest.raises(FileExistsError):
+        preparation._stage_implementation_sleeve_basis(
+            declaration_path=files["declaration.json"],
+            facts_path=files["facts.json"],
+            model_book_perf_path=files["perf.csv"],
+            retained_attribution_path=files["attribution.json"],
+            retained_reconciliation_path=files["reconciliation.json"],
+            admission_receipt_path=files["receipt.json"],
+            destination=destination,
+        )
+
+
+def test_a_restated_strategy_needs_a_named_sleeve_basis_source(tmp_path: Path) -> None:
+    check = preparation._require_implementation_sleeve_basis_source
+    restated = json.dumps(
+        {
+            "schema": "strategy-basis-declaration/1",
+            "strategies": [{"basis": "SLEEVE_EPOCH", "strategy_id": "p123-ai-factor"}],
+        }
+    ).encode()
+    plain = json.dumps(
+        {
+            "schema": "strategy-basis-declaration/1",
+            "strategies": [{"basis": "ACCOUNT", "strategy_id": "x"}],
+        }
+    ).encode()
+    perf = _file_pin(tmp_path / "perf.csv", b"date,value\n")
+    contract = _file_pin(tmp_path / "contract.json", b"{}")
+
+    def config(content: bytes | None, **extra: object) -> dict[str, object]:
+        base: dict[str, object] = {**extra}
+        if content is not None:
+            base["strategy_basis_declaration"] = _file_pin(
+                tmp_path / "declaration.json", content
+            )
+            base["sleeve_facts"] = {}
+        return base
+
+    check(config(None))  # no declaration: nothing restated
+    check(config(plain))
+    check(config(restated, implementation_model_book_perf=perf))
+    check(config(restated, implementation_sleeve_basis=contract))
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="p123-ai-factor.*implementation_model_book_perf",
+    ):
+        check(config(restated))
