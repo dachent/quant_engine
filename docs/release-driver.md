@@ -407,7 +407,7 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
    a leftover output refuses the next pass) and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` that lie
    outside it get an `.aside-<UTC time>` name; nothing is deleted. `--keep-cache` moves the retained cache (`retained_cache_root`,
    inside the cycle) from the aside directory back into the fresh cycle, so a cache worth reusing is not rebuilt; a cycle that
-   holds only that cache is already fresh and a second run moves nothing. Only paths inside the world are moved; an existing aside
+   holds only that cache is already fresh and a second run moves nothing. A configuration-bound input inside the cycle (`provenance_spec`, `release_inputs_root`, `cycle_manifest`, `cycle_roots_file`, `calendar_seed_authority`, the `predecessor_*` files, `expected_baseline`, `disclosure_inputs`) is refused by `config` and by `move-aside` before anything is written or moved, because it would go aside with the old outputs: keep the fresh seed and the release inputs outside the cycle (a sibling of it, as `cyc/` is). Only paths inside the world are moved; an existing aside
    name is refused; the output lists each move (and the cache restore) with the aside name `carry-over` reads from.
 4. `carry-over --from-cycle <the aside cycle> --to-cycle <cycle> [--carry RELATIVE ...] [--apply]`:
    `in/epoch-admission-policy.json` and each further file or directory named with `--carry` (the IBKR generation directory

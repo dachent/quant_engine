@@ -375,3 +375,63 @@ def test_an_interrupted_cache_restore_is_finished_by_the_next_run(
     assert not (cycle.with_name("c.aside-S") / "cache2").exists()
     # finished: nothing more to do
     assert tool.move_aside(cfg, apply=True, stamp="S3", keep_cache=True) == []
+
+
+def test_a_fresh_input_inside_the_cycle_is_refused_by_config_and_by_move_aside(
+    tmp_path: Path,
+) -> None:
+    # the whole cycle goes aside: a configuration-bound input prepared beneath it (the established layout puts the
+    # provenance seed and the release inputs under cycle/in) would be moved with the old outputs and the run would
+    # fail before staging. Both commands refuse, naming the keys, before anything is written or moved.
+    ri, pin = _inputs(tmp_path)
+    cfg = _world(tmp_path)
+    cycle = Path(cfg["cycle"])
+    seed = _put(cycle / "in" / "provenance-spec.json", "fresh seed")
+    previous = json.loads(_previous(tmp_path).read_bytes())
+    previous.update(cycle=str(cycle), provenance_spec=str(seed))
+    prev = _put(tmp_path / "prev-in-cycle.json", json.dumps(previous))
+    with pytest.raises(
+        tool.WorldError, match="reads provenance_spec from inside the cycle"
+    ):
+        tool.config(
+            prev,
+            tmp_path / "run-in-cycle.json",
+            candidate_commit="c" * 40,
+            code_commit="d" * 40,
+            release_inputs_root=ri,
+            release_inputs_manifest_sha256=pin,
+        )
+    assert not (tmp_path / "run-in-cycle.json").exists()
+    for key, value in (
+        ("provenance_spec", seed),
+        ("release_inputs_root", cycle / "in"),
+    ):
+        with pytest.raises(tool.WorldError, match=f"reads {key} from inside the cycle"):
+            tool.move_aside({**cfg, key: str(value)}, apply=True, stamp="S")
+        assert seed.is_file() and (cycle / "prov" / "marker").is_file()  # nothing moved
+    outside = _put(tmp_path / "cyc" / "provenance-spec.json", "fresh seed")
+    tool.move_aside({**cfg, "provenance_spec": str(outside)}, apply=True, stamp="S")
+    assert outside.is_file() and not cycle.exists()
+
+
+def test_the_aside_move_and_the_carry_over_never_nest_a_directory_in_itself(
+    tmp_path: Path,
+) -> None:
+    cfg = _world(tmp_path)
+    cycle = Path(cfg["cycle"])
+    world = Path(cfg["prep_pin_root"])
+    # a configured output that is, or contains, the cycle would take the cycle (or the world) aside with it
+    for bad in (world, cycle, cycle.parent):
+        with pytest.raises(tool.WorldError, match="is, or contains, the cycle"):
+            tool.move_aside({**cfg, "run": str(bad)}, apply=False, stamp="S")
+    assert (cycle / "prov" / "marker").is_file()
+    # carry-over copies between two cycles: neither may lie inside, or be, the other
+    src = tmp_path / "old"
+    _put(src / "in" / "epoch-admission-policy.json", "policy")
+    for dest in (src, src / "new", tmp_path):
+        with pytest.raises(tool.WorldError, match="separate directories"):
+            tool.carry_over(src, dest, apply=True)
+    if sys.platform == "win32":  # the same directory in the other case
+        with pytest.raises(tool.WorldError, match="separate directories"):
+            tool.carry_over(src, Path(str(src).swapcase()), apply=True)
+    assert not (src / "new").exists()
