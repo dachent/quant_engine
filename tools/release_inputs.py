@@ -18,9 +18,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -230,11 +232,9 @@ def _rebind_predecessor(args: argparse.Namespace) -> int:
             "other files still name the old predecessor (rebind them or pass "
             "--allow-stale-references):\n  " + "\n  ".join(stale)
         )
-    shutil.copytree(loaded.root, out, symlinks=False, dirs_exist_ok=True)
-    (out / "release-inputs.manifest.json").unlink()
     disclosure = _canonical({**inputs, "predecessor_comparison": new})
-    (out / DISCLOSURE_INPUTS).write_bytes(disclosure)
-    policy = _read_canonical(out / POLICY_MANIFEST, "sleeve policy manifest")
+    # every source file the new root rewrites is read and checked BEFORE anything is copied
+    policy = _read_canonical(loaded.path(POLICY_MANIFEST), "sleeve policy manifest")
     entry = policy.get(POLICY_DISCLOSURE_KEY)
     if (
         not isinstance(entry, dict)
@@ -249,14 +249,41 @@ def _rebind_predecessor(args: argparse.Namespace) -> int:
         "sha256": hashlib.sha256(disclosure).hexdigest(),
         "size_bytes": len(disclosure),
     }
-    (out / POLICY_MANIFEST).write_bytes(_canonical(policy))
-    _, pin = build_manifest(out, list(loaded.paths), cutoff=loaded.cutoff)
-    # the rebuilt root must load under the new pin, and its predecessor must be the committed release
-    load_release_inputs(out, pin)
+    # build next to the target and publish by one rename: a refusal leaves no half-written root behind
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f"{out.name}.building-", dir=out.parent))
     try:
-        sleeve_disclosures.check_predecessor_is_current_release(new, args.data_root)
-    except sleeve_disclosures.DisclosureError as exc:
-        raise ReleaseInputsError(str(exc)) from exc
+        shutil.copytree(loaded.root, staging, symlinks=False, dirs_exist_ok=True)
+        (staging / "release-inputs.manifest.json").unlink()
+        rewritten = {DISCLOSURE_INPUTS, POLICY_MANIFEST}
+        for relative in loaded.paths:
+            if relative in rewritten:
+                continue
+            copied = staging.joinpath(*relative.split("/"))
+            if not copied.is_file() or hashlib.sha256(
+                copied.read_bytes()
+            ).hexdigest() != loaded.sha256(relative):
+                raise ReleaseInputsError(
+                    f"{relative} differs from the pinned manifest in the copy "
+                    "(the source changed while it was copied): nothing is published"
+                )
+        (staging / DISCLOSURE_INPUTS).write_bytes(disclosure)
+        (staging / POLICY_MANIFEST).write_bytes(_canonical(policy))
+        _, pin = build_manifest(staging, list(loaded.paths), cutoff=loaded.cutoff)
+        # the rebuilt root must load under the new pin, and its predecessor must be the committed release
+        load_release_inputs(staging, pin)
+        try:
+            sleeve_disclosures.check_predecessor_is_current_release(new, args.data_root)
+        except sleeve_disclosures.DisclosureError as exc:
+            raise ReleaseInputsError(str(exc)) from exc
+        if out.exists():
+            out.rmdir()  # empty (checked above)
+        os.replace(staging, out)
+    except BaseException:
+        shutil.rmtree(
+            staging, ignore_errors=True
+        )  # our own staging directory, never a published root
+        raise
     print(
         json.dumps(
             {

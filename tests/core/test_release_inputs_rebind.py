@@ -233,3 +233,47 @@ def test_a_disclosure_file_in_another_format_is_not_reformatted(
     _committed(data_root, NEW_RELEASE, NEW_PANEL, b"{}")
     assert _rebind(root, pin, data_root, tmp_path / "ri-next") == 1
     assert "canonical formatting" in capsys.readouterr().err
+
+
+def test_a_source_file_that_changes_while_it_is_copied_is_never_pinned(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, pin = _root(tmp_path)
+    data_root = tmp_path / "workspace"
+    _committed(data_root, NEW_RELEASE, NEW_PANEL, b"{}")
+    real_copytree = cli.shutil.copytree
+
+    def racing_copytree(src: Path, dst: Path, *args: Any, **kwargs: Any) -> Path:
+        result = real_copytree(src, dst, *args, **kwargs)
+        if Path(dst).name.startswith("ri-next.building-"):  # the top call only
+            changed = b'{"declared": 2}' + bytes([10])
+            (Path(dst) / OTHER).write_bytes(changed)  # changed after verification
+        return result
+
+    monkeypatch.setattr(cli.shutil, "copytree", racing_copytree)
+    out = tmp_path / "ri-next"
+    assert _rebind(root, pin, data_root, out) == 1
+    assert "changed while it was copied" in capsys.readouterr().err
+    assert not out.exists()
+    assert not list(
+        tmp_path.glob("ri-next.building-*")
+    )  # no half-written root is left either
+
+
+def test_a_malformed_policy_manifest_is_refused_before_anything_is_written(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, _ = _root(tmp_path)
+    (root / POLICY).write_bytes(
+        json.dumps({"artifact_id": "x"}).encode()
+    )  # compact, no pin entry
+    _, pin = build_manifest(root, [DISCLOSURE, POLICY, OTHER], cutoff=CUTOFF)
+    data_root = tmp_path / "workspace"
+    _committed(data_root, NEW_RELEASE, NEW_PANEL, b"{}")
+    out = tmp_path / "ri-next"
+    assert _rebind(root, pin, data_root, out) == 1
+    assert "canonical formatting" in capsys.readouterr().err
+    assert not out.exists()  # a retry is not blocked by a non-empty target
+    assert not list(tmp_path.glob("ri-next.building-*"))
