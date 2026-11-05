@@ -8715,3 +8715,31 @@ def test_a_restated_strategys_live_boundary_stays_the_pinned_window_and_names_it
     assert first["live_boundary_observed_end"] == "2026-01-03"
     assert first["live_boundary_basis"] == "PARENT_ACCOUNT_LIVE_SERIES"
     assert "live_boundary_basis" not in rows["strategy-2"]
+
+
+def test_a_reconciliation_built_without_the_desktop_workbook_passes_the_observed_interval_check() -> (
+    None
+):
+    # the workbook is on hold and no input of the release: the reconciliation's workbook_parity row then names
+    # no interval, and the report's interval check (every observed_start/observed_end must be a date) accepts it
+    import portfolio_implementation_reconciliation as implementation
+
+    row = {
+        "workbook_parity": implementation._tt_workbook_return_parity(
+            None, {}, [], accepted_as_of=date(2026, 9, 17)
+        ),
+        "return_reconciliation": {
+            "observed_start": "2026-01-22",
+            "observed_end": "2026-09-17",
+        },
+    }
+    reporter._validate_implementation_observed_intervals(
+        row,
+        boundary=date(2026, 9, 17),
+        field_path="implementation reconciliation strategy tt-portfolio",
+    )
+    row["workbook_parity"]["observed_start"] = None  # the old shape: refused
+    with pytest.raises(reporter.ReportValidationError):
+        reporter._validate_implementation_observed_intervals(
+            row, boundary=date(2026, 9, 17), field_path="x"
+        )

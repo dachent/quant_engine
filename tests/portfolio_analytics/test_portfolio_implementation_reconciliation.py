@@ -1695,6 +1695,8 @@ def test_tt_reconciliation_completes_without_workbook(
     )
     parity = result["workbook_parity"]
     assert parity["status"] == "NOT_SUPPLIED_DERIVATION_SELFSUFFICIENT"
+    # nothing was compared, so the row names no observed interval (the report refuses a null one)
+    assert "observed_start" not in parity and "observed_end" not in parity
     assert result["return_reconciliation"]["observed_end"] == "2026-04-02"
 
 

@@ -1968,10 +1968,10 @@ def _tt_workbook_return_parity(
     refusal. The reconciliation refuses only on the manifest's own internal
     failures."""
     if workbook is None:
+        # no observed_start/observed_end keys: the report refuses any observed interval it finds as
+        # anything but a date, and there is no interval here (nothing was compared)
         return {
             "maximum_absolute_daily_return_difference": None,
-            "observed_end": None,
-            "observed_start": None,
             "observations": 0,
             "status": "NOT_SUPPLIED_DERIVATION_SELFSUFFICIENT",
         }
