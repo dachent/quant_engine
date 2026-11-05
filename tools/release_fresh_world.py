@@ -48,6 +48,8 @@ REFRESHED_PINS: Final = (
 SLEEVES_RELATIVE: Final = "ops/mvp2-release/inputs/sleeves"
 BASELINE_RELATIVE: Final = "acceptance/expected-baseline.json"
 SLEEVE_ROOT_ID: Final = "sleeve-policy"
+# where the calendar-seed stage writes the reissued authority, relative to the cycle (the graph's calendar_seed_reissued)
+CALENDAR_SEED_OUTPUT: Final = "calendar-seed-authority.json"
 
 
 class WorldError(Exception):
@@ -198,16 +200,31 @@ def config(
     ]
     for key in dropped:
         del cfg[key]
+    # the authority the ``calendar-seed`` stage writes: a file at that path now is the previous pass's (config
+    # runs before move-aside) and is never what gets pinned; its pin comes from the pinned seed
+    seed_output = cycle / CALENDAR_SEED_OUTPUT if cycle is not None else None
+    authority = cfg.get("calendar_authority")
+    from_seed = (
+        _calendar_pin_from_seed(cfg)
+        if isinstance(authority, str)
+        and seed_output is not None
+        and Path(authority).as_posix() == seed_output.as_posix()
+        else None
+    )
     pending: list[str] = []
+    calendar_pin = "from the authority file"
     for pin, file_key in REFRESHED_PINS:
         file = cfg.get(file_key)
-        if isinstance(file, str) and Path(file).is_file():
+        if pin == "calendar_authority_sha256" and from_seed is not None:
+            cfg[pin] = from_seed
+            calendar_pin = "derived from the pinned seed"
+        elif isinstance(file, str) and Path(file).is_file():
             cfg[pin] = _sha(Path(file))
         else:
             cfg.pop(pin, None)
             pending.append(pin)
-    calendar_pin = "from the authority file" if not pending else "pending"
     if "calendar_authority_sha256" in pending:
+        calendar_pin = "pending"
         derived = _calendar_pin_from_seed(cfg)
         if derived is not None:
             cfg["calendar_authority_sha256"] = derived

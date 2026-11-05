@@ -467,3 +467,38 @@ def test_a_seed_that_is_not_the_pinned_file_gives_no_calendar_pin(
     assert "calendar_authority_sha256" not in json.loads(
         (tmp_path / "run5.json").read_bytes()
     )
+
+
+def test_a_previous_authority_at_the_seed_output_path_is_not_what_gets_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # config runs before move-aside, so the previous pass's reissued authority still sits where the calendar-seed
+    # stage will write: pinning its hash would bind the old policy and the stage's different bytes would then fail
+    previous, expected = _seeded(tmp_path, monkeypatch)
+    cfg = json.loads(previous.read_bytes())
+    cycle = tmp_path / "world" / "c"
+    old_authority = _put(
+        cycle / tool.CALENDAR_SEED_OUTPUT, "the previous pass's authority"
+    )
+    cfg.update(cycle=str(cycle), calendar_authority=str(old_authority))
+    previous = _put(tmp_path / "prev7.json", json.dumps(cfg))
+    result = tool.config(
+        previous,
+        tmp_path / "run7.json",
+        candidate_commit="c" * 40,
+        code_commit="d" * 40,
+    )
+    written = json.loads((tmp_path / "run7.json").read_bytes())
+    assert result["calendar_pin"] == "derived from the pinned seed"
+    assert written["calendar_authority_sha256"] == _sha(expected)
+    assert written["calendar_authority_sha256"] != _sha(old_authority.read_bytes())
+    # an authored authority elsewhere (a later calendar-authority attempt) is still pinned from its own file
+    authored = _put(tmp_path / "authored.json", "authored authority")
+    cfg["calendar_authority"] = str(authored)
+    other = _put(tmp_path / "prev8.json", json.dumps(cfg))
+    tool.config(
+        other, tmp_path / "run8.json", candidate_commit="c" * 40, code_commit="d" * 40
+    )
+    assert json.loads((tmp_path / "run8.json").read_bytes())[
+        "calendar_authority_sha256"
+    ] == _sha(authored.read_bytes())
