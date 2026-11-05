@@ -43,8 +43,9 @@ def _numeric_leaves(value: object) -> list[int | float]:
     return []
 
 
+@pytest.mark.parametrize("with_workbook", [True, False])
 def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, with_workbook: bool
 ) -> None:
     """Closure-matrix B2: the TT account leg is the governed ACCOUNT_LIVE
     series, not the broker NAV/flow recomputation.
@@ -94,8 +95,14 @@ def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
     market.write_bytes(b"{}")
 
     day0, day1 = date(2026, 1, 5), date(2026, 1, 6)
+
+    def workbook_weights(_path: Path) -> dict[str, int]:
+        if not with_workbook:
+            raise AssertionError("the desktop workbook was read")
+        return {"A": 1}
+
     monkeypatch.setattr(
-        attribution.reconciliation, "_tt_component_weights", lambda _p: {"A": 1}
+        attribution.reconciliation, "_tt_component_weights", workbook_weights
     )
     monkeypatch.setattr(
         attribution,
@@ -104,6 +111,10 @@ def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
             "portfolio": {},
             "source_manifest_id": "m",
             "price_tape": {"artifact": attribution._sha256(market)},
+            "selected_components": [
+                {"slug": f"c{index}", "portfolio_weight": "0.1666666666666667"}
+                for index in range(6)
+            ],
         },
     )
     monkeypatch.setattr(
@@ -145,7 +156,7 @@ def test_tt_account_leg_binds_the_governed_series_not_the_broker_recompute(
     )
 
     row = attribution._tt_attribution(
-        workbook=workbook,
+        workbook=workbook if with_workbook else None,
         source_manifest_path=manifest,
         market_data=[market],
         schwab={},
