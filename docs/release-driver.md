@@ -421,8 +421,8 @@ optional flags and adds them to the validator only when given. Without them the 
 Cold-operator checklist (R3), with the numbered recipe below as the detail: (a) the release-inputs root and its manifest
 pin (`release_inputs.py verify --root <ri> --manifest-sha256 <pin> --cutoff <date>` passes); (b) the predecessor set (the R2.2
 `selected-inputs.json`, preparation spec and ledger spec) with their pins, remapped by step 5 from the world they were produced in
-(`C:\Dev\scratch\qe-p32`), and the seed authority file and its trust pin the owner gave; (c) the 3.11 venv for every command
-below (the tools and the driver refuse another interpreter); (d) a frozen clone at the candidate commit; (e) steps 1 to 5
+(`C:\Dev\scratch\qe-p32`), and the seed authority file and its trust pin the owner gave; (c) the 3.11 venv for every command, invoked as `<py> tools/<name>.py ...` (`<py>` is that venv's python; the tool names in the recipe are shortened, none is on `PATH`)
+and they and the driver refuse another interpreter; (d) a frozen clone at the candidate commit; (e) steps 1 to 5
 (seed, `config`, `move-aside`, `carry-over`, remap), then step 6 (`cycle-seeds`, `cycle-resolve`, `calendar-seed`), then
 step 7 (`run`, the ceremony); then the replica verification and the owner's direct hash confirmation. Every step is a committed
 tool; none needs a hand-written script.
@@ -485,16 +485,16 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
    run them, so the order is fixed (`calendar-seed` is `explicit` and never part of a full `run`):
 
    ```text
-   release_driver.py run --config <run json> --only cycle-seeds
-   release_driver.py run --config <run json> --only cycle-resolve
-   release_driver.py run --config <run json> --only calendar-seed
+   <py> tools/release_driver.py run --config <run json> --only cycle-seeds
+   <py> tools/release_driver.py run --config <run json> --only cycle-resolve
+   <py> tools/release_driver.py run --config <run json> --only calendar-seed
    ```
 
    Without the third, the full run refuses (`calendar_authority` is missing). Nothing needs rerunning after `config`: the
    calendar authority's pin is already in the configuration (see below), so these stages keep the binding they were run under.
    `config --require-calendar` afterwards is an optional check that the pin is written; it produces an identical file.
 7. `run` (full), in the foreground, or in the background with a log (the ceremony takes about an hour):
-   `( release_driver.py run --config <run json>; echo "DRV_RC=$?" ) > <log> 2>&1 &` (POSIX shell; `nohup` only if the
+   `( <py> tools/release_driver.py run --config <run json>; echo "DRV_RC=$?" ) > <log> 2>&1 &` (POSIX shell; `nohup` only if the
    session may end). The log is the driver's own output, so watch it for `refused` / `failed` lines; `DRV_RC=0` ends it.
 
 The calendar authority's pin is a deliberate trust pin, now derived rather than typed: `config` takes the seed the previous
