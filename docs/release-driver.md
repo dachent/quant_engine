@@ -300,8 +300,15 @@ runs, naming the file. `prep-spec` reads the crosswalk and policy through that s
 (`--release-inputs-root`, `--release-inputs-manifest-sha256`). The cycle manifest's `public_bundles` name the
 bundle roots (the directories that hold the generations), never a generation directory. The disclosure inputs'
 `predecessor_comparison` is checked against the COMMITTED `CURRENT_RELEASE.json` and panel (below), so once
-R2.1 commits it must be rebound to R2.1 (`91c77c1b`) in the release-inputs set before the next run; a pin still
-naming R2 refuses at `selected-inputs`.
+a release commits, the next cycle needs a release-inputs root whose comparison names it; a pin still naming the release before
+refuses at `selected-inputs`. `tools/release_inputs.py rebind-predecessor --root <root> --manifest-sha256 <pin> --data-root <workspace>
+--out <new root>` builds that root: the release id, panel generation and dashboard data file (id and sha256) are derived from the
+committed release in the workspace, never typed; only the authored `pointers` are kept, the sleeve policy manifest's pin of the
+disclosure inputs and the root's manifest are rebuilt, and the new manifest sha256 (the pin the run configuration takes) is printed.
+It refuses a non-empty target, a release that is not committed, a disclosure file in another format, and any other file in the root
+that still names the old release or panel (`--allow-stale-references` lists them and goes on). A root that already names the committed
+release is reported `already_current` and nothing is written. The predecessor set files (`predecessor_selected_inputs`,
+`predecessor_prep_spec`, `predecessor_ledger_spec`) are a separate input: the previous cycle's own seeds, not compared with `CURRENT_RELEASE`.
 
 Three stale inputs each cost R2 hours; the driver refuses them at the first stage that could use them:
 
