@@ -418,6 +418,15 @@ optional flags and adds them to the validator only when given. Without them the 
 
 ## Re-running a pass on a fresh world
 
+Cold-operator checklist (R3), with the numbered recipe below as the detail: (a) the release-inputs root and its manifest
+pin (`release_inputs.py verify --root <ri> --manifest-sha256 <pin> --cutoff <date>` passes); (b) the predecessor set (the R2.2
+`selected-inputs.json`, preparation spec and ledger spec) with their pins, remapped by step 5 from the world they were produced in
+(`C:\Dev\scratch\qe-p32`), and the seed authority file and its trust pin the owner gave; (c) the 3.11 venv for every command
+below (the tools and the driver refuse another interpreter); (d) a frozen clone at the candidate commit; (e) steps 1 to 5
+(seed, `config`, `move-aside`, `carry-over`, remap), then step 6 (`cycle-seeds`, `cycle-resolve`, `calendar-seed`), then
+step 7 (`run`, the ceremony); then the replica verification and the owner's direct hash confirmation. Every step is a committed
+tool; none needs a hand-written script.
+
 Three steps of a re-run are operator steps by design, not graph gaps:
 
 - `calendar_seed_authority_sha256` is a trust pin the operator supplies (`sha256sum` of the seed file the owner pinned); the
@@ -440,7 +449,8 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
    --set evidence_dest=...]`: repoints every occurrence of the old inputs root, verifies the inputs against the pin (never by repo path), takes the expected
    baseline pin from the verified set and recomputes the provenance seed pin from its file, derives the calendar authority's pin from the pinned seed (a pin of the previous pass is never carried) and drops `calendar_attempt_run` / `calendar_attempt_spec` when they point into a removed world (only the explicit `calendar-authority` stage reads them; it declares `needs_config` and refuses, naming the keys, when it is selected without them). Predecessor
    pins are never touched.
-3. `move-aside --config <run json> [--keep-cache] [--apply]`: the whole previous cycle directory (`prov`, `ledger`,
+3. First stop every driver or stage process of the previous pass: a live child holds files in the world and the move fails
+   with "Permission denied". Then `move-aside --config <run json> [--keep-cache] [--apply]`: the whole previous cycle directory (`prov`, `ledger`,
    `baseline`, `production`, the stage receipts and the rest: every stage records the run configuration it was produced under, so
    a leftover output refuses the next pass) and the configured `run`, `qa`, `evidence_dest` and `replica_workspace` that lie
    outside it get an `.aside-<UTC time>` name; nothing is deleted. `--keep-cache` moves the retained cache (`retained_cache_root`,
@@ -456,9 +466,36 @@ Order of a fresh-world pass, with `tools/release_fresh_world.py` (create-only or
    (`old_prefix`, `root_key`). It is create-only and fail-closed (a foreign absolute path or a missing carried target is refused) and
    `--expect-rewritten` refuses a mapping that matched another number of paths than the previous pass (42 in the R2.2 selected
    inputs, 44 in its preparation spec). The output is serialized canonically, so the `predecessor_*_sha256` pins are taken from
-   the tool's output (`sha256` in its summary), not from the original file.
-6. `run` (full). Nothing needs rerunning after `config`: the calendar authority's pin is already in the configuration (see
-   below), so the pre stages (`cycle-seeds`, `cycle-resolve`, `calendar-seed`) keep the binding they were run under.
+   the tool's output (`sha256` in its summary), not from the original file. Those pins and files go on `config` (step 2) as
+   `--set predecessor_ledger_spec=<file> --set predecessor_ledger_spec_sha256=<pin> --set predecessor_selected_inputs=<file>
+   --set predecessor_selected_inputs_sha256=<pin> --set predecessor_prep_spec=<file> --set predecessor_prep_spec_sha256=<pin>`.
+   The remapped files must lie outside the cycle (`config` refuses them inside it), so step 5 can run before step 2; when a
+   configuration exists already, run step 2 again with `--previous <that configuration>` and a new `--out`.
+
+   The mapping file is plain data, written with any editor; no script is needed (the full schema and refusals are in
+   `docs/release-spec-remap.md`). `old_prefix` is the world the predecessor files were produced in, and `root_key` the
+   cycle root that world becomes. For R3 the predecessors are the R2.2 set, produced in `C:\Dev\scratch\qe-p32`:
+
+   ```json
+   {"schema_version": "qe-release-spec-remap/1",
+    "mappings": [{"old_prefix": "C:\\Dev\\scratch\\qe-p32", "root_key": "world"}]}
+   ```
+6. The pre stages, now that the cycle is fresh (`move-aside` and `carry-over` have run, because these stages write into the
+   cycle). `--only` runs exactly the named stage and checks that the stages it requires are done and unchanged; it does not
+   run them, so the order is fixed (`calendar-seed` is `explicit` and never part of a full `run`):
+
+   ```text
+   release_driver.py run --config <run json> --only cycle-seeds
+   release_driver.py run --config <run json> --only cycle-resolve
+   release_driver.py run --config <run json> --only calendar-seed
+   ```
+
+   Without the third, the full run refuses (`calendar_authority` is missing). Nothing needs rerunning after `config`: the
+   calendar authority's pin is already in the configuration (see below), so these stages keep the binding they were run under.
+   `config --require-calendar` afterwards is an optional check that the pin is written; it produces an identical file.
+7. `run` (full), in the foreground, or in the background with a log (the ceremony takes about an hour):
+   `( release_driver.py run --config <run json>; echo "DRV_RC=$?" ) > <log> 2>&1 &` (POSIX shell; `nohup` only if the
+   session may end). The log is the driver's own output, so watch it for `refused` / `failed` lines; `DRV_RC=0` ends it.
 
 The calendar authority's pin is a deliberate trust pin, now derived rather than typed: `config` takes the seed the previous
 committed release pinned (`calendar_seed_authority` with its `calendar_seed_authority_sha256`; any other bytes refuse), runs the
