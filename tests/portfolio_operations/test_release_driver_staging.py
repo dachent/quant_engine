@@ -859,6 +859,41 @@ def test_prep_spec_repins_the_staged_implementation_seeds_when_a_root_is_named(
     ]
 
 
+IMPLEMENTATION_STAGES = (
+    "implementation-reconciliation",
+    "implementation-return-attribution",
+)
+
+
+def test_the_implementation_stages_take_no_desktop_workbook() -> None:
+    # the workbook is on permanent hold (AGENTS.md): a release-inputs set without one must be complete, so
+    # neither stage lists it among its release inputs or hands it to its builder
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stages = {s["id"]: s for s in graph["stages"]}
+    assert not [key for key in graph["paths"] if "workbook" in key]
+    for stage_id in IMPLEMENTATION_STAGES:
+        stage = stages[stage_id]
+        assert not [i for i in stage["release_inputs"] if "workbook" in i], stage_id
+        assert "--tt-workbook" not in stage["argv"], stage_id
+        assert not [a for a in stage["argv"] if "workbook" in str(a)], stage_id
+
+
+def test_the_implementation_stages_record_the_provider_generations_they_read() -> None:
+    # a P123 or IBKR generation directory or the Schwab catalog changed in place after the stage ran
+    # must fail the resume check: they are inputs of the stage, as the arguments that name them are
+    graph = json.loads(SHIPPED.read_text(encoding="utf-8"))
+    stages = {s["id"]: s for s in graph["stages"]}
+    for stage_id in IMPLEMENTATION_STAGES:
+        stage = stages[stage_id]
+        for placeholder, flag in (
+            ("{p123_generation}", "--p123-generation-root"),
+            ("{ibkr_generation}", "--ibkr-generation-root"),
+            ("{schwab_catalog}", "--schwab-catalog"),
+        ):
+            assert stage["argv"][stage["argv"].index(flag) + 1] == placeholder
+            assert placeholder in stage["inputs"], (stage_id, placeholder)
+
+
 def test_prep_spec_pins_the_model_book_export_from_the_release_inputs_root(
     tmp_path: Path,
 ) -> None:

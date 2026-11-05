@@ -284,7 +284,7 @@ ledger generation changes.
   --ibkr-current-xml '<exact-current-ibkr-flex.xml>' `
   --schwab-catalog '<exact-schwab-generation.json>' `
   --provider-ledger-root '<exact-provider-ledger-generation>' `
-  --tt-workbook '<exact-current-six-workbook.xlsx>' `
+  --tt-source-manifest '<exact-governed-tt-source-manifest.json>' `
   --tt-market-data '<exact-hash-bound-tt-model-symbol-price.json>' `
   --tt-market-data '<exact-hash-bound-tt-broker-only-symbol-price.json>' `
   --grizzly-signals '<exact-current-live-only-trades.csv>' `

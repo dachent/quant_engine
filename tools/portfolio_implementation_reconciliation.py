@@ -1779,6 +1779,12 @@ def _tt_manifest_component_weights(manifest: Mapping[str, Any]) -> dict[str, Dec
     return weights
 
 
+def tt_manifest_component_weights(manifest: Mapping[str, Any]) -> dict[str, Decimal]:
+    """The six TuringTrader components and their weights, from the governed source manifest."""
+
+    return _tt_manifest_component_weights(manifest)
+
+
 def _tt_manifest_nav_integrity(
     manifest: Mapping[str, Any], components: Sequence[str], *, accepted_as_of: date
 ) -> None:
