@@ -279,18 +279,20 @@ def test_a_malformed_policy_manifest_is_refused_before_anything_is_written(
     assert not list(tmp_path.glob("ri-next.building-*"))
 
 
-def test_a_target_inside_or_around_the_source_root_is_refused(
+def test_a_target_inside_equal_to_or_around_the_source_root_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # --out inside the verified source root made copytree recurse into its own staging directory
     root, pin = _root(tmp_path)
     data_root = tmp_path / "workspace"
     _committed(data_root, NEW_RELEASE, NEW_PANEL, b"{}")
-    # inside the source root the copy would recurse into its own staging directory
-    assert _rebind(root, pin, data_root, root / "next") == 1
-    assert "separate directory" in capsys.readouterr().err
-    assert not (root / "next").exists()
-    assert not list(root.glob("next.building-*"))
-    # the source root itself, and a directory that contains it
-    assert _rebind(root, pin, data_root, root) == 1
-    assert _rebind(root, pin, data_root, tmp_path) == 1
-    capsys.readouterr()
+    spellings = [root / "next", root / "deep" / "er" / "next", root, tmp_path]
+    if sys.platform == "win32":  # the same directory in the other case
+        spellings.append(Path(str(root / "next").swapcase()))
+    for out in spellings:
+        assert _rebind(root, pin, data_root, out) == 1, out
+        assert "separate directory" in capsys.readouterr().err
+    assert not (root / "next").exists() and not (root / "deep").exists()
+    assert not list(root.glob("*.building-*"))
+    # a sibling with a common name prefix is not nested
+    assert _rebind(root, pin, data_root, tmp_path / "ri-next") == 0
