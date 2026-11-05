@@ -422,7 +422,7 @@ Cold-operator checklist (R3), with the numbered recipe below as the detail: (a) 
 pin (`release_inputs.py verify --root <ri> --manifest-sha256 <pin> --cutoff <date>` passes); (b) the predecessor set (the R2.2
 `selected-inputs.json`, preparation spec and ledger spec) with their pins, remapped by step 5 from the world they were produced in
 (`C:\Dev\scratch\qe-p32`), and the seed authority file and its trust pin the owner gave; (c) the 3.11 venv for every command, invoked as `<py> tools/<name>.py ...` (`<py>` is that venv's python; the tool names in the recipe are shortened, none is on `PATH`)
-and they and the driver refuse another interpreter; (d) a frozen clone at the candidate commit; (e) steps 1 to 5
+(the tools and the driver refuse another interpreter); (d) a frozen clone at the candidate commit; (e) steps 1 to 5
 (seed, `config`, `move-aside`, `carry-over`, remap), then step 6 (`cycle-seeds`, `cycle-resolve`, `calendar-seed`), then
 step 7 (`run`, the ceremony); then the replica verification and the owner's direct hash confirmation. Every step is a committed
 tool; none needs a hand-written script.
