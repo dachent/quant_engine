@@ -167,6 +167,33 @@ def test_the_calendar_pin_is_added_once_the_authority_exists(tmp_path: Path) -> 
         tool.config(_previous(tmp_path), out, **{**args, "code_commit": "e" * 40})
 
 
+def test_stage_only_paths_into_a_removed_world_are_dropped_not_carried(
+    tmp_path: Path,
+) -> None:
+    # R3 pass 6: calendar_attempt_run / calendar_attempt_spec pointed into a removed world and the driver
+    # refused every stage for them although only the explicit calendar-authority stage reads them
+    ri, pin = _inputs(tmp_path)
+    live = _put(tmp_path / "attempt-spec.json", "{}")
+    cfg = json.loads(_previous(tmp_path).read_bytes())
+    cfg.update(
+        calendar_attempt_run=str(tmp_path / "removed-world" / "out3"),
+        calendar_attempt_spec=str(live),
+    )
+    previous = _put(tmp_path / "prev2.json", json.dumps(cfg))
+    result = tool.config(
+        previous,
+        tmp_path / "run2.json",
+        candidate_commit="c" * 40,
+        code_commit="d" * 40,
+        release_inputs_root=ri,
+        release_inputs_manifest_sha256=pin,
+    )
+    written = json.loads((tmp_path / "run2.json").read_bytes())
+    assert result["dropped"] == ["calendar_attempt_run"]
+    assert "calendar_attempt_run" not in written
+    assert written["calendar_attempt_spec"] == str(live)  # an existing path stays
+
+
 def test_a_release_inputs_root_needs_its_pin(tmp_path: Path) -> None:
     ri, _ = _inputs(tmp_path)
     with pytest.raises(tool.WorldError, match="manifest sha256 pin"):
@@ -182,51 +209,76 @@ def test_a_release_inputs_root_needs_its_pin(tmp_path: Path) -> None:
 def _world(tmp_path: Path) -> dict[str, str]:
     world = tmp_path / "world"
     cycle = world / "c"
-    for name in ("production", "clean-room"):
+    # outputs of every stage live in the cycle: production, but also prov, ledger, baseline ...
+    for name in ("production", "clean-room", "prov", "ledger", "baseline"):
         _put(cycle / name / "marker", name)
     _put(cycle / "pre-chain-cycle.json", "{}")
+    _put(cycle / "cache2" / "entry", "cached")
     _put(world / "replica-drv" / "_quant_engine" / ".replica-root.json", "{}")
-    _put(cycle / "keep" / "file", "kept")
     return {
         "cycle": cycle.as_posix(),
         "run": (cycle / "out").as_posix(),
+        "retained_cache_root": (cycle / "cache2").as_posix(),
         "replica_workspace": (world / "replica-drv" / "_quant_engine").as_posix(),
         "prep_pin_root": world.as_posix(),
     }
 
 
-def test_move_aside_prints_by_default_then_moves_and_never_deletes(
+def test_move_aside_moves_the_whole_cycle_and_prints_by_default(tmp_path: Path) -> None:
+    cfg = _world(tmp_path)
+    cycle = Path(cfg["cycle"])
+    planned = tool.move_aside(cfg, apply=False, stamp="S")
+    assert [Path(a["move"]).name for a in planned] == ["c", "_quant_engine"]
+    assert (cycle / "prov" / "marker").is_file()  # dry run moved nothing
+    tool.move_aside(cfg, apply=True, stamp="S")
+    aside = cycle.with_name("c.aside-S")
+    # R3 pass 6: a cycle-level output left behind refused the next run ("provenance-spec was produced
+    # under a different run configuration"); nothing of the old cycle stays under its name
+    assert not cycle.exists()
+    for name in ("prov", "ledger", "baseline", "production", "clean-room"):
+        assert (aside / name / "marker").read_text() == name
+    assert (aside / "cache2" / "entry").is_file()  # moved, never deleted
+    assert (Path(cfg["replica_workspace"]).parent / "_quant_engine.aside-S").is_dir()
+    assert tool.move_aside(cfg, apply=True, stamp="S") == []  # idempotent
+
+
+def test_move_aside_can_put_the_retained_cache_back_into_the_fresh_cycle(
     tmp_path: Path,
 ) -> None:
     cfg = _world(tmp_path)
     cycle = Path(cfg["cycle"])
-    planned = tool.move_aside(cfg, apply=False, stamp="S")
-    assert [Path(a["move"]).name for a in planned] == [
-        "production",
-        "clean-room",
-        "pre-chain-cycle.json",
-        "_quant_engine",
-    ]
-    assert (cycle / "production" / "marker").is_file()  # dry run moved nothing
-    tool.move_aside(cfg, apply=True, stamp="S")
-    assert not (cycle / "production").exists()
-    assert (cycle / "production.aside-S" / "marker").read_text() == "production"
-    assert (cycle / "pre-chain-cycle.json.aside-S").is_file()
-    assert (Path(cfg["replica_workspace"]).parent / "_quant_engine.aside-S").is_dir()
-    assert (cycle / "keep" / "file").is_file()
-    assert tool.move_aside(cfg, apply=True, stamp="S") == []  # idempotent
+    planned = tool.move_aside(cfg, apply=False, stamp="S", keep_cache=True)
+    assert [next(iter(a)) for a in planned] == ["move", "restore", "move"]
+    tool.move_aside(cfg, apply=True, stamp="S", keep_cache=True)
+    assert (cycle / "cache2" / "entry").read_text() == "cached"
+    assert sorted(entry.name for entry in cycle.iterdir()) == ["cache2"]
+    assert not (cycle.with_name("c.aside-S") / "cache2").exists()
+    assert (cycle.with_name("c.aside-S") / "prov" / "marker").is_file()
+    # the fresh cycle holds only the cache: a second run moves nothing
+    assert tool.move_aside(cfg, apply=True, stamp="S2", keep_cache=True) == []
+    # without the flag the cache goes aside with the rest
+    other = _world(tmp_path / "other")
+    tool.move_aside(other, apply=True, stamp="S")
+    assert not Path(other["cycle"]).exists()
 
 
 def test_move_aside_refuses_to_overwrite_or_leave_the_world(tmp_path: Path) -> None:
     cfg = _world(tmp_path)
-    _put(Path(cfg["cycle"]) / "production.aside-S" / "x", "earlier")
+    _put(Path(cfg["cycle"]).with_name("c.aside-S") / "x", "earlier")
     with pytest.raises(tool.WorldError, match="nothing is overwritten"):
         tool.move_aside(cfg, apply=True, stamp="S")
-    assert (Path(cfg["cycle"]) / "production" / "marker").is_file()
-    outside = {**_world(tmp_path), "run": str(tmp_path / "elsewhere")}
-    _put(Path(outside["run"]) / "x", "x")
+    assert (Path(cfg["cycle"]) / "prov" / "marker").is_file()
+    outside = {
+        **_world(tmp_path / "o2"),
+        "replica_workspace": str(tmp_path / "elsewhere"),
+    }
+    _put(Path(outside["replica_workspace"]) / "x", "x")
     with pytest.raises(tool.WorldError, match="outside the world"):
         tool.move_aside(outside, apply=False)
+    world_as_cycle = {**_world(tmp_path / "o3")}
+    world_as_cycle["cycle"] = world_as_cycle["prep_pin_root"]
+    with pytest.raises(tool.WorldError, match="not a directory inside the world"):
+        tool.move_aside(world_as_cycle, apply=False)
 
 
 def test_carry_over_copies_what_the_spec_still_names_and_refuses_a_difference(

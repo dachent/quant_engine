@@ -9,7 +9,7 @@ A pass on a fresh world used to need hand scripts for four things; each is a sub
   deliberate: it is recomputed only from an existing authority file, never carried, so a configuration written before
   ``calendar-seed`` ran lacks it (and ``--require-calendar`` refuses that), and the stages that need it refuse until it is
   set by a second ``config`` run. Predecessor pins are never touched.
-* ``move-aside``: move the previous pass's create-only outputs out of the way (never deleting, timestamped).
+* ``move-aside``: move the previous pass's outputs out of the way, the whole cycle directory first (never deleting, timestamped).
 * ``carry-over``: copy the files the new cycle's preparation spec still names from the previous cycle.
 
 Every writing command is create-only or idempotent (identical bytes are accepted, anything else is refused), and the
@@ -31,19 +31,15 @@ from typing import Any, Final
 
 from quant_engine.core import ReleaseInputsError, load_release_inputs
 
-# create-only outputs of a pass, relative to the cycle directory
-CREATE_ONLY: Final = (
-    "production",
-    "replica-production",
-    "replica-rehearsal",
-    "clean-room",
-    "pre-chain-cycle.json",
-)
-# configured directories a pass writes (create-only: the driver refuses an existing run or replica workspace)
+# configured directories a pass writes outside the cycle (create-only: the driver refuses an existing run
+# or replica workspace); the cycle directory itself holds every other output and goes aside whole
 CONFIGURED_OUTPUTS: Final = ("run", "qa", "evidence_dest", "replica_workspace")
 # files the new cycle's preparation spec still names, relative to the cycle directory; more (a generation directory
 # staged outside the graph) are named with --carry
 CARRIED: Final = ("in/epoch-admission-policy.json",)
+# run configuration keys only the explicit calendar-authority stage reads: kept when their files exist, dropped
+# when they point into a removed world (the stage refuses, naming them, if it is selected without them)
+STAGE_ONLY_PATHS: Final = ("calendar_attempt_run", "calendar_attempt_spec")
 # pins this tool may recompute: (config key, config key of the file it pins)
 REFRESHED_PINS: Final = (
     ("provenance_spec_sha256", "provenance_spec"),
@@ -189,6 +185,13 @@ def config(
         if not (sep and key):
             raise WorldError(f"--set expects KEY=VALUE, got {item!r}")
         cfg[key] = value
+    dropped = [
+        key
+        for key in STAGE_ONLY_PATHS
+        if isinstance(cfg.get(key), str) and not Path(str(cfg[key])).exists()
+    ]
+    for key in dropped:
+        del cfg[key]
     pending: list[str] = []
     for pin, file_key in REFRESHED_PINS:
         file = cfg.get(file_key)
@@ -203,7 +206,7 @@ def config(
             "cycle-resolve and calendar-seed first, then write the configuration again"
         )
     state = _write_config(out, cfg)
-    return {"state": state, "out": str(out), "pending": pending}
+    return {"state": state, "out": str(out), "pending": pending, "dropped": dropped}
 
 
 def _write_config(out: Path, cfg: Mapping[str, Any]) -> str:
@@ -239,14 +242,43 @@ def _world_root(cfg: Mapping[str, Any], cycle: Path) -> Path:
     return Path(str(root)) if root else cycle.parent
 
 
+def _cycle_is_fresh(cycle: Path, keep: Path | None) -> bool:
+    """Nothing in the cycle but the retained cache a previous move-aside restored."""
+
+    if not cycle.exists():
+        return True
+    kept = keep.relative_to(cycle).parts[0] if keep is not None else None
+    return all(entry.name == kept for entry in cycle.iterdir())
+
+
 def move_aside(
-    cfg: Mapping[str, Any], *, apply: bool, stamp: str | None = None
+    cfg: Mapping[str, Any],
+    *,
+    apply: bool,
+    stamp: str | None = None,
+    keep_cache: bool = False,
 ) -> list[dict[str, str]]:
+    """Move the previous pass's outputs out of the way: the whole cycle directory, and the configured
+    directories outside it. ``keep_cache`` puts the retained cache back into the fresh cycle."""
+
     cycle = Path(str(cfg["cycle"]))
     world = _world_root(cfg, cycle)
     stamp = stamp or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    targets = [cycle / name for name in CREATE_ONLY]
-    targets += [Path(str(cfg[key])) for key in CONFIGURED_OUTPUTS if cfg.get(key)]
+    if cycle.resolve() == world.resolve() or not _inside(cycle, world):
+        raise WorldError(
+            f"the cycle {cycle} is not a directory inside the world {world}"
+        )
+    cache = (
+        Path(str(cfg["retained_cache_root"]))
+        if cfg.get("retained_cache_root")
+        else None
+    )
+    keep = cache if keep_cache and cache is not None and _inside(cache, cycle) else None
+    targets = [] if _cycle_is_fresh(cycle, keep) else [cycle]
+    for key in CONFIGURED_OUTPUTS:
+        path = Path(str(cfg[key])) if cfg.get(key) else None
+        if path is not None and not _inside(path, cycle):
+            targets.append(path)
     actions: list[dict[str, str]] = []
     for target in targets:
         if not _inside(target, world):
@@ -257,9 +289,20 @@ def move_aside(
         if aside.exists():
             raise WorldError(f"{aside} exists already: nothing is overwritten")
         actions.append({"move": str(target), "to": str(aside)})
+        if target == cycle and keep is not None and keep.exists():
+            actions.append(
+                {
+                    "restore": str(aside / keep.relative_to(cycle)),
+                    "to": str(keep),
+                }
+            )
     if apply:
         for action in actions:
-            os.replace(action["move"], action["to"])
+            if "move" in action:
+                os.replace(action["move"], action["to"])
+            else:
+                Path(action["to"]).parent.mkdir(parents=True, exist_ok=True)
+                os.replace(action["restore"], action["to"])
     return actions
 
 
@@ -331,6 +374,11 @@ def _parser() -> argparse.ArgumentParser:
     aside = commands.add_parser("move-aside")
     aside.add_argument("--config", type=Path, required=True)
     aside.add_argument("--stamp")
+    aside.add_argument(
+        "--keep-cache",
+        action="store_true",
+        help="put the retained cache (inside the cycle) back into the fresh cycle",
+    )
     carry = commands.add_parser("carry-over")
     carry.add_argument("--from-cycle", type=Path, required=True)
     carry.add_argument("--to-cycle", type=Path, required=True)
@@ -376,6 +424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _json(args.config, "run configuration"),
                 apply=args.apply,
                 stamp=args.stamp,
+                keep_cache=args.keep_cache,
             )
         else:
             result = carry_over(

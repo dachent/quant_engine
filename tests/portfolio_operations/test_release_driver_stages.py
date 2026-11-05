@@ -1875,3 +1875,28 @@ def test_rerecord_refuses_while_a_stage_of_the_run_is_live(
     finally:
         sleeper.kill()
         sleeper.wait()
+
+
+def test_a_stage_that_needs_run_configuration_keys_is_refused_by_name_without_them(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # R3 pass 6: calendar_attempt_run/spec are read only by the explicit calendar-authority stage; a
+    # configuration without them runs every other stage, and that stage refuses naming the keys
+    assert _stage("calendar-authority")["needs_config"] == [
+        "calendar_attempt_run",
+        "calendar_attempt_spec",
+    ]
+    needing = {
+        "id": "needs",
+        "needs_config": ["only_for_needs"],
+        "outputs": ["{cycle}/needs.txt"],
+        "argv": _write_stage("{cycle}/needs.txt"),
+    }
+    graph = _graph(world, [CHAIN[0], needing])
+    assert (
+        _drive(world, graph, "--only", "one") == 0
+    )  # other stages do not need the key
+    assert _drive(world, graph, "--only", "needs") == 2
+    assert not (world["cycle"] / "needs.txt").exists()
+    _config(world, only_for_needs="x")
+    assert _drive(world, graph, "--only", "needs") == 0
