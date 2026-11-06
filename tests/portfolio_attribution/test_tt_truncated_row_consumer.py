@@ -56,7 +56,10 @@ def _manifest(
         manifest["capture_provenance"] = {
             "captures": captures
             if captures is not None
-            else [{"captured_at_utc": "2026-09-01T10:00:00Z", "role": "json"}],
+            else [
+                {"captured_at_utc": "2026-09-01T10:00:00Z", "role": "json"},
+                {"captured_at_utc": "2026-09-01T10:01:00Z", "role": "txt"},
+            ],
             "holdings_row_validation": {
                 "explain_tolerance": 0.02,
                 "flags": [
@@ -270,3 +273,35 @@ def test_a_capture_on_the_cutoff_day_still_passes_and_dated_fallbacks_ignore_it(
         "BIL": 0.4,
         "SPY": 0.6,
     }
+
+
+def test_only_the_captures_that_supply_the_fallback_are_checked(
+    tmp_path: Path,
+) -> None:
+    early = {"captured_at_utc": "2026-09-01T10:00:00Z", "role": "json"}
+    late_vane = {"captured_at_utc": "2026-09-03T00:00:00Z", "role": "vane"}
+    late_txt = {"captured_at_utc": "2026-09-03T00:00:00Z", "role": "txt"}
+    live = {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}}
+    for captures in ([early, late_vane], [early, late_txt, late_vane]):
+        manifest = _manifest(tmp_path, live, captures=captures)
+        repaired = reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+        assert _weights(repaired) == {"BIL": 0.5, "SPY": 0.5}
+    override = _manifest(
+        tmp_path,
+        _override("2026-09-01"),
+        weights={"SPY": 0.3},
+        captures=[early, late_vane],
+    )
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError, match="on or before"
+    ):
+        reconciliation.with_truncated_row_fallbacks(override, SECOND)
+    ok_txt = {"captured_at_utc": "2026-09-01T10:01:00Z", "role": "txt"}
+    manifest = _manifest(
+        tmp_path,
+        _override("2026-09-01"),
+        weights={"SPY": 0.3},
+        captures=[early, ok_txt, late_vane],
+    )
+    repaired = reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+    assert _weights(repaired) == {"BIL": 0.5, "SPY": 0.5}

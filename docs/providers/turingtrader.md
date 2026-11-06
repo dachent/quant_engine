@@ -64,9 +64,11 @@ not advance any provider, strategy, portfolio, or publication pointer.
 The portfolio-holdings and comp pages are live at capture, so a late capture is not a record of
 the cutoff day. The consumer (`with_truncated_row_fallbacks` in
 `tools/portfolio_implementation_reconciliation.py`) therefore refuses the two `LIVE_*`
-fallbacks for a truncated holdings row unless every capture recorded in the manifest provenance
-(`capture_provenance.captures[].captured_at_utc`) is dated on or before the accepted as-of day, and
-refuses them when no capture date is recorded. Complete rows and the dated fallbacks
+fallbacks for a truncated holdings row unless the captures that supply them, recorded in the manifest
+provenance (`capture_provenance.captures[]` by `role`), are dated on or before the accepted as-of day:
+the `json` capture for `LIVE_PORTFOLIO_HOLDINGS`, the `json` and `txt` captures for
+`LIVE_HOLDINGS_OVERRIDE` (the text capture holds the rebalance marker). A later market-vane capture
+is ignored, and a missing capture date for a needed role refuses the fallback. Complete rows and the dated fallbacks
 (`LAST_COMPLETE_ROW`, `NEXT_COMPLETE_ROW`) are not affected. The protection for a cutoff of D is
 therefore a capture taken on D itself: after a later capture, a truncated row that needs a live
 fallback stops the run instead of reading post-cutoff holdings.
