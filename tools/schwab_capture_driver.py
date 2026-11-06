@@ -1984,8 +1984,9 @@ def attach_check(
     *,
     cdp_url: str,
     connect: Callable[[str], Any],
-    observe: Callable[[Any], tuple[dict[str, str], str | None]],
+    observe: Callable[[Any], tuple[dict[str, str], str | None, list[str] | None]],
     capture_body_out: Path | None = None,
+    crosswalk: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Attach and observe the page's own requests; no governed request, no evidence.
 
@@ -2006,7 +2007,7 @@ def attach_check(
         raise DriverError(
             f"expected exactly one client.schwab.com page, found {len(pages)}"
         )
-    headers, post_data = observe(pages[0])
+    headers, post_data, page_accounts = observe(pages[0])
     result: dict[str, object] = {
         "authenticated_request_observed": "Authorization" in headers,
         "governed_requests": 0,
@@ -2029,19 +2030,55 @@ def attach_check(
             raise DriverError("output already exists") from exc
         result["holdings_body_sha256"] = _sha256(payload)
         result["holdings_body_keys"] = sorted(json.loads(payload))
+    if crosswalk is not None:
+        result.update(_compare_accounts(page_accounts, crosswalk))
     return result
+
+
+def _compare_accounts(
+    page_accounts: list[str] | None, crosswalk: Mapping[str, str]
+) -> dict[str, object]:
+    """The page's account set against the crosswalk; ids and values never shown."""
+
+    if page_accounts is None:
+        raise DriverError(
+            "no HoldingV2 response was observed in the wait window: open the "
+            "Schwab holdings/positions page (read-only navigation) and run "
+            "attach-check again, or STOP and use the retained UI method"
+        )
+    page = set(page_accounts)
+    if len(page) != len(page_accounts):
+        raise DriverError("the page lists an account twice")
+    missing = sorted(crosswalk[x] for x in set(crosswalk) - page)
+    extra = sorted(_sha256(x.encode("utf-8"))[:8] for x in page - set(crosswalk))
+    report: dict[str, object] = {
+        "accounts_on_page": len(page),
+        "accounts_in_crosswalk": len(crosswalk),
+        "crosswalk_accounts_missing_on_page": missing,
+        "page_accounts_not_in_crosswalk_hash8": extra,
+    }
+    if missing or extra:
+        raise DriverError(
+            "the page's account set differs from the crosswalk: "
+            + json.dumps(report, sort_keys=True)
+        )
+    report["account_set_matches"] = True
+    return report
 
 
 def _observe_with_body(
     page: Any, seconds: float
-) -> tuple[dict[str, str], str | None]:  # pragma: no cover - live only
-    seen: list[str | None] = []
+) -> tuple[
+    dict[str, str], str | None, list[str] | None
+]:  # pragma: no cover - live only
+    seen: list[Any] = []
 
-    def on_request(request: Any) -> None:
+    def on_response(response: Any) -> None:
+        request = response.request
         if request.method == "POST" and request.url.endswith(HOLDINGS_V2_PATH):
-            seen.append(request.post_data)
+            seen.append(response)
 
-    page.on("request", on_request)
+    page.on("response", on_response)
     try:
         headers = _observe_headers(page)
         waited = 0.0
@@ -2049,8 +2086,19 @@ def _observe_with_body(
             page.wait_for_timeout(500)
             waited += 0.5
     finally:
-        page.remove_listener("request", on_request)
-    return headers, (seen[0] if seen else None)
+        page.remove_listener("response", on_response)
+    if not seen:
+        return headers, None, None
+    response = seen[0]
+    accounts: list[str] | None = None
+    try:  # only the account ids leave this function; values are dropped here
+        document = response.json()
+        rows = document.get("accounts") if isinstance(document, dict) else None
+        if isinstance(rows, list):
+            accounts = [str(r.get("accountId")) for r in rows if isinstance(r, dict)]
+    except Exception:
+        accounts = None
+    return headers, response.request.post_data, accounts
 
 
 def _attach_live(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
@@ -2064,6 +2112,11 @@ def _attach_live(args: argparse.Namespace) -> dict[str, object]:  # pragma: no c
             connect=playwright.chromium.connect_over_cdp,
             observe=lambda page: _observe_with_body(page, args.wait_seconds),
             capture_body_out=args.capture_body_out,
+            crosswalk=(
+                parse_crosswalk(_load(args.crosswalk, "crosswalk"))
+                if args.crosswalk
+                else None
+            ),
         )
 
 
@@ -2141,6 +2194,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     attach.add_argument("--cdp-url", required=True)
     attach.add_argument("--capture-body-out", type=Path)
+    attach.add_argument("--crosswalk", type=Path)
     attach.add_argument("--wait-seconds", type=float, default=20.0)
     verify = sub.add_parser("verify", help="re-check a staged run from its bytes")
     verify.add_argument("run_dir", type=Path)

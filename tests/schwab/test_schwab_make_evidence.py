@@ -205,6 +205,7 @@ def test_attach_check_reports_names_only_and_issues_no_governed_request() -> Non
         observe=lambda page: (
             {"Authorization": "Bearer secret", "Schwab-Env": "x"},
             None,
+            None,
         ),
     )
     assert result["ok"] is True and result["governed_requests"] == 0
@@ -218,7 +219,7 @@ def test_attach_check_needs_exactly_one_schwab_page(urls: list[str]) -> None:
         driver.attach_check(
             cdp_url="x",
             connect=lambda url: _Browser(urls),
-            observe=lambda page: ({}, None),
+            observe=lambda page: ({}, None, None),
         )
 
 
@@ -226,7 +227,7 @@ def test_attach_check_not_ok_without_authorization() -> None:
     result = driver.attach_check(
         cdp_url="x",
         connect=lambda url: _Browser([SCHWAB]),
-        observe=lambda page: ({}, None),
+        observe=lambda page: ({}, None, None),
     )
     assert result["ok"] is False
 
@@ -235,7 +236,7 @@ def _attach(tmp_path: Path, post_data: str | None) -> dict[str, object]:
     return driver.attach_check(
         cdp_url="x",
         connect=lambda url: _Browser([SCHWAB]),
-        observe=lambda page: ({"Authorization": "t"}, post_data),
+        observe=lambda page: ({"Authorization": "t"}, post_data, None),
         capture_body_out=tmp_path / "body.json",
     )
 
@@ -267,3 +268,39 @@ def test_unusable_observed_body_is_refused(tmp_path: Path, post_data: str) -> No
     with pytest.raises(driver.DriverError):
         _attach(tmp_path, post_data)
     assert not (tmp_path / "body.json").exists()
+
+
+XW = {"EXT-A": "account-" + "1" * 16, "EXT-B": "account-" + "2" * 16}
+
+
+def _compare(page_accounts: list[str] | None) -> dict[str, object]:
+    return driver.attach_check(
+        cdp_url="x",
+        connect=lambda url: _Browser([SCHWAB]),
+        observe=lambda page: ({"Authorization": "t"}, None, page_accounts),
+        crosswalk=XW,
+    )
+
+
+def test_account_set_match_reports_counts_only() -> None:
+    result = _compare(["EXT-B", "EXT-A"])
+    assert result["account_set_matches"] is True
+    assert result["accounts_on_page"] == result["accounts_in_crosswalk"] == 2
+    assert "EXT-" not in json.dumps(result)
+
+
+def test_account_set_difference_is_refused_without_naming_provider_ids() -> None:
+    with pytest.raises(driver.DriverError) as extra:
+        _compare(["EXT-A", "EXT-B", "EXT-SECRET"])
+    assert "EXT-" not in str(extra.value) and "hash8" in str(extra.value)
+    with pytest.raises(driver.DriverError, match="differs") as missing:
+        _compare(["EXT-A"])
+    assert "account-" + "2" * 16 in str(missing.value)
+    assert "EXT-" not in str(missing.value)
+
+
+def test_account_compare_refuses_when_no_response_observed_or_duplicates() -> None:
+    with pytest.raises(driver.DriverError, match="no HoldingV2 response"):
+        _compare(None)
+    with pytest.raises(driver.DriverError, match="twice"):
+        _compare(["EXT-A", "EXT-A"])

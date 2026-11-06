@@ -172,6 +172,17 @@ writes nothing. The operator then opens the Schwab positions/holdings page by
 read-only navigation in the same browser and runs `attach-check` again, or STOPs
 and uses the retained UI method below.
 
+#### Account-set compare
+
+With `--crosswalk <crosswalk.json>`, `attach-check` also reads the response of that
+same HoldingV2 request (only the `accounts[].accountId` list is kept; no balance
+or position leaves the function) and compares the set to the crosswalk. It
+reports `accounts_on_page`, `accounts_in_crosswalk` and `account_set_matches`;
+on a difference it refuses, naming crosswalk accounts missing on the page by
+internal id and extra page accounts only by an 8-character hash, never a
+provider id. Run it before issuing evidence; `--account-count` must equal the
+matched count.
+
 #### Fallback: the retained UI method (R2.1)
 
 If the driver's first live use fails, the documented fallback is the method that
