@@ -108,9 +108,17 @@ before any evidence is read). The live command freezes that timestamp once, befo
 evidence, so the fetch may start no earlier than `00:00:00` UTC on the day after `D`: for
 `D` = Friday 2026-11-06 that is 2026-11-07T00:00:00Z = Friday 19:00 EST (US daylight time ended
 2026-11-01, so Eastern is UTC-5). A start at 18:59 ET is refused. Governance evidence is also
-checked against that timestamp (`valid_from_utc` <= start <= `valid_until_utc`, at most 24 hours),
-so the fetch evidence needs `valid_from_utc` at or before 2026-11-07T00:00:00Z. The evidence is
-single use and is consumed before the run starts, which is why the closed-day check now runs first:
+checked against that timestamp (`valid_from_utc` <= start <= `valid_until_utc`, at most 24 hours
+between them; `authorize_live`). The evidence does not mention `D` beyond its `cutoff` field and
+is never compared with the closed-day time, so it may be issued at any time (Friday evening,
+Saturday, even Sunday) as long as its window contains the instant the fetch starts: the only
+deadline is the evidence's own expiry, not 19:00 ET. The evidence also names the effective config
+hash and the run id, which only exist after the Schwab positions are captured, the probe has run
+and `apply-admissions` has written the resolved config (each step changes the hash), so the probe
+evidence can be issued after the positions and the first `config-check`, and the fetch evidence
+only after `config-check` on `r3-config.json`; neither can be prepared on Friday for a config
+resolved on Saturday. The evidence is single use and is consumed before the run starts, which is
+why the closed-day check now runs first:
 a start that is too early is refused with the evidence unspent. `config-check`, `probe` and
 `apply-admissions` do not apply the rule (the code has no closed-day check in them), so they can
 run before 19:00 ET; whether the probe's reference prices need the close of `D` is not established
