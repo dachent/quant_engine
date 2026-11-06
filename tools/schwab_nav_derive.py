@@ -403,6 +403,14 @@ def declare(
         crosswalk,
     )
     symbols = sorted({s for row in patched for s in held[row["account_id"]][0]})
+    # the guard concluded "nothing after D moved this account" from these files: pin them
+    transactions = [
+        {"account_id": account, **_pin(path)}
+        for account in sorted(held)
+        if (
+            path := run_dir / f"transactions/normalized/wch/transactions/{account}.json"
+        ).is_file()
+    ]
     return {
         "roots": spec_doc["roots"],
         "sources": [
@@ -423,6 +431,7 @@ def declare(
                 ],
                 "cash_security_type": CASH_SECURITY_TYPE,
                 "rounding": REPLAY_ROUNDING,
+                **({"transactions": transactions} if transactions else {}),
             },
             "native_balances": [
                 {

@@ -549,3 +549,49 @@ def test_an_effective_date_after_d_counts_even_when_the_posting_date_is_not(
     )
     with pytest.raises(derive_tool.DeriveError, match="Bank Interest x1"):
         _derive(run, closes)
+
+
+def test_the_transactions_the_guard_read_are_pinned_and_checked_by_the_ledger(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger()
+    run, closes = _world(tmp_path)
+    _rows(
+        run,
+        "account-00000000000000a2",
+        [{"transactionDate": "09/16/2026", "action": "Buy", "shareQuantity": "1"}],
+    )
+    record, _ = _derive(run, closes)
+    derivation = tmp_path / "derivation.json"
+    derivation.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"roots": {}, "sources": []}), encoding="utf-8")
+    evidence = derive_tool.declare(
+        run_dir=run,
+        crosswalk=CROSSWALK,
+        closes_dir=closes,
+        day=DAY,
+        prior_day=PRIOR,
+        tolerance=derive_tool.DEFAULT_TOLERANCE,
+        derivation=derivation,
+        spec=spec,
+    )
+    catalog = {
+        "journal_counterparty_crosswalk": {
+            "entries": [
+                {"account_id": internal, "native_suffix": external[-3:]}
+                for external, internal in CROSSWALK.items()
+            ]
+        }
+    }
+    pinned = evidence["derived_patch"]["replay"]["transactions"]  # type: ignore[index]
+    assert [p["account_id"] for p in pinned] == ["account-00000000000000a2"]
+    ledger._schwab_source_derived_patch(evidence, DAY, catalog)  # type: ignore[attr-defined]
+    path = Path(pinned[0]["path"])
+    original = path.read_text(encoding="utf-8")
+    path.write_text(original.replace("09/16/2026", "09/18/2026"), encoding="utf-8")
+    with pytest.raises(Exception, match="(?i)pin|sha|differ"):
+        ledger._schwab_source_derived_patch(evidence, DAY, catalog)  # type: ignore[attr-defined]
+    path.unlink()
+    with pytest.raises(Exception, match="regular file"):
+        ledger._schwab_source_derived_patch(evidence, DAY, catalog)  # type: ignore[attr-defined]
