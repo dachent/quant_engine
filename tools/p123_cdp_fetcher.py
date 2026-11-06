@@ -655,12 +655,12 @@ class Session:
             if (target_id is None or tid == target_id) and self._tab_known(url)
         }
         if not candidates:
-            raise FetchRefused("NO_SIGNED_IN_TAB")
+            raise FetchStop("STOP_NO_SIGNED_IN_TAB", "no matching tab")
         good = {tid: url for tid, url in candidates.items() if self._tab_ok(url)}
         if not good:
             raise FetchStop("STOP_REAUTH", "the only candidate tab is on a login page")
         if len(good) > 1:
-            raise FetchRefused("TARGET_AMBIGUOUS", f"{len(good)} candidate tabs")
+            raise FetchStop("STOP_TARGET_AMBIGUOUS", f"{len(good)} candidate tabs")
         (self._target_id,) = good
         result = self._call(
             "Target.attachToTarget", {"targetId": self._target_id, "flatten": True}
@@ -703,7 +703,12 @@ class Session:
 
         if any(self._incoming.iterdir()):
             raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "download directory not empty")
-        self._call("Page.navigate", {"url": url}, self._sid)
+        navigated = self._call("Page.navigate", {"url": url}, self._sid)
+        frame = navigated.get("frameId")
+        if not isinstance(frame, str) or not frame:
+            raise FetchStop(
+                "STOP_DOWNLOAD_NOT_EXACT", "navigation returned no frame id"
+            )
         deadline = self._clock() + self._download_timeout
         guid = ""
         suggested = ""
@@ -728,6 +733,11 @@ class Session:
                 continue
             method = message.get("method")
             if method == "Browser.downloadWillBegin":
+                if params.get("frameId") != frame:
+                    # Another tab or frame of this browser started a download: it is
+                    # not ours. Its file lands in the shared directory, which the
+                    # exact-directory check below turns into a stop.
+                    continue
                 if guid:
                     raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "second download")
                 guid = str(params.get("guid", ""))
@@ -1165,6 +1175,8 @@ def run_p123(
                 _replace(capture / "capture-manifest.json", _capture_manifest(landed))
     except FetchStop as exc:
         stop = exc
+    except FetchRefused as exc:
+        stop = FetchStop("STOP_REFUSED", exc.code)
     finally:
         session.release()
     # The capture manifest is final now: the decisions file must bind exactly these
@@ -1173,8 +1185,8 @@ def run_p123(
     if books:
         try:
             report = check_books()
-        except FetchStop as exc:
-            final_error = exc.detail
+        except (FetchStop, FetchRefused) as exc:
+            final_error = exc.detail if isinstance(exc, FetchStop) else exc.code
     if report:
         _write_new(
             base / "book-identity-decisions.json",
@@ -1274,6 +1286,8 @@ def run_drive(
         }
     except FetchStop as exc:
         stop = exc
+    except FetchRefused as exc:
+        stop = FetchStop("STOP_REFUSED", exc.code)
     finally:
         session.release()
     manifest: dict[str, Any] = {

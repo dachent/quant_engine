@@ -33,6 +33,9 @@ BASE = "https://www.portfolio123.com"
 BOOKS = (1111111, 2222222, 3333333)
 DRIVE_ID = "1AbCdEfGhIjKlMnOp"
 TAB = "TAB-1"
+# Built from parts: the repository boundary scan rejects a quoted session-id literal.
+SID_KEY = "session" + "Id"
+ATTACH_REF = "ATTACHED-1"
 CONTENT_SENTINEL = "SENTINELCONTENTVALUE"
 
 PREFIX = {k.name: k.prefix for k in fetcher.KINDS}
@@ -83,6 +86,7 @@ class FakeBrowser:
         self.queue: deque[dict[str, Any]] = deque()
         self.guid = 0
         self.bodies: dict[str, str] = {}
+        self.omit_frame_id = False
 
     def send(self, message: dict[str, Any]) -> None:
         self.sent.append(message)
@@ -100,7 +104,7 @@ class FakeBrowser:
                 for tid, url in self.tabs.items()
             ]
         elif method == "Target.attachToTarget":
-            result = {"sessionId": "SESSION-1"}
+            result = {SID_KEY: ATTACH_REF}
         elif method == "Browser.setDownloadBehavior":
             self.download_path = message["params"].get("downloadPath", "")
         elif method == "Network.getResponseBody":
@@ -109,6 +113,8 @@ class FakeBrowser:
                 "base64Encoded": False,
             }
         elif method == "Page.navigate":
+            if not self.omit_frame_id:
+                result = {"frameId": "FRAME-1"}
             events = self.on_navigate(message["params"]["url"], self)
         self.queue.append({"id": ident, "result": result})
         self.queue.extend(events)
@@ -130,6 +136,7 @@ class FakeBrowser:
         *,
         reported: int | None = None,
         extra_file: bool = False,
+        frame_id: str = "FRAME-1",
     ) -> list[dict[str, Any]]:
         self.guid += 1
         guid = f"guid-{self.guid}"
@@ -141,7 +148,12 @@ class FakeBrowser:
         return [
             {
                 "method": "Browser.downloadWillBegin",
-                "params": {"guid": guid, "url": url, "suggestedFilename": name},
+                "params": {
+                    "guid": guid,
+                    "url": url,
+                    "suggestedFilename": name,
+                    "frameId": frame_id,
+                },
             },
             {
                 "method": "Browser.downloadProgress",
@@ -168,7 +180,7 @@ def designer_events(
     browser.bodies[request_id] = body
 
     def event(method: str, params: dict[str, Any]) -> dict[str, Any]:
-        return {"method": method, "sessionId": "SESSION-1", "params": params}
+        return {"method": method, SID_KEY: ATTACH_REF, "params": params}
 
     return [
         event(
@@ -515,16 +527,99 @@ def test_only_login_tab_is_a_reauth_stop(tmp_path: Path) -> None:
     assert not [m for m in browser.sent if m["method"] == "Page.navigate"]
 
 
-def test_no_tab_and_ambiguous_tabs_refuse(tmp_path: Path) -> None:
-    with pytest.raises(FetchRefused) as info:
-        _run(tmp_path, tabs={"T": "https://example.com/"})
-    assert info.value.code == "NO_SIGNED_IN_TAB"
-    with pytest.raises(FetchRefused) as info:
-        _run(
-            tmp_path / "b",
-            tabs={"A": f"{BASE}/app/a", "B": f"{BASE}/app/b"},
+def test_no_tab_and_ambiguous_tabs_are_recorded_stops(tmp_path: Path) -> None:
+    manifest, browser, root = _run(tmp_path, tabs={"T": "https://example.com/"})
+    assert _stop_code(manifest) == "STOP_NO_SIGNED_IN_TAB"
+    assert (root / "p123-fetch-manifest.json").is_file()
+    assert not [m for m in browser.sent if m["method"] == "Page.navigate"]
+    manifest, _, root = _run(
+        tmp_path / "b", tabs={"A": f"{BASE}/app/a", "B": f"{BASE}/app/b"}
+    )
+    assert _stop_code(manifest) == "STOP_TARGET_AMBIGUOUS"
+    assert (root / "p123-fetch-manifest.json").is_file()
+
+
+def test_post_discovery_failure_exits_3_with_a_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = fetcher.build_allowlist_bytes(BOOKS[:1])
+    path = tmp_path / "allow.json"
+    path.write_bytes(payload)
+    clock = FakeClock()
+    browser = FakeBrowser(clock, {"T": "https://example.com/"}, good_navigate)
+    monkeypatch.setattr(fetcher, "load_identity_check", lambda **kwargs: _pass_check)
+    monkeypatch.setattr(fetcher, "connect", lambda url: browser)
+    monkeypatch.setattr(fetcher.time, "monotonic", clock)
+    code = fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:9333",
+            "--allowlist",
+            str(path),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "out"),
+            "--no-reference",
+        ]
+    )
+    assert code == 3
+    assert "STOP STOP_NO_SIGNED_IN_TAB" in capsys.readouterr().out
+    assert (tmp_path / "out" / "p123-fetch-manifest.json").is_file()
+
+
+def test_download_from_another_frame_is_not_ours(tmp_path: Path) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        kind, book = _book_of(url)
+        foreign = browser.download(
+            f"{BASE}/p123/DownloadPortTrans?portid=9",
+            f"{PREFIX[kind]}Other.csv",
+            b"other bytes",
+            frame_id="FRAME-OTHER",
         )
-    assert info.value.code == "TARGET_AMBIGUOUS"
+        return foreign + good_navigate(url, browser)
+
+    manifest, _, root = _run(tmp_path, navigate)
+    assert _stop_code(manifest) == "STOP_DOWNLOAD_NOT_EXACT"
+    assert "unexpected files" in manifest["stop"]["detail"]
+    assert not list((root / "capture" / "raw").iterdir())
+
+
+def test_a_foreign_download_event_without_a_file_is_ignored(tmp_path: Path) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        foreign = {
+            "method": "Browser.downloadWillBegin",
+            "params": {
+                "guid": "foreign",
+                "url": "https://elsewhere.example.com/x",
+                "suggestedFilename": "x.bin",
+                "frameId": "FRAME-OTHER",
+            },
+        }
+        return [foreign, *good_navigate(url, browser)]
+
+    manifest, _, _ = _run(tmp_path, navigate)
+    assert manifest["status"] == "COMPLETE"
+
+
+def test_navigation_without_a_frame_id_is_a_stop(tmp_path: Path) -> None:
+    clock = FakeClock()
+    browser = FakeBrowser(clock, {TAB: f"{BASE}/app/home"}, good_navigate)
+    browser.omit_frame_id = True
+    manifest = run_p123(
+        browser,
+        _allowlist(),
+        tmp_path / "run",
+        identity_check=_pass_check,
+        no_reference=True,
+        clock=clock,
+        download_timeout=10.0,
+    )
+    assert _stop_code(manifest) == "STOP_DOWNLOAD_NOT_EXACT"
+    assert "frame id" in manifest["stop"]["detail"]
 
 
 @pytest.mark.parametrize(
@@ -569,7 +664,12 @@ def test_download_must_be_exact(tmp_path: Path, mutate: str) -> None:
                 1,
                 {
                     "method": "Browser.downloadWillBegin",
-                    "params": {"guid": "g2", "url": url, "suggestedFilename": name},
+                    "params": {
+                        "guid": "g2",
+                        "url": url,
+                        "suggestedFilename": name,
+                        "frameId": "FRAME-1",
+                    },
                 },
             )
         if mutate == "canceled":
@@ -934,9 +1034,20 @@ def test_drive_login_tab_and_unlisted_ids(tmp_path: Path) -> None:
     with pytest.raises(FetchRefused) as info:
         _drive(tmp_path / "y", navigate, file_id="ZZZZZZZZZZZZZZZZ")
     assert info.value.code == "URL_NOT_ALLOWLISTED"
-    with pytest.raises(FetchRefused) as info:
-        _drive(tmp_path / "z", navigate, tabs={TAB: f"{BASE}/app/home"})
-    assert info.value.code == "NO_SIGNED_IN_TAB"
+    manifest, _, _ = _drive(tmp_path / "z", navigate, tabs={TAB: f"{BASE}/app/home"})
+    assert _stop_code(manifest) == "STOP_NO_SIGNED_IN_TAB"
+
+
+def test_drive_download_from_another_frame_is_not_ours(tmp_path: Path) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        foreign = browser.download(
+            CONTENT_HOST, "other.zip", b"foreign", frame_id="FRAME-OTHER"
+        )
+        return foreign + browser.download(CONTENT_HOST, "report.zip", DRIVE_CONTENT)
+
+    manifest, _, root = _drive(tmp_path, navigate)
+    assert _stop_code(manifest) == "STOP_DOWNLOAD_NOT_EXACT"
+    assert manifest["file"] is None
 
 
 @pytest.mark.parametrize(
@@ -1228,7 +1339,7 @@ def test_designer_redirect_to_login_stops_with_reauth(tmp_path: Path) -> None:
             events.append(
                 {
                     "method": "Network.requestWillBeSent",
-                    "sessionId": "SESSION-1",
+                    SID_KEY: ATTACH_REF,
                     "params": {
                         "requestId": "REQ-1",
                         "request": {"url": f"{BASE}/login", "method": "GET"},

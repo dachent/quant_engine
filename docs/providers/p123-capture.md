@@ -447,7 +447,14 @@ Safety rules, pinned by `tests/portfolio123/test_p123_cdp_fetcher.py`:
   which is how the preserved HARs show a signed-out session), `STOP_DOWNLOAD_NOT_EXACT`
   (URL, `P123_*` name prefix, `.csv`, a single completed download, a non-empty file whose
   size equals the bytes received, and nothing else in the directory), `STOP_IDENTITY_FAIL`
-  (below). Exit 2 is `REFUSED <CODE>` before anything was sent.
+  (below), and `STOP_NO_SIGNED_IN_TAB` / `STOP_TARGET_AMBIGUOUS` (no or several candidate
+  tabs after discovery, recorded in the manifest because the output directory already
+  exists). Exit 2 is `REFUSED <CODE>` before anything was sent.
+- Download ownership: the browser's download events and directory are shared by every tab,
+  so a download counts only when `Browser.downloadWillBegin.frameId` equals the frame id
+  returned by this run's `Page.navigate`. A download from another frame is ignored, and its
+  file in the shared directory turns the exact-directory check into a stop, so it is never
+  saved or manifested under an allowlisted id. Run with no other tab downloading anyway.
 - Interpreter: the identity check is only guarded in its own `main`, so `run` refuses on any
   Python other than 3.11 before connecting (`INTERPRETER_REFUSED`, exit 2) and again before
   each call to the check.
@@ -540,6 +547,9 @@ UNVERIFIED, never exercised live (the proof is a fake CDP transport):
 - Whether `Network.getResponseBody` returns the document body of a JSON page navigation
   (and byte-identical bytes), and whether the page-record `s` value may be freshly
   generated.
+- Whether `downloadWillBegin.frameId` equals the `Page.navigate` frame id for a
+  download-by-navigation (if it does not, every download stops with
+  `STOP_DOWNLOAD_NOT_EXACT`, which fails closed).
 - Whether any interstitial appears (a download prompt, a Drive virus-scan confirmation
   for large files, a consent banner). Any of them looks like "no download started" and
   stops.
