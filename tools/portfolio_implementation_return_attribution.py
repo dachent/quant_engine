@@ -2534,9 +2534,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(content)
     payload = json.loads(content)
+    table = reconciliation.observed_end_table(
+        payload["strategies"], date.fromisoformat(str(payload["as_of_date"]))
+    )
+    reconciliation.print_observed_end_table(table)
     print(
         json.dumps(
-            {"attribution_id": payload["attribution_id"], "output": str(args.output)}
+            {
+                "attribution_id": payload["attribution_id"],
+                "observed_end_vs_as_of": table,
+                "output": str(args.output),
+            }
         )
     )
     return 0

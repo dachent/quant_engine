@@ -4,10 +4,12 @@ The catalog names *saved* Activity Flex queries by role only.  The Flex query
 id and token are never part of the catalog or of any manifest: they come from
 the credential resolver and only a SHA-256 of the query id is retained.
 
-The date window is a property of the saved query configured in Client Portal
-(this driver sends only ``q``, ``t`` and ``v``).  A request therefore records
-the window the operator *expects*, and the normalizer and verifier check that
-the returned statements stay inside it and report any uncovered weekday.
+A plan request either sets its window (``window_override``: SendRequest carries
+``fd`` and ``td``, yyyymmdd) or leaves it to the saved query configured in Client
+Portal (only ``q``, ``t`` and ``v`` are sent).  Either way the plan records the
+window, and the normalizer and verifier check that the returned statements stay
+inside it, require an override request to get that window back, and report any
+uncovered weekday.
 """
 
 from __future__ import annotations

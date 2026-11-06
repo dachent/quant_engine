@@ -60,8 +60,10 @@ def _statement(account: str, day: date, *, extra_row: str = "") -> str:
         'toCurrency="USD" rate="1" />'
         "</ConversionRates>"
         "<CorporateActions />"
+        "<EquitySummaryInBase>"
         "<EquitySummaryByReportDateInBase "
         f'accountId="{account}" reportDate="{stamp}" total="1000.50" />'
+        "</EquitySummaryInBase>"
         "<OpenPositions>"
         f'<OpenPosition accountId="{account}" reportDate="{stamp}" '
         'levelOfDetail="SUMMARY" conid="900001" currency="USD" position="2" '
@@ -211,7 +213,7 @@ def write_evidence(
     *,
     name: str = "evidence.json",
     mutate: Callable[[dict[str, Any]], None] | None = None,
-    max_get: int = 5,
+    max_get: int = 6,
 ) -> Path:
     document: dict[str, Any] = {
         "schema_version": 1,
@@ -247,7 +249,7 @@ class Harness:
         responses: list[bytes | Exception],
         *,
         plan: RequestPlan | None = None,
-        max_get: int = 5,
+        max_get: int = 6,
     ) -> None:
         from quant_engine.ibkr.capture import (
             RawStage,

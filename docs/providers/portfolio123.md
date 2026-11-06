@@ -89,6 +89,126 @@ verified source-run authority before atomically advancing the pointer.
 hash-bound source files, removes the now-empty legacy roots, and records the
 recovery authority. Any inventory or byte difference fails closed.
 
+### Transaction captures and the per-book drop gate
+
+The HAR download of a model book can be thin or the wrong series (the 2026-09-02
+download held 67 of 1,176 2026 rows for the primary book, and six temporary books
+had none; seven of its eight `strategy_<id>_transactions.csv` held another
+strategy's rows, matched by exact row overlap with the 2026-07-31 pull). A
+transaction CSV carries no book id, so the id is only the filename: pull each book
+from its own page (`port_summary.jsp?portid=<book id>`, the id the page shows),
+save the export as `strategy_<that id>_transactions.csv`, and never rename or batch
+the files afterwards. The model-book events that the implementation builders read come only
+from `tables/har_transactions.parquet`, so a thin table gives a thin seed. Plan
+schema 2 therefore reads the full per-book transaction captures and refuses a
+generation that shrinks any book.
+
+Capture layout, one directory per signed-in session (the output directory of
+`p123_har_capture.py`; pass `--transaction-capture` once per directory):
+
+```text
+CAPTURE_DIR/capture-manifest.json                  artifacts[]: relative_path, sha256, observed_length
+CAPTURE_DIR/raw/strategy_<book>_transactions.csv   one saved export per book, ISO `Date` column
+CAPTURE_DIR/raw/strategy_<book>_perf.csv           the same book's performance export (equity curve)
+CAPTURE_DIR/raw/strategy_<book>_holdings.csv       optional, used by the identity check
+CAPTURE_DIR/raw/p123_investment_resource.json      optional, the page record used by the identity check
+```
+
+Every `raw/strategy_<book>_transactions.csv` and `_perf.csv` must be listed in the
+manifest with the same sha256 and length; a book may appear in one capture only, and
+a book with a transaction capture needs its perf capture (and the reverse). A covered
+book takes its `transactions` and `equity_curve` rows from the capture alone, tagged
+`_transport=capture_csv`, and every `downloads/strategy_<book>_*` file of the HAR root
+for that book is dropped and listed under `transaction_gate.dropped_har_downloads`
+(the 2026-09-02 download set held other strategies' rows under these ids; the HAR
+page-derived `csv/` rows stay). Capture rows dated after the as-of date are excluded
+and counted, and a non-ISO date refuses. A capture directory is retained evidence:
+`cutover` hashes and copies it but never removes it.
+
+```text
+python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as-of-date YYYY-MM-DD \
+  --transaction-capture CAPTURE_DIR [--transaction-capture OTHER_DIR] \
+  --expected-book BOOK_ID [--expected-book ...] \
+  [--previous-generation-id ID] [--supersede-book BOOK_ID=REASON] \
+  [--identity-correction CORRECTION_JSON] [--no-transactions-book BOOK_ID=REASON] \n  --identity-decisions DECISIONS_JSON [--untrusted-har-id BOOK_ID=REASON] \n  [--accept-identity-review BOOK_ID=REASON] [--book-inventory INVENTORY_JSON]
+```
+
+- `--expected-book` names every managed or shared book the cycle must cover. The plan
+  fails before it is written when one has no capture file, and the generation refuses
+  when one has no transaction rows or no equity-curve rows on or before the as-of date,
+  whether or not the previous generation held it (a header-only export never passes).
+- The gate compares each book with the previous generation, `--previous-generation-id`
+  or else the data root's `CURRENT`. The plan binds that generation's per-book row
+  count, first date, last date and row-set digest. `stage` and `publish` refuse,
+  listing every failing book, when a book has fewer rows, an earlier last date, a
+  different first date, or no transactions at all. `publish` also refuses when a
+  `CURRENT`-sourced predecessor is no longer `CURRENT`. There are no accepted gaps on
+  live accounts.
+- `--supersede-book ID=REASON` waives only the row-count and first-date checks for
+  one book whose previous generation held another series. The book must be an
+  `--expected-book` with a capture file that has rows. A lost last transaction date
+  or a book missing from the new generation is never waivable. The reason must state
+  both series, for example: `capture series is the live MVP2 book (start 2025-05-09,
+  1,000,000 start cash); the 09-02 download is a different series (2008-09-26 start,
+  20,000 start cash)`. The reason, the previous figures and the waived checks are
+  recorded under `transaction_gate.superseded` in `portfolio123-generation.json`, a
+  hash-bound artifact of the generation, and the plan carries the flag too. With no
+  flag the gate refuses.
+- `--identity-correction FILE` is for an id whose predecessor held a *foreign* series
+  that ends later than the correct one (no supersede can help). `FILE` is
+  `{"previous_generation_id": ..., "books": {ID: {"evidence": ..., "evidence_sha256": [...],
+  "predecessor_is_series_of": ..., "predecessor_rowset_sha256": ...,
+  "replacement_rowset_sha256": ...}}}`; every `evidence_sha256` must be the hash of a file in
+  one of the plan's own source inventories (the HAR download, the legacy pull, the capture), so
+  the evidence is dereferenced and not just described. The plan
+  refuses unless the named predecessor is the bound one and holds exactly the stated row
+  set under that id, and the build refuses unless the capture rows hash to the stated
+  replacement. Such a book waives all three comparisons, still needs rows, is recorded
+  under `transaction_gate.identity_corrected`, and the book may not also be superseded.
+  Same-series monotonicity is unchanged for every other book. Draft the digests with
+  `tools/p123_book_identity_check.py ... --previous-generation-root DATA_ROOT`.
+- `--no-transactions-book ID=REASON` declares an expected book with no transaction
+  export (for example a designer model). It must have no capture file, so another
+  book's export is never substituted, and is recorded under
+  `transaction_gate.transaction_exempt_books`.
+
+- No silent permuted rows. With a capture, every book id of the HAR root's `downloads/`
+  set must be recaptured (transaction, perf and an identity decision) or excluded with
+  `--untrusted-har-id ID=REASON`; the plan refuses otherwise and lists the ids. An
+  excluded id's `downloads/` rows are dropped, it is skipped by the drop gate, and its
+  reason (at least 20 characters, stating the id's downstream seed role) is recorded under
+  `transaction_gate.untrusted_har_ids`. An id cannot be both.
+- `--identity-decisions DECISIONS_JSON` (repeatable, one per capture directory) is the
+  book-identity decisions file that `tools/p123_book_identity_check.py` wrote for the same
+  `capture-manifest.json` bytes. Every captured book needs a PASS decision; a REVIEW
+  decision needs `--accept-identity-review ID=REASON`; FAIL refuses. The decisions are
+  recorded under `transaction_gate.identity_decisions`.
+
+- `--book-inventory INVENTORY_JSON` freezes every book the cycle knows:
+  `{"books": {ID: {"role": ..., "route": "capture"|"exempt"|"untrusted", "reason": ...}}}`
+  (`reason` is required for `exempt` and `untrusted`). When given it is the only source of
+  the expected, exempt and untrusted books (conflicting `--expected-book`,
+  `--no-transactions-book` or `--untrusted-har-id` refuse), every captured id and every HAR
+  download id must be listed, and the inventory is recorded under
+  `transaction_gate.book_inventory`.
+
+### Per-book identity check
+
+A transaction, perf or holdings CSV carries no book id. `tools/p123_book_identity_check.py
+CAPTURE_DIR --out OUT_DIR [--reference-index OLDER_RUN/artifacts/source-index.json]`
+checks every book of a capture as its files land (`--no-manifest --raw-subdir ""` reads a
+legacy downloads folder; `--cross-check DIR` and `--compare-prior DIR` compare the trade rows
+with other capture directories and with an older or HAR download set, `--require-reference`
+and `--reference-tolerance` bind the reference tie) and writes
+`book-identity-decisions-<manifest sha prefix>.json` (create-only per capture bytes) with the
+row-set digests, the net-share reconstruction and a PASS, REVIEW or FAIL per book; it exits
+non-zero unless every book is PASS. The checks and field definitions (page inception,
+the `Start MM/DD/YYYY` string of the page name, cash start, perf start) are in the tool's
+docstring. In particular a live book whose transactions precede its page inception is
+correct, and the holdings export must equal the net shares of its transactions.
+
+Schema 1 plans keep rebuilding under adapter 1.0.0; new plans build under 1.1.0.
+
 ## Generated installations
 
 The repository skill is checksum-locked by
