@@ -413,7 +413,11 @@ recorded in the manifest. `--as-of D` (required, `REFUSED AS_OF_REQUIRED` withou
 financial cutoff: the identity check rolls each book's holdings back to D (I5D) and
 `book-identity-decisions.json` records it as `settings.as_of`; the generation plan refuses
 decisions whose as-of is not its own `--as-of-date`, and a capture whose perf curve ends
-before D fails I5D. `--prior-dir` (warn) and `--cross-capture-dir` (fail) feed the
+before D fails I5D. The binding decisions file is the as-of one: the fetcher run with
+`--as-of D` (D = the plan's as-of date) and `--no-reference`; a standalone
+`tools/p123_book_identity_check.py --as-of D --reference-index ...` run (no
+`--require-reference`) adds the reference tie, and a book absent from the reference pull is
+REVIEW, accepted per book at plan time. `--prior-dir` (warn) and `--cross-capture-dir` (fail) feed the
 identity check's permutation comparison: the same trade rows under another id.
 
 `--download-dir` must not exist (absolute, outside Git, not in synced scratch). The

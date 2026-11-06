@@ -192,6 +192,7 @@ def check_book(
     require_reference: bool = False,
     tolerance: float = _REFERENCE_MISSING,
     as_of: date | None = None,
+    capture_reach: str | None = None,
 ) -> dict[str, Any]:
     checks: list[dict[str, str]] = []
     names = {
@@ -323,6 +324,8 @@ def check_book(
             holdings_symbols=len(held) if names["holdings"].is_file() else None,
             mismatched=len(differs),
             terminal=perf_print["last_date"],
+            cash_only=_cash_only(tx, perf, len(holdings)),
+            capture_reach=capture_reach,
         )
         checks.append(_check("I5D", status, detail))
     # I6
@@ -445,6 +448,8 @@ def _positions_as_of(
     holdings_symbols: int | None,
     mismatched: int,
     terminal: str | None,
+    cash_only: dict[str, Any] | None = None,
+    capture_reach: str | None = None,
 ) -> tuple[dict[str, Any], str, str]:
     """Positions at ``as_of``: the net signed shares of rows dated on or before it.
 
@@ -495,6 +500,8 @@ def _positions_as_of(
     }
     facts["splits_after_as_of"] = splits
     facts["capture_last_perf_date"] = terminal
+    if cash_only is not None:
+        return _cash_only_positions(facts, as_of, cash_only, terminal, capture_reach)
     numbers = f"rolled back {dict(sorted(rolled.items()))}, splits {splits}"
     if terminal is None or terminal < as_of.isoformat():
         return (
@@ -523,6 +530,86 @@ def _positions_as_of(
         "PASS",
         f"{sum(rolled.values())} rows after {as_of} rolled back and I5 closed at T over "
         f"{holdings_symbols} symbols ({numbers}); {len(open_net)} open symbols at {as_of}",
+    )
+
+
+def _cash_only(
+    tx: Sequence[dict[str, str]], perf: Sequence[dict[str, str]], holdings_rows: int
+) -> dict[str, Any] | None:
+    """A book with no instruments, defined from its own files: the transactions are exactly
+    one CASH row and the holdings export has no rows.  None for any other book."""
+    if len(tx) != 1 or tx[0].get("Type") != "CASH" or holdings_rows:
+        return None
+    equities = [_number(row.get("Total Equity")) for row in perf]
+    dates = [row.get("Date") or "" for row in perf]
+    return {
+        "cash_amount": _number(tx[0].get("Amount")),
+        "cash_date": tx[0].get("Date") or "",
+        "equities": equities,
+        "first_date": min(dates, default=None),
+        "last_date": max(dates, default=None),
+    }
+
+
+def _cash_only_positions(
+    facts: dict[str, Any],
+    as_of: date,
+    cash_only: dict[str, Any],
+    terminal: str | None,
+    capture_reach: str | None,
+) -> tuple[dict[str, Any], str, str]:
+    """I5D for a cash-only book: closure, not interpolation.
+
+    With no instruments there is nothing to roll back and nothing accrues, so the book's
+    equity can change only through a transaction row.  The transactions export of the same
+    pull lists every row to the capture day; it holds the one start CASH row.  That equity
+    equals the cash amount through the whole perf history and the capture itself reaches
+    ``as_of`` (another book of the pull has a perf curve to or past it), so the equity at
+    ``as_of`` is the cash amount.  Any deviation fails with the numbers."""
+    amount = cash_only["cash_amount"]
+    equities = [value for value in cash_only["equities"] if value is not None]
+    facts["cash_only_flat_through_as_of"] = False
+    facts["cash_only"] = {
+        "capture_reach": capture_reach,
+        "cash_amount": amount,
+        "equity_max": max(equities) if equities else None,
+        "equity_min": min(equities) if equities else None,
+        "first_date": cash_only["first_date"],
+        "last_perf_date": cash_only["last_date"],
+    }
+    numbers = (
+        f"cash {amount} dated {cash_only['cash_date']}, perf equity "
+        f"{facts['cash_only']['equity_min']}..{facts['cash_only']['equity_max']} "
+        f"{cash_only['first_date']}..{cash_only['last_date']}, capture reach {capture_reach}"
+    )
+    if amount is None or str(cash_only["cash_date"]) > as_of.isoformat():
+        return (
+            facts,
+            "FAIL",
+            f"cash-only book: no usable cash row by {as_of}; {numbers}",
+        )
+    if (
+        not equities
+        or len(equities) != len(cash_only["equities"])
+        or any(abs(value - amount) > 0.01 for value in equities)
+    ):
+        return (
+            facts,
+            "FAIL",
+            f"cash-only book: equity is not the cash amount throughout; {numbers}",
+        )
+    if capture_reach is None or capture_reach < as_of.isoformat():
+        return (
+            facts,
+            "FAIL",
+            f"cash-only book: no book of this capture reaches as-of {as_of}; {numbers}",
+        )
+    facts["cash_only_flat_through_as_of"] = True
+    facts["equity_at_as_of"] = amount
+    return (
+        facts,
+        "PASS",
+        f"cash-only book flat through {as_of}: equity {amount}, no instruments; {numbers}",
     )
 
 
@@ -569,6 +656,15 @@ def check_capture(
         }
     )
     selected = list(books) if books else found
+    reach = max(
+        (
+            row.get("Date") or ""
+            for book in found
+            if (raw / f"strategy_{book}_perf.csv").is_file()
+            for row in _rows(raw / f"strategy_{book}_perf.csv")
+        ),
+        default=None,
+    )
     pages = _page_records(raw)
     keys = {
         book: _trade_keys(_rows(raw / f"strategy_{book}_transactions.csv"))
@@ -587,6 +683,7 @@ def check_capture(
             require_reference=require_reference,
             tolerance=reference_tolerance,
             as_of=as_of,
+            capture_reach=reach or None,
         )
         for book in selected
     ]

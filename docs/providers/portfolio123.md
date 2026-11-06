@@ -215,6 +215,13 @@ back by the later rows exactly when I5 closes at T (a SPLIT enters as its export
 shares). The book is refused, with the numbers, only when data is missing (no holdings
 export, an unreadable date, an unknown row type after D) or the closure fails; the decisions
 file records `positions_as_of` (positions digest, rolled-back rows by type, splits after D).
+A cash-only book (transactions are exactly one CASH row, no holdings rows) passes I5D when its
+perf equity equals the cash amount throughout, the cash row is dated on or before D and another
+book of the same capture has a perf curve reaching D: with no instruments nothing accrues, so
+the equity at D is the cash amount (closure, not interpolation); the decisions file records
+`cash_only_flat_through_as_of`, the equity range, the first and last perf dates and the capture
+reach. Any deviation (equity not the cash amount, a cash row after D, no book reaching D) fails
+with those numbers.
 No consumer reads a Portfolio123 holdings table; positions at D are an audit record.
 Always run the identity check with `--as-of D`, D being the plan's as-of date: the plan
 refuses a decisions file whose `settings.as_of` is not the plan's as-of date, so a book

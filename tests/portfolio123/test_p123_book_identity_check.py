@@ -436,3 +436,67 @@ def test_required_reference_and_recorded_tolerance(tmp_path: Path) -> None:
         reference_tolerance=0.0,
     )
     assert _status(strict, "101", "I9") == "FAIL"
+
+
+def _perf_to(raw: Path, book: str, rows: list[tuple[str, str]]) -> None:
+    body = "".join(f'{day},0,"{equity}",0\n' for day, equity in rows)
+    (raw / f"strategy_{book}_perf.csv").write_text(PERF_HEADER + body, encoding="utf-8")
+
+
+def test_a_cash_only_book_is_flat_through_the_cutoff_by_closure(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")  # reaches 2026-09-11
+    _book(raw, "505", trades=[], held={})  # one CASH row, no holdings
+    _perf_to(
+        raw, "505", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "1,000,000.00")]
+    )
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 9, 11))
+    assert _status(report, "505", "I5D") == "PASS"
+    facts = report["books"]["505"]["positions_as_of"]
+    assert facts["cash_only_flat_through_as_of"] is True
+    assert facts["equity_at_as_of"] == 1000000.0
+    assert facts["cash_only"]["last_perf_date"] == "2026-08-20"
+    assert facts["cash_only"]["capture_reach"] == "2026-09-11"
+
+
+def test_cash_only_deviations_keep_the_failure_with_numbers(tmp_path: Path) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")
+    _book(raw, "505", trades=[], held={})
+    _perf_to(raw, "505", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "999,000.00")])
+    _book(raw, "606")  # a book with trades whose curve ends before the cutoff
+    _perf_to(
+        raw, "606", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "1,000,000.00")]
+    )
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 9, 11))
+    assert _status(report, "505", "I5D") == "FAIL"
+    detail = next(
+        c["detail"] for c in report["books"]["505"]["checks"] if c["check"] == "I5D"
+    )
+    assert "equity is not the cash amount" in detail and "999000" in detail
+    assert _status(report, "606", "I5D") == "FAIL"
+    assert (
+        report["books"]["606"]["positions_as_of"].get("cash_only_flat_through_as_of")
+        is None
+    )
+
+
+def test_a_cash_only_book_alone_in_a_capture_that_ends_early_fails(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "505", trades=[], held={})
+    _perf_to(
+        raw, "505", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "1,000,000.00")]
+    )
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 9, 11))
+    assert _status(report, "505", "I5D") == "FAIL"
+    detail = next(
+        c["detail"] for c in report["books"]["505"]["checks"] if c["check"] == "I5D"
+    )
+    assert "no book of this capture reaches as-of" in detail
