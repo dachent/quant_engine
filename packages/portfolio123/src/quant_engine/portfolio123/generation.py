@@ -342,13 +342,15 @@ def _capture_books(
     return books, perf
 
 
-_CORRECTION_FIELDS = {
+_CORRECTION_TEXT_FIELDS = {
     "evidence",
     "predecessor_is_series_of",
     "predecessor_rowset_sha256",
     "previous_generation_id",
     "replacement_rowset_sha256",
 }
+_CORRECTION_FIELDS = _CORRECTION_TEXT_FIELDS | {"evidence_sha256"}
+_BOOK_ROUTES = {"capture", "exempt", "untrusted"}
 
 
 def _gate_inputs(
@@ -358,11 +360,12 @@ def _gate_inputs(
     previous_generation_id: str | None,
     supersede_books: Mapping[str, str],
     transaction_exempt_books: Mapping[str, str],
-    identity_corrections: Mapping[str, Mapping[str, str]],
+    identity_corrections: Mapping[str, Mapping[str, Any]],
     untrusted_har_ids: Mapping[str, str],
     identity_decisions: Sequence[Mapping[str, Any]],
     identity_review_accepted: Mapping[str, str],
     har_download_ids: Sequence[str],
+    book_inventory: Mapping[str, Mapping[str, str]],
 ) -> dict[str, Any]:
     captured: dict[str, str] = {}
     captured_perf: dict[str, str] = {}
@@ -420,19 +423,38 @@ def _gate_inputs(
         if not reason.strip():
             raise Portfolio123GenerationError(f"book {book} exemption needs a reason")
     previous = _previous_gate(data_root, previous_generation_id)
-    corrections: dict[str, dict[str, str]] = {}
+    corrections: dict[str, dict[str, Any]] = {}
+    source_hashes = {
+        str(item["sha256"])
+        for source in sources
+        for item in _objects(source["files"], "files")
+    }
     for book, record in sorted(identity_corrections.items()):
         if book not in expected or book in supersede_books:
             raise Portfolio123GenerationError(
                 f"book {book} identity correction needs an expected book that is "
                 "not also superseded"
             )
-        if set(record) != _CORRECTION_FIELDS or not all(
-            isinstance(value, str) and value.strip() for value in record.values()
+        if (
+            set(record) != _CORRECTION_FIELDS
+            or not all(
+                isinstance(record[field], str) and record[field].strip()
+                for field in _CORRECTION_TEXT_FIELDS
+            )
+            or not isinstance(record["evidence_sha256"], list)
+            or not record["evidence_sha256"]
         ):
             raise Portfolio123GenerationError(
                 f"book {book} identity correction fields differ: "
                 + ", ".join(sorted(_CORRECTION_FIELDS))
+            )
+        unknown = [
+            str(item) for item in record["evidence_sha256"] if item not in source_hashes
+        ]
+        if unknown:
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction evidence is not a file of this "
+                "plan's sources: " + ", ".join(unknown)
             )
         if (
             previous is None
@@ -457,6 +479,17 @@ def _gate_inputs(
     decisions = _identity_decisions(
         sources, captured, identity_decisions, identity_review_accepted
     )
+    if book_inventory:
+        # The frozen inventory names every book the cycle knows: each captured id and
+        # each HAR download id must be in it, with the route its role was given.
+        unlisted = sorted(
+            (set(captured) | set(har_download_ids) | set(transaction_exempt_books))
+            - set(book_inventory)
+        )
+        if unlisted:
+            raise Portfolio123GenerationError(
+                "books missing from the inventory: " + ", ".join(unlisted)
+            )
     if captured:
         # No silent permuted rows: the 2026-09-02 download set held other strategies' rows
         # under seven of its eight ids, so every id of the HAR download set is recaptured
@@ -472,6 +505,10 @@ def _gate_inputs(
         "captured_perf_books": dict(sorted(captured_perf.items())),
         "expected_books": expected,
         "identity_corrections": corrections,
+        "book_inventory": {
+            book: dict(sorted(entry.items()))
+            for book, entry in sorted(book_inventory.items())
+        },
         "identity_decisions": decisions,
         "previous": previous,
         # Publishing refuses when a CURRENT-sourced predecessor is no longer CURRENT.
@@ -484,6 +521,47 @@ def _gate_inputs(
         "transaction_exempt_books": dict(sorted(transaction_exempt_books.items())),
         "untrusted_har_ids": untrusted,
     }
+
+
+def _apply_inventory(
+    inventory: Mapping[str, Mapping[str, str]],
+    expected: Sequence[str],
+    exempt: Mapping[str, str],
+    untrusted: Mapping[str, str],
+) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """Derive the expected, exempt and untrusted books from one frozen inventory."""
+
+    capture: list[str] = []
+    derived_exempt: dict[str, str] = {}
+    derived_untrusted: dict[str, str] = {}
+    for book, entry in sorted(inventory.items()):
+        if _BOOK_ID.fullmatch(str(book)) is None:
+            raise Portfolio123GenerationError("book IDs must be numeric")
+        route = entry.get("route")
+        if route not in _BOOK_ROUTES or not str(entry.get("role", "")).strip():
+            raise Portfolio123GenerationError(
+                f"inventory book {book} needs a role and a route of "
+                + ", ".join(sorted(_BOOK_ROUTES))
+            )
+        if route == "capture":
+            capture.append(book)
+        else:
+            reason = str(entry.get("reason", ""))
+            if not reason.strip():
+                raise Portfolio123GenerationError(
+                    f"inventory book {book} route {route} needs a reason"
+                )
+            (derived_exempt if route == "exempt" else derived_untrusted)[book] = reason
+    for given, derived, name in (
+        (set(expected), set(capture), "--expected-book"),
+        (set(exempt), set(derived_exempt), "--no-transactions-book"),
+        (set(untrusted), set(derived_untrusted), "--untrusted-har-id"),
+    ):
+        if given and given != derived:
+            raise Portfolio123GenerationError(
+                f"{name} differs from the book inventory; the inventory is the only source"
+            )
+    return capture, derived_exempt, derived_untrusted
 
 
 def _untrusted_ids(
@@ -581,7 +659,8 @@ def create_cutover_plan(
     previous_generation_id: str | None = None,
     supersede_books: Mapping[str, str] | None = None,
     transaction_exempt_books: Mapping[str, str] | None = None,
-    identity_corrections: Mapping[str, Mapping[str, str]] | None = None,
+    identity_corrections: Mapping[str, Mapping[str, Any]] | None = None,
+    book_inventory: Mapping[str, Mapping[str, str]] | None = None,
     untrusted_har_ids: Mapping[str, str] | None = None,
     identity_decisions: Sequence[Mapping[str, Any]] = (),
     identity_review_accepted: Mapping[str, str] | None = None,
@@ -647,15 +726,30 @@ def create_cutover_plan(
     )
     if har_count == 0:
         raise Portfolio123GenerationError("HAR derived CSV set is empty")
+    inventory = {book: dict(entry) for book, entry in (book_inventory or {}).items()}
+    expected_list, exempt_map, untrusted_map = (
+        _apply_inventory(
+            inventory,
+            expected_books,
+            dict(transaction_exempt_books or {}),
+            dict(untrusted_har_ids or {}),
+        )
+        if inventory
+        else (
+            list(expected_books),
+            dict(transaction_exempt_books or {}),
+            dict(untrusted_har_ids or {}),
+        )
+    )
     gate = _gate_inputs(
         sources,
         destination,
-        expected_books,
+        expected_list,
         previous_generation_id,
         dict(supersede_books or {}),
-        dict(transaction_exempt_books or {}),
+        exempt_map,
         {book: dict(record) for book, record in (identity_corrections or {}).items()},
-        dict(untrusted_har_ids or {}),
+        untrusted_map,
         list(identity_decisions),
         dict(identity_review_accepted or {}),
         sorted(
@@ -672,6 +766,7 @@ def create_cutover_plan(
                 and match.group(1).casefold() == "strategy"
             }
         ),
+        inventory,
     )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),

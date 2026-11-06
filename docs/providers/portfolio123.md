@@ -130,7 +130,7 @@ python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as
   --transaction-capture CAPTURE_DIR [--transaction-capture OTHER_DIR] \
   --expected-book BOOK_ID [--expected-book ...] \
   [--previous-generation-id ID] [--supersede-book BOOK_ID=REASON] \
-  [--identity-correction CORRECTION_JSON] [--no-transactions-book BOOK_ID=REASON] \n  --identity-decisions DECISIONS_JSON [--untrusted-har-id BOOK_ID=REASON] \n  [--accept-identity-review BOOK_ID=REASON]
+  [--identity-correction CORRECTION_JSON] [--no-transactions-book BOOK_ID=REASON] \n  --identity-decisions DECISIONS_JSON [--untrusted-har-id BOOK_ID=REASON] \n  [--accept-identity-review BOOK_ID=REASON] [--book-inventory INVENTORY_JSON]
 ```
 
 - `--expected-book` names every managed or shared book the cycle must cover. The plan
@@ -156,8 +156,11 @@ python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as
   flag the gate refuses.
 - `--identity-correction FILE` is for an id whose predecessor held a *foreign* series
   that ends later than the correct one (no supersede can help). `FILE` is
-  `{"previous_generation_id": ..., "books": {ID: {"evidence": ..., "predecessor_is_series_of": ...,
-  "predecessor_rowset_sha256": ..., "replacement_rowset_sha256": ...}}}`. The plan
+  `{"previous_generation_id": ..., "books": {ID: {"evidence": ..., "evidence_sha256": [...],
+  "predecessor_is_series_of": ..., "predecessor_rowset_sha256": ...,
+  "replacement_rowset_sha256": ...}}}`; every `evidence_sha256` must be the hash of a file in
+  one of the plan's own source inventories (the HAR download, the legacy pull, the capture), so
+  the evidence is dereferenced and not just described. The plan
   refuses unless the named predecessor is the bound one and holds exactly the stated row
   set under that id, and the build refuses unless the capture rows hash to the stated
   replacement. Such a book waives all three comparisons, still needs rows, is recorded
@@ -176,17 +179,28 @@ python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as
   reason (at least 20 characters, stating the id's downstream seed role) is recorded under
   `transaction_gate.untrusted_har_ids`. An id cannot be both.
 - `--identity-decisions DECISIONS_JSON` (repeatable, one per capture directory) is the
-  `book-identity-decisions.json` that `tools/p123_book_identity_check.py` wrote for the same
+  book-identity decisions file that `tools/p123_book_identity_check.py` wrote for the same
   `capture-manifest.json` bytes. Every captured book needs a PASS decision; a REVIEW
   decision needs `--accept-identity-review ID=REASON`; FAIL refuses. The decisions are
   recorded under `transaction_gate.identity_decisions`.
+
+- `--book-inventory INVENTORY_JSON` freezes every book the cycle knows:
+  `{"books": {ID: {"role": ..., "route": "capture"|"exempt"|"untrusted", "reason": ...}}}`
+  (`reason` is required for `exempt` and `untrusted`). When given it is the only source of
+  the expected, exempt and untrusted books (conflicting `--expected-book`,
+  `--no-transactions-book` or `--untrusted-har-id` refuse), every captured id and every HAR
+  download id must be listed, and the inventory is recorded under
+  `transaction_gate.book_inventory`.
 
 ### Per-book identity check
 
 A transaction, perf or holdings CSV carries no book id. `tools/p123_book_identity_check.py
 CAPTURE_DIR --out OUT_DIR [--reference-index OLDER_RUN/artifacts/source-index.json]`
 checks every book of a capture as its files land (`--no-manifest --raw-subdir ""` reads a
-legacy downloads folder) and writes `book-identity-decisions.json` (create-only) with the
+legacy downloads folder; `--cross-check DIR` and `--compare-prior DIR` compare the trade rows
+with other capture directories and with an older or HAR download set, `--require-reference`
+and `--reference-tolerance` bind the reference tie) and writes
+`book-identity-decisions-<manifest sha prefix>.json` (create-only per capture bytes) with the
 row-set digests, the net-share reconstruction and a PASS, REVIEW or FAIL per book; it exits
 non-zero unless every book is PASS. The checks and field definitions (page inception,
 the `Start MM/DD/YYYY` string of the page name, cash start, perf start) are in the tool's

@@ -584,6 +584,11 @@ def _correction_world(
     )
     record = {
         "evidence": "retained 07-31 and 09-12 files: the predecessor rows equal book 101's series",
+        "evidence_sha256": [
+            hashlib.sha256(
+                (har / "downloads" / "strategy_202_transactions.csv").read_bytes()
+            ).hexdigest()
+        ],
         "predecessor_is_series_of": "101",
         "predecessor_rowset_sha256": _previous_gate(data, previous)["books"]["202"][
             "rowset_sha256"
@@ -633,6 +638,7 @@ def test_identity_correction_waives_a_proven_foreign_series_only(
     for field, value in (
         ("predecessor_rowset_sha256", "0" * 64),
         ("previous_generation_id", "1" * 64),
+        ("evidence_sha256", ["2" * 64]),
     ):
         with pytest.raises(Portfolio123GenerationError, match="identity correction"):
             create_cutover_plan(
@@ -823,6 +829,81 @@ def test_identity_decisions_gate_every_captured_book(tmp_path: Path) -> None:
         "no page record, cash-only book"
     )
     assert decided["identity_decisions"]["101"]["decision"] == "PASS"  # type: ignore[index]
+
+
+INVENTORY = {
+    "101": {"role": "primary AI Factor book", "route": "capture"},
+    "909": {
+        "role": "designer model",
+        "route": "exempt",
+        "reason": "designer model: no transaction export route",
+    },
+    "999": {"role": "HAR holdings only", "route": "untrusted", "reason": SEED_ROLE},
+}
+
+
+def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    capture = _capture(tmp_path, "cap", {"101": _full(5)})
+    generation_id = _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[capture],
+        identity_decisions=[_decisions(capture)],
+        book_inventory=INVENTORY,
+    )
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    assert gate["expected_books"] == ["101"]  # type: ignore[index]
+    assert gate["transaction_exempt_books"] == {"909": INVENTORY["909"]["reason"]}  # type: ignore[index]
+    assert gate["untrusted_har_ids"] == {"999": SEED_ROLE}  # type: ignore[index]
+    assert gate["books"]["101"]["rows"] == 5  # type: ignore[index]
+    base: dict[str, object] = {
+        "transaction_captures": [capture],
+        "identity_decisions": [_decisions(capture)],
+    }
+    with pytest.raises(
+        Portfolio123GenerationError, match="differs from the book inventory"
+    ):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            expected_books=["101", "202"],
+            book_inventory=INVENTORY,
+            **base,  # type: ignore[arg-type]
+        )
+    unlisted = {k: v for k, v in INVENTORY.items() if k != "999"}
+    with pytest.raises(Portfolio123GenerationError, match="missing from the inventory"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            book_inventory=unlisted,
+            **base,  # type: ignore[arg-type]
+        )
+    with pytest.raises(Portfolio123GenerationError, match="needs a role and a route"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            book_inventory={**INVENTORY, "101": {"role": "x", "route": "skip"}},
+            **base,  # type: ignore[arg-type]
+        )
+    with pytest.raises(Portfolio123GenerationError, match="needs a reason"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            book_inventory={**INVENTORY, "909": {"role": "x", "route": "exempt"}},
+            **base,  # type: ignore[arg-type]
+        )
 
 
 def test_schema_one_plans_still_rebuild_under_the_legacy_adapter(

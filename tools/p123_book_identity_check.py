@@ -30,9 +30,21 @@ I7 against the page record: series start is not after the page inception; the se
    is correct and passes.
 I8 no two books share trade rows (CASH rows excluded): more than 5% of the smaller set fails.
 I9 against a reference pull (``--reference-index``): every older row of the same id is in
-   the new file, up to 1% missing.
+   the new file, up to ``--reference-tolerance`` (default 1%) missing, and the cash start is
+   equal; ``--require-reference`` makes a missing reference a failure.
+I8x ``--cross-check DIR`` (other capture directories of the same pull) fails, and
+   ``--compare-prior DIR`` (an older or HAR download set) warns, when the new book's trade
+   rows appear under ANOTHER id there: the permutation the 2026-09-02 set carried.
 
-``book-identity-decisions.json`` (create-only, in ``--out``) records every field, the row-set
+Dispositions. PASS: proceed. REVIEW: a warning only the capture operator may accept, in
+``portfolio123_generation.py plan --accept-identity-review ID=REASON`` (the reason states
+what was seen); it is recorded in the catalog. FAIL: stop before stage; re-pull the book or
+exclude its id with ``--untrusted-har-id`` (control decides). ``plan`` is the operator
+preflight: it refuses a missing decisions file, a decision for other capture bytes, any
+non-PASS decision without an accepted reason, and any HAR download id that is neither
+recaptured nor excluded.
+
+``book-identity-decisions-<manifest sha prefix>.json`` (create-only, in ``--out``; a re-run on the same bytes reproduces it) records every field, the row-set
 digests, the net-position reconstruction counts and each decision, for the release record.
 """
 
@@ -146,6 +158,8 @@ def check_book(
     page: dict[str, Any] | None,
     reference_index: Path | None,
     trade_keys: set[str],
+    require_reference: bool = False,
+    tolerance: float = _REFERENCE_MISSING,
 ) -> dict[str, Any]:
     checks: list[dict[str, str]] = []
     names = {
@@ -321,9 +335,19 @@ def check_book(
     # I8 is decided across books by the caller; the keys are returned for it.
     # I9
     reference = _reference(reference_index, book)
+    if reference_index is None and require_reference:
+        checks.append(
+            _check("I9", "FAIL", "a reference pull is required and none was given")
+        )
     if reference_index is not None:
         if reference is None:
-            checks.append(_check("I9", "WARN", "book absent from the reference pull"))
+            checks.append(
+                _check(
+                    "I9",
+                    "FAIL" if require_reference else "WARN",
+                    "book absent from the reference pull",
+                )
+            )
         else:
             reference_keys, reference_cash = reference
             missing_rows = len(reference_keys - trade_keys)
@@ -332,7 +356,7 @@ def check_book(
             checks.append(
                 _check(
                     "I9",
-                    "PASS" if share <= _REFERENCE_MISSING and same_start else "FAIL",
+                    "PASS" if share <= tolerance and same_start else "FAIL",
                     f"{missing_rows} of {len(reference_keys)} reference trade rows absent "
                     f"({share:.2%}); cash start "
                     + ("equals" if same_start else "differs from")
@@ -360,6 +384,15 @@ def _decision(checks: Sequence[dict[str, str]]) -> str:
     )
 
 
+def _directory_keys(directory: Path, subdir: str) -> dict[str, set[str]]:
+    base = directory / subdir if subdir else directory
+    return {
+        match.group(1): _trade_keys(_rows(path))
+        for path in sorted(base.glob("strategy_*_transactions.csv"))
+        if (match := re.match(r"strategy_(\d+)_transactions\.csv$", path.name))
+    }
+
+
 def check_capture(
     capture: Path,
     *,
@@ -367,6 +400,10 @@ def check_capture(
     raw_subdir: str = "raw",
     use_manifest: bool = True,
     reference_index: Path | None = None,
+    require_reference: bool = False,
+    reference_tolerance: float = _REFERENCE_MISSING,
+    cross_checks: Sequence[tuple[Path, str]] = (),
+    prior_checks: Sequence[tuple[Path, str]] = (),
 ) -> dict[str, Any]:
     raw = capture / raw_subdir if raw_subdir else capture
     listed = _manifest(capture) if use_manifest else None
@@ -397,6 +434,8 @@ def check_capture(
             page=pages.get(book),
             reference_index=reference_index,
             trade_keys=keys[book],
+            require_reference=require_reference,
+            tolerance=reference_tolerance,
         )
         for book in selected
     ]
@@ -420,7 +459,32 @@ def check_capture(
             result["checks"].append(
                 _check("I8", "PASS", "no trade rows shared with another book")
             )
+    # Other capture directories fail; an older or HAR download set only warns, because a
+    # correct book legitimately appears there under its wrong id (resolved by an exclusion).
+    for directory, subdir, status in (
+        *((d, sub, "FAIL") for d, sub in cross_checks),
+        *((d, sub, "WARN") for d, sub in prior_checks),
+    ):
+        others = _directory_keys(directory, subdir)
+        for book in selected:
+            for other, other_keys in sorted(others.items()):
+                smaller = min(len(keys[book]), len(other_keys))
+                shared = len(keys[book] & other_keys)
+                if other != book and smaller and shared / smaller > _OVERLAP_FAIL:
+                    by_book[book]["checks"].append(
+                        _check(
+                            "I8x",
+                            status,
+                            f"{shared} trade rows shared with book {other} in {directory.name}",
+                        )
+                    )
+    for result in results:
+        result["decision"] = _decision(result["checks"])
     return {
+        "settings": {
+            "reference_tolerance": reference_tolerance,
+            "require_reference": require_reference,
+        },
         "books": by_book,
         "capture_manifest_sha256": (
             hashlib.sha256((capture / "capture-manifest.json").read_bytes()).hexdigest()
@@ -443,6 +507,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-subdir", default="raw")
     parser.add_argument("--no-manifest", action="store_true")
     parser.add_argument("--reference-index", type=Path)
+    parser.add_argument("--require-reference", action="store_true")
+    parser.add_argument("--reference-tolerance", type=float, default=_REFERENCE_MISSING)
+    parser.add_argument(
+        "--cross-check",
+        type=Path,
+        action="append",
+        default=[],
+        help="another capture directory of the same pull (a shared trade row under another id fails)",
+    )
+    parser.add_argument(
+        "--compare-prior",
+        type=Path,
+        action="append",
+        default=[],
+        help="an older or HAR download set (a shared trade row under another id warns)",
+    )
+    parser.add_argument("--cross-raw-subdir", default="raw")
+    parser.add_argument("--prior-raw-subdir", default="")
     parser.add_argument(
         "--previous-generation-root",
         type=Path,
@@ -460,6 +542,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw_subdir=args.raw_subdir,
         use_manifest=not args.no_manifest,
         reference_index=args.reference_index,
+        require_reference=args.require_reference,
+        reference_tolerance=args.reference_tolerance,
+        cross_checks=[(path, args.cross_raw_subdir) for path in args.cross_check],
+        prior_checks=[(path, args.prior_raw_subdir) for path in args.compare_prior],
     )
     if args.previous_generation_root is not None:
         previous = previous_generation_books(
@@ -467,9 +553,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         report["predecessor"] = previous
     args.out.mkdir(parents=True, exist_ok=True)
-    target = args.out / "book-identity-decisions.json"
-    with target.open("x", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=1, sort_keys=True)
+    # One file per capture bytes: a re-run on the same bytes must reproduce it exactly.
+    tag = str(report["capture_manifest_sha256"] or "no-manifest")[:12]
+    target = args.out / f"book-identity-decisions-{tag}.json"
+    content = json.dumps(report, indent=1, sort_keys=True)
+    if target.exists() and target.read_text(encoding="utf-8") != content:
+        raise FileExistsError(f"{target} exists with different decisions")
+    if not target.exists():
+        with target.open("x", encoding="utf-8") as handle:
+            handle.write(content)
     decisions = {book: item["decision"] for book, item in report["books"].items()}
     print(json.dumps(decisions, sort_keys=True))
     return 0 if all(value == "PASS" for value in decisions.values()) else 1

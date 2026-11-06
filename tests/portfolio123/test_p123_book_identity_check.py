@@ -239,8 +239,8 @@ def test_reference_pull_must_be_contained_and_share_the_cash_start(
     assert _status(report, "101", "I9") == "FAIL"
 
 
-def test_cli_writes_a_create_only_decisions_file_and_exits_by_decision(
-    tmp_path: Path, capsys: object
+def test_cli_writes_one_decisions_file_per_capture_bytes_and_exits_by_decision(
+    tmp_path: Path,
 ) -> None:
     capture, raw = _capture(tmp_path)
     _book(raw, "101")
@@ -248,14 +248,81 @@ def test_cli_writes_a_create_only_decisions_file_and_exits_by_decision(
     _manifest(capture)
     out = tmp_path / "out"
     assert ic.main([str(capture), "--out", str(out)]) == 0
-    decisions = json.loads(
-        (out / "book-identity-decisions.json").read_text(encoding="utf-8")
-    )
+    (written,) = out.glob("book-identity-decisions-*.json")
+    decisions = json.loads(written.read_text(encoding="utf-8"))
     assert decisions["books"]["101"]["fingerprints"]["transactions"]["rows"] == 4
     assert decisions["schema"] == "p123-book-identity-decisions/1"
+    assert decisions["capture_manifest_sha256"][:12] in written.name
+    # The same bytes reproduce the same file; changed decisions for the same name refuse.
+    assert ic.main([str(capture), "--out", str(out)]) == 0
+    written.write_text("{}", encoding="utf-8")
     try:
         ic.main([str(capture), "--out", str(out)])
     except FileExistsError:
         pass
     else:  # pragma: no cover
-        raise AssertionError("the decisions file must be create-only")
+        raise AssertionError("decisions for the same bytes must not be overwritten")
+
+
+def test_a_book_whose_rows_sit_under_another_id_elsewhere_is_flagged(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")
+    _manifest(capture)
+    # An older download set holds 101's series under the id 909.
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    (prior / "strategy_909_transactions.csv").write_text(
+        (raw / "strategy_101_transactions.csv").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    report = ic.check_capture(capture, prior_checks=[(prior, "")])
+    assert _status(report, "101", "I8x") == "WARN"
+    assert report["books"]["101"]["decision"] == "REVIEW"
+    # In another capture directory of the same pull the same overlap fails.
+    other = tmp_path / "other"
+    (other / "raw").mkdir(parents=True)
+    (other / "raw" / "strategy_909_transactions.csv").write_text(
+        (raw / "strategy_101_transactions.csv").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    report = ic.check_capture(capture, cross_checks=[(other, "raw")])
+    assert report["books"]["101"]["decision"] == "FAIL"
+    # The same id elsewhere is the same book, not a permutation.
+    same = tmp_path / "same"
+    same.mkdir()
+    (same / "strategy_101_transactions.csv").write_text(
+        (raw / "strategy_101_transactions.csv").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    report = ic.check_capture(capture, prior_checks=[(same, "")])
+    assert not any(c["check"] == "I8x" for c in report["books"]["101"]["checks"])
+
+
+def test_required_reference_and_recorded_tolerance(tmp_path: Path) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")
+    _manifest(capture)
+    report = ic.check_capture(capture, require_reference=True)
+    assert _status(report, "101", "I9") == "FAIL"
+    assert report["settings"] == {
+        "reference_tolerance": 0.01,
+        "require_reference": True,
+    }
+    strict = ic.check_capture(
+        capture,
+        reference_index=_reference(
+            tmp_path,
+            _tx(
+                "2025-05-09",
+                "1,000,000.00",
+                [
+                    ("2025-05-12", "A101", "BUY", "100"),
+                    ("2025-05-13", "GONE", "BUY", "1"),
+                ],
+            ),
+        ),
+        reference_tolerance=0.0,
+    )
+    assert _status(strict, "101", "I9") == "FAIL"

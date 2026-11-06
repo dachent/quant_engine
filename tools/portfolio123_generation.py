@@ -6,7 +6,7 @@ import argparse
 from datetime import date
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from quant_engine.portfolio123 import (
     create_cutover_plan,
@@ -84,6 +84,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="ID=REASON",
         help="accept a REVIEW identity decision for one captured book with a reason",
     )
+    plan.add_argument(
+        "--book-inventory",
+        type=Path,
+        help="frozen inventory JSON {books: {ID: {role, route: capture|exempt|untrusted, "
+        "reason}}}: the only source of the expected, exempt and untrusted books",
+    )
     stage = commands.add_parser("stage")
     stage.add_argument("plan", type=Path)
     for command in (
@@ -132,7 +138,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.loads(path.read_text(encoding="utf-8"))
             for path in args.identity_decisions
         ]
-        corrections: dict[str, dict[str, str]] = {}
+        inventory = (
+            json.loads(args.book_inventory.read_text(encoding="utf-8"))["books"]
+            if args.book_inventory is not None
+            else None
+        )
+        corrections: dict[str, dict[str, Any]] = {}
         if args.identity_correction is not None:
             record = json.loads(args.identity_correction.read_text(encoding="utf-8"))
             for book, fields in record["books"].items():
@@ -151,6 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             supersede_books=supersede,
             transaction_exempt_books=exempt,
             identity_corrections=corrections,
+            book_inventory=inventory,
             untrusted_har_ids=untrusted,
             identity_decisions=decisions,
             identity_review_accepted=accepted,
