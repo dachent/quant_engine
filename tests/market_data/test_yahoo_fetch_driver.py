@@ -1868,3 +1868,71 @@ def test_held_check_lists_what_the_ingest_aliases_or_values_as_cash(
     bad.write_text("{}")
     assert driver.main([*argv, "--ingest-config", str(bad)]) == 1
     assert "ingest config" in capsys.readouterr().err
+
+
+def test_make_evidence_names_the_effective_config_and_is_accepted_by_the_authorization(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = tmp_path / "c.json"
+    cfg.write_bytes(_config())
+    out = tmp_path / "evidence.json"
+    review = "https://github.com/dachent/quant_engine/issues/1#issuecomment-1"
+    argv = [
+        "make-evidence",
+        "--config",
+        str(cfg),
+        "--cutoff",
+        CUTOFF,
+        "--run-id",
+        "r3-yahoo",
+        "--review",
+        review,
+        "--valid-from-utc",
+        "2026-10-10T00:00:00Z",
+        "--valid-until-utc",
+        "2026-10-10T23:00:00Z",
+        "--max-requests",
+        "250",
+        "--out",
+        str(out),
+    ]
+    assert driver.main(argv) == 0
+    printed = json.loads(capsys.readouterr().out)
+    config = driver.parse_config(cfg.read_bytes(), cutoff_override=CUTOFF)
+    assert printed["config_sha256"] == config.sha256 and printed["cutoff"] == CUTOFF
+    budget = driver.authorize_live(
+        out.read_bytes(),
+        config=config,
+        run_id="r3-yahoo",
+        stage_root=tmp_path / "stage",
+        now=datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc),
+    )
+    assert budget == 250
+    # create-only, a window over 24 h or without an offset is refused, and so is another review
+    assert driver.main(argv) == 1
+    capsys.readouterr()
+    long_window = [*argv[:-2], "--out", str(tmp_path / "long.json")]
+    long_window[long_window.index("--valid-until-utc") + 1] = "2026-10-11T00:00:01Z"
+    assert driver.main(long_window) == 1
+    assert "at most 24 hours" in capsys.readouterr().err
+    naive = [*argv[:-2], "--out", str(tmp_path / "naive.json")]
+    naive[naive.index("--valid-from-utc") + 1] = "2026-10-10T00:00:00"
+    assert driver.main(naive) == 1
+    capsys.readouterr()
+    bad_review = [*argv[:-2], "--out", str(tmp_path / "review.json")]
+    bad_review[bad_review.index("--review") + 1] = "https://example.com/x"
+    assert driver.main(bad_review) == 1
+    assert (
+        not (tmp_path / "long.json").exists()
+        and not (tmp_path / "review.json").exists()
+    )
+    # evidence made for another cutoff does not authorize this config
+    other = driver.parse_config(cfg.read_bytes(), cutoff_override="2026-10-08")
+    with pytest.raises(driver.GovernanceError):
+        driver.authorize_live(
+            out.read_bytes(),
+            config=other,
+            run_id="r3-yahoo",
+            stage_root=tmp_path / "stage2",
+            now=datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc),
+        )

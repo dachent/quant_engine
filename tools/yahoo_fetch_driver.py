@@ -675,6 +675,52 @@ def derive_schwab_positions(positions_path: Path) -> dict[str, Any]:
 _OFFICIAL_SUFFIX = "_yahoo_daily.csv"
 
 
+def make_evidence(
+    config: Config,
+    *,
+    run_id: str,
+    review: str,
+    valid_from_utc: datetime,
+    valid_until_utc: datetime,
+    max_requests: int,
+) -> bytes:
+    """The governance evidence of one run: it names the run, the EFFECTIVE config hash and the cutoff.
+
+    The comment it cites is made first; the hash it names is the one ``config-check`` prints for the
+    config the live command will read, so it cannot be mistyped or taken from the file's bytes.
+    """
+
+    if not _RUN_ID.fullmatch(run_id):
+        raise DriverError("run id is invalid")
+    if not _REVIEW.fullmatch(review):
+        raise DriverError("the review must be a quant_engine issue-comment URL")
+    if valid_from_utc.tzinfo is None or valid_until_utc.tzinfo is None:
+        raise DriverError("the evidence times need a UTC offset")
+    if (
+        valid_until_utc <= valid_from_utc
+        or valid_until_utc - valid_from_utc > timedelta(hours=24)
+    ):
+        raise DriverError("the evidence window must be positive and at most 24 hours")
+    if isinstance(max_requests, bool) or not 1 <= max_requests <= 5000:
+        raise DriverError("max_requests must be 1..5000")
+
+    def stamp(moment: datetime) -> str:
+        return utc_text(moment)
+
+    return pretty(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "config_sha256": config.sha256,
+            "cutoff": config.cutoff.isoformat(),
+            "review": review,
+            "valid_from_utc": stamp(valid_from_utc),
+            "valid_until_utc": stamp(valid_until_utc),
+            "max_requests": max_requests,
+        }
+    )
+
+
 def held_check(
     positions_path: Path,
     served_dirs: Sequence[Path],
@@ -2753,6 +2799,20 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--cutoff", default=None)
     apply.add_argument("--tt-source-manifest", type=Path, default=None)
     apply.add_argument("--schwab-positions", type=Path, default=None)
+    evidence = sub.add_parser(
+        "make-evidence",
+        help="write the governance evidence of one run for the config the live command will read",
+    )
+    evidence.add_argument("--config", type=Path, required=True)
+    evidence.add_argument("--cutoff", required=True)
+    evidence.add_argument("--tt-source-manifest", type=Path, default=None)
+    evidence.add_argument("--schwab-positions", type=Path, default=None)
+    evidence.add_argument("--run-id", required=True)
+    evidence.add_argument("--review", required=True, help="the issue comment URL")
+    evidence.add_argument("--valid-from-utc", required=True)
+    evidence.add_argument("--valid-until-utc", required=True)
+    evidence.add_argument("--max-requests", type=int, required=True)
+    evidence.add_argument("--out", type=Path, required=True)
     held = sub.add_parser(
         "held-check",
         help="offline: held symbols of a Schwab run against symbols a retained pull served",
@@ -2891,6 +2951,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 now=datetime.now(timezone.utc),
             )
             print(f"staged {path}")
+            return 0
+        if args.command == "make-evidence":
+            config = _load_config(args)
+            body = make_evidence(
+                config,
+                run_id=args.run_id,
+                review=args.review,
+                valid_from_utc=_aware(args.valid_from_utc, "valid_from_utc"),
+                valid_until_utc=_aware(args.valid_until_utc, "valid_until_utc"),
+                max_requests=args.max_requests,
+            )
+            _write_new(args.out, body)
+            print(
+                json.dumps(
+                    {
+                        "config_sha256": config.sha256,
+                        "cutoff": config.cutoff.isoformat(),
+                        "run_id": args.run_id,
+                        "evidence_sha256": sha256_hex(body),
+                    },
+                    indent=2,
+                )
+            )
             return 0
         if args.command == "held-check":
             report = held_check(args.positions, args.served_dir, args.ingest_config)

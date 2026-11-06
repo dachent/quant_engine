@@ -89,7 +89,11 @@ is in effect):
    prints `config_sha256` (the hash of the EFFECTIVE config: cutoff, derived symbols and starts and
    resolutions included, not a hash of the file), `cutoff`, `cutoff_source` (`cli`), the group ids
    and the resolution table. The probe evidence names this `config_sha256` and `D`.
-2. `probe --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS
+2. The issue comment approving the probe run, then `make-evidence --config CONFIG --cutoff D
+   --tt-source-manifest TT --schwab-positions POSITIONS --run-id R3-PROBE --review COMMENT_URL
+   --valid-from-utc T --valid-until-utc T --max-requests N --out PROBE_EVIDENCE` (create-only; the
+   window is at most 24 hours; it writes the effective config hash and `D` itself, so nothing is
+   copied by hand), then `probe --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS
    --run-id R3-PROBE --stage-root STAGE --governance PROBE_EVIDENCE`, then `verify STAGE/R3-PROBE`.
 3. `apply-admissions --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS
    --probe-run STAGE/R3-PROBE --out STAGE/r3-config.json` writes the resolved config (derived symbols
@@ -98,7 +102,10 @@ is in effect):
    evidence names that hash and `D`, not the hash of either file. The resolved config is read back as
    it is (its derived symbols are the ones in it; a `--cutoff` that is not the one it was derived for
    is refused).
-5. `fetch --config STAGE/r3-config.json --cutoff D --run-id R3-YAHOO --stage-root STAGE --governance
+5. The comment approving the fetch, `make-evidence --config STAGE/r3-config.json --cutoff D
+   --run-id R3-YAHOO --review COMMENT_URL --valid-from-utc T --valid-until-utc T --max-requests N
+   --out FETCH_EVIDENCE` (a window that contains the start instant, which is not before
+   2026-11-07T00:00:00Z), then `fetch --config STAGE/r3-config.json --cutoff D --run-id R3-YAHOO --stage-root STAGE --governance
    FETCH_EVIDENCE [--allow-unresolved]`, then `verify STAGE/R3-YAHOO`, which must print `VERIFIED`.
 
 The clock: the fetch refuses a group whose `through` day has not closed, and a day is closed only
