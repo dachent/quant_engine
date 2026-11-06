@@ -129,9 +129,18 @@ not a slow generation). A 7-day request (`fd=20261026`, `td=20261101`) was then 
 first GetStatement failed at the transport layer (the cause was not recorded) and was not retried.
 A period override (`p=1`, 2026-11-05 21:01 ET) was accepted at SendRequest and its first
 GetStatement also failed at the transport layer (not retried; `p=3` and `p=19` were not attempted),
-so `p` has never delivered a statement and this driver does not send it. Nothing larger than one
-day has delivered through an override; one request of each size is too little evidence to say
-whether the 1001 and the failed retrievals are size-related or transient. The saved query returned 49 sections as direct children of each statement, among them
+so `p` has never delivered a statement and this driver does not send it. A 1-day `fd`/`td` retest
+three minutes later (21:04 ET, a request shape that had delivered earlier the same day) was
+accepted at SendRequest and its GetStatement failed after 0.1 seconds with `URLError` / `gaierror`,
+a name-resolution failure on the local machine; both approved IBKR hosts resolved normally a few
+minutes afterwards. The failed retrievals at 21:01 to 21:04 ET are therefore consistent with a
+transient local DNS failure and say nothing about the shape of the request (the cause of the
+earlier 7-day failure was not recorded). The driver now records the exception classes of a
+transport failure (never the message, URL or parameters) in the `detail` of the refusal in the
+manifest. Nothing larger than one day has delivered through an override, so the 1001 for 31 days
+is still not explained. IBKR's service availability may vary with the time of day (which hours is
+UNVERIFIED); an operator should pull on Saturday morning Eastern time rather than at night and
+treat a transport failure as a stop that names its cause, not as a reason to retry. The saved query returned 49 sections as direct children of each statement, among them
 every wrapper and element of the activity list above; the NAV row sits inside the wrapper
 `EquitySummaryInBase`, the same structure as the retained legacy monthly XML (one statement per
 account and day, 88 wrappers with 88 rows in the 2026-04 file), so the existing saved query

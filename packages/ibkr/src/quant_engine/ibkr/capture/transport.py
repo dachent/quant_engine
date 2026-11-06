@@ -66,8 +66,14 @@ class UrllibHttpGet:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
         except urlerror.HTTPError as exc:
             raise TransportError(f"the service answered HTTP {exc.code}") from None
-        except (urlerror.URLError, OSError, ValueError):
-            raise TransportError("the service request failed") from None
+        except (urlerror.URLError, OSError, ValueError) as exc:
+            # exception classes only (a name-resolution failure reads URLError/gaierror): never
+            # the message, the URL or the parameters, which can carry the token
+            reason = getattr(exc, "reason", None)
+            kind = type(exc).__name__
+            if reason is not None:
+                kind += "/" + type(reason).__name__
+            raise TransportError(f"the service request failed ({kind})") from None
         if len(body) > MAX_RESPONSE_BYTES:
             raise TransportError("the service response exceeds the size bound")
         return body

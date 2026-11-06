@@ -135,24 +135,22 @@ def capture_plan(
             code: str | None,
             body: bytes | None,
             count: int,
+            detail: str | None = None,
         ) -> RunSummary:
             if body is not None:
                 run.write_new("refusal-response.xml", body)
-            _finish(
-                run,
-                base,
-                status="REFUSED",
-                attempts=attempts,
-                refusal={"kind": kind, "error_code": code},
-            )
+            refusal: dict[str, object] = {"kind": kind, "error_code": code}
+            if detail is not None:
+                refusal["detail"] = detail
+            _finish(run, base, status="REFUSED", attempts=attempts, refusal=refusal)
             return RunSummary(run_id, index, query.name, "REFUSED", count, kind, code)
 
         governance.reserve_send(index)
         pacer.before_call()
         try:
             send_body = http_get(SEND_REQUEST_URL, send_params, headers)
-        except TransportError:
-            summaries.append(refuse(KIND_TRANSPORT_FAILURE, None, None, 0))
+        except TransportError as exc:
+            summaries.append(refuse(KIND_TRANSPORT_FAILURE, None, None, 0, str(exc)))
             break
         _guard_echo(send_body, in_use)
         run.write_new("send-response.xml", send_body)
@@ -179,8 +177,8 @@ def capture_plan(
                     {"q": reference, "t": service_param, "v": SERVICE_VERSION},
                     headers,
                 )
-            except TransportError:
-                outcome = refuse(KIND_TRANSPORT_FAILURE, None, None, attempt)
+            except TransportError as exc:
+                outcome = refuse(KIND_TRANSPORT_FAILURE, None, None, attempt, str(exc))
                 break
             _guard_echo(body, in_use)
             response = classify_response(body, step=STEP_GET)

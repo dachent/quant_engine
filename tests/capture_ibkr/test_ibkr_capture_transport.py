@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import socket
 from typing import Any
 from urllib import error as urlerror
 from urllib import request
@@ -71,6 +72,16 @@ def test_failures_are_sanitized_and_oversize_is_refused(
     with pytest.raises(TransportError) as unreachable:
         UrllibHttpGet(opener=down)(SEND, {"t": "synthetic-value"}, {"User-Agent": "u"})
     assert "synthetic-value" not in str(unreachable.value)
+    assert str(unreachable.value) == "the service request failed (URLError/str)"
+
+    def unresolved(req: request.Request, timeout: float) -> Any:
+        raise urlerror.URLError(socket.gaierror(11001, "synthetic-value host"))
+
+    with pytest.raises(TransportError) as gaierror:
+        UrllibHttpGet(opener=unresolved)(
+            SEND, {"t": "synthetic-value"}, {"User-Agent": "u"}
+        )
+    assert str(gaierror.value) == "the service request failed (URLError/gaierror)"
 
     monkeypatch.setattr(transport, "MAX_RESPONSE_BYTES", 4)
     with pytest.raises(TransportError, match="size bound"):
