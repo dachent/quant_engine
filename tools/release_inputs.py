@@ -5,6 +5,9 @@
              repository and write its manifest; prints the manifest sha256 (the pin).
 ``verify``   load a root against a pin, hashing every file; exit 0 only if all hold.
 ``path``     print the verified absolute path of one repo-relative input (for shell drivers).
+``add``      build the NEXT root from a verified one with extra files: each ``--file LOGICAL=SOURCE`` copies
+             a source file byte for byte to a registered release-input path of the new root (a path the
+             root already holds is refused without ``--replace``); prints the new manifest sha256 (the pin).
 ``rebind-predecessor``  build the NEXT root from a verified one: its disclosure inputs'
              ``predecessor_comparison`` is derived from the committed ``CURRENT_RELEASE`` and its
              panel's ``dashboard_data.json`` (never typed); prints the new manifest sha256 (the pin).
@@ -201,6 +204,78 @@ def _stale_references(
     return hits
 
 
+def _add(args: argparse.Namespace) -> int:
+    loaded = _load(args)
+    additions: dict[str, Path] = {}
+    for item in args.file:
+        logical, separator, source = item.partition("=")
+        if not separator or not logical or not source:
+            raise ReleaseInputsError(f"--file wants LOGICAL=SOURCE, got {item!r}")
+        if classify(logical) != RELEASE_INPUT:
+            raise ReleaseInputsError(
+                f"{logical} is not a release input in the registry"
+            )
+        if logical in additions:
+            raise ReleaseInputsError(f"{logical} is named twice")
+        if logical in loaded.paths and not args.replace:
+            raise ReleaseInputsError(
+                f"{logical} is already in the root (pass --replace to swap its bytes)"
+            )
+        path = Path(source)
+        if path.is_symlink() or not path.is_file():
+            raise ReleaseInputsError(f"{source} is not a regular file")
+        additions[logical] = path
+    if not additions:
+        raise ReleaseInputsError("nothing to add: pass --file LOGICAL=SOURCE")
+    out = args.out
+    if _nested(out, loaded.root) or _nested(loaded.root, out):
+        raise ReleaseInputsError(
+            "the new root must be a separate directory: it is, lies inside or contains the source root"
+        )
+    if out.exists() and any(out.iterdir()):
+        raise ReleaseInputsError(f"target is not empty: {out}")
+    inside = REPO_ROOT.resolve()
+    if out.resolve() == inside or inside in out.resolve().parents:
+        raise ReleaseInputsError(
+            "the release-inputs root must be outside the repository"
+        )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f"{out.name}.building-", dir=out.parent))
+    try:
+        shutil.copytree(loaded.root, staging, symlinks=False, dirs_exist_ok=True)
+        (staging / "release-inputs.manifest.json").unlink()
+        for logical, source in additions.items():
+            target = staging.joinpath(*logical.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        paths = sorted({*loaded.paths, *additions})
+        _, pin = build_manifest(staging, paths, cutoff=loaded.cutoff)
+        added = load_release_inputs(staging, pin)
+        for logical, source in additions.items():
+            if added.sha256(logical) != hashlib.sha256(source.read_bytes()).hexdigest():
+                raise ReleaseInputsError(
+                    f"{logical} differs from its source (the source changed while it was copied)"
+                )
+        if out.exists():
+            out.rmdir()  # empty (checked above)
+        os.replace(staging, out)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)  # our own staging directory
+        raise
+    print(
+        json.dumps(
+            {
+                "status": "added",
+                "added": {
+                    logical: added.sha256(logical) for logical in sorted(additions)
+                },
+                "manifest_sha256": pin,
+            }
+        )
+    )
+    return 0
+
+
 def _rebind_predecessor(args: argparse.Namespace) -> int:
     loaded = _load(args)
     inputs = _read_canonical(loaded.path(DISCLOSURE_INPUTS), "disclosure inputs")
@@ -331,6 +406,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         command.add_argument("--manifest-sha256", required=True)
         command.add_argument("--cutoff", help="refuse a set built for another cutoff")
     commands.choices["path"].add_argument("--logical", required=True)
+    add = commands.add_parser("add")
+    add.add_argument("--root", type=Path, required=True)
+    add.add_argument("--manifest-sha256", required=True)
+    add.add_argument("--cutoff", help="refuse a set built for another cutoff")
+    add.add_argument(
+        "--out", type=Path, required=True, help="the new root (empty or absent)"
+    )
+    add.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        metavar="LOGICAL=SOURCE",
+        help="a release-input path and the file whose bytes it takes",
+    )
+    add.add_argument(
+        "--replace", action="store_true", help="swap a path the root holds"
+    )
     rebind = commands.add_parser("rebind-predecessor")
     rebind.add_argument("--root", type=Path, required=True)
     rebind.add_argument("--manifest-sha256", required=True)
@@ -349,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     handlers = {
         "census": _census,
         "extract": _extract,
+        "add": _add,
         "verify": _verify,
         "path": _path,
         "rebind-predecessor": _rebind_predecessor,

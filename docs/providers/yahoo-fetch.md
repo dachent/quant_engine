@@ -48,9 +48,30 @@ dataset but `history`) and `--grizzly-market-data`
 (`portfolio_implementation_return_attribution.py`); the Grizzly price extension of
 `portfolio_strategy_history.py` reads the same shape. The guards are `min_rows` 4400 and
 `max_missing_weekdays` 180 (the 2008-11-05..2026-09-17 span has 4,662 weekdays and 169 market
-holidays). Record the file's sha256 from the run manifest as the release input; do not
-convert a CSV by hand. The `qsi-daily` and `vtma-spxl-60m` groups also carry `SPXL`
-for their own consumers and are unchanged.
+holidays). Do not convert a CSV by hand. The `qsi-daily` and `vtma-spxl-60m` groups also
+carry `SPXL` for their own consumers and are unchanged.
+
+Price column per reader: the reconciliation (`_market_prices`) and the Grizzly price extension of
+`portfolio_strategy_history.py` take `Adj Close` and fall back to `Close` only when it is absent
+(`row.get("Adj Close") or row.get("Close")`); the Grizzly return attribution values SPXL at the raw
+`Close` (`_grizzly_state_simulation`, `_grizzly_actual_ledger_return`; its `Adj Close` fallback is the
+TT path). `Adj Close` is a property of the vintage: a dividend paid after a fetch rescales every
+earlier `Adj Close` of that fetch, so a later run reproduces `Close` (the retained 2026-09-17 CSV's
+`close` of 280.760009765625 on that date) but not `adjclose` on dates before a newer dividend.
+
+From the run to the release input (no hand step): the file is copied byte for byte into the
+pinned release-inputs root as `ops/mvp2-release/inputs/implementation/spxl-market-data.json`
+(the path `release-stages.json` reads for `--spxl-market-data` and `--grizzly-market-data`) by
+the committed `release_inputs.py add`, which verifies the source root against its pin, copies it
+to a new root outside the repository, adds the file, rebuilds the manifest and prints the new
+pin (`release_inputs_manifest_sha256` of the release-driver config):
+
+```
+python -I tools/release_inputs.py add --root <ROOT> --manifest-sha256 <PIN> --cutoff <D> \
+  --out <NEW_ROOT> --file ops/mvp2-release/inputs/implementation/spxl-market-data.json=<STAGE>/r3-yahoo/artifacts/yahoo-spxl-raw-history-history.json
+```
+
+A path the root already holds is refused unless `--replace` is passed.
 
 ## Official closes for the Schwab ingest
 

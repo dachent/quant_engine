@@ -1530,3 +1530,17 @@ def test_the_raw_spxl_file_is_accepted_by_every_builder_reader(
     assert max(rows["SPXL"]) == cutoff
     extension, _ = history._yahoo_price_extension(artifact, "spxl-raw-history")
     assert max(extension["SPXL"]) == cutoff
+
+
+def test_the_whole_shipped_config_parses_with_the_new_group(tmp_path: Path) -> None:
+    """What `config-check` runs on the Saturday: sixteen groups, nothing counts fifteen."""
+
+    manifest = _tt_manifest(tmp_path, ["BNY", "DUK", "IBIT", "PEP", "SHY"], ["AAPL"])
+    positions = _positions(tmp_path, ["SPY", "AAPL"])
+    raw = SHIPPED_CONFIG.read_bytes()
+    config = driver.parse_config(
+        raw, tt_source_manifest=manifest, schwab_positions=positions
+    )
+    ids = [group.group_id for group in config.groups]
+    assert len(ids) == len(set(ids)) == len(json.loads(raw)["groups"]) == 16
+    assert "spxl-raw-history" in ids and "qsi-daily" in ids

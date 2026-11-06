@@ -591,3 +591,104 @@ def test_unmanifested_release_input_under_the_root_refused(
         b"not a release input path"
     )  # other files do not matter
     load_release_inputs(root, pin)
+
+
+SPXL = "ops/mvp2-release/inputs/implementation/spxl-market-data.json"
+
+
+def _add(inputs: tuple[Path, str], out: Path, *extra: str) -> int:
+    root, pin = inputs
+    return cli.main(
+        [
+            "add",
+            "--root",
+            str(root),
+            "--manifest-sha256",
+            pin,
+            "--out",
+            str(out),
+            *extra,
+        ]
+    )
+
+
+def test_add_puts_a_governed_file_into_the_next_root(
+    inputs: tuple[Path, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "yahoo-spxl-raw-history-history.json"
+    source.write_bytes(b'{"dataset": "history"}\n')
+    out = tmp_path / "next"
+    assert _add(inputs, out, "--file", f"{SPXL}={source}") == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "added"
+    loaded = load_release_inputs(out, result["manifest_sha256"])
+    assert (loaded.path(SPXL).read_bytes(), loaded.cutoff) == (
+        source.read_bytes(),
+        CUTOFF,
+    )
+    assert set(loaded.paths) == {*FILES, SPXL}
+    # every carried file is byte-identical and the source root is untouched
+    root, pin = inputs
+    for relative, data in FILES.items():
+        assert loaded.path(relative).read_bytes() == data
+    assert load_release_inputs(root, pin).paths == tuple(sorted(FILES))
+
+
+def test_add_refuses_a_held_path_without_replace(
+    inputs: tuple[Path, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    first.write_bytes(b"1\n")
+    second.write_bytes(b"2\n")
+    held = (inputs[0], inputs[1])
+    assert _add(held, tmp_path / "n1", "--file", f"{POLICY_FILE}={first}") == 1
+    assert "already in the root" in capsys.readouterr().err
+    assert not (tmp_path / "n1").exists()
+    assert (
+        _add(held, tmp_path / "n2", "--file", f"{POLICY_FILE}={second}", "--replace")
+        == 0
+    )
+    pin = json.loads(capsys.readouterr().out)["manifest_sha256"]
+    assert (
+        load_release_inputs(tmp_path / "n2", pin).path(POLICY_FILE).read_bytes()
+        == b"2\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--file", "notes/spxl.json={source}"],  # not a registered release input
+        ["--file", f"{SPXL}=" + "{missing}"],
+        ["--file", f"{SPXL}"],
+        [],
+    ],
+)
+def test_add_refuses_a_bad_request(
+    inputs: tuple[Path, str],
+    tmp_path: Path,
+    arguments: list[str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "s.json"
+    source.write_bytes(b"{}\n")
+    arguments = [
+        item.format(source=source, missing=tmp_path / "missing.json")
+        for item in arguments
+    ]
+    out = tmp_path / "next"
+    assert _add(inputs, out, *arguments) == 1
+    assert "release-inputs: FAIL" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_add_refuses_a_target_inside_the_source_root_or_the_repository(
+    inputs: tuple[Path, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "s.json"
+    source.write_bytes(b"{}\n")
+    argument = ("--file", f"{SPXL}={source}")
+    assert _add(inputs, inputs[0] / "nested", *argument) == 1
+    assert _add(inputs, ROOT / "next-root-inside-repo", *argument) == 1
+    assert not (ROOT / "next-root-inside-repo").exists()
+    capsys.readouterr()
