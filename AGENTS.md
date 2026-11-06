@@ -18,11 +18,16 @@ checkpoints, issue descriptions, PR text and skill defaults:
   A successful extraction, coherent older generation, passing component suite or
   new build date alone is not closure. Preserve documented publication lag,
   fixed-history boundaries and owner-approved unavailable observations.
-- The owner-selected financial data cutoff is **EOD 2026-11-06** for release R3 and for
-  deliveries from R3 onward (owner instruction 2026-11-06, quoted in the pull request that
-  introduced this sentence); it replaces the earlier fixed **EOD 2026-09-17** selection.
-  R1, R2, R2.1 and R2.2 remain at EOD 2026-09-17 as released. Any further cutoff change
-  needs a new owner instruction recorded the same way.
+- The delivery's financial data cutoff is the EOD of the **last complete NYSE trading day**:
+  the most recent regular NYSE session whose close has passed, in America/New_York, as of
+  the owner's data-refresh instruction (a weekend or market holiday resolves to the previous
+  session). It is resolved once, when the owner starts the refresh, and is then fixed for the
+  cycle: a pull that runs later (for example Monday afternoon for a cycle started on Friday)
+  keeps the resolved date. Each cycle records the resolved date in its owner-declared cutoff
+  artifact, which the release tooling and the derivers require to equal the run's cutoff. A
+  cutoff other than the last complete NYSE trading day needs an explicit owner instruction
+  recorded in the cycle. History: R1, R2, R2.1 and R2.2 were EOD 2026-09-17; R3 is EOD
+  2026-11-06 (Friday).
   Keep financial observation dates, provider finality, source capture timestamps,
   source-generation provenance dates, and execution/calculation timestamps distinct.
   A later capture or execution timestamp does not change the financial cutoff;
@@ -39,8 +44,8 @@ checkpoints, issue descriptions, PR text and skill defaults:
   minimum across unrelated closed epochs, fixed histories or publication dates.
   Declare limiting sources and bind these declarations into the real QC receipt
   and report/panel metadata. A date-only source must not receive an invented
-  time. Identifying a later common EOD does not change the delivery's fixed
-  EOD selection (2026-11-06 from R3 onward) without a new owner instruction.
+  time. Identifying a later common EOD does not change the cycle's fixed cutoff (the last
+  complete NYSE trading day resolved when the refresh started) without a new owner instruction.
 - If any required capture or input QC remains pending, keep the source phase
   open in the governing issue. Do not report the input phase complete or resume
   downstream work. Resume it only after the missing source evidence is obtained
