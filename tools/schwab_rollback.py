@@ -100,6 +100,9 @@ class RolledBack:
     informational: dict[
         str, int
     ]  # action -> rows after D with no quantity and no amount
+    straddlers: dict[
+        str, int
+    ]  # action -> rows posted after D but effective on or before D
 
 
 def symbol_key(symbol: str) -> str:
@@ -179,19 +182,35 @@ def parse_effect(account: str, row: Mapping[str, Any]) -> Effect:
     return Effect(action, symbol, shares, amount or Decimal(0), posted, effective)
 
 
+STRADDLERS_REFUSED = "refuse"
+STRADDLERS_IN_D = (
+    "in_d"  # a row posted after D but effective on or before D belongs to D
+)
+STRADDLERS_OUT_D = "out_d"  # ... belongs after D
+
+
 def roll_back(
     account: str,
     rows: Sequence[Mapping[str, Any]],
     quantities: Mapping[str, Decimal],
     cash: Decimal,
     day: date,
+    straddlers: str = STRADDLERS_REFUSED,
 ) -> RolledBack:
-    """Quantities and cash of ``account`` at the close of ``day``, from the capture's own state."""
+    """Quantities and cash of ``account`` at the close of ``day``, from the capture's own state.
+
+    A row posted and effective after ``day`` is undone and one posted and effective on or before
+    it is kept. A straddler (the two dates fall on different sides of ``day``) is placed by
+    ``straddlers``: refused by default, because the retained bytes do not say which date the broker's
+    balances follow; the caller that can test both placements against an independent value passes
+    ``in_d`` or ``out_d`` (see ``tools/schwab_nav_derive.py``).
+    """
 
     keyed = {symbol_key(symbol): symbol for symbol in quantities}
     result = dict(quantities)
     undone: dict[str, int] = {}
     inert: dict[str, int] = {}
+    straddled: dict[str, int] = {}
     for row in rows:
         posted = _date(account, row.get("transactionDate"))
         effective = (
@@ -202,11 +221,17 @@ def roll_back(
         if posted <= day and effective <= day:
             continue
         if posted <= day or effective <= day:
-            raise RollbackError(
-                f"{account}: a {row.get('action')} row posted {posted} with effective date "
-                f"{effective} straddles {day}; the retained bytes do not say which date the "
-                "capture follows, so it cannot be rolled back"
-            )
+            action = str(row.get("action") or "?")
+            if straddlers == STRADDLERS_REFUSED:
+                raise RollbackError(
+                    f"{account}: a {action} row posted {posted} with effective date "
+                    f"{effective} straddles {day}; the retained bytes do not say which date "
+                    "the capture follows, so it is placed by the closure against the native "
+                    "balance (see schwab_nav_derive), not here"
+                )
+            straddled[action] = straddled.get(action, 0) + 1
+            if straddlers == STRADDLERS_IN_D:
+                continue
         if not (
             str(row.get("shareQuantity") or "").strip()
             or str(row.get("amount") or "").strip()
@@ -228,4 +253,6 @@ def roll_back(
             f"{account}: rolling back to {day} leaves a negative quantity ({listing}): "
             "the capture and its transactions do not agree"
         )
-    return RolledBack({s: q for s, q in result.items() if q != 0}, cash, undone, inert)
+    return RolledBack(
+        {s: q for s, q in result.items() if q != 0}, cash, undone, inert, straddled
+    )

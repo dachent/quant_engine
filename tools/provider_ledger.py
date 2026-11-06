@@ -3155,7 +3155,20 @@ def _replay_schwab_patched_navs(
         raise ProviderLedgerError("schwab replay transactions differ from the record")
     for account_id, rows in rows_of.items():
         try:
-            rolled = schwab_rollback.roll_back(account_id, rows, *held[account_id], end)
+            stated_reading = _object(record.get(account_id, {}), "derivation row").get(
+                "straddler_reading"
+            )
+            rolled = schwab_rollback.roll_back(
+                account_id,
+                rows,
+                *held[account_id],
+                end,
+                {
+                    None: schwab_rollback.STRADDLERS_REFUSED,
+                    "IN_D": schwab_rollback.STRADDLERS_IN_D,
+                    "OUT_D": schwab_rollback.STRADDLERS_OUT_D,
+                }[stated_reading],
+            )
         except schwab_rollback.RollbackError as exc:
             raise ProviderLedgerError(
                 f"schwab replay roll-back refused: {exc}"

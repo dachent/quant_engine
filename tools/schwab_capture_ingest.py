@@ -733,14 +733,17 @@ def ingest(
     undone: dict[str, Any] = {}
     noted: dict[str, Any] = {}
     rolled: dict[str, Any] = {}
+    placed: dict[str, Any] = {}
     rolled_zero_rows = 0
     try:
         if derive_tool.rows_after_exist(run_dir, sorted(accounts), cutoff.as_of_date):
-            rolled = derive_tool.rolled_holdings(
+            placed = derive_tool.decide_rolled(
                 run_dir,
                 derive_tool.read_holdings(raw_response, crosswalk),
+                closes_dir,
                 cutoff.as_of_date,
             )
+            rolled = {a: p.rolled for a, p in placed.items()}
             undone = {a: r for a, r in rolled.items() if r.rows_rolled_back}
             noted = {
                 a: r for a, r in rolled.items() if r.rows_rolled_back or r.informational
@@ -951,6 +954,14 @@ def ingest(
                         sorted(r.informational.items())
                     ),
                     "rows_rolled_back": dict(sorted(r.rows_rolled_back.items())),
+                    **(
+                        {
+                            "straddler_reading": placed[account].reading,
+                            "straddlers": dict(sorted(r.straddlers.items())),
+                        }
+                        if placed[account].reading
+                        else {}
+                    ),
                 }
                 for account, r in sorted(noted.items())
             },

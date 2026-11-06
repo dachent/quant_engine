@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+from dataclasses import dataclass
 import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
@@ -46,7 +47,13 @@ from typing import Any
 from quant_engine.core import check_entry_interpreter, strict_json_loads
 
 import schwab_capture_driver as driver
-from schwab_rollback import RolledBack, RollbackError, roll_back
+from schwab_rollback import (
+    STRADDLERS_IN_D,
+    STRADDLERS_OUT_D,
+    RolledBack,
+    RollbackError,
+    roll_back,
+)
 
 CASH_SECURITY_TYPE = 9
 DEFAULT_TOLERANCE = Decimal("0.05")
@@ -213,22 +220,83 @@ def account_rows(run_dir: Path, account: str) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
-def rolled_holdings(
+READING_IN_D = (
+    "IN_D"  # a straddler (posted after D, effective on or before D) belongs to D
+)
+READING_OUT_D = "OUT_D"  # ... belongs after D
+
+
+@dataclass(frozen=True)
+class Placement:
+    """An account's holdings at the close of the day and how its straddlers were placed."""
+
+    rolled: RolledBack
+    reading: str | None  # None when the account has no straddler
+    official: Mapping[str, Decimal]  # reading -> official value of the day under it
+
+
+def decide_rolled(
     run_dir: Path,
     held: Mapping[str, tuple[dict[str, Decimal], Decimal]],
+    closes_dir: Path,
     day: date,
-) -> dict[str, RolledBack]:
-    """Every account's holdings at the close of ``day``, rolled back from the capture."""
+    tolerance: Decimal = DEFAULT_TOLERANCE,
+) -> dict[str, Placement]:
+    """Every account's holdings at the close of ``day``, rolled back from the capture.
 
-    rolled: dict[str, RolledBack] = {}
+    The retained bytes cannot say whether a row posted after ``day`` with an effective date on or
+    before it is part of the close of ``day`` (none of the 68 such rows straddles a snapshot date).
+    An account with such rows is valued under both readings and the reading whose value matches the
+    native balance of ``day`` within ``tolerance`` is taken. It stops, with both values, when neither
+    or both match, or when the native row cannot decide (it repeats the row before it, or is absent).
+    """
+
+    placements: dict[str, Placement] = {}
     for account, (quantities, cash) in held.items():
+        rows = account_rows(run_dir, account)
         try:
-            rolled[account] = roll_back(
-                account, account_rows(run_dir, account), quantities, cash, day
-            )
+            inside = roll_back(account, rows, quantities, cash, day, STRADDLERS_IN_D)
+            if not inside.straddlers:
+                placements[account] = Placement(inside, None, {})
+                continue
+            outside = roll_back(account, rows, quantities, cash, day, STRADDLERS_OUT_D)
         except RollbackError as exc:
             raise DeriveError(str(exc)) from exc
-    return rolled
+        history = driver.parse_balance_history(
+            strict_json_loads(
+                (run_dir / f"raw/balances.historical/{account}.json").read_bytes(),
+                label="raw balances",
+            )
+        )
+        earlier = sorted(d for d in history if d < day)
+        listing = ", ".join(f"{k} x{v}" for k, v in sorted(inside.straddlers.items()))
+        if day not in history or not earlier or history[earlier[-1]] == history[day]:
+            raise DeriveError(
+                f"{account}: rows posted after {day} with an effective date on or before it "
+                f"({listing}) cannot be placed: the native balance of {day} is absent or "
+                "repeats the day before, so it cannot decide"
+            )
+        values: dict[str, Decimal] = {}
+        for reading, option in ((READING_IN_D, inside), (READING_OUT_D, outside)):
+            closes = {s: read_closes(closes_dir, s) for s in sorted(option.quantities)}
+            values[reading] = official_value(
+                option.quantities, option.cash, closes, day, account
+            )
+        native = history[day]
+        close = {k: abs(v - native) <= tolerance for k, v in values.items()}
+        if close[READING_IN_D] == close[READING_OUT_D]:
+            raise DeriveError(
+                f"{account}: rows posted after {day} with an effective date on or before it "
+                f"({listing}) are ambiguous: the native balance {native} of {day} "
+                f"{'matches both' if all(close.values()) else 'matches neither'} readings "
+                f"(in the day {values[READING_IN_D]}, after it {values[READING_OUT_D]}, "
+                f"tolerance {tolerance})"
+            )
+        reading = READING_IN_D if close[READING_IN_D] else READING_OUT_D
+        placements[account] = Placement(
+            inside if reading == READING_IN_D else outside, reading, values
+        )
+    return placements
 
 
 def _like(original: object, value: Decimal) -> object:
@@ -334,7 +402,8 @@ def derive(
         ),
         crosswalk,
     )
-    rolled_by_account = rolled_holdings(run_dir, held, day)
+    placements = decide_rolled(run_dir, held, closes_dir, day, tolerance)
+    rolled_by_account = {a: p.rolled for a, p in placements.items()}
     symbols = sorted(
         {s for rolled in rolled_by_account.values() for s in rolled.quantities}
     )
@@ -406,6 +475,14 @@ def derive(
             "official_day": str(official_day),
             "status": status,
         }
+        placement = placements[account]
+        if placement.reading is not None:
+            entry["straddler_reading"] = placement.reading
+            entry["straddler_rows"] = ", ".join(
+                f"{k} x{v}" for k, v in sorted(rolled.straddlers.items())
+            )
+            for name, value in sorted(placement.official.items()):
+                entry[f"straddler_official_{name.lower()}"] = str(value)
         if rolled.rows_rolled_back:
             entry["rolled_back_rows"] = ", ".join(
                 f"{k} x{v}" for k, v in sorted(rolled.rows_rolled_back.items())
@@ -482,7 +559,10 @@ def declare(
         ),
         crosswalk,
     )
-    rolled = rolled_holdings(run_dir, held, day)
+    rolled = {
+        a: p.rolled
+        for a, p in decide_rolled(run_dir, held, closes_dir, day, tolerance).items()
+    }
     symbols = sorted(
         {s for row in patched for s in rolled[row["account_id"]].quantities}
     )

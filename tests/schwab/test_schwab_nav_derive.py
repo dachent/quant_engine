@@ -525,24 +525,106 @@ def test_an_action_outside_the_table_after_d_is_refused_by_name(
         _derive(run, closes)
 
 
-def test_a_row_posted_after_d_with_an_effective_date_on_or_before_d_is_refused(
+STRADDLER = {
+    "transactionDate": "09/18/2026 as of 09/17/2026",
+    "effectiveDate": "09/17/2026",
+    "action": "Cash Dividend",
+    "symbol": "BBB",
+    "amount": "$50.00",
+}
+
+
+def test_a_straddler_the_native_balance_places_in_the_day_is_taken_in_the_day(
+    tmp_path: Path,
+) -> None:
+    # captured cash 20.00 already holds a 50.00 dividend posted after D "as of" D. Counted in D the
+    # close of D is 4 x 125 + 20.00 = 520.00, the native balance; counted after D it is 470.00.
+    run, closes = _world(tmp_path)
+    _rows(run, MOVED, [STRADDLER])
+    record, _ = _derive(run, closes)
+    assert record[MOVED]["straddler_reading"] == "IN_D"
+    assert record[MOVED]["straddler_rows"] == "Cash Dividend x1"
+    assert record[MOVED]["straddler_official_in_d"] == "520.00"
+    assert record[MOVED]["straddler_official_out_d"] == "470.00"
+    assert record[MOVED]["official_0917"] == "520.00"
+    assert "rolled_back_rows" not in record[MOVED]
+
+
+def test_a_straddler_the_native_balance_places_after_the_day_is_rolled_back(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path, moved_native=(450.0, 470.0))
+    _rows(run, MOVED, [STRADDLER])
+    record, _ = _derive(run, closes)
+    assert record[MOVED]["straddler_reading"] == "OUT_D"
+    assert record[MOVED]["official_0917"] == "470.00"
+    assert record[MOVED]["cash"] == "-30.00"
+    assert record[MOVED]["rolled_back_rows"] == "Cash Dividend x1"
+
+
+def test_a_straddler_that_both_readings_match_is_ambiguous_and_stops(
     tmp_path: Path,
 ) -> None:
     run, closes = _world(tmp_path)
-    _rows(
-        run,
-        STALE,
-        [
-            {
-                "transactionDate": "09/18/2026 as of 09/17/2026",
-                "effectiveDate": "09/17/2026",
-                "action": "Bank Interest",
-                "amount": "$1",
-            }
-        ],
-    )
-    with pytest.raises(derive_tool.DeriveError, match="straddles 2026-09-17"):
+    _rows(run, MOVED, [{**STRADDLER, "amount": "$0.01"}])
+    with pytest.raises(derive_tool.DeriveError, match="matches both readings"):
         _derive(run, closes)
+
+
+def test_a_straddler_that_neither_reading_matches_stops_with_both_values(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path, moved_native=(500.0, 999.0))
+    _rows(run, MOVED, [STRADDLER])
+    with pytest.raises(
+        derive_tool.DeriveError, match=r"matches neither.*520\.00.*470\.00"
+    ):
+        _derive(run, closes)
+
+
+def test_a_straddler_on_a_carried_native_row_cannot_be_decided(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path, stale_native=(1055.5, 1055.5))
+    _rows(run, STALE, [STRADDLER])
+    with pytest.raises(derive_tool.DeriveError, match="repeats the day before"):
+        _derive(run, closes)
+
+
+def test_the_ledger_replays_the_reading_the_derivation_stated(tmp_path: Path) -> None:
+    ledger = _ledger()
+    evidence, catalog = _declared(tmp_path, rows=None)
+    run = Path(
+        evidence["derived_patch"]["replay"]["positions_capture"]["path"]
+    ).parents[1]  # type: ignore[index]
+    # a straddler on the unpatched account is placed by the record and replayed by the ledger
+    folder = run / "transactions/normalized/wch/transactions"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{MOVED}.json").write_text(json.dumps([STRADDLER]), encoding="utf-8")
+    closes = tmp_path / "closes"
+    record, _ = derive_tool.derive(
+        run_dir=run, crosswalk=CROSSWALK, closes_dir=closes, day=DAY, prior_day=PRIOR
+    )
+    derivation = tmp_path / "derivation2.json"
+    derivation.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    spec = tmp_path / "spec2.json"
+    spec.write_text(json.dumps({"roots": {}, "sources": []}), encoding="utf-8")
+    declared = derive_tool.declare(
+        run_dir=run,
+        crosswalk=CROSSWALK,
+        closes_dir=closes,
+        day=DAY,
+        prior_day=PRIOR,
+        tolerance=derive_tool.DEFAULT_TOLERANCE,
+        derivation=derivation,
+        spec=spec,
+    )
+    ledger._schwab_source_derived_patch(declared, DAY, catalog)  # type: ignore[attr-defined]
+    record[MOVED].pop("straddler_reading")
+    derivation.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    # the record is pinned by hash: an edited one no longer matches the declaration
+    with pytest.raises(Exception, match="(?i)pin|sha|differ"):
+        ledger._schwab_source_derived_patch(declared, DAY, catalog)  # type: ignore[attr-defined]
 
 
 def test_a_row_after_d_with_no_quantity_or_amount_is_recorded_not_rolled_back(
