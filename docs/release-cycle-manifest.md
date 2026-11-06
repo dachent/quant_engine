@@ -370,9 +370,36 @@ above. Quantbase captures that the data root keeps only inside archives are not 
 root: assemble them with `release_quantbase_sources.py` (B7, which checks them against the sleeve policy
 manifest's pins) and pass that directory as `--artifact-dir quantbase=KEY:REL`; each file must still
 equal the generation manifest's own record. `ibkr_declared_inputs`, `quantbase_declared_inputs`, `tag_map` and `crosswalk` default to the
-governed files under `repo:ops/mvp2-release/inputs/` and can be replaced with `--file ROLE=KEY:REL`;
-the declared inputs must end at the cycle cutoff (`window.last_day`, `data_cutoff`) and the crosswalk
-must carry it.
+governed files of the release-inputs root (`--release-inputs-root` with
+`--release-inputs-manifest-sha256`; without them the checkout) and can be replaced with
+`--file ROLE=KEY:REL`; the declared inputs must end at the cycle cutoff (`window.last_day`,
+`data_cutoff`) and the crosswalk must carry it.
+
+### Cutoff-aware defaults and one error for everything to fix
+
+A default is never trusted for the cycle just because it exists. Before any default is pinned its own
+date is compared with the cycle cutoff (the root's cutoff, then `window.last_day` / `data_cutoff` /
+`calculation_cutoff_date` of the file), so the previous cycle's root cannot leak into a new cutoff.
+The builders do not stop at the first problem: every stale input (defaults and `--file` inputs alike)
+and every ambiguous provider family is collected, and one refusal lists all of them:
+
+```
+release-acceptance-inputs: FAIL: CUTOFF_MISMATCH: 3 inputs are refused; fix all of them and rerun:
+  1. [CUTOFF_MISMATCH] crosswalk: calculation_cutoff_date is '2026-09-02', the cycle cutoff is 2026-11-06 (default ops/mvp2-release/inputs/current-epoch-crosswalk.json)
+     supply a cutoff-dated replacement with: --file crosswalk=KEY:REL  (KEY:REL = a crosswalk with calculation_cutoff_date 2026-11-06)
+  2. [AMBIGUOUS_FILE] quantbase_accounts: 2 files match (source-runs/r/.staging/csv/accounts.csv, source-runs/r/artifacts/csv/accounts.csv)
+     and: quantbase_account_activity: 2 files match (...)
+     narrow the search with one of: --artifact-dir quantbase=world:.../r/.staging | --artifact-dir quantbase=world:.../r/artifacts (the directory must hold every quantbase capture)
+```
+
+A stale default names its role and the flag to replace it (`--file ibkr_declared_inputs=`,
+`--file quantbase_declared_inputs=`, `--file tag_map=`, `--file crosswalk=` for sleeve inputs;
+`--file declared_cutoff_date=` and `--file account_strategy_map_and_active_universe=` for the
+acceptance manifest). An ambiguous family lists its candidate files and one `--artifact-dir
+PROVIDER=KEY:REL` per candidate subtree (each directory holds exactly that candidate; a capture of the
+same provider shares one fix, printed once). A single problem is raised as itself, not as a list.
+Nothing is weakened: a stale default still refuses, a refusal still writes nothing, and a consistent
+cycle produces byte-identical outputs.
 
 ### Refusals
 
