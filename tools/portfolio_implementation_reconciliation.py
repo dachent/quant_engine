@@ -71,6 +71,25 @@ def _insufficient_exact_common_data() -> ImplementationReconciliationError:
     return ImplementationReconciliationError(INSUFFICIENT_EXACT_COMMON_DATA)
 
 
+def require_model_through_as_of(
+    strategy_id: str, model_end: date | None, accepted_as_of: date
+) -> None:
+    """A model that ends before the as-of would silently shorten every window built from it.
+
+    The as-of is the cycle's pinned cutoff. A weekend cutoff is held to the last weekday before it.
+    """
+
+    expected = accepted_as_of
+    while expected.weekday() >= 5:
+        expected -= timedelta(days=1)
+    if model_end is None or model_end < expected:
+        ended = "has no dated rows" if model_end is None else f"ends {model_end}"
+        raise ImplementationReconciliationError(
+            f"{strategy_id}: the model {ended}, before the as-of {accepted_as_of} "
+            f"(expected through {expected}): the source is stale, recapture it through the as-of"
+        )
+
+
 @dataclass(frozen=True)
 class TradeEvent:
     observed: date
@@ -1941,6 +1960,9 @@ def _tt_manifest_model_returns(
             )
         weights[component] = weight
     common = sorted(set.intersection(*(set(levels[item]) for item in components)))
+    require_model_through_as_of(
+        "tt-portfolio", common[-1] if common else None, accepted_as_of
+    )
     result: dict[date, float] = {}
     previous: dict[str, Decimal] | None = None
     for observed in common:
@@ -2476,6 +2498,7 @@ def _grizzly_model_states(
     calendar = sorted(item for item in calendar if item <= accepted_as_of)
     if len(calendar) < 2:
         raise _insufficient_exact_common_data()
+    require_model_through_as_of("grizzlybears-vtma", calendar[-1], accepted_as_of)
     first = calendar[0]
     invested = False
     for observed, action in signals:
