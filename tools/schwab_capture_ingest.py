@@ -88,6 +88,7 @@ from quant_engine.schwab import (
 )
 
 import schwab_capture_driver as driver
+import schwab_nav_derive as derive_tool
 
 
 ADAPTER_VERSION = "schwab-capture-ingest-1"
@@ -511,8 +512,15 @@ def _price_guard(
     sweeps: Sequence[Mapping[str, Any]],
     reader_closes: Mapping[str, Decimal],
     config: IngestConfig,
+    *,
+    late: bool = False,
 ) -> dict[str, object]:
-    """Compare the provider's own price with the value used for each symbol."""
+    """Compare the provider's own price with the value used for each symbol.
+
+    A late capture quotes the day it was taken, not the cutoff close: only the cash equivalents
+    (stated 1.00 NAV) are compared, and the NAV closure of ``_write_nav`` against the native
+    balance of the cutoff replaces the comparison for every other symbol.
+    """
 
     for row in sweeps:
         symbol = str(row["symbol"])
@@ -526,6 +534,8 @@ def _price_guard(
         price = driver.decimal_value(row.get("price_usd"))
         if price is None:
             raise IngestError("held position has no provider price")
+        if late and symbol not in config.cash_equivalent_symbols:
+            continue
         ratio = abs(price / reader_closes[symbol] - 1)
         deviations[symbol] = max(deviations.get(symbol, Decimal(0)), ratio)
     offenders: list[str] = []
@@ -592,11 +602,15 @@ def _capture_binding(
     if recomputed != capture or balance_recomputed != balance_capture:
         raise IngestError("capture timing differs from the capture time it records")
     utc_date = date.fromisoformat(str(capture["capture_date_utc"]))
-    if label is None and (
-        capture["capture_mode"] != driver.MODE_NEXT_SESSION
-        or balance_capture["capture_mode"] != driver.MODE_NEXT_SESSION
-        or utc_date != cutoff.as_of_date + timedelta(days=1)
-        or capture["capture_date_new_york"] != utc_date.isoformat()
+    if (
+        label is None
+        and capture["capture_mode"] != driver.MODE_LATE  # rolled back: no +1 rule
+        and (
+            capture["capture_mode"] != driver.MODE_NEXT_SESSION
+            or balance_capture["capture_mode"] != driver.MODE_NEXT_SESSION
+            or utc_date != cutoff.as_of_date + timedelta(days=1)
+            or capture["capture_date_new_york"] != utc_date.isoformat()
+        )
     ):
         raise IngestError(
             "an unlabelled run must be captured on the first date after the "
@@ -660,11 +674,12 @@ def ingest(
     if set(manifest["accounts"]) != accounts or len(accounts) != len(crosswalk):
         raise IngestError("crosswalk scope differs from the driver run")
     capture = _capture_binding(positions, balances, cutoff, label)
-    if capture["capture_mode"] not in (driver.MODE_NEXT_SESSION, driver.MODE_SAME_DAY):
-        raise IngestError(
-            "a capture outside the first-next-date and same-day modes cannot be "
-            "bound: it exceeds the proven +1 pattern"
-        )
+    if capture["capture_mode"] not in (
+        driver.MODE_NEXT_SESSION,
+        driver.MODE_SAME_DAY,
+        driver.MODE_LATE,
+    ):
+        raise IngestError("the capture mode cannot be bound")
     snapshot_at = driver.aware_utc(capture["captured_at_utc"], "captured_at_utc")
     observed_basis = OBSERVED_AT_BASIS
     as_of = snapshot_at.date()
@@ -672,7 +687,59 @@ def ingest(
     held = driver.json_objects(positions.get("positions"), "positions")
     sweeps = driver.json_objects(positions.get("sweep_vehicles"), "sweep vehicles")
     cash_rows = driver.json_objects(positions.get("cash_balances"), "cash balances")
-    symbols = sorted({str(row["symbol"]) for row in held})
+    raw_response = strict_json_loads(
+        (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
+    )
+    late = capture["capture_mode"] == driver.MODE_LATE
+    # the capture is the account at capture time; the binding is the account at the cutoff close,
+    # so the roll-back comes before the scope of the official closes is read off the holdings
+    undone: dict[str, Any] = {}
+    noted: dict[str, Any] = {}
+    rolled: dict[str, Any] = {}
+    placed: dict[str, Any] = {}
+    rolled_zero_rows = 0
+    quote_dates_set = 0
+    try:
+        if late or derive_tool.rows_after_exist(
+            run_dir, sorted(accounts), cutoff.as_of_date
+        ):
+            placed = derive_tool.decide_rolled(
+                run_dir,
+                derive_tool.read_holdings(raw_response, crosswalk),
+                closes_dir,
+                cutoff.as_of_date,
+            )
+            rolled = {a: p.rolled for a, p in placed.items()}
+            undone = {a: r for a, r in rolled.items() if r.rows_rolled_back}
+            noted = {
+                a: r for a, r in rolled.items() if r.rows_rolled_back or r.informational
+            }
+        if undone:
+            raw_response, rolled_zero_rows = derive_tool.apply_rollback(
+                raw_response, crosswalk, rolled
+            )
+    except derive_tool.DeriveError as exc:
+        raise IngestError(str(exc)) from exc
+    if late:
+        # the quote date is informational: the value comes from the official closes of the cutoff
+        raw_response, quote_dates_set = _quotes_dated_at_cutoff(
+            raw_response, cutoff.as_of_date
+        )
+    rolled_quantity = {
+        (account, symbol): quantity
+        for account, after in rolled.items()
+        for symbol, quantity in after.quantities.items()
+    }
+    scope = (
+        [
+            row
+            for row in held
+            if rolled_quantity.get((str(row["account_id"]), str(row["symbol"])), 0) != 0
+        ]
+        if rolled
+        else held
+    )
+    symbols = sorted({str(row["symbol"]) for row in scope})
     close_set = official_closes(closes_dir, cutoff.as_of_date)
     if label is None:
         if close_set.provenance["status"] != PROVENANCE_VERIFIED:
@@ -715,16 +782,12 @@ def ingest(
             "held position lacks an official close: "
             f"symbols={len(missing)} missing={','.join(missing)}"
         )
-    guard = _price_guard(held, sweeps, reader_closes, config)
+    guard = _price_guard(scope, sweeps, reader_closes, config, late=late)
     used_files = sorted(
         {config.symbol_aliases.get(s, s) for s in symbols} & set(close_set.closes)
     )
 
-    raw_holdings, dropped_position_rows = _without_zero_quantity_rows(
-        strict_json_loads(
-            (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
-        )
-    )
+    raw_holdings, dropped_position_rows = _without_zero_quantity_rows(raw_response)
     try:
         read = read_holdings_v2_current_snapshot(
             raw_holdings,
@@ -743,15 +806,20 @@ def ingest(
     # count must reconcile with the verified driver run (summaries, sweeps and
     # the zero-quantity rows the driver omitted).
     zero_cash_rows = read.sweep_vehicle_count - len(sweeps) - len(cash_rows)
-    if zero_cash_rows < 0 or dropped_position_rows + zero_cash_rows != positions.get(
-        "zero_quantity_rows_omitted"
-    ):
+    omitted = dropped_position_rows - rolled_zero_rows + zero_cash_rows
+    if zero_cash_rows < 0 or omitted != positions.get("zero_quantity_rows_omitted"):
         raise IngestError("snapshot rows differ from the verified driver run")
-    zero_quantity_rows = dropped_position_rows + zero_cash_rows
+    zero_quantity_rows = omitted
     snapshot = replace(read, sweep_vehicle_count=len(sweeps))
     if any(_market_value_status(row) != "AVAILABLE" for row in snapshot.positions):
         raise IngestError("a held position has no market value after valuation")
     expected = _positions_by_identity(held)
+    if undone:  # the positions of the cutoff close, not of the capture
+        expected = {
+            (account, symbol): quantity
+            for account, after in sorted(rolled.items())
+            for symbol, quantity in sorted(after.quantities.items())
+        }
     observed = {
         (str(row["account_id"]), str(row["symbol"])): Decimal(str(row["quantity"]))
         for row in snapshot.positions
@@ -792,6 +860,24 @@ def ingest(
         {"sha256": digest, "size_bytes": size},
     )
 
+    closure: dict[str, Decimal] | None = None
+    if late:  # the rolled-back holdings at the cutoff closes, to be closed against the native NAV
+        try:
+            closure = {
+                account: derive_tool.official_value(
+                    after.quantities,
+                    after.cash,
+                    {
+                        s: {cutoff.as_of_date: reader_closes[s]}
+                        for s in after.quantities
+                    },
+                    cutoff.as_of_date,
+                    account,
+                )
+                for account, after in sorted(rolled.items())
+            }
+        except derive_tool.DeriveError as exc:
+            raise IngestError(str(exc)) from exc
     nav_sources, nav_summary = _write_nav(
         run_dir,
         output_root,
@@ -800,6 +886,7 @@ def ingest(
         record,
         label is not None,
         derivation,
+        closure,
     )
     transaction_sources, transaction_manifest, tx_rule = _write_terminal(
         run_dir, output_root, as_of, sorted(accounts), record
@@ -909,8 +996,57 @@ def ingest(
         "transaction_manifest": tx_rule,
         "unverified_shapes": list(driver.UNVERIFIED_SHAPES),
     }
+    if late:  # absent otherwise: an ordinary binding is unchanged
+        binding["late_capture"] = {
+            "price_guard": "NAV_CLOSURE_AGAINST_NATIVE_CUTOFF_BALANCE",
+            "quote_dates_set_to_cutoff": quote_dates_set,
+        }
+    if noted:  # absent otherwise: an ordinary binding is unchanged
+        binding["roll_back"] = {
+            "to": cutoff.as_of_date.isoformat(),
+            "basis": "CAPTURE_MINUS_POSTED_TRANSACTIONS_AFTER_THE_CUTOFF_CLOSE",
+            "accounts": {
+                account: {
+                    "after_cutoff_rows_not_applied": dict(
+                        sorted(r.informational.items())
+                    ),
+                    "rows_rolled_back": dict(sorted(r.rows_rolled_back.items())),
+                    **(
+                        {
+                            "straddler_reading": placed[account].reading,
+                            "straddlers": dict(sorted(r.straddlers.items())),
+                        }
+                        if placed[account].reading
+                        else {}
+                    ),
+                }
+                for account, r in sorted(noted.items())
+            },
+        }
     _write_new(output_root / "ingest-binding.json", driver.canonical_bytes(binding))
     return binding
+
+
+def _quotes_dated_at_cutoff(
+    raw: object, cutoff_day: date
+) -> tuple[dict[str, Any], int]:
+    """A copy of the raw holdings whose rows carry the cutoff as their quote date (and the count
+    changed): the frozen reader requires the quote date to equal the cutoff, and a late capture's
+    quote date is the day it was taken."""
+
+    document = copy.deepcopy(driver.json_object(raw, "raw holdings"))
+    stamp, changed = f"{cutoff_day:%m/%d/%Y}", 0
+    for account in driver.json_objects(document.get("accounts"), "accounts"):
+        for group in driver.json_objects(account.get("groupedPositions"), "groups"):
+            for row in driver.json_objects(group.get("holdingsRows"), "holdings rows"):
+                price = row.get("price")
+                if isinstance(price, dict) and price.get("priceDate") not in (
+                    None,
+                    stamp,
+                ):
+                    price["priceDate"] = stamp
+                    changed += 1
+    return document, changed
 
 
 def _without_zero_quantity_rows(raw: object) -> tuple[dict[str, Any], int]:
@@ -979,6 +1115,7 @@ def _write_nav(
     record: Any,
     labelled: bool,
     derivation: Mapping[str, Any] | None = None,
+    closure: Mapping[str, Decimal] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     sources: list[dict[str, object]] = []
     summary: dict[str, object] = {}
@@ -1004,6 +1141,25 @@ def _write_nav(
                 else "balance history does not end at or just before the cutoff"
             )
         derived_row: dict[str, str] | None = None
+        late_closure: dict[str, str] | None = None
+        if (
+            closure is not None
+            and kept[-1][0] == cutoff.as_of_date
+            and not (len(kept) > 1 and kept[-1][1] == kept[-2][1])
+        ):
+            # a late capture's native cutoff row is an observation, not a carry: the rolled-back
+            # holdings at the cutoff closes must reproduce it
+            official_now = closure[internal]
+            late_closure = {
+                "native": format(kept[-1][1], "f"),
+                "official": format(official_now, "f"),
+            }
+            if abs(official_now - kept[-1][1]) > derive_tool.DEFAULT_TOLERANCE:
+                raise IngestError(
+                    f"{internal}: the rolled-back holdings at the cutoff closes are worth "
+                    f"{official_now}, the native balance of the cutoff is {kept[-1][1]} "
+                    f"(more than {derive_tool.DEFAULT_TOLERANCE} apart)"
+                )
         if kept[-1][0] == cutoff.as_of_date and len(kept) > 1:
             native_value, carried = kept[-1][1], kept[-2][1]
             if native_value == carried:
@@ -1059,6 +1215,8 @@ def _write_nav(
             derived_row is not None
         ):  # absent otherwise: an ordinary binding is unchanged
             entry["derived_cutoff_row"] = derived_row
+        if late_closure is not None:
+            entry["late_closure"] = late_closure
         summary[internal] = entry
     return sources, summary
 
