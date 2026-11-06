@@ -8,7 +8,8 @@ Hard limits, enforced before a message leaves the process:
 
 * The only CDP messages it can send are ``Target.getTargets`` (discovery),
   ``Target.attachToTarget``, ``Page.enable`` and ``Page.navigate``. There is no
-  ``Input.*``, ``Runtime.*``, ``Fetch.*``, ``Network.*`` or ``Page.reload``. A
+  ``Runtime.*``, ``Fetch.*``, ``Network.*`` or ``Page.reload``, and no ``Input.*``
+  unless ``--scroll`` is given, which adds bounded mouseWheel events and nothing else. A
   ``Page.navigate`` is sent only with exactly ``{"url": <allow-listed url>}``.
 * The CDP URL must be a loopback ``http://host:port`` endpoint.
 * Navigation targets come ONLY from a hash-bound allow-list file (data, not code).
@@ -51,10 +52,26 @@ from quantbase_cdp_har_recorder import (
 
 SCHEMA_VERSION = 1
 APP_HOST = "app.getquantbase.com"
-DEFAULT_DWELL_SECONDS = 5.0
+DEFAULT_DWELL_SECONDS = 30.0
 MAX_DWELL_SECONDS = 120.0
 DEFAULT_LOAD_TIMEOUT_SECONDS = 30.0
 MAX_PAGES = 50
+ACCOUNT_ACTIVITY_PATH = "/account-activity"
+
+#: ``--scroll`` fallback (OFF by default): mouse WHEEL events only, bounded.
+WHEEL_X = 300
+WHEEL_Y = 300
+WHEEL_STEP = 400
+WHEEL_DOWN_STEPS = 6
+WHEEL_MAX_EVENTS = 12  # per page
+WHEEL_MAX_ABS_DELTA = 600  # per event
+WHEEL_MAX_TOTAL_DELTA = 5000  # sum of |deltaY| per page
+WHEEL_PAUSE_SECONDS = 1.0
+WHEEL_COORD_MAX = 2000
+
+#: The navigator holds no recorder access and may not send Network.*, so it cannot
+#: count responses. The operator reads the recorder's per-capability counts.
+COUNTS_NOT_AVAILABLE = "READ_RECORDER_MANIFEST"
 
 EXIT_OK = 0
 EXIT_INCOMPLETE = 1
@@ -70,6 +87,9 @@ ALLOWED_CDP_METHODS = frozenset(
         "Page.navigate",
     }
 )
+
+#: Sent only when ``--scroll`` is set, and then only as a bounded wheel event.
+SCROLL_ONLY_METHODS = frozenset({"Input.dispatchMouseEvent"})
 
 _MUTATION_RE = re.compile("|".join(re.escape(word) for word in MUTATION_WORDS))
 #: A path with one of these segments-in-text is a sign-in flow, never a read-only page.
@@ -173,6 +193,12 @@ def _dwell(value: object, where: str) -> float:
     return value + 0.0
 
 
+def page_key(url: str) -> str:
+    """Identity of a page for the never-revisit rule: its decoded path, any query."""
+
+    return unquote(urlsplit(url).path).rstrip("/").lower() or "/"
+
+
 @dataclass(frozen=True)
 class Page:
     label: str
@@ -217,6 +243,7 @@ def parse_allowlist(raw: bytes, *, pin_sha256: str | None = None) -> Allowlist:
     pages: list[Page] = []
     labels: set[str] = set()
     urls: set[str] = set()
+    keys: set[str] = set()
     for index, item in enumerate(items):
         where = str(index)
         if not isinstance(item, dict) or set(item) - {"label", "url", "dwell_seconds"}:
@@ -232,6 +259,15 @@ def parse_allowlist(raw: bytes, *, pin_sha256: str | None = None) -> Allowlist:
             raise NavigatorError("ALLOWLIST_LABEL_DUPLICATE", where)
         if url in urls:
             raise NavigatorError("ALLOWLIST_URL_DUPLICATE", where)
+        key = page_key(url)
+        if key in keys:
+            raise NavigatorError(
+                "ALLOWLIST_ACCOUNT_ACTIVITY_REPEATED"
+                if key == ACCOUNT_ACTIVITY_PATH
+                else "ALLOWLIST_PAGE_REVISITED",
+                where,
+            )
+        keys.add(key)
         labels.add(label)
         urls.add(url)
         dwell = (
@@ -251,13 +287,67 @@ class GuardedTransport:
     """Wrap a transport so only the four allowed messages can ever be sent, and
     ``Page.navigate`` only ever carries exactly one allow-listed URL."""
 
-    def __init__(self, inner: CdpTransport, allowed_urls: frozenset[str]) -> None:
+    def __init__(
+        self,
+        inner: CdpTransport,
+        allowed_urls: frozenset[str],
+        *,
+        scroll: bool = False,
+    ) -> None:
         self._inner = inner
         self._urls = allowed_urls
+        self._scroll = scroll
+        self._wheel_events = 0
+        self._wheel_total = 0
+
+    def new_page(self) -> None:
+        """The wheel budget is per page."""
+
+        self._wheel_events = 0
+        self._wheel_total = 0
+
+    def _check_wheel(self, params: object) -> None:
+        if not isinstance(params, dict) or not set(params) <= {
+            "type",
+            "x",
+            "y",
+            "deltaX",
+            "deltaY",
+        }:
+            raise NavigatorError("CDP_INPUT_REFUSED", "params")
+        if params.get("type") != "mouseWheel":
+            raise NavigatorError("CDP_INPUT_REFUSED", "type")
+        for name in ("x", "y"):
+            value = params.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= WHEEL_COORD_MAX
+            ):
+                raise NavigatorError("CDP_INPUT_REFUSED", name)
+        dx, dy = params.get("deltaX", 0), params.get("deltaY")
+        if dx != 0 or isinstance(dx, bool):
+            raise NavigatorError("CDP_INPUT_REFUSED", "deltaX")
+        if (
+            isinstance(dy, bool)
+            or not isinstance(dy, int)
+            or dy == 0
+            or abs(dy) > WHEEL_MAX_ABS_DELTA
+        ):
+            raise NavigatorError("CDP_INPUT_REFUSED", "deltaY")
+        if (
+            self._wheel_events + 1 > WHEEL_MAX_EVENTS
+            or self._wheel_total + abs(dy) > WHEEL_MAX_TOTAL_DELTA
+        ):
+            raise NavigatorError("CDP_INPUT_BUDGET_EXCEEDED")
+        self._wheel_events += 1
+        self._wheel_total += abs(dy)
 
     def send(self, message: dict[str, Any]) -> None:
         method = message.get("method")
-        if method not in ALLOWED_CDP_METHODS:
+        if method in SCROLL_ONLY_METHODS and self._scroll:
+            self._check_wheel(message.get("params"))
+        elif method not in ALLOWED_CDP_METHODS:
             raise NavigatorError("CDP_METHOD_REFUSED", str(method))
         if method == "Page.navigate":
             params = message.get("params")
@@ -290,8 +380,13 @@ class Navigator:
         clock: Callable[[], float] = time.monotonic,
         load_timeout: float = DEFAULT_LOAD_TIMEOUT_SECONDS,
         call_timeout: float = 20.0,
+        scroll: bool = False,
     ) -> None:
-        self._transport = GuardedTransport(transport, allowlist.urls)
+        keys = [page_key(page.url) for page in allowlist.pages]
+        if len(set(keys)) != len(keys):
+            raise NavigatorError("ALLOWLIST_PAGE_REVISITED")
+        self._scroll = scroll
+        self._transport = GuardedTransport(transport, allowlist.urls, scroll=scroll)
         self._allowlist = allowlist
         self._emit = emit
         self._clock = clock
@@ -466,6 +561,7 @@ class Navigator:
                 "ok": counts["ok"],
                 "timeout": counts["timeout"],
                 "stopped": stopped or None,
+                "scroll": self._scroll,
             }
         )
         if stopped:
@@ -474,10 +570,12 @@ class Navigator:
 
     def _visit(self, page: Page) -> dict[str, Any]:
         self._events.clear()
+        self._transport.new_page()
         reply = self._call("Page.navigate", {"url": page.url}, self._sid)
         if reply.get("errorText"):
             raise StopReauth("NAVIGATE_ERROR")
         loaded = self._wait_for_load()
+        wheel = self._wheel() if loaded and self._scroll else 0
         self._drain(page.dwell_seconds)
         final = urlsplit(self._tab_url())
         if not on_app_origin(final.geturl()):
@@ -490,7 +588,28 @@ class Navigator:
             "result": "ok" if loaded else "timeout",
             "redirected_in_app": not same,
             "dwell_seconds": page.dwell_seconds,
+            "wheel_events": wheel,
+            "capability_counts": COUNTS_NOT_AVAILABLE,
         }
+
+    def _wheel(self) -> int:
+        """Bounded wheel scroll down then back up, to bring footer links into view."""
+
+        steps = [WHEEL_STEP] * WHEEL_DOWN_STEPS + [-WHEEL_STEP] * WHEEL_DOWN_STEPS
+        for delta in steps:
+            self._call(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseWheel",
+                    "x": WHEEL_X,
+                    "y": WHEEL_Y,
+                    "deltaX": 0,
+                    "deltaY": delta,
+                },
+                self._sid,
+            )
+            self._drain(WHEEL_PAUSE_SECONDS)
+        return len(steps)
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +627,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allowlist-sha256",
         help="pin: refuse unless the allow-list file has exactly this sha256",
+    )
+    parser.add_argument(
+        "--scroll",
+        action="store_true",
+        help="FALLBACK, off by default: after each page load send bounded "
+        "mouseWheel events only (no click, key or touch)",
     )
     parser.add_argument(
         "--load-timeout-seconds", type=float, default=DEFAULT_LOAD_TIMEOUT_SECONDS
@@ -554,6 +679,7 @@ def main(
             emit=emit,
             clock=clock,
             load_timeout=args.load_timeout_seconds,
+            scroll=args.scroll,
         ).run()
     except NavigatorError as exc:
         print(f"REFUSED {exc.code}")
