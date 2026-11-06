@@ -982,6 +982,16 @@ def _late_capture(data: dict[str, Any]) -> None:
     )
     rows.append(
         _row(
+            activity_type="transfer",
+            id="w9",
+            type="WITHDRAWAL",
+            amount="20",
+            created_at=_at(9, "10:00:00"),
+            status="C",
+        )
+    )
+    rows.append(
+        _row(
             activity_type="dividend",
             id="d9",
             symbol="AAA",
@@ -1006,15 +1016,15 @@ def test_a_late_capture_is_rolled_back_to_the_cutoff_by_the_rows_after_it() -> N
     assert "post_cutoff_cash_rolled_back" not in baseline["cash"]
     data = _inputs()
     _late_capture(data)
-    # the balance a capture after the cutoff shows: 760.00 + 100 + 1.5 - 0.5 - 3
-    data["accounts"][1]["settled_balance"] = "858.00"
+    # the balance a capture after the cutoff shows: 760.00 + 100 - 20 + 1.5 - 0.5 - 3
+    data["accounts"][1]["settled_balance"] = "838.00"
     account = _facts(data)["closure"]["account"]
     cash = account["cash"]
-    assert cash["post_cutoff_cash_rolled_back"] == "98"
-    assert cash["provider_settled_cash"] == "858"
+    assert cash["post_cutoff_cash_rolled_back"] == "78"
+    assert cash["provider_settled_cash"] == "838"
     assert cash["derived_cash"] == baseline["cash"]["derived_cash"]
     assert cash["residual"] == baseline["cash"]["residual"] == "0.66"
-    assert account["rows_after_cutoff_excluded"] == 3
+    assert account["rows_after_cutoff_excluded"] == 4
 
     # the balance of the cutoff itself would no longer close once the rows are rolled back
     data["accounts"][1]["settled_balance"] = "760.00"
