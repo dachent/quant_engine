@@ -2206,3 +2206,103 @@ def test_account_leg_ignores_dates_after_the_accepted_boundary() -> None:
             {"date": "2026-01-06", "return": "0.02"},
         ]
     )
+
+
+# -- a model that ends before the as-of is refused (both builders read the TT model through this) --
+
+
+def _tt_manifest_through(last: str) -> dict[str, Any]:
+    days = ["2026-08-28", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03"]
+    days = [item for item in days if item <= last]
+    return {
+        "selected_components": [
+            {
+                "slug": slug,
+                "portfolio_weight": "0.5",
+                "performance": {
+                    "nav_history": [
+                        {"observed_date": item, "value": str(100 + index)}
+                        for index, item in enumerate(days)
+                    ]
+                },
+            }
+            for slug in ("component-1", "component-2")
+        ]
+    }
+
+
+def test_a_tt_model_ending_before_the_as_of_is_refused_with_both_dates() -> None:
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match=r"tt-portfolio: the model ends 2026-09-01, before the as-of 2026-09-03",
+    ):
+        reconciliation._tt_manifest_model_returns(
+            _tt_manifest_through("2026-09-01"),
+            ["component-1", "component-2"],
+            accepted_as_of=date(2026, 9, 3),
+        )
+
+
+def test_a_tt_model_through_the_as_of_is_accepted() -> None:
+    returns = reconciliation._tt_manifest_model_returns(
+        _tt_manifest_through("2026-09-03"),
+        ["component-1", "component-2"],
+        accepted_as_of=date(2026, 9, 3),
+    )
+    assert max(returns) == date(2026, 9, 3)
+
+
+def test_a_weekend_as_of_is_held_to_the_last_weekday() -> None:
+    reconciliation.require_model_through_as_of(
+        "tt-portfolio", date(2026, 9, 4), date(2026, 9, 6)
+    )
+    with pytest.raises(reconciliation.ImplementationReconciliationError):
+        reconciliation.require_model_through_as_of(
+            "tt-portfolio", date(2026, 9, 3), date(2026, 9, 6)
+        )
+
+
+def test_a_model_without_dated_rows_is_refused_not_an_index_error() -> None:
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError, match="has no dated rows"
+    ):
+        reconciliation.require_model_through_as_of(
+            "grizzlybears-vtma", None, date(2026, 9, 3)
+        )
+
+
+def test_a_grizzly_tape_ending_before_the_as_of_is_refused(tmp_path: Path) -> None:
+    signals = tmp_path / "signals.csv"
+    signals.write_text(
+        "Date (New York time),Trade\n01/05/2026 09:30 AM,Sell\n",
+        encoding="utf-8",
+    )
+    calendar = [date(2026, 8, 31), date(2026, 9, 1)]
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match=r"grizzlybears-vtma: the model ends 2026-09-01, before the as-of 2026-09-03",
+    ):
+        reconciliation._grizzly_model_states(
+            signals, calendar, accepted_as_of=date(2026, 9, 3)
+        )
+
+
+def test_the_attribution_builder_reads_the_tt_model_through_the_checked_function() -> (
+    None
+):
+    import portfolio_implementation_return_attribution as attribution
+
+    source = Path(attribution.__file__).read_text(encoding="utf-8")
+    assert "reconciliation._tt_manifest_model_returns(" in source
+    assert "reconciliation._grizzly_model_states(" in source
+
+
+def test_a_holiday_cutoff_is_held_to_the_last_trading_day() -> None:
+    # 2026-04-03 is Good Friday: the model ends 2026-04-02 and is complete
+    reconciliation.require_model_through_as_of(
+        "tt-portfolio", date(2026, 4, 2), date(2026, 4, 3)
+    )
+    with pytest.raises(reconciliation.ImplementationReconciliationError):
+        reconciliation.require_model_through_as_of(
+            "tt-portfolio", date(2026, 4, 1), date(2026, 4, 3)
+        )

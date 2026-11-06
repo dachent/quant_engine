@@ -634,6 +634,7 @@ def ingest(
     closes_dir: Path,
     output_root: Path,
     config: IngestConfig,
+    derivation: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
     """Bind one verified driver run; returns the binding document."""
 
@@ -792,7 +793,13 @@ def ingest(
     )
 
     nav_sources, nav_summary = _write_nav(
-        run_dir, output_root, cutoff, sorted(accounts), record, label is not None
+        run_dir,
+        output_root,
+        cutoff,
+        sorted(accounts),
+        record,
+        label is not None,
+        derivation,
     )
     transaction_sources, transaction_manifest, tx_rule = _write_terminal(
         run_dir, output_root, as_of, sorted(accounts), record
@@ -971,6 +978,7 @@ def _write_nav(
     accounts: Sequence[str],
     record: Any,
     labelled: bool,
+    derivation: Mapping[str, Any] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     sources: list[dict[str, object]] = []
     summary: dict[str, object] = {}
@@ -995,6 +1003,29 @@ def _write_nav(
                 if not labelled
                 else "balance history does not end at or just before the cutoff"
             )
+        derived_row: dict[str, str] | None = None
+        if kept[-1][0] == cutoff.as_of_date and len(kept) > 1:
+            native_value, carried = kept[-1][1], kept[-2][1]
+            if native_value == carried:
+                # a native cutoff row equal to the row before is a stale carry unless the derivation
+                # record states the same official value (a flat account whose NAV is its cash)
+                stated = (derivation or {}).get(internal)
+                key = f"official_{cutoff.as_of_date:%m%d}"
+                if not isinstance(stated, dict) or key not in stated:
+                    raise IngestError(
+                        f"the native cutoff NAV of {internal} repeats its prior day: "
+                        "derive it (schwab_nav_derive.py) and pass --derivation-record"
+                    )
+                try:
+                    official = Decimal(str(stated[key]))
+                except ArithmeticError as exc:
+                    raise IngestError("the derived NAV is not a number") from exc
+                if official != native_value:
+                    derived_row = {
+                        "derived": format(official, "f"),
+                        "native": format(native_value, "f"),
+                    }
+                    kept[-1] = (kept[-1][0], official)
         buffer = io.StringIO(newline="")
         writer = csv.writer(buffer, lineterminator="\n")
         writer.writerow(["account_id", "account_name", "date", "account_value"])
@@ -1017,13 +1048,18 @@ def _write_nav(
                 "schema_version": "1",
             }
         )
-        summary[internal] = {
+        entry: dict[str, object] = {
             "cutoff_row_present": kept[-1][0] == cutoff.as_of_date,
             "first_date": kept[0][0].isoformat(),
             "last_date": kept[-1][0].isoformat(),
             "rows": len(kept),
             "rows_after_cutoff_dropped": len(history) - len(kept),
         }
+        if (
+            derived_row is not None
+        ):  # absent otherwise: an ordinary binding is unchanged
+            entry["derived_cutoff_row"] = derived_row
+        summary[internal] = entry
     return sources, summary
 
 
@@ -1285,6 +1321,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--output-root", required=True, type=Path)
     run.add_argument("--base-spec", type=Path)
     run.add_argument("--spec-out", type=Path)
+    run.add_argument("--derivation-record", type=Path)
     return parser
 
 
@@ -1307,6 +1344,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             closes_dir=args.official_closes_dir,
             config=load_config(args.config),
             output_root=args.output_root,
+            derivation=_load(args.derivation_record, "derivation record")
+            if args.derivation_record
+            else None,
         )
         result: dict[str, object] = {
             "as_of_date": binding["as_of_date"],

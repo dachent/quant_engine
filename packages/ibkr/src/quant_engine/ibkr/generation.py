@@ -497,10 +497,24 @@ def _next_weekday(day: date) -> date:
     return candidate
 
 
+def _previous_weekday_or_same(day: date) -> date:
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
 def _flex_history_coverage(
-    statements: Sequence[FlexDailyStatement], crosswalk: Mapping[str, str]
+    statements: Sequence[FlexDailyStatement],
+    crosswalk: Mapping[str, str],
+    declared_gaps: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """Project exact selected statement days under the account weekday calendar."""
+    """Project exact selected statement days under the account weekday calendar.
+
+    Every account's history must also reach the latest statement day of the generation (the last
+    weekday on or before the newest statement): an account that stops earlier is refused unless
+    its exact gap atom is a declared general exclusion (a retired account the owner ruled
+    outside the strategy perimeter).  The between-days gaps stay reported as before.
+    """
 
     by_account: dict[str, dict[date, set[str]]] = {}
     for statement in statements:
@@ -512,6 +526,7 @@ def _flex_history_coverage(
         ).add(statement.artifact_id)
     accounts: list[dict[str, Any]] = []
     known_gaps: list[str] = []
+    latest_day = _previous_weekday_or_same(max(item.report_date for item in statements))
     for account_id in sorted(by_account):
         dated_artifacts = by_account[account_id]
         days = sorted(dated_artifacts)
@@ -546,6 +561,17 @@ def _flex_history_coverage(
                 "source_artifact_ids": sorted(interval_artifacts),
             }
         )
+        if days[-1] < latest_day:
+            atom = (
+                f"missing weekday statement for {account_id}: "
+                f"{days[-1].isoformat()} to {latest_day.isoformat()}"
+            )
+            if atom not in declared_gaps:
+                raise IbkrGenerationError(
+                    "an account's Flex history does not reach the latest statement day: "
+                    + atom
+                )
+            known_gaps.append(atom)
         accounts.append(
             {
                 "account_id": account_id,
@@ -1848,7 +1874,11 @@ def build_generation(
         _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap"),
         declared_zero_activity=declared_zero_activity,
     )
-    flex_history_coverage = _flex_history_coverage(statements, crosswalk)
+    flex_history_coverage = _flex_history_coverage(
+        statements,
+        crosswalk,
+        frozenset(_parse_general_exclusions(spec.get("declared_general_exclusions"))),
+    )
     catalog = _normalize(
         statements,
         baseline,

@@ -13,7 +13,7 @@ import re
 import shutil
 import stat
 import tempfile
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
@@ -33,11 +33,23 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PLAN_SCHEMA_VERSION = 1
+# Schema 1 plans (HAR roots only) stay verifiable under adapter 1.0.0. Schema 2 adds the transaction-capture sources
+# and the per-book transaction gate, and builds under adapter 1.1.0.
+PLAN_SCHEMA_VERSION = 2
+SUPPORTED_PLAN_SCHEMA_VERSIONS = (1, 2)
 CATALOG_SCHEMA_VERSION = 1
-ADAPTER_VERSION = "1.0.0"
+ADAPTER_VERSION = "1.1.0"
+_LEGACY_ADAPTER_VERSION = "1.0.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ENTITY = re.compile(r"^(strategy|account)_(\d+)_", re.IGNORECASE)
+_CAPTURE_LABEL = re.compile(r"^transaction-capture-[1-9][0-9]*$")
+_CAPTURE_TRANSACTIONS = re.compile(r"^raw/strategy_([0-9]+)_transactions\.csv$")
+_CAPTURE_PERF = re.compile(r"^raw/strategy_([0-9]+)_perf\.csv$")
+_BOOK_ID = re.compile(r"^[0-9]+$")
+_MIN_REASON_CHARS = 20
+_ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_CAPTURE_MANIFEST = "capture-manifest.json"
+_TRANSACTIONS_TABLE = "tables/har_transactions.parquet"
 _MAX_CSV_FIELD_BYTES = 64 * 1024 * 1024
 _LEGACY_TABLES = {
     "book_assets.parquet",
@@ -132,6 +144,10 @@ def _disposition(label: str, relative: str) -> str:
         and portable.parts[0] in {"csv", "downloads"}
     ):
         return "HAR_DERIVED_CSV"
+    if _CAPTURE_LABEL.fullmatch(label) and _CAPTURE_TRANSACTIONS.fullmatch(relative):
+        return "CAPTURE_TRANSACTION_CSV"
+    if _CAPTURE_LABEL.fullmatch(label) and _CAPTURE_PERF.fullmatch(relative):
+        return "CAPTURE_PERF_CSV"
     return "PROVENANCE_ONLY"
 
 
@@ -151,19 +167,529 @@ def _inventory(label: str, root: Path) -> list[dict[str, object]]:
     return entries
 
 
+def _book_stats(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, Any]]:
+    """Per-book transaction count and first/last ISO date over parsed rows."""
+
+    stats: dict[str, dict[str, Any]] = {}
+    lines: dict[str, list[str]] = defaultdict(list)
+    for row in rows:
+        book = row.get("_entity_id", "")
+        if not book:
+            continue
+        entry = stats.setdefault(
+            book, {"first_date": None, "last_date": None, "rows": 0}
+        )
+        entry["rows"] += 1
+        lines[book].append(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if not key.startswith("_") and value != ""
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        day = row.get("Date", "")
+        if _ISO_DATE.fullmatch(day) is None:
+            if row.get("_transport") == "capture_csv":
+                raise Portfolio123GenerationError(
+                    f"capture transaction date is not ISO for book {book}"
+                )
+            continue
+        if entry["first_date"] is None or day < entry["first_date"]:
+            entry["first_date"] = day
+        if entry["last_date"] is None or day > entry["last_date"]:
+            entry["last_date"] = day
+    for book, entry in stats.items():
+        # Identity of the exact row set: columns the row actually carries, order-free.
+        entry["rowset_sha256"] = hashlib.sha256(
+            "\n".join(sorted(lines[book])).encode("utf-8")
+        ).hexdigest()
+    return stats
+
+
+def _previous_gate(data_root: Path, generation_id: str | None) -> dict[str, Any] | None:
+    """Per-book transaction stats of the generation a new one must not regress from."""
+
+    if generation_id is None:
+        if not (data_root / "CURRENT.json").exists():
+            return None
+        generation_id = read_current(data_root).generation_id
+    if _SHA256.fullmatch(generation_id) is None:
+        raise Portfolio123GenerationError("previous generation ID is invalid")
+    root = data_root / "generations" / generation_id
+    try:
+        manifest = GenerationManifest.from_json_bytes(
+            (root / "generation.json").read_bytes()
+        )
+    except (OSError, ValueError) as exc:
+        raise Portfolio123GenerationError("previous generation is unreadable") from exc
+    if manifest.generation_id != generation_id:
+        raise Portfolio123GenerationError("previous generation identity differs")
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == _TRANSACTIONS_TABLE
+        ),
+        None,
+    )
+    books: dict[str, dict[str, Any]] = {}
+    digest = ""
+    if artifact is not None:
+        table = _safe_path(root, _TRANSACTIONS_TABLE)
+        if not table.is_file() or hash_file(table) != (
+            artifact.sha256,
+            artifact.size_bytes,
+        ):
+            raise Portfolio123GenerationError(
+                "previous generation transactions differ from its manifest"
+            )
+        digest = artifact.sha256
+        rows = pq.read_table(table).to_pylist()
+        books = _book_stats(
+            {key: "" if value is None else str(value) for key, value in row.items()}
+            for row in rows
+        )
+    return {
+        "books": dict(sorted(books.items())),
+        "generation_id": generation_id,
+        "transactions_sha256": digest,
+    }
+
+
+def book_rowset_fingerprint(path: Path, book: str, family: str) -> dict[str, Any]:
+    """Rows, first/last ISO date and canonical row-set digest of one capture CSV (read-only)."""
+
+    rows = _csv_rows(
+        path, f"transaction-capture-1/raw/{path.name}", family, "capture_csv"
+    )
+    return _book_stats(rows).get(
+        book,
+        {
+            "first_date": None,
+            "last_date": None,
+            "rows": 0,
+            "rowset_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+    )
+
+
+def previous_generation_books(
+    data_root: Path, generation_id: str | None = None
+) -> dict[str, Any] | None:
+    """Per-book transaction fingerprints of a published generation (default: CURRENT)."""
+
+    return _previous_gate(data_root, generation_id)
+
+
+def _capture_books(
+    label: str, files: list[dict[str, object]], root: Path
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Book -> relative path of transactions and of perf in one capture root, manifest-checked."""
+
+    by_path = {str(item["relative_path"]): item for item in files}
+    manifest_item = by_path.get(_CAPTURE_MANIFEST)
+    if manifest_item is None:
+        raise Portfolio123GenerationError(f"{label} has no {_CAPTURE_MANIFEST}")
+    try:
+        manifest = _object(
+            json.loads((root / _CAPTURE_MANIFEST).read_text(encoding="utf-8")),
+            "capture manifest",
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Portfolio123GenerationError("capture manifest is not JSON") from exc
+    listed: dict[str, tuple[str, int]] = {}
+    for entry in _objects(manifest.get("artifacts"), "capture manifest artifacts"):
+        relative = _text(entry.get("relative_path"), "capture relative_path")
+        listed[relative] = (
+            _text(entry.get("sha256"), "capture sha256"),
+            _integer(entry.get("observed_length"), "capture observed_length"),
+        )
+    books: dict[str, str] = {}
+    perf: dict[str, str] = {}
+    for relative, item in sorted(by_path.items()):
+        lowered = relative.casefold()
+        if item["disposition"] not in {"CAPTURE_TRANSACTION_CSV", "CAPTURE_PERF_CSV"}:
+            for token, expected in (
+                ("transaction", "transactions"),
+                ("perf", "perf"),
+            ):
+                if (
+                    lowered.startswith("raw/")
+                    and lowered.endswith(".csv")
+                    and token in lowered
+                ):
+                    raise Portfolio123GenerationError(
+                        f"{label} {relative} looks like a {token} export but is not "
+                        f"raw/strategy_<book>_{expected}.csv"
+                    )
+            continue
+        if listed.get(relative) != (item["sha256"], item["bytes"]):
+            raise Portfolio123GenerationError(
+                f"{label} {relative} is not hash-bound by its capture manifest"
+            )
+        if item["disposition"] == "CAPTURE_TRANSACTION_CSV":
+            match = _CAPTURE_TRANSACTIONS.fullmatch(relative)
+            assert match is not None
+            books[match.group(1)] = relative
+        else:
+            match = _CAPTURE_PERF.fullmatch(relative)
+            assert match is not None
+            perf[match.group(1)] = relative
+    return books, perf
+
+
+_CORRECTION_TEXT_FIELDS = {
+    "evidence",
+    "predecessor_is_series_of",
+    "predecessor_rowset_sha256",
+    "previous_generation_id",
+    "replacement_rowset_sha256",
+}
+_CORRECTION_FIELDS = _CORRECTION_TEXT_FIELDS | {"evidence_sha256"}
+_BOOK_ROUTES = {"capture", "exempt", "untrusted"}
+
+
+def _gate_inputs(
+    sources: Sequence[Mapping[str, Any]],
+    data_root: Path,
+    expected_books: Sequence[str],
+    previous_generation_id: str | None,
+    supersede_books: Mapping[str, str],
+    transaction_exempt_books: Mapping[str, str],
+    identity_corrections: Mapping[str, Mapping[str, Any]],
+    untrusted_har_ids: Mapping[str, str],
+    identity_decisions: Sequence[Mapping[str, Any]],
+    identity_review_accepted: Mapping[str, str],
+    har_download_ids: Sequence[str],
+    book_inventory: Mapping[str, Mapping[str, str]],
+) -> dict[str, Any]:
+    captured: dict[str, str] = {}
+    captured_perf: dict[str, str] = {}
+    for source in sources:
+        if not _CAPTURE_LABEL.fullmatch(str(source["label"])):
+            continue
+        root = Path(str(source["root"]))
+        transactions, perf = _capture_books(
+            str(source["label"]), _objects(source["files"], "files"), root
+        )
+        for found, target, kind in (
+            (transactions, captured, "transaction"),
+            (perf, captured_perf, "perf"),
+        ):
+            for book, relative in found.items():
+                if book in target:
+                    raise Portfolio123GenerationError(
+                        f"book {book} has a {kind} capture in more than one capture"
+                    )
+                target[book] = f"{source['label']}/{relative}"
+    expected = sorted({str(book) for book in expected_books})
+    for book in (
+        *expected,
+        *supersede_books,
+        *transaction_exempt_books,
+        *identity_corrections,
+    ):
+        if _BOOK_ID.fullmatch(str(book)) is None:
+            raise Portfolio123GenerationError("book IDs must be numeric")
+    missing = [book for book in expected if book not in captured]
+    if missing:
+        raise Portfolio123GenerationError(
+            "expected books have no transaction capture: " + ", ".join(missing)
+        )
+    # The HAR equity curve of a captured book is never trusted (a permuted download held
+    # another strategy's curve), so a transaction capture needs its own perf capture.
+    if set(captured) != set(captured_perf):
+        raise Portfolio123GenerationError(
+            "transaction and perf captures cover different books: "
+            + ", ".join(sorted(set(captured) ^ set(captured_perf)))
+        )
+    for book, reason in supersede_books.items():
+        if book not in expected:
+            raise Portfolio123GenerationError(
+                f"book {book} cannot be superseded unless it is an expected book"
+            )
+        if not reason.strip():
+            raise Portfolio123GenerationError(f"book {book} supersede needs a reason")
+    for book, reason in transaction_exempt_books.items():
+        if book in expected or book in captured or book in captured_perf:
+            raise Portfolio123GenerationError(
+                f"book {book} is exempt from transactions, so it cannot also be "
+                "expected or captured"
+            )
+        if not reason.strip():
+            raise Portfolio123GenerationError(f"book {book} exemption needs a reason")
+    previous = _previous_gate(data_root, previous_generation_id)
+    corrections: dict[str, dict[str, Any]] = {}
+    source_hashes = {
+        str(item["sha256"])
+        for source in sources
+        for item in _objects(source["files"], "files")
+    }
+    for book, record in sorted(identity_corrections.items()):
+        if book not in expected or book in supersede_books:
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction needs an expected book that is "
+                "not also superseded"
+            )
+        if (
+            set(record) != _CORRECTION_FIELDS
+            or not all(
+                isinstance(record[field], str) and record[field].strip()
+                for field in _CORRECTION_TEXT_FIELDS
+            )
+            or not isinstance(record["evidence_sha256"], list)
+            or not record["evidence_sha256"]
+        ):
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction fields differ: "
+                + ", ".join(sorted(_CORRECTION_FIELDS))
+            )
+        unknown = [
+            str(item) for item in record["evidence_sha256"] if item not in source_hashes
+        ]
+        if unknown:
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction evidence is not a file of this "
+                "plan's sources: " + ", ".join(unknown)
+            )
+        if (
+            previous is None
+            or record["previous_generation_id"] != previous["generation_id"]
+        ):
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction names another predecessor generation"
+            )
+        held = previous["books"].get(book)
+        if held is None or record["predecessor_rowset_sha256"] != held["rowset_sha256"]:
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction does not match the predecessor's rows"
+            )
+        if _SHA256.fullmatch(record["replacement_rowset_sha256"]) is None:
+            raise Portfolio123GenerationError(
+                f"book {book} replacement rowset hash is invalid"
+            )
+        corrections[book] = dict(sorted(record.items()))
+    untrusted = _untrusted_ids(
+        untrusted_har_ids, captured, captured_perf, har_download_ids
+    )
+    decisions = _identity_decisions(
+        sources, captured, identity_decisions, identity_review_accepted
+    )
+    if book_inventory:
+        # The frozen inventory names every book the cycle knows: each captured id and
+        # each HAR download id must be in it, with the route its role was given.
+        unlisted = sorted(
+            (set(captured) | set(har_download_ids) | set(transaction_exempt_books))
+            - set(book_inventory)
+        )
+        if unlisted:
+            raise Portfolio123GenerationError(
+                "books missing from the inventory: " + ", ".join(unlisted)
+            )
+    if captured:
+        # No silent permuted rows: the 2026-09-02 download set held other strategies' rows
+        # under seven of its eight ids, so every id of the HAR download set is recaptured
+        # (capture, perf and an identity decision) or excluded with a stated reason.
+        uncovered = sorted(set(har_download_ids) - set(captured) - set(untrusted))
+        if uncovered:
+            raise Portfolio123GenerationError(
+                "HAR download ids neither recaptured nor excluded as untrusted: "
+                + ", ".join(uncovered)
+            )
+    return {
+        "captured_books": dict(sorted(captured.items())),
+        "captured_perf_books": dict(sorted(captured_perf.items())),
+        "expected_books": expected,
+        "identity_corrections": corrections,
+        "book_inventory": {
+            book: dict(sorted(entry.items()))
+            for book, entry in sorted(book_inventory.items())
+        },
+        "identity_decisions": decisions,
+        "previous": previous,
+        # Publishing refuses when a CURRENT-sourced predecessor is no longer CURRENT.
+        "previous_source": (
+            "explicit"
+            if previous_generation_id is not None
+            else ("current" if previous is not None else "none")
+        ),
+        "supersede": dict(sorted(supersede_books.items())),
+        "transaction_exempt_books": dict(sorted(transaction_exempt_books.items())),
+        "untrusted_har_ids": untrusted,
+    }
+
+
+def _apply_inventory(
+    inventory: Mapping[str, Mapping[str, str]],
+    expected: Sequence[str],
+    exempt: Mapping[str, str],
+    untrusted: Mapping[str, str],
+) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """Derive the expected, exempt and untrusted books from one frozen inventory."""
+
+    capture: list[str] = []
+    derived_exempt: dict[str, str] = {}
+    derived_untrusted: dict[str, str] = {}
+    for book, entry in sorted(inventory.items()):
+        if _BOOK_ID.fullmatch(str(book)) is None:
+            raise Portfolio123GenerationError("book IDs must be numeric")
+        route = entry.get("route")
+        if route not in _BOOK_ROUTES or not str(entry.get("role", "")).strip():
+            raise Portfolio123GenerationError(
+                f"inventory book {book} needs a role and a route of "
+                + ", ".join(sorted(_BOOK_ROUTES))
+            )
+        if route == "capture":
+            capture.append(book)
+        else:
+            reason = str(entry.get("reason", ""))
+            if not reason.strip():
+                raise Portfolio123GenerationError(
+                    f"inventory book {book} route {route} needs a reason"
+                )
+            (derived_exempt if route == "exempt" else derived_untrusted)[book] = reason
+    for given, derived, name in (
+        (set(expected), set(capture), "--expected-book"),
+        (set(exempt), set(derived_exempt), "--no-transactions-book"),
+        (set(untrusted), set(derived_untrusted), "--untrusted-har-id"),
+    ):
+        if given and given != derived:
+            raise Portfolio123GenerationError(
+                f"{name} differs from the book inventory; the inventory is the only source"
+            )
+    return capture, derived_exempt, derived_untrusted
+
+
+def _untrusted_ids(
+    reasons: Mapping[str, str],
+    captured: Mapping[str, str],
+    captured_perf: Mapping[str, str],
+    har_download_ids: Sequence[str],
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for book, reason in sorted(reasons.items()):
+        if _BOOK_ID.fullmatch(str(book)) is None:
+            raise Portfolio123GenerationError("book IDs must be numeric")
+        if book in captured or book in captured_perf:
+            raise Portfolio123GenerationError(
+                f"book {book} is recaptured, so it cannot also be untrusted"
+            )
+        if book not in har_download_ids:
+            raise Portfolio123GenerationError(
+                f"book {book} has no HAR download to exclude"
+            )
+        if len(reason.strip()) < _MIN_REASON_CHARS:
+            raise Portfolio123GenerationError(
+                f"book {book} exclusion needs a reason that states its downstream seed role"
+            )
+        result[book] = reason
+    return result
+
+
+def _identity_decisions(
+    sources: Sequence[Mapping[str, Any]],
+    captured: Mapping[str, str],
+    decision_files: Sequence[Mapping[str, Any]],
+    review_accepted: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    """Every captured book needs a PASS identity decision for these capture bytes."""
+
+    if not captured:
+        if decision_files or review_accepted:
+            raise Portfolio123GenerationError(
+                "identity decisions need a transaction capture"
+            )
+        return {}
+    by_manifest: dict[str, str] = {}
+    for source in sources:
+        label = str(source["label"])
+        if not _CAPTURE_LABEL.fullmatch(label):
+            continue
+        for item in _objects(source["files"], "files"):
+            if item["relative_path"] == _CAPTURE_MANIFEST:
+                by_manifest[str(item["sha256"])] = label
+    by_label: dict[str, Mapping[str, Any]] = {}
+    for decided in decision_files:
+        owner = by_manifest.get(str(decided.get("capture_manifest_sha256")))
+        if decided.get("schema") != "p123-book-identity-decisions/1" or owner is None:
+            raise Portfolio123GenerationError(
+                "identity decisions are not for a capture of this plan"
+            )
+        by_label[owner] = decided
+    result: dict[str, dict[str, Any]] = {}
+    for book, path in sorted(captured.items()):
+        record: Mapping[str, Any] = by_label.get(path.split("/", 1)[0], {})
+        item = record.get("books", {}).get(book)
+        if not isinstance(item, dict):
+            raise Portfolio123GenerationError(f"book {book} has no identity decision")
+        decision = item.get("decision")
+        reason = review_accepted.get(book, "").strip()
+        if decision != "PASS" and not (decision == "REVIEW" and reason):
+            raise Portfolio123GenerationError(
+                f"book {book} identity decision is {decision}"
+                + (" (REVIEW needs an accepted reason)" if decision == "REVIEW" else "")
+            )
+        result[book] = {
+            "accepted_review": reason or None,
+            "decision": decision,
+            "decisions_sha256": hashlib.sha256(
+                canonical_json_bytes(record)
+            ).hexdigest(),
+        }
+    for book in review_accepted:
+        if book not in result or result[book]["decision"] != "REVIEW":
+            raise Portfolio123GenerationError(
+                f"book {book} review acceptance needs a REVIEW decision"
+            )
+    return result
+
+
 def create_cutover_plan(
     legacy_root: Path,
     har_root: Path,
     data_root: Path,
     *,
     as_of_date: date,
+    transaction_captures: Sequence[Path] = (),
+    expected_books: Sequence[str] = (),
+    previous_generation_id: str | None = None,
+    supersede_books: Mapping[str, str] | None = None,
+    transaction_exempt_books: Mapping[str, str] | None = None,
+    identity_corrections: Mapping[str, Mapping[str, Any]] | None = None,
+    book_inventory: Mapping[str, Mapping[str, str]] | None = None,
+    untrusted_har_ids: Mapping[str, str] | None = None,
+    identity_decisions: Sequence[Mapping[str, Any]] = (),
+    identity_review_accepted: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """Hash every approved input and create a private content-addressed plan."""
+    """Hash every approved input and create a private content-addressed plan.
+
+    ``transaction_captures`` are saved Portfolio123 capture directories
+    (``capture-manifest.json`` plus ``raw/strategy_<id>_transactions.csv`` and
+    ``raw/strategy_<id>_perf.csv`` per book). A book they cover takes its transactions
+    and equity curve from the capture alone. Every expected book must then have rows on
+    or before the as-of date, and no book may regress against ``previous_generation_id``
+    (default: the data root's CURRENT) unless it is named in ``supersede_books`` with a
+    reason (row count and first date only), or in ``identity_corrections`` with a
+    hash-bound record proving the predecessor held another strategy's rows under that
+    id. With captures, every id of the HAR root's ``downloads/`` set must be recaptured
+    (capture, perf and a PASS identity decision from ``tools/p123_book_identity_check.py``
+    for these capture bytes) or excluded in ``untrusted_har_ids`` with a reason stating
+    its downstream seed role. ``transaction_exempt_books`` names expected books with no transaction export
+    (for example a designer model) and a reason; they must have no capture file.
+    """
 
     legacy = _root(legacy_root, "legacy_root", existing=True)
     har = _root(har_root, "har_root", existing=True)
     destination = _root(data_root, "data_root", existing=True)
-    roots = (legacy, har, destination)
+    captures = [
+        _root(path, "transaction_capture", existing=True)
+        for path in transaction_captures
+    ]
+    roots = (legacy, har, destination, *captures)
     if any(
         _within(left, right) or _within(right, left)
         for index, left in enumerate(roots)
@@ -182,6 +708,11 @@ def create_cutover_plan(
             "root": str(har),
         },
     ]
+    for number, capture in enumerate(captures, start=1):
+        label = f"transaction-capture-{number}"
+        sources.append(
+            {"files": _inventory(label, capture), "label": label, "root": str(capture)}
+        )
     legacy_tables = {
         PurePosixPath(str(item["relative_path"])).name
         for item in _objects(sources[0]["files"], "legacy files")
@@ -195,12 +726,55 @@ def create_cutover_plan(
     )
     if har_count == 0:
         raise Portfolio123GenerationError("HAR derived CSV set is empty")
+    inventory = {book: dict(entry) for book, entry in (book_inventory or {}).items()}
+    expected_list, exempt_map, untrusted_map = (
+        _apply_inventory(
+            inventory,
+            expected_books,
+            dict(transaction_exempt_books or {}),
+            dict(untrusted_har_ids or {}),
+        )
+        if inventory
+        else (
+            list(expected_books),
+            dict(transaction_exempt_books or {}),
+            dict(untrusted_har_ids or {}),
+        )
+    )
+    gate = _gate_inputs(
+        sources,
+        destination,
+        expected_list,
+        previous_generation_id,
+        dict(supersede_books or {}),
+        exempt_map,
+        {book: dict(record) for book, record in (identity_corrections or {}).items()},
+        untrusted_map,
+        list(identity_decisions),
+        dict(identity_review_accepted or {}),
+        sorted(
+            {
+                match.group(2)
+                for item in _objects(sources[1]["files"], "HAR files")
+                if item["disposition"] == "HAR_DERIVED_CSV"
+                and str(item["relative_path"]).startswith("downloads/")
+                and (
+                    match := _ENTITY.match(
+                        PurePosixPath(str(item["relative_path"])).name
+                    )
+                )
+                and match.group(1).casefold() == "strategy"
+            }
+        ),
+        inventory,
+    )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),
         "data_root": str(destination),
         "provider_id": "portfolio123",
         "schema_version": PLAN_SCHEMA_VERSION,
         "sources": sources,
+        "transaction_gate": gate,
     }
     plan_id = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     run_id = f"legacy-{as_of_date.strftime('%Y%m%d')}-{plan_id[:12]}"
@@ -213,6 +787,10 @@ def create_cutover_plan(
         ),
         "har_csv_count": har_count,
         "legacy_table_count": len(legacy_tables),
+        "previous_generation_id": (
+            gate["previous"]["generation_id"] if gate["previous"] else None
+        ),
+        "transaction_capture_count": len(captures),
         "plan_id": plan_id,
         "plan_path": str(plan_path),
         "run_id": run_id,
@@ -261,14 +839,25 @@ def _load_plan(plan_path: Path) -> dict[str, Any]:
     )
     if run_id != expected_run or plan_path.parent.name != plan_id:
         raise Portfolio123GenerationError("plan run identity differs")
-    if plan.get("schema_version") != PLAN_SCHEMA_VERSION:
+    if plan.get("schema_version") not in SUPPORTED_PLAN_SCHEMA_VERSIONS:
         raise Portfolio123GenerationError("plan schema version is unsupported")
+    if plan["schema_version"] == 1 and "transaction_gate" in plan:
+        raise Portfolio123GenerationError("schema 1 plan carries a transaction gate")
+    if plan["schema_version"] == 2:
+        _object(plan.get("transaction_gate"), "transaction_gate")
     return plan
 
 
 def _sources(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     sources = _objects(plan.get("sources"), "sources")
-    if {item.get("label") for item in sources} != {"legacy-data", "har-workspace"}:
+    labels = [item.get("label") for item in sources]
+    captures = [label for label in labels if _CAPTURE_LABEL.fullmatch(str(label))]
+    if (
+        labels[:2] != ["legacy-data", "har-workspace"]
+        or labels[2:] != captures
+        or captures != [f"transaction-capture-{n}" for n in range(1, len(captures) + 1)]
+        or (plan.get("schema_version") == 1 and captures)
+    ):
         raise Portfolio123GenerationError("plan source labels differ")
     return sources
 
@@ -420,7 +1009,9 @@ def _family(relative: str) -> str:
     return "supporting_metadata"
 
 
-def _csv_rows(path: Path, artifact_id: str, family: str) -> list[dict[str, str]]:
+def _csv_rows(
+    path: Path, artifact_id: str, family: str, transport: str | None = None
+) -> list[dict[str, str]]:
     entity = _ENTITY.match(PurePosixPath(artifact_id).name)
     rows: list[dict[str, str]] = []
     try:
@@ -457,9 +1048,12 @@ def _csv_rows(path: Path, artifact_id: str, family: str) -> list[dict[str, str]]
                         else "unknown",
                         "_source_artifact": artifact_id,
                         "_source_row": str(number),
-                        "_transport": "browser_download"
-                        if artifact_id.startswith("downloads/")
-                        else "har_derived",
+                        "_transport": transport
+                        or (
+                            "browser_download"
+                            if artifact_id.startswith("downloads/")
+                            else "har_derived"
+                        ),
                     }
                 )
                 rows.append(normalized)
@@ -493,6 +1087,135 @@ def _write_parquet(
     )
     digest, size = hash_file(path)
     return digest, size, len(materialized)
+
+
+def _capture_day(row: Mapping[str, str]) -> date:
+    day = row.get("Date", "")
+    try:
+        if _ISO_DATE.fullmatch(day) is None:
+            raise ValueError(day)
+        return date.fromisoformat(day)
+    except ValueError:
+        raise Portfolio123GenerationError(
+            f"capture transaction date is not ISO for book {row.get('_entity_id', '')}"
+        ) from None
+
+
+def _enforce_transaction_gate(
+    gate: Mapping[str, Any],
+    rows: Iterable[Mapping[str, str]],
+    perf_rows: Iterable[Mapping[str, str]] = (),
+    excluded: Mapping[str, int] | None = None,
+    excluded_perf: Mapping[str, int] | None = None,
+) -> dict[str, object]:
+    """Refuse, per book, an empty expected book or a history that shrank against the previous generation."""
+
+    stats = _book_stats(rows)
+    perf_stats = _book_stats(perf_rows)
+    captured = _object(gate.get("captured_books"), "captured_books")
+    supersede = _object(gate.get("supersede"), "supersede")
+    corrections = _object(gate.get("identity_corrections", {}), "corrections")
+    exempt = _object(gate.get("transaction_exempt_books", {}), "exempt books")
+    untrusted = _object(gate.get("untrusted_har_ids", {}), "untrusted ids")
+    previous = gate.get("previous")
+    books = (
+        _object(_object(previous, "previous")["books"], "previous books")
+        if previous is not None
+        else {}
+    )
+    failures: list[str] = []
+    waived: dict[str, object] = {}
+    corrected: dict[str, object] = {}
+    # An expected book needs real dated rows on or before the cutoff whether or not the
+    # predecessor held it (the six temporary books were absent from 3c8a0f41).
+    for book in gate.get("expected_books", []):
+        if book not in stats:
+            failures.append(
+                f"{book}: expected book has no transactions on or before the as-of date"
+            )
+        if book not in perf_stats:
+            failures.append(
+                f"{book}: expected book has no equity-curve rows on or before the as-of date"
+            )
+    for book in sorted(books):
+        old = _object(books[book], "previous book")
+        new = stats.get(book)
+        if book in untrusted:
+            continue  # the predecessor's rows under this id are excluded, not compared
+        if book in corrections:
+            record = _object(corrections[book], "correction")
+            if new is None:
+                failures.append(f"{book}: identity correction has no replacement rows")
+            elif new["rowset_sha256"] != record["replacement_rowset_sha256"]:
+                failures.append(
+                    f"{book}: replacement rows differ from the identity correction"
+                )
+            else:
+                corrected[book] = {"previous": old, "record": record, "new": new}
+            continue
+        # A superseded book may change its series (row count, first date); it can never lose
+        # its last transaction date or disappear.
+        hard: list[str] = []
+        waivable: list[str] = []
+        if new is None:
+            hard.append("no transactions")
+        else:
+            if old["last_date"] and (
+                new["last_date"] is None or new["last_date"] < old["last_date"]
+            ):
+                hard.append(f"last date {new['last_date']} < {old['last_date']}")
+            if new["rows"] < old["rows"]:
+                waivable.append(f"rows {new['rows']} < {old['rows']}")
+            if old["first_date"] and new["first_date"] != old["first_date"]:
+                waivable.append(
+                    f"first date {new['first_date']} != {old['first_date']}"
+                )
+        if book in supersede:
+            if hard:
+                failures.append(f"{book}: " + ", ".join(hard) + " (not waivable)")
+            elif waivable:
+                waived[book] = {
+                    "previous": old,
+                    "reason": supersede[book],
+                    "waived": waivable,
+                }
+        elif hard or waivable:
+            failures.append(f"{book}: " + ", ".join([*hard, *waivable]))
+    for book in sorted(supersede):
+        if book not in captured or book not in stats:
+            failures.append(f"{book}: supersede needs captured transactions")
+    for book in sorted(corrections):
+        if book not in books:
+            failures.append(
+                f"{book}: identity correction names a book the predecessor lacks"
+            )
+    if failures:
+        raise Portfolio123GenerationError(
+            "transaction gate refused the generation (previous "
+            f"{_object(previous, 'previous')['generation_id'] if previous else 'none'}"
+            "): " + "; ".join(failures)
+        )
+    return {
+        "books": dict(sorted(stats.items())),
+        "captured_books": dict(sorted(captured.items())),
+        "equity_curve_books": dict(sorted(perf_stats.items())),
+        "excluded_after_as_of": dict(sorted((excluded or {}).items())),
+        "excluded_equity_curve_after_as_of": dict(
+            sorted((excluded_perf or {}).items())
+        ),
+        "expected_books": list(gate.get("expected_books", [])),
+        "identity_corrected": corrected,
+        "identity_decisions": dict(
+            sorted(dict(gate.get("identity_decisions", {})).items())
+        ),
+        "previous_generation_id": (
+            _object(previous, "previous")["generation_id"] if previous else None
+        ),
+        "status": "PASS",
+        "superseded": waived,
+        "transaction_exempt_books": dict(sorted(exempt.items())),
+        "untrusted_har_ids": dict(sorted(untrusted.items())),
+    }
 
 
 def _build_outputs(
@@ -529,14 +1252,83 @@ def _build_outputs(
     rows_by_family: dict[str, list[dict[str, str]]] = defaultdict(list)
     dataset_rows: Counter[str] = Counter()
     har = by_label["har-workspace"]
+    gate = (
+        _object(plan["transaction_gate"], "transaction_gate")
+        if (plan.get("schema_version") == 2)
+        else None
+    )
+    captured = dict(gate["captured_books"]) if gate is not None else {}
+    dropping = set(captured) | (
+        set(gate.get("untrusted_har_ids", {})) if gate is not None else set()
+    )
+    excluded: Counter[str] = Counter()
+    excluded_perf: Counter[str] = Counter()
+    dropped_downloads: dict[str, list[str]] = defaultdict(list)
     for item in _objects(har.get("files"), "files"):
         if item.get("disposition") != "HAR_DERIVED_CSV":
             continue
         relative = _text(item["relative_path"], "relative_path")
         family = _family(relative)
+        entity = _ENTITY.match(PurePosixPath(relative).name)
+        if entity and entity.group(2) in dropping and relative.startswith("downloads/"):
+            # The browser-download set of a captured book is never trusted: the 2026-09-02
+            # set held other strategies' rows under these ids. Its HAR page-derived csv/
+            # rows stay; the capture supplies transactions and the equity curve.
+            dropped_downloads[entity.group(2)].append(relative)
+            continue
         parsed = _csv_rows(_object_path(authority, item), relative, family)
         rows_by_family[family].extend(parsed)
         dataset_rows[family] += len(parsed)
+    for source in _sources(plan):
+        label = _text(source["label"], "label")
+        if _CAPTURE_LABEL.fullmatch(label) is None:
+            continue
+        for item in _objects(source.get("files"), "files"):
+            disposition = item.get("disposition")
+            if disposition not in {"CAPTURE_TRANSACTION_CSV", "CAPTURE_PERF_CSV"}:
+                continue
+            family = (
+                "transactions"
+                if disposition == "CAPTURE_TRANSACTION_CSV"
+                else "equity_curve"
+            )
+            counter = excluded if family == "transactions" else excluded_perf
+            relative = _text(item["relative_path"], "relative_path")
+            parsed = _csv_rows(
+                _object_path(authority, item),
+                f"{label}/{relative}",
+                family,
+                "capture_csv",
+            )
+            kept: list[dict[str, str]] = []
+            for row in parsed:
+                day = _capture_day(row)
+                if day > as_of:
+                    # Retained as source evidence, never a row of a generation cut at as_of.
+                    counter[row["_entity_id"]] += 1
+                else:
+                    kept.append(row)
+            rows_by_family[family].extend(kept)
+            dataset_rows[family] += len(kept)
+    gate_report = (
+        _enforce_transaction_gate(
+            gate,
+            rows_by_family.get("transactions", []),
+            [
+                row
+                for row in rows_by_family.get("equity_curve", [])
+                if row["_transport"] == "capture_csv"
+            ],
+            excluded,
+            excluded_perf,
+        )
+        if gate is not None
+        else None
+    )
+    if gate_report is not None:
+        gate_report["dropped_har_downloads"] = {
+            book: sorted(paths) for book, paths in sorted(dropped_downloads.items())
+        }
     for family in sorted(rows_by_family):
         destination = work / "tables" / f"har_{family}.parquet"
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -592,6 +1384,8 @@ def _build_outputs(
             "unclassified_input_count": 0,
         },
     }
+    if gate_report is not None:
+        catalog["transaction_gate"] = gate_report
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_path = work / "portfolio123-generation.json"
     catalog_path.write_bytes(catalog_bytes)
@@ -606,7 +1400,7 @@ def _build_outputs(
             plan_size,
             as_of,
             "portfolio123-cutover-plan",
-            str(PLAN_SCHEMA_VERSION),
+            str(plan["schema_version"]),
         ),
         SourceArtifact(
             "normalized/portfolio123-generation.json",
@@ -619,7 +1413,12 @@ def _build_outputs(
     )
     manifest = GenerationManifest.build(
         as_of_date=as_of,
-        adapter=AdapterIdentity("quant-engine-portfolio123", ADAPTER_VERSION),
+        adapter=AdapterIdentity(
+            "quant-engine-portfolio123",
+            ADAPTER_VERSION
+            if plan.get("schema_version") == PLAN_SCHEMA_VERSION
+            else _LEGACY_ADAPTER_VERSION,
+        ),
         coverage=CoverageClaim(
             CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             "exact hash-bound legacy database and derived CSV snapshot",
@@ -694,6 +1493,27 @@ def _rebuild(
     return catalog, manifest
 
 
+def _require_bound_predecessor(plan: Mapping[str, Any], data_root: Path) -> None:
+    """A plan gated against CURRENT cannot replace a CURRENT that moved after planning."""
+
+    if plan.get("schema_version") != 2:
+        return
+    gate = _object(plan["transaction_gate"], "transaction_gate")
+    source = gate.get("previous_source")
+    current = (
+        read_current(data_root).generation_id
+        if (data_root / "CURRENT.json").exists()
+        else None
+    )
+    previous = gate.get("previous")
+    bound = _object(previous, "previous")["generation_id"] if previous else None
+    if source in {"current", "none"} and current != bound:
+        raise Portfolio123GenerationError(
+            "CURRENT moved after the plan was made "
+            f"(planned against {bound}, now {current}); plan again"
+        )
+
+
 def publish_candidate(plan_path: Path, generation_id: str) -> dict[str, object]:
     staged = stage_candidate(plan_path)
     if staged["generation_id"] != generation_id:
@@ -703,6 +1523,7 @@ def publish_candidate(plan_path: Path, generation_id: str) -> dict[str, object]:
         Path(_text(plan["data_root"], "data_root")), "data_root", existing=True
     )
     _rebuild(plan_path, generation_id)
+    _require_bound_predecessor(plan, data_root)
     pointer = publish_generation(data_root, generation_id)
     return {
         "generation_id": pointer.generation_id,
@@ -749,6 +1570,8 @@ def cutover_sources(plan_path: Path, generation_id: str) -> dict[str, object]:
     removed: list[str] = []
     for source in _sources(plan):
         label = _text(source["label"], "label")
+        if _CAPTURE_LABEL.fullmatch(label):
+            continue  # a capture directory is retained evidence, never removed by cutover
         root = Path(_text(source["root"], "root"))
         if not root.exists():
             removed.append(label)

@@ -3008,3 +3008,44 @@ def test_flex_time_of_day_is_kept_as_reported() -> None:
     assert _time_of_day(None) is None
     with pytest.raises(FlexValidationError):
         _time_of_day("20260105;253015")
+
+
+def _statement_for(tmp_path: Path, account: str, day: date) -> Any:
+    path = tmp_path / f"{account}-{day.isoformat()}.xml"
+    path.write_text(_xml(account, day, "100"), encoding="utf-8")
+    return parse_flex_file(path, artifact_id=f"selected/{path.name}").statements[0]
+
+
+def test_an_account_whose_history_stops_before_the_latest_day_is_refused(
+    tmp_path: Path,
+) -> None:
+    days = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)]
+    statements = [_statement_for(tmp_path, "RAW-A", day) for day in days]
+    statements += [_statement_for(tmp_path, "RAW-B", day) for day in days[:2]]
+    crosswalk = {"RAW-A": "account-aaaa", "RAW-B": "account-bbbb"}
+    with pytest.raises(
+        IbkrGenerationError, match="does not reach the latest statement day"
+    ):
+        ibkr_generation._flex_history_coverage(statements, crosswalk)
+    # the message names the account and the span, so the exact atom can be declared
+    atom = "missing weekday statement for account-bbbb: 2026-01-06 to 2026-01-07"
+    with pytest.raises(IbkrGenerationError, match=atom):
+        ibkr_generation._flex_history_coverage(statements, crosswalk)
+    coverage = ibkr_generation._flex_history_coverage(
+        statements, crosswalk, frozenset({atom})
+    )
+    assert coverage["known_gaps"] == [atom] and coverage["status"] == "PARTIAL"
+
+
+def test_every_account_reaching_the_latest_weekday_is_complete(tmp_path: Path) -> None:
+    friday, monday = date(2026, 1, 9), date(2026, 1, 12)
+    statements = [
+        _statement_for(tmp_path, account, day)
+        for account in ("RAW-A", "RAW-B")
+        for day in (friday, monday)
+    ]
+    coverage = ibkr_generation._flex_history_coverage(
+        statements, {"RAW-A": "account-aaaa", "RAW-B": "account-bbbb"}
+    )
+    assert coverage["known_gaps"] == []
+    assert coverage["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
