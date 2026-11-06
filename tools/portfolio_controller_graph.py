@@ -113,6 +113,9 @@ _PATH_STAGES = {
     # into any delivery artifact, so it affects no stage.
     "packages/core/src/quant_engine/core/stage_timing.py": [],
     "packages/core/src/quant_engine/core/parallel_hash.py": [],
+    # The regular NYSE closures: the implementation builders hold a model's expected end to its last
+    # trading day, so it can refuse the reconciliation and attribution that the report and panel read.
+    "packages/core/src/quant_engine/core/market_calendar.py": ["report", "panel"],
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
