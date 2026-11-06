@@ -211,6 +211,16 @@ def _add(args: argparse.Namespace) -> int:
         logical, separator, source = item.partition("=")
         if not separator or not logical or not source:
             raise ReleaseInputsError(f"--file wants LOGICAL=SOURCE, got {item!r}")
+        # the registry patterns cross "/", so a path with ".." would still classify
+        if (
+            logical.startswith("/")
+            or "\\" in logical
+            or ":" in logical
+            or any(part in ("", ".", "..") for part in logical.split("/"))
+        ):
+            raise ReleaseInputsError(
+                f"release input path is not a safe relative path: {logical!r}"
+            )
         if classify(logical) != RELEASE_INPUT:
             raise ReleaseInputsError(
                 f"{logical} is not a release input in the registry"

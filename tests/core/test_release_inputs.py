@@ -661,6 +661,8 @@ def test_add_refuses_a_held_path_without_replace(
         ["--file", "notes/spxl.json={source}"],  # not a registered release input
         ["--file", f"{SPXL}=" + "{missing}"],
         ["--file", f"{SPXL}"],
+        ["--file", "ops/mvp2-release/inputs/../../../../escaped.json={source}"],
+        ["--file", "ops/mvp2-release/inputs//x.json={source}"],
         [],
     ],
 )
@@ -679,7 +681,7 @@ def test_add_refuses_a_bad_request(
     out = tmp_path / "next"
     assert _add(inputs, out, *arguments) == 1
     assert "release-inputs: FAIL" in capsys.readouterr().err
-    assert not out.exists()
+    assert not out.exists() and not (tmp_path / "escaped.json").exists()
 
 
 def test_add_refuses_a_target_inside_the_source_root_or_the_repository(
@@ -691,4 +693,44 @@ def test_add_refuses_a_target_inside_the_source_root_or_the_repository(
     assert _add(inputs, inputs[0] / "nested", *argument) == 1
     assert _add(inputs, ROOT / "next-root-inside-repo", *argument) == 1
     assert not (ROOT / "next-root-inside-repo").exists()
+    capsys.readouterr()
+
+
+def test_add_is_repeatable_and_its_root_verifies_and_chains(
+    inputs: tuple[Path, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "s.json"
+    source.write_bytes(b'{"dataset": "history"}\n')
+    pins = []
+    for name in ("one", "two"):
+        assert _add(inputs, tmp_path / name, "--file", f"{SPXL}={source}") == 0
+        pins.append(json.loads(capsys.readouterr().out)["manifest_sha256"])
+    # the same root and bytes give the same manifest, byte for byte
+    assert pins[0] == pins[1]
+    assert (tmp_path / "one" / MANIFEST_NAME).read_bytes() == (
+        tmp_path / "two" / MANIFEST_NAME
+    ).read_bytes()
+    assert (
+        cli.main(
+            ["verify", "--root", str(tmp_path / "one"), "--manifest-sha256", pins[0]]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    # a rebuilt root is itself a verified input of the next add
+    other = tmp_path / "o.json"
+    other.write_bytes(b"{}\n")
+    chained = (tmp_path / "one", pins[0])
+    extra = "ops/mvp2-release/inputs/implementation/grizzly-signals.json"
+    assert _add(chained, tmp_path / "three", "--file", f"{extra}={other}") == 0
+    pin = json.loads(capsys.readouterr().out)["manifest_sha256"]
+    assert set(load_release_inputs(tmp_path / "three", pin).paths) == {
+        *FILES,
+        SPXL,
+        extra,
+    }
+    # a root that no longer matches its pin is refused before anything is written
+    (tmp_path / "one" / SPXL).write_bytes(b"tampered\n")
+    assert _add(chained, tmp_path / "four", "--file", f"{extra}={other}") == 1
+    assert not (tmp_path / "four").exists()
     capsys.readouterr()

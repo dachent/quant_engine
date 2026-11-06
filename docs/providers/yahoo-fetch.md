@@ -71,7 +71,12 @@ python -I tools/release_inputs.py add --root <ROOT> --manifest-sha256 <PIN> --cu
   --out <NEW_ROOT> --file ops/mvp2-release/inputs/implementation/spxl-market-data.json=<STAGE>/r3-yahoo/artifacts/yahoo-spxl-raw-history-history.json
 ```
 
-A path the root already holds is refused unless `--replace` is passed.
+A path the root already holds is refused unless `--replace` is passed. Adding is an entry edit, so
+it belongs to steps 1-2 of the root assembly (R3-PLAN section 14.8) and `rebind-predecessor` stays the
+last operation: it copies every manifest path of the root it is given, so the added file carries
+through, and the pin handed to the release driver is the rebound root's, not this command's. Running
+`add` again from the same root with the same bytes gives the same pin; a rebound root is never the
+input of a later `add`.
 
 ## Official closes for the Schwab ingest
 
