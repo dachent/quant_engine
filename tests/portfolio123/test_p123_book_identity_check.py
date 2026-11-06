@@ -462,7 +462,9 @@ def test_a_cash_only_book_is_flat_through_the_cutoff_by_closure(
     assert facts["cash_only"]["capture_reach"] == "2026-09-11"
 
 
-def test_cash_only_deviations_keep_the_failure_with_numbers(tmp_path: Path) -> None:
+def test_a_moving_cash_only_book_is_review_and_a_trades_book_ending_early_fails(
+    tmp_path: Path,
+) -> None:
     capture, raw = _capture(tmp_path)
     _book(raw, "101")
     _book(raw, "505", trades=[], held={})
@@ -473,11 +475,13 @@ def test_cash_only_deviations_keep_the_failure_with_numbers(tmp_path: Path) -> N
     )
     _manifest(capture)
     report = ic.check_capture(capture, as_of=date(2026, 9, 11))
-    assert _status(report, "505", "I5D") == "FAIL"
+    assert _status(report, "505", "I5D") == "WARN"  # a moving curve, no instruments
     detail = next(
         c["detail"] for c in report["books"]["505"]["checks"] if c["check"] == "I5D"
     )
-    assert "equity is not the cash amount" in detail and "999000" in detail
+    assert "positions at as-of not determinable" in detail and "999000" in detail
+    assert report["books"]["505"]["positions_as_of"]["positions_not_determinable"]
+    assert report["books"]["505"]["decision"] == "REVIEW"
     assert _status(report, "606", "I5D") == "FAIL"
     assert (
         report["books"]["606"]["positions_as_of"].get("cash_only_flat_through_as_of")

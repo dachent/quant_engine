@@ -558,14 +558,16 @@ def _cash_only_positions(
     terminal: str | None,
     capture_reach: str | None,
 ) -> tuple[dict[str, Any], str, str]:
-    """I5D for a cash-only book: closure, not interpolation.
+    """I5D for a cash-only book: closure, not interpolation (PASS when flat); a moving
+    curve with no exported instruments is REVIEW; everything else fails.
 
     With no instruments there is nothing to roll back and nothing accrues, so the book's
     equity can change only through a transaction row.  The transactions export of the same
     pull lists every row to the capture day; it holds the one start CASH row.  That equity
     equals the cash amount through the whole perf history and the capture itself reaches
     ``as_of`` (another book of the pull has a perf curve to or past it), so the equity at
-    ``as_of`` is the cash amount.  Any deviation fails with the numbers."""
+    ``as_of`` is the cash amount.  A cash row after ``as_of``, unreadable equity or a
+    capture that does not reach ``as_of`` fails with the numbers."""
     amount = cash_only["cash_amount"]
     equities = [value for value in cash_only["equities"] if value is not None]
     facts["cash_only_flat_through_as_of"] = False
@@ -588,21 +590,24 @@ def _cash_only_positions(
             "FAIL",
             f"cash-only book: no usable cash row by {as_of}; {numbers}",
         )
-    if (
-        not equities
-        or len(equities) != len(cash_only["equities"])
-        or any(abs(value - amount) > 0.01 for value in equities)
-    ):
-        return (
-            facts,
-            "FAIL",
-            f"cash-only book: equity is not the cash amount throughout; {numbers}",
-        )
+    if not equities or len(equities) != len(cash_only["equities"]):
+        return facts, "FAIL", f"cash-only book: unreadable perf equity; {numbers}"
     if capture_reach is None or capture_reach < as_of.isoformat():
         return (
             facts,
             "FAIL",
             f"cash-only book: no book of this capture reaches as-of {as_of}; {numbers}",
+        )
+    if any(abs(value - amount) > 0.01 for value in equities):
+        # A simulation book: its curve moves, but no instruments are exported (one CASH row,
+        # an empty holdings export), so its positions at as-of are not in the files.  The
+        # operator accepts that per book with a reason; nothing reads these positions.
+        facts["positions_not_determinable"] = True
+        return (
+            facts,
+            "WARN",
+            "no instruments exported; positions at as-of not determinable from the "
+            f"files (equity moves, so the book holds something); {numbers}",
         )
     facts["cash_only_flat_through_as_of"] = True
     facts["equity_at_as_of"] = amount

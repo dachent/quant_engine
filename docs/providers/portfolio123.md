@@ -220,8 +220,9 @@ perf equity equals the cash amount throughout, the cash row is dated on or befor
 book of the same capture has a perf curve reaching D: with no instruments nothing accrues, so
 the equity at D is the cash amount (closure, not interpolation); the decisions file records
 `cash_only_flat_through_as_of`, the equity range, the first and last perf dates and the capture
-reach. Any deviation (equity not the cash amount, a cash row after D, no book reaching D) fails
-with those numbers.
+reach. A cash-only book whose equity moves (a simulation book: a curve but no exported instruments)
+is REVIEW, `positions_not_determinable`, accepted per book at plan time; a cash row after D,
+unreadable equity or no book reaching D fails with those numbers.
 No consumer reads a Portfolio123 holdings table; positions at D are an audit record.
 The BINDING decisions file of a cycle is the standalone `tools/p123_book_identity_check.py`
 run after the fetch, on the same capture directory, with `--as-of D`, `--reference-index` (the
