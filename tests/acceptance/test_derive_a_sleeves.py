@@ -704,7 +704,6 @@ def test_no_sleeve_inputs_unchanged(tmp_path: Path) -> None:
             "test",
             {},
             original.LAYOUT,
-            cutoff,
             None,
         )
     actual = derive.derive(
@@ -715,7 +714,6 @@ def test_no_sleeve_inputs_unchanged(tmp_path: Path) -> None:
         code_commit="test",
         expected_sha256={},
         layout=original.LAYOUT,
-        declared_cutoff=cutoff,
     )
     assert derive.dumps(actual) == derive.dumps(expected)
     assert "sleeve_derivation" not in actual

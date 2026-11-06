@@ -152,7 +152,6 @@ PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"
 MVP_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
 FLOW_POLICY = "contracts/account-strategy-flow-classification-policy-v1.json"
 CONTRACTS = (PERFORMANCE_POLICY, MVP_CONTRACT, FLOW_POLICY)
-DECLARED_CUTOFF = dt.date(2026, 9, 17)
 
 # --------------------------------------------------------------------- v3 (R6 v3 / R8)
 #
@@ -471,12 +470,14 @@ WINDOWED = {
     "mwr.strategy",
 }
 
-CONVENTION_NOTES = (
-    "R7 cutoff gate: the declared cutoff 2026-09-17 (metric spec fixed fact) must "
+CUTOFF_GATE_NOTE = (
+    "R7 cutoff gate: the declared cutoff {cutoff} (metric spec fixed fact) must "
     "equal the selected cutoff, crosswalk.calculation_cutoff_date, crosswalk."
     "as_of_date and provider-ledger.as_of_date; any mismatch fails closed and every "
     "metric is emitted as not_derivable. The account-strategy manifest is a "
-    "production output and is not read.",
+    "production output and is not read."
+)
+CONVENTION_NOTES = (
     "Windows: contracts/portfolio-performance-policy-v1.json defines no window ids; "
     "only ITD is derived (spec minimum).",
     "R1/R2 membership: contracts/portfolio-hwm-policy-v4.json membership_policy."
@@ -3912,7 +3913,6 @@ def derive(
     code_commit: str,
     expected_sha256: Mapping[str, str] | None = None,
     layout: Mapping[str, str] | None = None,
-    declared_cutoff: dt.date = DECLARED_CUTOFF,
     manifest: InputsManifest | None = None,
     sleeve_inputs: Path | None = None,
     sleeves_only: bool = False,
@@ -4001,7 +4001,6 @@ def derive(
             code_commit,
             expected_sha256,
             layout,
-            declared_cutoff,
             manifest,
             sleeve_document,
             sleeve_parents,
@@ -4087,7 +4086,6 @@ def _derive(
     code_commit: str,
     expected_sha256: Mapping[str, str] | None,
     layout: Mapping[str, str] | None,
-    declared_cutoff: dt.date,
     manifest: InputsManifest | None,
     sleeve_document: dict[str, Any] | None = None,
     sleeve_parents: Mapping[str, str] | None = None,
@@ -4189,12 +4187,12 @@ def _derive(
     statuses = parse_membership_status(contract_bytes[MVP_CONTRACT])
     output = Output()
     restated_rows: list[str] = []
-    notes = list(CONVENTION_NOTES)
+    notes = [CUTOFF_GATE_NOTE.format(cutoff=cutoff), *CONVENTION_NOTES]
     if v3 and authority is not None:
         notes.extend(V3_CONVENTION_NOTES)
         notes.extend(authority.notes)
     mismatches = [
-        f"{name} {value} != {declared_cutoff}"
+        f"{name} {value} != {cutoff}"
         for name, value in (
             ("selected cutoff", cutoff),
             ("crosswalk.calculation_cutoff_date", crosswalk.calculation_cutoff_date),
@@ -4202,7 +4200,7 @@ def _derive(
             ("provider-ledger.as_of_date", ledger.as_of_date),
         )
         + ((("inputs manifest cutoff", manifest.cutoff),) if manifest else ())
-        if value != declared_cutoff
+        if value != cutoff
     ]
     if mismatches:
         reason = "R7 INPUT_CUTOFF_MISMATCH (fail closed): " + "; ".join(mismatches)
