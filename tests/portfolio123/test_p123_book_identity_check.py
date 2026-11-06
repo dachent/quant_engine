@@ -175,6 +175,25 @@ def test_series_starting_after_the_page_inception_or_the_start_string_fails(
     assert "after page inception" in detail and "Start 2025-05-12" in detail
 
 
+def test_us_format_inception_is_checked_and_unparseable_needs_review(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101", start="2026-03-02")
+    nameless = {**LIVE_PAGE, "assetName": "Plain Book", "inceptionDt": "01/28/2026"}
+    _page(capture, [nameless])
+    _manifest(capture)
+    report = ic.check_capture(capture)
+    assert _status(report, "101", "I7") == "FAIL"
+    assert report["books"]["101"]["page_record"]["inceptionDt"] == "01/28/2026"
+
+    _page(capture, [{**nameless, "inceptionDt": "sometime"}])
+    _manifest(capture)
+    report = ic.check_capture(capture)
+    assert _status(report, "101", "I7") == "WARN"
+    assert report["books"]["101"]["decision"] != "PASS"
+
+
 def test_manifest_mismatch_and_missing_perf_fail(tmp_path: Path) -> None:
     capture, raw = _capture(tmp_path)
     _book(raw, "101")
