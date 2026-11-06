@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "94bb54eaaaa8a59b3ba53451fc5d61b47fd49d88d603307ef7dd9c0a75265004"
+        "390a16130de4e93176632852af80f0ac45df74384b85736b839e6584907273ef"
     )
 
 
@@ -4360,7 +4360,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "c70d31d2d5f418553e906c07fef7c18e58807db27b24961cc6d5941b1a7c5439"
+        "578820e2ea410553f39b9bdbe69b55e57df613915b83075f62949fa1234924d9"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4397,7 +4397,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "c70d31d2d5f418553e906c07fef7c18e58807db27b24961cc6d5941b1a7c5439"
+        "578820e2ea410553f39b9bdbe69b55e57df613915b83075f62949fa1234924d9"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
