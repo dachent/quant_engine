@@ -44,6 +44,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ENTITY = re.compile(r"^(strategy|account)_(\d+)_", re.IGNORECASE)
 _CAPTURE_LABEL = re.compile(r"^transaction-capture-[1-9][0-9]*$")
 _CAPTURE_TRANSACTIONS = re.compile(r"^raw/strategy_([0-9]+)_transactions\.csv$")
+_CAPTURE_PERF = re.compile(r"^raw/strategy_([0-9]+)_perf\.csv$")
 _BOOK_ID = re.compile(r"^[0-9]+$")
 _ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _CAPTURE_MANIFEST = "capture-manifest.json"
@@ -144,6 +145,8 @@ def _disposition(label: str, relative: str) -> str:
         return "HAR_DERIVED_CSV"
     if _CAPTURE_LABEL.fullmatch(label) and _CAPTURE_TRANSACTIONS.fullmatch(relative):
         return "CAPTURE_TRANSACTION_CSV"
+    if _CAPTURE_LABEL.fullmatch(label) and _CAPTURE_PERF.fullmatch(relative):
+        return "CAPTURE_PERF_CSV"
     return "PROVENANCE_ONLY"
 
 
@@ -167,6 +170,7 @@ def _book_stats(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, Any]]:
     """Per-book transaction count and first/last ISO date over parsed rows."""
 
     stats: dict[str, dict[str, Any]] = {}
+    lines: dict[str, list[str]] = defaultdict(list)
     for row in rows:
         book = row.get("_entity_id", "")
         if not book:
@@ -175,6 +179,17 @@ def _book_stats(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, Any]]:
             book, {"first_date": None, "last_date": None, "rows": 0}
         )
         entry["rows"] += 1
+        lines[book].append(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in row.items()
+                    if not key.startswith("_") and value != ""
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         day = row.get("Date", "")
         if _ISO_DATE.fullmatch(day) is None:
             if row.get("_transport") == "capture_csv":
@@ -186,6 +201,11 @@ def _book_stats(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, Any]]:
             entry["first_date"] = day
         if entry["last_date"] is None or day > entry["last_date"]:
             entry["last_date"] = day
+    for book, entry in stats.items():
+        # Identity of the exact row set: columns the row actually carries, order-free.
+        entry["rowset_sha256"] = hashlib.sha256(
+            "\n".join(sorted(lines[book])).encode("utf-8")
+        ).hexdigest()
     return stats
 
 
@@ -239,10 +259,35 @@ def _previous_gate(data_root: Path, generation_id: str | None) -> dict[str, Any]
     }
 
 
+def book_rowset_fingerprint(path: Path, book: str, family: str) -> dict[str, Any]:
+    """Rows, first/last ISO date and canonical row-set digest of one capture CSV (read-only)."""
+
+    rows = _csv_rows(
+        path, f"transaction-capture-1/raw/{path.name}", family, "capture_csv"
+    )
+    return _book_stats(rows).get(
+        book,
+        {
+            "first_date": None,
+            "last_date": None,
+            "rows": 0,
+            "rowset_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+    )
+
+
+def previous_generation_books(
+    data_root: Path, generation_id: str | None = None
+) -> dict[str, Any] | None:
+    """Per-book transaction fingerprints of a published generation (default: CURRENT)."""
+
+    return _previous_gate(data_root, generation_id)
+
+
 def _capture_books(
     label: str, files: list[dict[str, object]], root: Path
-) -> dict[str, str]:
-    """Book -> relative path of one capture root after checking its manifest."""
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Book -> relative path of transactions and of perf in one capture root, manifest-checked."""
 
     by_path = {str(item["relative_path"]): item for item in files}
     manifest_item = by_path.get(_CAPTURE_MANIFEST)
@@ -263,26 +308,46 @@ def _capture_books(
             _integer(entry.get("observed_length"), "capture observed_length"),
         )
     books: dict[str, str] = {}
+    perf: dict[str, str] = {}
     for relative, item in sorted(by_path.items()):
-        if item["disposition"] != "CAPTURE_TRANSACTION_CSV":
-            if (
-                relative.casefold().startswith("raw/")
-                and relative.casefold().endswith(".csv")
-                and "transaction" in relative.casefold()
+        lowered = relative.casefold()
+        if item["disposition"] not in {"CAPTURE_TRANSACTION_CSV", "CAPTURE_PERF_CSV"}:
+            for token, expected in (
+                ("transaction", "transactions"),
+                ("perf", "perf"),
             ):
-                raise Portfolio123GenerationError(
-                    f"{label} {relative} looks like a transaction export but is not "
-                    "raw/strategy_<book>_transactions.csv"
-                )
+                if (
+                    lowered.startswith("raw/")
+                    and lowered.endswith(".csv")
+                    and token in lowered
+                ):
+                    raise Portfolio123GenerationError(
+                        f"{label} {relative} looks like a {token} export but is not "
+                        f"raw/strategy_<book>_{expected}.csv"
+                    )
             continue
         if listed.get(relative) != (item["sha256"], item["bytes"]):
             raise Portfolio123GenerationError(
                 f"{label} {relative} is not hash-bound by its capture manifest"
             )
-        match = _CAPTURE_TRANSACTIONS.fullmatch(relative)
-        assert match is not None
-        books[match.group(1)] = relative
-    return books
+        if item["disposition"] == "CAPTURE_TRANSACTION_CSV":
+            match = _CAPTURE_TRANSACTIONS.fullmatch(relative)
+            assert match is not None
+            books[match.group(1)] = relative
+        else:
+            match = _CAPTURE_PERF.fullmatch(relative)
+            assert match is not None
+            perf[match.group(1)] = relative
+    return books, perf
+
+
+_CORRECTION_FIELDS = {
+    "evidence",
+    "predecessor_is_series_of",
+    "predecessor_rowset_sha256",
+    "previous_generation_id",
+    "replacement_rowset_sha256",
+}
 
 
 def _gate_inputs(
@@ -291,23 +356,35 @@ def _gate_inputs(
     expected_books: Sequence[str],
     previous_generation_id: str | None,
     supersede_books: Mapping[str, str],
+    transaction_exempt_books: Mapping[str, str],
+    identity_corrections: Mapping[str, Mapping[str, str]],
 ) -> dict[str, Any]:
     captured: dict[str, str] = {}
+    captured_perf: dict[str, str] = {}
     for source in sources:
         if not _CAPTURE_LABEL.fullmatch(str(source["label"])):
             continue
         root = Path(str(source["root"]))
-        books = _capture_books(
+        transactions, perf = _capture_books(
             str(source["label"]), _objects(source["files"], "files"), root
         )
-        for book, relative in books.items():
-            if book in captured:
-                raise Portfolio123GenerationError(
-                    f"book {book} is captured by more than one transaction capture"
-                )
-            captured[book] = f"{source['label']}/{relative}"
+        for found, target, kind in (
+            (transactions, captured, "transaction"),
+            (perf, captured_perf, "perf"),
+        ):
+            for book, relative in found.items():
+                if book in target:
+                    raise Portfolio123GenerationError(
+                        f"book {book} has a {kind} capture in more than one capture"
+                    )
+                target[book] = f"{source['label']}/{relative}"
     expected = sorted({str(book) for book in expected_books})
-    for book in (*expected, *supersede_books):
+    for book in (
+        *expected,
+        *supersede_books,
+        *transaction_exempt_books,
+        *identity_corrections,
+    ):
         if _BOOK_ID.fullmatch(str(book)) is None:
             raise Portfolio123GenerationError("book IDs must be numeric")
     missing = [book for book in expected if book not in captured]
@@ -315,21 +392,65 @@ def _gate_inputs(
         raise Portfolio123GenerationError(
             "expected books have no transaction capture: " + ", ".join(missing)
         )
+    # The HAR equity curve of a captured book is never trusted (a permuted download held
+    # another strategy's curve), so a transaction capture needs its own perf capture.
+    if set(captured) != set(captured_perf):
+        raise Portfolio123GenerationError(
+            "transaction and perf captures cover different books: "
+            + ", ".join(sorted(set(captured) ^ set(captured_perf)))
+        )
     for book, reason in supersede_books.items():
         if book not in expected:
             raise Portfolio123GenerationError(
                 f"book {book} cannot be superseded unless it is an expected book"
             )
-        if book not in captured:
-            raise Portfolio123GenerationError(
-                f"book {book} cannot be superseded without a transaction capture"
-            )
         if not reason.strip():
             raise Portfolio123GenerationError(f"book {book} supersede needs a reason")
+    for book, reason in transaction_exempt_books.items():
+        if book in expected or book in captured or book in captured_perf:
+            raise Portfolio123GenerationError(
+                f"book {book} is exempt from transactions, so it cannot also be "
+                "expected or captured"
+            )
+        if not reason.strip():
+            raise Portfolio123GenerationError(f"book {book} exemption needs a reason")
     previous = _previous_gate(data_root, previous_generation_id)
+    corrections: dict[str, dict[str, str]] = {}
+    for book, record in sorted(identity_corrections.items()):
+        if book not in expected or book in supersede_books:
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction needs an expected book that is "
+                "not also superseded"
+            )
+        if set(record) != _CORRECTION_FIELDS or not all(
+            isinstance(value, str) and value.strip() for value in record.values()
+        ):
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction fields differ: "
+                + ", ".join(sorted(_CORRECTION_FIELDS))
+            )
+        if (
+            previous is None
+            or record["previous_generation_id"] != previous["generation_id"]
+        ):
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction names another predecessor generation"
+            )
+        held = previous["books"].get(book)
+        if held is None or record["predecessor_rowset_sha256"] != held["rowset_sha256"]:
+            raise Portfolio123GenerationError(
+                f"book {book} identity correction does not match the predecessor's rows"
+            )
+        if _SHA256.fullmatch(record["replacement_rowset_sha256"]) is None:
+            raise Portfolio123GenerationError(
+                f"book {book} replacement rowset hash is invalid"
+            )
+        corrections[book] = dict(sorted(record.items()))
     return {
         "captured_books": dict(sorted(captured.items())),
+        "captured_perf_books": dict(sorted(captured_perf.items())),
         "expected_books": expected,
+        "identity_corrections": corrections,
         "previous": previous,
         # Publishing refuses when a CURRENT-sourced predecessor is no longer CURRENT.
         "previous_source": (
@@ -338,6 +459,7 @@ def _gate_inputs(
             else ("current" if previous is not None else "none")
         ),
         "supersede": dict(sorted(supersede_books.items())),
+        "transaction_exempt_books": dict(sorted(transaction_exempt_books.items())),
     }
 
 
@@ -351,14 +473,21 @@ def create_cutover_plan(
     expected_books: Sequence[str] = (),
     previous_generation_id: str | None = None,
     supersede_books: Mapping[str, str] | None = None,
+    transaction_exempt_books: Mapping[str, str] | None = None,
+    identity_corrections: Mapping[str, Mapping[str, str]] | None = None,
 ) -> dict[str, object]:
     """Hash every approved input and create a private content-addressed plan.
 
     ``transaction_captures`` are saved Portfolio123 capture directories
-    (``capture-manifest.json`` plus ``raw/strategy_<id>_transactions.csv``). A book they
-    cover takes its transactions from the capture alone. The generation must then not
-    regress any book against ``previous_generation_id`` (default: the data root's
-    CURRENT) unless the book is named in ``supersede_books`` with a reason.
+    (``capture-manifest.json`` plus ``raw/strategy_<id>_transactions.csv`` and
+    ``raw/strategy_<id>_perf.csv`` per book). A book they cover takes its transactions
+    and equity curve from the capture alone. Every expected book must then have rows on
+    or before the as-of date, and no book may regress against ``previous_generation_id``
+    (default: the data root's CURRENT) unless it is named in ``supersede_books`` with a
+    reason (row count and first date only), or in ``identity_corrections`` with a
+    hash-bound record proving the predecessor held another strategy's rows under that
+    id. ``transaction_exempt_books`` names expected books with no transaction export
+    (for example a designer model) and a reason; they must have no capture file.
     """
 
     legacy = _root(legacy_root, "legacy_root", existing=True)
@@ -411,6 +540,8 @@ def create_cutover_plan(
         expected_books,
         previous_generation_id,
         dict(supersede_books or {}),
+        dict(transaction_exempt_books or {}),
+        {book: dict(record) for book, record in (identity_corrections or {}).items()},
     )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),
@@ -748,13 +879,18 @@ def _capture_day(row: Mapping[str, str]) -> date:
 def _enforce_transaction_gate(
     gate: Mapping[str, Any],
     rows: Iterable[Mapping[str, str]],
+    perf_rows: Iterable[Mapping[str, str]] = (),
     excluded: Mapping[str, int] | None = None,
+    excluded_perf: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
-    """Refuse, per book, any transaction history that shrank against the previous generation."""
+    """Refuse, per book, an empty expected book or a history that shrank against the previous generation."""
 
     stats = _book_stats(rows)
+    perf_stats = _book_stats(perf_rows)
     captured = _object(gate.get("captured_books"), "captured_books")
     supersede = _object(gate.get("supersede"), "supersede")
+    corrections = _object(gate.get("identity_corrections", {}), "corrections")
+    exempt = _object(gate.get("transaction_exempt_books", {}), "exempt books")
     previous = gate.get("previous")
     books = (
         _object(_object(previous, "previous")["books"], "previous books")
@@ -763,9 +899,32 @@ def _enforce_transaction_gate(
     )
     failures: list[str] = []
     waived: dict[str, object] = {}
+    corrected: dict[str, object] = {}
+    # An expected book needs real dated rows on or before the cutoff whether or not the
+    # predecessor held it (the six temporary books were absent from 3c8a0f41).
+    for book in gate.get("expected_books", []):
+        if book not in stats:
+            failures.append(
+                f"{book}: expected book has no transactions on or before the as-of date"
+            )
+        if book not in perf_stats:
+            failures.append(
+                f"{book}: expected book has no equity-curve rows on or before the as-of date"
+            )
     for book in sorted(books):
         old = _object(books[book], "previous book")
         new = stats.get(book)
+        if book in corrections:
+            record = _object(corrections[book], "correction")
+            if new is None:
+                failures.append(f"{book}: identity correction has no replacement rows")
+            elif new["rowset_sha256"] != record["replacement_rowset_sha256"]:
+                failures.append(
+                    f"{book}: replacement rows differ from the identity correction"
+                )
+            else:
+                corrected[book] = {"previous": old, "record": record, "new": new}
+            continue
         # A superseded book may change its series (row count, first date); it can never lose
         # its last transaction date or disappear.
         hard: list[str] = []
@@ -797,6 +956,11 @@ def _enforce_transaction_gate(
     for book in sorted(supersede):
         if book not in captured or book not in stats:
             failures.append(f"{book}: supersede needs captured transactions")
+    for book in sorted(corrections):
+        if book not in books:
+            failures.append(
+                f"{book}: identity correction names a book the predecessor lacks"
+            )
     if failures:
         raise Portfolio123GenerationError(
             "transaction gate refused the generation (previous "
@@ -806,13 +970,19 @@ def _enforce_transaction_gate(
     return {
         "books": dict(sorted(stats.items())),
         "captured_books": dict(sorted(captured.items())),
+        "equity_curve_books": dict(sorted(perf_stats.items())),
+        "excluded_after_as_of": dict(sorted((excluded or {}).items())),
+        "excluded_equity_curve_after_as_of": dict(
+            sorted((excluded_perf or {}).items())
+        ),
         "expected_books": list(gate.get("expected_books", [])),
+        "identity_corrected": corrected,
         "previous_generation_id": (
             _object(previous, "previous")["generation_id"] if previous else None
         ),
-        "excluded_after_as_of": dict(sorted((excluded or {}).items())),
         "status": "PASS",
         "superseded": waived,
+        "transaction_exempt_books": dict(sorted(exempt.items())),
     }
 
 
@@ -857,13 +1027,19 @@ def _build_outputs(
     )
     captured = dict(gate["captured_books"]) if gate is not None else {}
     excluded: Counter[str] = Counter()
+    excluded_perf: Counter[str] = Counter()
+    dropped_downloads: dict[str, list[str]] = defaultdict(list)
     for item in _objects(har.get("files"), "files"):
         if item.get("disposition") != "HAR_DERIVED_CSV":
             continue
         relative = _text(item["relative_path"], "relative_path")
         family = _family(relative)
         entity = _ENTITY.match(PurePosixPath(relative).name)
-        if family == "transactions" and entity and entity.group(2) in captured:
+        if entity and entity.group(2) in captured and relative.startswith("downloads/"):
+            # The browser-download set of a captured book is never trusted: the 2026-09-02
+            # set held other strategies' rows under these ids. Its HAR page-derived csv/
+            # rows stay; the capture supplies transactions and the equity curve.
+            dropped_downloads[entity.group(2)].append(relative)
             continue
         parsed = _csv_rows(_object_path(authority, item), relative, family)
         rows_by_family[family].extend(parsed)
@@ -873,13 +1049,20 @@ def _build_outputs(
         if _CAPTURE_LABEL.fullmatch(label) is None:
             continue
         for item in _objects(source.get("files"), "files"):
-            if item.get("disposition") != "CAPTURE_TRANSACTION_CSV":
+            disposition = item.get("disposition")
+            if disposition not in {"CAPTURE_TRANSACTION_CSV", "CAPTURE_PERF_CSV"}:
                 continue
+            family = (
+                "transactions"
+                if disposition == "CAPTURE_TRANSACTION_CSV"
+                else "equity_curve"
+            )
+            counter = excluded if family == "transactions" else excluded_perf
             relative = _text(item["relative_path"], "relative_path")
             parsed = _csv_rows(
                 _object_path(authority, item),
                 f"{label}/{relative}",
-                "transactions",
+                family,
                 "capture_csv",
             )
             kept: list[dict[str, str]] = []
@@ -887,18 +1070,30 @@ def _build_outputs(
                 day = _capture_day(row)
                 if day > as_of:
                     # Retained as source evidence, never a row of a generation cut at as_of.
-                    excluded[row["_entity_id"]] += 1
+                    counter[row["_entity_id"]] += 1
                 else:
                     kept.append(row)
-            rows_by_family["transactions"].extend(kept)
-            dataset_rows["transactions"] += len(kept)
+            rows_by_family[family].extend(kept)
+            dataset_rows[family] += len(kept)
     gate_report = (
         _enforce_transaction_gate(
-            gate, rows_by_family.get("transactions", []), excluded
+            gate,
+            rows_by_family.get("transactions", []),
+            [
+                row
+                for row in rows_by_family.get("equity_curve", [])
+                if row["_transport"] == "capture_csv"
+            ],
+            excluded,
+            excluded_perf,
         )
         if gate is not None
         else None
     )
+    if gate_report is not None:
+        gate_report["dropped_har_downloads"] = {
+            book: sorted(paths) for book, paths in sorted(dropped_downloads.items())
+        }
     for family in sorted(rows_by_family):
         destination = work / "tables" / f"har_{family}.parquet"
         destination.parent.mkdir(parents=True, exist_ok=True)

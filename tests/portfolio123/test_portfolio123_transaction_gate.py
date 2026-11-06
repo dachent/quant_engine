@@ -19,7 +19,12 @@ from quant_engine.portfolio123 import (
     stage_candidate,
     verify_published,
 )
-from quant_engine.portfolio123.generation import _LEGACY_TABLES
+from quant_engine.portfolio123.generation import (
+    _LEGACY_TABLES,
+    _book_stats,
+    _csv_rows,
+    _previous_gate,
+)
 
 HEADER = "Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes\n"
 
@@ -62,20 +67,34 @@ def _full(count: int, last: str = "2026-09-11") -> str:
     )
 
 
-def _capture(root: Path, name: str, books: dict[str, str], *, tamper: str = "") -> Path:
+PERF = "Date,Cash,Total Equity\n2025-05-09,1.00,1.00\n2026-09-11,2.00,2.00\n"
+
+
+def _capture(
+    root: Path,
+    name: str,
+    books: dict[str, str],
+    *,
+    tamper: str = "",
+    perf: bool = True,
+) -> Path:
     capture = root / name
     (capture / "raw").mkdir(parents=True)
     artifacts = []
     for book, text in books.items():
-        path = capture / "raw" / f"strategy_{book}_transactions.csv"
-        path.write_text(text, encoding="utf-8")
-        artifacts.append(
-            {
-                "observed_length": path.stat().st_size,
-                "relative_path": f"raw/{path.name}",
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            }
-        )
+        files = {f"strategy_{book}_transactions.csv": text}
+        if perf:
+            files[f"strategy_{book}_perf.csv"] = PERF
+        for file_name, content in files.items():
+            path = capture / "raw" / file_name
+            path.write_text(content, encoding="utf-8")
+            artifacts.append(
+                {
+                    "observed_length": path.stat().st_size,
+                    "relative_path": f"raw/{path.name}",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
     if tamper:
         artifacts[0]["sha256"] = tamper
     (capture / "capture-manifest.json").write_text(
@@ -397,6 +416,236 @@ def test_supersede_needs_an_expected_captured_book(tmp_path: Path) -> None:
             as_of_date=date(2026, 9, 13),
             expected_books=["101"],
             supersede_books={"101": "no capture"},
+        )
+
+
+def test_expected_book_absent_from_the_predecessor_cannot_stay_empty(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[_capture(tmp_path, "a", {"101": _full(5)})],
+    )
+    # 606 is new (absent from the predecessor), expected, and its export is header-only.
+    header_only = _capture(tmp_path, "b", {"101": _full(5), "606": HEADER})
+    message = _refused(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 12),
+        transaction_captures=[header_only],
+        expected_books=["101", "606"],
+    )
+    assert (
+        "606: expected book has no transactions on or before the as-of date" in message
+    )
+    assert "101:" not in message
+
+
+def test_expected_book_with_only_post_cutoff_rows_is_refused(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    late = _capture(tmp_path, "late", {"101": HEADER + "2026-09-14,AAA,BUY,1,1,1,,,\n"})
+    message = _refused(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 11),
+        transaction_captures=[late],
+        expected_books=["101"],
+    )
+    assert (
+        "101: expected book has no transactions on or before the as-of date" in message
+    )
+
+
+def test_a_transaction_capture_needs_its_own_perf_capture(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    capture = _capture(tmp_path, "cap", {"101": _full(5)}, perf=False)
+    with pytest.raises(Portfolio123GenerationError, match="different books"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 11),
+            transaction_captures=[capture],
+        )
+
+
+def test_captured_book_takes_perf_from_the_capture_and_drops_its_downloads(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    # A permuted download: another strategy's curve and holdings under book 101's name.
+    (har / "downloads" / "strategy_101_perf.csv").write_text(
+        "Date,Cash,Total Equity\n2008-09-26,20000.00,20000.00\n", encoding="utf-8"
+    )
+    (har / "downloads" / "strategy_101_holdings.csv").write_text(
+        "Ticker,Weight\nFOREIGN,100\n", encoding="utf-8"
+    )
+    (har / "downloads" / "strategy_303_perf.csv").write_text(
+        "Date,Cash,Total Equity\n2020-01-01,1.00,1.00\n", encoding="utf-8"
+    )
+    capture = _capture(tmp_path, "cap", {"101": _full(5)})
+    generation_id = _generate(
+        legacy, har, data, transaction_captures=[capture], expected_books=["101"]
+    )
+    tables = data / "generations" / generation_id / "tables"
+    curve = pq.read_table(tables / "har_equity_curve.parquet").to_pylist()
+    assert {row["_transport"] for row in curve if row["_entity_id"] == "101"} == {
+        "capture_csv"
+    }
+    assert (
+        min(row["Date"] for row in curve if row["_entity_id"] == "101") == "2025-05-09"
+    )
+    assert any(
+        row["_entity_id"] == "303" for row in curve
+    )  # an uncaptured book is untouched
+    holdings = pq.read_table(tables / "har_holdings.parquet").to_pylist()
+    assert not any(row["_entity_id"] == "101" for row in holdings)
+    dropped = _catalog(data, generation_id)["transaction_gate"]["dropped_har_downloads"]  # type: ignore[index]
+    assert dropped == {
+        "101": [
+            "downloads/strategy_101_holdings.csv",
+            "downloads/strategy_101_perf.csv",
+        ]
+    }
+
+
+def _rowset(path: Path, book: str) -> str:
+    rows = _csv_rows(
+        path, f"transaction-capture-1/raw/{path.name}", "transactions", "capture_csv"
+    )
+    return str(_book_stats(rows)[book]["rowset_sha256"])
+
+
+def _correction_world(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, str, Path, dict[str, str]]:
+    """A predecessor holding a longer foreign series under 202, and the true replacement."""
+
+    legacy, har, data = _inputs(tmp_path)
+    _stage_downloads(har, {"202": _full(343, "2026-09-01")})
+    previous = _generate(legacy, har, data)
+    capture = _capture(
+        tmp_path, "cap", {"202": HEADER + "2025-05-09,,CASH,,,555.00,,,Starting cash\n"}
+    )
+    record = {
+        "evidence": "retained 07-31 and 09-12 files: the predecessor rows equal book 101's series",
+        "predecessor_is_series_of": "101",
+        "predecessor_rowset_sha256": _previous_gate(data, previous)["books"]["202"][
+            "rowset_sha256"
+        ],
+        "previous_generation_id": previous,
+        "replacement_rowset_sha256": _rowset(
+            capture / "raw" / "strategy_202_transactions.csv", "202"
+        ),
+    }
+    return legacy, har, data, previous, capture, record
+
+
+def test_foreign_last_date_blocks_a_correct_capture_without_a_correction(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data, _, capture, _ = _correction_world(tmp_path)
+    message = _refused(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 12),
+        transaction_captures=[capture],
+        expected_books=["202"],
+        supersede_books={"202": "different series"},
+    )
+    assert "202: last date 2025-05-09 < 2026-09-01 (not waivable)" in message
+
+
+def test_identity_correction_waives_a_proven_foreign_series_only(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data, previous, capture, record = _correction_world(tmp_path)
+    generation_id = _generate(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 12),
+        transaction_captures=[capture],
+        expected_books=["202"],
+        identity_corrections={"202": record},
+    )
+    corrected = _catalog(data, generation_id)["transaction_gate"]["identity_corrected"]  # type: ignore[index]
+    assert corrected["202"]["record"]["predecessor_is_series_of"] == "101"
+    assert corrected["202"]["previous"]["rows"] == 343
+    assert corrected["202"]["new"]["rows"] == 1
+    # The correction names the predecessor rows and the replacement rows exactly.
+    for field, value in (
+        ("predecessor_rowset_sha256", "0" * 64),
+        ("previous_generation_id", "1" * 64),
+    ):
+        with pytest.raises(Portfolio123GenerationError, match="identity correction"):
+            create_cutover_plan(
+                legacy,
+                har,
+                data,
+                as_of_date=date(2026, 9, 13),
+                transaction_captures=[capture],
+                expected_books=["202"],
+                identity_corrections={"202": {**record, field: value}},
+                previous_generation_id=generation_id if field == "x" else previous,
+            )
+    wrong = {**record, "replacement_rowset_sha256": "2" * 64}
+    assert "replacement rows differ" in _refused(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 14),
+        transaction_captures=[capture],
+        expected_books=["202"],
+        previous_generation_id=previous,
+        identity_corrections={"202": wrong},
+    )
+    with pytest.raises(Portfolio123GenerationError, match="not also superseded"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 15),
+            transaction_captures=[capture],
+            expected_books=["202"],
+            previous_generation_id=previous,
+            supersede_books={"202": "both"},
+            identity_corrections={"202": record},
+        )
+
+
+def test_transaction_exempt_book_is_recorded_and_never_substituted(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    capture = _capture(tmp_path, "cap", {"101": _full(5)})
+    reason = "designer model: no transaction export route"
+    generation_id = _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[capture],
+        expected_books=["101"],
+        transaction_exempt_books={"909": reason},
+    )
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    assert gate["transaction_exempt_books"] == {"909": reason}  # type: ignore[index]
+    assert "909" not in gate["books"]  # type: ignore[index]
+    other = _capture(tmp_path, "other", {"909": _full(5)})
+    with pytest.raises(Portfolio123GenerationError, match="cannot also be expected"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 12),
+            transaction_captures=[other],
+            transaction_exempt_books={"909": reason},
         )
 
 
