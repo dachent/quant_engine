@@ -124,3 +124,101 @@ def test_check_evidence_cli_on_current_evidence(
     )
     assert json.loads(capsys.readouterr().out)["already_consumed"] is False
     assert not roots.exists()
+
+
+class _Target:
+    def __init__(self, internal: str, provider: str) -> None:
+        self.internal_account_id = internal
+        self.provider_account_id = provider
+
+
+def test_build_crosswalk_is_create_only_and_never_prints_ids(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    targets = (
+        _Target("account-" + "2" * 16, "PROV-B"),
+        _Target("account-" + "1" * 16, "PROV-A"),
+    )
+    monkeypatch.setattr(
+        driver._TRANSACTION_CAPTURE, "load_retained_targets", lambda root: targets
+    )
+    out = tmp_path / "crosswalk.json"
+    argv = [
+        "build-crosswalk",
+        "--selected-source-root",
+        str(tmp_path),
+        "--out",
+        str(out),
+    ]
+    assert driver.main(argv) == 0
+    stdout = capsys.readouterr().out
+    assert "PROV-" not in stdout and json.loads(stdout)["account_count"] == 2
+    parsed = driver.parse_crosswalk(json.loads(out.read_text(encoding="utf-8")))
+    assert parsed == {t.provider_account_id: t.internal_account_id for t in targets}
+    assert driver.main(argv) == 2  # create-only
+    assert "already exists" in capsys.readouterr().out
+
+
+def test_build_crosswalk_refuses_unloadable_or_redacted_targets(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "crosswalk.json"
+    argv = [
+        "build-crosswalk",
+        "--selected-source-root",
+        str(tmp_path),
+        "--out",
+        str(out),
+    ]
+    assert driver.main(argv) == 2  # no manifest in the root
+    monkeypatch.setattr(
+        driver._TRANSACTION_CAPTURE,
+        "load_retained_targets",
+        lambda root: (_Target("account-" + "1" * 16, "[REDACTED]"),),
+    )
+    assert driver.main(argv) == 2
+    assert not out.exists()
+
+
+class _Page:
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
+class _Browser:
+    def __init__(self, urls: list[str]) -> None:
+        self.contexts = [type("C", (), {"pages": [_Page(u) for u in urls]})()]
+
+
+SCHWAB = "https://client.schwab.com/app/accounts/positions/"
+
+
+def test_attach_check_reports_names_only_and_issues_no_governed_request() -> None:
+    seen: list[str] = []
+    result = driver.attach_check(
+        cdp_url="http://127.0.0.1:9223",
+        connect=lambda url: seen.append(url) or _Browser([SCHWAB, "about:blank"]),
+        observe=lambda page: {"Authorization": "Bearer secret", "Schwab-Env": "x"},
+    )
+    assert result["ok"] is True and result["governed_requests"] == 0
+    assert result["observed_header_names"] == ["Authorization", "Schwab-Env"]
+    assert "secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("urls", [[], [SCHWAB, SCHWAB], ["about:blank"]])
+def test_attach_check_needs_exactly_one_schwab_page(urls: list[str]) -> None:
+    with pytest.raises(driver.DriverError, match="exactly one"):
+        driver.attach_check(
+            cdp_url="x", connect=lambda url: _Browser(urls), observe=lambda page: {}
+        )
+
+
+def test_attach_check_not_ok_without_authorization() -> None:
+    result = driver.attach_check(
+        cdp_url="x", connect=lambda url: _Browser([SCHWAB]), observe=lambda page: {}
+    )
+    assert result["ok"] is False

@@ -1934,6 +1934,86 @@ def _check_evidence(args: argparse.Namespace) -> dict[str, object]:
     return summary
 
 
+def build_crosswalk(source_root: Path, output: Path) -> dict[str, object]:
+    """Write the restricted crosswalk the retained terminal targets define.
+
+    Create-only; the provider ids go to the file and never to stdout. The result
+    is exactly what ``run_capture`` compares against the targets, so a capture
+    cannot start from a crosswalk that disagrees with them.
+    """
+
+    try:
+        targets = _TRANSACTION_CAPTURE.load_retained_targets(source_root)
+    except (SchwabCaptureError, OSError, ValueError) as exc:
+        raise DriverError("retained targets could not be loaded") from exc
+    rows = sorted(
+        (
+            {
+                "external_account_id": t.provider_account_id,
+                "internal_account_id": t.internal_account_id,
+            }
+            for t in targets
+        ),
+        key=lambda row: row["internal_account_id"],
+    )
+    payload = json.dumps({"crosswalk": rows}, indent=2, sort_keys=True).encode()
+    parse_crosswalk(json.loads(payload))  # exact, one-to-one, no redaction
+    try:
+        with output.open("xb") as handle:
+            handle.write(payload + b"\n")
+    except FileExistsError as exc:
+        raise DriverError("output already exists") from exc
+    return {"account_count": len(rows), "output_sha256": _sha256(payload + b"\n")}
+
+
+def attach_check(
+    *,
+    cdp_url: str,
+    connect: Callable[[str], Any],
+    observe: Callable[[Any], dict[str, str]],
+) -> dict[str, object]:
+    """Attach and observe the page's own headers; no governed request, no evidence.
+
+    ``observe`` reloads the Schwab page and reads one of the SPA's own API
+    requests, exactly as ``capture`` does first. Header values are never
+    returned, only their names.
+    """
+
+    browser = connect(cdp_url)
+    if not browser.contexts:
+        raise DriverError("attached browser has no default context")
+    pages = [
+        page
+        for page in browser.contexts[0].pages
+        if page.url.startswith("https://client.schwab.com/")
+    ]
+    if len(pages) != 1:
+        raise DriverError(
+            f"expected exactly one client.schwab.com page, found {len(pages)}"
+        )
+    headers = observe(pages[0])
+    return {
+        "authenticated_request_observed": "Authorization" in headers,
+        "governed_requests": 0,
+        "observed_header_names": sorted(headers),
+        "ok": "Authorization" in headers,
+        "schwab_pages": len(pages),
+    }
+
+
+def _attach_live(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
+    try:
+        sync_playwright = importlib.import_module("playwright.sync_api").sync_playwright
+    except ImportError as exc:
+        raise DriverError("Playwright is required for live Schwab capture") from exc
+    with sync_playwright() as playwright:
+        return attach_check(
+            cdp_url=args.cdp_url,
+            connect=playwright.chromium.connect_over_cdp,
+            observe=_observe_headers,
+        )
+
+
 def _normalize_offline(args: argparse.Namespace) -> dict[str, object]:
     crosswalk = parse_crosswalk(_load(args.crosswalk, "crosswalk"))
     raw = strict_json_loads(args.raw_response.read_bytes(), label="raw holdings")
@@ -1996,6 +2076,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     check.add_argument("evidence", type=Path)
     check.add_argument("--receipt-root", type=Path)
+    crosswalk = sub.add_parser(
+        "build-crosswalk",
+        help="offline: write the restricted crosswalk from the retained targets",
+    )
+    crosswalk.add_argument("--selected-source-root", required=True, type=Path)
+    crosswalk.add_argument("--out", required=True, type=Path)
+    attach = sub.add_parser(
+        "attach-check",
+        help="live, no evidence: attach over CDP and observe the page's headers",
+    )
+    attach.add_argument("--cdp-url", required=True)
     verify = sub.add_parser("verify", help="re-check a staged run from its bytes")
     verify.add_argument("run_dir", type=Path)
     verify.add_argument("--crosswalk", type=Path)
@@ -2028,6 +2119,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = _make_evidence(args)
         elif args.command == "check-evidence":
             result = _check_evidence(args)
+        elif args.command == "build-crosswalk":
+            result = build_crosswalk(args.selected_source_root, args.out)
+        elif args.command == "attach-check":  # pragma: no cover - live only
+            result = _attach_live(args)
         else:
             crosswalk = (
                 parse_crosswalk(_load(args.crosswalk, "crosswalk"))

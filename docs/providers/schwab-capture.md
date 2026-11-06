@@ -141,6 +141,21 @@ Run it just before `capture`. `issued_at` must be in the past and `expires_at` i
 the future when `capture` runs. `capture` itself is unchanged and still the only
 thing that consumes evidence.
 
+### Crosswalk and the first-minute live check
+
+`build-crosswalk --selected-source-root <dir> --out <crosswalk.json>` writes the
+restricted `{"crosswalk": [...]}` file from the retained terminal targets
+(create-only; prints only the account count and the file hash, never an id). It
+is exactly what `capture` compares to the targets, so the two cannot disagree.
+The approved evidence `--account-count` must equal that count (the retained
+`refresh-20260902` root, manifest sha256 `1b57aa1d...ba858fd0`, yields 8).
+
+`attach-check --cdp-url http://127.0.0.1:9223` is the live check to run before
+the single-use capture: it attaches, requires exactly one `client.schwab.com`
+page, reloads it and reads one of the SPA's own API requests (the same step
+`capture` starts with), and prints `ok`, `governed_requests: 0` and the observed
+header names (never values). It needs no evidence and consumes nothing.
+
 ## Credentials
 
 None. Capture attaches over CDP to the owner's already-authenticated browser and
