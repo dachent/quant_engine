@@ -427,8 +427,8 @@ python tools/quantbase_cdp_navigator.py --cdp-url http://127.0.0.1:9333 --allowl
 
 - Allow-list: a JSON file (data, not code): `schema_version` 1, optional
   `dwell_seconds` (default 30, max 120), and `pages`, a list of `{label, url,
-  dwell_seconds?}`. The tool prints the file's sha256 first; `--allowlist-sha256`
-  pins it and a mismatch is refused before any connection. Every URL must be https on
+  dwell_seconds?}`. The tool prints the file's sha256 first. `--allowlist-sha256` is
+  REQUIRED: a missing pin or a mismatch is refused before any connection. Every URL must be https on
   exactly `app.getquantbase.com` (no userinfo, port, fragment, `..`), must contain
   none of the recorder's `MUTATION_WORDS` (imported, not copied) and must not look
   like a login path. `qbapi3.com` is never a navigation target.

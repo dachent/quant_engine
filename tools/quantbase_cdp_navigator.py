@@ -520,13 +520,13 @@ class Navigator:
         try:
             self._attach()
             for index, page in enumerate(self._allowlist.pages):
+                done += 1  # counted when the navigation starts, not when it returns
                 try:
                     result = self._visit(page)
                 except StopReauth as stop:
                     stop.label = page.label
                     raise
                 counts[result["result"]] += 1
-                done += 1
                 self._emit(
                     {"event": "step", "index": index, "label": page.label, **result}
                 )
@@ -626,7 +626,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--allowlist", required=True, type=Path)
     parser.add_argument(
         "--allowlist-sha256",
-        help="pin: refuse unless the allow-list file has exactly this sha256",
+        help="REQUIRED pin: refuse unless the allow-list file has exactly this sha256",
     )
     parser.add_argument(
         "--scroll",
@@ -658,6 +658,8 @@ def main(
             raw = args.allowlist.read_bytes()
         except OSError:
             raise NavigatorError("ALLOWLIST_UNREADABLE") from None
+        if args.allowlist_sha256 is None:
+            raise NavigatorError("PIN_REQUIRED")
         allowlist = parse_allowlist(raw, pin_sha256=args.allowlist_sha256)
         if not 0 < args.load_timeout_seconds <= 300:
             raise NavigatorError("LOAD_TIMEOUT_INVALID")

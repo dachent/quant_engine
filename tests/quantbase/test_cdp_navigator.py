@@ -466,6 +466,7 @@ def cli(
     *extra: str,
     cdp: str = "http://127.0.0.1:9333",
     raw: bytes | None = None,
+    pin: bool = True,
 ) -> tuple[int, list[dict[str, Any]], list[str], FakeBrowser]:
     clock = Clock()
     browser = FakeBrowser(clock)
@@ -476,8 +477,12 @@ def cli(
         return browser
 
     lines: list[dict[str, Any]] = []
+    path = write_allowlist(tmp_path, raw)
+    pinned: list[str] = []
+    if pin and "--allowlist-sha256" not in extra:
+        pinned = ["--allowlist-sha256", hashlib.sha256(path.read_bytes()).hexdigest()]
     code = nav.main(
-        ["--cdp-url", cdp, "--allowlist", str(write_allowlist(tmp_path, raw)), *extra],
+        ["--cdp-url", cdp, "--allowlist", str(path), *pinned, *extra],
         connect=connect,
         emit=lines.append,
         clock=clock,
@@ -555,7 +560,14 @@ def test_invalid_allowlist_is_refused_before_connecting(
 
 def test_missing_allowlist_file_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
     code = nav.main(
-        ["--cdp-url", "http://127.0.0.1:9333", "--allowlist", "no-such-file.json"],
+        [
+            "--cdp-url",
+            "http://127.0.0.1:9333",
+            "--allowlist",
+            "no-such-file.json",
+            "--allowlist-sha256",
+            "0" * 64,
+        ],
         connect=lambda url: (_ for _ in ()).throw(AssertionError("connected")),
     )
     assert code == 2
@@ -572,6 +584,8 @@ def test_cli_stop_reauth_exit_code(tmp_path: Path) -> None:
             "http://127.0.0.1:9333",
             "--allowlist",
             str(write_allowlist(tmp_path)),
+            "--allowlist-sha256",
+            hashlib.sha256(allowlist_bytes()).hexdigest(),
         ],
         connect=lambda url: browser,
         emit=lambda record: None,
@@ -1016,3 +1030,32 @@ def test_wheel_total_delta_is_bounded() -> None:
             guard.send({"id": 1, "method": "Input.dispatchMouseEvent", "params": big})
             sent += 1
     assert sent * 600 <= 5000 and sent == 8
+
+
+# --- review findings: pin is required, attempts counted at navigation start --
+
+
+def test_missing_pin_is_refused_before_any_connection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, lines, connected, browser = cli(tmp_path, pin=False)
+    assert code == 2
+    assert "REFUSED PIN_REQUIRED" in capsys.readouterr().out
+    assert connected == [] and browser.sent == [] and lines == []
+
+
+def test_attempted_counts_the_navigation_that_ended_in_a_stop() -> None:
+    clock, browser = setup()
+    browser.final[PAGES[1]["url"]] = f"{APP}/sign-in"
+    code, lines = run(browser, clock)
+    assert code == 3
+    summary = lines[-1]
+    assert summary["attempted"] == len(browser.navigated) == 2
+    assert summary["ok"] == 1
+
+
+def test_attempted_counts_a_navigation_that_errored() -> None:
+    clock, browser = setup()
+    browser.fail = "Page.navigate"
+    _, lines = run(browser, clock)
+    assert lines[-1]["attempted"] == 1 and lines[-1]["ok"] == 0
