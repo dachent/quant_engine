@@ -1093,3 +1093,32 @@ def test_derive_module_has_no_dynamic_loading_of_its_own():
     derivation = load_module(DERIVE_PATH, "derive_b_for_sleeves_g")
     assert callable(derivation.derive_sleeves)
     assert not hasattr(derivation, "_load_sleeves_module")
+
+
+def test_a_late_capture_cash_is_rolled_back_to_the_cutoff(tmp_path: Path) -> None:
+    """A deposit dated after the cutoff is in the late balance and is rolled back out."""
+    derivation = load_module(DERIVE_PATH, "derive_b_for_sleeves_late")
+    engine = make_engine(derivation, derivation)
+    paths = write_toy_tree(tmp_path)
+    activity_path = tmp_path / "toy" / "account_activity.csv"
+    activity_path.write_text(
+        activity_path.read_text(encoding="utf-8")
+        + "transfer,tl,,DEPOSIT,50,,,,,,,,2026-09-19T12:00:00Z,C,\n",
+        encoding="utf-8",
+    )
+    # the toy's own balance (30) plus the late deposit
+    (tmp_path / "toy" / "accounts.csv").write_text(
+        "id,type,settled_balance\nx,alpaca,80\n", encoding="utf-8"
+    )
+    selection = write_sleeve_inputs(tmp_path, paths)
+    result = derivation.derive_sleeves(
+        sleeve_inputs_path=selection,
+        qe_root=tmp_path,
+        repo_root=tmp_path,
+        cutoff=CUTOFF,
+        engine=engine,
+    )
+    assert result["sleeve_derivation"]["refusals"] == []
+    cash = result["sleeve_derivation"]["closure"]["quantbase"]["cash"]
+    assert cash["post_cutoff_cash_rolled_back"] == "50"
+    assert cash["provider_settled_cash"] == "80"

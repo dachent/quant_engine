@@ -545,6 +545,9 @@ class Activity:
     dividends: tuple[tuple[date, str, Decimal, str], ...]
     funds_by_symbol: Mapping[str, frozenset[str]]
     after_cutoff: int
+    # net cash effect of the non-fund-fill rows dated after the cutoff (deposits and
+    # dividends in, fees out); the account balance of a late capture already holds it
+    post_cutoff_cash: Decimal
 
 
 def _parse_activity(raw: bytes, cutoff: date) -> Activity:
@@ -584,6 +587,7 @@ def _parse_activity(raw: bytes, cutoff: date) -> Activity:
     dividends: list[tuple[date, str, Decimal, str]] = []
     ignored = 0
     after = 0
+    post_cash = _ZERO
     for row in unique:
         kind = row["activity_type"]
         if kind == "filled_txn":
@@ -645,19 +649,15 @@ def _parse_activity(raw: bytes, cutoff: date) -> Activity:
                 ignored += 1
                 continue
             when = _timestamp(row["created_at"], "transfer created_at").date()
-            if when > cutoff:
-                after += 1
-                continue
             amount = _money(row["amount"], "transfer amount")
             if amount <= 0:
                 raise QuantbaseFundFactsError("a transfer amount is not positive")
-            deposits.append(
-                (
-                    when,
-                    amount if transfer_type == "DEPOSIT" else -amount,
-                    row["id"],
-                )
-            )
+            signed = amount if transfer_type == "DEPOSIT" else -amount
+            if when > cutoff:
+                after += 1
+                post_cash += signed
+                continue
+            deposits.append((when, signed, row["id"]))
         elif kind == "journal":
             journal_type = row["type"].strip().upper()
             if journal_type not in {"AUM_FEE", "PARTNER_SUB_FEE"}:
@@ -665,21 +665,23 @@ def _parse_activity(raw: bytes, cutoff: date) -> Activity:
             if row["status"] != "COMPLETE":
                 raise QuantbaseFundFactsError("a fee journal is not complete")
             when = _timestamp(row["created_at"], "journal created_at").date()
-            if when > cutoff:
-                after += 1
-                continue
             amount = _money(row["amount"], "journal amount")
             if amount <= 0:
                 raise QuantbaseFundFactsError("a fee journal amount is not positive")
+            if when > cutoff:
+                after += 1
+                post_cash -= amount
+                continue
             journals.append((when, journal_type, amount, row["id"]))
         elif kind == "dividend":
             when = _timestamp(row["date"], "dividend date").date()
-            if when > cutoff:
-                after += 1
-                continue
             amount = _money(row["amount"], "dividend amount")
             if amount <= 0 or not row["symbol"].strip():
                 raise QuantbaseFundFactsError("a dividend is invalid")
+            if when > cutoff:
+                after += 1
+                post_cash += amount
+                continue
             dividends.append((when, row["symbol"].strip(), amount, row["id"]))
         elif kind != "order":
             raise QuantbaseFundFactsError(f"unknown activity type {kind!r}")
@@ -693,6 +695,7 @@ def _parse_activity(raw: bytes, cutoff: date) -> Activity:
         dividends=tuple(sorted(dividends)),
         funds_by_symbol={k: frozenset(v) for k, v in funds_by_symbol.items()},
         after_cutoff=after,
+        post_cutoff_cash=post_cash,
     )
 
 
@@ -1259,7 +1262,13 @@ def _account_closure(
     dividends = sum((a for _d, _s, a, _i in activity.dividends), _ZERO)
     net_funds = sum(net_by_fund.values(), _ZERO)
     derived_cash = deposits - net_funds + dividends - aum - sub
-    residual = derived_cash - provider_cash
+    # A capture after the cutoff holds the settled balance of its own day: roll it back
+    # to the cutoff by the cash effect of every row dated after it (fund fills, deposits,
+    # dividends, fees), so the declared residual still compares like with like.
+    post_cutoff = activity.post_cutoff_cash - sum(
+        (fill.amount for fill in activity.fills if fill.time.date() > cutoff), _ZERO
+    )
+    residual = derived_cash - (provider_cash - post_cutoff)
     declared_residual = declared.cash_residual.amount
     cash_tolerance = declared.cash_residual.tolerance
     assert declared_residual is not None and cash_tolerance is not None
@@ -1318,6 +1327,11 @@ def _account_closure(
             "partner_subscription_fees": _dec(sub),
             "derived_cash": _dec(derived_cash),
             "provider_settled_cash": _dec(provider_cash),
+            **(
+                {"post_cutoff_cash_rolled_back": _dec(post_cutoff)}
+                if post_cutoff != _ZERO
+                else {}
+            ),
             "residual": _dec(residual),
             "declared_residual": _dec(declared_residual),
             "residual_tolerance": _dec(cash_tolerance),

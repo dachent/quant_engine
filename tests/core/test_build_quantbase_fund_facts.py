@@ -961,3 +961,62 @@ def test_a_vendor_total_that_ends_before_the_components_is_refused() -> None:
         data["dashboards"]["total"] = data["dashboards"]["total"][:-1]
 
     _refused(truncated, "total dashboard ends before")
+
+
+def _late_capture(data: dict[str, Any]) -> None:
+    """Rows dated after the cutoff, and the account balance of a capture that holds them."""
+
+    rows = data["activity"]
+    rows += _txn(
+        "z9", "99", "Gamma Fund", "BUY", "3", _at(9, "10:00:00"), _at(9, "11:00:00")
+    )
+    rows.append(
+        _row(
+            activity_type="transfer",
+            id="t9",
+            type="DEPOSIT",
+            amount="100",
+            created_at=_at(9, "09:00:00"),
+            status="C",
+        )
+    )
+    rows.append(
+        _row(
+            activity_type="dividend",
+            id="d9",
+            symbol="AAA",
+            amount="1.5",
+            date=_at(9, "04:00:00"),
+        )
+    )
+    rows.append(
+        _row(
+            activity_type="journal",
+            id="j9",
+            type="AUM_FEE",
+            amount="0.5",
+            created_at=_at(9, "11:00:00"),
+            status="COMPLETE",
+        )
+    )
+
+
+def test_a_late_capture_is_rolled_back_to_the_cutoff_by_the_rows_after_it() -> None:
+    baseline = _facts()["closure"]["account"]
+    assert "post_cutoff_cash_rolled_back" not in baseline["cash"]
+    data = _inputs()
+    _late_capture(data)
+    # the balance a capture after the cutoff shows: 760.00 + 100 + 1.5 - 0.5 - 3
+    data["accounts"][1]["settled_balance"] = "858.00"
+    account = _facts(data)["closure"]["account"]
+    cash = account["cash"]
+    assert cash["post_cutoff_cash_rolled_back"] == "98"
+    assert cash["provider_settled_cash"] == "858"
+    assert cash["derived_cash"] == baseline["cash"]["derived_cash"]
+    assert cash["residual"] == baseline["cash"]["residual"] == "0.66"
+    assert account["rows_after_cutoff_excluded"] == 3
+
+    # the balance of the cutoff itself would no longer close once the rows are rolled back
+    data["accounts"][1]["settled_balance"] = "760.00"
+    with pytest.raises(builder.QuantbaseFundFactsError, match="not the declared"):
+        _build(data)

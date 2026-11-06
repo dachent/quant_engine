@@ -911,17 +911,9 @@ def derive_csv_files(
         if gap > 0:
             label["gap_hours"] = round(gap, 4)
         snapshots.append(label)
-    late = [str(item["file"]) for item in snapshots if "gap_hours" in item]
-    if late and snapshot_exception is None:
-        raise QuantbaseCsvError(
-            "snapshot captured after the cutoff day end (a cutoff-dated reader "
-            f"would mistake it for a cutoff value): {late}; label an exception "
-            "with --snapshot-exception"
-        )
-    if snapshot_exception is not None and not late:
-        raise QuantbaseCsvError(
-            "snapshot exception given but every snapshot is within the cutoff day"
-        )
+    # A snapshot taken after the cutoff day end is recorded with its gap (above); no
+    # label is needed.  The only snapshot a number reads is the account balance, and the
+    # fund facts builder rolls it back to the cutoff by the activity rows dated after it.
     facts: dict[str, object] = {
         "snapshots": snapshots,
         "excluded_after_cutoff": dict(sorted(cutoff.excluded.items())),
