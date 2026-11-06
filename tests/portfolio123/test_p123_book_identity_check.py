@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date
 from pathlib import Path
 
 from tools import p123_book_identity_check as ic
@@ -194,6 +195,51 @@ def test_us_format_inception_is_checked_and_unparseable_needs_review(
     assert report["books"]["101"]["decision"] != "PASS"
 
 
+def test_positions_at_the_cutoff_roll_back_the_rows_after_it(tmp_path: Path) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")  # B: +50 on 2026-01-05, -20 on 2026-02-02; held A 100, B 30 at T
+    _manifest(capture)
+    assert "I5D" not in {
+        c["check"] for c in ic.check_capture(capture)["books"]["101"]["checks"]
+    }
+    report = ic.check_capture(capture, as_of=date(2026, 1, 31))
+    item = report["books"]["101"]
+    assert _status(report, "101", "I5D") == "PASS"
+    assert item["positions_as_of"]["rolled_back_rows"] == {"SELL": 1}
+    assert item["positions_as_of"]["open_symbols"] == 2
+    full = ic.check_capture(capture, as_of=date(2026, 9, 11))["books"]["101"]
+    assert (
+        full["positions_as_of"]["positions_sha256"]
+        != item["positions_as_of"]["positions_sha256"]
+    )
+
+
+def test_rolling_back_refuses_unknown_types_and_flags_splits_and_open_closure(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    base = [("2025-05-12", "A101", "BUY", "100")]
+    _book(
+        raw,
+        "101",
+        trades=[*base, ("2026-03-01", "A101", "WEIRD", "5")],
+        held={"A101": "105.0"},
+    )
+    _book(
+        raw,
+        "202",
+        trades=[*base, ("2026-03-01", "A202", "SPLIT", "100")],
+        held={"A101": "100.0", "A202": "100.0"},
+    )
+    _book(raw, "303", held={"A303": "1.0"})  # I5 fails at T
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 2, 1))
+    assert _status(report, "101", "I5D") == "FAIL"
+    assert _status(report, "202", "I5D") == "WARN"
+    assert _status(report, "303", "I5D") == "WARN"
+    assert report["books"]["303"]["decision"] == "FAIL"
+
+
 def test_manifest_mismatch_and_missing_perf_fail(tmp_path: Path) -> None:
     capture, raw = _capture(tmp_path)
     _book(raw, "101")
@@ -326,6 +372,7 @@ def test_required_reference_and_recorded_tolerance(tmp_path: Path) -> None:
     report = ic.check_capture(capture, require_reference=True)
     assert _status(report, "101", "I9") == "FAIL"
     assert report["settings"] == {
+        "as_of": None,
         "reference_tolerance": 0.01,
         "require_reference": True,
     }

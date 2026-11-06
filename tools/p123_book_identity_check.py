@@ -173,6 +173,7 @@ def check_book(
     trade_keys: set[str],
     require_reference: bool = False,
     tolerance: float = _REFERENCE_MISSING,
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     checks: list[dict[str, str]] = []
     names = {
@@ -295,6 +296,13 @@ def check_book(
         )
     else:
         checks.append(_check("I5", "WARN", "no holdings export to reconstruct against"))
+    # I5D
+    positions_as_of: dict[str, Any] | None = None
+    if as_of is not None:
+        positions_as_of, status, detail = _positions_as_of(
+            tx, as_of, closed=names["holdings"].is_file() and not differs
+        )
+        checks.append(_check("I5D", status, detail))
     # I6
     positions = _number(perf[-1].get("# Positions")) if perf else None
     if names["holdings"].is_file() and positions is not None:
@@ -388,11 +396,66 @@ def check_book(
         "fingerprints": {"perf": perf_print, "transactions": tx_print},
         "holdings_reconstruction": recon,
         "page_record": page_facts,
+        "positions_as_of": positions_as_of,
         "series_start": {
             "cash_amount": cash_amount,
             "date": cash_day.isoformat() if cash_day else None,
         },
     }
+
+
+_SHARE_TYPES = {"BUY", "SELL", "SHORT", "COVER", "SPLIT"}
+
+
+def _positions_as_of(
+    tx: Sequence[dict[str, str]], as_of: date, *, closed: bool
+) -> tuple[dict[str, Any], str, str]:
+    """Positions at ``as_of``: the net signed shares of rows dated on or before it.
+
+    The holdings export describes the capture day T; rolling back the rows dated after
+    ``as_of`` gives the positions at ``as_of`` only because I5 closed at T with every row
+    in the same signed-share arithmetic.  An unknown row type or an unreadable date among
+    the rolled-back rows refuses; a SPLIT among them needs review."""
+    net: dict[str, float] = defaultdict(float)
+    rolled: dict[str, int] = defaultdict(int)
+    refusals: list[str] = []
+    for row in tx:
+        kind = row.get("Type") or ""
+        day = _day(row.get("Date"))
+        if day is None:
+            refusals.append(f"unreadable date {row.get('Date')!r}")
+            continue
+        if day > as_of:
+            rolled[kind] += 1
+            if kind not in _SHARE_TYPES | _NON_SHARE_TYPES:
+                refusals.append(f"unknown row type {kind!r} dated {day}")
+            continue
+        shares = _number(row.get("Shares"))
+        if kind in _NON_SHARE_TYPES or shares is None or not row.get("Symbol"):
+            continue
+        net[row["Symbol"]] += shares
+    open_net = {
+        s: round(v, 6) for s, v in sorted(net.items()) if abs(v) > _SHARES_TOLERANCE
+    }
+    facts: dict[str, Any] = {
+        "as_of": as_of.isoformat(),
+        "open_symbols": len(open_net),
+        "positions_sha256": hashlib.sha256(
+            json.dumps(open_net, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "rolled_back_rows": dict(sorted(rolled.items())),
+    }
+    if refusals:
+        return facts, "FAIL", "; ".join(sorted(set(refusals))[:5])
+    if not closed:
+        return facts, "WARN", "positions at as-of not proven: I5 did not close at T"
+    detail = (
+        f"{sum(rolled.values())} rows after {as_of} rolled back "
+        f"({dict(sorted(rolled.items()))}); {len(open_net)} open symbols at {as_of}"
+    )
+    if rolled.get("SPLIT"):
+        return facts, "WARN", detail + "; a SPLIT after as-of needs review"
+    return facts, "PASS", detail
 
 
 def _decision(checks: Sequence[dict[str, str]]) -> str:
@@ -422,6 +485,7 @@ def check_capture(
     reference_tolerance: float = _REFERENCE_MISSING,
     cross_checks: Sequence[tuple[Path, str]] = (),
     prior_checks: Sequence[tuple[Path, str]] = (),
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     raw = capture / raw_subdir if raw_subdir else capture
     listed = _manifest(capture) if use_manifest else None
@@ -454,6 +518,7 @@ def check_capture(
             trade_keys=keys[book],
             require_reference=require_reference,
             tolerance=reference_tolerance,
+            as_of=as_of,
         )
         for book in selected
     ]
@@ -500,6 +565,7 @@ def check_capture(
         result["decision"] = _decision(result["checks"])
     return {
         "settings": {
+            "as_of": as_of.isoformat() if as_of else None,
             "reference_tolerance": reference_tolerance,
             "require_reference": require_reference,
         },
@@ -549,6 +615,12 @@ def _parser() -> argparse.ArgumentParser:
         help="data root; prints the predecessor fingerprints per book",
     )
     parser.add_argument("--previous-generation-id")
+    parser.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        help="cutoff D (YYYY-MM-DD): roll the T holdings back to D from the transactions "
+        "and record the positions at D (I5D)",
+    )
     return parser
 
 
@@ -569,6 +641,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         reference_tolerance=args.reference_tolerance,
         cross_checks=[(path, args.cross_raw_subdir) for path in args.cross_check],
         prior_checks=[(path, args.prior_raw_subdir) for path in args.compare_prior],
+        as_of=args.as_of,
     )
     if args.previous_generation_root is not None:
         previous = previous_generation_books(
@@ -578,6 +651,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     # One file per capture bytes: a re-run on the same bytes must reproduce it exactly.
     tag = str(report["capture_manifest_sha256"] or "no-manifest")[:12]
+    if args.as_of is not None:
+        tag += f"-asof-{args.as_of.isoformat()}"
     target = args.out / f"book-identity-decisions-{tag}.json"
     content = json.dumps(report, indent=1, sort_keys=True)
     if target.exists() and target.read_text(encoding="utf-8") != content:
