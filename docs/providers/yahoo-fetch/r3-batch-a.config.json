@@ -15,6 +15,9 @@
       "group_id": "held-closes",
       "kind": "yfinance",
       "symbols_from": "schwab-positions",
+      "exclude_symbols": [
+        "SWVXX"
+      ],
       "start_offset_days_before_through": 10,
       "interval": "1d",
       "through": "cutoff",
@@ -36,6 +39,21 @@
       "through": "cutoff",
       "min_rows": 1000,
       "max_missing_weekdays": 10
+    },
+    {
+      "group_id": "spxl-raw-history",
+      "kind": "yfinance",
+      "symbols": [
+        "SPXL"
+      ],
+      "interval": "1d",
+      "start": "2008-11-01",
+      "through": "cutoff",
+      "datasets": [
+        "history"
+      ],
+      "min_rows": 4400,
+      "max_missing_weekdays": 180
     },
     {
       "group_id": "qsi-daily",

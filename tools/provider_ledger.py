@@ -3042,8 +3042,10 @@ def _replay_schwab_patched_navs(
     patch: Mapping[str, Any],
     entries: Mapping[str, Mapping[str, Any]],
     catalog: Mapping[str, Any],
-) -> None:
+) -> dict[str, tuple[dict[str, Decimal], Decimal]]:
     """Recompute every patched NAV from pinned inputs; no tolerance, exact match.
+
+    Returns the pinned holdings (quantity by symbol and cash, by account) it replayed from.
 
     Value = round(sum(quantity x official close), 2) + cash rows, from the
     hash-pinned all-brokerage holdings capture and hash-pinned official-close
@@ -3104,8 +3106,13 @@ def _replay_schwab_patched_navs(
                         "Schwab cash",
                     )
                 else:
+                    # the frozen holdings reader prefers dataSymbol over the nested symbol
+                    listed = row.get("dataSymbol")
                     symbol = _text(
-                        _object(row["symbol"], "Schwab symbol")["symbol"], "symbol"
+                        listed
+                        if isinstance(listed, str) and listed.strip()
+                        else _object(row["symbol"], "Schwab symbol")["symbol"],
+                        "symbol",
                     )
                     quantities[symbol] = quantities.get(symbol, Decimal(0)) + _decimal(
                         _object(row["qty"], "Schwab quantity")["qty"], "Schwab qty"
@@ -3140,6 +3147,7 @@ def _replay_schwab_patched_navs(
                 stated.get(f"official_{day:%m%d}"), "derivation record value"
             ):
                 raise ProviderLedgerError("schwab derived patch replay differs")
+    return held
 
 
 def _schwab_derived_patch(
@@ -3346,6 +3354,7 @@ def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
         )
         return result
     roots = _object(evidence.get("roots"), "Schwab source roots")
+    source_patch = _schwab_source_derived_patch(evidence, end, catalog)
     sources = [
         r
         for r in _objects(evidence.get("sources"), "Schwab sources")
@@ -3385,8 +3394,148 @@ def _finality_schwab(ctx: _FinalityContext) -> dict[str, Any]:
             or max(values) != end
         ):
             raise ProviderLedgerError("schwab source finality labels or values differ")
-    result["basis"] = "SELECTED_HISTORICAL_NAV_LABEL_CAPTURE_TIME_UNKNOWN"
+        _check_schwab_source_cutoff_row(source_patch, source["account_id"], values, end)
+    if set(source_patch.entries) != source_patch.used:
+        raise ProviderLedgerError("schwab source derived patch inventory differs")
+    result["basis"] = (
+        "SELECTED_HISTORICAL_NAV_LABEL_WITH_DECLARED_DERIVED_PATCH"
+        if source_patch.entries
+        else "SELECTED_HISTORICAL_NAV_LABEL_CAPTURE_TIME_UNKNOWN"
+    )
     return result
+
+
+_SCHWAB_SOURCE_PATCH_KEYS: Final = frozenset(
+    {
+        "schema",
+        "derivation_basis",
+        "patched_dates",
+        "derivation_record",
+        "replay",
+        "native_balances",
+        "patches",
+    }
+)
+_SCHWAB_SOURCE_PATCH_ENTRY_KEYS: Final = frozenset(
+    {"account_id", "original_values", "patched_values"}
+)
+
+
+class _SchwabSourcePatch(NamedTuple):
+    """The cutoff-day NAV derivation a source-branch finality declares (empty when none is)."""
+
+    entries: Mapping[str, Mapping[str, Any]]
+    natives: Mapping[str, Mapping[date, Decimal]]
+    flat_cash: Mapping[
+        str, Decimal
+    ]  # account to cash, for accounts the pinned holdings show flat
+    used: set[str]
+
+
+def _schwab_source_derived_patch(
+    evidence: Mapping[str, Any], end: date, catalog: Mapping[str, Any]
+) -> _SchwabSourcePatch:
+    """The declared derived cutoff-day NAV rows of a source-branch finality, replayed exactly.
+
+    A native ``balances.historical`` row for the cutoff day can be a stale carry of the day before.
+    The declaration names each account whose selected cutoff row is a DERIVATION (quantity x official
+    close + cash, replayed by ``_replay_schwab_patched_navs`` from pinned bytes with no tolerance),
+    pins the native balances it replaces, and pins the derivation record.
+    """
+
+    raw = evidence.get("derived_patch")
+    if raw is None:
+        return _SchwabSourcePatch({}, {}, {}, set())
+    patch = _object(raw, "Schwab source derived patch")
+    if (
+        set(patch) != _SCHWAB_SOURCE_PATCH_KEYS
+        or patch["schema"] != "schwab-nav-source-derived-patch/1"
+        or patch["derivation_basis"] != "DERIVED_FROM_OFFICIAL_CLOSES"
+        or [
+            _day(d, "Schwab patched date")
+            for d in _strings(patch["patched_dates"], "dates")
+        ]
+        != [end]
+    ):
+        raise ProviderLedgerError("schwab source derived patch declaration differs")
+    entries: dict[str, Mapping[str, Any]] = {}
+    for entry in _objects(patch["patches"], "Schwab source derived patches"):
+        account = _text(entry.get("account_id"), "Schwab patched account")
+        original = _object(entry.get("original_values"), "Schwab original values")
+        patched = _object(entry.get("patched_values"), "Schwab patched values")
+        if (
+            set(entry) != _SCHWAB_SOURCE_PATCH_ENTRY_KEYS
+            or account in entries
+            or set(original) != {end.isoformat()}
+            or set(patched) != {end.isoformat()}
+        ):
+            raise ProviderLedgerError("schwab source derived patch entry differs")
+        entries[account] = entry
+    held = _replay_schwab_patched_navs(patch, entries, catalog)
+    flat_cash = {
+        account: cash for account, (quantities, cash) in held.items() if not quantities
+    }
+    natives: dict[str, Mapping[date, Decimal]] = {}
+    for pin in _objects(patch["native_balances"], "Schwab native balances"):
+        account = _text(pin.get("account_id"), "Schwab native balance account")
+        if account in natives:
+            raise ProviderLedgerError("schwab native balance account repeats")
+        payload = _object(
+            json.loads(
+                _schwab_pinned_bytes(
+                    {k: pin.get(k) for k in ("path", "sha256", "size_bytes")},
+                    "Schwab native balances",
+                )
+            ),
+            "Schwab native balances",
+        )
+        natives[account] = {
+            _quantbase_day(day, "Schwab native date"): _decimal(
+                _object(value, "Schwab native row")["AccountValue"], "Schwab native NAV"
+            )
+            for day, value in _object(payload.get("histories"), "histories").items()
+        }
+    return _SchwabSourcePatch(entries, natives, flat_cash, set())
+
+
+def _check_schwab_source_cutoff_row(
+    patch: _SchwabSourcePatch,
+    account_id: str,
+    values: Mapping[date, Decimal],
+    end: date,
+) -> None:
+    """The selected cutoff row is a declared derivation, or is not a carry of the day before.
+
+    A cutoff row equal to the prior row is accepted only for an account the pinned holdings capture shows
+    flat (no position rows) whose cash equals that row: its NAV is its cash, so the repeat is exact.
+    Anything else is a stale carry that finality must not claim as the cutoff day's NAV, however a
+    record describes it.
+    """
+
+    entry = patch.entries.get(account_id)
+    if entry is not None:
+        native = patch.natives.get(account_id)
+        day = end.isoformat()
+        original = _decimal(entry["original_values"][day], "Schwab original value")
+        patched = _decimal(entry["patched_values"][day], "Schwab patched value")
+        if (
+            native is None
+            or native.get(end) != original
+            or values[end] != patched
+            or values[end] == native[end]
+            or any(values.get(d) != v for d, v in native.items() if d != end)
+        ):
+            raise ProviderLedgerError("schwab derived patch rows differ from selected")
+        patch.used.add(account_id)
+        return
+    prior = max((d for d in values if d < end), default=None)
+    if prior is None or values[end] != values[prior]:
+        return
+    if patch.flat_cash.get(account_id) != values[end]:
+        raise ProviderLedgerError(
+            "schwab source NAV repeats its prior day without a derived patch: "
+            "a stale carry cannot be the cutoff day's NAV"
+        )
 
 
 _FINALITY_VALIDATORS: Final = {

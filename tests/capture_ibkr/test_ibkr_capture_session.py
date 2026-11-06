@@ -123,10 +123,15 @@ def test_poll_exhaustion_refuses_after_the_evidence_cap(tmp_path: Path) -> None:
 
 
 def test_transport_failure_is_terminal_and_never_retried(tmp_path: Path) -> None:
-    harness = Harness(tmp_path, [TransportError("the service request failed")])
+    harness = Harness(
+        tmp_path, [TransportError("the service request failed (URLError/gaierror)")]
+    )
     (summary,) = harness.run()
     assert summary.refusal_kind == "TRANSPORT_FAILURE"
     assert len(harness.http.calls) == 1
+    (run_dir,) = harness.run_dirs()
+    refusal = _manifest(run_dir)["refusal"]
+    assert refusal["detail"] == "the service request failed (URLError/gaierror)"  # type: ignore[index]
 
 
 @pytest.mark.parametrize(

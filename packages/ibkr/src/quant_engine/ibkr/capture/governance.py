@@ -33,6 +33,9 @@ TERMS_TEXT = (
 )
 TERMS_SHA256 = sha256_hex(TERMS_TEXT.encode("utf-8"))
 MAX_GET_ATTEMPTS = 9
+# A report is usually ready at the first poll; the rest of the budget covers connection-class
+# GetStatement failures (retried with the same reference code) and the 1019 polls.
+MIN_GET_ATTEMPTS_OVERRIDE = 6
 _MAX_EVIDENCE_BYTES = 64 * 1024
 _REPARSE_POINT = 0x0400
 _REVIEW_REFERENCE = re.compile(
@@ -241,6 +244,14 @@ def authorize_live_read(
         raise GovernanceError("governance max_send_requests must equal the plan size")
     if not 1 <= max_get <= MAX_GET_ATTEMPTS:
         raise GovernanceError("governance max_get_attempts is outside 1..9")
+    if (
+        any(request.window_override for request in plan.requests)
+        and max_get < MIN_GET_ATTEMPTS_OVERRIDE
+    ):
+        raise GovernanceError(
+            f"a plan that overrides its windows needs max_get_attempts of at least "
+            f"{MIN_GET_ATTEMPTS_OVERRIDE}"
+        )
     if metering["retry_count"] != 0:
         raise GovernanceError("governance retry_count must be exactly zero")
 

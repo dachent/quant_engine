@@ -414,6 +414,105 @@ page-set `jwt` header in `Network.requestWillBeSent` (the tool warns
 that response bodies stay readable after `loadingFinished` for large fund series,
 and which extra routes the real pages call beyond the reviewed table.
 
+## CDP navigator (`tools/quantbase_cdp_navigator.py`)
+
+An unattended capture needs the pages loaded without anyone clicking. The navigator
+drives the owner's already-signed-in Quantbase tab through a FIXED list of read-only
+pages while the passive recorder above (a separate process, started first) records
+the traffic. The navigator records nothing and keeps no header, cookie or body.
+
+```powershell
+python tools/quantbase_cdp_navigator.py --cdp-url http://127.0.0.1:9333 --allowlist <allowlist.json> --allowlist-sha256 <sha256>
+```
+
+- Allow-list: a JSON file (data, not code): `schema_version` 1, optional
+  `dwell_seconds` (default 30, max 120), and `pages`, a list of `{label, url,
+  dwell_seconds?}`. The tool prints the file's sha256 first. `--allowlist-sha256` is
+  REQUIRED: a missing pin or a mismatch is refused before any connection. Every URL must be https on
+  exactly `app.getquantbase.com` (no userinfo, port, fragment, `..`), must contain
+  none of the recorder's `MUTATION_WORDS` (imported, not copied) and must not look
+  like a login path. `qbapi3.com` is never a navigation target.
+- Placeholders: any entry whose label or URL still contains `{...}` (literal or
+  percent-encoded braces) is refused, so the UNVERIFIED template below cannot run
+  until the operator has replaced every placeholder.
+- Never revisit: two entries with the same page path (any query, case or trailing
+  slash) are refused. `/account-activity` listed twice is refused with
+  `ALLOWLIST_ACCOUNT_ACTIVITY_REPEATED`: the role-driven flow proof needs exactly
+  one successful `accounts.activity` GET across the declared HARs. The navigator
+  also refuses to run a hand-built list that repeats a page.
+- CDP messages by default: only `Target.getTargets`, `Target.attachToTarget`,
+  `Page.enable` and `Page.navigate` (with exactly one allow-listed `url` and nothing
+  else). No `Input.*`, `Runtime.*`, `Fetch.*`, `Network.*` or `Page.reload`;
+  anything else is refused in the transport guard. The CDP URL must be loopback.
+- Flow: attach to the one page whose URL starts with `https://app.getquantbase.com/`
+  (none: STOP; more than one: refused), navigate to each URL in order, wait for
+  `Page.loadEventFired` (timeout recorded, run continues), dwell, then read the tab
+  URL back. Output is one JSON line per step (label, `ok` or `timeout`, dwell,
+  `redirected_in_app`, `wheel_events`) and a summary; exit 0, or 1 if any step
+  timed out.
+- Per-capability counts: NOT printed. The navigator has no recorder access, and
+  reading response counts itself would need `Network.*`, which is deliberately not
+  in the allow-list. Each step line therefore prints the page label and dwell with
+  `capability_counts: READ_RECORDER_MANIFEST`; the operator reads the recorder's
+  per-capability counts (`capabilities.<name>.responses` in its manifest or summary).
+- STOP rule: if after any navigation the tab is off `app.getquantbase.com`, on a
+  login/sign-in path, gone, or any CDP call fails or errors, the tool navigates no
+  further, prints `STOP_REAUTH` (stderr) and a `stop` line with a reason code, and
+  exits 3. Refusals (bad allow-list, pin, CDP URL, two tabs) exit 2.
+- Pairing: start the recorder, then the navigator; stop the recorder (Ctrl-C) after
+  the navigator's summary and run the recorder's `verify`. The intake manifest's
+  `expected_responses` must equal the recorder's counts (page order below gives
+  users.profile 4, portfolio.dashboard 2, accounts.linked 2, accounts.activity 1,
+  funds.statistics 1, funds.rebalance-history 1, partners.status 1 when each page
+  loads once).
+
+### `--scroll` fallback (off by default)
+
+Default: the navigator sends NO input of any kind. `--scroll` is a
+coordinator-enabled fallback, to be used only if `funds.invest` (the
+`/_next/data/<build>/invest.json` prefetch, a REQUIRED capability) does not fire on
+dwell alone. In the retained HARs it fired only at the end of a long dwell, which
+fits footer links entering the viewport, so a bounded wheel scroll can trigger it.
+With `--scroll` the tool may additionally send ONLY `Input.dispatchMouseEvent` with
+`type: mouseWheel`, after a page has loaded: 6 steps of +400 then 6 of -400
+(`deltaY`, integer, |deltaY| <= 600, `deltaX` 0, x/y 300/300 and never outside 0 to
+2000), no `button`, `buttons`, `modifiers` or `clickCount`. The budget is at most 12
+events and 5000 total |deltaY| per page. Click (`mousePressed`, `mouseReleased`),
+`mouseMoved`, key, touch, drag, any other `Input.*`, `Runtime.*`, `Fetch.*`,
+`Network.*` and `Page.reload` stay refused before sending, with or without
+`--scroll`.
+
+### First-minute dry-run procedure
+
+1. Start the recorder (`capture`), then the navigator on the derived allow-list
+   (without `--scroll`). Page order is `/profile` first (never a cold `/dashboard`
+   first, which once injected unreviewed page-data routes), then `/dashboard`,
+   `/account-activity` (exactly once), then the fund page; 30 s per page.
+2. When the navigator prints its summary, stop the recorder and record its
+   per-capability counts (`capabilities.<name>.responses`) in the run notes.
+3. If `funds.invest` is missing after the dwell, rerun ONLY the page that should
+   have triggered it with `--scroll` (a one-page allow-list), against a recorder
+   run of its own. Never repeat `/account-activity`.
+4. Check the counts against the expected set above before treating the run as
+   complete; any of `funds.catalog`, `funds.index`, `funds.projections` in the
+   capture means the run must be repeated, the intake refuses them.
+
+### Allow-list data
+
+Derived offline from the retained Quantbase HARs (page paths only, ids masked; no
+HAR content is copied):
+
+| File | Status |
+| --- | --- |
+| `docs/providers/quantbase-navigator-allowlist.derived.json` | VERIFIED as document loads in the HARs, in this order: `/profile`, `/dashboard`, `/account-activity`, `/fund/details/Volatis%20Strategy` (the fund page keys on the fund NAME, not an id); dwell 30 s |
+| `docs/providers/quantbase-navigator-allowlist.template.json` | UNVERIFIED, refused until filled: `/invest`, `/funds`, `/projections` were seen only as `_next/data` requests (client-side routing), never as a document load; `{fund_name}` for any other fund's page cannot be known offline and the operator supplies it |
+
+`/sign-in` appears in the HARs and is deliberately excluded. UNVERIFIED items: that
+a direct load of `/invest`, `/funds` or `/projections` works and fires the same API
+calls; the fund names beyond Volatis Strategy; whether `funds.invest` fires on dwell
+alone (see `--scroll`); behaviour of a live browser (the tests use a fake CDP
+transport only).
+
 ## Declared contract extension (`build_quantbase_contract`)
 
 `quant_engine.web_contracts.build_quantbase_contract(extension)` widens the reviewed

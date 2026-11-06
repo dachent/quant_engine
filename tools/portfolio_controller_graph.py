@@ -113,6 +113,9 @@ _PATH_STAGES = {
     # into any delivery artifact, so it affects no stage.
     "packages/core/src/quant_engine/core/stage_timing.py": [],
     "packages/core/src/quant_engine/core/parallel_hash.py": [],
+    # The regular NYSE closures: the implementation builders hold a model's expected end to its last
+    # trading day, so it can refuse the reconciliation and attribution that the report and panel read.
+    "packages/core/src/quant_engine/core/market_calendar.py": ["report", "panel"],
     _RELEASE: list(_STAGE_ORDER),
     # WS4 T1.4 (corrective program): `commit_release` here is the coordinated
     # publication sink every stage's release commit reaches (directly, or via
@@ -228,6 +231,10 @@ _PATH_STAGES = {
     # Passive CDP listener for one attended Portfolio123 sitting; writes a
     # create-only run directory and a draft catalog diff, no stage reads it.
     "tools/p123_cdp_recorder.py": [],
+    # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
+    # hash-pinned allowlist of read-only exports into a create-only directory; the
+    # staging CLI and the generation read only the files and manifest they are handed.
+    "tools/p123_cdp_fetcher.py": [],
     # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
     # create-only run directory; no stage reads it, only a pinned run it is handed.
     "tools/grizzlybulls_capture.py": [],
@@ -307,6 +314,9 @@ _PATH_STAGES = {
     "tools/verify_sleeve_ledger.py": [],
     "tools/schwab_capture_driver.py": [],
     "tools/schwab_capture_ingest.py": [],
+    # derives the cutoff-day Schwab NAV from the verified holdings and official closes; an operator
+    # step before the ingest, it writes no delivery artifact itself
+    "tools/schwab_nav_derive.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": ["report", "panel"],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
@@ -315,6 +325,7 @@ _PATH_STAGES = {
     "tools/capture_quantbase_har.py": [],
     "tools/quantbase_har_to_csv.py": [],
     "tools/quantbase_cdp_har_recorder.py": [],
+    "tools/quantbase_cdp_navigator.py": [],
     "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
@@ -346,6 +357,12 @@ _PATH_STAGES = {
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
     "tools/alpaca_generation.py": [],
+    # Plans and stages the Portfolio123 generation (HAR roots and transaction captures);
+    # consumers read only the generation they are handed, never this tool.
+    "tools/portfolio123_generation.py": [],
+    # Per-book identity check of a Portfolio123 export set (offline, read-only; writes a
+    # decisions file); no stage reads it.
+    "tools/p123_book_identity_check.py": [],
     # Derived release-findings producer (ruling B / C1): binds every non-panel
     # release target to the panel's own findings. Its checks live in
     # `acceptance/validate/release_targets.py`; it reads a prepared release.json
