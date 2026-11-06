@@ -91,7 +91,13 @@ def test_missing_weekdays_are_reported_and_known_holidays_are_not(
     label = account_label(ACCOUNT_ONE)
     assert document["coverage"]["status"] == "GAPS_PRESENT"
     assert document["coverage"]["weekday_gaps"] == {label: ["2026-10-07"]}
-    assert verify_run(run_dir, tmp_path / "a.json").coverage_status == "GAPS_PRESENT"
+    # a gap on an activity run is a refusal; only an explicit inspection may read it
+    with pytest.raises(VerificationError) as refused:
+        verify_run(run_dir, tmp_path / "a.json")
+    assert refused.value.reason == "coverage-gaps"
+    assert "2026-10-07" in str(refused.value)
+    report = verify_run(run_dir, tmp_path / "a.json", allow_gaps=True)
+    assert report.coverage_status == "GAPS_PRESENT"
     sub = tmp_path / "second"
     sub.mkdir()
     run_dir2, _ = _staged(
@@ -273,3 +279,23 @@ def test_security_reference_requires_its_catalogued_sections(
     with pytest.raises(VerificationError) as error:
         verify_run(run_dir, output)
     assert error.value.reason == "statement-sections"
+
+
+def test_one_account_missing_the_final_day_is_not_verified(tmp_path: Path) -> None:
+    labels = tuple(sorted({account_label(ACCOUNT_ONE), account_label(ACCOUNT_TWO)}))
+    first = activity_xml((ACCOUNT_ONE,), DAYS)
+    second = activity_xml((ACCOUNT_TWO,), DAYS[:-1])
+    merged = (
+        first.replace(b"</FlexStatements></FlexQueryResponse>", b"")
+        + second[second.index(b"<FlexStatement ") : second.index(b"</FlexStatements>")]
+        + b"</FlexStatements></FlexQueryResponse>"
+    )
+    run_dir, _ = _staged(tmp_path, merged, labels=labels)
+    document = normalize_run(run_dir, tmp_path / "n.json")
+    assert document["coverage"]["weekday_gaps"] == {
+        account_label(ACCOUNT_TWO): [DAYS[-1].isoformat()]
+    }
+    with pytest.raises(VerificationError) as refused:
+        verify_run(run_dir, tmp_path / "n.json")
+    assert refused.value.reason == "coverage-gaps"
+    assert "1 account(s) lack 1 requested weekday(s)" in str(refused.value)

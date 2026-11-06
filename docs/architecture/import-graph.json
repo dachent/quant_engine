@@ -629,6 +629,11 @@
       1
     ],
     [
+      "quantbase_cdp_navigator",
+      "quantbase_cdp_har_recorder",
+      1
+    ],
+    [
       "quantbase_har_to_csv",
       "capture_quantbase_har",
       1
@@ -725,6 +730,11 @@
     ],
     [
       "schwab_capture_ingest",
+      "schwab_capture_driver",
+      1
+    ],
+    [
+      "schwab_nav_derive",
       "schwab_capture_driver",
       1
     ],

@@ -5,7 +5,9 @@ Configuration (``[credentials.ibkr]``) lists, per field, an ordered list of
 
 * ``flex_token`` - the Flex Web Service token;
 * one ``query_*`` field per catalog query a plan uses (the catalog's
-  ``query_field``), holding that saved query's id.
+  ``query_field``), holding that saved query's id.  Several fields may name the
+  same secret: one saved query can serve several roles when its sections cover
+  them (the verifier refuses a statement that lacks a section of its role).
 
 Secret and vault NAMES are owner-supplied configuration; none appears in code.
 Only the fields a plan needs are read (least privilege), after governance has
