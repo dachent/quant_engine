@@ -943,6 +943,8 @@ def test_cli_sleeves_only_requires_sleeve_inputs(
         "argv",
         [
             "derive.py",
+            "--cutoff",
+            "2026-09-17",
             "--qe-root",
             str(tmp_path),
             "--out",
@@ -966,6 +968,8 @@ def test_cli_sleeve_input_error_exits_2(
         "argv",
         [
             "derive.py",
+            "--cutoff",
+            "2026-09-17",
             "--qe-root",
             str(tmp_path),
             "--out",
