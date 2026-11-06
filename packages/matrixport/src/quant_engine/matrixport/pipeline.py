@@ -131,6 +131,34 @@ def recorded_capture_label(run: Mapping[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+# A current-state capture taken up to this long after the cutoff day's end is recorded as a
+# fact and needs no approval label (Friday cutoff, pull on the following Monday UTC).  The
+# D share count of the daily valuation is the share count at capture (``valuation.py``
+# anchors the opening gap on the current holding), so share events between the cutoff and the
+# capture are not visible; past this bound a person must say so with a label.
+MAX_UNLABELLED_GAP_HOURS = 72
+
+
+def late_capture_fact(
+    captures: Mapping[str, int], limit_ms: int
+) -> dict[str, Any] | None:
+    """The recorded fact of current-state requests captured after the cutoff day's end."""
+
+    late = {path: at_ms for path, at_ms in captures.items() if at_ms > limit_ms}
+    if not late:
+        return None
+    latest = max(late.values())
+    stamp = datetime.fromtimestamp(latest / 1000, timezone.utc)
+    return {
+        "cutoff_end_ms": limit_ms,
+        "latest_captured_at_ms": latest,
+        "latest_captured_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "gap_hours": round((latest - limit_ms) / 3_600_000, 4),
+        "late_paths": sorted(late),
+        "valuation_share_count": "capture-time shares (no event after the cutoff is visible)",
+    }
+
+
 def recorded_captures(run: Mapping[str, Any]) -> dict[str, int]:
     """Path -> UTC ms at which each current-state request was captured."""
 
@@ -1018,7 +1046,15 @@ class MatrixportExtractor:
             "captured_at_ms": moment,
             "captured_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         }
-        self.storage.merge_run_metadata(self.run_id, {"captures": captures})
+        update: dict[str, Any] = {"captures": captures}
+        if self.cutoff is not None:
+            fact = late_capture_fact(
+                {key: int(item["captured_at_ms"]) for key, item in captures.items()},
+                cutoff_end_ms(self.cutoff, 2**62),
+            )
+            if fact is not None:
+                update["late_capture"] = fact
+        self.storage.merge_run_metadata(self.run_id, update)
 
     def _offset(
         self,

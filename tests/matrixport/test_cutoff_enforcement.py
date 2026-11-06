@@ -341,6 +341,47 @@ def test_verify_refuses_late_captures_without_a_label(
         cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
 
 
+def test_verify_records_a_capture_within_the_bound_as_a_fact_without_a_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a Monday-noon capture of a Friday cutoff: 36 h after the cutoff day's end, no label
+    clock = CUTOFF_END_MS + 1 + 36 * 3_600_000
+    run_dir = _extract(tmp_path, monkeypatch, clock=clock)
+    fact = cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
+    assert fact is not None
+    assert fact["gap_hours"] == 36.0
+    assert fact["cutoff_end_ms"] == CUTOFF_END_MS
+    assert fact["latest_captured_at_ms"] == clock
+    assert fact["late_paths"] == sorted(SNAPSHOTS)
+    assert "capture-time shares" in fact["valuation_share_count"]
+    metadata = json.loads(_run(run_dir)["metadata_json"])
+    assert metadata["late_capture"] == fact
+    assert metadata["captured_after_cutoff_label"] is None
+
+
+def test_verify_refuses_a_capture_past_the_bound_without_a_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound_ms = pipeline.MAX_UNLABELLED_GAP_HOURS * 3_600_000
+    (tmp_path / "in").mkdir()
+    (tmp_path / "out").mkdir()
+    inside = _extract(tmp_path / "in", monkeypatch, clock=CUTOFF_END_MS + bound_ms)
+    assert cli._require_recorded_cutoff(inside, inside.name, CUTOFF) is not None
+    outside = _extract(
+        tmp_path / "out", monkeypatch, clock=CUTOFF_END_MS + bound_ms + 3_600_000
+    )
+    with pytest.raises(cli.CredentialError, match="more than 72 h"):
+        cli._require_recorded_cutoff(outside, outside.name, CUTOFF)
+
+
+def test_a_capture_inside_the_cutoff_day_records_no_late_fact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _extract(tmp_path, monkeypatch, clock=NOON_MS)
+    assert cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF) is None
+    assert "late_capture" not in json.loads(_run(run_dir)["metadata_json"])
+
+
 def test_verify_accepts_late_captures_with_an_explicit_label_and_records_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

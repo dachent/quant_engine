@@ -131,10 +131,23 @@ holding snapshot allows only `is_cleared`, `is_holding` and `product_id` (172-17
 1153-1160, wallet 1661-1668) and `transport.py:207` rejects any parameter not in
 the allowlist. They therefore reflect the moment of the call. Each call's UTC
 capture time is recorded in the run metadata (`captures`). `verify` refuses a
-cutoff-bound run whose capture time is after the cutoff day's end (UTC), or that
-did not record capture times, unless the evidence provenance carries an explicit
+cutoff-bound run that did not record capture times. A capture after the cutoff
+day's end (UTC) is recorded automatically as the `late_capture` fact (latest
+`captured_at`, `cutoff_end_ms`, `gap_hours`, the late paths) in the run metadata,
+in the `verify` output and in `release_status.json`; no approval is needed up to
+`MAX_UNLABELLED_GAP_HOURS` (72 h: a Friday cutoff and a pull through the following
+Monday UTC). Past that, or for inherited rows with no recorded capture time,
+`verify` refuses unless the evidence provenance carries an explicit
 `captured_after_cutoff_label` (`governance-evidence --captured-after-cutoff-label
-TEXT`), which is then recorded in the run metadata.
+TEXT`), which is recorded in the run metadata (and must not change on `--resume`).
+The fact is not a closure: the daily valuation anchors its opening share gap on the
+current holding (`valuation.py` 576), so the D share count is the share count at
+capture and a share event between the cutoff and the capture is not visible
+(history windows end at the cutoff). A reviewer reads `gap_hours` for that exposure.
+The wallet coverage `updated_at_utc` date that `provider_ledger.py` (8535-8545)
+requires to equal the observed boundary date is not written by this package (no
+`updated_at_utc` in `packages/matrixport`), so whether a late wallet coverage file
+passes it is UNVERIFIED here.
 
 Receipt transitions are durable before a live request is permitted. On POSIX,
 the adapter fsyncs the receipt's containing directory after exclusive creation
