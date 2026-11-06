@@ -175,6 +175,11 @@ from quant_engine.core.interpreter import (
     require as require_interpreter,
     require_current as require_current_interpreter,
 )
+from quant_engine.core.market_calendar import (
+    is_nyse_trading_day,
+    last_nyse_trading_day,
+    nyse_holidays,
+)
 from quant_engine.core.providers import (
     AdapterCapabilities,
     ProviderCapability,
@@ -247,6 +252,9 @@ __all__ = [
     "verify_replica_receipt",
     "inventory_identity",
     "InterpreterRefusal",
+    "is_nyse_trading_day",
+    "last_nyse_trading_day",
+    "nyse_holidays",
     "check_entry_interpreter",
     "require_current_interpreter",
     "require_interpreter",

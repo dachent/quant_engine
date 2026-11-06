@@ -29,8 +29,7 @@ SPEC.loader.exec_module(reconciliation)
 
 
 ACCEPTED_AS_OF = date(2026, 1, 25)
-# the last NAV date of the TT fixtures (2026-04-03 was Good Friday: no NAV that day)
-TT_ACCEPTED_AS_OF = date(2026, 4, 2)
+TT_ACCEPTED_AS_OF = date(2026, 4, 3)
 INSUFFICIENT_EXACT_COMMON_DATA = "accepted as_of leaves insufficient exact-common data"
 
 
@@ -2296,3 +2295,14 @@ def test_the_attribution_builder_reads_the_tt_model_through_the_checked_function
     source = Path(attribution.__file__).read_text(encoding="utf-8")
     assert "reconciliation._tt_manifest_model_returns(" in source
     assert "reconciliation._grizzly_model_states(" in source
+
+
+def test_a_holiday_cutoff_is_held_to_the_last_trading_day() -> None:
+    # 2026-04-03 is Good Friday: the model ends 2026-04-02 and is complete
+    reconciliation.require_model_through_as_of(
+        "tt-portfolio", date(2026, 4, 2), date(2026, 4, 3)
+    )
+    with pytest.raises(reconciliation.ImplementationReconciliationError):
+        reconciliation.require_model_through_as_of(
+            "tt-portfolio", date(2026, 4, 1), date(2026, 4, 3)
+        )
