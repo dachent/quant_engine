@@ -144,6 +144,13 @@ The fact is not a closure: the daily valuation anchors its opening share gap on 
 current holding (`valuation.py` 576), so the D share count is the share count at
 capture and a share event between the cutoff and the capture is not visible
 (history windows end at the cutoff). A reviewer reads `gap_hours` for that exposure.
+
+The 72 h unlabelled cap protects only that unclosed caveat (the D share count equals the T share
+count; `valuation.py` 576 anchors D shares on the current holding, so a share event between D and
+the capture is invisible, and windows end at the cutoff). It is not a numeric check of its own, it
+disappears when a share-event netting lane exists, and it is kept until then and not widened.
+Share count at D = T share count is an unclosed caveat for any LATE Matrixport pull; R3's Friday
+extract captures current state at D so it does not touch R3.
 The wallet coverage `updated_at_utc` is the real clock at the moment the endpoint's coverage
 row is written (`storage.py` 431; the pipeline passes no time), so a late pull makes it a later date
 than the cutoff day. `provider_ledger.py` `_matrixport_flow_coverage` and the acceptance replica
