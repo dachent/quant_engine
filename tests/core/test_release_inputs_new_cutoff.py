@@ -33,7 +33,7 @@ BASELINE = "acceptance/expected-baseline.json"
 HISTORIC = "acceptance/baselines/expected-baseline-old.json"
 POLICY = "ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json"
 CALENDAR = "ops/mvp2-release/inputs/hwm/calendar-authority.json"
-TAGMAP = "ops/mvp2-release/inputs/sleeves/nested-strategy-tag-map.json"
+TAGMAP = "ops/mvp2-release/inputs/sleeves/strategy-basis-declaration.json"
 FILES = {
     BASELINE: json.dumps({"cutoff": OLD}).encode(),
     HISTORIC: json.dumps({"cutoff": "1999-12-31"}).encode(),
@@ -100,6 +100,12 @@ def test_registry_flag() -> None:
     assert is_cutoff_dependent(CALENDAR)
     assert not is_cutoff_dependent(HISTORIC)
     assert not is_cutoff_dependent(TAGMAP)
+    for dated in (
+        "sleeves/timestamp-delta-result.txt",
+        "sleeves/nested-strategy-tag-map.json",
+        "base-spec/x.json",
+    ):
+        assert is_cutoff_dependent("ops/mvp2-release/inputs/" + dated)
     assert not is_cutoff_dependent("contracts/x.json")
 
 
