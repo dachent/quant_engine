@@ -266,3 +266,104 @@ def test_the_command_writes_create_only_and_reports_the_closure(
     assert "account-00000000000000a2: STALE_CARRY_PATCHED" in capsys.readouterr().out
     assert derive_tool.main(argv) == 1  # create-only
     assert "FAIL" in capsys.readouterr().err
+
+
+# -- the declared evidence is replayed by the provider ledger ---------------------------------
+
+
+def _ledger() -> object:
+    import importlib.util
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "provider_ledger_for_nav_derive_test", root / "tools" / "provider_ledger.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _declared(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
+    run, closes = _world(tmp_path)
+    record, _ = _derive(run, closes)
+    derivation = tmp_path / "derivation.json"
+    derivation.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "roots": {"ingest-nav": "C:/nav"},
+                "sources": [
+                    {"role": "WCH_NAV_CSV", "account_id": "account-00000000000000a2"},
+                    {"role": "WCH_TRANSACTION_JSON", "account_id": "x"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    evidence = derive_tool.declare(
+        run_dir=run,
+        crosswalk=CROSSWALK,
+        closes_dir=closes,
+        day=DAY,
+        prior_day=PRIOR,
+        tolerance=derive_tool.DEFAULT_TOLERANCE,
+        derivation=derivation,
+        spec=spec,
+    )
+    catalog = {
+        "journal_counterparty_crosswalk": {
+            "entries": [
+                {"account_id": internal, "native_suffix": external[-3:]}
+                for external, internal in CROSSWALK.items()
+            ]
+        }
+    }
+    return evidence, catalog
+
+
+def test_the_declared_evidence_is_replayed_exactly_by_the_ledger(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger()
+    evidence, catalog = _declared(tmp_path)
+    assert [s["role"] for s in evidence["sources"]] == ["WCH_NAV_CSV"]  # type: ignore[index, union-attr]
+    patch = ledger._schwab_source_derived_patch(evidence, DAY, catalog)  # type: ignore[attr-defined]
+    assert set(patch.entries) == {"account-00000000000000a2"}
+    values = {PRIOR: Decimal("1000.5"), DAY: Decimal("1055.50")}
+    ledger._check_schwab_source_cutoff_row(  # type: ignore[attr-defined]
+        patch, "account-00000000000000a2", values, DAY
+    )
+    assert derive_tool.REPLAY_ROUNDING == ledger._SCHWAB_REPLAY_ROUNDING  # type: ignore[attr-defined]
+
+
+def test_a_derivation_file_that_differs_from_the_run_is_refused(tmp_path: Path) -> None:
+    run, closes = _world(tmp_path)
+    record, _ = _derive(run, closes)
+    record["account-00000000000000a2"]["official_0917"] = "1.00"
+    derivation = tmp_path / "derivation.json"
+    derivation.write_text(json.dumps(record), encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"roots": {}, "sources": []}), encoding="utf-8")
+    with pytest.raises(derive_tool.DeriveError, match="differs from the one derived"):
+        derive_tool.declare(
+            run_dir=run,
+            crosswalk=CROSSWALK,
+            closes_dir=closes,
+            day=DAY,
+            prior_day=PRIOR,
+            tolerance=derive_tool.DEFAULT_TOLERANCE,
+            derivation=derivation,
+            spec=spec,
+        )
+
+
+def test_native_equal_to_official_on_a_carry_is_not_patched(tmp_path: Path) -> None:
+    # the carried value happens to be the official one: nothing to patch
+    run, closes = _world(tmp_path, stale_native=(1055.5, 1055.5))
+    record, report = _derive(run, closes, tolerance=Decimal("100"))
+    stale = next(row for row in report if row["account_id"].endswith("a2"))
+    assert stale["status"] == derive_tool.STATUS_AGREES

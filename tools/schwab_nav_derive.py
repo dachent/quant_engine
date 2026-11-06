@@ -18,12 +18,21 @@ closure failure:
 
 python tools/schwab_nav_derive.py derive --run-dir R --crosswalk C --closes-dir D --day 2026-11-06 \\
     --prior-day 2026-11-05 --out derivation.json [--report report.json] [--tolerance 0.05]
+
+The ingest then writes the derived cutoff row into the NAV CSVs (``--derivation-record``), and ``declare``
+writes the source-branch finality evidence (the composed spec's roots and NAV sources plus the pinned
+``derived_patch`` that ``provider_ledger`` replays with no tolerance), create-only; it re-derives the
+record from the run and refuses when the file on disk differs:
+
+python tools/schwab_nav_derive.py declare --run-dir R --crosswalk C --closes-dir D --day 2026-11-06 \\
+    --prior-day 2026-11-05 --derivation derivation.json --spec composed-spec.json --out finality.json
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -42,6 +51,8 @@ DEFAULT_TOLERANCE = Decimal("0.05")
 STATUS_FLAT = "FLAT_NO_PATCH"
 STATUS_PATCH = "STALE_CARRY_PATCHED"
 STATUS_AGREES = "NATIVE_AGREES_WITH_OFFICIAL"
+# the ledger replay's rounding label (provider_ledger._SCHWAB_REPLAY_ROUNDING); a test pins the two together
+REPLAY_ROUNDING = "SUM_QUANTITY_X_CLOSE_QUANTIZE_0.01_HALF_EVEN_PLUS_CASH"
 
 
 class DeriveError(ValueError):
@@ -184,7 +195,7 @@ def derive(
                     f"({native_prior}, {native_day}) must both equal its cash {cash}"
                 )
             status = STATUS_FLAT
-        elif native_day == native_prior:
+        elif native_day == native_prior and official_day != native_day:
             status = STATUS_PATCH
         elif abs(official_day - native_day) <= tolerance:
             status = STATUS_AGREES
@@ -216,18 +227,115 @@ def _create_only(path: Path, content: bytes) -> None:
         handle.write(content)
 
 
+def _pin(path: Path) -> dict[str, Any]:
+    path = path.resolve()
+    data = path.read_bytes()
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size_bytes": len(data),
+    }
+
+
+def declare(
+    *,
+    run_dir: Path,
+    crosswalk: Mapping[str, str],
+    closes_dir: Path,
+    day: date,
+    prior_day: date,
+    tolerance: Decimal,
+    derivation: Path,
+    spec: Path,
+) -> dict[str, Any]:
+    """The source-branch finality evidence: the spec's roots and NAV sources plus the derived patch.
+
+    The record on disk must equal the one re-derived from the run, so the pinned file is never
+    trusted over the captured evidence it came from.
+    """
+
+    record, report = derive(
+        run_dir=run_dir,
+        crosswalk=crosswalk,
+        closes_dir=closes_dir,
+        day=day,
+        prior_day=prior_day,
+        tolerance=tolerance,
+    )
+    if strict_json_loads(derivation.read_bytes(), label="derivation record") != record:
+        raise DeriveError(
+            "the derivation record differs from the one derived from the run"
+        )
+    spec_doc = _mapping(
+        strict_json_loads(spec.read_bytes(), label="generation spec"), "generation spec"
+    )
+    patched = [row for row in report if row["status"] == STATUS_PATCH]
+    held = read_holdings(
+        strict_json_loads(
+            (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
+        ),
+        crosswalk,
+    )
+    symbols = sorted({s for row in patched for s in held[row["account_id"]][0]})
+    return {
+        "roots": spec_doc["roots"],
+        "sources": [
+            item
+            for item in _list(spec_doc["sources"], "spec sources")
+            if _mapping(item, "spec source").get("role") == "WCH_NAV_CSV"
+        ],
+        "derived_patch": {
+            "schema": "schwab-nav-source-derived-patch/1",
+            "derivation_basis": "DERIVED_FROM_OFFICIAL_CLOSES",
+            "patched_dates": [day.isoformat()],
+            "derivation_record": _pin(derivation),
+            "replay": {
+                "positions_capture": _pin(run_dir / "raw/holdings.v2.json"),
+                "closes": [
+                    {"symbol": symbol, **_pin(closes_dir / f"{symbol}_yahoo_daily.csv")}
+                    for symbol in symbols
+                ],
+                "cash_security_type": CASH_SECURITY_TYPE,
+                "rounding": REPLAY_ROUNDING,
+            },
+            "native_balances": [
+                {
+                    "account_id": row["account_id"],
+                    **_pin(
+                        run_dir / f"raw/balances.historical/{row['account_id']}.json"
+                    ),
+                }
+                for row in patched
+            ],
+            "patches": [
+                {
+                    "account_id": row["account_id"],
+                    "original_values": {day.isoformat(): row["native_day"]},
+                    "patched_values": {day.isoformat(): row["official_day"]},
+                }
+                for row in patched
+            ],
+        },
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("derive")
-    run.add_argument("--run-dir", type=Path, required=True)
-    run.add_argument("--crosswalk", type=Path, required=True)
-    run.add_argument("--closes-dir", type=Path, required=True)
-    run.add_argument("--day", required=True)
-    run.add_argument("--prior-day", required=True)
-    run.add_argument("--tolerance", default=str(DEFAULT_TOLERANCE))
-    run.add_argument("--out", type=Path, required=True)
-    run.add_argument("--report", type=Path)
+    for name in ("derive", "declare"):
+        run = commands.add_parser(name)
+        run.add_argument("--run-dir", type=Path, required=True)
+        run.add_argument("--crosswalk", type=Path, required=True)
+        run.add_argument("--closes-dir", type=Path, required=True)
+        run.add_argument("--day", required=True)
+        run.add_argument("--prior-day", required=True)
+        run.add_argument("--tolerance", default=str(DEFAULT_TOLERANCE))
+        run.add_argument("--out", type=Path, required=True)
+        if name == "derive":
+            run.add_argument("--report", type=Path)
+        else:
+            run.add_argument("--derivation", type=Path, required=True)
+            run.add_argument("--spec", type=Path, required=True)
     return parser
 
 
@@ -236,17 +344,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     refused = check_entry_interpreter("the Schwab NAV derivation", "schwab-nav-derive")
     if refused is not None:
         return refused
+    report: list[dict[str, str]] = []
     try:
-        record, report = derive(
-            run_dir=args.run_dir,
-            crosswalk=driver.parse_crosswalk(
+        common: dict[str, Any] = {
+            "run_dir": args.run_dir,
+            "crosswalk": driver.parse_crosswalk(
                 strict_json_loads(args.crosswalk.read_bytes(), label="crosswalk")
             ),
-            closes_dir=args.closes_dir,
-            day=date.fromisoformat(args.day),
-            prior_day=date.fromisoformat(args.prior_day),
-            tolerance=_decimal(args.tolerance, "tolerance"),
-        )
+            "closes_dir": args.closes_dir,
+            "day": date.fromisoformat(args.day),
+            "prior_day": date.fromisoformat(args.prior_day),
+            "tolerance": _decimal(args.tolerance, "tolerance"),
+        }
+        if args.command == "declare":
+            evidence = declare(**common, derivation=args.derivation, spec=args.spec)
+            _create_only(
+                args.out,
+                (json.dumps(evidence, indent=1, sort_keys=True) + "\n").encode("utf-8"),
+            )
+            return 0
+        record, report = derive(**common)
         _create_only(args.out, (json.dumps(record, indent=1) + "\n").encode("utf-8"))
         if args.report is not None:
             _create_only(
