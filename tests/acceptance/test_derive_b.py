@@ -1509,6 +1509,27 @@ def pinned_entry(path: Path) -> dict[str, object]:
     }
 
 
+def pin_contract_to_generation(
+    paths: dict[str, Path], entries: list[dict[str, object]] | None = None
+) -> None:
+    """Make the synthetic contract carry the sha256 of the final FX manifest bytes.
+
+    When the manifest entries already exist, the contract's own pin is refreshed.
+    """
+    import hashlib
+
+    contract = json.loads(paths["contract.json"].read_text(encoding="utf-8"))
+    contract["source_segments"][0]["current_generation"]["sha256"] = hashlib.sha256(
+        paths["generation.json"].read_bytes()
+    ).hexdigest()
+    paths["contract.json"].write_text(json.dumps(contract), encoding="utf-8")
+    for index, entry in enumerate(entries or []):
+        if entry["path"] == str(paths["contract.json"]):
+            updated = pinned_entry(paths["contract.json"])
+            updated["family"] = "financial_source_contract"
+            entries[index] = updated  # type: ignore[index]
+
+
 def unpinned_entry(path: Path) -> dict[str, object]:
     return {"family": "test", "path": str(path), "sha256": None, "bytes": None}
 
@@ -1702,6 +1723,7 @@ def custody_v3_fixture(
         )
     ]
     paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    pin_contract_to_generation(paths)
     entries = [
         pinned_entry(paths[name])
         for name in (
@@ -2774,6 +2796,7 @@ def test_oracle_v3_b_conflicted_included_crosswalk_fails_closed(
         )
     ]
     paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    pin_contract_to_generation(paths)
     native_artifacts = [
         ("csv/nav_daily.csv", "nav_daily.csv", "matrixport-canonical-csv", "1"),
         (
@@ -3373,6 +3396,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
         )
     ]
     paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    pin_contract_to_generation(paths)
     entries = [pinned_entry(paths[name]) for name in list(files)[:8]]
     family_paths = {
         "financial_source_contract": "contract.json",
@@ -3442,6 +3466,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
         size_bytes=pinned_entry(rates_path)["bytes"],
     )
     paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    pin_contract_to_generation(paths, entries)
     for index, entry in enumerate(entries):
         if entry["path"] == str(paths["generation.json"]):
             updated = pinned_entry(paths["generation.json"])
@@ -3471,6 +3496,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
         size_bytes=pinned_entry(rates_path)["bytes"],
     )
     paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    pin_contract_to_generation(paths, entries)
     for index, entry in enumerate(entries):
         if entry["path"] == str(paths["generation.json"]):
             updated = pinned_entry(paths["generation.json"])
@@ -3483,6 +3509,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
 
     generation["artifacts"][0]["sha256"] = "0" * 64
     paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    pin_contract_to_generation(paths, entries)
     for index, entry in enumerate(entries):
         if entry["path"] == str(paths["generation.json"]):
             updated = pinned_entry(paths["generation.json"])
@@ -3494,6 +3521,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
         "sha256"
     ]
     paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    pin_contract_to_generation(paths, entries)
     for index, entry in enumerate(entries):
         if entry["path"] == str(paths["generation.json"]):
             updated = pinned_entry(paths["generation.json"])
@@ -4777,6 +4805,55 @@ def test_oracle_v3_b_fx_generation_must_match_the_contract_named_generation(
     with pytest.raises(
         derivation.ManifestError, match="FX generation does not cover the cutoff"
     ):
+        derivation.derive(tmp_path, manifest)
+
+
+def _repin(entries: list[dict[str, object]], path: Path, family: str) -> None:
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(path):
+            updated = pinned_entry(path)
+            updated["family"] = family
+            entries[index] = updated
+
+
+def test_oracle_v3_b_fx_manifest_sha_matching_the_contract_pin_passes(tmp_path: Path):
+    derivation = load_derivation_module()
+    manifest, _, _ = custody_v3_fixture(tmp_path, amended_custody_policy())
+
+    derivation.derive(tmp_path, manifest)
+
+
+def test_oracle_v3_b_changed_fx_manifest_bytes_with_unchanged_contract_fail(
+    tmp_path: Path,
+):
+    """A repinned, self-consistent generation manifest cannot replace the contract's."""
+    derivation = load_derivation_module()
+    manifest, paths, entries = custody_v3_fixture(tmp_path, amended_custody_policy())
+    generation = json.loads(paths["generation.json"].read_text(encoding="utf-8"))
+    generation["note"] = "bytes changed, id/cutoff/artifacts still consistent"
+    paths["generation.json"].write_text(json.dumps(generation), encoding="utf-8")
+    _repin(entries, paths["generation.json"], "fx_generation_manifest")
+
+    with pytest.raises(derivation.ManifestError, match="current_generation sha256"):
+        derivation.derive(tmp_path, manifest)
+
+
+@pytest.mark.parametrize("bad", ["missing", "malformed"])
+def test_oracle_v3_b_missing_or_malformed_contract_fx_pin_fails(
+    tmp_path: Path, bad: str
+):
+    derivation = load_derivation_module()
+    manifest, paths, entries = custody_v3_fixture(tmp_path, amended_custody_policy())
+    contract = json.loads(paths["contract.json"].read_text(encoding="utf-8"))
+    current = contract["source_segments"][0]["current_generation"]
+    if bad == "missing":
+        del current["sha256"]
+    else:
+        current["sha256"] = "XYZ"
+    paths["contract.json"].write_text(json.dumps(contract), encoding="utf-8")
+    _repin(entries, paths["contract.json"], "financial_source_contract")
+
+    with pytest.raises(derivation.ManifestError, match="current_generation sha256"):
         derivation.derive(tmp_path, manifest)
 
 

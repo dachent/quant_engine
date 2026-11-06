@@ -71,8 +71,10 @@ def write_inputs(
     manifest_cutoff: str | None = None,
     ledger_dir: str = "dataPortfolio/provider-ledger/generations/" + "ab" * 32,
     nav_value: str = "123",
+    declared_cutoff: str | None = "same",
 ) -> Path:
-    """A schema-2 manifest whose ledger sits at a path no constant names."""
+    """declared_cutoff: "same" = the owner artifact names `cutoff`; None = absent."""
+    # A schema-2 manifest whose ledger sits at a path no constant names.
     files = {
         f"{ledger_dir}/provider-ledger.json": json.dumps(
             _ledger(ledger_as_of or cutoff, nav_value)
@@ -87,6 +89,23 @@ def write_inputs(
         "x/wallet_bills.csv": "currency,direction,amount,timestamp_utc\n",
         "x/yfinance-history.json": json.dumps({"rows": []}),
     }
+    if declared_cutoff is not None:
+        files["x/declared-cutoff-manifest.json"] = json.dumps(
+            {
+                "artifact": "account-strategy-manifest",
+                "calculation_cutoff_date": (
+                    cutoff if declared_cutoff == "same" else declared_cutoff
+                ),
+                "rows": [
+                    {
+                        "account_id": "account-a",
+                        "strategy_id": "strategy-a",
+                        "effective_start": "2026-01-01",
+                        "effective_end": None,
+                    }
+                ],
+            }
+        )
     entries = []
     for relative, contents in files.items():
         path = tmp_path / relative
@@ -94,7 +113,11 @@ def write_inputs(
         path.write_text(contents, encoding="utf-8")
         entries.append(
             {
-                "family": "test",
+                "family": (
+                    "declared_cutoff_date"
+                    if relative.endswith("declared-cutoff-manifest.json")
+                    else "test"
+                ),
                 "path": relative,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "bytes": path.stat().st_size,
@@ -206,6 +229,56 @@ def test_cli_cutoff_must_equal_the_manifest_cutoff(
     assert "differs from the declared" in err
     assert declared in err
     assert not (tmp_path / "out.json").exists()
+
+
+@pytest.mark.parametrize("artifact", [None, "2026-09-18", "2026-11-05"])
+def test_cli_owner_declared_cutoff_artifact_gates_the_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, artifact: str | None
+):
+    """Absent artifact, or one naming another date, refuses even if flag == manifest."""
+    derivation = load_derivation_module("derive_b_cutoff_3b")
+    manifest = write_inputs(tmp_path, cutoff=R3_CUTOFF, declared_cutoff=artifact)
+
+    code = run_cli(
+        derivation,
+        monkeypatch,
+        tmp_path,
+        "--cutoff",
+        R3_CUTOFF,
+        "--inputs",
+        str(manifest),
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "owner-declared cutoff artifact" in err
+    assert not (tmp_path / "out.json").exists()
+
+
+def test_cli_unreadable_owner_declared_cutoff_artifact_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    derivation = load_derivation_module("derive_b_cutoff_3c")
+    manifest = write_inputs(tmp_path, cutoff=R3_CUTOFF)
+    (tmp_path / "x" / "declared-cutoff-manifest.json").write_text("{", encoding="utf-8")
+    entries = json.loads(manifest.read_text(encoding="utf-8"))
+    for entry in entries["inputs"]:
+        entry.pop("sha256", None)
+        entry.pop("bytes", None)
+    manifest.write_text(json.dumps(entries), encoding="utf-8")
+
+    code = run_cli(
+        derivation,
+        monkeypatch,
+        tmp_path,
+        "--cutoff",
+        R3_CUTOFF,
+        "--inputs",
+        str(manifest),
+    )
+
+    assert code == 1
+    assert "is unreadable" in capsys.readouterr().err
 
 
 def test_cli_without_a_manifest_refuses_a_non_legacy_cutoff(

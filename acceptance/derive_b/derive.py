@@ -397,6 +397,46 @@ def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str
     return resolved
 
 
+def verify_owner_declared_cutoff(manifest: dict[str, object], qe_root: Path) -> None:
+    """Bind the declared cutoff to the owner-declared cutoff artifact, fail closed.
+
+    The manifest must name exactly one ACCOUNT_MANIFEST_FAMILY entry; that file
+    must be readable, match its declared sha256 pin, and carry a
+    calculation_cutoff_date equal to the cutoff this run was asked to derive.
+    """
+    entries = manifest.get("inputs")
+    declared = [
+        entry
+        for entry in (entries if isinstance(entries, list) else [])
+        if isinstance(entry, dict) and entry.get("family") == ACCOUNT_MANIFEST_FAMILY
+    ]
+    if len(declared) != 1 or not isinstance(declared[0].get("path"), str):
+        raise ManifestError(
+            f"inputs manifest must name exactly one owner-declared cutoff "
+            f"artifact (family {ACCOUNT_MANIFEST_FAMILY}); found {len(declared)}"
+        )
+    path = resolve_input_path(qe_root, str(declared[0]["path"]))
+    pin = declared[0].get("sha256")
+    try:
+        if isinstance(pin, str) and file_sha256(path) != pin:
+            raise ManifestError(
+                f"owner-declared cutoff artifact {path} differs from its sha256 pin"
+            )
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError) as error:
+        raise ManifestError(
+            f"owner-declared cutoff artifact {path} is unreadable: {error}"
+        ) from error
+    named = (
+        document.get("calculation_cutoff_date") if isinstance(document, dict) else None
+    )
+    if named != CUTOFF.isoformat():
+        raise ManifestError(
+            f"owner-declared cutoff artifact names cutoff {named!r}, which differs "
+            f"from the requested {CUTOFF.isoformat()} cutoff"
+        )
+
+
 def native_matrixport_input_paths(
     manifest: dict[str, object], qe_root: Path
 ) -> dict[str, Path]:
@@ -2753,6 +2793,21 @@ def contract_fx_generation_id(contract: object) -> str | None:
     return None
 
 
+def contract_fx_manifest_sha256(contract: object) -> str | None:
+    """The FX generation-manifest sha256 pin the bound contract carries."""
+    segments = contract.get("source_segments", []) if isinstance(contract, dict) else []
+    for segment in segments if isinstance(segments, list) else []:
+        if (
+            isinstance(segment, dict)
+            and segment.get("source_id") == "portfolio-fx-rates"
+        ):
+            current = segment.get("current_generation")
+            pin = current.get("sha256") if isinstance(current, dict) else None
+            if isinstance(pin, str) and re.fullmatch(r"[0-9a-f]{64}", pin):
+                return pin
+    return None
+
+
 def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, Path]:
     """Resolve and semantically bind the selected R6/R8 authority records."""
     entries = manifest["inputs"]
@@ -2899,6 +2954,14 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
         or coverage.get("status") != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
     ):
         raise ManifestError("v3 selected FX generation does not cover the cutoff")
+    fx_manifest_pin = contract_fx_manifest_sha256(contract)
+    if fx_manifest_pin is None or fx_manifest_pin != file_sha256(
+        by_family["fx_generation_manifest"]
+    ):
+        raise ManifestError(
+            "v3 selected FX generation manifest bytes do not match the contract "
+            "current_generation sha256 pin"
+        )
     artifacts = generation.get("artifacts", [])
     if not isinstance(artifacts, list):
         raise ManifestError("v3 selected FX generation lacks artifact records")
@@ -7639,6 +7702,7 @@ def main() -> None:
     if args.inputs is not None:
         try:
             manifest = load_inputs_manifest(args.inputs)
+            verify_owner_declared_cutoff(manifest, args.qe_root)
         except ManifestError as error:
             parser.exit(1, f"error: {error}\n")
     try:
