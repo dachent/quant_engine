@@ -672,6 +672,42 @@ def derive_schwab_positions(positions_path: Path) -> dict[str, Any]:
     }
 
 
+_OFFICIAL_SUFFIX = "_yahoo_daily.csv"
+
+
+def held_check(positions_path: Path, served_dirs: Sequence[Path]) -> dict[str, Any]:
+    """Held symbols of a Schwab run against the symbols a retained Yahoo pull already served.
+
+    Offline and before any evidence is minted: a held symbol no retained pull ever served is the
+    one a live fetch could fail on (a run with a symbol Yahoo does not serve is rejected after the
+    single-use evidence is spent).  ``served_before`` means a ``<SYMBOL>_yahoo_daily.csv`` exists in
+    one of the given directories; it says nothing about the symbol today.
+    """
+
+    held = derive_schwab_positions(positions_path)
+    served: set[str] = set()
+    for directory in served_dirs:
+        if not directory.is_dir():
+            raise DriverError("a served directory is not a directory")
+        served.update(
+            item.name[: -len(_OFFICIAL_SUFFIX)]
+            for item in directory.glob(f"*{_OFFICIAL_SUFFIX}")
+        )
+    rows = [
+        {
+            "symbol": schwab,
+            "provider_ticker": provider,
+            "served_before": schwab in served,
+        }
+        for provider, schwab in sorted(held["names"].items())
+    ]
+    return {
+        "positions_sha256": held["positions_sha256"],
+        "held": rows,
+        "never_served": [row["symbol"] for row in rows if not row["served_before"]],
+    }
+
+
 def _materialize(
     value: dict[str, Any],
     cutoff: date,
@@ -2680,6 +2716,13 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--cutoff", default=None)
     apply.add_argument("--tt-source-manifest", type=Path, default=None)
     apply.add_argument("--schwab-positions", type=Path, default=None)
+    held = sub.add_parser(
+        "held-check",
+        help="offline: held symbols of a Schwab run against symbols a retained pull served",
+    )
+    held.add_argument("--positions", type=Path, required=True)
+    held.add_argument("--served-dir", type=Path, action="append", default=[])
+    held.add_argument("--allow-unseen", action="store_true")
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
     )
@@ -2805,6 +2848,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 now=datetime.now(timezone.utc),
             )
             print(f"staged {path}")
+            return 0
+        if args.command == "held-check":
+            report = held_check(args.positions, args.served_dir)
+            print(json.dumps(report, indent=2, sort_keys=True))
+            if report["never_served"] and not args.allow_unseen:
+                print(
+                    "Error: held symbols no retained pull has served: "
+                    + ", ".join(report["never_served"])
+                    + "; check them against Yahoo before any evidence is minted",
+                    file=sys.stderr,
+                )
+                return 1
             return 0
         if args.command == "verify":
             print(

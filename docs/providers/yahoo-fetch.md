@@ -149,14 +149,28 @@ key: the Schwab symbol with `/` written as `.` (`BRK/B` -> `BRK.B_yahoo_daily.cs
 For R3 the `held-closes` group takes every symbol of the Schwab run's `positions.json` (the
 derived valuation of day D needs the closes of D and of the previous trading day, which the
 fetch now requires for every one of them) except those named in the group's `exclude_symbols`
-(Schwab symbols; shipped: `SWVXX`, the sweep money-market fund the R2.1 pull list valued at its
-stated $1.00 NAV as cash, so it is not fetched). An excluded symbol that is not held is ignored,
-the symbols actually left out are recorded in the config's derivations, and the exclusion is part
-of the effective config hash the evidence names. The derive step reads the per-symbol
-`<SYMBOL>_yahoo_daily.csv` (header `date,open,high,low,close,adjclose,volume,dividend`; `date`
-and `close` are the columns it needs) and the sidecar's per-file sha256. Whether every Schwab
-position other than `SWVXX` is a Yahoo-served symbol is not established here: a symbol Yahoo does
-not serve rejects the run (and the evidence), so check the held list against the probe first.
+(Schwab symbols; shipped: `SWVXX`). `positions.json` holds the equity and ETF rows only: the
+Schwab driver writes the cash group's rows, the sweep money-market fund `SWVXX` among them (valued
+by the derive step as cash at its stated NAV, as the R2.1 pull list did), to a separate sweeps
+list, so `SWVXX` is not in the derived list anyway and the exclusion is a guard for the day it
+appears as a position. An excluded symbol that is not held is ignored, the symbols actually left
+out are recorded in the config's derivations, and the exclusion is part of the effective config
+hash the evidence names. The derive step reads the per-symbol `<SYMBOL>_yahoo_daily.csv` (header
+`date,open,high,low,close,adjclose,volume,dividend`; `date` and `close` are the columns it needs)
+and the sidecar's per-file sha256; a held symbol without a close for D and for the day before is
+its refusal, never a skipped symbol (`tools/schwab_nav_derive.py`, PR 830).
+
+Before any evidence is minted (the Schwab capture has produced the held list): run
+`held-check --positions RUN/normalized/positions.json --served-dir DIR [--served-dir DIR ...]`.
+It is offline and lists the held symbols that no retained pull ever served (a
+`<SYMBOL>_yahoo_daily.csv` in a given directory), and exits 1 if there is any, so a symbol Yahoo
+does not serve is found before it can reject a run and spend the single-use evidence;
+`--allow-unseen` reports without refusing. The retained R2.1 pulls
+(`dataPortfolio/source-runs/r21-schwab-0917-closes-20261030` and `inputs/spy-spxl-yahoo`) served
+all 15 non-cash symbols of the R2.1 09-17 capture (BIL, CL, DGP, ERX, IBIT, NEE, PEP, PG, SOXL,
+SPXL, SPY, TQQQ, UDOW, UPRO, XLE; the "38 positions" of that pull list are rows across accounts,
+16 symbols with `SWVXX`). A symbol that appears in the R3 capture and is not in those directories
+is "never served" and needs a read-only Yahoo chart request by hand before the evidence is minted.
 
 ## Symbol resolution and admission
 

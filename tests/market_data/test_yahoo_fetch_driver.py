@@ -1803,3 +1803,33 @@ def test_the_shipped_held_closes_group_excludes_the_sweep_fund() -> None:
     groups = json.loads(SHIPPED_CONFIG.read_bytes())["groups"]
     (held,) = [g for g in groups if g["group_id"] == "held-closes"]
     assert held["exclude_symbols"] == ["SWVXX"] and held["through"] == "cutoff"
+
+
+def test_held_check_names_the_held_symbols_no_retained_pull_served(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "NEWCO", "BRK/B"])
+    served = tmp_path / "served"
+    served.mkdir()
+    (served / "SPY_yahoo_daily.csv").write_text("date,close\n")
+    (served / "BRK.B_yahoo_daily.csv").write_text("date,close\n")
+    (served / "OLD_yahoo_daily.csv").write_text(
+        "date,close\n"
+    )  # served once, no longer held
+    argv = ["held-check", "--positions", str(positions), "--served-dir", str(served)]
+    assert driver.main(argv) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["never_served"] == ["NEWCO"]
+    assert {row["symbol"]: row["served_before"] for row in report["held"]} == {
+        "BRK.B": True,
+        "NEWCO": False,
+        "SPY": True,
+    }
+    assert "NEWCO" in captured.err and "before any evidence is minted" in captured.err
+    # an explicit allowance reports without refusing; nothing unseen exits clean
+    assert driver.main([*argv, "--allow-unseen"]) == 0
+    capsys.readouterr()
+    (served / "NEWCO_yahoo_daily.csv").write_text("date,close\n")
+    assert driver.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["never_served"] == []
