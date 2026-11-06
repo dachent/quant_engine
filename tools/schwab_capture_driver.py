@@ -1026,13 +1026,23 @@ def _parse_requests(value: object) -> tuple[ApprovedRequest, ...]:
     return tuple(sorted(approved, key=lambda item: item.capability))
 
 
-def authorize_live_read(
-    evidence_path: Path,
-    *,
-    receipt_root: Path,
-    now: Callable[[], datetime] | None = None,
-) -> LiveReadGovernance:
-    """Validate and consume one operator-supplied attestation (single use)."""
+@dataclass(frozen=True)
+class ValidatedEvidence:
+    evidence_sha256: str
+    cutoff: Cutoff
+    exception_label: str | None
+    account_count: int
+    requests: tuple[ApprovedRequest, ...]
+    max_requests: int
+    review: dict[str, str]
+    issued_at: datetime
+    expires_at: datetime
+
+
+def validate_evidence(
+    evidence_path: Path, *, now: Callable[[], datetime] | None = None
+) -> ValidatedEvidence:
+    """Every authorization check, with no receipt written (the offline verify)."""
 
     if not evidence_path.is_file() or evidence_path.is_symlink():
         raise GovernanceError("live-read governance evidence file is required")
@@ -1126,8 +1136,29 @@ def authorize_live_read(
         raise GovernanceError("governance max_requests must be an integer")
     if not 1 <= max_requests <= _MAX_REQUESTS or metering["retry_count"] != 0:
         raise GovernanceError("governance metering is outside the allowed range")
+    return ValidatedEvidence(
+        evidence_sha256=_sha256(payload),
+        cutoff=cutoff,
+        exception_label=label,
+        account_count=account_count,
+        requests=requests,
+        max_requests=max_requests,
+        review={"identity": identity.strip(), "reference": reference},
+        issued_at=issued,
+        expires_at=expires,
+    )
 
-    evidence_sha256 = _sha256(payload)
+
+def authorize_live_read(
+    evidence_path: Path,
+    *,
+    receipt_root: Path,
+    now: Callable[[], datetime] | None = None,
+) -> LiveReadGovernance:
+    """Validate and consume one operator-supplied attestation (single use)."""
+
+    checked = validate_evidence(evidence_path, now=now)
+    evidence_sha256, max_requests = checked.evidence_sha256, checked.max_requests
     receipt_root.mkdir(parents=True, exist_ok=True)
     receipt_path = receipt_root / f"{evidence_sha256}.json"
     try:
@@ -1157,12 +1188,12 @@ def authorize_live_read(
     return LiveReadGovernance(
         receipt_path=receipt_path,
         evidence_sha256=evidence_sha256,
-        cutoff=cutoff,
-        exception_label=label,
-        account_count=account_count,
-        requests=requests,
+        cutoff=checked.cutoff,
+        exception_label=checked.exception_label,
+        account_count=checked.account_count,
+        requests=checked.requests,
         max_requests=max_requests,
-        review={"identity": identity.strip(), "reference": reference},
+        review=checked.review,
     )
 
 
@@ -1798,6 +1829,111 @@ def capture_live(
         )
 
 
+def build_evidence(
+    *,
+    cutoff: Cutoff,
+    account_count: int,
+    holdings_body: Mapping[str, object],
+    review_identity: str,
+    review_reference: str,
+    issued_at: datetime,
+    expires_at: datetime,
+    max_requests: int,
+    exception_label: str | None = None,
+) -> dict[str, object]:
+    """The evidence document for one capture; the driver fills every hash."""
+
+    def request(capability: str, body: object) -> dict[str, object]:
+        entry = next(e for e in catalog() if e.capability == capability)
+        return {
+            "body": body,
+            "capability": capability,
+            "method": entry.method,
+            "path": entry.path,
+            "query": {},
+        }
+
+    return {
+        "authority": {
+            "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
+            "issued_at": issued_at.astimezone(timezone.utc).isoformat(),
+            "status": "CURRENT",
+        },
+        "catalog": {"sha256": catalog_sha256()},
+        "cutoff": {
+            "as_of_date": cutoff.as_of_date.isoformat(),
+            "close_time_zone": CLOSE_TIME_ZONE,
+        },
+        "exception_label": exception_label,
+        "metering": {"max_requests": max_requests, "retry_count": 0},
+        "operation": "capture",
+        "review": {"identity": review_identity, "reference": review_reference},
+        "schema_version": SCHEMA_VERSION,
+        "scope": {
+            "account_count": account_count,
+            "requests": [
+                request("balances.historical", None),
+                request("holdings.v2", dict(holdings_body)),
+                request("transactions.history", None),
+            ],
+        },
+        "terms": {"sha256": TERMS_SHA256, "version": TERMS_VERSION},
+    }
+
+
+def _evidence_summary(checked: ValidatedEvidence) -> dict[str, object]:
+    return {
+        "account_count": checked.account_count,
+        "as_of_date": checked.cutoff.as_of_date.isoformat(),
+        "catalog_sha256": catalog_sha256(),
+        "evidence_sha256": checked.evidence_sha256,
+        "expires_at": checked.expires_at.isoformat(),
+        "issued_at": checked.issued_at.isoformat(),
+        "max_requests": checked.max_requests,
+        "review": checked.review,
+        "terms_sha256": TERMS_SHA256,
+    }
+
+
+def _make_evidence(args: argparse.Namespace) -> dict[str, object]:
+    body = strict_json_loads(args.holdings_body.read_bytes(), label="holdings body")
+    issued = _aware_utc(args.issued_at, "issued_at")
+    document = build_evidence(
+        cutoff=parse_cutoff(args.cutoff),
+        account_count=args.account_count,
+        holdings_body=_object(body, "holdings body"),
+        review_identity=args.review_identity,
+        review_reference=args.review_reference,
+        issued_at=issued,
+        expires_at=_aware_utc(args.expires_at, "expires_at"),
+        max_requests=args.max_requests,
+        exception_label=args.exception_label,
+    )
+    payload = json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    try:
+        with args.output.open("xb") as handle:  # create-only, like the raw staging
+            handle.write(payload)
+    except FileExistsError as exc:
+        raise DriverError("output already exists") from exc
+    try:
+        # Same checks authorize runs, evaluated at issue time; none consumed.
+        checked = validate_evidence(args.output, now=lambda: issued)
+    except DriverError:
+        args.output.unlink(missing_ok=True)
+        raise
+    return _evidence_summary(checked)
+
+
+def _check_evidence(args: argparse.Namespace) -> dict[str, object]:
+    checked = validate_evidence(args.evidence)
+    summary = _evidence_summary(checked)
+    if args.receipt_root is not None:
+        summary["already_consumed"] = (
+            args.receipt_root / f"{checked.evidence_sha256}.json"
+        ).exists()
+    return summary
+
+
 def _normalize_offline(args: argparse.Namespace) -> dict[str, object]:
     crosswalk = parse_crosswalk(_load(args.crosswalk, "crosswalk"))
     raw = strict_json_loads(args.raw_response.read_bytes(), label="raw holdings")
@@ -1840,6 +1976,26 @@ def _parser() -> argparse.ArgumentParser:
     normalize.add_argument("--cutoff", required=True)
     normalize.add_argument("--captured-at", required=True)
     normalize.add_argument("--exception-label")
+    make = sub.add_parser(
+        "make-evidence",
+        help="offline: write create-only governance evidence and validate it",
+    )
+    make.add_argument("--output", required=True, type=Path)
+    make.add_argument("--cutoff", required=True)
+    make.add_argument("--account-count", required=True, type=int)
+    make.add_argument("--holdings-body", required=True, type=Path)
+    make.add_argument("--review-identity", required=True)
+    make.add_argument("--review-reference", required=True)
+    make.add_argument("--issued-at", required=True)
+    make.add_argument("--expires-at", required=True)
+    make.add_argument("--max-requests", required=True, type=int)
+    make.add_argument("--exception-label")
+    check = sub.add_parser(
+        "check-evidence",
+        help="offline: run the authorization checks without consuming the evidence",
+    )
+    check.add_argument("evidence", type=Path)
+    check.add_argument("--receipt-root", type=Path)
     verify = sub.add_parser("verify", help="re-check a staged run from its bytes")
     verify.add_argument("run_dir", type=Path)
     verify.add_argument("--crosswalk", type=Path)
@@ -1868,6 +2024,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "normalize-holdings":
             result = _normalize_offline(args)
+        elif args.command == "make-evidence":
+            result = _make_evidence(args)
+        elif args.command == "check-evidence":
+            result = _check_evidence(args)
         else:
             crosswalk = (
                 parse_crosswalk(_load(args.crosswalk, "crosswalk"))

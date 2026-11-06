@@ -121,6 +121,26 @@ so one call returns every account; `balances.historical` is a `GET` with an empt
 `query`, scoped per account by `Schwab-Client-Ids`; `transactions.history` is the
 reviewed POST. `body` is `null` for the two requests the driver builds itself.
 
+### Generating and checking the evidence
+
+`make-evidence` writes the evidence for you (create-only; the driver fills the
+`catalog` and `terms` hashes and the three fixed request entries) and then runs
+the same checks `capture` runs, deleting the file if any fails:
+
+```powershell
+python tools/schwab_capture_driver.py make-evidence --output <evidence.json> `
+  --cutoff 2026-11-06 --account-count <N> --holdings-body <body.json> `
+  --review-identity <name> --review-reference <issue-comment-url> `
+  --issued-at <RFC3339> --expires-at <RFC3339> --max-requests <M>
+```
+
+`check-evidence <evidence.json> [--receipt-root <dir>]` re-runs every
+authorization check against the real clock without writing a receipt, so it never
+consumes the evidence; with `--receipt-root` it also reports `already_consumed`.
+Run it just before `capture`. `issued_at` must be in the past and `expires_at` in
+the future when `capture` runs. `capture` itself is unchanged and still the only
+thing that consumes evidence.
+
 ## Credentials
 
 None. Capture attaches over CDP to the owner's already-authenticated browser and
