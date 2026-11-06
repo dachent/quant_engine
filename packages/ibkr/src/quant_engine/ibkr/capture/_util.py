@@ -36,6 +36,12 @@ def account_label(raw_account_id: str) -> str:
     return hashlib.sha256(raw_account_id.encode("utf-8")).hexdigest()[:16]
 
 
+def compact_date(day: date) -> str:
+    """The Flex Web Service date form (yyyymmdd) of the ``fd`` / ``td`` overrides."""
+
+    return day.strftime("%Y%m%d")
+
+
 def parse_iso_date(value: object, name: str) -> date:
     if not isinstance(value, str) or _ISO_DATE.fullmatch(value) is None:
         raise ValueError(f"{name} must be a YYYY-MM-DD date")

@@ -23,7 +23,7 @@ import time
 from .credentials import TOKEN_FIELD, SecretValue
 from quant_engine.ibkr.flex import GET_STATEMENT_URL, SEND_REQUEST_URL, HttpGet
 
-from ._util import sha256_hex
+from ._util import compact_date, sha256_hex
 from .catalog import SERVICE_VERSION, get_query
 from .governance import LiveReadGovernance
 from .plan import RequestPlan
@@ -121,6 +121,13 @@ def capture_plan(
             },
             "created_utc": stamp,
         }
+        send_params = {"q": query_id, "t": service_param, "v": SERVICE_VERSION}
+        if request.window_override:
+            # the request sets the window (IBKR: fd/td yyyymmdd, up to 365 days; the catalog
+            # keeps each request to its own maximum), and the manifest records what was sent
+            send_params["fd"] = compact_date(request.window_from)
+            send_params["td"] = compact_date(request.window_to)
+            base["send_window"] = {"fd": send_params["fd"], "td": send_params["td"]}
         attempts: list[dict[str, object]] = []
 
         def refuse(
@@ -143,11 +150,7 @@ def capture_plan(
         governance.reserve_send(index)
         pacer.before_call()
         try:
-            send_body = http_get(
-                SEND_REQUEST_URL,
-                {"q": query_id, "t": service_param, "v": SERVICE_VERSION},
-                headers,
-            )
+            send_body = http_get(SEND_REQUEST_URL, send_params, headers)
         except TransportError:
             summaries.append(refuse(KIND_TRANSPORT_FAILURE, None, None, 0))
             break

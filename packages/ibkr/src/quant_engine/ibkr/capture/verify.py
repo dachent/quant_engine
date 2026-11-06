@@ -19,8 +19,8 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from ._util import canonical_json_bytes
-from .catalog import get_query
-from .plan import PlanError, plan_from_document
+from .catalog import WINDOW_SINGLE_DAY, FlexQuery, get_query
+from .plan import CaptureRequest, PlanError, plan_from_document
 
 _MANIFEST = "capture-manifest.json"
 _STATEMENT = "statement.xml"
@@ -202,6 +202,26 @@ def _security_rows(securities: dict[str, dict[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
+def _returns_requested_window(
+    query: FlexQuery, request: CaptureRequest, spans: list[tuple[date, date]]
+) -> bool:
+    """A request that set its window got that window back (not merely a window inside it).
+
+    One-day roles: every statement is exactly that day.  The range security reference: the
+    statements together run from the first to the last requested day.  Per-day activity
+    statements of a range are only bound to lie inside it (their missing weekdays are reported).
+    """
+
+    if query.window_kind == WINDOW_SINGLE_DAY:
+        return all(span == (request.window_from, request.window_from) for span in spans)
+    if query.kind == "security-reference":
+        return (
+            min(start for start, _ in spans) == request.window_from
+            and max(end for _, end in spans) == request.window_to
+        )
+    return True
+
+
 def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     checks: list[str] = []
     manifest_bytes = (
@@ -264,6 +284,12 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     if manifest.get("query") != request.query:
         raise _fail("query-mismatch")
     query = get_query(request.query)
+    sent = {
+        "fd": request.window_from.strftime("%Y%m%d"),
+        "td": request.window_to.strftime("%Y%m%d"),
+    }
+    if manifest.get("send_window") != (sent if request.window_override else None):
+        raise _fail("send-window")
     checks.append("plan")
 
     attempts = manifest.get("attempts")
@@ -337,6 +363,8 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     for start, end in spans:
         if start < request.window_from or end > request.window_to:
             raise _fail("window")
+    if request.window_override and not _returns_requested_window(query, request, spans):
+        raise _fail("window-override")
     owners = [row["account_label"] for row in rows]
     keyed = [(row["account_label"], row.get("report_date")) for row in rows]
     if query.kind == "activity-statement" and len(set(keyed)) != len(keyed):

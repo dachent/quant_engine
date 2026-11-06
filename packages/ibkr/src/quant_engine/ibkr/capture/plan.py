@@ -26,6 +26,10 @@ class CaptureRequest:
     query: str
     window_from: date
     window_to: date
+    # True: SendRequest carries the window as fd/td (yyyymmdd), so the request, not the saved
+    # query, sets the date range.  False (absent from a plan document): the saved query's own
+    # window applies and the plan only records what the operator expects.
+    window_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,8 @@ class RequestPlan:
                     "query": item.query,
                     "window_from": item.window_from.isoformat(),
                     "window_to": item.window_to.isoformat(),
+                    # emitted only when set, so a plan without an override keeps its hash
+                    **({"window_override": True} if item.window_override else {}),
                 }
                 for item in self.requests
             ],
@@ -122,14 +128,21 @@ def plan_from_document(document: Mapping[str, Any]) -> RequestPlan:
             raise ValueError("plan lists are malformed")
         requests = []
         for entry in raw_requests:
-            row = require_keys(entry, "request", {"query", "window_from", "window_to"})
+            keys = {"query", "window_from", "window_to"}
+            override = isinstance(entry, dict) and "window_override" in entry
+            row = require_keys(
+                entry, "request", keys | {"window_override"} if override else keys
+            )
             if not isinstance(row["query"], str):
                 raise ValueError("request query must be a string")
+            if override and row["window_override"] is not True:
+                raise ValueError("window_override is true or absent")
             requests.append(
                 CaptureRequest(
                     row["query"],
                     parse_iso_date(row["window_from"], "window_from"),
                     parse_iso_date(row["window_to"], "window_to"),
+                    override,
                 )
             )
         if not all(isinstance(label, str) for label in raw_labels):

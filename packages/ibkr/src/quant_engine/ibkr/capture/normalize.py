@@ -23,7 +23,7 @@ from ._util import (
     reject_declarations,
     sha256_hex,
 )
-from .catalog import KIND_ACTIVITY, KIND_SECURITY, get_query
+from .catalog import KIND_ACTIVITY, KIND_SECURITY, WINDOW_SINGLE_DAY, get_query
 from .plan import PlanError, RequestPlan, plan_from_document
 from .securities import SecurityScanError, aggregate_rows, scan_securities
 from .staging import MANIFEST_NAME, write_new_file
@@ -185,6 +185,18 @@ def build_normalized(run_dir: Path) -> tuple[dict[str, Any], bytes]:
             raise NormalizationError("a statement has reversed dates")
         if start < request.window_from or end > request.window_to:
             raise NormalizationError("a statement lies outside the requested window")
+    if request.window_override:
+        if query.window_kind == WINDOW_SINGLE_DAY:
+            returned = all(span == (request.window_from,) * 2 for span in spans)
+        elif query.kind == KIND_SECURITY:
+            returned = (
+                min(start for start, _ in spans) == request.window_from
+                and max(end for _, end in spans) == request.window_to
+            )
+        else:
+            returned = True
+        if not returned:
+            raise NormalizationError("the statements are not the requested window")
     labels = sorted({label for label, _ in dates})
     if len(dates) != len(set(dates)) and query.kind == KIND_ACTIVITY:
         raise NormalizationError("an account-day appears more than once")
