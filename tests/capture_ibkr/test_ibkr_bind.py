@@ -278,3 +278,68 @@ def test_the_preflight_runs_the_generation_builder_and_writes_nothing_on_a_refus
             preflight=True,
         )
     assert not out.exists()
+
+
+def test_make_evidence_writes_what_the_authorization_accepts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from datetime import datetime, timezone
+
+    from quant_engine.ibkr.capture import GovernanceError, authorize_live_read
+
+    plan_path = tmp_path / "plan.json"
+    assert (
+        main(
+            [
+                "build-plan",
+                "--first-day",
+                "2026-10-05",
+                "--last-day",
+                "2026-10-07",
+                "--pull-date",
+                "2026-11-03",
+                "--label",
+                LABEL,
+                "--out",
+                str(plan_path),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    out = tmp_path / "evidence.json"
+    argv = [
+        "make-evidence",
+        "--plan",
+        str(plan_path),
+        "--review-identity",
+        "synthetic-reviewer",
+        "--review-reference",
+        "https://github.com/dachent/quant_engine/issues/1#issuecomment-1",
+        "--issued-at",
+        "2026-11-03T00:00:00Z",
+        "--expires-at",
+        "2026-11-04T00:00:00Z",
+        "--out",
+        str(out),
+    ]
+    assert main(argv) == 0
+    printed = _emitted(capsys)
+    assert printed["max_send_requests"] == 3 and printed["max_get_attempts"] == 6
+    plan = load_plan(plan_path.read_bytes())
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    now = datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc)
+    governance = authorize_live_read(
+        out, plan=plan, receipt_root=receipts, now=lambda: now
+    )
+    assert governance.max_send_requests == 3 and governance.max_get_attempts == 6
+    # create-only, and a budget the override authorization would refuse is refused up front
+    assert main(argv) == 2
+    low = [*argv[:-2], "--max-get-attempts", "5", "--out", str(tmp_path / "low.json")]
+    assert main(low) == 2
+    assert not (tmp_path / "low.json").exists()
+    with pytest.raises(GovernanceError):
+        authorize_live_read(
+            out, plan=plan, receipt_root=receipts, now=lambda: now
+        )  # single use

@@ -11,7 +11,7 @@ refuses the result unless the generation builder itself accepts it (``--prefligh
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -19,7 +19,8 @@ import tempfile
 from typing import Any
 
 from ._util import canonical_json_bytes, parse_iso_date
-from .catalog import KIND_ACTIVITY, get_query
+from .catalog import KIND_ACTIVITY, catalog_sha256, get_query
+from .governance import MIN_GET_ATTEMPTS_OVERRIDE, TERMS_SHA256, TERMS_VERSION
 from .normalize import normalize_run
 from .plan import CaptureRequest, PlanError, RequestPlan, plan_from_document
 from .staging import write_new_file
@@ -74,6 +75,59 @@ def build_plan(
 
 def write_plan(plan: RequestPlan, out: Path) -> None:
     write_new_file(out, canonical_json_bytes(plan.to_document()))
+
+
+def build_evidence(
+    *,
+    plan: RequestPlan,
+    review_identity: str,
+    review_reference: str,
+    issued_at: datetime,
+    expires_at: datetime,
+    max_get_attempts: int,
+) -> dict[str, Any]:
+    """The governance evidence document for one plan (the comment it cites is made first).
+
+    It names the plan hash, the catalog and the accepted terms from the code, the send budget equal
+    to the plan size, and a GetStatement budget that an override plan's authorization accepts.
+    """
+
+    if issued_at.tzinfo is None or expires_at.tzinfo is None:
+        raise BindError("the evidence times need a UTC offset")
+    if expires_at <= issued_at:
+        raise BindError("the evidence expires before it is issued")
+    if not 1 <= max_get_attempts <= 9:
+        raise BindError("max_get_attempts is outside 1..9")
+    if (
+        any(request.window_override for request in plan.requests)
+        and max_get_attempts < MIN_GET_ATTEMPTS_OVERRIDE
+    ):
+        raise BindError(
+            f"a plan that overrides its windows needs max_get_attempts of at least "
+            f"{MIN_GET_ATTEMPTS_OVERRIDE}"
+        )
+
+    def stamp(moment: datetime) -> str:
+        return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return {
+        "schema_version": 1,
+        "operation": "flex-capture",
+        "plan": {"sha256": plan.sha256},
+        "review": {"identity": review_identity, "reference": review_reference},
+        "authority": {
+            "status": "CURRENT",
+            "issued_at": stamp(issued_at),
+            "expires_at": stamp(expires_at),
+        },
+        "terms": {"version": TERMS_VERSION, "sha256": TERMS_SHA256},
+        "catalog": {"sha256": catalog_sha256()},
+        "metering": {
+            "max_send_requests": len(plan.requests),
+            "max_get_attempts": max_get_attempts,
+            "retry_count": 0,
+        },
+    }
 
 
 def _run_request(run_dir: Path) -> tuple[CaptureRequest, str]:

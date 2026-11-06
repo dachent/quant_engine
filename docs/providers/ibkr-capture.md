@@ -235,7 +235,11 @@ a JSON file. `python -I -m quant_engine.ibkr.capture` is written `CAP` below.
    [--label LABEL ...] [--non-trading-day DAY ...] --out PLAN` writes the plan (one override request
    per trading day, create-only) and prints its `plan_sha256`; the labels are decided as described
    under "Account scope" before this step. `CAP plan-hash PLAN` re-reads it.
-2. Evidence for that plan hash (`max_send_requests` 35, `max_get_attempts` 6) and the issue comment.
+2. The issue comment approving that plan hash, then `CAP make-evidence --plan PLAN
+   --review-identity NAME --review-reference COMMENT_URL --issued-at TIME --expires-at TIME
+   [--max-get-attempts 6] --out EVIDENCE` (create-only): it names the plan hash, the catalog and
+   the accepted terms from the code, `max_send_requests` equal to the plan size (35) and the
+   GetStatement budget (6 by default; below 6 is refused for an override plan).
 3. `CAP live --plan PLAN --governance EVIDENCE --config CREDENTIALS.toml --receipt-root RECEIPTS
    --staging-root DATA_IBKR/source-runs --user-agent UA --deadline-utc TIME`: the staging root is
    inside the generation spec's `data-ibkr` root, because the spec names each statement by its path

@@ -23,7 +23,7 @@ from .credentials import CredentialError, resolve_flex_credentials
 from quant_engine.ibkr.flex import HttpGet
 
 from ._util import canonical_json_bytes, parse_iso_date
-from .bind import BindError, bind_spec, build_plan, write_plan
+from .bind import BindError, bind_spec, build_evidence, build_plan, write_plan
 from .catalog import catalog_sha256
 from .governance import GovernanceError, authorize_live_read
 from .normalize import NormalizationError, normalize_run
@@ -123,6 +123,19 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--non-trading-day", action="append", default=[])
     build.add_argument("--query", default="activity-history")
     build.add_argument("--out", type=Path, required=True)
+    evidence = commands.add_parser(
+        "make-evidence",
+        help="write the governance evidence document of a plan (create-only)",
+    )
+    evidence.add_argument("--plan", type=Path, required=True)
+    evidence.add_argument("--review-identity", required=True)
+    evidence.add_argument(
+        "--review-reference", required=True, help="the issue comment URL"
+    )
+    evidence.add_argument("--issued-at", type=_aware_time, required=True)
+    evidence.add_argument("--expires-at", type=_aware_time, required=True)
+    evidence.add_argument("--max-get-attempts", type=int, default=6)
+    evidence.add_argument("--out", type=Path, required=True)
     bind = commands.add_parser(
         "bind-spec",
         help="add verified runs to a generation spec with their real hashes",
@@ -184,6 +197,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             write_plan(plan, args.out)
             _emit({"plan_sha256": plan.sha256, "requests": len(plan.requests)})
+        elif args.command == "make-evidence":
+            plan = load_plan(args.plan.read_bytes())
+            document = build_evidence(
+                plan=plan,
+                review_identity=args.review_identity,
+                review_reference=args.review_reference,
+                issued_at=args.issued_at,
+                expires_at=args.expires_at,
+                max_get_attempts=args.max_get_attempts,
+            )
+            write_new_file(args.out, canonical_json_bytes(document))
+            _emit(
+                {
+                    "plan_sha256": plan.sha256,
+                    "max_send_requests": len(plan.requests),
+                    "max_get_attempts": args.max_get_attempts,
+                }
+            )
         elif args.command == "bind-spec":
             exclusions: dict[str, str] = {}
             for item in args.exclusion:
