@@ -468,12 +468,25 @@ fails), and the `--prior-dir`/`--cross-capture-dir` sets. The page record is rea
 I7 has its input. Result policy:
 
 - `PASS`: continue.
-- `FAIL`: stop; no later book is fetched.
-- `REVIEW` (warnings only): continue ONLY for a cash-only book, defined from the saved files:
-  the transactions export is a single data row of type `CASH` and no holdings row (the
-  simulation-book case, one start-cash row, no holdings). Any other `REVIEW` is treated as
-  `FAIL` and stops. The manifest records `identity_policy` per book (`CONTINUE`,
-  `CONTINUE_CASH_ONLY_REVIEW`, `STOP`). There is no flag to relax this.
+- `FAIL`: stop at once (exit 3); no later book is fetched. The manifest and
+  `book-identity-decisions.json` are still written.
+- `REVIEW` (warnings only, for example a missing optional holdings export, no page record,
+  or a shared simulation that is not on the account page): NEVER stops downloads. The book
+  is recorded `REVIEW` with its warning checks (`identity_checks`, `review_checks`) and the
+  run continues through every book. There is no special case for any book or book type.
+  An unknown or missing decision is a `FAIL`.
+
+Exit codes of `run`: `0` every book PASS (status `COMPLETE`); `2` refused before anything
+was sent; `3` stopped (a FAIL, a login, an inexact download, ...); `4` no book FAILED but at
+least one book is REVIEW (status `REVIEW_PENDING`). Exit 4 is NOT a failure of the capture:
+every file was fetched and saved. It means the capture is not accepted yet. Nothing non-PASS
+passes silently: the summary line carries `review_pending` (book id to check names), one
+`REVIEW_PENDING book=<id> checks=<names>` line per book follows it, and the manifest lists
+the same under `review_pending`. The operator must accept each REVIEW book at generation
+time with `portfolio123_generation.py plan --accept-identity-review ID=REASON` (the reason
+states what was seen); until then the generation refuses it. Re-pull or exclude a FAILed id
+instead. For an unattended timeline, treat exit 4 as "capture finished, operator decision
+pending", exit 0 as "finished and clean", and exit 3 as "stopped, partial directory".
 
 **This needs PR 827:** the module is loaded by file path so this tool still imports and
 passes CI without it, but `run` refuses with `IDENTITY_CHECK_UNAVAILABLE` (there is no skip
