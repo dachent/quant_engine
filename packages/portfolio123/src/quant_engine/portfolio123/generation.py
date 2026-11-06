@@ -13,7 +13,7 @@ import re
 import shutil
 import stat
 import tempfile
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
@@ -33,11 +33,21 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-PLAN_SCHEMA_VERSION = 1
+# Schema 1 plans (HAR roots only) stay verifiable under adapter 1.0.0. Schema 2 adds the transaction-capture sources
+# and the per-book transaction gate, and builds under adapter 1.1.0.
+PLAN_SCHEMA_VERSION = 2
+SUPPORTED_PLAN_SCHEMA_VERSIONS = (1, 2)
 CATALOG_SCHEMA_VERSION = 1
-ADAPTER_VERSION = "1.0.0"
+ADAPTER_VERSION = "1.1.0"
+_LEGACY_ADAPTER_VERSION = "1.0.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ENTITY = re.compile(r"^(strategy|account)_(\d+)_", re.IGNORECASE)
+_CAPTURE_LABEL = re.compile(r"^transaction-capture-[1-9][0-9]*$")
+_CAPTURE_TRANSACTIONS = re.compile(r"^raw/strategy_([0-9]+)_transactions\.csv$")
+_BOOK_ID = re.compile(r"^[0-9]+$")
+_ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_CAPTURE_MANIFEST = "capture-manifest.json"
+_TRANSACTIONS_TABLE = "tables/har_transactions.parquet"
 _MAX_CSV_FIELD_BYTES = 64 * 1024 * 1024
 _LEGACY_TABLES = {
     "book_assets.parquet",
@@ -132,6 +142,8 @@ def _disposition(label: str, relative: str) -> str:
         and portable.parts[0] in {"csv", "downloads"}
     ):
         return "HAR_DERIVED_CSV"
+    if _CAPTURE_LABEL.fullmatch(label) and _CAPTURE_TRANSACTIONS.fullmatch(relative):
+        return "CAPTURE_TRANSACTION_CSV"
     return "PROVENANCE_ONLY"
 
 
@@ -151,19 +163,201 @@ def _inventory(label: str, root: Path) -> list[dict[str, object]]:
     return entries
 
 
+def _book_stats(rows: Iterable[Mapping[str, str]]) -> dict[str, dict[str, Any]]:
+    """Per-book transaction count and first/last ISO date over parsed rows."""
+
+    stats: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        book = row.get("_entity_id", "")
+        if not book:
+            continue
+        entry = stats.setdefault(
+            book, {"first_date": None, "last_date": None, "rows": 0}
+        )
+        entry["rows"] += 1
+        day = row.get("Date", "")
+        if _ISO_DATE.fullmatch(day) is None:
+            if row.get("_transport") == "capture_csv":
+                raise Portfolio123GenerationError(
+                    f"capture transaction date is not ISO for book {book}"
+                )
+            continue
+        if entry["first_date"] is None or day < entry["first_date"]:
+            entry["first_date"] = day
+        if entry["last_date"] is None or day > entry["last_date"]:
+            entry["last_date"] = day
+    return stats
+
+
+def _previous_gate(data_root: Path, generation_id: str | None) -> dict[str, Any] | None:
+    """Per-book transaction stats of the generation a new one must not regress from."""
+
+    if generation_id is None:
+        if not (data_root / "CURRENT.json").exists():
+            return None
+        generation_id = read_current(data_root).generation_id
+    if _SHA256.fullmatch(generation_id) is None:
+        raise Portfolio123GenerationError("previous generation ID is invalid")
+    root = data_root / "generations" / generation_id
+    try:
+        manifest = GenerationManifest.from_json_bytes(
+            (root / "generation.json").read_bytes()
+        )
+    except (OSError, ValueError) as exc:
+        raise Portfolio123GenerationError("previous generation is unreadable") from exc
+    if manifest.generation_id != generation_id:
+        raise Portfolio123GenerationError("previous generation identity differs")
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == _TRANSACTIONS_TABLE
+        ),
+        None,
+    )
+    books: dict[str, dict[str, Any]] = {}
+    digest = ""
+    if artifact is not None:
+        table = _safe_path(root, _TRANSACTIONS_TABLE)
+        if not table.is_file() or hash_file(table) != (
+            artifact.sha256,
+            artifact.size_bytes,
+        ):
+            raise Portfolio123GenerationError(
+                "previous generation transactions differ from its manifest"
+            )
+        digest = artifact.sha256
+        rows = pq.read_table(table).to_pylist()
+        books = _book_stats(
+            {key: "" if value is None else str(value) for key, value in row.items()}
+            for row in rows
+        )
+    return {
+        "books": dict(sorted(books.items())),
+        "generation_id": generation_id,
+        "transactions_sha256": digest,
+    }
+
+
+def _capture_books(
+    label: str, files: list[dict[str, object]], root: Path
+) -> dict[str, str]:
+    """Book -> relative path of one capture root after checking its manifest."""
+
+    by_path = {str(item["relative_path"]): item for item in files}
+    manifest_item = by_path.get(_CAPTURE_MANIFEST)
+    if manifest_item is None:
+        raise Portfolio123GenerationError(f"{label} has no {_CAPTURE_MANIFEST}")
+    try:
+        manifest = _object(
+            json.loads((root / _CAPTURE_MANIFEST).read_text(encoding="utf-8")),
+            "capture manifest",
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Portfolio123GenerationError("capture manifest is not JSON") from exc
+    listed: dict[str, tuple[str, int]] = {}
+    for entry in _objects(manifest.get("artifacts"), "capture manifest artifacts"):
+        relative = _text(entry.get("relative_path"), "capture relative_path")
+        listed[relative] = (
+            _text(entry.get("sha256"), "capture sha256"),
+            _integer(entry.get("observed_length"), "capture observed_length"),
+        )
+    books: dict[str, str] = {}
+    for relative, item in sorted(by_path.items()):
+        if item["disposition"] != "CAPTURE_TRANSACTION_CSV":
+            if (
+                relative.casefold().startswith("raw/")
+                and relative.casefold().endswith(".csv")
+                and "transaction" in relative.casefold()
+            ):
+                raise Portfolio123GenerationError(
+                    f"{label} {relative} looks like a transaction export but is not "
+                    "raw/strategy_<book>_transactions.csv"
+                )
+            continue
+        if listed.get(relative) != (item["sha256"], item["bytes"]):
+            raise Portfolio123GenerationError(
+                f"{label} {relative} is not hash-bound by its capture manifest"
+            )
+        match = _CAPTURE_TRANSACTIONS.fullmatch(relative)
+        assert match is not None
+        books[match.group(1)] = relative
+    return books
+
+
+def _gate_inputs(
+    sources: Sequence[Mapping[str, Any]],
+    data_root: Path,
+    expected_books: Sequence[str],
+    previous_generation_id: str | None,
+    supersede_books: Mapping[str, str],
+) -> dict[str, Any]:
+    captured: dict[str, str] = {}
+    for source in sources:
+        if not _CAPTURE_LABEL.fullmatch(str(source["label"])):
+            continue
+        root = Path(str(source["root"]))
+        books = _capture_books(
+            str(source["label"]), _objects(source["files"], "files"), root
+        )
+        for book, relative in books.items():
+            if book in captured:
+                raise Portfolio123GenerationError(
+                    f"book {book} is captured by more than one transaction capture"
+                )
+            captured[book] = f"{source['label']}/{relative}"
+    expected = sorted({str(book) for book in expected_books})
+    for book in (*expected, *supersede_books):
+        if _BOOK_ID.fullmatch(str(book)) is None:
+            raise Portfolio123GenerationError("book IDs must be numeric")
+    missing = [book for book in expected if book not in captured]
+    if missing:
+        raise Portfolio123GenerationError(
+            "expected books have no transaction capture: " + ", ".join(missing)
+        )
+    for book, reason in supersede_books.items():
+        if book not in captured:
+            raise Portfolio123GenerationError(
+                f"book {book} cannot be superseded without a transaction capture"
+            )
+        if not reason.strip():
+            raise Portfolio123GenerationError(f"book {book} supersede needs a reason")
+    return {
+        "captured_books": dict(sorted(captured.items())),
+        "expected_books": expected,
+        "previous": _previous_gate(data_root, previous_generation_id),
+        "supersede": dict(sorted(supersede_books.items())),
+    }
+
+
 def create_cutover_plan(
     legacy_root: Path,
     har_root: Path,
     data_root: Path,
     *,
     as_of_date: date,
+    transaction_captures: Sequence[Path] = (),
+    expected_books: Sequence[str] = (),
+    previous_generation_id: str | None = None,
+    supersede_books: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """Hash every approved input and create a private content-addressed plan."""
+    """Hash every approved input and create a private content-addressed plan.
+
+    ``transaction_captures`` are saved Portfolio123 capture directories
+    (``capture-manifest.json`` plus ``raw/strategy_<id>_transactions.csv``). A book they
+    cover takes its transactions from the capture alone. The generation must then not
+    regress any book against ``previous_generation_id`` (default: the data root's
+    CURRENT) unless the book is named in ``supersede_books`` with a reason.
+    """
 
     legacy = _root(legacy_root, "legacy_root", existing=True)
     har = _root(har_root, "har_root", existing=True)
     destination = _root(data_root, "data_root", existing=True)
-    roots = (legacy, har, destination)
+    captures = [
+        _root(path, "transaction_capture", existing=True)
+        for path in transaction_captures
+    ]
+    roots = (legacy, har, destination, *captures)
     if any(
         _within(left, right) or _within(right, left)
         for index, left in enumerate(roots)
@@ -182,6 +376,11 @@ def create_cutover_plan(
             "root": str(har),
         },
     ]
+    for number, capture in enumerate(captures, start=1):
+        label = f"transaction-capture-{number}"
+        sources.append(
+            {"files": _inventory(label, capture), "label": label, "root": str(capture)}
+        )
     legacy_tables = {
         PurePosixPath(str(item["relative_path"])).name
         for item in _objects(sources[0]["files"], "legacy files")
@@ -195,12 +394,20 @@ def create_cutover_plan(
     )
     if har_count == 0:
         raise Portfolio123GenerationError("HAR derived CSV set is empty")
+    gate = _gate_inputs(
+        sources,
+        destination,
+        expected_books,
+        previous_generation_id,
+        dict(supersede_books or {}),
+    )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),
         "data_root": str(destination),
         "provider_id": "portfolio123",
         "schema_version": PLAN_SCHEMA_VERSION,
         "sources": sources,
+        "transaction_gate": gate,
     }
     plan_id = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     run_id = f"legacy-{as_of_date.strftime('%Y%m%d')}-{plan_id[:12]}"
@@ -213,6 +420,10 @@ def create_cutover_plan(
         ),
         "har_csv_count": har_count,
         "legacy_table_count": len(legacy_tables),
+        "previous_generation_id": (
+            gate["previous"]["generation_id"] if gate["previous"] else None
+        ),
+        "transaction_capture_count": len(captures),
         "plan_id": plan_id,
         "plan_path": str(plan_path),
         "run_id": run_id,
@@ -261,14 +472,25 @@ def _load_plan(plan_path: Path) -> dict[str, Any]:
     )
     if run_id != expected_run or plan_path.parent.name != plan_id:
         raise Portfolio123GenerationError("plan run identity differs")
-    if plan.get("schema_version") != PLAN_SCHEMA_VERSION:
+    if plan.get("schema_version") not in SUPPORTED_PLAN_SCHEMA_VERSIONS:
         raise Portfolio123GenerationError("plan schema version is unsupported")
+    if plan["schema_version"] == 1 and "transaction_gate" in plan:
+        raise Portfolio123GenerationError("schema 1 plan carries a transaction gate")
+    if plan["schema_version"] == 2:
+        _object(plan.get("transaction_gate"), "transaction_gate")
     return plan
 
 
 def _sources(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     sources = _objects(plan.get("sources"), "sources")
-    if {item.get("label") for item in sources} != {"legacy-data", "har-workspace"}:
+    labels = [item.get("label") for item in sources]
+    captures = [label for label in labels if _CAPTURE_LABEL.fullmatch(str(label))]
+    if (
+        labels[:2] != ["legacy-data", "har-workspace"]
+        or labels[2:] != captures
+        or captures != [f"transaction-capture-{n}" for n in range(1, len(captures) + 1)]
+        or (plan.get("schema_version") == 1 and captures)
+    ):
         raise Portfolio123GenerationError("plan source labels differ")
     return sources
 
@@ -420,7 +642,9 @@ def _family(relative: str) -> str:
     return "supporting_metadata"
 
 
-def _csv_rows(path: Path, artifact_id: str, family: str) -> list[dict[str, str]]:
+def _csv_rows(
+    path: Path, artifact_id: str, family: str, transport: str | None = None
+) -> list[dict[str, str]]:
     entity = _ENTITY.match(PurePosixPath(artifact_id).name)
     rows: list[dict[str, str]] = []
     try:
@@ -457,9 +681,12 @@ def _csv_rows(path: Path, artifact_id: str, family: str) -> list[dict[str, str]]
                         else "unknown",
                         "_source_artifact": artifact_id,
                         "_source_row": str(number),
-                        "_transport": "browser_download"
-                        if artifact_id.startswith("downloads/")
-                        else "har_derived",
+                        "_transport": transport
+                        or (
+                            "browser_download"
+                            if artifact_id.startswith("downloads/")
+                            else "har_derived"
+                        ),
                     }
                 )
                 rows.append(normalized)
@@ -493,6 +720,69 @@ def _write_parquet(
     )
     digest, size = hash_file(path)
     return digest, size, len(materialized)
+
+
+def _enforce_transaction_gate(
+    gate: Mapping[str, Any], rows: Iterable[Mapping[str, str]]
+) -> dict[str, object]:
+    """Refuse, per book, any transaction history that shrank against the previous generation."""
+
+    stats = _book_stats(rows)
+    captured = _object(gate.get("captured_books"), "captured_books")
+    supersede = _object(gate.get("supersede"), "supersede")
+    previous = gate.get("previous")
+    books = (
+        _object(_object(previous, "previous")["books"], "previous books")
+        if previous is not None
+        else {}
+    )
+    failures: list[str] = []
+    waived: dict[str, object] = {}
+    for book in sorted(books):
+        old = _object(books[book], "previous book")
+        new = stats.get(book)
+        problems: list[str] = []
+        if new is None:
+            problems.append("no transactions")
+        else:
+            if new["rows"] < old["rows"]:
+                problems.append(f"rows {new['rows']} < {old['rows']}")
+            if old["last_date"] and (
+                new["last_date"] is None or new["last_date"] < old["last_date"]
+            ):
+                problems.append(f"last date {new['last_date']} < {old['last_date']}")
+            if old["first_date"] and new["first_date"] != old["first_date"]:
+                problems.append(
+                    f"first date {new['first_date']} != {old['first_date']}"
+                )
+        if not problems:
+            continue
+        if book in supersede:
+            if book not in captured or new is None or new["rows"] == 0:
+                failures.append(f"{book}: supersede needs captured transactions")
+            else:
+                waived[book] = {"previous": old, "reason": supersede[book]}
+            continue
+        failures.append(f"{book}: " + ", ".join(problems))
+    for book in sorted(supersede):
+        if book not in captured:
+            failures.append(f"{book}: supersede needs captured transactions")
+    if failures:
+        raise Portfolio123GenerationError(
+            "transaction gate refused the generation (previous "
+            f"{_object(previous, 'previous')['generation_id'] if previous else 'none'}"
+            "): " + "; ".join(failures)
+        )
+    return {
+        "books": dict(sorted(stats.items())),
+        "captured_books": dict(sorted(captured.items())),
+        "expected_books": list(gate.get("expected_books", [])),
+        "previous_generation_id": (
+            _object(previous, "previous")["generation_id"] if previous else None
+        ),
+        "status": "PASS",
+        "superseded": waived,
+    }
 
 
 def _build_outputs(
@@ -529,14 +819,44 @@ def _build_outputs(
     rows_by_family: dict[str, list[dict[str, str]]] = defaultdict(list)
     dataset_rows: Counter[str] = Counter()
     har = by_label["har-workspace"]
+    gate = (
+        _object(plan["transaction_gate"], "transaction_gate")
+        if (plan.get("schema_version") == 2)
+        else None
+    )
+    captured = dict(gate["captured_books"]) if gate is not None else {}
     for item in _objects(har.get("files"), "files"):
         if item.get("disposition") != "HAR_DERIVED_CSV":
             continue
         relative = _text(item["relative_path"], "relative_path")
         family = _family(relative)
+        entity = _ENTITY.match(PurePosixPath(relative).name)
+        if family == "transactions" and entity and entity.group(2) in captured:
+            continue
         parsed = _csv_rows(_object_path(authority, item), relative, family)
         rows_by_family[family].extend(parsed)
         dataset_rows[family] += len(parsed)
+    for source in _sources(plan):
+        label = _text(source["label"], "label")
+        if _CAPTURE_LABEL.fullmatch(label) is None:
+            continue
+        for item in _objects(source.get("files"), "files"):
+            if item.get("disposition") != "CAPTURE_TRANSACTION_CSV":
+                continue
+            relative = _text(item["relative_path"], "relative_path")
+            parsed = _csv_rows(
+                _object_path(authority, item),
+                f"{label}/{relative}",
+                "transactions",
+                "capture_csv",
+            )
+            rows_by_family["transactions"].extend(parsed)
+            dataset_rows["transactions"] += len(parsed)
+    gate_report = (
+        _enforce_transaction_gate(gate, rows_by_family.get("transactions", []))
+        if gate is not None
+        else None
+    )
     for family in sorted(rows_by_family):
         destination = work / "tables" / f"har_{family}.parquet"
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -592,6 +912,8 @@ def _build_outputs(
             "unclassified_input_count": 0,
         },
     }
+    if gate_report is not None:
+        catalog["transaction_gate"] = gate_report
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_path = work / "portfolio123-generation.json"
     catalog_path.write_bytes(catalog_bytes)
@@ -619,7 +941,12 @@ def _build_outputs(
     )
     manifest = GenerationManifest.build(
         as_of_date=as_of,
-        adapter=AdapterIdentity("quant-engine-portfolio123", ADAPTER_VERSION),
+        adapter=AdapterIdentity(
+            "quant-engine-portfolio123",
+            ADAPTER_VERSION
+            if plan.get("schema_version") == PLAN_SCHEMA_VERSION
+            else _LEGACY_ADAPTER_VERSION,
+        ),
         coverage=CoverageClaim(
             CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             "exact hash-bound legacy database and derived CSV snapshot",
@@ -749,6 +1076,8 @@ def cutover_sources(plan_path: Path, generation_id: str) -> dict[str, object]:
     removed: list[str] = []
     for source in _sources(plan):
         label = _text(source["label"], "label")
+        if _CAPTURE_LABEL.fullmatch(label):
+            continue  # a capture directory is retained evidence, never removed by cutover
         root = Path(_text(source["root"], "root"))
         if not root.exists():
             removed.append(label)

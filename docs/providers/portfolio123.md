@@ -89,6 +89,52 @@ verified source-run authority before atomically advancing the pointer.
 hash-bound source files, removes the now-empty legacy roots, and records the
 recovery authority. Any inventory or byte difference fails closed.
 
+### Transaction captures and the per-book drop gate
+
+The HAR download of a model book can be thin or the wrong series (the 2026-09-02
+download held 67 of 1,176 2026 rows for the primary book, and six temporary books
+had none). The model-book events that the implementation builders read come only
+from `tables/har_transactions.parquet`, so a thin table gives a thin seed. Plan
+schema 2 therefore reads the full per-book transaction captures and refuses a
+generation that shrinks any book.
+
+Capture layout, one directory per signed-in session (the output directory of
+`p123_har_capture.py`; pass `--transaction-capture` once per directory):
+
+```text
+CAPTURE_DIR/capture-manifest.json            artifacts[]: relative_path, sha256, observed_length
+CAPTURE_DIR/raw/strategy_<book>_transactions.csv   one saved export per book, ISO `Date` column
+```
+
+Every `raw/strategy_<book>_transactions.csv` must be listed in the manifest with
+the same sha256 and length, and a book may appear in one capture only. A covered
+book takes its `transactions` rows from the capture alone (the HAR rows for that
+book are dropped, never unioned), tagged `_transport=capture_csv`. All other HAR
+families are unchanged. A capture directory is retained evidence: `cutover` hashes
+and copies it but never removes it.
+
+```text
+python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as-of-date YYYY-MM-DD \
+  --transaction-capture CAPTURE_DIR [--transaction-capture OTHER_DIR] \
+  --expected-book BOOK_ID [--expected-book ...] \
+  [--previous-generation-id ID] [--supersede-book BOOK_ID=REASON]
+```
+
+- `--expected-book` names every managed or shared book the cycle must cover; the
+  plan fails before it is written when one has no capture file (a header-only file
+  is allowed for a book with no transactions).
+- The gate compares each book with the previous generation, `--previous-generation-id`
+  or else the data root's `CURRENT`. The plan binds that generation's per-book row
+  count, first date, and last date. `stage` and `publish` refuse, listing every
+  failing book, when a book has fewer rows, an earlier last date, a different first
+  date, or no transactions at all. There are no accepted gaps on live accounts.
+- `--supersede-book` waives that comparison for one captured book with a stated
+  reason (for example a previous generation that held another series). It needs a
+  capture with rows, and the reason and the previous figures are recorded under
+  `transaction_gate.superseded` in `portfolio123-generation.json`.
+
+Schema 1 plans keep rebuilding under adapter 1.0.0; new plans build under 1.1.0.
+
 ## Generated installations
 
 The repository skill is checksum-locked by
