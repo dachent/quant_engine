@@ -287,6 +287,34 @@ def test_refuses_stale_capture_and_token_url(tmp_path: Path) -> None:
     assert builder.main(argv) == 2
 
 
+def test_max_capture_date_passes_on_the_day_and_refuses_the_day_before(
+    tmp_path: Path,
+) -> None:
+    jroot, troot = _capture(tmp_path)
+    argv = _args(tmp_path, jroot, troot)
+    assert builder.main([*argv, "--max-capture-date", "2026-09-02"]) == 2
+    assert not (tmp_path / "out").exists()
+    assert builder.main([*argv, "--max-capture-date", "2026-09-03"]) == 0
+    prov = json.loads((tmp_path / "out" / builder.MANIFEST_NAME).read_text())[
+        builder.PROVENANCE_KEY
+    ]
+    assert prov["max_capture_date"] == "2026-09-03"
+
+
+def test_max_capture_date_absent_keeps_the_manifest_unchanged(tmp_path: Path) -> None:
+    assert _build(tmp_path) == 0
+    prov = json.loads((tmp_path / "out" / builder.MANIFEST_NAME).read_text())[
+        builder.PROVENANCE_KEY
+    ]
+    assert "max_capture_date" not in prov
+
+
+def test_max_capture_date_before_the_minimum_is_refused(tmp_path: Path) -> None:
+    jroot, troot = _capture(tmp_path)
+    argv = _args(tmp_path, jroot, troot)
+    assert builder.main([*argv, "--max-capture-date", "2026-08-31"]) == 2
+
+
 def test_market_vane_missing_needs_explicit_file(tmp_path: Path) -> None:
     jroot, troot = _capture(tmp_path)
     vane = jroot / "tt-market-vane__status.json"

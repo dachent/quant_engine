@@ -626,6 +626,7 @@ def _provenance(
     *,
     legacy: bool,
     min_capture_date: str,
+    max_capture_date: str | None,
     slugs: Sequence[str],
     chart_last: date,
     vane: Mapping[str, Any],
@@ -636,7 +637,11 @@ def _provenance(
     portfolio_version: str,
     live_inception: str,
 ) -> dict[str, Any]:
+    bounds: dict[str, Any] = (
+        {} if max_capture_date is None else {"max_capture_date": max_capture_date}
+    )
     return {
+        **bounds,
         "builder": BUILDER,
         "caller_supplied": {
             "component_weights": {
@@ -685,6 +690,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     legacy = bool(args.accept_legacy_capture_shape)
     slugs = _slugs(args.slugs)
     min_day = _day(args.min_capture_date, "--min-capture-date")
+    max_day = (
+        None
+        if args.max_capture_date is None
+        else _day(args.max_capture_date, "--max-capture-date")
+    )
+    if max_day is not None and max_day < min_day:
+        raise BuilderError("--max-capture-date is before --min-capture-date")
     inception = _day(args.live_inception, "--live-inception").isoformat()
     version = str(args.portfolio_version or "").strip()
     if not version:
@@ -720,6 +732,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                 f"{item.role} capture is older than the minimum date: "
                 f"{item.captured_at_utc} < {min_day}"
             )
+        if (
+            max_day is not None
+            and _day(item.captured_at_utc[:10], "capture date") > max_day
+        ):
+            raise BuilderError(
+                f"{item.role} capture is after the maximum date: "
+                f"{item.captured_at_utc} > {max_day}"
+            )
     records = _gather(captures, capture_dir, slugs, legacy=legacy)
     comp = records[GLOBAL_OBJECT]
     if comp.last_modified_utc is not None and (
@@ -727,6 +747,15 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     ):
         raise BuilderError(
             f"portfolio-comp last-modified is older than the minimum date: "
+            f"{comp.last_modified_utc}"
+        )
+    if (
+        max_day is not None
+        and comp.last_modified_utc is not None
+        and _day(comp.last_modified_utc[:10], "last-modified") > max_day
+    ):
+        raise BuilderError(
+            f"portfolio-comp last-modified is after the maximum date: "
             f"{comp.last_modified_utc}"
         )
     if comp.last_modified_utc is None and not legacy:
@@ -764,6 +793,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         raise BuilderError(
             "market-vane status is older than the minimum date: "
             f"{vane_prov['captured_at_utc']} < {vane_day}"
+        )
+    if (
+        max_day is not None
+        and _day(str(vane_prov["captured_at_utc"])[:10], "vane capture") > max_day
+    ):
+        raise BuilderError(
+            "market-vane status is after the maximum date: "
+            f"{vane_prov['captured_at_utc']} > {max_day}"
         )
     vane_prov["min_date"] = vane_day.isoformat()
 
@@ -847,6 +884,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             records,
             legacy=legacy,
             min_capture_date=min_day.isoformat(),
+            max_capture_date=None if max_day is None else max_day.isoformat(),
             slugs=slugs,
             chart_last=chart_last,
             vane=vane_prov,
@@ -961,6 +999,10 @@ def verify_dir(out_dir: Path) -> dict[str, Any]:
     for item in provenance.get("captures", []):
         if _day(str(item["captured_at_utc"])[:10], "capture date") < min_day:
             raise BuilderError("capture is older than the recorded minimum date")
+        if "max_capture_date" in provenance and _day(
+            str(item["captured_at_utc"])[:10], "capture date"
+        ) > _day(str(provenance["max_capture_date"]), "max_capture_date"):
+            raise BuilderError("capture is after the recorded maximum date")
     price = manifest.get("price_tape")
     if not isinstance(price, dict):
         raise BuilderError("manifest lacks the price tape binding")
@@ -1076,6 +1118,10 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--txt-capture-dir")
     b.add_argument("--out-dir", required=True)
     b.add_argument("--min-capture-date", required=True, help="YYYY-MM-DD")
+    b.add_argument(
+        "--max-capture-date",
+        help="YYYY-MM-DD: refuse a capture, comp last-modified or vane stamp dated after it",
+    )
     b.add_argument("--portfolio-version", required=True)
     b.add_argument("--live-inception", required=True, help="YYYY-MM-DD")
     b.add_argument("--price-tape", required=True)

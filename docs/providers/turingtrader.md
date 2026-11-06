@@ -70,3 +70,8 @@ refuses them when no capture date is recorded. Complete rows and the dated fallb
 (`LAST_COMPLETE_ROW`, `NEXT_COMPLETE_ROW`) are not affected. The protection for a cutoff of D is
 therefore a capture taken on D itself: after a later capture, a truncated row that needs a live
 fallback stops the run instead of reading post-cutoff holdings.
+
+The manifest builder takes an optional `--max-capture-date D` (a date): it refuses a capture, the
+comp last-modified stamp or the market-vane capture dated after D (a capture on D passes), records
+`max_capture_date` in the provenance, and `verify` re-checks it. Without the flag the builder is
+unchanged.
