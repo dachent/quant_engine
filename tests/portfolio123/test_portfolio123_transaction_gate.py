@@ -259,6 +259,54 @@ def test_misnamed_transaction_export_in_a_capture_is_refused(tmp_path: Path) -> 
         )
 
 
+def test_capture_rows_after_the_cutoff_are_excluded_and_counted(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    text = (
+        _full(10, "2026-09-11")
+        + "2026-09-12,LATE,BUY,1,1,1,,,\n2026-09-14,LATE,BUY,1,1,1,,,\n"
+    )
+    capture = _capture(tmp_path, "cap", {"101": text})
+    generation_id = _generate(
+        legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+    )
+    rows = pq.read_table(
+        data / "generations" / generation_id / "tables/har_transactions.parquet"
+    ).to_pylist()
+    assert len(rows) == 10 and max(row["Date"] for row in rows) == "2026-09-11"
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    assert gate["excluded_after_as_of"] == {"101": 2}  # type: ignore[index]
+    assert gate["books"]["101"]["last_date"] == "2026-09-11"  # type: ignore[index]
+
+
+def test_publish_refuses_when_current_moved_after_planning(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[_capture(tmp_path, "a", {"101": _full(5)})],
+    )
+    stale = create_cutover_plan(
+        legacy,
+        har,
+        data,
+        as_of_date=date(2026, 9, 12),
+        transaction_captures=[_capture(tmp_path, "b", {"101": _full(6)})],
+    )
+    moved = _generate(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 13),
+        transaction_captures=[_capture(tmp_path, "c", {"101": _full(40)})],
+    )
+    plan = Path(str(stale["plan_path"]))
+    generation_id = str(stage_candidate(plan)["generation_id"])
+    with pytest.raises(Portfolio123GenerationError, match="CURRENT moved"):
+        publish_candidate(plan, generation_id)
+    assert _current(data) == moved
+
+
 def test_non_iso_capture_date_is_refused(tmp_path: Path) -> None:
     legacy, har, data = _inputs(tmp_path)
     capture = _capture(
@@ -374,4 +422,10 @@ def test_schema_one_plans_still_rebuild_under_the_legacy_adapter(
         )
     )
     assert manifest["adapter"]["version"] == "1.0.0"
+    plan_artifact = next(
+        item
+        for item in manifest["artifacts"]
+        if item["artifact_id"] == "provenance/cutover-plan.json"
+    )
+    assert plan_artifact["schema"]["version"] == "1"
     assert verify_published(old_path, generation_id)["state"] == "VERIFIED_PUBLISHED"

@@ -326,10 +326,17 @@ def _gate_inputs(
             )
         if not reason.strip():
             raise Portfolio123GenerationError(f"book {book} supersede needs a reason")
+    previous = _previous_gate(data_root, previous_generation_id)
     return {
         "captured_books": dict(sorted(captured.items())),
         "expected_books": expected,
-        "previous": _previous_gate(data_root, previous_generation_id),
+        "previous": previous,
+        # Publishing refuses when a CURRENT-sourced predecessor is no longer CURRENT.
+        "previous_source": (
+            "explicit"
+            if previous_generation_id is not None
+            else ("current" if previous is not None else "none")
+        ),
         "supersede": dict(sorted(supersede_books.items())),
     }
 
@@ -726,8 +733,22 @@ def _write_parquet(
     return digest, size, len(materialized)
 
 
+def _capture_day(row: Mapping[str, str]) -> date:
+    day = row.get("Date", "")
+    try:
+        if _ISO_DATE.fullmatch(day) is None:
+            raise ValueError(day)
+        return date.fromisoformat(day)
+    except ValueError:
+        raise Portfolio123GenerationError(
+            f"capture transaction date is not ISO for book {row.get('_entity_id', '')}"
+        ) from None
+
+
 def _enforce_transaction_gate(
-    gate: Mapping[str, Any], rows: Iterable[Mapping[str, str]]
+    gate: Mapping[str, Any],
+    rows: Iterable[Mapping[str, str]],
+    excluded: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     """Refuse, per book, any transaction history that shrank against the previous generation."""
 
@@ -789,6 +810,7 @@ def _enforce_transaction_gate(
         "previous_generation_id": (
             _object(previous, "previous")["generation_id"] if previous else None
         ),
+        "excluded_after_as_of": dict(sorted((excluded or {}).items())),
         "status": "PASS",
         "superseded": waived,
     }
@@ -834,6 +856,7 @@ def _build_outputs(
         else None
     )
     captured = dict(gate["captured_books"]) if gate is not None else {}
+    excluded: Counter[str] = Counter()
     for item in _objects(har.get("files"), "files"):
         if item.get("disposition") != "HAR_DERIVED_CSV":
             continue
@@ -859,10 +882,20 @@ def _build_outputs(
                 "transactions",
                 "capture_csv",
             )
-            rows_by_family["transactions"].extend(parsed)
-            dataset_rows["transactions"] += len(parsed)
+            kept: list[dict[str, str]] = []
+            for row in parsed:
+                day = _capture_day(row)
+                if day > as_of:
+                    # Retained as source evidence, never a row of a generation cut at as_of.
+                    excluded[row["_entity_id"]] += 1
+                else:
+                    kept.append(row)
+            rows_by_family["transactions"].extend(kept)
+            dataset_rows["transactions"] += len(kept)
     gate_report = (
-        _enforce_transaction_gate(gate, rows_by_family.get("transactions", []))
+        _enforce_transaction_gate(
+            gate, rows_by_family.get("transactions", []), excluded
+        )
         if gate is not None
         else None
     )
@@ -937,7 +970,7 @@ def _build_outputs(
             plan_size,
             as_of,
             "portfolio123-cutover-plan",
-            str(PLAN_SCHEMA_VERSION),
+            str(plan["schema_version"]),
         ),
         SourceArtifact(
             "normalized/portfolio123-generation.json",
@@ -1030,6 +1063,27 @@ def _rebuild(
     return catalog, manifest
 
 
+def _require_bound_predecessor(plan: Mapping[str, Any], data_root: Path) -> None:
+    """A plan gated against CURRENT cannot replace a CURRENT that moved after planning."""
+
+    if plan.get("schema_version") != 2:
+        return
+    gate = _object(plan["transaction_gate"], "transaction_gate")
+    source = gate.get("previous_source")
+    current = (
+        read_current(data_root).generation_id
+        if (data_root / "CURRENT.json").exists()
+        else None
+    )
+    previous = gate.get("previous")
+    bound = _object(previous, "previous")["generation_id"] if previous else None
+    if source in {"current", "none"} and current != bound:
+        raise Portfolio123GenerationError(
+            "CURRENT moved after the plan was made "
+            f"(planned against {bound}, now {current}); plan again"
+        )
+
+
 def publish_candidate(plan_path: Path, generation_id: str) -> dict[str, object]:
     staged = stage_candidate(plan_path)
     if staged["generation_id"] != generation_id:
@@ -1039,6 +1093,7 @@ def publish_candidate(plan_path: Path, generation_id: str) -> dict[str, object]:
         Path(_text(plan["data_root"], "data_root")), "data_root", existing=True
     )
     _rebuild(plan_path, generation_id)
+    _require_bound_predecessor(plan, data_root)
     pointer = publish_generation(data_root, generation_id)
     return {
         "generation_id": pointer.generation_id,

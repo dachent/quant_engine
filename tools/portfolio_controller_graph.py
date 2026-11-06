@@ -346,6 +346,9 @@ _PATH_STAGES = {
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
     "tools/alpaca_generation.py": [],
+    # Plans and stages the Portfolio123 generation (HAR roots and transaction captures);
+    # consumers read only the generation they are handed, never this tool.
+    "tools/portfolio123_generation.py": [],
     # Derived release-findings producer (ruling B / C1): binds every non-panel
     # release target to the panel's own findings. Its checks live in
     # `acceptance/validate/release_targets.py`; it reads a prepared release.json
