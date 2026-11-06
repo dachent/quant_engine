@@ -19,8 +19,8 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from ._util import canonical_json_bytes
-from .catalog import get_query
-from .plan import PlanError, plan_from_document
+from .catalog import WINDOW_SINGLE_DAY, FlexQuery, get_query
+from .plan import CaptureRequest, PlanError, plan_from_document
 
 _MANIFEST = "capture-manifest.json"
 _STATEMENT = "statement.xml"
@@ -46,8 +46,8 @@ _COUNTED = {
 class VerificationError(ValueError):
     """Verification failed; ``reason`` is a stable, value-free code."""
 
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
+    def __init__(self, reason: str, detail: str | None = None) -> None:
+        super().__init__(reason if detail is None else f"{reason}: {detail}")
         self.reason = reason
 
 
@@ -202,7 +202,27 @@ def _security_rows(securities: dict[str, dict[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
-def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
+def _returns_requested_window(
+    query: FlexQuery, request: CaptureRequest, spans: list[tuple[date, date]]
+) -> bool:
+    """A request that set its window got that window back (not merely a window inside it).
+
+    One-day roles: every statement is exactly that day.  The range security reference: every
+    statement (one per account) is exactly the requested window, so a partial or discontinuous
+    answer cannot pass on its first and last day alone.  Per-day activity statements of a range
+    are only bound to lie inside it (their missing weekdays are reported).
+    """
+
+    if query.window_kind == WINDOW_SINGLE_DAY:
+        return all(span == (request.window_from, request.window_from) for span in spans)
+    if query.kind == "security-reference":
+        return all(span == (request.window_from, request.window_to) for span in spans)
+    return True
+
+
+def verify_run(
+    run_dir: Path, normalized_path: Path, *, allow_gaps: bool = False
+) -> VerificationReport:
     checks: list[str] = []
     manifest_bytes = (
         (run_dir / _MANIFEST).read_bytes() if (run_dir / _MANIFEST).is_file() else b""
@@ -264,6 +284,12 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     if manifest.get("query") != request.query:
         raise _fail("query-mismatch")
     query = get_query(request.query)
+    sent = {
+        "fd": request.window_from.strftime("%Y%m%d"),
+        "td": request.window_to.strftime("%Y%m%d"),
+    }
+    if manifest.get("send_window") != (sent if request.window_override else None):
+        raise _fail("send-window")
     checks.append("plan")
 
     attempts = manifest.get("attempts")
@@ -282,15 +308,21 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     if len(sends) != 1 or sends[0].get("kind") != "SEND_ACCEPTED" or not gets:
         raise _fail("attempt-log")
     if gets[-1].get("kind") != "REPORT" or any(
-        g.get("kind") != "POLL_AGAIN" for g in gets[:-1]
+        g.get("kind") not in ("POLL_AGAIN", "TRANSPORT_FAILURE") for g in gets[:-1]
     ):
         raise _fail("attempt-log")
     checks.append("attempts")
 
     statements, securities = _scan_raw(run_dir / _STATEMENT)
     for item in statements:
-        if not set(query.sections) <= item["sections"]:
-            raise _fail("statement-sections")
+        missing = [name for name in query.sections if name not in item["sections"]]
+        if missing:
+            # section and role names carry no account data, so the refusal says which
+            # element the saved query lacks and for which role (credential field)
+            raise VerificationError(
+                "statement-sections",
+                f"{query.name} ({query.query_field}) lacks {', '.join(missing)}",
+            )
     rows: list[dict[str, Any]] = []
     spans: list[tuple[date, date]] = []
     for item in statements:
@@ -337,6 +369,8 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     for start, end in spans:
         if start < request.window_from or end > request.window_to:
             raise _fail("window")
+    if request.window_override and not _returns_requested_window(query, request, spans):
+        raise _fail("window-override")
     owners = [row["account_label"] for row in rows]
     keyed = [(row["account_label"], row.get("report_date")) for row in rows]
     if query.kind == "activity-statement" and len(set(keyed)) != len(keyed):
@@ -359,6 +393,16 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
             missing = [d.isoformat() for d in wanted if d.isoformat() not in have]
             if missing:
                 gaps[label] = missing
+    if gaps and not allow_gaps:
+        # an activity run is verified only when every expected account has a statement for
+        # every requested trading day (the plan lists the non-trading days); a gap on a live
+        # account is an error, not a coverage status to read later
+        days = sorted({day for missing in gaps.values() for day in missing})
+        raise VerificationError(
+            "coverage-gaps",
+            f"{len(gaps)} account(s) lack {len(days)} requested weekday(s), "
+            f"first {days[0]}, last {days[-1]}",
+        )
     rows.sort(key=lambda row: (row["account_label"], json.dumps(row, sort_keys=True)))
     expected_document = {
         "schema": "ibkr-capture-normalized-v1",

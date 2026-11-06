@@ -32,9 +32,10 @@ from quant_engine.portfolio123.capture_shapes import (
 )
 from quant_engine.web_contracts import PORTFOLIO123_CONTRACT, WebContractError
 
-# Digest of the reviewed contract's endpoint identities, taken at the base of this
-# change: the catalog must leave the reviewed contract byte-for-byte unchanged.
-_REVIEWED = "1abfce2c39a905e1f0c8ea7a9b2386bd62ddc7df503dbd6d22f5635f22fb9d1c"
+# Digest of the reviewed contract's endpoint identities. Re-pinned once, when the
+# account investment-list route (investment.resource-list) was added for the CDP
+# fetcher; the catalog must leave the reviewed contract byte-for-byte unchanged.
+_REVIEWED = "2cc7832b178bc072c810f721c7d6947a210767d6d7ae3f12556ef32e8e038923"
 
 
 def _digest(endpoints: Any) -> str:
@@ -58,7 +59,7 @@ def _digest(endpoints: Any) -> str:
 def test_reviewed_contract_is_not_altered_by_the_catalog() -> None:
     assert _digest(PORTFOLIO123_CONTRACT.endpoints) == _REVIEWED
     proposed = catalog.proposed_contract()
-    assert _digest(proposed.endpoints[:13]) == _REVIEWED
+    assert _digest(proposed.endpoints[:14]) == _REVIEWED
     assert (
         PORTFOLIO123_CONTRACT.api_fallback is False and proposed.api_fallback is False
     )
