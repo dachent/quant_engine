@@ -324,6 +324,7 @@ _DERIVED_OPTIONAL = {
     "symbols_must_include",
     "start_offset_days_before_inception",
     "start_offset_days_before_through",
+    "exclude_symbols",
 }
 _DERIVED_SOURCES = frozenset({"tt-source-manifest", "schwab-positions"})
 _GROUP_OPTIONAL = {
@@ -671,6 +672,125 @@ def derive_schwab_positions(positions_path: Path) -> dict[str, Any]:
     }
 
 
+_OFFICIAL_SUFFIX = "_yahoo_daily.csv"
+
+
+def make_evidence(
+    config: Config,
+    *,
+    run_id: str,
+    review: str,
+    valid_from_utc: datetime,
+    valid_until_utc: datetime,
+    max_requests: int,
+) -> bytes:
+    """The governance evidence of one run: it names the run, the EFFECTIVE config hash and the cutoff.
+
+    The comment it cites is made first; the hash it names is the one ``config-check`` prints for the
+    config the live command will read, so it cannot be mistyped or taken from the file's bytes.
+    """
+
+    if not _RUN_ID.fullmatch(run_id):
+        raise DriverError("run id is invalid")
+    if not _REVIEW.fullmatch(review):
+        raise DriverError("the review must be a quant_engine issue-comment URL")
+    if valid_from_utc.tzinfo is None or valid_until_utc.tzinfo is None:
+        raise DriverError("the evidence times need a UTC offset")
+    if (
+        valid_until_utc <= valid_from_utc
+        or valid_until_utc - valid_from_utc > timedelta(hours=24)
+    ):
+        raise DriverError("the evidence window must be positive and at most 24 hours")
+    if isinstance(max_requests, bool) or not 1 <= max_requests <= 5000:
+        raise DriverError("max_requests must be 1..5000")
+
+    def stamp(moment: datetime) -> str:
+        return utc_text(moment)
+
+    return pretty(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": run_id,
+            "config_sha256": config.sha256,
+            "cutoff": config.cutoff.isoformat(),
+            "review": review,
+            "valid_from_utc": stamp(valid_from_utc),
+            "valid_until_utc": stamp(valid_until_utc),
+            "max_requests": max_requests,
+        }
+    )
+
+
+def held_check(
+    positions_path: Path,
+    served_dirs: Sequence[Path],
+    ingest_config: Path | None = None,
+) -> dict[str, Any]:
+    """Held symbols of a Schwab run against the symbols a retained Yahoo pull already served.
+
+    Offline and before any evidence is minted: a held symbol no retained pull ever served is the
+    one a live fetch could fail on (a run with a symbol Yahoo does not serve is rejected after the
+    single-use evidence is spent).  ``served_before`` means a ``<SYMBOL>_yahoo_daily.csv`` exists in
+    one of the given directories; it says nothing about the symbol today.  With the Schwab ingest
+    config (``symbol_aliases``, ``cash_equivalent_symbols``) it also lists the held symbols the
+    ingest spells differently or values at 1.00 with no close: the driver fetches a cash-equivalent
+    position that appears in ``positions.json`` for nothing, and writes an aliased symbol's file
+    under the held spelling, not the alias target the ingest looks for.
+    """
+
+    held = derive_schwab_positions(positions_path)
+    served: set[str] = set()
+    for directory in served_dirs:
+        if not directory.is_dir():
+            raise DriverError("a served directory is not a directory")
+        served.update(
+            item.name[: -len(_OFFICIAL_SUFFIX)]
+            for item in directory.glob(f"*{_OFFICIAL_SUFFIX}")
+        )
+    rows = [
+        {
+            "symbol": schwab,
+            "provider_ticker": provider,
+            "served_before": schwab in served,
+        }
+        for provider, schwab in sorted(held["names"].items())
+    ]
+    report: dict[str, Any] = {
+        "positions_sha256": held["positions_sha256"],
+        "held": rows,
+        "never_served": [row["symbol"] for row in rows if not row["served_before"]],
+    }
+    if ingest_config is not None:
+        try:
+            document = json.loads(ingest_config.read_bytes().decode("utf-8"))
+            aliases = document["symbol_aliases"]
+            cash = document["cash_equivalent_symbols"]
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+        ) as exc:
+            raise DriverError(
+                "the ingest config is unreadable or lacks its symbol maps"
+            ) from exc
+        if not isinstance(aliases, dict) or not isinstance(cash, list):
+            raise DriverError("the ingest config symbol maps have the wrong shape")
+        # the ingest spells a symbol as Schwab does (BRK/B); the file name writes it BRK.B
+        names = {row["symbol"] for row in rows}
+        dotted = {
+            str(key).replace("/", "."): str(value) for key, value in aliases.items()
+        }
+        report["aliased_by_ingest"] = {
+            symbol: dotted[symbol] for symbol in sorted(names & set(dotted))
+        }
+        report["cash_equivalent_by_ingest"] = sorted(
+            names & {str(item).replace("/", ".") for item in cash}
+        )
+    return report
+
+
 def _materialize(
     value: dict[str, Any],
     cutoff: date,
@@ -688,6 +808,10 @@ def _materialize(
             raise DriverError(f"{gid}: symbols_from is unsupported")
         if "symbols" in group or "start" in group:
             raise DriverError(f"{gid}: a derived group must not list symbols or start")
+        if "exclude_symbols" in group and source != "schwab-positions":
+            raise DriverError(
+                f"{gid}: exclude_symbols applies to schwab-positions only"
+            )
         if source == "schwab-positions":
             if schwab_positions is None:
                 raise DriverError(
@@ -707,15 +831,35 @@ def _materialize(
                     f"{gid}: start_offset_days_before_through is required"
                 )
             held = derive_schwab_positions(schwab_positions)
+            excluded_raw = group.get("exclude_symbols", [])
+            if (
+                not isinstance(excluded_raw, list)
+                or not all(isinstance(item, str) and item for item in excluded_raw)
+                or len(set(excluded_raw)) != len(excluded_raw)
+            ):
+                raise DriverError(f"{gid}: exclude_symbols must be a list of symbols")
+            # cash-equivalent holdings (a sweep money-market fund valued at its stated NAV)
+            # are named by their Schwab symbol; one that is not held is ignored, so selling
+            # it never blocks a fetch, and the symbols actually left out are recorded
+            excluded = sorted(
+                provider
+                for provider, schwab in held["names"].items()
+                if schwab in excluded_raw or provider in excluded_raw
+            )
+            symbols = [item for item in held["symbols"] if item not in excluded]
+            names = {k: v for k, v in held["names"].items() if k not in excluded}
+            if not symbols:
+                raise DriverError(f"{gid}: every held symbol is excluded")
             derivations[f"{source}:{end_s.isoformat()}"] = {
                 "positions_sha256": held["positions_sha256"],
                 "end": end_s.isoformat(),
-                "symbols": held["symbols"],
+                "symbols": symbols,
+                **({"excluded": excluded} if excluded_raw else {}),
             }
-            group["symbols"] = list(held["symbols"])
+            group["symbols"] = symbols
             group["start"] = (end_s - timedelta(days=offset_s)).isoformat()
             if "official_closes" in group:
-                group["official_closes"] = {"names": dict(held["names"])}
+                group["official_closes"] = {"names": names}
             continue
         if tt_manifest is None:
             raise DriverError(
@@ -1445,6 +1589,11 @@ def official_manifest(
         body = bodies[f"official-closes/{name}_yahoo_daily.csv"]
         days = sorted(merged[name])
         at_cutoff = merged[name].get(cutoff.isoformat())
+        before = [
+            day for rows in merged.values() for day in rows if day < cutoff.isoformat()
+        ]
+        previous = max(before) if before else None
+        at_previous = None if previous is None else merged[name].get(previous)
         entries.append(
             {
                 "symbol": name,
@@ -1455,6 +1604,8 @@ def official_manifest(
                 "last_bar": days[-1],
                 "cutoff_bar": None if at_cutoff is None else cutoff.isoformat(),
                 "cutoff_close": None if at_cutoff is None else at_cutoff[3],
+                "previous_bar": None if at_previous is None else previous,
+                "previous_close": None if at_previous is None else at_previous[3],
             }
         )
     return pretty(
@@ -1498,17 +1649,31 @@ def official_coverage(
 ) -> tuple[dict[str, Any], list[str]]:
     failures = []
     names: dict[str, Any] = {}
+    # the previous trading day is the newest day before the cutoff on which any symbol has a bar
+    # (a market holiday has no bar for any symbol); every symbol must have its close on it too
+    earlier = [
+        day for rows in merged.values() for day in rows if day < cutoff.isoformat()
+    ]
+    previous = max(earlier) if earlier else None
     for name in sorted(merged):
         days = sorted(merged[name])
         at_cutoff = merged[name].get(cutoff.isoformat())
+        at_previous = None if previous is None else merged[name].get(previous)
         names[name] = {
             "first": days[0],
             "last": days[-1],
             "cutoff_close": None if at_cutoff is None else at_cutoff[3],
             "cutoff_adjclose": None if at_cutoff is None else at_cutoff[4],
+            "previous_bar": None if at_previous is None else previous,
+            "previous_close": None if at_previous is None else at_previous[3],
         }
         if at_cutoff is None:
             failures.append(f"official close for {name} has no bar on {cutoff}")
+        if previous is None or at_previous is None:
+            failures.append(
+                f"official close for {name} has no bar on the previous trading day "
+                f"{previous} before {cutoff}"
+            )
     return {"column": "close = raw daily Close", "names": names}, failures
 
 
@@ -1590,6 +1755,31 @@ def preflight(
             resolve_group(group, config, allow_unresolved=allow_unresolved)[1]
         )
     return skipped
+
+
+def require_closed_days(config: Config, now: datetime) -> None:
+    """Refuse a fetch whose clock has not passed the end of every group's ``through`` day.
+
+    The rule ``run_fetch`` applies (a ``through`` date is closed only once the UTC date of the
+    fetch's start timestamp is later) is checked here too, before any governance evidence is
+    consumed: the evidence is single use, and the run would otherwise be rejected after it was
+    spent.  ``now`` is the one timestamp the live command freezes before the evidence is read.
+    """
+
+    today = now.astimezone(timezone.utc).date()
+    late = sorted(
+        {
+            f"{g.group_id} (through {g.through})"
+            for g in config.groups
+            if g.through >= today
+        }
+    )
+    if late:
+        raise DriverError(
+            "a through date is not a closed UTC day at "
+            f"{now.astimezone(timezone.utc).isoformat()}: {', '.join(late)}; start the fetch "
+            "when the UTC date is later than the cutoff (00:00 UTC), before any evidence is spent"
+        )
 
 
 def run_fetch(
@@ -2609,6 +2799,33 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--cutoff", default=None)
     apply.add_argument("--tt-source-manifest", type=Path, default=None)
     apply.add_argument("--schwab-positions", type=Path, default=None)
+    evidence = sub.add_parser(
+        "make-evidence",
+        help="write the governance evidence of one run for the config the live command will read",
+    )
+    evidence.add_argument("--config", type=Path, required=True)
+    evidence.add_argument("--cutoff", required=True)
+    evidence.add_argument("--tt-source-manifest", type=Path, default=None)
+    evidence.add_argument("--schwab-positions", type=Path, default=None)
+    evidence.add_argument("--run-id", required=True)
+    evidence.add_argument("--review", required=True, help="the issue comment URL")
+    evidence.add_argument("--valid-from-utc", required=True)
+    evidence.add_argument("--valid-until-utc", required=True)
+    evidence.add_argument("--max-requests", type=int, required=True)
+    evidence.add_argument("--out", type=Path, required=True)
+    held = sub.add_parser(
+        "held-check",
+        help="offline: held symbols of a Schwab run against symbols a retained pull served",
+    )
+    held.add_argument("--positions", type=Path, required=True)
+    held.add_argument("--served-dir", type=Path, action="append", default=[])
+    held.add_argument("--allow-unseen", action="store_true")
+    held.add_argument(
+        "--ingest-config",
+        type=Path,
+        default=None,
+        help="Schwab ingest config: also list held symbols it aliases or values as cash",
+    )
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
     )
@@ -2645,17 +2862,50 @@ def _config_bytes(path: Path) -> bytes:
 
 
 def _load_config(args: argparse.Namespace) -> Config:
+    raw = _config_bytes(args.config)
+    resolved = False
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        document = None  # parse_config names the problem
+    if isinstance(document, dict) and "derivations" in document:
+        # a config the driver itself resolved (apply-admissions writes one): its derived symbols
+        # and starts are already in it for the cutoff it names
+        resolved = True
+        if args.cutoff is not None and args.cutoff != document.get("cutoff"):
+            raise DriverError(
+                f"the resolved config was derived for cutoff {document.get('cutoff')}, "
+                f"not {args.cutoff}"
+            )
     return parse_config(
-        _config_bytes(args.config),
+        raw,
         cutoff_override=args.cutoff,
         tt_source_manifest=args.tt_source_manifest,
         schwab_positions=args.schwab_positions,
+        resolved=resolved,
     )
+
+
+def _require_explicit_cutoff(args: argparse.Namespace) -> None:
+    """The config's own cutoff is only a default: a command that reads live data or writes the
+    config a fetch will use must be told the cutoff, so a literal run cannot spend single-use
+    evidence on an old delivery's date."""
+
+    command = args.command
+    if command in ("fetch", "apply-admissions") or (
+        command == "probe" and getattr(args, "recorded_dir", None) is None
+    ):
+        if args.cutoff is None:
+            raise DriverError(
+                f"{command} needs --cutoff (the config's own cutoff is only a default; "
+                "use the date `config-check --cutoff` printed)"
+            )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        _require_explicit_cutoff(args)
         if args.command == "config-check":
             config = _load_config(args)
             print(
@@ -2663,6 +2913,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     {
                         "config_sha256": config.sha256,
                         "cutoff": config.cutoff.isoformat(),
+                        "cutoff_source": "cli" if args.cutoff else "config_default",
                         "groups": [g.group_id for g in config.groups],
                         "resolution": [
                             {
@@ -2700,6 +2951,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 now=datetime.now(timezone.utc),
             )
             print(f"staged {path}")
+            return 0
+        if args.command == "make-evidence":
+            config = _load_config(args)
+            body = make_evidence(
+                config,
+                run_id=args.run_id,
+                review=args.review,
+                valid_from_utc=_aware(args.valid_from_utc, "valid_from_utc"),
+                valid_until_utc=_aware(args.valid_until_utc, "valid_until_utc"),
+                max_requests=args.max_requests,
+            )
+            _write_new(args.out, body)
+            print(
+                json.dumps(
+                    {
+                        "config_sha256": config.sha256,
+                        "cutoff": config.cutoff.isoformat(),
+                        "run_id": args.run_id,
+                        "evidence_sha256": sha256_hex(body),
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if args.command == "held-check":
+            report = held_check(args.positions, args.served_dir, args.ingest_config)
+            print(json.dumps(report, indent=2, sort_keys=True))
+            if report["never_served"] and not args.allow_unseen:
+                print(
+                    "Error: held symbols no retained pull has served: "
+                    + ", ".join(report["never_served"])
+                    + "; check them against Yahoo before any evidence is minted",
+                    file=sys.stderr,
+                )
+                return 1
             return 0
         if args.command == "verify":
             print(
@@ -2753,6 +3039,7 @@ def _live(args: argparse.Namespace) -> int:  # pragma: no cover - live only
     now = datetime.now(timezone.utc)
     if args.command == "fetch":
         preflight(config, allow_unresolved=args.allow_unresolved)
+        require_closed_days(config, now)
     budget = authorize_live(
         args.governance.read_bytes(),
         config=config,

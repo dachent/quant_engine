@@ -28,6 +28,10 @@ UNCHECKED_TOOLS: dict[str, str] = {
     # needs --explicit-package-bases or a MYPYPATH change across the whole invocation.
     "build_account_manifest_generation.py": "module-path conflict with account_strategy_manifest",
     "verify_account_manifest_generation.py": "module-path conflict with account_strategy_manifest",
+    # It imports tools.p123_cdp_recorder, which the invocation lists as a file, so mypy sees
+    # that module under two names. It passes strict mypy when run on its own
+    # (``mypy tools/p123_cdp_fetcher.py``); the recorder it uses stays in the invocation.
+    "p123_cdp_fetcher.py": "module-path conflict with p123_cdp_recorder",
     # These carry real strict-mode errors. Counted, not waved through: 19 errors across the
     # five, dominated by untyped mappings indexed as if they were concrete.
     "schwab_transaction_capture.py": "7 strict errors",

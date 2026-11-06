@@ -1184,6 +1184,8 @@ def test_cli_offline_probe_and_apply(tmp_path: Path) -> None:
                 str(stage / "cli-probe"),
                 "--out",
                 str(out),
+                "--cutoff",
+                CUTOFF,
             ]
         )
         == 0
@@ -1202,6 +1204,8 @@ def test_cli_offline_probe_and_apply(tmp_path: Path) -> None:
                 str(stage / "cli-probe"),
                 "--out",
                 str(out),
+                "--cutoff",
+                CUTOFF,
             ]
         )
         == 1
@@ -1474,3 +1478,461 @@ def test_official_manifest_is_bound_to_files_and_times(tmp_path: Path) -> None:
         driver.DriverError, match="official-closes-manifest.json differs"
     ):
         driver.verify_run(run2)
+
+
+# ------------------------------------------------ R3 raw SPXL history (gate b)
+
+SHIPPED_CONFIG = (
+    Path(__file__).resolve().parents[2]
+    / "docs/providers/yahoo-fetch/r3-batch-a.config.json"
+)
+
+
+def _shipped_spxl_group() -> dict[str, Any]:
+    groups = json.loads(SHIPPED_CONFIG.read_bytes())["groups"]
+    (group,) = [item for item in groups if item["group_id"] == "spxl-raw-history"]
+    return group
+
+
+def test_the_shipped_config_names_a_raw_daily_spxl_history_group() -> None:
+    group = _shipped_spxl_group()
+    assert group["symbols"] == ["SPXL"] and group["interval"] == "1d"
+    assert group["through"] == "cutoff"
+    # raw only: the builders refuse a history_adjusted SPXL file
+    assert group["datasets"] == ["history"]
+    parsed = driver.parse_config(_config([group])).groups[0]
+    assert parsed.datasets == ("history",)
+    # the proof's SPXL file starts at the fund's inception (2008-11-05)
+    assert parsed.start <= date(2008, 11, 5)
+
+
+def test_the_raw_spxl_file_is_accepted_by_every_builder_reader(
+    tmp_path: Path,
+) -> None:
+    import portfolio_implementation_reconciliation as reconciliation
+    import portfolio_implementation_return_attribution as attribution
+    import portfolio_strategy_history as history
+
+    run = _fetch(tmp_path, _config([_shipped_spxl_group()]), run_id="spxl")
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    spxl = [name for name in manifest["files"] if "spxl-raw-history" in name]
+    assert spxl and not any("history_adjusted" in name for name in spxl)
+    (artifact_name,) = [name for name in spxl if name.endswith("history.json")]
+    artifact = run / artifact_name
+    payload = json.loads(artifact.read_text())
+    assert (payload["provider"], payload["transport"], payload["dataset"]) == (
+        "yahoo",
+        "yfinance",
+        "history",
+    )
+    cutoff = date.fromisoformat(CUTOFF)
+    prices = reconciliation._market_prices(artifact, accepted_as_of=cutoff)
+    assert min(prices) <= date(2008, 11, 5) and max(prices) == cutoff
+    assert len(prices) > 4400
+    rows = attribution._market_rows(artifact, accepted_as_of=cutoff)
+    assert max(rows["SPXL"]) == cutoff
+    extension, _ = history._yahoo_price_extension(artifact, "spxl-raw-history")
+    assert max(extension["SPXL"]) == cutoff
+
+
+def test_the_whole_shipped_config_parses_with_the_new_group(tmp_path: Path) -> None:
+    """What `config-check` runs on the Saturday: sixteen groups, nothing counts fifteen."""
+
+    manifest = _tt_manifest(tmp_path, ["BNY", "DUK", "IBIT", "PEP", "SHY"], ["AAPL"])
+    positions = _positions(tmp_path, ["SPY", "AAPL"])
+    raw = SHIPPED_CONFIG.read_bytes()
+    config = driver.parse_config(
+        raw, tt_source_manifest=manifest, schwab_positions=positions
+    )
+    ids = [group.group_id for group in config.groups]
+    assert len(ids) == len(set(ids)) == len(json.loads(raw)["groups"]) == 16
+    assert "spxl-raw-history" in ids and "qsi-daily" in ids
+
+
+def test_a_command_that_reads_live_data_or_writes_the_fetch_config_needs_a_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = tmp_path / "c.json"
+    cfg.write_bytes(_config())
+    gov = tmp_path / "g.json"
+    gov.write_text("{}")
+    base = ["--config", str(cfg), "--stage-root", str(tmp_path / "s"), "--run-id", "r"]
+    for argv in (
+        ["fetch", *base, "--governance", str(gov)],
+        ["probe", *base],
+        [
+            "apply-admissions",
+            "--config",
+            str(cfg),
+            "--probe-run",
+            str(tmp_path),
+            "--out",
+            str(tmp_path / "o"),
+        ],
+    ):
+        assert driver.main(argv) == 1
+        assert "needs --cutoff" in capsys.readouterr().err
+    # an offline probe, config-check and verify do not need one, and config-check says where it came from
+    assert driver.main(["config-check", "--config", str(cfg)]) == 0
+    assert json.loads(capsys.readouterr().out)["cutoff_source"] == "config_default"
+    assert driver.main(["config-check", "--config", str(cfg), "--cutoff", CUTOFF]) == 0
+    assert json.loads(capsys.readouterr().out)["cutoff_source"] == "cli"
+
+
+def test_a_fetch_before_the_cutoff_day_has_closed_is_refused_before_any_evidence_is_spent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    cfg = tmp_path / "c.json"
+    cfg.write_bytes(_config())
+    gov = tmp_path / "g.json"
+    gov.write_text("{}")
+
+    def spent(*args: Any, **kwargs: Any) -> int:
+        raise AssertionError("the evidence was consumed")
+
+    monkeypatch.setattr(driver, "authorize_live", spent)
+    code = driver.main(
+        [
+            "fetch",
+            "--config",
+            str(cfg),
+            "--stage-root",
+            str(tmp_path / "s"),
+            "--run-id",
+            "r",
+            "--governance",
+            str(gov),
+            "--cutoff",
+            today,
+        ]
+    )
+    assert code == 1
+    assert "not a closed UTC day" in capsys.readouterr().err
+
+
+def test_the_closed_day_rule_is_the_utc_date_of_the_start_timestamp() -> None:
+    config = driver.parse_config(_config())  # through = the cutoff, a Friday
+    through = config.cutoff
+    # 23:59:59 UTC on the cutoff day is still open (Friday 18:59 ET after the November clock change)
+    open_ = datetime(
+        through.year, through.month, through.day, 23, 59, 59, tzinfo=timezone.utc
+    )
+    closed = open_ + timedelta(seconds=1)
+    with pytest.raises(driver.DriverError, match="not a closed UTC day"):
+        driver.require_closed_days(config, open_)
+    driver.require_closed_days(config, closed)
+    # the clock is compared in UTC whatever zone it is expressed in
+    eastern = closed.astimezone(ZoneInfo("America/New_York"))
+    driver.require_closed_days(config, eastern)
+
+
+def test_a_config_the_driver_resolved_can_be_read_back_by_the_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """apply-admissions writes the resolved config; fetch and config-check must accept it."""
+
+    manifest = _tt_manifest(tmp_path, ["AAA", "BRK.B"], ["BNY", "DUK"])
+    source = driver.parse_config(_derived_config(), tt_source_manifest=manifest)
+    resolved = tmp_path / "r3-config.json"
+    resolved.write_bytes(source.effective_bytes)
+    assert (
+        driver.main(["config-check", "--config", str(resolved), "--cutoff", CUTOFF])
+        == 0
+    )
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["config_sha256"] == source.sha256
+    assert printed["cutoff"] == CUTOFF
+    # without the cutoff the CLI still reads it, and a different cutoff is refused loudly
+    assert driver.main(["config-check", "--config", str(resolved)]) == 0
+    capsys.readouterr()
+    assert (
+        driver.main(
+            ["config-check", "--config", str(resolved), "--cutoff", "2026-09-17"]
+        )
+        == 1
+    )
+    assert "derived for cutoff" in capsys.readouterr().err
+    # the unresolved source config is not accepted as resolved
+    with pytest.raises(
+        driver.DriverError, match="derivations are written by the driver"
+    ):
+        driver.parse_config(source.effective_bytes, tt_source_manifest=manifest)
+
+
+# ------------------------------------------------ held closes: D and the previous trading day
+
+
+def _row(close: str) -> list[str]:
+    return ["1", "1", "1", close, close, "0", "0"]
+
+
+def test_official_coverage_needs_every_symbol_on_the_cutoff_and_the_previous_trading_day() -> (
+    None
+):
+    cutoff = date(2026, 10, 9)
+    full = {"2026-10-07": _row("7"), "2026-10-08": _row("8"), "2026-10-09": _row("9")}
+    # a market holiday on the 8th: no symbol has a bar, the previous trading day is the 7th
+    holiday = {"2026-10-07": _row("7"), "2026-10-09": _row("9")}
+    coverage, failures = driver.official_coverage(
+        {"AAA": holiday, "BBB": holiday}, cutoff
+    )
+    assert failures == []
+    assert coverage["names"]["AAA"]["previous_bar"] == "2026-10-07"
+    assert coverage["names"]["AAA"]["previous_close"] == "7"
+    # one symbol lacks the 8th that another has: it is named, with the day
+    _, failures = driver.official_coverage({"AAA": full, "BBB": holiday}, cutoff)
+    assert failures == [
+        "official close for BBB has no bar on the previous trading day 2026-10-08 before 2026-10-09"
+    ]
+    # a symbol with only the cutoff bar fails on the previous day, and one without the cutoff bar fails too
+    only_cutoff = {"2026-10-09": _row("9")}
+    _, failures = driver.official_coverage({"AAA": full, "CCC": only_cutoff}, cutoff)
+    assert any(
+        "CCC has no bar on the previous trading day" in item for item in failures
+    )
+    _, failures = driver.official_coverage({"AAA": {"2026-10-08": _row("8")}}, cutoff)
+    assert any("has no bar on 2026-10-09" in item for item in failures)
+
+
+def test_a_held_symbol_without_the_previous_trading_day_rejects_the_run(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "NEW"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    with pytest.raises(driver.DriverError, match="rejected"):
+        driver.run_fetch(
+            config,
+            stage_root=tmp_path / "s",
+            run_id="no-previous",
+            yf=FakeYF(start_after={"NEW": date.fromisoformat(CUTOFF)}),
+            chart=FakeChart(),
+            now=NOW,
+        )
+    rejected = (tmp_path / "s" / "no-previous.REJECTED.json").read_text()
+    assert "NEW has no bar on the previous trading day" in rejected
+
+
+def test_the_official_manifest_carries_the_previous_trading_day_close(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    run = driver.run_fetch(
+        config,
+        stage_root=tmp_path / "s",
+        run_id="held-previous",
+        yf=FakeYF(),
+        chart=FakeChart(),
+        now=NOW,
+    )
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    sidecar = json.loads(
+        (run / "official-closes/official-closes-manifest.json").read_text()
+    )
+    (entry,) = sidecar["files"]
+    rows = [
+        r.split(",")
+        for r in (run / "official-closes/SPY_yahoo_daily.csv")
+        .read_text()
+        .splitlines()[1:]
+    ]
+    assert entry["cutoff_bar"] == rows[-1][0] == CUTOFF
+    assert entry["previous_bar"] == rows[-2][0]
+    assert entry["previous_close"] == rows[-2][4]
+    # the file the derive step reads is date..close per symbol, listed with its sha256
+    assert entry["sha256"] == driver.sha256_hex(
+        (run / "official-closes/SPY_yahoo_daily.csv").read_bytes()
+    )
+
+
+def _held_config_excluding(*excluded: str) -> bytes:
+    group = _group("held-closes", symbols_from="schwab-positions", datasets=["history"])
+    del group["symbols"], group["start"]
+    group.update(
+        start_offset_days_before_through=10,
+        min_rows=5,
+        official_closes={},
+        exclude_symbols=list(excluded),
+    )
+    return _config([group])
+
+
+def test_a_cash_equivalent_holding_can_be_left_out_of_the_held_closes(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "SWVXX", "BRK/B"])
+    config = driver.parse_config(
+        _held_config_excluding("SWVXX"), schwab_positions=positions
+    )
+    group = config.groups[0]
+    assert group.symbols == ("BRK-B", "SPY")
+    assert group.official_names == {"BRK-B": "BRK.B", "SPY": "SPY"}
+    (derivation,) = json.loads(config.effective_bytes)["derivations"].values()
+    assert derivation["excluded"] == ["SWVXX"] and "SWVXX" not in derivation["symbols"]
+    # an excluded symbol that is not held is ignored (selling it never blocks a fetch)
+    other = driver.parse_config(
+        _held_config_excluding("SWVXX"), schwab_positions=_positions(tmp_path, ["SPY"])
+    )
+    assert other.groups[0].symbols == ("SPY",)
+    # the exclusion is part of the effective config, so it is part of the evidence hash
+    assert (
+        config.sha256
+        != driver.parse_config(_held_config(), schwab_positions=positions).sha256
+    )
+    with pytest.raises(driver.DriverError, match="every held symbol is excluded"):
+        driver.parse_config(
+            _held_config_excluding("SPY"),
+            schwab_positions=_positions(tmp_path, ["SPY"]),
+        )
+
+
+def test_exclude_symbols_is_for_the_schwab_derived_group_only(tmp_path: Path) -> None:
+    manifest = _tt_manifest(tmp_path, ["AAA"], ["BNY"])
+    group = _group(
+        "tt-daily", symbols_from="tt-source-manifest", exclude_symbols=["AAA"]
+    )
+    del group["symbols"], group["start"]
+    group.update(symbols_must_include=["BNY"], start_offset_days_before_inception=7)
+    with pytest.raises(driver.DriverError, match="schwab-positions only"):
+        driver.parse_config(_config([group]), tt_source_manifest=manifest)
+
+
+def test_the_shipped_held_closes_group_excludes_the_sweep_fund() -> None:
+    groups = json.loads(SHIPPED_CONFIG.read_bytes())["groups"]
+    (held,) = [g for g in groups if g["group_id"] == "held-closes"]
+    assert held["exclude_symbols"] == ["SWVXX"] and held["through"] == "cutoff"
+
+
+def test_held_check_names_the_held_symbols_no_retained_pull_served(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "NEWCO", "BRK/B"])
+    served = tmp_path / "served"
+    served.mkdir()
+    (served / "SPY_yahoo_daily.csv").write_text("date,close\n")
+    (served / "BRK.B_yahoo_daily.csv").write_text("date,close\n")
+    (served / "OLD_yahoo_daily.csv").write_text(
+        "date,close\n"
+    )  # served once, no longer held
+    argv = ["held-check", "--positions", str(positions), "--served-dir", str(served)]
+    assert driver.main(argv) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["never_served"] == ["NEWCO"]
+    assert {row["symbol"]: row["served_before"] for row in report["held"]} == {
+        "BRK.B": True,
+        "NEWCO": False,
+        "SPY": True,
+    }
+    assert "NEWCO" in captured.err and "before any evidence is minted" in captured.err
+    # an explicit allowance reports without refusing; nothing unseen exits clean
+    assert driver.main([*argv, "--allow-unseen"]) == 0
+    capsys.readouterr()
+    (served / "NEWCO_yahoo_daily.csv").write_text("date,close\n")
+    assert driver.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["never_served"] == []
+
+
+def test_held_check_lists_what_the_ingest_aliases_or_values_as_cash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "BRK/B", "MMKT"])
+    served = tmp_path / "served"
+    served.mkdir()
+    for name in ("SPY", "BRK.B", "MMKT"):
+        (served / f"{name}_yahoo_daily.csv").write_text("date,close\n")
+    config = tmp_path / "ingest.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "price_ratio_tolerance": "0.1",
+                "symbol_aliases": {"BRK/B": "BRK-B", "OLD": "NEW"},
+                "cash_equivalent_symbols": ["MMKT", "GONE"],
+                "price_ratio_exceptions": {},
+            }
+        )
+    )
+    argv = ["held-check", "--positions", str(positions), "--served-dir", str(served)]
+    assert driver.main([*argv, "--ingest-config", str(config)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    # only the symbols actually held are named, with the spelling the ingest would look for
+    assert report["aliased_by_ingest"] == {"BRK.B": "BRK-B"}
+    assert report["cash_equivalent_by_ingest"] == ["MMKT"]
+    # without the config the report has neither key; a broken config is refused
+    assert driver.main(argv) == 0
+    assert "aliased_by_ingest" not in json.loads(capsys.readouterr().out)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    assert driver.main([*argv, "--ingest-config", str(bad)]) == 1
+    assert "ingest config" in capsys.readouterr().err
+
+
+def test_make_evidence_names_the_effective_config_and_is_accepted_by_the_authorization(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = tmp_path / "c.json"
+    cfg.write_bytes(_config())
+    out = tmp_path / "evidence.json"
+    review = "https://github.com/dachent/quant_engine/issues/1#issuecomment-1"
+    argv = [
+        "make-evidence",
+        "--config",
+        str(cfg),
+        "--cutoff",
+        CUTOFF,
+        "--run-id",
+        "r3-yahoo",
+        "--review",
+        review,
+        "--valid-from-utc",
+        "2026-10-10T00:00:00Z",
+        "--valid-until-utc",
+        "2026-10-10T23:00:00Z",
+        "--max-requests",
+        "250",
+        "--out",
+        str(out),
+    ]
+    assert driver.main(argv) == 0
+    printed = json.loads(capsys.readouterr().out)
+    config = driver.parse_config(cfg.read_bytes(), cutoff_override=CUTOFF)
+    assert printed["config_sha256"] == config.sha256 and printed["cutoff"] == CUTOFF
+    budget = driver.authorize_live(
+        out.read_bytes(),
+        config=config,
+        run_id="r3-yahoo",
+        stage_root=tmp_path / "stage",
+        now=datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc),
+    )
+    assert budget == 250
+    # create-only, a window over 24 h or without an offset is refused, and so is another review
+    assert driver.main(argv) == 1
+    capsys.readouterr()
+    long_window = [*argv[:-2], "--out", str(tmp_path / "long.json")]
+    long_window[long_window.index("--valid-until-utc") + 1] = "2026-10-11T00:00:01Z"
+    assert driver.main(long_window) == 1
+    assert "at most 24 hours" in capsys.readouterr().err
+    naive = [*argv[:-2], "--out", str(tmp_path / "naive.json")]
+    naive[naive.index("--valid-from-utc") + 1] = "2026-10-10T00:00:00"
+    assert driver.main(naive) == 1
+    capsys.readouterr()
+    bad_review = [*argv[:-2], "--out", str(tmp_path / "review.json")]
+    bad_review[bad_review.index("--review") + 1] = "https://example.com/x"
+    assert driver.main(bad_review) == 1
+    assert (
+        not (tmp_path / "long.json").exists()
+        and not (tmp_path / "review.json").exists()
+    )
+    # evidence made for another cutoff does not authorize this config
+    other = driver.parse_config(cfg.read_bytes(), cutoff_override="2026-10-08")
+    with pytest.raises(driver.GovernanceError):
+        driver.authorize_live(
+            out.read_bytes(),
+            config=other,
+            run_id="r3-yahoo",
+            stage_root=tmp_path / "stage2",
+            now=datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc),
+        )

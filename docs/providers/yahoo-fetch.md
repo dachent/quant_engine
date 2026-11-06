@@ -36,6 +36,101 @@ stale or incomplete. A hand list on such a group is refused. The derivation (man
 sha256, end, inception) is written into the effective config, so the config hash binds
 it, and `verify` re-parses the staged config as already resolved.
 
+## Raw SPXL history (builder input)
+
+The group `spxl-raw-history` fetches `SPXL` daily from its inception (`start` 2008-11-01,
+first bar 2008-11-05) through the cutoff with `datasets: ["history"]` only, so the run
+holds `artifacts/yahoo-spxl-raw-history-history.json` (`provider` yahoo, `transport`
+yfinance, `dataset` history, raw `Close` beside `Adj Close`) and its sibling manifest, and
+no `history_adjusted` file. That one file is the governed input of
+`--spxl-market-data` (`portfolio_implementation_reconciliation.py`, which refuses any
+dataset but `history`) and `--grizzly-market-data`
+(`portfolio_implementation_return_attribution.py`); the Grizzly price extension of
+`portfolio_strategy_history.py` reads the same shape. The guards are `min_rows` 4400 and
+`max_missing_weekdays` 180 (the 2008-11-05..2026-09-17 span has 4,662 weekdays and 169 market
+holidays). Do not convert a CSV by hand. The `qsi-daily` and `vtma-spxl-60m` groups also
+carry `SPXL` for their own consumers and are unchanged.
+
+Price column per reader: the reconciliation (`_market_prices`) and the Grizzly price extension of
+`portfolio_strategy_history.py` take `Adj Close` and fall back to `Close` only when it is absent
+(`row.get("Adj Close") or row.get("Close")`); the Grizzly return attribution values SPXL at the raw
+`Close` (`_grizzly_state_simulation`, `_grizzly_actual_ledger_return`; its `Adj Close` fallback is the
+TT path). `Adj Close` is a property of the vintage: a dividend paid after a fetch rescales every
+earlier `Adj Close` of that fetch, so a later run reproduces `Close` (the retained 2026-09-17 CSV's
+`close` of 280.760009765625 on that date) but not `adjclose` on dates before a newer dividend.
+
+From the run to the release input (no hand step): the file is copied byte for byte into the
+pinned release-inputs root as `ops/mvp2-release/inputs/implementation/spxl-market-data.json`
+(the path `release-stages.json` reads for `--spxl-market-data` and `--grizzly-market-data`) by
+the committed `release_inputs.py add`, which verifies the source root against its pin, copies it
+to a new root outside the repository, adds the file, rebuilds the manifest and prints the new
+pin (`release_inputs_manifest_sha256` of the release-driver config):
+
+```
+python -I tools/release_inputs.py add --root <ROOT> --manifest-sha256 <PIN> --cutoff <D> \
+  --out <NEW_ROOT> --file ops/mvp2-release/inputs/implementation/spxl-market-data.json=<STAGE>/r3-yahoo/artifacts/yahoo-spxl-raw-history-history.json
+```
+
+A path the root already holds is refused unless `--replace` is passed. Adding is an entry edit, so
+it belongs to steps 1-2 of the root assembly (R3-PLAN section 14.8) and `rebind-predecessor` stays the
+last operation: it copies every manifest path of the root it is given, so the added file carries
+through, and the pin handed to the release driver is the rebound root's, not this command's. Running
+`add` again from the same root with the same bytes gives the same pin; a rebound root is never the
+input of a later `add`.
+
+## Run order and the clock (R3)
+
+Commands, in order (`D` is the cutoff, the delivery date; every command that reads live data or
+writes the config a fetch will use now refuses to run without `--cutoff`: the shipped config's own
+`cutoff` (2026-09-17) is only a default, and `config-check` prints `cutoff_source` to say which one
+is in effect):
+
+1. `config-check --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS`
+   prints `config_sha256` (the hash of the EFFECTIVE config: cutoff, derived symbols and starts and
+   resolutions included, not a hash of the file), `cutoff`, `cutoff_source` (`cli`), the group ids
+   and the resolution table. The probe evidence names this `config_sha256` and `D`.
+2. The issue comment approving the probe run, then `make-evidence --config CONFIG --cutoff D
+   --tt-source-manifest TT --schwab-positions POSITIONS --run-id R3-PROBE --review COMMENT_URL
+   --valid-from-utc T --valid-until-utc T --max-requests N --out PROBE_EVIDENCE` (create-only; the
+   window is at most 24 hours; it writes the effective config hash and `D` itself, so nothing is
+   copied by hand), then `probe --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS
+   --run-id R3-PROBE --stage-root STAGE --governance PROBE_EVIDENCE`, then `verify STAGE/R3-PROBE`.
+3. `apply-admissions --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS
+   --probe-run STAGE/R3-PROBE --out STAGE/r3-config.json` writes the resolved config (derived symbols
+   and `derivations` included; the probe must have judged exactly this effective config).
+4. `config-check --config STAGE/r3-config.json --cutoff D` prints the NEW `config_sha256`: the fetch
+   evidence names that hash and `D`, not the hash of either file. The resolved config is read back as
+   it is (its derived symbols are the ones in it; a `--cutoff` that is not the one it was derived for
+   is refused).
+5. The comment approving the fetch, `make-evidence --config STAGE/r3-config.json --cutoff D
+   --run-id R3-YAHOO --review COMMENT_URL --valid-from-utc T --valid-until-utc T --max-requests N
+   --out FETCH_EVIDENCE` (a window that contains the start instant, which is not before
+   2026-11-07T00:00:00Z), then `fetch --config STAGE/r3-config.json --cutoff D --run-id R3-YAHOO --stage-root STAGE --governance
+   FETCH_EVIDENCE [--allow-unresolved]`, then `verify STAGE/R3-YAHOO`, which must print `VERIFIED`.
+
+The clock: the fetch refuses a group whose `through` day has not closed, and a day is closed only
+once the UTC date of the fetch's start timestamp is later than it (`run_fetch`:
+`group.through >= now.astimezone(utc).date()`; `require_closed_days` applies the same comparison
+before any evidence is read). The live command freezes that timestamp once, before it reads the
+evidence, so the fetch may start no earlier than `00:00:00` UTC on the day after `D`: for
+`D` = Friday 2026-11-06 that is 2026-11-07T00:00:00Z = Friday 19:00 EST (US daylight time ended
+2026-11-01, so Eastern is UTC-5). A start at 18:59 ET is refused. Governance evidence is also
+checked against that timestamp (`valid_from_utc` <= start <= `valid_until_utc`, at most 24 hours
+between them; `authorize_live`). The evidence does not mention `D` beyond its `cutoff` field and
+is never compared with the closed-day time, so it may be issued at any time (Friday evening,
+Saturday, even Sunday) as long as its window contains the instant the fetch starts: the only
+deadline is the evidence's own expiry, not 19:00 ET. The evidence also names the effective config
+hash and the run id, which only exist after the Schwab positions are captured, the probe has run
+and `apply-admissions` has written the resolved config (each step changes the hash), so the probe
+evidence can be issued after the positions and the first `config-check`, and the fetch evidence
+only after `config-check` on `r3-config.json`; neither can be prepared on Friday for a config
+resolved on Saturday. The evidence is single use and is consumed before the run starts, which is
+why the closed-day check now runs first:
+a start that is too early is refused with the evidence unspent. `config-check`, `probe` and
+`apply-admissions` do not apply the rule (the code has no closed-day check in them), so they can
+run before 19:00 ET; whether the probe's reference prices need the close of `D` is not established
+here. `verify` applies the closed-day rule at its own clock as well.
+
 ## Official closes for the Schwab ingest
 
 A daily `yfinance` group with `history` and `official_closes: {}` also emits
@@ -47,7 +142,10 @@ daily Close (`raw/<group>/history.csv` column `Close`, text copied unchanged; Ya
 `Close` is split-adjusted, not dividend-adjusted) and `adjclose` is `Adj Close`. The
 `history_adjusted` artifact has `Close = Adj Close` and must never feed a valuation.
 Files from several groups are merged into one directory; two groups disagreeing on a
-bar refuse the run, and every name must have a bar on the cutoff date. A group with
+bar refuse the run, and every name must have a bar on the cutoff date and on the previous
+trading day (the newest day before the cutoff on which any symbol has a bar, so a market
+holiday is not one; a held symbol that lacks it rejects the run and is named with the day). A
+group with
 `symbols_from: "schwab-positions"` takes its symbols from `--schwab-positions
 <run>/normalized/positions.json` (`/` and `.` become `-` for Yahoo; the file name is the
 Schwab symbol with `/` written as `.`). `verify` rebuilds each file from the raw CSV and
@@ -58,9 +156,41 @@ rejects any difference.
 UTC form, `completed >= started` and that the fetch started after the cutoff day closed.
 `official-closes/official-closes-manifest.json` sits beside the files so the ingest need
 not open the run: per file the symbol, sha256, size, first and last bar, the cutoff bar
-and its raw close, plus the run id, cutoff, config hash and the same two timestamps;
+and its raw close, the previous trading day's bar and raw close (`previous_bar`,
+`previous_close`), plus the run id, cutoff, config hash and the same two timestamps;
 `verify` rebuilds it from the files and the header. The file name is the ingest's alias
 key: the Schwab symbol with `/` written as `.` (`BRK/B` -> `BRK.B_yahoo_daily.csv`).
+
+For R3 the `held-closes` group takes every symbol of the Schwab run's `positions.json` (the
+derived valuation of day D needs the closes of D and of the previous trading day, which the
+fetch now requires for every one of them) except those named in the group's `exclude_symbols`
+(Schwab symbols; shipped: `SWVXX`). `positions.json` holds the equity and ETF rows only: the
+Schwab driver writes the cash group's rows, the sweep money-market fund `SWVXX` among them (valued
+by the derive step as cash at its stated NAV, as the R2.1 pull list did), to a separate sweeps
+list, so `SWVXX` is not in the derived list anyway and the exclusion is a guard for the day it
+appears as a position. An excluded symbol that is not held is ignored, the symbols actually left
+out are recorded in the config's derivations, and the exclusion is part of the effective config
+hash the evidence names. The derive step reads the per-symbol `<SYMBOL>_yahoo_daily.csv` (header
+`date,open,high,low,close,adjclose,volume,dividend`; `date` and `close` are the columns it needs)
+and the sidecar's per-file sha256; a held symbol without a close for D and for the day before is
+its refusal, never a skipped symbol (`tools/schwab_nav_derive.py`, PR 830).
+
+Before any evidence is minted (the Schwab capture has produced the held list): run
+`held-check --positions RUN/normalized/positions.json --served-dir DIR [--served-dir DIR ...]`.
+It is offline and lists the held symbols that no retained pull ever served (a
+`<SYMBOL>_yahoo_daily.csv` in a given directory), and exits 1 if there is any, so a symbol Yahoo
+does not serve is found before it can reject a run and spend the single-use evidence;
+`--allow-unseen` reports without refusing. With `--ingest-config INGEST.json` (the Schwab ingest
+config) it also names the held symbols that config aliases (`aliased_by_ingest`, symbol to the
+file spelling the ingest looks for, which the driver does not write: it names the file by the held
+symbol) or values at 1.00 as cash (`cash_equivalent_by_ingest`: a cash-equivalent that appears in
+`positions.json` is fetched for nothing and belongs in `exclude_symbols`); both are reports, not
+refusals, so they can be decided before Saturday. The retained R2.1 pulls
+(`dataPortfolio/source-runs/r21-schwab-0917-closes-20261030` and `inputs/spy-spxl-yahoo`) served
+all 15 non-cash symbols of the R2.1 09-17 capture (BIL, CL, DGP, ERX, IBIT, NEE, PEP, PG, SOXL,
+SPXL, SPY, TQQQ, UDOW, UPRO, XLE; the "38 positions" of that pull list are rows across accounts,
+16 symbols with `SWVXX`). A symbol that appears in the R3 capture and is not in those directories
+is "never served" and needs a read-only Yahoo chart request by hand before the evidence is minted.
 
 ## Symbol resolution and admission
 

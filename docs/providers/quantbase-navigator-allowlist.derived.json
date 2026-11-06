@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "note": "HAR-VERIFIED document pages only (derived offline from the retained Quantbase HARs; page paths, no ids). Order matters: /profile first (never a cold /dashboard first), /account-activity exactly once. Pin its sha256 with --allowlist-sha256.",
+  "dwell_seconds": 30,
+  "pages": [
+    {"label": "profile", "url": "https://app.getquantbase.com/profile"},
+    {"label": "dashboard", "url": "https://app.getquantbase.com/dashboard"},
+    {"label": "account-activity", "url": "https://app.getquantbase.com/account-activity"},
+    {"label": "fund-volatis", "url": "https://app.getquantbase.com/fund/details/Volatis%20Strategy"}
+  ]
+}

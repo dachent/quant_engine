@@ -26,7 +26,11 @@ from xml.etree import ElementTree
 
 import pyarrow.parquet as parquet  # type: ignore[import-untyped]
 
-from quant_engine.core import InterpreterRefusal, require_current_interpreter
+from quant_engine.core import (
+    InterpreterRefusal,
+    last_nyse_trading_day,
+    require_current_interpreter,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
@@ -69,6 +73,24 @@ class ImplementationReconciliationError(ValueError):
 
 def _insufficient_exact_common_data() -> ImplementationReconciliationError:
     return ImplementationReconciliationError(INSUFFICIENT_EXACT_COMMON_DATA)
+
+
+def require_model_through_as_of(
+    strategy_id: str, model_end: date | None, accepted_as_of: date
+) -> None:
+    """A model that ends before the as-of would silently shorten every window built from it.
+
+    The as-of is the cycle's pinned cutoff. A cutoff that is not a trading day (a weekend or a regular NYSE
+    closure) is held to the last trading day before it.
+    """
+
+    expected = last_nyse_trading_day(accepted_as_of)
+    if model_end is None or model_end < expected:
+        ended = "has no dated rows" if model_end is None else f"ends {model_end}"
+        raise ImplementationReconciliationError(
+            f"{strategy_id}: the model {ended}, before the as-of {accepted_as_of} "
+            f"(expected through {expected}): the source is stale, recapture it through the as-of"
+        )
 
 
 @dataclass(frozen=True)
@@ -1941,6 +1963,9 @@ def _tt_manifest_model_returns(
             )
         weights[component] = weight
     common = sorted(set.intersection(*(set(levels[item]) for item in components)))
+    require_model_through_as_of(
+        "tt-portfolio", common[-1] if common else None, accepted_as_of
+    )
     result: dict[date, float] = {}
     previous: dict[str, Decimal] | None = None
     for observed in common:
@@ -2476,6 +2501,7 @@ def _grizzly_model_states(
     calendar = sorted(item for item in calendar if item <= accepted_as_of)
     if len(calendar) < 2:
         raise _insufficient_exact_common_data()
+    require_model_through_as_of("grizzlybears-vtma", calendar[-1], accepted_as_of)
     first = calendar[0]
     invested = False
     for observed, action in signals:
@@ -2989,6 +3015,48 @@ def _write_exact(path: Path, content: bytes) -> None:
         handle.write(content)
 
 
+def observed_end_table(
+    strategies: Iterable[Mapping[str, Any]], as_of: date
+) -> list[dict[str, Any]]:
+    """Each strategy's last observed date against the as-of: a read-only table for the operator.
+
+    A row's end is the shorter of its model and its account series, so a lag is not by itself a fault;
+    it is what the operator reads after a build instead of remembering which strategies lag.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for item in strategies:
+        end: str | None = None
+        for holder in (
+            item.get("return_reconciliation"),
+            item.get("account_live_return_summary"),
+            item,
+        ):
+            if isinstance(holder, Mapping) and isinstance(
+                holder.get("observed_end"), str
+            ):
+                end = holder["observed_end"]
+                break
+        rows.append(
+            {
+                "as_of_date": as_of.isoformat(),
+                "lag_days": (as_of - date.fromisoformat(end)).days if end else None,
+                "observed_end": end,
+                "strategy_id": item.get("strategy_id"),
+            }
+        )
+    return rows
+
+
+def print_observed_end_table(table: Iterable[Mapping[str, Any]]) -> None:
+    for row in table:
+        print(
+            f"observed_end {row['strategy_id']}: {row['observed_end']} "
+            f"(as-of {row['as_of_date']}, lag {row['lag_days']} d)",
+            file=sys.stderr,
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--p123-generation-root", type=Path, required=True)
@@ -3033,9 +3101,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ImplementationReconciliationError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     payload = json.loads(content)
+    table = observed_end_table(
+        payload["strategies"], date.fromisoformat(str(payload["as_of_date"]))
+    )
+    print_observed_end_table(table)
     print(
         json.dumps(
             {
+                "observed_end_vs_as_of": table,
                 "output": str(args.output),
                 "reconciliation_id": payload["reconciliation_id"],
                 "strategies": [item["strategy_id"] for item in payload["strategies"]],

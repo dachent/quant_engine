@@ -23,7 +23,7 @@ from ._util import (
     reject_declarations,
     sha256_hex,
 )
-from .catalog import KIND_ACTIVITY, KIND_SECURITY, get_query
+from .catalog import KIND_ACTIVITY, KIND_SECURITY, WINDOW_SINGLE_DAY, get_query
 from .plan import PlanError, RequestPlan, plan_from_document
 from .securities import SecurityScanError, aggregate_rows, scan_securities
 from .staging import MANIFEST_NAME, write_new_file
@@ -135,7 +135,10 @@ def _security_statements(path: Path, required: tuple[str, ...]) -> list[dict[str
                 raise NormalizationError("a FlexStatement lacks account or dates")
             present = {item.tag.rsplit("}", 1)[-1] for item in element.iter()}
             if not set(required) <= present:
-                raise NormalizationError("security statement sections missing")
+                raise NormalizationError(
+                    "security statement sections missing: "
+                    + ", ".join(sorted(set(required) - present))
+                )
             try:
                 start_day = date.fromisoformat(f"{start[:4]}-{start[4:6]}-{start[6:8]}")
                 end_day = date.fromisoformat(f"{end[:4]}-{end[4:6]}-{end[6:8]}")
@@ -185,6 +188,17 @@ def build_normalized(run_dir: Path) -> tuple[dict[str, Any], bytes]:
             raise NormalizationError("a statement has reversed dates")
         if start < request.window_from or end > request.window_to:
             raise NormalizationError("a statement lies outside the requested window")
+    if request.window_override:
+        if query.window_kind == WINDOW_SINGLE_DAY:
+            returned = all(span == (request.window_from,) * 2 for span in spans)
+        elif query.kind == KIND_SECURITY:
+            returned = all(
+                span == (request.window_from, request.window_to) for span in spans
+            )
+        else:
+            returned = True
+        if not returned:
+            raise NormalizationError("the statements are not the requested window")
     labels = sorted({label for label, _ in dates})
     if len(dates) != len(set(dates)) and query.kind == KIND_ACTIVITY:
         raise NormalizationError("an account-day appears more than once")
