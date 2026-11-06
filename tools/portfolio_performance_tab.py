@@ -92,7 +92,8 @@ SLICE_FLOW_DEFINITION: Final = (
     "separate external from internal flows."
 )
 
-REQUIRED_PULL: Final[dict[str, Any]] = {
+_PULL_WINDOW_START: Final = "2024-10-01"
+_REQUIRED_PULL_BASE: Final[dict[str, Any]] = {
     "source_id": "yahoo-adjusted-etf-daily",
     "series": (
         "daily adjusted close with dividends and distributions reinvested, or "
@@ -103,11 +104,34 @@ REQUIRED_PULL: Final[dict[str, Any]] = {
         "not admitted, no adjusted close or distributions, and they stop before the "
         "cutoff, so they are not a total-return series and are not used"
     ),
-    "to_date": "2026-09-17",
-    "minimum_window": ["2024-10-01", "2026-09-17"],
     "admission": "hash-bound input plus a place in CORE_BENCHMARKS and the plan manifest",
     "approval": "the owner's direct approval of the pull",
 }
+
+
+def required_pull(cutoff: Any) -> dict[str, Any]:
+    """The pull the owner must approve, ending at the build's cutoff.
+
+    The cutoff is the weekly returns' ``as_of_date`` (the common end date the
+    report truncated every series to); the builder and the verifier both read it
+    from the panel, never from a constant.
+    """
+
+    pull = dict(_REQUIRED_PULL_BASE)
+    pull["to_date"] = cutoff
+    pull["minimum_window"] = [_PULL_WINDOW_START, cutoff]
+    return {key: pull[key] for key in _PULL_KEY_ORDER}
+
+
+_PULL_KEY_ORDER: Final = (
+    "source_id",
+    "series",
+    "existing_files",
+    "to_date",
+    "minimum_window",
+    "admission",
+    "approval",
+)
 _BENCHMARKS: Final = (
     ("market:SPY", "SPY", "2007-01-03", "SPY"),
     ("market:SPXL", "SPXL", "2008-11-05", "SPXL (its own total return, not 3x SPY)"),
@@ -1258,7 +1282,11 @@ def _benchmark_entry(
         "reason": "NOT_ADMITTED_NO_GOVERNED_PULL",
         "substitute": None,
         "source": None,
-        "required_pull": {**REQUIRED_PULL, "from_date": since, "note": note},
+        "required_pull": {
+            **required_pull(weekly.get("as_of_date")),
+            "from_date": since,
+            "note": note,
+        },
         "first_week": None,
         "last_week": None,
         "daily": {
@@ -2585,7 +2613,9 @@ def verify_performance_tab(
         if (
             benchmark.get("status") != "UNAVAILABLE"
             or pull.get("source_id") != "yahoo-adjusted-etf-daily"
-            or pull.get("to_date") != "2026-09-17"
+            or pull.get("to_date") != weekly.get("as_of_date")
+            or pull.get("minimum_window")
+            != [_PULL_WINDOW_START, weekly.get("as_of_date")]
             or benchmark.get("first_week") is not None
             or _mapping(benchmark.get("daily")).get("status") != "UNAVAILABLE"
         ):

@@ -339,11 +339,67 @@ def test_spy_and_spxl_are_explicit_unavailable_entries_with_the_pull() -> None:
         assert benchmark["substitute"] is None
         pull = benchmark["required_pull"]
         assert pull["source_id"] == "yahoo-adjusted-etf-daily"
-        assert pull["to_date"] == "2026-09-17"
-        assert pull["minimum_window"] == ["2024-10-01", "2026-09-17"]
+        assert pull["to_date"] == "2026-03-05"
+        assert pull["minimum_window"] == ["2024-10-01", "2026-03-05"]
     assert block["benchmarks"][0]["required_pull"]["from_date"] == "2007-01-03"
     assert block["benchmarks"][1]["required_pull"]["from_date"] == "2008-11-05"
     assert "ITOT" not in json.dumps(block)
+
+
+_OLD_R22_PULL = {
+    "source_id": "yahoo-adjusted-etf-daily",
+    "series": (
+        "daily adjusted close with dividends and distributions reinvested, or "
+        "daily price plus the distribution history"
+    ),
+    "existing_files": (
+        "price-only daily CSVs exist on disk (SPY to 2026-01-22, SPXL to 2025-12-19): "
+        "not admitted, no adjusted close or distributions, and they stop before the "
+        "cutoff, so they are not a total-return series and are not used"
+    ),
+    "to_date": "2026-09-17",
+    "minimum_window": ["2024-10-01", "2026-09-17"],
+    "admission": "hash-bound input plus a place in CORE_BENCHMARKS and the plan manifest",
+    "approval": "the owner's direct approval of the pull",
+}
+
+
+def _panel_at(cutoff: str) -> dict[str, Any]:
+    panel = _panel()
+    panel["weekly_returns"]["as_of_date"] = cutoff
+    panel["account_manifest"] = None
+    return panel
+
+
+def test_pull_for_the_r22_cutoff_is_byte_identical_to_the_old_constant() -> None:
+    block = tab.build_performance_tab(_panel_at("2026-09-17"))
+    for benchmark, since in zip(
+        block["benchmarks"], ("2007-01-03", "2008-11-05"), strict=True
+    ):
+        pull = benchmark["required_pull"]
+        assert pull == {**_OLD_R22_PULL, "from_date": since, "note": pull["note"]}
+        assert json.dumps(pull) == json.dumps(
+            {**_OLD_R22_PULL, "from_date": since, "note": pull["note"]}
+        )
+    tab.verify_performance_tab(block, _panel_at("2026-09-17"))
+
+
+def test_pull_ends_at_the_build_cutoff_and_the_verifier_rejects_a_stale_end() -> None:
+    panel = _panel_at("2026-11-06")
+    block = tab.build_performance_tab(panel)
+    for benchmark in block["benchmarks"]:
+        pull = benchmark["required_pull"]
+        assert pull["to_date"] == "2026-11-06"
+        assert pull["minimum_window"] == ["2024-10-01", "2026-11-06"]
+    tab.verify_performance_tab(block, panel)
+    stale = copy.deepcopy(block)
+    stale["benchmarks"][0]["required_pull"]["to_date"] = "2026-09-17"
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(stale, panel)
+    stale = copy.deepcopy(block)
+    stale["benchmarks"][1]["required_pull"]["minimum_window"][1] = "2026-09-17"
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(stale, panel)
 
 
 # ------------------------------------------------------------ slices
