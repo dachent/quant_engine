@@ -1936,3 +1936,92 @@ def test_make_evidence_names_the_effective_config_and_is_accepted_by_the_authori
             stage_root=tmp_path / "stage2",
             now=datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc),
         )
+
+
+def _closes_file(directory: Path, symbol: str, rows: dict[str, float]) -> None:
+    directory.mkdir(exist_ok=True)
+    lines = ["date,open,high,low,close,adjclose,volume,dividend"]
+    lines += [f"{day},0,0,0,{close},{close},1,0" for day, close in rows.items()]
+    (directory / f"{symbol}_yahoo_daily.csv").write_text("\n".join(lines) + "\n")
+
+
+def test_rescale_check_catches_a_split_after_the_retained_pull(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    previous = tmp_path / "previous"
+    new = tmp_path / "new"
+    days = {"2026-09-16": 100.0, "2026-09-17": 101.0}
+    _closes_file(previous, "SAME", days)
+    _closes_file(previous, "SPLIT", days)
+    _closes_file(previous, "GONE", {"2026-08-03": 5.0})
+    _closes_file(
+        new, "SAME", {**days, "2026-11-06": 120.0}
+    )  # dividends and moves after the retained pull change nothing
+    _closes_file(
+        new, "SPLIT", {"2026-09-16": 50.0, "2026-09-17": 50.5, "2026-11-06": 55.0}
+    )
+    _closes_file(new, "GONE", {"2026-11-06": 6.0})
+    _closes_file(new, "NEWCO", {"2026-11-06": 9.0})
+    argv = ["rescale-check", "--closes-dir", str(new), "--previous-dir", str(previous)]
+    assert driver.main(argv) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["rescaled"] == ["SPLIT"]
+    assert report["no_overlap"] == ["GONE"]
+    assert report["not_in_previous"] == ["NEWCO"]
+    by_symbol = {row["symbol"]: row for row in report["symbols"]}
+    assert by_symbol["SAME"]["status"] == "ok"
+    assert by_symbol["SPLIT"]["ratio_new_over_previous"] == 0.5
+    assert "SPLIT" in captured.err and "GONE" in captured.err
+    # the clean case exits 0; a symbol no retained pull holds is warned about, and refused
+    # only when the operator requires every symbol to have a previous pull
+    (new / "SPLIT_yahoo_daily.csv").unlink()
+    (new / "GONE_yahoo_daily.csv").unlink()
+    assert driver.main(argv) == 0
+    assert "NEWCO" in capsys.readouterr().err
+    assert driver.main([*argv, "--require-previous"]) == 1
+    capsys.readouterr()
+
+
+def test_rescale_check_refuses_malformed_input(tmp_path: Path) -> None:
+    new = tmp_path / "new"
+    new.mkdir()
+    previous = tmp_path / "previous"
+    previous.mkdir()
+    with pytest.raises(driver.DriverError, match="holds no official-closes file"):
+        driver.rescale_check(new, [previous])
+    (new / "BAD_yahoo_daily.csv").write_text("nope\n")
+    with pytest.raises(driver.DriverError, match="not an official-closes file"):
+        driver.rescale_check(new, [previous])
+    with pytest.raises(driver.DriverError, match="tolerance"):
+        driver.rescale_check(new, [previous], 0.0)
+    with pytest.raises(driver.DriverError, match="not a directory"):
+        driver.rescale_check(new, [tmp_path / "missing"])
+
+
+def test_rescale_check_uses_the_last_day_of_a_retained_adjusted_history(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "adjusted.json"
+    rows = [
+        # dividend-adjusted earlier days differ from the raw close; the last day equals it
+        {"Ticker": "SPXL", "Date": "2026-09-16T00:00:00", "Close": 99.0},
+        {"Ticker": "SPXL", "Date": "2026-09-17T00:00:00", "Close": 101.0},
+        {"Ticker": "OTHER", "Date": "2026-09-17T00:00:00", "Close": 10.0},
+    ]
+    artifact.write_text(json.dumps({"rows": rows}))
+    new = tmp_path / "new"
+    _closes_file(new, "SPXL", {"2026-09-16": 100.0, "2026-09-17": 101.0})
+    _closes_file(new, "OTHER", {"2026-09-17": 5.0})
+    previous = tmp_path / "previous"
+    previous.mkdir()
+    report = driver.rescale_check(new, [previous], adjusted_json=[artifact])
+    by_symbol = {row["symbol"]: row for row in report["symbols"]}
+    assert by_symbol["SPXL"]["status"] == "ok"
+    assert by_symbol["SPXL"]["basis"] == "adjusted_last_day"
+    assert by_symbol["SPXL"]["days_compared"] == 1
+    assert report["rescaled"] == ["OTHER"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    with pytest.raises(driver.DriverError, match="not a history artifact"):
+        driver.rescale_check(new, [previous], adjusted_json=[bad])

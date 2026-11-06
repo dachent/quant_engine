@@ -791,6 +791,106 @@ def held_check(
     return report
 
 
+RESCALE_TOLERANCE = 1e-4
+
+
+def rescale_check(
+    closes_dir: Path,
+    previous_dirs: Sequence[Path],
+    tolerance: float = RESCALE_TOLERANCE,
+    adjusted_json: Sequence[Path] = (),
+) -> dict[str, Any]:
+    """New official closes against the closes a retained earlier pull holds for the same days.
+
+    ``Close`` is split-adjusted by Yahoo at fetch time and not dividend-adjusted, so a split after
+    an earlier pull rescales every earlier day of the new pull and a dividend moves nothing.  A
+    late fetch (a pull after the cutoff) cannot see events after the cutoff (the request ends at
+    the cutoff), so the retained pull is the witness: any overlapping day whose close differs by
+    more than ``tolerance`` (relative) is a rescale, reported with the largest ratio.  A symbol the
+    retained pulls never held is listed as ``not_in_previous`` and is not checked.
+
+    ``adjusted_json`` are retained ``history_adjusted`` artifacts (OHLC rescaled by the dividend
+    factor, so only their last day equals the raw close): for a symbol with no raw pull the last
+    day of such an artifact is compared (``basis`` ``adjusted_last_day``); a split after that pull
+    still shows, a dividend does not.
+    """
+
+    if not tolerance > 0:
+        raise DriverError("the rescale tolerance must be positive")
+
+    def closes(path: Path) -> dict[str, float]:
+        try:
+            reader = csv.DictReader(io.StringIO(path.read_bytes().decode("utf-8")))
+            if not {"date", "close"} <= set(reader.fieldnames or ()):
+                raise KeyError("date,close")
+            return {row["date"]: float(row["close"]) for row in reader if row["close"]}
+        except (OSError, UnicodeDecodeError, KeyError, ValueError) as exc:
+            raise DriverError(f"{path.name} is not an official-closes file") from exc
+
+    if not closes_dir.is_dir() or any(not item.is_dir() for item in previous_dirs):
+        raise DriverError("a closes directory is not a directory")
+    previous: dict[str, dict[str, float]] = {}
+    for directory in previous_dirs:
+        for item in sorted(directory.glob(f"*{_OFFICIAL_SUFFIX}")):
+            previous.setdefault(item.name[: -len(_OFFICIAL_SUFFIX)], {}).update(
+                closes(item)
+            )
+    adjusted: dict[str, dict[str, float]] = {}
+    for path in adjusted_json:
+        try:
+            artifact = json.loads(path.read_bytes().decode("utf-8"))
+            for row in artifact["rows"]:
+                if row.get("Close") is not None:
+                    adjusted.setdefault(str(row["Ticker"]), {})[
+                        str(row["Date"])[:10]
+                    ] = float(row["Close"])
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+            raise DriverError(f"{path.name} is not a history artifact") from None
+    names = sorted(
+        item.name[: -len(_OFFICIAL_SUFFIX)]
+        for item in closes_dir.glob(f"*{_OFFICIAL_SUFFIX}")
+    )
+    if not names:
+        raise DriverError("the closes directory holds no official-closes file")
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        new = closes(closes_dir / f"{name}{_OFFICIAL_SUFFIX}")
+        old = previous.get(name)
+        basis = "raw"
+        if old is None and name in adjusted:
+            last = max(adjusted[name])
+            old, basis = {last: adjusted[name][last]}, "adjusted_last_day"
+        if old is None:
+            rows.append({"symbol": name, "status": "not_in_previous"})
+            continue
+        shared = sorted(set(new) & set(old))
+        if not shared:
+            rows.append({"symbol": name, "status": "no_overlap"})
+            continue
+        worst = max(shared, key=lambda day: abs(new[day] - old[day]) / abs(old[day]))
+        change = abs(new[worst] - old[worst]) / abs(old[worst])
+        rows.append(
+            {
+                "symbol": name,
+                "status": "RESCALED" if change > tolerance else "ok",
+                "basis": basis,
+                "days_compared": len(shared),
+                "worst_day": worst,
+                "worst_relative_change": round(change, 8),
+                "ratio_new_over_previous": round(new[worst] / old[worst], 8),
+            }
+        )
+    return {
+        "tolerance": tolerance,
+        "symbols": rows,
+        "rescaled": [row["symbol"] for row in rows if row["status"] == "RESCALED"],
+        "no_overlap": [row["symbol"] for row in rows if row["status"] == "no_overlap"],
+        "not_in_previous": [
+            row["symbol"] for row in rows if row["status"] == "not_in_previous"
+        ],
+    }
+
+
 def _materialize(
     value: dict[str, Any],
     cutoff: date,
@@ -2826,6 +2926,21 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="Schwab ingest config: also list held symbols it aliases or values as cash",
     )
+    rescale = sub.add_parser(
+        "rescale-check",
+        help="offline: new official closes against a retained pull's closes for the same days",
+    )
+    rescale.add_argument("--closes-dir", type=Path, required=True)
+    rescale.add_argument("--previous-dir", type=Path, action="append", required=True)
+    rescale.add_argument("--tolerance", type=float, default=RESCALE_TOLERANCE)
+    rescale.add_argument(
+        "--previous-adjusted-json", type=Path, action="append", default=[]
+    )
+    rescale.add_argument(
+        "--require-previous",
+        action="store_true",
+        help="also exit 1 for a symbol no retained pull holds (it is always reported)",
+    )
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
     )
@@ -2987,6 +3102,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 1
             return 0
+        if args.command == "rescale-check":
+            outcome = rescale_check(
+                args.closes_dir,
+                args.previous_dir,
+                args.tolerance,
+                args.previous_adjusted_json,
+            )
+            print(json.dumps(outcome, indent=2, sort_keys=True))
+            if outcome["not_in_previous"]:
+                print(
+                    "Warning: no retained pull holds these symbols, so they are NOT checked "
+                    "for a rescale: " + ", ".join(outcome["not_in_previous"]),
+                    file=sys.stderr,
+                )
+            if outcome["rescaled"] or outcome["no_overlap"]:
+                print(
+                    "Error: closes rescaled against the retained pull (a split after it) or "
+                    "sharing no day with it: "
+                    + ", ".join(outcome["rescaled"] + outcome["no_overlap"]),
+                    file=sys.stderr,
+                )
+                return 1
+            return 1 if args.require_previous and outcome["not_in_previous"] else 0
         if args.command == "verify":
             print(
                 json.dumps(
