@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "dad266f0512345cb4a96024d35b4d140adeaed785434598aba1b1ef63214f40f"
+        "94bb54eaaaa8a59b3ba53451fc5d61b47fd49d88d603307ef7dd9c0a75265004"
     )
 
 
@@ -2905,7 +2905,7 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         "transform": "matrixport-declared-gap-span-returns",
         "version": "1",
     }
-    assert [row["span_days"] for row in policy["span_return_receipts"]] == [2, 2]
+    assert [row["span_days"] for row in policy["span_return_receipts"]] == [2, 2, 2]
     robuxio = next(
         row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
     )
@@ -2938,7 +2938,7 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
     changed_policy = _source(changed_date, "matrixport-account-generation")[
         "declared_gap_policy"
     ]
-    changed_policy["omitted_return_dates"] = ["2026-01-29", "2026-07-04"]
+    changed_policy["omitted_return_dates"] = ["2026-01-29", "2026-07-04", "2026-10-17"]
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="omitted return dates differ",
@@ -2961,7 +2961,7 @@ def test_matrixport_owner_span_receipts_and_funded_epoch_reject_coherent_rebinds
 
     contract = _contract()
     policy = _source(contract, "matrixport-account-generation")["declared_gap_policy"]
-    assert [item["span_days"] for item in policy["span_return_receipts"]] == [2, 2]
+    assert [item["span_days"] for item in policy["span_return_receipts"]] == [2, 2, 2]
 
     altered_span = copy.deepcopy(contract)
     altered_policy = _source(altered_span, "matrixport-account-generation")[
@@ -4355,11 +4355,12 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # approved source-backed IBKR/Schwab leverage classes without changing
     # historical generation, inventory or admitted-item pins. The held-workbook
     # correction removes only that consumer from the historical source rows.
+    # Moved again by the 2026-10-16 Matrixport NAV gap declaration (#287 V3).
     # The affected product-data-class pins are then rederived from those changed
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "15d2527fe543f3b8eb2f67ae2c845530426370024381cebfba72735f2fd759d8"
+        "c70d31d2d5f418553e906c07fef7c18e58807db27b24961cc6d5941b1a7c5439"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4396,7 +4397,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "15d2527fe543f3b8eb2f67ae2c845530426370024381cebfba72735f2fd759d8"
+        "c70d31d2d5f418553e906c07fef7c18e58807db27b24961cc6d5941b1a7c5439"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
