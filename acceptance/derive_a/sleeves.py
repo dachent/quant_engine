@@ -916,6 +916,7 @@ def quantbase_facts(
     fills = []
     volatis = []
     excluded = 0
+    post_cash = Z
     keep = []
     for r in rows:
         typ = r["activity_type"]
@@ -938,6 +939,7 @@ def quantbase_facts(
             day = at.date().isoformat()
             if day > cutoff:
                 excluded += 1
+                post_cash -= D(r["amount"])
                 continue
             amount = D(r["amount"])
             fund = r["fund"]
@@ -984,6 +986,16 @@ def quantbase_facts(
         )
         if stamp and utc(stamp).date().isoformat() > cutoff:
             excluded += 1
+            if typ == "transfer":
+                if r["status"] == "C" and r["type"] in ["DEPOSIT", "WITHDRAWAL"]:
+                    post_cash += abs(D(r["amount"])) * (
+                        1 if r["type"] == "DEPOSIT" else -1
+                    )
+            elif typ == "journal" and r["status"] == "COMPLETE":
+                if r["type"] in ["AUM_FEE", "PARTNER_SUB_FEE"]:
+                    post_cash -= D(r["amount"])
+            elif typ == "dividend":
+                post_cash += D(r["amount"])
             continue
         keep.append(r)
     fills.sort(key=lambda f: (f["fill_at_utc"], f["txn_id"]))
@@ -1185,7 +1197,7 @@ def quantbase_facts(
             )
         )
     )
-    residual = derived - provider
+    residual = derived - (provider - post_cash)
     expected = D(dec["open_items"]["cash_residual"]["amount"])
     tolerance = D(dec["open_items"]["cash_residual"]["tolerance"])
     if abs(residual - expected) > tolerance:
@@ -1291,6 +1303,7 @@ def quantbase_facts(
         partner_subscription_fees=partner,
         derived_cash=derived,
         provider_settled_cash=provider,
+        **({"post_cutoff_cash_rolled_back": post_cash} if post_cash != 0 else {}),
         residual=residual,
         declared_residual=expected,
         declared_residual_difference=residual - expected,

@@ -6239,10 +6239,32 @@ def _qb_facts(
         return None
 
     kept, after_cutoff = [], 0
+    post_cash = Decimal(0)
     for r in activity:
         d = row_day(r)
         if d is not None and d > cutoff:
             after_cutoff += 1
+            at = r["activity_type"]
+            if (
+                at == "filled_txn"
+                and r["filled"] == "Y"
+                and r["type"] in ("BUY", "SELL", "MAX_S")
+            ):
+                post_cash -= D(r["amount"])
+            elif (
+                at == "transfer"
+                and r["status"] == "C"
+                and r["type"] in ("DEPOSIT", "WITHDRAWAL")
+            ):
+                post_cash += abs(D(r["amount"])) * (1 if r["type"] == "DEPOSIT" else -1)
+            elif (
+                at == "journal"
+                and r["status"] == "COMPLETE"
+                and r["type"] in ("AUM_FEE", "PARTNER_SUB_FEE")
+            ):
+                post_cash -= D(r["amount"])
+            elif at == "dividend":
+                post_cash += D(r["amount"])
             continue
         kept.append(r)
 
@@ -6587,7 +6609,7 @@ def _qb_facts(
         refusals.append("accounts.csv: no row with type=alpaca")
 
     derived_cash = deposits - net_fund_flows + dividends_total - aum_fees - partner_fees
-    residual = derived_cash - settled if settled is not None else None
+    residual = derived_cash - (settled - post_cash) if settled is not None else None
     cash_residual = declared["open_items"]["cash_residual"]  # type: ignore[index]
     declared_residual = D(cash_residual["amount"])
     residual_tol = D(cash_residual["tolerance"])
@@ -6875,6 +6897,11 @@ def _qb_facts(
                 "partner_subscription_fees": fmt(partner_fees),
                 "derived_cash": fmt(derived_cash),
                 "provider_settled_cash": fmt(settled),
+                **(
+                    {"post_cutoff_cash_rolled_back": fmt(post_cash)}
+                    if post_cash != 0
+                    else {}
+                ),
                 "residual": fmt(residual),
             },
             "dividends": {

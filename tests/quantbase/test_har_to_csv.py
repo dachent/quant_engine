@@ -947,11 +947,17 @@ def test_every_snapshot_is_labelled_with_its_capture_time(tmp_path: Path) -> Non
     assert "snapshot_exception" not in manifest
 
 
-def test_a_snapshot_after_the_cutoff_day_end_is_refused(tmp_path: Path) -> None:
+def test_a_snapshot_after_the_cutoff_day_end_is_recorded_without_a_label(
+    tmp_path: Path,
+) -> None:
     case = _late_case(tmp_path, "2026-10-08T06:30:00+00:00")
-    with pytest.raises(ERROR, match="--snapshot-exception"):
-        case.convert()
-    assert not (case.out / "quantbase-har-csv").exists()
+    case.convert()
+    report = json.loads((case.output() / "conversion-report.json").read_bytes())
+    assert report["snapshot_exception"] is None
+    assert {item["gap_hours"] for item in report["snapshots"]} == {6.5}
+    manifest = json.loads((case.output() / "native-manifest.json").read_bytes())
+    assert "snapshot_exception" not in manifest
+    assert {item["gap_hours"] for item in manifest["snapshots"]} == {6.5}
 
 
 def test_a_labelled_exception_records_the_gap_in_hours(tmp_path: Path) -> None:
@@ -967,25 +973,20 @@ def test_a_labelled_exception_records_the_gap_in_hours(tmp_path: Path) -> None:
     assert converter.verify_conversion(case.intake, case.out, "public", label)[
         "state"
     ] == ("VERIFIED")
-    with pytest.raises(ERROR, match="--snapshot-exception"):
+    with pytest.raises(ERROR):  # a different label than the one converted with
         converter.verify_conversion(case.intake, case.out, "public")
 
 
-def test_the_exception_label_is_validated_and_must_be_used(tmp_path: Path) -> None:
+def test_the_exception_label_is_validated(tmp_path: Path) -> None:
     late = _late_case(tmp_path / "a", "2026-10-08T06:30:00+00:00")
     with pytest.raises(ERROR, match="label is invalid"):
         converter.convert(late.intake, late.out, "public", "bad\nlabel")
-    ontime = Case(tmp_path / "b")
-    with pytest.raises(ERROR, match="within the cutoff day"):
-        converter.convert(ontime.intake, ontime.out, "public", "unneeded")
 
 
 def test_an_entry_without_a_time_uses_the_run_capture_time(tmp_path: Path) -> None:
     # The fixture session was captured 2026-10-08T12:00Z, after the cutoff day end.
     case = _late_case(tmp_path, None)
-    with pytest.raises(ERROR, match="--snapshot-exception"):
-        case.convert()
-    converter.convert(case.intake, case.out, "public", "session time only")
+    case.convert()
     report = json.loads((case.output() / "conversion-report.json").read_bytes())
     assert {item["source"] for item in report["snapshots"]} == {"session"}
     assert {item["gap_hours"] for item in report["snapshots"]} == {12.0}
@@ -1093,9 +1094,7 @@ _LATE = {**_ONTIME, "gap_hours": 6.5}
         ([{**_LATE, "gap_hours": -1}], "label", "positive"),
         ([{**_LATE, "gap_hours": True}], "label", "positive"),
         ([_ONTIME, _ONTIME], None, "repeat"),
-        ([_LATE], None, "labelled exception"),
-        ([_ONTIME], "unused", "invalid or unused"),
-        ([_LATE], "bad\nlabel", "invalid or unused"),
+        ([_LATE], "bad\nlabel", "label is invalid"),
     ],
 )
 def test_the_generation_refuses_malformed_snapshot_labels(
@@ -1110,3 +1109,13 @@ def test_labels_are_absent_for_legacy_plans_and_exceptions_need_labels() -> None
     with pytest.raises(GEN_ERROR, match="needs snapshot labels"):
         generation._snapshot_plan_block(_DATASETS, None, "label")
     assert generation._snapshot_catalog_fields(None, None) == {}
+
+
+def test_a_late_snapshot_needs_no_label_and_an_unused_label_is_not_refused() -> None:
+    late = generation._snapshot_plan_block(_DATASETS, [_LATE], None)
+    assert "snapshot_exception" not in late["snapshot_labels"][0]
+    assert late["snapshot_labels"][0]["gap_hours"] == 6.5
+    assert generation._snapshot_plan_block(_DATASETS, [_ONTIME], "unused") == {
+        "snapshot_labels": [_ONTIME],
+        "snapshot_exception": "unused",
+    }
