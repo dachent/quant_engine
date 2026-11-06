@@ -34,6 +34,10 @@ from .transport import Pacer, TransportError
 MANIFEST_SCHEMA = "ibkr-capture-manifest-v1"
 _POLL_INITIAL_SECONDS = 20.0
 _POLL_MAX_SECONDS = 120.0
+# Waits before asking the same GetStatement again after a connection-class failure (name
+# resolution, reset, timeout).  The reference code already exists, so the SendRequest is never
+# repeated; each retry spends one of the evidence's GetStatement attempts.
+_TRANSPORT_BACKOFF_SECONDS = (5.0, 15.0, 30.0, 60.0)
 KIND_POLL_EXHAUSTED = "POLL_EXHAUSTED"
 KIND_TRANSPORT_FAILURE = "TRANSPORT_FAILURE"
 
@@ -167,8 +171,11 @@ def capture_plan(
         base["get_url"] = get_url
         base["send_url"] = SEND_REQUEST_URL
         outcome: RunSummary | None = None
+        next_wait = _POLL_INITIAL_SECONDS
+        polls = 0
+        transport_failures = 0
         for attempt in range(1, governance.max_get_attempts + 1):
-            wait(min(_POLL_INITIAL_SECONDS * (2 ** (attempt - 1)), _POLL_MAX_SECONDS))
+            wait(next_wait)
             governance.reserve_get(index)
             pacer.before_call()
             try:
@@ -178,8 +185,25 @@ def capture_plan(
                     headers,
                 )
             except TransportError as exc:
-                outcome = refuse(KIND_TRANSPORT_FAILURE, None, None, attempt, str(exc))
-                break
+                attempts.append(
+                    {
+                        "step": STEP_GET,
+                        "attempt": attempt,
+                        "kind": KIND_TRANSPORT_FAILURE,
+                        "code": None,
+                        "detail": str(exc),
+                    }
+                )
+                if not exc.retryable:
+                    outcome = refuse(
+                        KIND_TRANSPORT_FAILURE, None, None, attempt, str(exc)
+                    )
+                    break
+                transport_failures += 1
+                next_wait = _TRANSPORT_BACKOFF_SECONDS[
+                    min(transport_failures, len(_TRANSPORT_BACKOFF_SECONDS)) - 1
+                ]
+                continue
             _guard_echo(body, in_use)
             response = classify_response(body, step=STEP_GET)
             attempts.append(
@@ -192,6 +216,8 @@ def capture_plan(
                 }
             )
             if response.kind is ResponseKind.POLL_AGAIN:
+                polls += 1
+                next_wait = min(_POLL_INITIAL_SECONDS * (2**polls), _POLL_MAX_SECONDS)
                 continue
             if response.kind is ResponseKind.REPORT:
                 run.write_new("statement.xml", body)
@@ -201,9 +227,18 @@ def capture_plan(
             outcome = refuse(response.kind.value, response.error_code, body, attempt)
             break
         else:
-            outcome = refuse(
-                KIND_POLL_EXHAUSTED, "1019", None, governance.max_get_attempts
-            )
+            if attempts and attempts[-1].get("kind") == KIND_TRANSPORT_FAILURE:
+                outcome = refuse(
+                    KIND_TRANSPORT_FAILURE,
+                    None,
+                    None,
+                    governance.max_get_attempts,
+                    f"get attempts exhausted: {attempts[-1]['detail']}",
+                )
+            else:
+                outcome = refuse(
+                    KIND_POLL_EXHAUSTED, "1019", None, governance.max_get_attempts
+                )
         summaries.append(outcome)
         if outcome.status != "STAGED":
             break

@@ -102,7 +102,7 @@ def test_governance_consumes_single_use_evidence(tmp_path: Path) -> None:
     plan = make_plan()
     receipts = tmp_path / "receipts"
     receipts.mkdir()
-    evidence = write_evidence(tmp_path, plan)
+    evidence = write_evidence(tmp_path, plan, max_get=5)
     governance = authorize_live_read(
         evidence, plan=plan, receipt_root=receipts, now=lambda: NOW
     )

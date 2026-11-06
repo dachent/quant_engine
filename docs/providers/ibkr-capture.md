@@ -19,7 +19,7 @@ generation, admission, or any existing module.
 | Governance | `governance.py` | Single-use evidence for the exact plan hash and catalog hash; CURRENT authority; review reference is a quant_engine issue comment URL; metering of one SendRequest per planned request, zero retry, at most nine GetStatement attempts. A consumption receipt is created exclusively and rewritten durably before each request. |
 | Credentials | `credentials.py` | Only through the core resolver (`[credentials.ibkr]`). Only the fields a plan needs are read, and only after governance is consumed. |
 | Transport | `transport.py` | HTTPS to `ndcdyn` / `gdcdyn.interactivebrokers.com` only, no redirects, size bound, sanitized errors, pacing of 1 call per second and 10 per minute. Constructed only by the `live` command. |
-| Session | `session.py` | SendRequest once (with `fd`/`td` when the plan overrides the window), stage the exact response, poll GetStatement only for 1019 (20, 40, 80, 120 second backoff), stage the exact statement, write a hash-bound manifest. Stops at the first refusal. |
+| Session | `session.py` | SendRequest once (with `fd`/`td` when the plan overrides the window), stage the exact response, poll GetStatement for 1019 (20, 40, 80, 120 second backoff) and retry a connection-class GetStatement failure (see "GetStatement retries"), stage the exact statement, write a hash-bound manifest. Stops at the first refusal. |
 | Responses | `responses.py` | Classifies success, warn/poll, retry-later (1001, 1009, 1018, 1021), incomplete (1004), settlement-not-ready (1005), P&L-not-ready (1006 to 1008), request errors, malformed or HTML bodies. Every refusal stages no statement. |
 | Raw staging | `staging.py` | Create-only under a caller-supplied absolute root; run directories and files are never overwritten; manifest lists every file with SHA-256 and size. |
 | Normalizer | `normalize.py` | Strict reader (`parse_flex_file`) for activity statements; masked account labels (SHA-256[:16]), NAV, row counts, weekday gaps, hashed security keys. No raw account id, cash amount, or execution detail. |
@@ -168,6 +168,36 @@ in the portal, an override request is unaffected (the request sets its window, a
 request has been seen to return exactly that day), and a request without an override fails loudly:
 the normalizer and verifier refuse any statement outside the planned window, and report any
 uncovered weekday inside it.
+
+## GetStatement retries (connection-class failures)
+
+The service answers a SendRequest with a reference code and the statement is then fetched with
+GetStatement. On 2026-11-05 (evening ET) the GetStatement call failed intermittently with
+`URLError` / `gaierror` (name resolution) after 0.1 seconds, including for the 1-day window that
+delivered minutes earlier and later, while both approved hosts resolved at the checks before and
+after. A report IBKR has already generated must not be thrown away by that, so a failure of the
+connection class (name resolution, connection reset, timeout) on GetStatement is retried:
+
+- the SAME reference code is asked again (it is written to `reference-code.txt` before the first
+  GetStatement) and the SendRequest is never repeated; a failed SendRequest is never retried, even
+  of the connection class, because the service may have accepted it;
+- each retry spends one of the evidence's `metering.max_get_attempts` (the 1019 polls spend them
+  too), after a wait of 5, 15, 30 and then 60 seconds (the poll waits of 20, 40, 80 and 120
+  seconds are unchanged); every attempt opens a fresh connection and so resolves the host again;
+- every failed attempt is recorded in the manifest's attempt log with the exception classes and
+  the GetStatement host name (an approved public IBKR hostname; never the message, URL or
+  parameters), for example `the service request failed (URLError/gaierror) at
+  gdcdyn.interactivebrokers.com`; a run whose attempts end in a report still verifies;
+- when the budget is spent the run is refused as `TRANSPORT_FAILURE` with `get attempts exhausted:`
+  and the last failure as detail, and a new run needs new evidence;
+- an HTTP status answer, a refused host, an oversize body and the service error codes (1012, 1015,
+  1001, 1018, 1004 and the rest) are not retried and keep their refusal; 1019 keeps polling.
+
+Plans that override their windows must carry `max_get_attempts` of at least 6 in their governance
+evidence (the authorization refuses less): the report is normally ready at the first poll, and
+the rest of the budget is for these retries. Evidence for a plan without an override keeps any
+value from 1 to 9. `retry_count` in the evidence stays 0: it counts repeated SendRequests, which never happen. Before each live step an operator should also check that both approved hosts
+resolve.
 
 ## Preflight (before the real pulls)
 

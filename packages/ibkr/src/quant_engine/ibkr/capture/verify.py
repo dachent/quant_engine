@@ -308,7 +308,7 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
     if len(sends) != 1 or sends[0].get("kind") != "SEND_ACCEPTED" or not gets:
         raise _fail("attempt-log")
     if gets[-1].get("kind") != "REPORT" or any(
-        g.get("kind") != "POLL_AGAIN" for g in gets[:-1]
+        g.get("kind") not in ("POLL_AGAIN", "TRANSPORT_FAILURE") for g in gets[:-1]
     ):
         raise _fail("attempt-log")
     checks.append("attempts")

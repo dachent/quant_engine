@@ -213,7 +213,7 @@ def write_evidence(
     *,
     name: str = "evidence.json",
     mutate: Callable[[dict[str, Any]], None] | None = None,
-    max_get: int = 5,
+    max_get: int = 6,
 ) -> Path:
     document: dict[str, Any] = {
         "schema_version": 1,
@@ -249,7 +249,7 @@ class Harness:
         responses: list[bytes | Exception],
         *,
         plan: RequestPlan | None = None,
-        max_get: int = 5,
+        max_get: int = 6,
     ) -> None:
         from quant_engine.ibkr.capture import (
             RawStage,
