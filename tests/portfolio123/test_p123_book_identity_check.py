@@ -214,30 +214,42 @@ def test_positions_at_the_cutoff_roll_back_the_rows_after_it(tmp_path: Path) -> 
     )
 
 
-def test_rolling_back_refuses_unknown_types_and_flags_splits_and_open_closure(
+def test_rolling_back_refuses_only_missing_data_or_a_failed_closure(
     tmp_path: Path,
 ) -> None:
     capture, raw = _capture(tmp_path)
-    base = [("2025-05-12", "A101", "BUY", "100")]
     _book(
         raw,
         "101",
-        trades=[*base, ("2026-03-01", "A101", "WEIRD", "5")],
+        trades=[
+            ("2025-05-12", "A101", "BUY", "100"),
+            ("2026-03-01", "A101", "WEIRD", "5"),
+        ],
         held={"A101": "105.0"},
     )
+    split = [
+        ("2025-05-12", "A202", "BUY", "100"),
+        ("2026-03-01", "A202", "SPLIT", "100"),
+    ]
     _book(
-        raw,
-        "202",
-        trades=[*base, ("2026-03-01", "A202", "SPLIT", "100")],
-        held={"A101": "100.0", "A202": "100.0"},
-    )
-    _book(raw, "303", held={"A303": "1.0"})  # I5 fails at T
+        raw, "202", trades=split, held={"A202": "200.0"}
+    )  # split after D, closes at T
+    _book(raw, "303", trades=split, held={"A202": "100.0"})  # does not close at T
+    _book(raw, "404", trades=split, held={"A202": "200.0"})
+    (raw / "strategy_404_holdings.csv").unlink()  # no holdings export at T
     _manifest(capture)
     report = ic.check_capture(capture, as_of=date(2026, 2, 1))
-    assert _status(report, "101", "I5D") == "FAIL"
-    assert _status(report, "202", "I5D") == "WARN"
-    assert _status(report, "303", "I5D") == "WARN"
-    assert report["books"]["303"]["decision"] == "FAIL"
+    assert _status(report, "101", "I5D") == "FAIL"  # unknown row type after D
+    assert _status(report, "202", "I5D") == "PASS"
+    assert report["books"]["202"]["positions_as_of"]["splits_after_as_of"] == [
+        {"date": "2026-03-01", "shares": "100", "symbol": "A202"}
+    ]
+    assert _status(report, "303", "I5D") == "FAIL"
+    assert _status(report, "404", "I5D") == "FAIL"
+    detail = next(
+        c["detail"] for c in report["books"]["303"]["checks"] if c["check"] == "I5D"
+    )
+    assert "cannot close" in detail and "SPLIT" in detail
 
 
 def test_manifest_mismatch_and_missing_perf_fail(tmp_path: Path) -> None:

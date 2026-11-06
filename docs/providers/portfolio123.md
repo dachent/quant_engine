@@ -207,6 +207,17 @@ the `Start MM/DD/YYYY` string of the page name, cash start, perf start) are in t
 docstring. In particular a live book whose transactions precede its page inception is
 correct, and the holdings export must equal the net shares of its transactions.
 
+For a pull dated after the cutoff D, `--as-of D` adds I5D: the positions at D are the net
+signed shares of the rows dated on or before D, which equals the T holdings export rolled
+back by the later rows exactly when I5 closes at T (a SPLIT enters as its exported signed
+shares). The book is refused, with the numbers, only when data is missing (no holdings
+export, an unreadable date, an unknown row type after D) or the closure fails; the decisions
+file records `positions_as_of` (positions digest, rolled-back rows by type, splits after D).
+No consumer reads a Portfolio123 holdings table; positions at D are an audit record.
+In a schema 2 generation the HAR-derived `transactions`, `equity_curve` and
+`period_performance` rows dated after the cutoff are excluded and counted in
+`har_excluded_after_as_of`, like the capture rows.
+
 Schema 1 plans keep rebuilding under adapter 1.0.0; new plans build under 1.1.0.
 
 ## Generated installations

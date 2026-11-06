@@ -342,6 +342,34 @@ def test_capture_rows_after_the_cutoff_are_excluded_and_counted(tmp_path: Path) 
     assert gate["books"]["101"]["last_date"] == "2026-09-11"  # type: ignore[index]
 
 
+def test_har_rows_of_a_non_captured_book_after_the_cutoff_are_excluded_and_counted(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    (har / "csv").mkdir()
+    (har / "csv" / "strategy_303_transactions.csv").write_text(
+        _full(6, "2026-09-11") + "2026-09-12,LATE,BUY,1,1,1,,,\n", encoding="utf-8"
+    )
+    (har / "csv" / "strategy_303_perf.csv").write_text(
+        PERF + "2026-09-14,3.00,3.00\n", encoding="utf-8"
+    )
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    generation_id = _generate(
+        legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+    )
+    root = data / "generations" / generation_id / "tables"
+    tx = pq.read_table(root / "har_transactions.parquet").to_pylist()
+    curve = pq.read_table(root / "har_equity_curve.parquet").to_pylist()
+    assert max(row["Date"] for row in tx) == "2026-09-11"
+    assert max(row["Date"] for row in curve) == "2026-09-11"
+    assert sum(row["_entity_id"] == "303" for row in tx) == 6
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    assert gate["har_excluded_after_as_of"] == {  # type: ignore[index]
+        "equity_curve": {"303": 1},
+        "transactions": {"303": 1},
+    }
+
+
 def test_publish_refuses_when_current_moved_after_planning(tmp_path: Path) -> None:
     legacy, har, data = _inputs(tmp_path)
     _generate(

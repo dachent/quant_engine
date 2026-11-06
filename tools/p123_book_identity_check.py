@@ -300,7 +300,10 @@ def check_book(
     positions_as_of: dict[str, Any] | None = None
     if as_of is not None:
         positions_as_of, status, detail = _positions_as_of(
-            tx, as_of, closed=names["holdings"].is_file() and not differs
+            tx,
+            as_of,
+            holdings_symbols=len(held) if names["holdings"].is_file() else None,
+            mismatched=len(differs),
         )
         checks.append(_check("I5D", status, detail))
     # I6
@@ -408,16 +411,22 @@ _SHARE_TYPES = {"BUY", "SELL", "SHORT", "COVER", "SPLIT"}
 
 
 def _positions_as_of(
-    tx: Sequence[dict[str, str]], as_of: date, *, closed: bool
+    tx: Sequence[dict[str, str]],
+    as_of: date,
+    *,
+    holdings_symbols: int | None,
+    mismatched: int,
 ) -> tuple[dict[str, Any], str, str]:
     """Positions at ``as_of``: the net signed shares of rows dated on or before it.
 
     The holdings export describes the capture day T; rolling back the rows dated after
-    ``as_of`` gives the positions at ``as_of`` only because I5 closed at T with every row
-    in the same signed-share arithmetic.  An unknown row type or an unreadable date among
-    the rolled-back rows refuses; a SPLIT among them needs review."""
+    ``as_of`` gives the positions at ``as_of`` exactly when I5 closed at T, because every
+    row, a SPLIT included, enters that identity as its exported signed shares.  Refused,
+    with the numbers, only when data is missing (no holdings export, an unreadable date,
+    an unknown row type among the rolled-back rows) or the closure fails."""
     net: dict[str, float] = defaultdict(float)
     rolled: dict[str, int] = defaultdict(int)
+    splits: list[dict[str, str]] = []
     refusals: list[str] = []
     for row in tx:
         kind = row.get("Type") or ""
@@ -427,6 +436,14 @@ def _positions_as_of(
             continue
         if day > as_of:
             rolled[kind] += 1
+            if kind == "SPLIT":
+                splits.append(
+                    {
+                        "date": day.isoformat(),
+                        "shares": row.get("Shares") or "",
+                        "symbol": row.get("Symbol") or "",
+                    }
+                )
             if kind not in _SHARE_TYPES | _NON_SHARE_TYPES:
                 refusals.append(f"unknown row type {kind!r} dated {day}")
             continue
@@ -445,17 +462,29 @@ def _positions_as_of(
         ).hexdigest(),
         "rolled_back_rows": dict(sorted(rolled.items())),
     }
+    facts["splits_after_as_of"] = splits
+    numbers = f"rolled back {dict(sorted(rolled.items()))}, splits {splits}"
     if refusals:
-        return facts, "FAIL", "; ".join(sorted(set(refusals))[:5])
-    if not closed:
-        return facts, "WARN", "positions at as-of not proven: I5 did not close at T"
-    detail = (
-        f"{sum(rolled.values())} rows after {as_of} rolled back "
-        f"({dict(sorted(rolled.items()))}); {len(open_net)} open symbols at {as_of}"
+        return facts, "FAIL", "; ".join(sorted(set(refusals))[:5]) + f"; {numbers}"
+    if holdings_symbols is None:
+        return (
+            facts,
+            "FAIL",
+            f"no holdings export at T to close the roll-back; {numbers}",
+        )
+    if mismatched:
+        return (
+            facts,
+            "FAIL",
+            f"the roll-back cannot close: {mismatched} of {holdings_symbols} symbols "
+            f"differ at T; {numbers}",
+        )
+    return (
+        facts,
+        "PASS",
+        f"{sum(rolled.values())} rows after {as_of} rolled back and I5 closed at T over "
+        f"{holdings_symbols} symbols ({numbers}); {len(open_net)} open symbols at {as_of}",
     )
-    if rolled.get("SPLIT"):
-        return facts, "WARN", detail + "; a SPLIT after as-of needs review"
-    return facts, "PASS", detail
 
 
 def _decision(checks: Sequence[dict[str, str]]) -> str:
