@@ -44,6 +44,7 @@ def _manifest(
     index: int = -1,
     weights: dict[str, float] | None = None,
     observed: str = "2026-09-01",
+    captures: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     capture = Path(tempfile.mkdtemp(dir=tmp_path))
     base._capture_fixture(capture)
@@ -53,6 +54,9 @@ def _manifest(
     snapshots[index]["weights"] = weights or {"SPY": 0.5}
     if flag is not None:
         manifest["capture_provenance"] = {
+            "captures": captures
+            if captures is not None
+            else [{"captured_at_utc": "2026-09-01T10:00:00Z", "role": "json"}],
             "holdings_row_validation": {
                 "explain_tolerance": 0.02,
                 "flags": [
@@ -64,7 +68,7 @@ def _manifest(
                         **flag,
                     }
                 ],
-            }
+            },
         }
     manifest.pop("source_manifest_id")
     manifest["source_manifest_id"] = hashlib.sha256(
@@ -215,3 +219,54 @@ def test_live_holdings_override_only_repairs_the_latest_row(tmp_path: Path) -> N
         reconciliation.ImplementationReconciliationError, match="no usable fallback"
     ):
         reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+LATE = [{"captured_at_utc": "2026-09-02T00:30:00Z", "role": "json"}]
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [{"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}}, _override("2026-09-01")],
+)
+def test_live_fallbacks_refuse_a_capture_after_the_cutoff(
+    tmp_path: Path, flag: dict[str, Any]
+) -> None:
+    manifest = _manifest(tmp_path, flag, captures=LATE)
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError, match="on or before"
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+    with pytest.raises(attribution.ReturnAttributionError, match="on or before"):
+        attribution._tt_target_snapshots(manifest, COMPONENTS, accepted_as_of=SECOND)
+
+
+def test_live_fallback_refuses_a_manifest_with_no_capture_date(tmp_path: Path) -> None:
+    manifest = _manifest(
+        tmp_path, {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}}, captures=[]
+    )
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError, match="on or before"
+    ):
+        reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
+
+
+def test_a_capture_on_the_cutoff_day_still_passes_and_dated_fallbacks_ignore_it(
+    tmp_path: Path,
+) -> None:
+    same_day = [{"captured_at_utc": "2026-09-01T23:59:59Z", "role": "json"}]
+    live = _manifest(
+        tmp_path, {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}}, captures=same_day
+    )
+    assert _weights(reconciliation.with_truncated_row_fallbacks(live, SECOND)) == {
+        "BIL": 0.5,
+        "SPY": 0.5,
+    }
+    dated = _manifest(
+        tmp_path,
+        {"fallback": {"kind": "LAST_COMPLETE_ROW", "observed_date": "2026-08-31"}},
+        captures=LATE,
+    )
+    assert _weights(reconciliation.with_truncated_row_fallbacks(dated, SECOND)) == {
+        "BIL": 0.4,
+        "SPY": 0.6,
+    }

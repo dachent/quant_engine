@@ -1200,6 +1200,13 @@ def with_truncated_row_fallbacks(
 
     A flag whose fallback is unusable fails closed.  Flags dated after the
     cutoff are ignored (the row is outside the calculation).
+
+    The two ``LIVE_*`` fallbacks read the live holdings as they were when the
+    source was captured, so they describe the cutoff only if every recorded
+    capture was taken on or before it: a capture dated after ``accepted_as_of``
+    (or a manifest that records no capture date) refuses them, because a
+    rebalance after the cutoff would otherwise be read as the cutoff state.
+    The dated fallbacks and rows that are complete are not affected.
     """
     provenance = manifest.get("capture_provenance")
     validation = (
@@ -1220,6 +1227,22 @@ def with_truncated_row_fallbacks(
             "TuringTrader truncated row has no usable fallback"
         )
 
+    captures = provenance.get("captures") if isinstance(provenance, dict) else None
+    capture_days: list[date] = []
+    for item in captures if isinstance(captures, list) else []:
+        stamp = item.get("captured_at_utc") if isinstance(item, dict) else None
+        try:
+            capture_days.append(date.fromisoformat(str(stamp)[:10]))
+        except ValueError:
+            capture_days = []
+            break
+
+    def live_capture_after_cutoff() -> ImplementationReconciliationError:
+        return ImplementationReconciliationError(
+            "TuringTrader live holdings fallback needs every capture dated on or "
+            "before the accepted as-of date"
+        )
+
     applied: list[dict[str, str]] = []
     for flag in flags:
         if not isinstance(flag, dict) or flag.get("flag") != "TRUNCATED_ROW":
@@ -1231,6 +1254,11 @@ def with_truncated_row_fallbacks(
         fallback = flag.get("fallback")
         if component is None or not isinstance(fallback, dict):
             raise refuse()
+        if fallback.get("kind") in {
+            "LIVE_HOLDINGS_OVERRIDE",
+            "LIVE_PORTFOLIO_HOLDINGS",
+        } and (not capture_days or max(capture_days) > accepted_as_of):
+            raise live_capture_after_cutoff()
         snapshots = component["dated_holdings"]["snapshots"]
         target = next(
             (s for s in snapshots if s.get("observed_date") == observed), None
