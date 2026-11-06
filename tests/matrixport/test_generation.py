@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1083,3 +1085,75 @@ def test_anchor_coverage_catalog_shape_matches_the_ledger_reader(
     # The catalog is canonical JSON: the block must round-trip byte-identical.
     reloaded = json.loads(catalog_bytes.decode("utf-8"))
     assert reloaded["anchor_coverage"] == block
+
+
+def _rewrite_report(spec: Path, name: str, mutate: Callable[[Any], None]) -> None:
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    path = Path(document["run_root"]) / "reports" / name
+    value = json.loads(path.read_text(encoding="utf-8"))
+    mutate(value)
+    _write_json(path, value)
+    for artifact in document["artifacts"]:
+        if artifact["artifact_id"] == f"reports/{name}":
+            payload = path.read_bytes()
+            artifact["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+            artifact["expected_size_bytes"] = len(payload)
+            break
+    _write_json(spec, document)
+
+
+def _without_statuses(spec: Path) -> None:
+    """A run made with separate extract, export and verify commands."""
+
+    def drop(release: dict[str, Any]) -> None:
+        release.pop("export_status", None)
+        release.pop("extraction_status", None)
+
+    _rewrite_report(spec, "release_status.json", drop)
+
+
+def test_release_status_fields_are_read_from_the_reports_when_the_run_lacks_them(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    plain, _, _ = build_generation(spec)
+    assert "release_status_source" not in plain  # a run that carries the fields
+    _without_statuses(spec)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+    assert catalog["release_status_source"] == {
+        "export_status": "reports/export_status.json",
+        "extraction_status": "reports/extraction_summary.json",
+    }
+
+
+@pytest.mark.parametrize(
+    ("report", "mutation"),
+    [
+        ("export_status.json", {"status": "FAILED"}),
+        ("extraction_summary.json", {"status": "RUNNING"}),
+    ],
+)
+def test_a_report_that_is_not_completed_is_refused_when_the_run_lacks_the_fields(
+    tmp_path: Path, report: str, mutation: dict[str, object]
+) -> None:
+    spec = _spec(tmp_path)
+    _without_statuses(spec)
+    _rewrite_report(spec, report, lambda value: value.update(mutation))
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="release status is not the accepted partial result",
+    ):
+        build_generation(spec)
+
+
+def test_a_present_status_field_is_never_overridden_by_a_report(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    _update_release_status(spec, export_status="FAILED")
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="release status is not the accepted partial result",
+    ):
+        build_generation(spec)
