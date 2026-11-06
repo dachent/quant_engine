@@ -53,7 +53,7 @@ from __future__ import annotations
 import argparse
 import csv
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -93,6 +93,18 @@ def _rows(path: Path) -> list[dict[str, str]]:
 def _day(value: str | None) -> date | None:
     try:
         return date.fromisoformat((value or "").strip())
+    except ValueError:
+        return None
+
+
+def _page_day(value: Any) -> date | None:
+    """Parse a page date: ISO, or the provider's US MM/DD/YYYY."""
+    text = str(value or "").strip()
+    parsed = _day(text)
+    if parsed is not None:
+        return parsed
+    try:
+        return datetime.strptime(text, "%m/%d/%Y").date()
     except ValueError:
         return None
 
@@ -298,7 +310,7 @@ def check_book(
     if page is None:
         checks.append(_check("I7", "WARN", "no page record for this book id"))
     else:
-        inception = _day(str(page.get("inceptionDt")))
+        inception = _page_day(page.get("inceptionDt"))
         start = _START_STRING.search(str(page.get("assetName") or ""))
         start_day = date(int(start[3]), int(start[1]), int(start[2])) if start else None
         page_facts = {
@@ -310,6 +322,11 @@ def check_book(
         }
         problems: list[str] = []
         warns: list[str] = []
+        if inception is None:
+            warns.append(
+                f"page inceptionDt {page.get('inceptionDt')!r} is missing or unparseable;"
+                " the inception check was not run"
+            )
         if cash_day and inception and cash_day > inception:
             problems.append(
                 f"series starts {cash_day} after page inception {inception}"
