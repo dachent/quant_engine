@@ -120,6 +120,10 @@ def _category(provider_id: str, label: str, relative: Path) -> str | None:
             return "AUTHENTICATED_HAR"
         if "cookies" in name:
             return "AUTHENTICATED_SESSION_RISK"
+        if name == "journal.jsonl":
+            # the recorder's per-run journal: a recorded entry line holds the full HAR entry,
+            # so it carries the same provider jwt header values as the HAR
+            return "AUTHENTICATED_HAR_JOURNAL"
         if relative.suffix.lower() == ".png":
             return "ACCOUNT_SCREENSHOT_RISK"
         if name == "account_activity_api_response.json":
