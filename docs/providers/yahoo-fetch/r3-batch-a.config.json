@@ -178,14 +178,14 @@
         "USDT-USD"
       ],
       "interval": "1d",
-      "start": "2025-12-03",
+      "start": "2025-01-01",
       "through": "cutoff",
       "calendar": "every_day",
       "datasets": [
         "history"
       ],
       "artifact_profile": "capture-v0",
-      "min_rows": 270,
+      "min_rows": 540,
       "max_missing_weekdays": 0
     },
     {
