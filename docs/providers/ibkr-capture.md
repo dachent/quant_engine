@@ -89,8 +89,9 @@ document without the key keeps its hash.
 - **What is recorded and checked.** The plan records the requested window; the manifest records
   `send_window` (`fd`, `td`) as sent; the normalizer and the verifier refuse any statement outside
   the requested window, and for a request that set its window they require what came back to be
-  that window: every statement of a one-day role is exactly that day, and the statements of the
-  `security-reference` range together run from the first to the last requested day. The per-day
+  that window: every statement of a one-day role is exactly that day, and every statement of the
+  `security-reference` range (one per account) is exactly the requested window, so a partial or
+  discontinuous answer cannot pass on its first and last day. The per-day
   activity statements of a range are bound to lie inside it; their missing weekdays are reported
   as before. The verifier also refuses a manifest whose `send_window` disagrees with the plan
   (`send-window`) and a returned window that is not the one asked for (`window-override`).

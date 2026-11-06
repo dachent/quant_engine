@@ -207,18 +207,16 @@ def _returns_requested_window(
 ) -> bool:
     """A request that set its window got that window back (not merely a window inside it).
 
-    One-day roles: every statement is exactly that day.  The range security reference: the
-    statements together run from the first to the last requested day.  Per-day activity
-    statements of a range are only bound to lie inside it (their missing weekdays are reported).
+    One-day roles: every statement is exactly that day.  The range security reference: every
+    statement (one per account) is exactly the requested window, so a partial or discontinuous
+    answer cannot pass on its first and last day alone.  Per-day activity statements of a range
+    are only bound to lie inside it (their missing weekdays are reported).
     """
 
     if query.window_kind == WINDOW_SINGLE_DAY:
         return all(span == (request.window_from, request.window_from) for span in spans)
     if query.kind == "security-reference":
-        return (
-            min(start for start, _ in spans) == request.window_from
-            and max(end for _, end in spans) == request.window_to
-        )
+        return all(span == (request.window_from, request.window_to) for span in spans)
     return True
 
 

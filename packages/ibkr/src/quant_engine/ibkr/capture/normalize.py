@@ -192,9 +192,8 @@ def build_normalized(run_dir: Path) -> tuple[dict[str, Any], bytes]:
         if query.window_kind == WINDOW_SINGLE_DAY:
             returned = all(span == (request.window_from,) * 2 for span in spans)
         elif query.kind == KIND_SECURITY:
-            returned = (
-                min(start for start, _ in spans) == request.window_from
-                and max(end for _, end in spans) == request.window_to
+            returned = all(
+                span == (request.window_from, request.window_to) for span in spans
             )
         else:
             returned = True

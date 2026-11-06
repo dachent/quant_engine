@@ -385,3 +385,32 @@ def test_the_all_override_plan_for_the_r3_gap_fits_one_plan_and_ignores_the_pull
                 LABELS,
             ).to_document()
         )
+
+
+def test_a_security_override_needs_every_statement_to_cover_the_window(
+    tmp_path: Path,
+) -> None:
+    # one account answers only the first requested day, another only the last: the first and
+    # last day are both present, but no statement covers the window and the days between are not
+    first = security_xml((ACCOUNT_ONE,), START, START)
+    last = security_xml(("SYNTHACCT2",), END, END)
+    merged = (
+        first.replace(b"</FlexStatements></FlexQueryResponse>", b"")
+        + last[last.index(b"<FlexStatement ") : last.index(b"</FlexStatements>")]
+        + b"</FlexStatements></FlexQueryResponse>"
+    )
+    labels = tuple(sorted({account_label(ACCOUNT_ONE), account_label("SYNTHACCT2")}))
+    plan = RequestPlan(
+        date(2026, 11, 3),
+        (CaptureRequest("security-reference", START, END, True),),
+        labels,
+    )
+    run_dir = _staged(tmp_path / "o", merged, plan)
+    with pytest.raises(NormalizationError, match="not the requested window"):
+        normalize_run(run_dir, tmp_path / "n.json")
+    # a window-wide statement per account is accepted
+    both = security_xml((ACCOUNT_ONE, "SYNTHACCT2"), START, END)
+    ok = _staged(tmp_path / "ok", both, plan)
+    output = tmp_path / "ok.json"
+    normalize_run(ok, output)
+    assert verify_run(ok, output).status == "VERIFIED"
