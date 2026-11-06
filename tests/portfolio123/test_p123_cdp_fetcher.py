@@ -726,7 +726,7 @@ CASH_ONLY_TRANSACTIONS = (
 
 
 def _cash_only_navigate(
-    cash_books: set[int], held_rows: bool = False, extra_row: bool = False
+    cash_books: set[int],
 ) -> Callable[[str, FakeBrowser], list[dict[str, Any]]]:
     def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
         kind, book = _book_of(url)
@@ -734,88 +734,153 @@ def _cash_only_navigate(
         if book in cash_books:
             if kind == "transactions_csv":
                 content = CASH_ONLY_TRANSACTIONS
-                if extra_row:
-                    content += "2020-05-13,AAA,BUY,1,2,3,0,,\r\n"
             elif kind == "holdings_csv":
-                content = "Ticker,Shares\n" + ("AAA,1\n" if held_rows else "")
+                content = "Ticker,Shares\n"
         return browser.download(url, f"{PREFIX[kind]}N.csv", content.encode())
 
     return navigate
 
 
 def _decisions(**by_book: str) -> fetcher.IdentityCheck:
+    """Per-book decisions; a REVIEW carries one warning check (I7), a FAIL one failure."""
+
     def check(
         capture: Path, books: list[str], reference: Path | None
     ) -> dict[str, Any]:
-        return {
-            "books": {
-                b: {"decision": by_book.get("b" + b, "PASS"), "checks": []}
-                for b in books
-            }
-        }
+        out: dict[str, Any] = {}
+        for b in books:
+            decision = by_book.get("b" + b, "PASS")
+            checks = [{"check": "I1", "status": "PASS", "detail": "ok"}]
+            if decision != "PASS":
+                status = "WARN" if decision == "REVIEW" else "FAIL"
+                checks.append({"check": "I7", "status": status, "detail": "x"})
+            out[b] = {"decision": decision, "checks": checks}
+        return {"books": out}
 
     return check
 
 
-def test_cash_only_review_continues(tmp_path: Path) -> None:
-    manifest, _, _ = _run(
+def test_review_never_stops_downloads_and_is_review_pending(tmp_path: Path) -> None:
+    manifest, _, root = _run(
         tmp_path,
-        _cash_only_navigate({BOOKS[1]}),
         allowlist=_allowlist(books=BOOKS),
         check=_decisions(**{f"b{BOOKS[1]}": "REVIEW"}),
     )
-    assert manifest["status"] == "COMPLETE"
+    assert manifest["status"] == "REVIEW_PENDING"
+    assert manifest["stop"] is None
+    assert manifest["books_not_attempted"] == []
+    assert set(manifest["books"]) == {str(b) for b in BOOKS}
     entry = manifest["books"][str(BOOKS[1])]
     assert entry["identity"] == "REVIEW"
-    assert entry["identity_policy"] == "CONTINUE_CASH_ONLY_REVIEW"
+    assert entry["identity_policy"] == "CONTINUE_REVIEW"
+    assert entry["review_checks"] == ["I7"]
     assert manifest["books"][str(BOOKS[0])]["identity_policy"] == "CONTINUE"
-    assert str(BOOKS[2]) in manifest["books"]
+    assert manifest["review_pending"] == {str(BOOKS[1]): ["I7"]}
+    decisions = json.loads((root / "book-identity-decisions.json").read_text())
+    assert decisions["books"][str(BOOKS[1])]["decision"] == "REVIEW"
+    assert (root / "p123-fetch-manifest.json").is_file()
 
 
-def test_non_cash_review_stops_like_a_fail(tmp_path: Path) -> None:
-    manifest, _, _ = _run(
+def test_every_kind_of_review_book_continues(tmp_path: Path) -> None:
+    # a cash-only book (no special case any more), a book with trades, and an
+    # allowlist without holdings and without a page record: all REVIEW, all fetched
+    manifest, _, root = _run(
+        tmp_path,
+        _cash_only_navigate({BOOKS[0]}),
+        allowlist=_allowlist(books=BOOKS, kinds=("transactions_csv", "perf_csv")),
+        check=_decisions(**{f"b{b}": "REVIEW" for b in BOOKS}),
+    )
+    assert manifest["status"] == "REVIEW_PENDING"
+    assert manifest["page_record"] is None
+    assert set(manifest["review_pending"]) == {str(b) for b in BOOKS}
+    assert not list((root / "capture/raw").glob("*holdings*"))
+    assert len(list((root / "capture/raw").glob("strategy_*"))) == 2 * len(BOOKS)
+
+
+def test_all_pass_is_complete_with_nothing_pending(tmp_path: Path) -> None:
+    manifest, _, root = _run(tmp_path, check=_decisions())
+    assert manifest["status"] == "COMPLETE"
+    assert manifest["review_pending"] == {}
+    assert (root / "book-identity-decisions.json").is_file()
+
+
+def test_fail_after_review_stops_at_the_fail(tmp_path: Path) -> None:
+    manifest, _, root = _run(
         tmp_path,
         allowlist=_allowlist(books=BOOKS),
-        check=_decisions(**{f"b{BOOKS[0]}": "REVIEW"}),
+        check=_decisions(**{f"b{BOOKS[0]}": "REVIEW", f"b{BOOKS[1]}": "FAIL"}),
     )
     assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
-    assert manifest["books"][str(BOOKS[0])]["identity_policy"] == "STOP"
-    assert manifest["books_not_attempted"] == [str(BOOKS[1]), str(BOOKS[2])]
+    assert manifest["books_not_attempted"] == [str(BOOKS[2])]
+    assert manifest["books"][str(BOOKS[1])]["identity_policy"] == "STOP"
+    assert manifest["review_pending"] == {str(BOOKS[0]): ["I7"]}
+    assert (root / "book-identity-decisions.json").is_file()
 
 
-@pytest.mark.parametrize(
-    ("decision", "held", "extra"),
-    [
-        ("FAIL", False, False),
-        ("REVIEW", True, False),
-        ("REVIEW", False, True),
-    ],
-)
-def test_cash_only_exception_is_narrow(
-    tmp_path: Path, decision: str, held: bool, extra: bool
+def test_an_unknown_decision_is_a_failure(tmp_path: Path) -> None:
+    manifest, _, _ = _run(tmp_path, check=_decisions(**{f"b{BOOKS[0]}": "WEIRD"}))
+    assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
+
+
+def _cli_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    check: fetcher.IdentityCheck,
+    books: tuple[int, ...] = BOOKS[:2],
+) -> int:
+    payload = fetcher.build_allowlist_bytes(books)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "allow.json"
+    path.write_bytes(payload)
+    clock = FakeClock()
+    browser = FakeBrowser(clock, {TAB: f"{BASE}/app/home"}, good_navigate)
+    monkeypatch.setattr(fetcher, "load_identity_check", lambda **kwargs: check)
+    monkeypatch.setattr(fetcher, "connect", lambda url: browser)
+    monkeypatch.setattr(fetcher.time, "monotonic", clock)
+    return fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:9333",
+            "--allowlist",
+            str(path),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "out"),
+            "--download-timeout",
+            "10",
+            "--no-reference",
+        ]
+    )
+
+
+def test_exit_codes_pass_review_fail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    manifest, _, _ = _run(
-        tmp_path,
-        _cash_only_navigate({BOOKS[0]}, held_rows=held, extra_row=extra),
-        check=_decisions(**{f"b{BOOKS[0]}": decision}),
+    assert _cli_run(tmp_path / "a", monkeypatch, _decisions()) == 0
+    assert "REVIEW_PENDING" not in capsys.readouterr().out
+    code = _cli_run(
+        tmp_path / "b",
+        monkeypatch,
+        _decisions(**{f"b{BOOKS[0]}": "REVIEW", f"b{BOOKS[1]}": "REVIEW"}),
     )
-    assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
-    assert manifest["books_not_attempted"] == [str(BOOKS[1])]
-
-
-def test_is_cash_only_reads_the_saved_files(tmp_path: Path) -> None:
-    raw = tmp_path
-    (raw / "strategy_5_transactions.csv").write_text(CASH_ONLY_TRANSACTIONS)
-    assert fetcher.is_cash_only(raw, 5)
-    (raw / "strategy_5_holdings.csv").write_text("Ticker,Shares\n")
-    assert fetcher.is_cash_only(raw, 5)
-    (raw / "strategy_5_holdings.csv").write_text("Ticker,Shares\nAAA,1\n")
-    assert not fetcher.is_cash_only(raw, 5)
-    assert not fetcher.is_cash_only(raw, 6)
-    (raw / "strategy_7_transactions.csv").write_text(
-        "Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes\n2020-01-01,A,BUY,1,1,1,0,,\n"
+    out = capsys.readouterr().out
+    assert code == 4
+    assert '"status":"REVIEW_PENDING"' in out
+    for book in BOOKS[:2]:
+        assert f"REVIEW_PENDING book={book} checks=I7" in out
+    code = _cli_run(
+        tmp_path / "c",
+        monkeypatch,
+        _decisions(**{f"b{BOOKS[0]}": "REVIEW", f"b{BOOKS[1]}": "FAIL"}),
     )
-    assert not fetcher.is_cash_only(raw, 7)
+    out = capsys.readouterr().out
+    assert code == 3
+    assert "STOP STOP_IDENTITY_FAIL" in out
+    assert (tmp_path / "c" / "out" / "book-identity-decisions.json").is_file()
 
 
 def test_there_is_no_require_identity_pass_option() -> None:

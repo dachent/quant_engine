@@ -76,9 +76,11 @@ ALLOWED_CDP_METHODS = frozenset(
 #: the request id of an exact allowlisted designer-model GET.
 NETWORK_CDP_METHODS = frozenset({"Network.enable", "Network.getResponseBody"})
 JSON_MEDIA = frozenset({"application/json", "text/json"})
-#: Exit codes: 0 done, 2 refused before sending, 3 stopped mid-run.
+#: Exit codes: 0 done, 2 refused before sending, 3 stopped mid-run, 4 review pending.
 EXIT_REFUSED = 2
 EXIT_STOP = 3
+#: The capture is complete but at least one book is REVIEW: not a failure.
+EXIT_REVIEW_PENDING = 4
 
 DRIVE_URL = "https://drive.google.com/uc?export=download&id={id}"
 #: Exact hosts a Drive download may start from or be redirected to. The per-file
@@ -956,40 +958,29 @@ def _prepare_root(root: Path) -> tuple[Path, Path, Path]:
     return incoming, capture, root
 
 
-def _data_rows(path: Path) -> list[dict[str, str]]:
-    text = path.read_bytes().decode("utf-8-sig")
-    return [row for row in csv.DictReader(io.StringIO(text)) if any(row.values())]
+def _identity_policy(decision: str) -> str:
+    """STOP for anything but PASS or REVIEW; REVIEW never stops a download.
 
-
-def is_cash_only(raw: Path, book_id: int) -> bool:
-    """A book whose export is a single start-cash row and which holds nothing.
-
-    The transactions file has exactly one data row, of type ``CASH``; a holdings file,
-    when one was fetched, has no data rows.
-    """
-
-    transactions = raw / KIND_BY_NAME["transactions_csv"].saved.format(id=book_id)
-    holdings = raw / KIND_BY_NAME["holdings_csv"].saved.format(id=book_id)
-    try:
-        rows = _data_rows(transactions)
-        held = _data_rows(holdings) if holdings.is_file() else []
-    except (OSError, UnicodeDecodeError, csv.Error):
-        return False
-    return len(rows) == 1 and rows[0].get("Type") == "CASH" and not held
-
-
-def _identity_policy(decision: str, raw: Path, book_id: int) -> str:
-    """CONTINUE for PASS, CONTINUE_CASH_ONLY_REVIEW for a cash-only REVIEW, else STOP.
-
-    A REVIEW (warnings only) is accepted for no other book: a warning on a book with
-    trades or holdings is a stop, exactly like a FAIL.
+    A REVIEW is a set of warnings (a missing optional holdings export, no page record,
+    a book that is not on the account page, ...). The operator accepts each one at
+    generation time (``portfolio123_generation.py plan --accept-identity-review
+    ID=REASON``), so the run finishes and is reported as REVIEW_PENDING (exit 4). An
+    unknown or missing decision is treated as a FAIL.
     """
 
     if decision == "PASS":
         return "CONTINUE"
-    if decision == "REVIEW" and is_cash_only(raw, book_id):
-        return "CONTINUE_CASH_ONLY_REVIEW"
+    if decision == "REVIEW":
+        return "CONTINUE_REVIEW"
     return "STOP"
+
+
+def _review_checks(item: Mapping[str, Any]) -> list[str]:
+    """Names of the checks that are not PASS in one book's decision."""
+
+    return sorted(
+        str(c.get("check")) for c in item.get("checks", []) if c.get("status") != "PASS"
+    )
 
 
 def _capture_manifest(files: Sequence[Landed]) -> bytes:
@@ -1148,9 +1139,9 @@ def run_p123(
                 str(c.get("check")): str(c.get("status"))
                 for c in result.get("checks", [])
             }
-            entry["identity_policy"] = _identity_policy(
-                decision, capture / "raw", book.book_id
-            )
+            entry["identity_policy"] = _identity_policy(decision)
+            if decision == "REVIEW":
+                entry["review_checks"] = _review_checks(result)
             if entry["identity_policy"] == "STOP":
                 raise FetchStop(
                     "STOP_IDENTITY_FAIL", f"book identity decision {decision}"
@@ -1192,10 +1183,28 @@ def run_p123(
             base / "book-identity-decisions.json",
             (json.dumps(report, indent=1, sort_keys=True, default=str) + "\n").encode(),
         )
+    final_books = dict(report.get("books", {}))
+    review: dict[str, list[str]] = {
+        bid: _review_checks(item)
+        for bid, item in final_books.items()
+        if item.get("decision") == "REVIEW"
+    }
+    for bid, entry in books.items():
+        if bid not in final_books and entry.get("identity") == "REVIEW":
+            review[bid] = list(entry.get("review_checks", []))
+    failed = sorted(
+        bid for bid, item in final_books.items() if item.get("decision") == "FAIL"
+    )
+    if stop is None and failed:
+        stop = FetchStop(
+            "STOP_IDENTITY_FAIL", "final identity check failed: " + ", ".join(failed)
+        )
+    status = "STOPPED" if stop else ("REVIEW_PENDING" if review else "COMPLETE")
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
         "mode": "p123",
-        "status": "STOPPED" if stop else "COMPLETE",
+        "status": status,
+        "review_pending": review,
         "stop": {"code": stop.code, "detail": stop.detail} if stop else None,
         "allowlist_sha256": allowlist.sha256,
         "capture_directory": "capture",
@@ -1387,6 +1396,7 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
             for book, item in manifest["books"].items()
         }
         out["books_not_attempted"] = len(manifest["books_not_attempted"])
+        out["review_pending"] = manifest["review_pending"]
     return out
 
 
@@ -1462,6 +1472,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if stop is not None:
         print(f"STOP {stop.code}")
         return EXIT_STOP
+    if manifest["status"] == "REVIEW_PENDING":
+        # Nothing non-PASS passes silently: every REVIEW book and its checks are named.
+        for book, names in sorted(manifest["review_pending"].items()):
+            print(f"REVIEW_PENDING book={book} checks={','.join(names) or '-'}")
+        return EXIT_REVIEW_PENDING
     return 0
 
 
