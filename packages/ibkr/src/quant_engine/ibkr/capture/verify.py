@@ -46,8 +46,8 @@ _COUNTED = {
 class VerificationError(ValueError):
     """Verification failed; ``reason`` is a stable, value-free code."""
 
-    def __init__(self, reason: str) -> None:
-        super().__init__(reason)
+    def __init__(self, reason: str, detail: str | None = None) -> None:
+        super().__init__(reason if detail is None else f"{reason}: {detail}")
         self.reason = reason
 
 
@@ -315,8 +315,14 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
 
     statements, securities = _scan_raw(run_dir / _STATEMENT)
     for item in statements:
-        if not set(query.sections) <= item["sections"]:
-            raise _fail("statement-sections")
+        missing = [name for name in query.sections if name not in item["sections"]]
+        if missing:
+            # section and role names carry no account data, so the refusal says which
+            # element the saved query lacks and for which role (credential field)
+            raise VerificationError(
+                "statement-sections",
+                f"{query.name} ({query.query_field}) lacks {', '.join(missing)}",
+            )
     rows: list[dict[str, Any]] = []
     spans: list[tuple[date, date]] = []
     for item in statements:

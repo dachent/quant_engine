@@ -135,7 +135,10 @@ def _security_statements(path: Path, required: tuple[str, ...]) -> list[dict[str
                 raise NormalizationError("a FlexStatement lacks account or dates")
             present = {item.tag.rsplit("}", 1)[-1] for item in element.iter()}
             if not set(required) <= present:
-                raise NormalizationError("security statement sections missing")
+                raise NormalizationError(
+                    "security statement sections missing: "
+                    + ", ".join(sorted(set(required) - present))
+                )
             try:
                 start_day = date.fromisoformat(f"{start[:4]}-{start[4:6]}-{start[6:8]}")
                 end_day = date.fromisoformat(f"{end[:4]}-{end[4:6]}-{end[6:8]}")

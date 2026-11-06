@@ -84,9 +84,17 @@ document without the key keeps its hash.
   statement it returns: `activity-history` and `activity-current-increment` the nine sections of
   `ACTIVITY_SECTIONS` (`AccountInformation`, `CashTransactions`, `ChangeInNAV`, `ConversionRates`,
   `CorporateActions`, `EquitySummaryByReportDateInBase`, `OpenPositions`, `Trades`, `Transfers`);
-  `security-reference` needs `OpenPositions` and `Trades`. The verifier refuses a statement that
-  lacks a catalogued section of its role (`statement-sections`), so a query that is too narrow
-  fails closed on the first run. Configuration may point all three `query_*` fields at the same
+  `security-reference` needs `OpenPositions` and `Trades`. The reader and the verifier match
+  these as element tags at any depth inside each `FlexStatement`, not as top-level section
+  names: in a real statement `AccountInformation` and `ChangeInNAV` are elements, `CashTransactions`,
+  `ConversionRates`, `CorporateActions`, `OpenPositions`, `Trades` and `Transfers` are wrappers, and
+  `EquitySummaryByReportDateInBase` is the row inside the wrapper `EquitySummaryInBase` (the
+  check keys on the row, so an empty wrapper does not satisfy it). Every statement must also be a
+  single day (`fromDate` equals `toDate`: one statement per account and day; the reader refuses
+  anything else). The verifier refuses a statement that lacks a catalogued element, naming it and
+  the role (`statement-sections: activity-history (query_activity_history) lacks
+  EquitySummaryByReportDateInBase`), so a query that is too narrow fails closed on the first run,
+  and the normalizer's refusal names the same tags. Configuration may point all three `query_*` fields at the same
   secret (the resolver reads each field independently; a test covers it).
 - **Token.** Per IBKR's guide a Flex Web Service token is valid for 6 hours by default; its
   validity is set when it is created in Client Portal. The service has no call that returns a token's validity, so the driver cannot
@@ -101,10 +109,32 @@ Read-only probe, 2026-11-05 (not a capture; nothing was written or retained): on
 saved query, SendRequest `v=3` with `fd=td=20261103` was accepted and the first GetStatement after
 20 seconds returned the report (1.84 MB, 20.8 seconds in all) with 4 statements, each with
 `fromDate=toDate=20261103` and an empty `period`: the returned window equalled the override. A
-31-day request (`fd=20261001`, `td=20261031`) was answered with error 1001 (retry later) and was
-not retried, so the 31-day case is untested. That saved query held 49 sections and did not hold
-`EquitySummaryByReportDateInBase` (it held `EquitySummaryInBase`), so it does not satisfy the
-activity roles above until that section is added.
+31-day request (`fd=20261001`, `td=20261031`) was answered with error 1001 (retry later) twice, the
+second time well over three minutes after the first, in 0.7 seconds each (a refusal at SendRequest,
+not a slow generation). A 7-day request (`fd=20261026`, `td=20261101`) was then accepted, but the
+first GetStatement failed at the transport layer (the cause was not recorded) and was not retried.
+Nothing larger than one day has delivered; one request of each size is too little evidence to say
+whether the 1001 is size-related or transient. The saved query returned 49 sections as direct children of each statement, among them
+every wrapper and element of the activity list above; the NAV row sits inside the wrapper
+`EquitySummaryInBase`, the same structure as the retained legacy monthly XML (one statement per
+account and day, 88 wrappers with 88 rows in the 2026-04 file), so the existing saved query
+satisfies the activity roles and needs no portal edit. (An earlier reading of this probe took the
+wrapper for a different section; it was wrong.)
+
+## Preflight (before the real pulls)
+
+Before the real pulls, run one one-day request per role (the smallest window each role accepts,
+ending before the pull date) and read three things from the three runs: the token (a refused
+SendRequest with code 1012 or 1015 is an expired or invalid token), the returned window (the
+override check: every statement is exactly the requested day), and the sections (the verifier names
+a missing element and the role). Recommended form: an ordinary three-request plan through the same
+`live` command with its own governance evidence. The evidence rule is per plan (single-use evidence
+bound to the plan hash, a reviewed issue comment, a receipt written before each request), and the
+preflight plan has a different hash from the real plans, so a separate approval comment is needed;
+batch it with the real ones. A "preflight mode" that read the credentials with a throwaway receipt
+would be a second path to the credentials without that evidence, and is not recommended. Run
+`normalize` and `verify` on the three runs; the preflight costs three SendRequests and their
+polls, about 2 MB for the activity roles.
 
 ## Credential configuration
 

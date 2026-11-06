@@ -60,8 +60,10 @@ def _statement(account: str, day: date, *, extra_row: str = "") -> str:
         'toCurrency="USD" rate="1" />'
         "</ConversionRates>"
         "<CorporateActions />"
+        "<EquitySummaryInBase>"
         "<EquitySummaryByReportDateInBase "
         f'accountId="{account}" reportDate="{stamp}" total="1000.50" />'
+        "</EquitySummaryInBase>"
         "<OpenPositions>"
         f'<OpenPosition accountId="{account}" reportDate="{stamp}" '
         'levelOfDetail="SUMMARY" conid="900001" currency="USD" position="2" '

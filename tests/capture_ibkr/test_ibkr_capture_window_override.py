@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import re
 import json
 from pathlib import Path
 
@@ -217,3 +218,36 @@ def test_all_three_roles_can_share_one_vault_secret() -> None:
         config, plan, sources={"windows-credential-manager": source}
     )
     assert {resolved[field].reveal() for field in fields} == {FAKE_B}
+
+
+def _without_nav_row(body: bytes) -> bytes:
+    return re.sub(rb"<EquitySummaryByReportDateInBase [^>]*/>", b"", body)
+
+
+def test_a_statement_without_the_nav_row_is_refused_naming_the_section_and_role(
+    tmp_path: Path,
+) -> None:
+    body = _without_nav_row(activity_xml((ACCOUNT_ONE,), weekday_range(START, END)))
+    assert b"<EquitySummaryInBase></EquitySummaryInBase>" in body  # wrapper, no row
+    run_dir = _staged(tmp_path / "r", body, _plan("activity-history", START, END))
+    with pytest.raises(NormalizationError, match="EquitySummaryByReportDateInBase"):
+        normalize_run(run_dir, tmp_path / "n.json")
+    with pytest.raises(VerificationError) as error:
+        verify_run(run_dir, tmp_path / "unused.json")
+    assert error.value.reason == "statement-sections"
+    message = str(error.value)
+    assert "activity-history" in message and "query_activity_history" in message
+    assert "EquitySummaryByReportDateInBase" in message
+
+
+def test_the_nav_check_keys_on_the_row_element_not_on_its_wrapper(
+    tmp_path: Path,
+) -> None:
+    body = activity_xml((ACCOUNT_ONE,), weekday_range(START, END))
+    unwrapped = body.replace(b"<EquitySummaryInBase>", b"").replace(
+        b"</EquitySummaryInBase>", b""
+    )
+    run_dir = _staged(tmp_path / "r", unwrapped, _plan("activity-history", START, END))
+    output = tmp_path / "n.json"
+    normalize_run(run_dir, output)
+    assert verify_run(run_dir, output).status == "VERIFIED"
