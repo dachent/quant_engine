@@ -1235,3 +1235,37 @@ def test_consistent_defaults_pin_the_governed_bytes_unchanged(
             "root": "repo",
             "sha256": _sha((world["repo"] / relative).read_bytes()),
         }
+
+
+def test_only_directories_holding_the_whole_family_are_advertised(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = world["qe"] / "data-quantbase" / "source-runs"
+    source = root / "run-one" / "artifacts" / "csv" / "accounts.csv"
+    _put(root / "run-two" / "artifacts" / "csv" / "accounts.csv", source.read_bytes())
+    for argv in (acceptance_args(world), sleeve_args(world)):
+        err = _stderr(world, argv, capsys)
+        assert "FAIL: AMBIGUOUS_FILE:" in err
+        assert "--artifact-dir quantbase=qe:data-quantbase/source-runs/run-one" in err
+        assert "run-two" not in err.partition("narrow the search")[2]
+    # when no candidate holds the family, no flag is suggested
+    (
+        root / "run-one" / "artifacts" / "csv" / "dashboard_Total_pricehistory.csv"
+    ).unlink()
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "no candidate directory holds the whole quantbase family" in err
+    assert "narrow the search" not in err
+
+
+def test_a_stale_provider_does_not_hide_a_later_ambiguous_provider(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = make_world(tmp_path, as_of={"ibkr": "2031-03-01"})
+    root = world["qe"] / "data-quantbase" / "source-runs"
+    source = root / "run-one" / "artifacts" / "csv" / "accounts.csv"
+    _put(root / "run-two" / "artifacts" / "csv" / "accounts.csv", source.read_bytes())
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "2 inputs are refused" in err
+    assert "[STALE_GENERATION] ibkr" in err
+    assert "[AMBIGUOUS_FILE] quantbase_accounts" in err
+    assert "--artifact-dir quantbase=qe:data-quantbase/source-runs/run-one" in err

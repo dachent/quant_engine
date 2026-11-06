@@ -430,6 +430,17 @@ def _narrowing_dirs(found: Sequence[Path]) -> list[Path]:
     return dirs
 
 
+def _resolves_family(directory: Path, family: Sequence[tuple[str, int, str]]) -> bool:
+    """Every ``(sha, size, name)`` of the family is found exactly once below ``directory``."""
+
+    for sha, size, name in family:
+        try:
+            find_by_content(directory, sha, size, name, "family check")
+        except AcceptanceInputsError:
+            return False
+    return True
+
+
 def find_by_content(
     directory: Path,
     sha: str,
@@ -440,6 +451,7 @@ def find_by_content(
     provider: str | None = None,
     roots: Mapping[str, Path] | None = None,
     narrowable: bool = True,
+    family: Sequence[tuple[str, int, str]] = (),
 ) -> Path:
     """The one file below ``directory`` with this content (and name, when given).
 
@@ -476,17 +488,28 @@ def find_by_content(
         shown = ", ".join(p.relative_to(directory).as_posix() for p in found[:3])
         headline = f"{what}: {len(found)} files match ({shown})"
         who = provider or "PROVIDER"
+        # --artifact-dir serves every capture of the provider: advertise only a directory
+        # in which the whole family resolves to exactly one file each
+        usable = [d for d in _narrowing_dirs(found) if _resolves_family(d, family)]
         options = " | ".join(
-            f"--artifact-dir {who}={_ref_label(d, roots)}"
-            for d in _narrowing_dirs(found)
+            f"--artifact-dir {who}={_ref_label(d, roots)}" for d in usable
         )
-        fix = (
-            f"narrow the search with one of: {options} "
-            f"(the directory must hold every {who} capture)"
-            if narrowable
-            else f"two copies sit under the generation directory {directory.as_posix()}; "
-            "--artifact-dir does not apply to a normalized output, remove the stray copy"
-        )
+        if not narrowable:
+            fix = (
+                f"two copies sit under the generation directory {directory.as_posix()}; "
+                "--artifact-dir does not apply to a normalized output, remove the stray copy"
+            )
+        elif usable:
+            fix = (
+                f"narrow the search with one of: {options} "
+                f"(the directory must hold every {who} capture)"
+            )
+        else:
+            fix = (
+                f"no candidate directory holds the whole {who} family exactly once; "
+                f"assemble one directory with every {who} capture and pass it as "
+                f"--artifact-dir {who}=KEY:REL"
+            )
         raise AcceptanceInputsError(
             "AMBIGUOUS_FILE", f"{headline}; {fix}", headline=headline, fix=fix
         )
@@ -716,12 +739,29 @@ def load_generation(
     )
 
 
+def _family_of(
+    generation: Generation, artifact_ids: Sequence[str]
+) -> list[tuple[str, int, str]]:
+    """``(sha, size, name)`` of the searched (non-normalized) artifacts a provider is asked for."""
+
+    family: list[tuple[str, int, str]] = []
+    for artifact_id in artifact_ids:
+        record = generation.artifacts.get(artifact_id)
+        if record is None or artifact_id.startswith("normalized/"):
+            continue
+        sha, size = record.get("sha256"), record.get("size_bytes")
+        if isinstance(sha, str) and _SHA.match(sha) and isinstance(size, int):
+            family.append((sha, size, artifact_id.rsplit("/", 1)[-1]))
+    return family
+
+
 def artifact_file(
     generation: Generation,
     artifact_id: str,
     search: Path | None,
     what: str,
     roots: Mapping[str, Path] | None = None,
+    family_ids: Sequence[str] = (),
 ) -> tuple[Path, str, int, Mapping[str, Any]]:
     """The bytes of one manifest artifact: ``(path, sha256, size, record)``."""
 
@@ -757,6 +797,7 @@ def artifact_file(
             what,
             provider=generation.provider,
             roots=roots,
+            family=_family_of(generation, family_ids),
         )
     return path, sha, size, record
 
@@ -1126,10 +1167,18 @@ def _acceptance_inputs(
     # provider captures, from the cycle's generations
     generations: dict[str, Generation] = {}
     located: dict[str, tuple[Path, str, int, Mapping[str, Any]]] = {}
+    failed: set[str] = set()
     for role, (family, artifact_id) in ACCEPTANCE_ARTIFACTS.items():
         provider = role.partition("_")[0]
+        if provider in failed:
+            continue
         if provider not in generations:
-            generations[provider] = load_generation(resolved, provider, cutoff)
+            try:
+                generations[provider] = load_generation(resolved, provider, cutoff)
+            except AcceptanceInputsError as exc:
+                refusals.add_error(exc)  # an independent provider is still scanned
+                failed.add(provider)
+                continue
         try:
             path, sha, size, record = artifact_file(
                 generations[provider],
@@ -1137,6 +1186,11 @@ def _acceptance_inputs(
                 artifact_dirs.get(provider),
                 role,
                 roots,
+                [
+                    a
+                    for r, (_f, a) in ACCEPTANCE_ARTIFACTS.items()
+                    if r.partition("_")[0] == provider
+                ],
             )
         except AcceptanceInputsError as exc:
             if exc.code != "AMBIGUOUS_FILE":
@@ -1421,14 +1475,31 @@ def _sleeve_inputs(
     inputs: dict[str, dict[str, str]] = {}
     generations: dict[str, Generation] = {}
     located: dict[str, tuple[Path, str]] = {}
+    failed: set[str] = set()
     for role, artifact_id in SLEEVE_ARTIFACTS.items():
         provider = role.partition("_")[0]
+        if provider in failed:
+            continue
         if provider not in generations:
-            generations[provider] = load_generation(resolved, provider, cutoff)
+            try:
+                generations[provider] = load_generation(resolved, provider, cutoff)
+            except AcceptanceInputsError as exc:
+                refusals.add_error(exc)  # an independent provider is still scanned
+                failed.add(provider)
+                continue
         generation = generations[provider]
         try:
             path, sha, _size, _record = artifact_file(
-                generation, artifact_id, artifact_dirs.get(provider), role, roots
+                generation,
+                artifact_id,
+                artifact_dirs.get(provider),
+                role,
+                roots,
+                [
+                    a
+                    for r, a in SLEEVE_ARTIFACTS.items()
+                    if r.partition("_")[0] == provider
+                ],
             )
         except AcceptanceInputsError as exc:
             if exc.code != "AMBIGUOUS_FILE":
