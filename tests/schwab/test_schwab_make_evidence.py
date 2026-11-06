@@ -305,3 +305,32 @@ def test_account_compare_refuses_when_no_response_observed_or_duplicates() -> No
         _compare(None)
     with pytest.raises(driver.DriverError, match="twice"):
         _compare(["EXT-A", "EXT-A"])
+
+
+def test_a_budget_that_cannot_complete_a_capture_is_refused_and_leaves_no_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # three accounts need 1 holdings + 3 balances + 3 transaction pages = 7 requests
+    assert driver.main(_args(tmp_path, **{"--max-requests": "6"})) == 2
+    assert "at least 7" in capsys.readouterr().out
+    assert not (tmp_path / "evidence.json").exists()
+    assert driver.main(_args(tmp_path, **{"--max-requests": "7"})) == 0
+
+
+def test_check_evidence_refuses_an_unworkable_budget(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    document = driver.build_evidence(
+        cutoff=driver.parse_cutoff("2031-06-13"),
+        account_count=3,
+        holdings_body=BODY,
+        review_identity="synthetic-reviewer",
+        review_reference=REVIEW,
+        issued_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        expires_at=datetime(2999, 1, 1, tzinfo=timezone.utc),
+        max_requests=1,
+    )
+    path = tmp_path / "low.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    assert driver.main(["check-evidence", str(path)]) == 2
+    assert "cannot complete a capture" in capsys.readouterr().out

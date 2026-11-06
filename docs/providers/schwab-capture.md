@@ -429,7 +429,7 @@ directory outside the world.
    --prior-day 2026-11-05 --out <ev>/schwab-nav-derivation.json --report <ev>/schwab-nav-report.json`
    (add `--waive-prior-closure ACCOUNT=REASON` only for an account the run shows transactions on D for; see below).
 4. `python tools/schwab_capture_ingest.py ingest <run> --crosswalk <xw> --cutoff 2026-11-06 --official-closes-dir
-   <yahoo run> --config <ingest config> --output-root <ingest root> --base-spec <base spec> --spec-out
+   <closes> --config <ingest config> --output-root <ingest root> --base-spec <base spec> --spec-out
    <ev>/schwab-composed-spec.json --derivation-record <ev>/schwab-nav-derivation.json`.
 5. `python tools/schwab_generation.py stage <ev>/schwab-composed-spec.json <dataSchwab root>` (then `publish` with the
    accepted generation id), giving the generation id and `generation.json` sha256.

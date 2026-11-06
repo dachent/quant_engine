@@ -1881,6 +1881,18 @@ def build_evidence(
     }
 
 
+def _require_workable_budget(checked: ValidatedEvidence) -> None:
+    """A capture makes one holdings request, one balance request per account and at least one
+    transaction page per account; a smaller budget would consume the evidence and fail."""
+
+    needed = 1 + 2 * checked.account_count
+    if checked.max_requests < needed:
+        raise GovernanceError(
+            f"max_requests {checked.max_requests} cannot complete a capture of "
+            f"{checked.account_count} accounts (at least {needed})"
+        )
+
+
 def _evidence_summary(checked: ValidatedEvidence) -> dict[str, object]:
     return {
         "account_count": checked.account_count,
@@ -1918,6 +1930,7 @@ def _make_evidence(args: argparse.Namespace) -> dict[str, object]:
     try:
         # Same checks authorize runs, evaluated at issue time; none consumed.
         checked = validate_evidence(args.output, now=lambda: issued)
+        _require_workable_budget(checked)
     except DriverError:
         args.output.unlink(missing_ok=True)
         raise
@@ -1926,6 +1939,7 @@ def _make_evidence(args: argparse.Namespace) -> dict[str, object]:
 
 def _check_evidence(args: argparse.Namespace) -> dict[str, object]:
     checked = validate_evidence(args.evidence)
+    _require_workable_budget(checked)
     summary = _evidence_summary(checked)
     if args.receipt_root is not None:
         summary["already_consumed"] = (
