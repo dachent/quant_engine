@@ -226,6 +226,36 @@ listed non-trading day in the plan. The 2026-11-06 request is the last increment
   compares with the newest statement in the build; the capture verify above is what checks that the
   statements reach the cutoff.
 
+## R3 IBKR commands, end to end (no hand-written file)
+
+The plan and the generation source spec are produced and bound by commands; nothing is typed into
+a JSON file. `python -I -m quant_engine.ibkr.capture` is written `CAP` below.
+
+1. `CAP build-plan --first-day 2026-09-21 --last-day 2026-11-06 --pull-date PULL --label LABEL
+   [--label LABEL ...] [--non-trading-day DAY ...] --out PLAN` writes the plan (one override request
+   per trading day, create-only) and prints its `plan_sha256`; the labels are decided as described
+   under "Account scope" before this step. `CAP plan-hash PLAN` re-reads it.
+2. Evidence for that plan hash (`max_send_requests` 35, `max_get_attempts` 6) and the issue comment.
+3. `CAP live --plan PLAN --governance EVIDENCE --config CREDENTIALS.toml --receipt-root RECEIPTS
+   --staging-root DATA_IBKR/source-runs --user-agent UA --deadline-utc TIME`: the staging root is
+   inside the generation spec's `data-ibkr` root, because the spec names each statement by its path
+   below that root.
+4. For every staged run: `CAP normalize RUN OUT` then `CAP verify RUN OUT` (refuses any gap).
+5. `CAP bind-spec --base-spec R21_SPEC --root-id data-ibkr --as-of CUTOFF --run-dir RUN
+   [--run-dir RUN ...] [--exclusion 'ATOM=PROVENANCE'] --preflight --out R3_SPEC` re-normalizes and
+   re-verifies every run, adds each statement as a `REFRESH_FLEX_ACTIVITY` source with its actual
+   sha256 and size (one per day; a duplicate day or an artifact already in the spec is refused),
+   sets the generation date (not before any source), declares the owner's exclusions, runs the
+   generation builder on a scratch copy and writes the spec (create-only) only if the builder
+   accepts it. The base spec is the R2.1 spec (schema version 2 or 3: 8 primary XMLs, the retained
+   refresh runs, the retained TWS snapshot and the references carried unchanged).
+6. `python -I tools/ibkr_generation.py build R3_SPEC` (the same checks without writes), then
+   `stage R3_SPEC OUTPUT_ROOT` and `publish R3_SPEC OUTPUT_ROOT GENERATION_ID`.
+
+After a refusal or a reached deadline, the same commands with `--first-day` at the first
+unattempted day make the remaining-days plan (new hash, new evidence), and `bind-spec` takes every
+verified run of both pulls.
+
 ## Account scope: closed versus uncaptured
 
 Two different lists must agree before the plan is hashed: the plan's `expected_account_labels`
@@ -277,12 +307,11 @@ identical. For R3:
   conid (it refuses only conflicting values); whether the reconciliation builder dedupes the same
   trade ids is UNVERIFIED, so confirm it on the first run or decide that the increment is the
   newest file only.
-- **Who and when:** the release session assembles the spec after the pull and verification (P2/P3),
-  from the verified runs; it needs no owner time except the declared-exclusion provenance. The
-  skeleton above is a list, not a file: the sha256 and size of each new statement exist only after
-  the capture, so the spec is written from the verified runs and the generation builder's own
-  checks (hashes, role counts, the end rule) are the gate; no template with placeholder hashes is
-  shipped.
+- **Who and when:** the release session assembles the spec after the pull and verification (P2/P3)
+  with `bind-spec` (above); it needs no owner time except the declared-exclusion provenance. The
+  hashes of the new statements exist only after the capture, so the spec is bound from the verified
+  runs, and the generation builder's own checks (hashes, role counts, the end rule) are the gate
+  (`--preflight`).
 - **A refusal mid-plan.** The staged prefix is verified and kept run by run; the remaining days
   are a new plan (its own hash, comment and evidence; the first plan's evidence does not cover
   it). The generation is built only once the union of the prefix and the remaining runs reaches the
