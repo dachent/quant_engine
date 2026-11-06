@@ -353,7 +353,7 @@ def _strings(value: object, name: str) -> list[str]:
 
 def _report_contract(
     paths: Mapping[str, Path], *, run_id: str, baseline: Mapping[str, Any]
-) -> tuple[list[dict[str, object]], dict[str, int], list[str], date]:
+) -> tuple[list[dict[str, object]], dict[str, int], list[str], date, dict[str, str]]:
     _strict(
         baseline,
         {
@@ -375,21 +375,40 @@ def _report_contract(
     release = _object(
         _json(paths["reports/release_status.json"], "release_status"), "release_status"
     )
+    extraction = _object(
+        _json(paths["reports/extraction_summary.json"], "extraction_summary"),
+        "extraction_summary",
+    )
+    export = _object(
+        _json(paths["reports/export_status.json"], "export_status"), "export_status"
+    )
+    # `run` writes export_status and extraction_status into release_status.json; a run made
+    # with separate extract, export and verify commands only carries status and
+    # verification_ok there.  The same two facts are in the hash-bound reports, which are
+    # checked below with the same strictness, so a missing field is read from its report
+    # (the source is recorded in the catalog); a present field is never overridden.
+    derived_release: dict[str, str] = {}
+    effective_release = dict(release)
+    for field, report, report_name in (
+        ("export_status", export, "reports/export_status.json"),
+        ("extraction_status", extraction, "reports/extraction_summary.json"),
+    ):
+        if field not in release:
+            effective_release[field] = report.get("status")
+            derived_release[field] = report_name
     required_release = {
         "export_status": "COMPLETED",
         "extraction_status": "COMPLETED",
         "status": "PARTIAL",
         "verification_ok": True,
     }
-    if any(release.get(key) != value for key, value in required_release.items()):
+    if any(
+        effective_release.get(key) != value for key, value in required_release.items()
+    ):
         raise MatrixportGenerationError(
             "release status is not the accepted partial result"
         )
 
-    extraction = _object(
-        _json(paths["reports/extraction_summary.json"], "extraction_summary"),
-        "extraction_summary",
-    )
     if (
         extraction.get("run_id") != run_id
         or extraction.get("status") != "COMPLETED"
@@ -411,9 +430,6 @@ def _report_contract(
     if len(extraction_counts) != dataset_count:
         raise MatrixportGenerationError("extraction dataset count differs")
 
-    export = _object(
-        _json(paths["reports/export_status.json"], "export_status"), "export_status"
-    )
     if export != {"dataset_count": dataset_count, "status": "COMPLETED"}:
         raise MatrixportGenerationError("export status differs")
 
@@ -501,7 +517,7 @@ def _report_contract(
     )
     if request_lines != request_count:
         raise MatrixportGenerationError("request manifest count differs")
-    return datasets, coverage, actual_gaps, observed_boundary
+    return datasets, coverage, actual_gaps, observed_boundary, derived_release
 
 
 def build_generation(
@@ -522,8 +538,8 @@ def build_generation(
         as_of=as_of,
         expected_count=_integer(baseline.get("artifact_count"), "artifact_count"),
     )
-    datasets, coverage_counts, known_gaps, observed_boundary = _report_contract(
-        artifacts, run_id=run_id, baseline=baseline
+    datasets, coverage_counts, known_gaps, observed_boundary, derived_release = (
+        _report_contract(artifacts, run_id=run_id, baseline=baseline)
     )
     if observed_boundary != as_of:
         raise MatrixportGenerationError(
@@ -590,6 +606,8 @@ def build_generation(
         "request_count": baseline["request_count"],
         "source_run_id": run_id,
     }
+    if derived_release:
+        catalog["release_status_source"] = dict(sorted(derived_release.items()))
     if spec.get("anchor_coverage") is not None:
         catalog["anchor_coverage"] = spec["anchor_coverage"]
     if declared_exclusions:
