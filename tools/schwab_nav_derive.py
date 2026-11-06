@@ -105,7 +105,10 @@ def read_holdings(
                         "cash value",
                     )
                 else:
-                    symbol = _mapping(row.get("symbol"), "symbol").get("symbol")
+                    # the frozen holdings reader prefers dataSymbol over the nested symbol
+                    symbol = row.get("dataSymbol")
+                    if not isinstance(symbol, str) or not symbol.strip():
+                        symbol = _mapping(row.get("symbol"), "symbol").get("symbol")
                     if not isinstance(symbol, str) or not symbol:
                         raise DeriveError("holdings row has no symbol")
                     quantities[symbol] = quantities.get(symbol, Decimal(0)) + _decimal(

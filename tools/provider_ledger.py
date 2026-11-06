@@ -3104,8 +3104,13 @@ def _replay_schwab_patched_navs(
                         "Schwab cash",
                     )
                 else:
+                    # the frozen holdings reader prefers dataSymbol over the nested symbol
+                    listed = row.get("dataSymbol")
                     symbol = _text(
-                        _object(row["symbol"], "Schwab symbol")["symbol"], "symbol"
+                        listed
+                        if isinstance(listed, str) and listed.strip()
+                        else _object(row["symbol"], "Schwab symbol")["symbol"],
+                        "symbol",
                     )
                     quantities[symbol] = quantities.get(symbol, Decimal(0)) + _decimal(
                         _object(row["qty"], "Schwab quantity")["qty"], "Schwab qty"
