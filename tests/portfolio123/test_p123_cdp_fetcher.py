@@ -52,8 +52,9 @@ def _allowlist(
     designers: tuple[int, ...] = (),
     drive: tuple[str, ...] = (DRIVE_ID,),
     kinds: tuple[str, ...] | None = None,
+    page_record: bool = False,
 ) -> fetcher.Allowlist:
-    payload = fetcher.build_allowlist_bytes(books, designers, drive, kinds)
+    payload = fetcher.build_allowlist_bytes(books, designers, drive, kinds, page_record)
     return parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
 
 
@@ -81,6 +82,7 @@ class FakeBrowser:
         self.download_path = ""
         self.queue: deque[dict[str, Any]] = deque()
         self.guid = 0
+        self.bodies: dict[str, str] = {}
 
     def send(self, message: dict[str, Any]) -> None:
         self.sent.append(message)
@@ -101,6 +103,11 @@ class FakeBrowser:
             result = {"sessionId": "SESSION-1"}
         elif method == "Browser.setDownloadBehavior":
             self.download_path = message["params"].get("downloadPath", "")
+        elif method == "Network.getResponseBody":
+            result = {
+                "body": self.bodies[message["params"]["requestId"]],
+                "base64Encoded": False,
+            }
         elif method == "Page.navigate":
             events = self.on_navigate(message["params"]["url"], self)
         self.queue.append({"id": ident, "result": result})
@@ -148,6 +155,40 @@ class FakeBrowser:
         ]
 
 
+def designer_events(
+    browser: FakeBrowser,
+    url: str,
+    body: str,
+    *,
+    status: int = 200,
+    mime: str = "application/json",
+    request_id: str = "REQ-1",
+    request_url: str | None = None,
+) -> list[dict[str, Any]]:
+    browser.bodies[request_id] = body
+
+    def event(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        return {"method": method, "sessionId": "SESSION-1", "params": params}
+
+    return [
+        event(
+            "Network.requestWillBeSent",
+            {
+                "requestId": request_id,
+                "request": {"url": request_url or url, "method": "GET"},
+            },
+        ),
+        event(
+            "Network.responseReceived",
+            {
+                "requestId": request_id,
+                "response": {"url": url, "status": status, "mimeType": mime},
+            },
+        ),
+        event("Network.loadingFinished", {"requestId": request_id}),
+    ]
+
+
 def _book_of(url: str) -> tuple[str, int]:
     for kind in fetcher.KINDS:
         if url.startswith(f"{BASE}{kind.path}?portid="):
@@ -155,7 +196,15 @@ def _book_of(url: str) -> tuple[str, int]:
     raise AssertionError(url)
 
 
+PAGE_BODY = '[{"assetUid": 1111111, "assetName": "Book \u00e9", "posCnt": 3}]\n'
+DESIGNER_BODY = '{"name": "Model \u00e9 \u4e2d", "portUid": 1, "desc": "caf\u00e9"}\n'
+
+
 def good_navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+    if "/spr/strategy/model/" in url:
+        return designer_events(browser, url, DESIGNER_BODY)
+    if "/app/investment/resource" in url:
+        return designer_events(browser, url, PAGE_BODY, request_id="REQ-PAGE")
     kind, book = _book_of(url)
     return browser.download(
         url, f"{PREFIX[kind]}Some Name {book}.csv", PAYLOAD[kind].encode()
@@ -180,6 +229,9 @@ def _run(
     clock = FakeClock()
     browser = FakeBrowser(clock, tabs or {TAB: f"{BASE}/app/home"}, navigate)
     root = tmp_path / "run"
+    if "reference_index" not in kwargs:
+        kwargs.setdefault("no_reference", True)
+    kwargs.setdefault("wall_clock", lambda: 1786737863.73)
     manifest = run_p123(
         browser,
         allowlist or _allowlist(),
@@ -294,6 +346,8 @@ def test_transport_guard_refuses_everything_else(message: dict[str, Any]) -> Non
         "Target.attachToTarget",
         "Page.navigate",
         "Browser.setDownloadBehavior",
+        "Network.enable",
+        "Network.getResponseBody",
     }
 
 
@@ -383,17 +437,15 @@ def test_output_root_must_be_new(tmp_path: Path) -> None:
     assert info.value.code == "OUTPUT_ROOT_EXISTS"
 
 
-def test_designer_models_are_refused_unless_skipped(tmp_path: Path) -> None:
+def test_skipped_designer_models_send_no_network_message(tmp_path: Path) -> None:
     allowlist = _allowlist(designers=(4444444,))
-    with pytest.raises(FetchRefused) as info:
-        _run(tmp_path, allowlist=allowlist)
-    assert info.value.code == "DESIGNER_MODEL_NEEDS_BODY_READ"
-    assert not (tmp_path / "run").exists()
     manifest, browser, _ = _run(
         tmp_path, allowlist=allowlist, skip_designer_models=True
     )
     assert manifest["designer_models_not_fetched"] == ["4444444"]
+    assert manifest["safety"]["body_reads"] == "none"
     assert all("model" not in m["params"].get("url", "") for m in browser.sent)
+    assert not [m for m in browser.sent if m["method"].startswith("Network.")]
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +607,11 @@ def test_identity_runs_after_each_book_and_fail_stops_later_books(
 
     manifest, _, root = _run(tmp_path, allowlist=_allowlist(books=BOOKS), check=check)
     assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
-    assert calls == [([str(BOOKS[0])], 3), ([str(BOOKS[0]), str(BOOKS[1])], 6)]
+    assert calls == [
+        ([str(BOOKS[0])], 3),
+        ([str(BOOKS[0]), str(BOOKS[1])], 6),
+        ([str(BOOKS[0]), str(BOOKS[1])], 6),  # the final check, after the last manifest
+    ]
     assert manifest["books"][str(BOOKS[0])]["identity"] == "PASS"
     assert manifest["books"][str(BOOKS[1])]["identity"] == "FAIL"
     assert manifest["books"][str(BOOKS[1])]["identity_checks"] == {"I8": "FAIL"}
@@ -563,17 +619,122 @@ def test_identity_runs_after_each_book_and_fail_stops_later_books(
     assert (root / "book-identity-decisions.json").is_file()
 
 
-def test_review_continues_unless_pass_is_required(tmp_path: Path) -> None:
-    def review(
+CASH_ONLY_TRANSACTIONS = (
+    "Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes\r\n"
+    "2020-05-12,,CASH,,,1000000,,,\r\n"
+)
+
+
+def _cash_only_navigate(
+    cash_books: set[int], held_rows: bool = False, extra_row: bool = False
+) -> Callable[[str, FakeBrowser], list[dict[str, Any]]]:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        kind, book = _book_of(url)
+        content = PAYLOAD[kind]
+        if book in cash_books:
+            if kind == "transactions_csv":
+                content = CASH_ONLY_TRANSACTIONS
+                if extra_row:
+                    content += "2020-05-13,AAA,BUY,1,2,3,0,,\r\n"
+            elif kind == "holdings_csv":
+                content = "Ticker,Shares\n" + ("AAA,1\n" if held_rows else "")
+        return browser.download(url, f"{PREFIX[kind]}N.csv", content.encode())
+
+    return navigate
+
+
+def _decisions(**by_book: str) -> fetcher.IdentityCheck:
+    def check(
         capture: Path, books: list[str], reference: Path | None
     ) -> dict[str, Any]:
-        return {"books": {b: {"decision": "REVIEW", "checks": []} for b in books}}
+        return {
+            "books": {
+                b: {"decision": by_book.get("b" + b, "PASS"), "checks": []}
+                for b in books
+            }
+        }
 
-    manifest, _, _ = _run(tmp_path, check=review)
+    return check
+
+
+def test_cash_only_review_continues(tmp_path: Path) -> None:
+    manifest, _, _ = _run(
+        tmp_path,
+        _cash_only_navigate({BOOKS[1]}),
+        allowlist=_allowlist(books=BOOKS),
+        check=_decisions(**{f"b{BOOKS[1]}": "REVIEW"}),
+    )
     assert manifest["status"] == "COMPLETE"
-    assert manifest["books"][str(BOOKS[0])]["identity"] == "REVIEW"
-    manifest, _, _ = _run(tmp_path / "strict", check=review, require_identity_pass=True)
+    entry = manifest["books"][str(BOOKS[1])]
+    assert entry["identity"] == "REVIEW"
+    assert entry["identity_policy"] == "CONTINUE_CASH_ONLY_REVIEW"
+    assert manifest["books"][str(BOOKS[0])]["identity_policy"] == "CONTINUE"
+    assert str(BOOKS[2]) in manifest["books"]
+
+
+def test_non_cash_review_stops_like_a_fail(tmp_path: Path) -> None:
+    manifest, _, _ = _run(
+        tmp_path,
+        allowlist=_allowlist(books=BOOKS),
+        check=_decisions(**{f"b{BOOKS[0]}": "REVIEW"}),
+    )
     assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
+    assert manifest["books"][str(BOOKS[0])]["identity_policy"] == "STOP"
+    assert manifest["books_not_attempted"] == [str(BOOKS[1]), str(BOOKS[2])]
+
+
+@pytest.mark.parametrize(
+    ("decision", "held", "extra"),
+    [
+        ("FAIL", False, False),
+        ("REVIEW", True, False),
+        ("REVIEW", False, True),
+    ],
+)
+def test_cash_only_exception_is_narrow(
+    tmp_path: Path, decision: str, held: bool, extra: bool
+) -> None:
+    manifest, _, _ = _run(
+        tmp_path,
+        _cash_only_navigate({BOOKS[0]}, held_rows=held, extra_row=extra),
+        check=_decisions(**{f"b{BOOKS[0]}": decision}),
+    )
+    assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
+    assert manifest["books_not_attempted"] == [str(BOOKS[1])]
+
+
+def test_is_cash_only_reads_the_saved_files(tmp_path: Path) -> None:
+    raw = tmp_path
+    (raw / "strategy_5_transactions.csv").write_text(CASH_ONLY_TRANSACTIONS)
+    assert fetcher.is_cash_only(raw, 5)
+    (raw / "strategy_5_holdings.csv").write_text("Ticker,Shares\n")
+    assert fetcher.is_cash_only(raw, 5)
+    (raw / "strategy_5_holdings.csv").write_text("Ticker,Shares\nAAA,1\n")
+    assert not fetcher.is_cash_only(raw, 5)
+    assert not fetcher.is_cash_only(raw, 6)
+    (raw / "strategy_7_transactions.csv").write_text(
+        "Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes\n2020-01-01,A,BUY,1,1,1,0,,\n"
+    )
+    assert not fetcher.is_cash_only(raw, 7)
+
+
+def test_there_is_no_require_identity_pass_option() -> None:
+    parser = fetcher._parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "run",
+                "--cdp-url",
+                "http://127.0.0.1:1",
+                "--allowlist",
+                "a",
+                "--allowlist-sha256",
+                "b",
+                "--download-dir",
+                "c",
+                "--require-identity-pass",
+            ]
+        )
 
 
 def test_missing_decision_is_a_failure(tmp_path: Path) -> None:
@@ -583,30 +744,56 @@ def test_missing_decision_is_a_failure(tmp_path: Path) -> None:
     assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
 
 
-def test_identity_loader_is_guarded(tmp_path: Path) -> None:
+def _fake_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, source: str
+) -> str:
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / f"{name}.py").write_text(source)
+    return name
+
+
+def test_identity_loader_is_guarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     with pytest.raises(FetchRefused) as info:
-        fetcher.load_identity_check(tmp_path)
+        fetcher.load_identity_check("tools.p123_no_such_check_module")
     assert info.value.code == "IDENTITY_CHECK_UNAVAILABLE"
-    module = tmp_path / "p123_book_identity_check.py"
-    module.write_text("from quant_engine.portfolio123 import no_such_name\n")
+    broken = _fake_module(
+        tmp_path,
+        monkeypatch,
+        "fake_ic_broken",
+        "from quant_engine.portfolio123 import no_such_name\n",
+    )
     with pytest.raises(FetchRefused) as info:
-        fetcher.load_identity_check(tmp_path)
+        fetcher.load_identity_check(broken)
     assert info.value.code == "IDENTITY_CHECK_UNAVAILABLE"
-    module.write_text("x = 1\n")
+    missing_dependency = _fake_module(
+        tmp_path, monkeypatch, "fake_ic_dep", "import not_a_real_dependency_xyz\n"
+    )
+    with pytest.raises(FetchRefused) as info:
+        fetcher.load_identity_check(missing_dependency)
+    assert info.value.code == "IDENTITY_CHECK_UNAVAILABLE"
+    no_function = _fake_module(tmp_path, monkeypatch, "fake_ic_none", "x = 1\n")
     with pytest.raises(FetchRefused):
-        fetcher.load_identity_check(tmp_path)
-    module.write_text(
+        fetcher.load_identity_check(no_function)
+    good = _fake_module(
+        tmp_path,
+        monkeypatch,
+        "fake_ic_good",
         "def check_capture(capture, **kwargs):\n"
         "    return {'books': {b: {'decision': 'PASS', 'checks': [], "
-        "'kw': sorted(kwargs)} for b in kwargs['books']}}\n"
+        "'kw': sorted(kwargs)} for b in kwargs['books']}}\n",
     )
-    check = fetcher.load_identity_check(tmp_path)
+    check = fetcher.load_identity_check(good)
     result = check(tmp_path, ["5"], None)
     assert result["books"]["5"]["decision"] == "PASS"
     assert result["books"]["5"]["kw"] == [
         "books",
+        "cross_checks",
+        "prior_checks",
         "raw_subdir",
         "reference_index",
+        "require_reference",
         "use_manifest",
     ]
 
@@ -618,7 +805,7 @@ def test_cli_refuses_without_identity_check_before_any_connection(
     path = tmp_path / "allow.json"
     path.write_bytes(payload)
 
-    def unavailable() -> None:
+    def unavailable(**kwargs: Any) -> None:
         raise FetchRefused("IDENTITY_CHECK_UNAVAILABLE")
 
     def no_connect(url: str) -> None:
@@ -637,6 +824,7 @@ def test_cli_refuses_without_identity_check_before_any_connection(
             hashlib.sha256(payload).hexdigest(),
             "--download-dir",
             str(tmp_path / "out"),
+            "--no-reference",
         ]
     )
     assert code == 2
@@ -772,3 +960,639 @@ def test_drive_url_screen(url: str, code: str) -> None:
         screen_drive_url(url, _allowlist())
     assert info.value.code == code
     assert screen_drive_url(fetcher.drive_url(DRIVE_ID), _allowlist()) == DRIVE_ID
+
+
+# ---------------------------------------------------------------------------
+# designer-model JSON: the narrow Network.getResponseBody widening
+
+DESIGNER_IDS = (4444444, 5555555)
+
+
+def _designer_url(model: int) -> str:
+    return f"{BASE}/spr/strategy/model/{model}?dm=true"
+
+
+def _designer_run(
+    tmp_path: Path,
+    navigate: Callable[[str, FakeBrowser], list[dict[str, Any]]] = good_navigate,
+    **kwargs: Any,
+) -> tuple[dict[str, Any], FakeBrowser, Path]:
+    return _run(
+        tmp_path,
+        navigate,
+        allowlist=_allowlist(books=BOOKS[:1], designers=DESIGNER_IDS),
+        **kwargs,
+    )
+
+
+def test_designer_body_is_saved_byte_identical(tmp_path: Path) -> None:
+    manifest, browser, root = _designer_run(tmp_path)
+    assert manifest["status"] == "COMPLETE"
+    expected = DESIGNER_BODY.encode("utf-8")
+    for model in DESIGNER_IDS:
+        saved = root / "capture" / "raw" / f"designer_model_{model}.json"
+        assert saved.read_bytes() == expected
+        entry = manifest["designer_models"][str(model)]
+        assert entry["sha256"] == hashlib.sha256(expected).hexdigest()
+        assert entry["size_bytes"] == len(expected)
+        assert entry["stage_file_capability"] == "designer-model.json"
+    assert manifest["designer_models_not_fetched"] == []
+    assert (
+        manifest["safety"]["body_reads"]
+        == "allowlisted page-record and designer-model requests only"
+    )
+    on_disk = (root / "p123-fetch-manifest.json").read_text(encoding="utf-8")
+    assert "caf" not in on_disk
+    sent = [m["method"] for m in browser.sent]
+    assert sent.count("Network.enable") == 1
+    assert sent.count("Network.getResponseBody") == len(DESIGNER_IDS)
+    # designers come after the books, and a body is read only for designer requests
+    navigations = [
+        m["params"]["url"] for m in browser.sent if m["method"] == "Page.navigate"
+    ]
+    assert [u for u in navigations if "/spr/strategy/model/" in u] == navigations[-2:]
+    assert {m["method"] for m in browser.sent} <= ALLOWED_CDP_METHODS
+    index = json.loads(
+        (root / "capture" / "capture-manifest.json").read_text(encoding="utf-8")
+    )
+    assert f"raw/designer_model_{DESIGNER_IDS[0]}.json" in {
+        a["relative_path"] for a in index["artifacts"]
+    }
+
+
+def test_designer_identity_fail_stops_before_designers(tmp_path: Path) -> None:
+    manifest, browser, _ = _designer_run(
+        tmp_path, check=_decisions(**{f"b{BOOKS[0]}": "FAIL"})
+    )
+    assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
+    assert not [m for m in browser.sent if m["method"] == "Network.getResponseBody"]
+    assert manifest["designer_models_not_fetched"] == [str(i) for i in DESIGNER_IDS]
+
+
+class _Inner:
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    def send(self, m: dict[str, Any]) -> None:
+        self.sent.append(m)
+
+    def receive(self, timeout: float) -> None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+def _guard(network_read: bool = True) -> tuple[GuardedTransport, _Inner]:
+    inner = _Inner()
+    guard = GuardedTransport(
+        inner,
+        allowed_urls=frozenset({_designer_url(DESIGNER_IDS[0])}),
+        download_path="D",
+        network_read=network_read,
+    )
+    guard.readable.add("REQ-OK")
+    return guard, inner
+
+
+def test_body_read_is_allowed_only_for_a_registered_request_id() -> None:
+    guard, inner = _guard()
+    guard.send({"id": 1, "method": "Network.enable", "params": {}})
+    guard.send(
+        {
+            "id": 2,
+            "method": "Network.getResponseBody",
+            "params": {"requestId": "REQ-OK"},
+        }
+    )
+    assert [m["method"] for m in inner.sent] == [
+        "Network.enable",
+        "Network.getResponseBody",
+    ]
+    for params in (
+        {"requestId": "REQ-OTHER"},
+        {"requestId": ["REQ-OK"]},
+        {"requestId": "REQ-OK", "extra": 1},
+        {},
+    ):
+        with pytest.raises(FetchRefused) as info:
+            guard.send({"id": 3, "method": "Network.getResponseBody", "params": params})
+        assert info.value.code == "CDP_BODY_READ_NOT_ALLOWLISTED"
+    with pytest.raises(FetchRefused):
+        guard.send(
+            {"id": 4, "method": "Network.enable", "params": {"maxTotalBufferSize": 1}}
+        )
+    assert len(inner.sent) == 2
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "Network.getCookies",
+        "Network.getAllCookies",
+        "Network.setRequestInterception",
+        "Network.setExtraHTTPHeaders",
+        "Network.getRequestPostData",
+        "Network.disable",
+        "Runtime.evaluate",
+        "Fetch.enable",
+        "Fetch.fulfillRequest",
+        "Input.dispatchKeyEvent",
+        "Page.captureSnapshot",
+    ],
+)
+def test_every_other_method_stays_refused_with_network_read_on(method: str) -> None:
+    guard, inner = _guard()
+    with pytest.raises(FetchRefused) as info:
+        guard.send({"id": 1, "method": method, "params": {}})
+    assert info.value.code == "CDP_METHOD_REFUSED"
+    assert inner.sent == []
+
+
+def test_network_methods_are_refused_when_no_designer_is_fetched() -> None:
+    guard, inner = _guard(network_read=False)
+    guard.readable.add("REQ-OK")
+    for message in (
+        {"id": 1, "method": "Network.enable", "params": {}},
+        {
+            "id": 2,
+            "method": "Network.getResponseBody",
+            "params": {"requestId": "REQ-OK"},
+        },
+    ):
+        with pytest.raises(FetchRefused):
+            guard.send(message)
+    assert inner.sent == []
+
+
+@pytest.mark.parametrize(
+    ("url", "code"),
+    [
+        (f"{BASE}/spr/strategy/model/9999999?dm=true", "URL_NOT_ALLOWLISTED"),
+        (
+            f"{BASE}/spr/strategy/model/{DESIGNER_IDS[0]}?dm=false",
+            "URL_NOT_ALLOWLISTED",
+        ),
+        (f"{BASE}/spr/strategy/model/{DESIGNER_IDS[0]}", "URL_NOT_ALLOWLISTED"),
+        (
+            f"{BASE}/spr/strategy/model/{DESIGNER_IDS[0]}?dm=true&x=1",
+            "URL_NOT_ALLOWLISTED",
+        ),
+        (
+            f"{BASE}/spr/strategy/model/{DESIGNER_IDS[0]}?x=1&dm=true",
+            "URL_NOT_ALLOWLISTED",
+        ),
+        (
+            f"{BASE}/spr/strategy/portmodel/{DESIGNER_IDS[0]}/perf",
+            "URL_NOT_ALLOWLISTED",
+        ),
+        (
+            f"http://www.portfolio123.com/spr/strategy/model/{DESIGNER_IDS[0]}?dm=true",
+            "URL_NOT_HTTPS",
+        ),
+        (
+            f"https://evil.example.com/spr/strategy/model/{DESIGNER_IDS[0]}?dm=true",
+            "URL_OFF_ORIGIN",
+        ),
+        (
+            f"{BASE}/spr/strategy/model/{DESIGNER_IDS[0]}?dm=true&delete=1",
+            "URL_MUTATION_WORD",
+        ),
+    ],
+)
+def test_designer_screen_refuses_other_urls(url: str, code: str) -> None:
+    allowed = {_designer_url(DESIGNER_IDS[0]): DESIGNER_IDS[0]}
+    with pytest.raises(FetchRefused) as info:
+        fetcher.screen_designer_url(url, allowed)
+    assert info.value.code == code
+    fetcher.screen_designer_url(_designer_url(DESIGNER_IDS[0]), allowed)
+
+
+def test_navigation_to_other_designer_urls_is_refused_by_the_guard() -> None:
+    guard, inner = _guard()
+    for url in (
+        _designer_url(9999999),
+        f"{BASE}/spr/strategy/model/{DESIGNER_IDS[0]}?dm=false",
+        f"{BASE}/spr/strategy/model/{DESIGNER_IDS[0]}?dm=true&x=1",
+    ):
+        with pytest.raises(FetchRefused):
+            guard.send({"id": 1, "method": "Page.navigate", "params": {"url": url}})
+    assert inner.sent == []
+
+
+def test_a_request_for_another_url_is_never_read(tmp_path: Path) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        if "/spr/strategy/model/" in url:
+            return designer_events(
+                browser, url, DESIGNER_BODY, request_url=url + "&other=1"
+            )
+        return good_navigate(url, browser)
+
+    manifest, browser, root = _designer_run(tmp_path, navigate)
+    assert _stop_code(manifest) == "STOP_REAUTH"
+    assert not [m for m in browser.sent if m["method"] == "Network.getResponseBody"]
+    assert not list((root / "capture" / "raw").glob("designer_*"))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        ({"status": 401}, "STOP_REAUTH"),
+        ({"status": 403}, "STOP_REAUTH"),
+        ({"mime": "text/html"}, "STOP_REAUTH"),
+        ({"status": 500}, "STOP_DOWNLOAD_NOT_EXACT"),
+        ({"mime": "image/png"}, "STOP_DOWNLOAD_NOT_EXACT"),
+        ({"body": "not json"}, "STOP_DOWNLOAD_NOT_EXACT"),
+        ({"body": "[1, 2]"}, "STOP_DOWNLOAD_NOT_EXACT"),
+    ],
+)
+def test_designer_response_must_be_exact(
+    tmp_path: Path, kwargs: dict[str, Any], code: str
+) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        if "/spr/strategy/model/" in url:
+            options = dict(kwargs)
+            body = options.pop("body", DESIGNER_BODY)
+            return designer_events(browser, url, body, **options)
+        return good_navigate(url, browser)
+
+    manifest, _, root = _designer_run(tmp_path, navigate)
+    assert _stop_code(manifest) == code
+    assert not list((root / "capture" / "raw").glob("designer_*"))
+
+
+def test_designer_redirect_to_login_stops_with_reauth(tmp_path: Path) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        if "/spr/strategy/model/" in url:
+            events = designer_events(browser, url, DESIGNER_BODY)[:1]
+            events.append(
+                {
+                    "method": "Network.requestWillBeSent",
+                    "sessionId": "SESSION-1",
+                    "params": {
+                        "requestId": "REQ-1",
+                        "request": {"url": f"{BASE}/login", "method": "GET"},
+                        "redirectResponse": {"status": 302},
+                    },
+                }
+            )
+            return events
+        return good_navigate(url, browser)
+
+    manifest, browser, _ = _designer_run(tmp_path, navigate)
+    assert _stop_code(manifest) == "STOP_REAUTH"
+    assert not [m for m in browser.sent if m["method"] == "Network.getResponseBody"]
+
+
+def test_designer_login_tab_exits_3_through_the_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        if "/spr/strategy/model/" in url:
+            return [
+                {
+                    "method": "Target.targetInfoChanged",
+                    "params": {
+                        "targetInfo": {
+                            "targetId": TAB,
+                            "type": "page",
+                            "url": f"{BASE}/login/signin",
+                        }
+                    },
+                }
+            ]
+        return good_navigate(url, browser)
+
+    payload = fetcher.build_allowlist_bytes(BOOKS[:1], DESIGNER_IDS)
+    path = tmp_path / "allow.json"
+    path.write_bytes(payload)
+    clock = FakeClock()
+    browser = FakeBrowser(clock, {TAB: f"{BASE}/app/home"}, navigate)
+    monkeypatch.setattr(fetcher, "load_identity_check", lambda **kwargs: _pass_check)
+    monkeypatch.setattr(fetcher, "connect", lambda url: browser)
+    monkeypatch.setattr(fetcher.time, "monotonic", clock)
+    code = fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:9333",
+            "--allowlist",
+            str(path),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "out"),
+            "--download-timeout",
+            "10",
+            "--no-reference",
+        ]
+    )
+    assert code == 3
+    assert "STOP STOP_REAUTH" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# page record (the identity check's I7 input), same narrow body-read rule
+
+PAGE_URL = f"{BASE}/app/investment/resource?f=1&s=1786737863730"
+
+
+def _page_run(
+    tmp_path: Path,
+    navigate: Callable[[str, FakeBrowser], list[dict[str, Any]]] = good_navigate,
+    **kwargs: Any,
+) -> tuple[dict[str, Any], FakeBrowser, Path]:
+    return _run(
+        tmp_path,
+        navigate,
+        allowlist=_allowlist(books=BOOKS[:1], page_record=True),
+        **kwargs,
+    )
+
+
+def test_page_record_is_saved_first_unmodified_and_listed(tmp_path: Path) -> None:
+    manifest, browser, root = _page_run(tmp_path)
+    assert manifest["status"] == "COMPLETE"
+    saved = root / "capture" / "raw" / "p123_investment_resource.json"
+    assert saved.read_bytes() == PAGE_BODY.encode("utf-8")
+    assert (
+        manifest["page_record"]["sha256"]
+        == hashlib.sha256(PAGE_BODY.encode("utf-8")).hexdigest()
+    )
+    index = json.loads(
+        (root / "capture" / "capture-manifest.json").read_text(encoding="utf-8")
+    )
+    assert "raw/p123_investment_resource.json" in {
+        a["relative_path"] for a in index["artifacts"]
+    }
+    navigations = [
+        m["params"]["url"] for m in browser.sent if m["method"] == "Page.navigate"
+    ]
+    assert navigations[0] == PAGE_URL
+    sent = [m["method"] for m in browser.sent]
+    assert sent.count("Network.enable") == 1
+    assert sent.count("Network.getResponseBody") == 1
+    assert "Book" not in (root / "p123-fetch-manifest.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("url", "code"),
+    [
+        (PAGE_URL.replace("https://", "http://"), "URL_NOT_HTTPS"),
+        (
+            PAGE_URL.replace("www.portfolio123.com", "evil.example.com"),
+            "URL_OFF_ORIGIN",
+        ),
+        (PAGE_URL.replace("f=1", "f=2"), "URL_NOT_ALLOWLISTED"),
+        (PAGE_URL.replace("1786737863730", "17867378637"), "URL_NOT_ALLOWLISTED"),
+        (PAGE_URL + "&x=1", "URL_NOT_ALLOWLISTED"),
+        (PAGE_URL.replace("resource?", "resource/5?"), "URL_NOT_ALLOWLISTED"),
+        (PAGE_URL.replace("1786737863730", "1786737863731"), "URL_NOT_ALLOWLISTED"),
+        (PAGE_URL + "&delete=1", "URL_MUTATION_WORD"),
+    ],
+)
+def test_page_record_screen_refuses_other_urls(url: str, code: str) -> None:
+    with pytest.raises(FetchRefused) as info:
+        fetcher.screen_page_record_url(url, PAGE_URL)
+    assert info.value.code == code
+    fetcher.screen_page_record_url(PAGE_URL, PAGE_URL)
+
+
+def test_page_record_route_is_in_the_reviewed_contract() -> None:
+    from quant_engine.web_contracts.portfolio123 import PORTFOLIO123_CONTRACT
+
+    endpoint = PORTFOLIO123_CONTRACT.route("GET", PAGE_URL)
+    assert endpoint.capability == "investment.resource-list"
+    assert endpoint.method == "GET"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        ({"mime": "text/html"}, "STOP_REAUTH"),
+        ({"status": 401}, "STOP_REAUTH"),
+        ({"body": "{}"}, "STOP_DOWNLOAD_NOT_EXACT"),
+        ({"body": "garbage"}, "STOP_DOWNLOAD_NOT_EXACT"),
+    ],
+)
+def test_page_record_response_must_be_a_json_list(
+    tmp_path: Path, kwargs: dict[str, Any], code: str
+) -> None:
+    def navigate(url: str, browser: FakeBrowser) -> list[dict[str, Any]]:
+        if "/app/investment/resource" in url:
+            options = dict(kwargs)
+            body = options.pop("body", PAGE_BODY)
+            return designer_events(browser, url, body, **options)
+        return good_navigate(url, browser)
+
+    manifest, browser, root = _page_run(tmp_path, navigate)
+    assert _stop_code(manifest) == code
+    assert manifest["books"] == {}
+    assert not [
+        m
+        for m in browser.sent
+        if m["method"] == "Page.navigate" and "Download" in str(m)
+    ]
+
+
+def test_page_record_guard_refuses_a_different_stamp() -> None:
+    guard = GuardedTransport(
+        _Inner(),
+        allowed_urls=frozenset({PAGE_URL}),
+        download_path="D",
+        network_read=True,
+    )
+    with pytest.raises(FetchRefused):
+        guard.send(
+            {
+                "id": 1,
+                "method": "Page.navigate",
+                "params": {"url": PAGE_URL.replace("730", "731")},
+            }
+        )
+
+
+def test_allowlist_without_page_record_sends_no_network_message(
+    tmp_path: Path,
+) -> None:
+    manifest, browser, _ = _run(tmp_path)
+    assert manifest["page_record"] is None
+    assert not [m for m in browser.sent if m["method"].startswith("Network.")]
+
+
+# ---------------------------------------------------------------------------
+# reference pull, permutation inputs, final check, interpreter
+
+
+def test_reference_is_required_unless_declared_absent(tmp_path: Path) -> None:
+    clock = FakeClock()
+    browser = FakeBrowser(clock, {TAB: f"{BASE}/app/home"}, good_navigate)
+    for kwargs, code in (
+        ({}, "REFERENCE_REQUIRED"),
+        (
+            {"reference_index": tmp_path / "x.json", "no_reference": True},
+            "REFERENCE_CONFLICT",
+        ),
+        ({"reference_index": tmp_path / "missing.json"}, "REFERENCE_UNREADABLE"),
+    ):
+        with pytest.raises(FetchRefused) as info:
+            run_p123(
+                browser,
+                _allowlist(),
+                tmp_path / "run",
+                identity_check=_pass_check,
+                clock=clock,
+                **kwargs,
+            )
+        assert info.value.code == code
+    assert not (tmp_path / "run").exists()
+    assert browser.sent == []
+
+
+def test_reference_index_is_passed_and_recorded(tmp_path: Path) -> None:
+    index = tmp_path / "source-index.json"
+    index.write_bytes(b'{"entries": []}')
+    seen: list[Path | None] = []
+
+    def check(
+        capture: Path, books: list[str], reference: Path | None
+    ) -> dict[str, Any]:
+        seen.append(reference)
+        return _pass_check(capture, books, reference)
+
+    manifest, _, _ = _run(tmp_path, check=check, reference_index=index)
+    assert set(seen) == {index}
+    assert manifest["reference"] == {
+        "mode": "INDEX",
+        "index_sha256": hashlib.sha256(b'{"entries": []}').hexdigest(),
+    }
+    manifest, _, _ = _run(tmp_path / "n")
+    assert manifest["reference"] == {"mode": "NONE_DECLARED", "index_sha256": None}
+
+
+def test_final_check_runs_after_the_final_manifest_write(tmp_path: Path) -> None:
+    digests: list[str] = []
+
+    def check(
+        capture: Path, books: list[str], reference: Path | None
+    ) -> dict[str, Any]:
+        digests.append(
+            hashlib.sha256((capture / "capture-manifest.json").read_bytes()).hexdigest()
+        )
+        return _pass_check(capture, books, reference)
+
+    manifest, _, root = _page_run(tmp_path, check=check)
+    final = hashlib.sha256(
+        (root / "capture/capture-manifest.json").read_bytes()
+    ).hexdigest()
+    assert digests[-1] == final
+    assert len(digests) == 2  # after the book, and the final check
+    assert manifest["final_identity"] == {str(BOOKS[0]): "PASS"}
+    assert (root / "book-identity-decisions.json").is_file()
+
+
+def test_decisions_file_is_written_when_stopped(tmp_path: Path) -> None:
+    manifest, _, root = _run(tmp_path, check=_decisions(**{f"b{BOOKS[0]}": "FAIL"}))
+    assert _stop_code(manifest) == "STOP_IDENTITY_FAIL"
+    assert (root / "book-identity-decisions.json").is_file()
+    assert manifest["final_identity"] == {str(BOOKS[0]): "FAIL"}
+
+
+def test_loader_passes_permutation_inputs_and_requires_a_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _fake_module(
+        tmp_path,
+        monkeypatch,
+        "fake_ic_kw",
+        "def check_capture(capture, **kw):\n"
+        "    return {'books': {}, 'kw': {k: (list(v) if isinstance(v, list) else v)"
+        " for k, v in kw.items()}}\n",
+    )
+    prior, cross = tmp_path / "old", tmp_path / "other"
+    check = fetcher.load_identity_check(name, prior_dirs=[prior], cross_dirs=[cross])
+    with_reference = check(tmp_path, ["5"], tmp_path / "idx.json")["kw"]
+    assert with_reference["require_reference"] is True
+    assert with_reference["prior_checks"] == [(prior, "")]
+    assert with_reference["cross_checks"] == [(cross, "raw")]
+    assert with_reference["raw_subdir"] == "raw"
+    without = check(tmp_path, ["5"], None)["kw"]
+    assert without["require_reference"] is False
+
+
+def test_interpreter_other_than_3_11_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sys
+
+    name = _fake_module(
+        tmp_path,
+        monkeypatch,
+        "fake_ic_never",
+        "def check_capture(capture, **kw):\n    raise AssertionError('called')\n",
+    )
+    check = fetcher.load_identity_check(name)
+    monkeypatch.setattr(sys, "version_info", (3, 13, 1, "final", 0))
+    with pytest.raises(FetchRefused) as info:
+        check(tmp_path, ["5"], None)
+    assert info.value.code == "INTERPRETER_REFUSED"
+    clock = FakeClock()
+    browser = FakeBrowser(clock, {TAB: f"{BASE}/app/home"}, good_navigate)
+    with pytest.raises(FetchRefused) as info:
+        run_p123(
+            browser,
+            _allowlist(),
+            tmp_path / "run",
+            identity_check=_pass_check,
+            no_reference=True,
+            clock=clock,
+        )
+    assert info.value.code == "INTERPRETER_REFUSED"
+    assert browser.sent == []
+    payload = fetcher.build_allowlist_bytes(BOOKS[:1])
+    path = tmp_path / "allow.json"
+    path.write_bytes(payload)
+    code = fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:9333",
+            "--allowlist",
+            str(path),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "out"),
+            "--no-reference",
+        ]
+    )
+    assert code == 2
+    assert "found Python 3.13.1" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_cli_refuses_a_run_without_reference_choice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = fetcher.build_allowlist_bytes(BOOKS[:1])
+    path = tmp_path / "allow.json"
+    path.write_bytes(payload)
+    code = fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:9333",
+            "--allowlist",
+            str(path),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert code == 2
+    assert capsys.readouterr().out.strip() == "REFUSED REFERENCE_REQUIRED"

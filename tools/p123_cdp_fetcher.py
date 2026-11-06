@@ -11,9 +11,10 @@ printed. Hand the files to the staging CLI afterwards (``docs/providers/p123-cap
 Transport allow-list, enforced before a message leaves the process: target discovery
 and attach, ``Page.navigate`` to an exact allowlisted URL, and
 ``Browser.setDownloadBehavior`` to the one new download directory. Nothing else:
-no ``Runtime.*``, no ``Fetch.*``, no ``Network.*``, no ``Input.*``. Because reading a
-JSON page body would need one of those, designer-model entries are validated but not
-fetched (see ``docs/providers/p123-capture.md``).
+no ``Runtime.*``, no ``Fetch.*``, no ``Input.*``. One narrow widening exists for the
+allowlisted designer-model JSON pages, which are shown rather than downloaded:
+``Network.enable`` and ``Network.getResponseBody``, and a body is read only for the
+request id of the one exact allowlisted ``GET /spr/strategy/model/<id>?dm=true``.
 
 Stops (exit 3) rather than continuing: the tab leaves https://www.portfolio123.com or
 lands on a login page, no download starts, a download is not exactly the expected file,
@@ -26,12 +27,13 @@ host allowlist, into a new directory, with a sha256 manifest.
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 import csv
 from dataclasses import dataclass
 import hashlib
-import importlib.util
+import importlib
 import io
 import json
 import os
@@ -42,13 +44,13 @@ import time
 from typing import Any, Protocol
 from urllib.parse import parse_qsl, unquote_plus, urlsplit
 
-_TOOLS_DIRECTORY = Path(__file__).resolve().parent
-if str(_TOOLS_DIRECTORY) not in sys.path:
-    sys.path.insert(0, str(_TOOLS_DIRECTORY))
-
-from quant_engine.web_contracts import WebContractError  # noqa: E402
-from quant_engine.web_contracts.portfolio123 import PORTFOLIO123_CONTRACT  # noqa: E402
-import p123_cdp_recorder as recorder  # noqa: E402
+from quant_engine.core import (
+    InterpreterRefusal,
+    check_entry_interpreter,
+    require_current_interpreter,
+)
+from quant_engine.web_contracts import PORTFOLIO123_CONTRACT, WebContractError
+from tools import p123_cdp_recorder as recorder
 
 
 SCHEMA = "p123-cdp-fetcher/1"
@@ -59,15 +61,21 @@ P123_HOST = "www.portfolio123.com"
 MUTATION_WORDS: tuple[str, ...] = recorder.MUTATION_WORDS
 _MUTATION_RE = re.compile("|".join(MUTATION_WORDS))
 
-#: The only messages this process may send to the browser.
+#: The messages this process may ever send to the browser.
 ALLOWED_CDP_METHODS = frozenset(
     {
         "Target.setDiscoverTargets",
         "Target.attachToTarget",
         "Page.navigate",
         "Browser.setDownloadBehavior",
+        "Network.enable",
+        "Network.getResponseBody",
     }
 )
+#: Allowed only in a run that fetches designer models, and ``getResponseBody`` only for
+#: the request id of an exact allowlisted designer-model GET.
+NETWORK_CDP_METHODS = frozenset({"Network.enable", "Network.getResponseBody"})
+JSON_MEDIA = frozenset({"application/json", "text/json"})
 #: Exit codes: 0 done, 2 refused before sending, 3 stopped mid-run.
 EXIT_REFUSED = 2
 EXIT_STOP = 3
@@ -159,6 +167,7 @@ class Allowlist:
     books: tuple[Book, ...]
     designer_models: tuple[int, ...]
     drive_files: tuple[str, ...]
+    page_record: bool
     sha256: str
 
 
@@ -186,7 +195,14 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise FetchRefused("ALLOWLIST_INVALID", "not JSON") from exc
-    keys = {"schema_version", "origin", "books", "designer_models", "drive_files"}
+    keys = {
+        "schema_version",
+        "origin",
+        "books",
+        "designer_models",
+        "drive_files",
+        "page_record",
+    }
     if not isinstance(data, dict) or set(data) != keys:
         raise FetchRefused("ALLOWLIST_INVALID", "keys")
     if data["schema_version"] != ALLOWLIST_SCHEMA_VERSION:
@@ -227,7 +243,11 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
         raise FetchRefused("ALLOWLIST_INVALID", "duplicate id")
     if len(set(drive)) != len(drive):
         raise FetchRefused("ALLOWLIST_INVALID", "duplicate drive id")
-    return Allowlist(tuple(books), tuple(models), tuple(drive), digest)
+    if not isinstance(data["page_record"], bool):
+        raise FetchRefused("ALLOWLIST_INVALID", "page_record")
+    return Allowlist(
+        tuple(books), tuple(models), tuple(drive), data["page_record"], digest
+    )
 
 
 def load_allowlist(path: Path, expected_sha256: str) -> Allowlist:
@@ -243,6 +263,7 @@ def build_allowlist_bytes(
     designer_ids: Sequence[int] = (),
     drive_ids: Sequence[str] = (),
     kinds: Sequence[str] | None = None,
+    page_record: bool = False,
 ) -> bytes:
     chosen = list(kinds) if kinds else [k.name for k in KINDS]
     return canonical_bytes(
@@ -252,6 +273,7 @@ def build_allowlist_bytes(
             "books": [{"id": b, "kinds": chosen} for b in book_ids],
             "designer_models": list(designer_ids),
             "drive_files": list(drive_ids),
+            "page_record": page_record,
         }
     )
 
@@ -262,6 +284,12 @@ def book_url(kind: Kind, book_id: int) -> str:
 
 def designer_url(model_id: int) -> str:
     return f"{ORIGIN}/spr/strategy/model/{model_id}?dm=true"
+
+
+def page_record_url(stamp_ms: int) -> str:
+    """The account's investment list: the page record the identity check reads (I7)."""
+
+    return f"{ORIGIN}/app/investment/resource?f=1&s={stamp_ms}"
 
 
 def drive_url(file_id: str) -> str:
@@ -316,6 +344,60 @@ def screen_p123_url(url: str, allowed: Mapping[str, object]) -> None:
         raise FetchRefused("URL_NOT_IN_REVIEWED_CONTRACT") from exc
     expected = KIND_BY_NAME[str(allowed[url][0])]  # type: ignore[index]
     if endpoint.capability != expected.capability:
+        raise FetchRefused("URL_NOT_IN_REVIEWED_CONTRACT")
+
+
+def screen_designer_url(url: str, allowed: Mapping[str, object]) -> None:
+    """Raise FetchRefused unless ``url`` is exactly one allowlisted designer-model GET."""
+
+    if not url.startswith("https://"):
+        raise FetchRefused("URL_NOT_HTTPS")
+    if not _origin_ok(url, frozenset({P123_HOST})):
+        raise FetchRefused("URL_OFF_ORIGIN")
+    parts = urlsplit(url)
+    text = (unquote_plus(parts.path) + "?" + unquote_plus(parts.query)).lower()
+    if _MUTATION_RE.search(text):
+        raise FetchRefused("URL_MUTATION_WORD")
+    if (
+        url not in allowed
+        or _DESIGNER_PATH.fullmatch(parts.path) is None
+        or parts.query != "dm=true"
+        or parts.fragment
+    ):
+        raise FetchRefused("URL_NOT_ALLOWLISTED")
+
+
+def screen_page_record_url(url: str, expected: str) -> None:
+    """Raise FetchRefused unless ``url`` is exactly the one page-record GET of this run.
+
+    The only variable part of the route is ``s``, a 13-digit millisecond cache-buster
+    (the preserved HARs show 78 calls with ``f=1`` and a different ``s`` each time). The
+    run generates it once; ``expected`` is that exact URL.
+    """
+
+    if not url.startswith("https://"):
+        raise FetchRefused("URL_NOT_HTTPS")
+    if not _origin_ok(url, frozenset({P123_HOST})):
+        raise FetchRefused("URL_OFF_ORIGIN")
+    parts = urlsplit(url)
+    text = (unquote_plus(parts.path) + "?" + unquote_plus(parts.query)).lower()
+    if _MUTATION_RE.search(text):
+        raise FetchRefused("URL_MUTATION_WORD")
+    values = dict(parse_qsl(parts.query, keep_blank_values=True))
+    if (
+        url != expected
+        or parts.path != "/app/investment/resource"
+        or values.get("f") != "1"
+        or re.fullmatch(r"[0-9]{13}", values.get("s", "")) is None
+        or len(values) != 2
+        or parts.fragment
+    ):
+        raise FetchRefused("URL_NOT_ALLOWLISTED")
+    try:
+        endpoint = PORTFOLIO123_CONTRACT.route("GET", url)
+    except WebContractError as exc:
+        raise FetchRefused("URL_NOT_IN_REVIEWED_CONTRACT") from exc
+    if endpoint.capability != "investment.resource-list":
         raise FetchRefused("URL_NOT_IN_REVIEWED_CONTRACT")
 
 
@@ -379,7 +461,11 @@ class CdpTransport(Protocol):
 
 
 class GuardedTransport:
-    """Send only the four allowed methods, with their arguments pinned."""
+    """Send only the allowed methods, with their arguments pinned.
+
+    ``readable`` holds the request ids whose body may be read: the session adds an id
+    only after seeing the exact allowlisted designer-model GET under it.
+    """
 
     def __init__(
         self,
@@ -387,17 +473,31 @@ class GuardedTransport:
         *,
         allowed_urls: frozenset[str],
         download_path: str,
+        network_read: bool = False,
     ) -> None:
         self._inner = inner
         self._urls = allowed_urls
         self._download_path = download_path
+        self._network_read = network_read
+        self.readable: set[str] = set()
 
     def send(self, message: dict[str, Any]) -> None:
         method = message.get("method")
         params = message.get("params") or {}
         if method not in ALLOWED_CDP_METHODS:
             raise FetchRefused("CDP_METHOD_REFUSED", str(method))
-        if method == "Page.navigate":
+        if method in NETWORK_CDP_METHODS:
+            if not self._network_read:
+                raise FetchRefused("CDP_METHOD_REFUSED", str(method))
+            if method == "Network.enable" and params:
+                raise FetchRefused("CDP_NETWORK_ARGUMENTS_REFUSED")
+            if method == "Network.getResponseBody" and (
+                set(params) != {"requestId"}
+                or not isinstance(params["requestId"], str)
+                or params["requestId"] not in self.readable
+            ):
+                raise FetchRefused("CDP_BODY_READ_NOT_ALLOWLISTED")
+        elif method == "Page.navigate":
             if set(params) != {"url"} or params["url"] not in self._urls:
                 raise FetchRefused("CDP_NAVIGATE_NOT_ALLOWLISTED")
         elif method == "Browser.setDownloadBehavior":
@@ -470,9 +570,13 @@ class Session:
         call_timeout: float = 20.0,
         download_timeout: float = 180.0,
         attach_wait: float = 5.0,
+        network_read: bool = False,
     ) -> None:
         self._transport = GuardedTransport(
-            transport, allowed_urls=allowed_urls, download_path=str(incoming)
+            transport,
+            allowed_urls=allowed_urls,
+            download_path=str(incoming),
+            network_read=network_read,
         )
         self._incoming = incoming
         self._tab_ok = tab_ok
@@ -654,6 +758,100 @@ class Session:
             extension = ""
         return hashlib.sha256(data).hexdigest(), len(data), count_rows(data), extension
 
+    # -- one allowlisted JSON page (designer model) ------------------------
+    def enable_network(self) -> None:
+        self._call("Network.enable", {}, self._sid)
+
+    def read_json(self, url: str, saved: Path, shape: type = dict) -> tuple[str, int]:
+        """Navigate to the exact ``url`` and save its response body unmodified.
+
+        The body is read for the one request id seen with exactly this URL and ``GET``;
+        the guard refuses a read for any other id.
+        """
+
+        request_id = ""
+        status = -1
+        mime = ""
+        finished = False
+        self._call("Page.navigate", {"url": url}, self._sid)
+        deadline = self._clock() + self._download_timeout
+        while not finished:
+            if self._clock() > deadline:
+                raise FetchStop(
+                    "STOP_REAUTH", "NO_RESPONSE (signed out or session expired)"
+                )
+            message = self._event(0.5)
+            self._check_tab()
+            if message is None:
+                continue
+            method = message.get("method")
+            params = message.get("params")
+            if (
+                not isinstance(params, dict)
+                or message.get("sessionId") != self._sid
+                or not isinstance(method, str)
+                or not method.startswith("Network.")
+            ):
+                continue
+            ident = params.get("requestId")
+            if method == "Network.requestWillBeSent":
+                request = params.get("request")
+                actual = request.get("url") if isinstance(request, dict) else None
+                if ident == request_id and actual != url:
+                    raise FetchStop("STOP_REAUTH", "the request was redirected")
+                if (
+                    isinstance(request, dict)
+                    and actual == url
+                    and request.get("method") == "GET"
+                ):
+                    if request_id and ident != request_id:
+                        raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "second request")
+                    request_id = str(ident)
+                    self._transport.readable.add(request_id)
+            elif ident == request_id and request_id:
+                if method == "Network.responseReceived":
+                    response = params.get("response")
+                    if not isinstance(response, dict) or response.get("url") != url:
+                        raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "response url")
+                    status = int(response.get("status", -1))
+                    mime = str(response.get("mimeType", "")).lower()
+                elif method == "Network.loadingFailed":
+                    raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "request failed")
+                elif method == "Network.loadingFinished":
+                    finished = True
+        if status in {401, 403}:
+            raise FetchStop("STOP_REAUTH", f"HTTP {status}")
+        if status != 200:
+            raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", f"HTTP {status}")
+        if mime == "text/html":
+            raise FetchStop("STOP_REAUTH", "an HTML page was served")
+        if mime not in JSON_MEDIA:
+            raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "response is not JSON")
+        result = self._call(
+            "Network.getResponseBody", {"requestId": request_id}, self._sid
+        )
+        self._transport.readable.discard(request_id)
+        body = str(result.get("body", ""))
+        data = (
+            base64.b64decode(body)
+            if result.get("base64Encoded")
+            else body.encode("utf-8")
+        )
+        try:
+            document = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "body is not JSON") from exc
+        if not data or not isinstance(document, shape):
+            raise FetchStop(
+                "STOP_DOWNLOAD_NOT_EXACT", f"body is not a JSON {shape.__name__}"
+            )
+        if saved.exists():
+            raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "destination exists")
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        with saved.open("xb") as handle:
+            handle.write(data)
+        return hashlib.sha256(data).hexdigest(), len(data)
+
 
 # ---------------------------------------------------------------------------
 # Identity check wiring (tools/p123_book_identity_check.py, PR 827)
@@ -661,25 +859,34 @@ class Session:
 IdentityCheck = Callable[[Path, Sequence[str], Path | None], Mapping[str, Any]]
 
 
-def load_identity_check(directory: Path | None = None) -> IdentityCheck:
-    """Load the per-book identity check by file path; refuse when it is absent.
+IDENTITY_CHECK_MODULE = "tools.p123_book_identity_check"
+
+
+def load_identity_check(
+    module_name: str = IDENTITY_CHECK_MODULE,
+    *,
+    prior_dirs: Sequence[Path] = (),
+    cross_dirs: Sequence[Path] = (),
+) -> IdentityCheck:
+    """Import the per-book identity check by module path; refuse when it is absent.
 
     ``tools/p123_book_identity_check.py`` arrived with PR 827. Until that is on the
     branch, or when its package dependency is missing, the fetcher refuses to start a
-    Portfolio123 run (there is no skip flag).
+    Portfolio123 run (there is no skip flag). ``prior_dirs`` (older or HAR download
+    sets, warn) and ``cross_dirs`` (other capture directories of the same pull, fail)
+    feed the check's permutation comparison; a reference index makes a book absent from
+    the reference pull a failure. Run the fetcher from the repository root as
+    ``python -m tools.p123_cdp_fetcher`` so the ``tools`` package is importable.
     """
 
-    path = (
-        directory or Path(__file__).resolve().parent
-    ) / "p123_book_identity_check.py"
-    if not path.is_file():
-        raise FetchRefused("IDENTITY_CHECK_UNAVAILABLE", "module file not present")
-    spec = importlib.util.spec_from_file_location("p123_book_identity_check", path)
-    if spec is None or spec.loader is None:
-        raise FetchRefused("IDENTITY_CHECK_UNAVAILABLE", "not loadable")
-    module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name not in {module_name, module_name.split(".")[0]}:
+            raise FetchRefused(
+                "IDENTITY_CHECK_UNAVAILABLE", f"missing dependency {exc.name}"
+            ) from exc
+        raise FetchRefused("IDENTITY_CHECK_UNAVAILABLE", "module not present") from exc
     except Exception as exc:  # noqa: BLE001 - any import failure means unavailable
         raise FetchRefused("IDENTITY_CHECK_UNAVAILABLE", type(exc).__name__) from exc
     check = getattr(module, "check_capture", None)
@@ -689,12 +896,20 @@ def load_identity_check(directory: Path | None = None) -> IdentityCheck:
     def run(
         capture: Path, books: Sequence[str], reference_index: Path | None
     ) -> Mapping[str, Any]:
+        # check_capture is not interpreter-guarded (only the tool's main is).
+        try:
+            require_current_interpreter("the P123 CDP fetcher book identity check")
+        except InterpreterRefusal as exc:
+            raise FetchRefused("INTERPRETER_REFUSED", str(exc)) from exc
         result = check(
             capture,
             books=list(books),
             raw_subdir="raw",
             use_manifest=True,
             reference_index=reference_index,
+            require_reference=reference_index is not None,
+            cross_checks=[(Path(item), "raw") for item in cross_dirs],
+            prior_checks=[(Path(item), "") for item in prior_dirs],
         )
         return result  # type: ignore[no-any-return]
 
@@ -731,6 +946,42 @@ def _prepare_root(root: Path) -> tuple[Path, Path, Path]:
     return incoming, capture, root
 
 
+def _data_rows(path: Path) -> list[dict[str, str]]:
+    text = path.read_bytes().decode("utf-8-sig")
+    return [row for row in csv.DictReader(io.StringIO(text)) if any(row.values())]
+
+
+def is_cash_only(raw: Path, book_id: int) -> bool:
+    """A book whose export is a single start-cash row and which holds nothing.
+
+    The transactions file has exactly one data row, of type ``CASH``; a holdings file,
+    when one was fetched, has no data rows.
+    """
+
+    transactions = raw / KIND_BY_NAME["transactions_csv"].saved.format(id=book_id)
+    holdings = raw / KIND_BY_NAME["holdings_csv"].saved.format(id=book_id)
+    try:
+        rows = _data_rows(transactions)
+        held = _data_rows(holdings) if holdings.is_file() else []
+    except (OSError, UnicodeDecodeError, csv.Error):
+        return False
+    return len(rows) == 1 and rows[0].get("Type") == "CASH" and not held
+
+
+def _identity_policy(decision: str, raw: Path, book_id: int) -> str:
+    """CONTINUE for PASS, CONTINUE_CASH_ONLY_REVIEW for a cash-only REVIEW, else STOP.
+
+    A REVIEW (warnings only) is accepted for no other book: a warning on a book with
+    trades or holdings is a stop, exactly like a FAIL.
+    """
+
+    if decision == "PASS":
+        return "CONTINUE"
+    if decision == "REVIEW" and is_cash_only(raw, book_id):
+        return "CONTINUE_CASH_ONLY_REVIEW"
+    return "STOP"
+
+
 def _capture_manifest(files: Sequence[Landed]) -> bytes:
     return canonical_bytes(
         {
@@ -754,30 +1005,55 @@ def run_p123(
     *,
     identity_check: IdentityCheck,
     reference_index: Path | None = None,
+    no_reference: bool = False,
     skip_designer_models: bool = False,
-    require_identity_pass: bool = False,
     target_id: str | None = None,
     clock: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], float] = time.time,
     download_timeout: float = 180.0,
 ) -> dict[str, Any]:
     """Fetch every allowlisted export; return the manifest (also written to disk)."""
 
-    if allowlist.designer_models and not skip_designer_models:
+    try:
+        require_current_interpreter("the P123 CDP fetcher")
+    except InterpreterRefusal as exc:
+        raise FetchRefused("INTERPRETER_REFUSED", str(exc)) from exc
+    if reference_index is None and not no_reference:
         raise FetchRefused(
-            "DESIGNER_MODEL_NEEDS_BODY_READ",
-            "designer-model JSON is a page, not a download; reading it needs "
-            "Network.getResponseBody. Pass --skip-designer-models to fetch the "
-            "books only",
+            "REFERENCE_REQUIRED", "pass a reference index or no_reference"
         )
-    if not allowlist.books:
+    if reference_index is not None and no_reference:
+        raise FetchRefused("REFERENCE_CONFLICT")
+    reference_sha: str | None = None
+    if reference_index is not None:
+        try:
+            reference_sha = hashlib.sha256(reference_index.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise FetchRefused("REFERENCE_UNREADABLE") from exc
+    fetch_designers = bool(allowlist.designer_models) and not skip_designer_models
+    fetch_page = allowlist.page_record
+    network_read = fetch_designers or fetch_page
+    if not allowlist.books and not fetch_designers and not fetch_page:
         raise FetchRefused("ALLOWLIST_EMPTY")
     urls = allowed_p123_urls(allowlist)
     for url in urls:  # screen the whole allowlist before anything is sent
         screen_p123_url(url, urls)
+    designer_urls = {designer_url(model): model for model in allowlist.designer_models}
+    for url in designer_urls:
+        screen_designer_url(url, designer_urls)
+    page_url = page_record_url(int(wall_clock() * 1000)) if fetch_page else ""
+    if page_url:
+        screen_page_record_url(page_url, page_url)
+    navigable = set(urls)
+    if fetch_designers:
+        navigable |= set(designer_urls)
+    if page_url:
+        navigable.add(page_url)
     incoming, capture, base = _prepare_root(root)
     session = Session(
         transport,
-        allowed_urls=frozenset(urls),
+        allowed_urls=frozenset(navigable),
+        network_read=network_read,
         incoming=incoming,
         tab_ok=p123_tab_ok,
         tab_known=recorder.origin_allowed,
@@ -787,10 +1063,36 @@ def run_p123(
     )
     landed: list[Landed] = []
     books: dict[str, dict[str, Any]] = {}
+    designers: dict[str, dict[str, Any]] = {}
+    page_info: dict[str, Any] | None = None
     stop: FetchStop | None = None
     report: Mapping[str, Any] = {}
+
+    def check_books() -> Mapping[str, Any]:
+        landed_books = [
+            str(b.book_id) for b in allowlist.books if str(b.book_id) in books
+        ]
+        try:
+            return identity_check(capture, landed_books, reference_index)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise FetchStop(
+                "STOP_IDENTITY_FAIL", f"identity check error {type(exc).__name__}"
+            ) from exc
+
     try:
         session.attach(target_id)
+        if network_read:
+            session.enable_network()
+        if fetch_page:
+            relative = "raw/p123_investment_resource.json"
+            digest, size = session.read_json(page_url, capture / relative, list)
+            landed.append(Landed("page_record_json", "-", relative, digest, size, None))
+            page_info = {
+                "relative_path": relative,
+                "sha256": digest,
+                "size_bytes": size,
+            }
+            _replace(capture / "capture-manifest.json", _capture_manifest(landed))
         for book in allowlist.books:
             entry = books.setdefault(
                 str(book.book_id), {"files": [], "identity": "NOT_RUN"}
@@ -828,11 +1130,7 @@ def run_p123(
                     }
                 )
                 _replace(capture / "capture-manifest.json", _capture_manifest(landed))
-            report = identity_check(
-                capture,
-                [str(b.book_id) for b in allowlist.books if str(b.book_id) in books],
-                reference_index,
-            )
+            report = check_books()
             result = report.get("books", {}).get(str(book.book_id), {})
             decision = str(result.get("decision", "FAIL"))
             entry["identity"] = decision
@@ -840,14 +1138,43 @@ def run_p123(
                 str(c.get("check")): str(c.get("status"))
                 for c in result.get("checks", [])
             }
-            if decision == "FAIL" or (require_identity_pass and decision != "PASS"):
+            entry["identity_policy"] = _identity_policy(
+                decision, capture / "raw", book.book_id
+            )
+            if entry["identity_policy"] == "STOP":
                 raise FetchStop(
                     "STOP_IDENTITY_FAIL", f"book identity decision {decision}"
                 )
+        if fetch_designers:
+            for model in allowlist.designer_models:
+                url = designer_url(model)
+                screen_designer_url(url, designer_urls)
+                relative = f"raw/designer_model_{model}.json"
+                digest, size = session.read_json(url, capture / relative)
+                landed.append(
+                    Landed(
+                        "designer_model_json", str(model), relative, digest, size, None
+                    )
+                )
+                designers[str(model)] = {
+                    "relative_path": relative,
+                    "sha256": digest,
+                    "size_bytes": size,
+                    "stage_file_capability": "designer-model.json",
+                }
+                _replace(capture / "capture-manifest.json", _capture_manifest(landed))
     except FetchStop as exc:
         stop = exc
     finally:
         session.release()
+    # The capture manifest is final now: the decisions file must bind exactly these
+    # bytes, so the last check runs after the last manifest write, stopped or not.
+    final_error: str | None = None
+    if books:
+        try:
+            report = check_books()
+        except FetchStop as exc:
+            final_error = exc.detail
     if report:
         _write_new(
             base / "book-identity-decisions.json",
@@ -860,14 +1187,33 @@ def run_p123(
         "stop": {"code": stop.code, "detail": stop.detail} if stop else None,
         "allowlist_sha256": allowlist.sha256,
         "capture_directory": "capture",
+        "reference": {
+            "mode": "NONE_DECLARED" if no_reference else "INDEX",
+            "index_sha256": reference_sha,
+        },
+        "page_record": page_info,
         "books": books,
         "books_not_attempted": [
             str(b.book_id) for b in allowlist.books if str(b.book_id) not in books
         ],
-        "designer_models_not_fetched": [str(m) for m in allowlist.designer_models],
+        "final_identity": {
+            book: str(item.get("decision"))
+            for book, item in dict(report.get("books", {})).items()
+        },
+        "final_identity_error": final_error,
+        "designer_models": designers,
+        "designer_models_not_fetched": [
+            str(m) for m in allowlist.designer_models if str(m) not in designers
+        ],
         "safety": {
-            "cdp_methods": sorted(ALLOWED_CDP_METHODS),
-            "reads_page_body": False,
+            "cdp_methods": sorted(
+                ALLOWED_CDP_METHODS - (set() if network_read else NETWORK_CDP_METHODS)
+            ),
+            "body_reads": (
+                "allowlisted page-record and designer-model requests only"
+                if network_read
+                else "none"
+            ),
             "input_events": False,
         },
     }
@@ -938,8 +1284,8 @@ def run_drive(
         "allowlist_sha256": allowlist.sha256,
         "file": record,
         "safety": {
-            "cdp_methods": sorted(ALLOWED_CDP_METHODS),
-            "reads_page_body": False,
+            "cdp_methods": sorted(ALLOWED_CDP_METHODS - NETWORK_CDP_METHODS),
+            "body_reads": "none",
             "input_events": False,
         },
     }
@@ -964,6 +1310,11 @@ def _parser() -> argparse.ArgumentParser:
     make.add_argument("--designer-model", type=int, action="append", default=[])
     make.add_argument("--drive-file-id", action="append", default=[])
     make.add_argument(
+        "--page-record",
+        action="store_true",
+        help="also read the account investment list (the identity check's page record)",
+    )
+    make.add_argument(
         "--kind",
         action="append",
         default=[],
@@ -979,9 +1330,32 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--target-id")
         item.add_argument("--download-timeout", type=float)
         if name == "run":
-            item.add_argument("--reference-index", type=Path)
+            item.add_argument(
+                "--reference-index",
+                type=Path,
+                help="source-index.json of the 2026-07-31 run (required unless "
+                "--no-reference)",
+            )
+            item.add_argument(
+                "--no-reference",
+                action="store_true",
+                help="run without a reference pull (recorded in the manifest)",
+            )
+            item.add_argument(
+                "--prior-dir",
+                type=Path,
+                action="append",
+                default=[],
+                help="older or HAR download set to compare for permuted rows (warn)",
+            )
+            item.add_argument(
+                "--cross-capture-dir",
+                type=Path,
+                action="append",
+                default=[],
+                help="other capture directory of the same pull (shared rows fail)",
+            )
             item.add_argument("--skip-designer-models", action="store_true")
-            item.add_argument("--require-identity-pass", action="store_true")
         else:
             item.add_argument("--file-id", required=True)
     return parser
@@ -1009,7 +1383,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not args.book and not args.designer_model and not args.drive_file_id:
                 raise FetchRefused("ALLOWLIST_EMPTY")
             payload = build_allowlist_bytes(
-                args.book, args.designer_model, args.drive_file_id, args.kind
+                args.book,
+                args.designer_model,
+                args.drive_file_id,
+                args.kind,
+                args.page_record,
             )
             parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
             digest = _write_new(args.out, payload)
@@ -1018,7 +1396,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         allowlist = load_allowlist(args.allowlist, args.allowlist_sha256)
         timeout = args.download_timeout
         if args.command == "run":
-            check = load_identity_check()
+            refusal = check_entry_interpreter(
+                "the P123 CDP fetcher (it runs the book identity check)",
+                "p123-cdp-fetcher",
+            )
+            if refusal is not None:
+                return refusal
+            if args.reference_index is None and not args.no_reference:
+                raise FetchRefused("REFERENCE_REQUIRED")
+            check = load_identity_check(
+                prior_dirs=args.prior_dir, cross_dirs=args.cross_capture_dir
+            )
             transport = connect(args.cdp_url)
             try:
                 extra: dict[str, Any] = {"download_timeout": timeout} if timeout else {}
@@ -1028,8 +1416,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.download_dir,
                     identity_check=check,
                     reference_index=args.reference_index,
+                    no_reference=args.no_reference,
                     skip_designer_models=args.skip_designer_models,
-                    require_identity_pass=args.require_identity_pass,
                     target_id=args.target_id,
                     **extra,
                 )
