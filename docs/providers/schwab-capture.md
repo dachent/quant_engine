@@ -156,6 +156,43 @@ page, reloads it and reads one of the SPA's own API requests (the same step
 `capture` starts with), and prints `ok`, `governed_requests: 0` and the observed
 header names (never values). It needs no evidence and consumes nothing.
 
+#### The holdings body, read from the page itself
+
+No retained capture holds a Holdings-V2 request body (the 2026-07-31 HARs contain
+the SPA bundle, which has only key names). `attach-check --cdp-url <url>
+--capture-body-out <body.json> [--wait-seconds 20]` records the body of the
+page's OWN HoldingV2 POST while it reloads the page (a passive
+`request.post_data` read; no request of ours, no header, cookie or token is
+stored or printed). The body is reduced to the keys the gate allows and written
+create-only; the output lists the key names and the file hash. Feed the file to
+`make-evidence --holdings-body`.
+
+If no HoldingV2 request is seen within the wait window the command refuses and
+writes nothing. The operator then opens the Schwab positions/holdings page by
+read-only navigation in the same browser and runs `attach-check` again, or STOPs
+and uses the retained UI method below.
+
+#### Fallback: the retained UI method (R2.1)
+
+If the driver's first live use fails, the documented fallback is the method that
+produced `source-runs/r21-schwab-0917-official`: the "All Brokerage Accounts"
+page's own HoldingV2 call (HTTP 200) saved as `all-brokerage-positions.json`, with
+`capture-receipt.json` (selected UI perimeter, source path, file hashes), the
+selected-account transactions, `official-nav-derivation.json` and the
+`finality/` and `normalized/` directories. Ledger finality for a fresh capture
+then comes from the same chain as the driver's output: derive, ingest and
+declare (above), with the declared evidence wired into the cycle manifest. The
+fallback needs its own review and the owner's say-so; it is not interchangeable
+with a driver run without that.
+
+#### Re-issuing evidence in the capture window
+
+Evidence is single use and a failed run is not resumed, so a second evidence is a
+new file with a new review comment. The cycle is `make-evidence` (writes and
+validates) then `check-evidence`, each well under a second; the time is the review
+comment and the `--issued-at`/`--expires-at` values, not the tools. Use a fresh
+`--output` path each time.
+
 ## Credentials
 
 None. Capture attaches over CDP to the owner's already-authenticated browser and

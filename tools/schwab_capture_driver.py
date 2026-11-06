@@ -1966,17 +1966,32 @@ def build_crosswalk(source_root: Path, output: Path) -> dict[str, object]:
     return {"account_count": len(rows), "output_sha256": _sha256(payload + b"\n")}
 
 
+def extract_holdings_body(post_data: object) -> dict[str, object]:
+    """The page's own HoldingV2 body, reduced to the keys the gate allows."""
+
+    if not isinstance(post_data, str) or not post_data.strip():
+        raise DriverError("the observed HoldingV2 request carried no body")
+    try:
+        parsed = strict_json_loads(post_data.encode("utf-8"), label="holdings body")
+    except Exception as exc:
+        raise DriverError("the observed HoldingV2 body is not strict JSON") from exc
+    kept = {k: v for k, v in _object(parsed, "holdings body").items()
+            if k in _HOLDINGS_BODY_KEYS}  # fmt: skip
+    return _parse_body("holdings.v2", kept) or {}
+
+
 def attach_check(
     *,
     cdp_url: str,
     connect: Callable[[str], Any],
-    observe: Callable[[Any], dict[str, str]],
+    observe: Callable[[Any], tuple[dict[str, str], str | None]],
+    capture_body_out: Path | None = None,
 ) -> dict[str, object]:
-    """Attach and observe the page's own headers; no governed request, no evidence.
+    """Attach and observe the page's own requests; no governed request, no evidence.
 
-    ``observe`` reloads the Schwab page and reads one of the SPA's own API
-    requests, exactly as ``capture`` does first. Header values are never
-    returned, only their names.
+    ``observe`` reloads the Schwab page, reads one of the SPA's own API requests
+    (as ``capture`` does first) and, passively, the body of its own HoldingV2
+    POST. Header values are never returned or stored; only their names.
     """
 
     browser = connect(cdp_url)
@@ -1991,14 +2006,51 @@ def attach_check(
         raise DriverError(
             f"expected exactly one client.schwab.com page, found {len(pages)}"
         )
-    headers = observe(pages[0])
-    return {
+    headers, post_data = observe(pages[0])
+    result: dict[str, object] = {
         "authenticated_request_observed": "Authorization" in headers,
         "governed_requests": 0,
         "observed_header_names": sorted(headers),
         "ok": "Authorization" in headers,
         "schwab_pages": len(pages),
     }
+    if capture_body_out is not None:
+        if post_data is None:
+            raise DriverError(
+                "no HoldingV2 request was observed in the wait window: open the "
+                "Schwab holdings/positions page (read-only navigation) and run "
+                "attach-check again, or STOP and use the retained UI method"
+            )
+        payload = _canonical(extract_holdings_body(post_data))
+        try:
+            with capture_body_out.open("xb") as handle:
+                handle.write(payload)
+        except FileExistsError as exc:
+            raise DriverError("output already exists") from exc
+        result["holdings_body_sha256"] = _sha256(payload)
+        result["holdings_body_keys"] = sorted(json.loads(payload))
+    return result
+
+
+def _observe_with_body(
+    page: Any, seconds: float
+) -> tuple[dict[str, str], str | None]:  # pragma: no cover - live only
+    seen: list[str | None] = []
+
+    def on_request(request: Any) -> None:
+        if request.method == "POST" and request.url.endswith(HOLDINGS_V2_PATH):
+            seen.append(request.post_data)
+
+    page.on("request", on_request)
+    try:
+        headers = _observe_headers(page)
+        waited = 0.0
+        while not seen and waited < seconds:
+            page.wait_for_timeout(500)
+            waited += 0.5
+    finally:
+        page.remove_listener("request", on_request)
+    return headers, (seen[0] if seen else None)
 
 
 def _attach_live(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
@@ -2010,7 +2062,8 @@ def _attach_live(args: argparse.Namespace) -> dict[str, object]:  # pragma: no c
         return attach_check(
             cdp_url=args.cdp_url,
             connect=playwright.chromium.connect_over_cdp,
-            observe=_observe_headers,
+            observe=lambda page: _observe_with_body(page, args.wait_seconds),
+            capture_body_out=args.capture_body_out,
         )
 
 
@@ -2087,6 +2140,8 @@ def _parser() -> argparse.ArgumentParser:
         help="live, no evidence: attach over CDP and observe the page's headers",
     )
     attach.add_argument("--cdp-url", required=True)
+    attach.add_argument("--capture-body-out", type=Path)
+    attach.add_argument("--wait-seconds", type=float, default=20.0)
     verify = sub.add_parser("verify", help="re-check a staged run from its bytes")
     verify.add_argument("run_dir", type=Path)
     verify.add_argument("--crosswalk", type=Path)

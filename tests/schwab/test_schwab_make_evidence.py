@@ -202,7 +202,10 @@ def test_attach_check_reports_names_only_and_issues_no_governed_request() -> Non
     result = driver.attach_check(
         cdp_url="http://127.0.0.1:9223",
         connect=lambda url: seen.append(url) or _Browser([SCHWAB, "about:blank"]),
-        observe=lambda page: {"Authorization": "Bearer secret", "Schwab-Env": "x"},
+        observe=lambda page: (
+            {"Authorization": "Bearer secret", "Schwab-Env": "x"},
+            None,
+        ),
     )
     assert result["ok"] is True and result["governed_requests"] == 0
     assert result["observed_header_names"] == ["Authorization", "Schwab-Env"]
@@ -213,12 +216,54 @@ def test_attach_check_reports_names_only_and_issues_no_governed_request() -> Non
 def test_attach_check_needs_exactly_one_schwab_page(urls: list[str]) -> None:
     with pytest.raises(driver.DriverError, match="exactly one"):
         driver.attach_check(
-            cdp_url="x", connect=lambda url: _Browser(urls), observe=lambda page: {}
+            cdp_url="x",
+            connect=lambda url: _Browser(urls),
+            observe=lambda page: ({}, None),
         )
 
 
 def test_attach_check_not_ok_without_authorization() -> None:
     result = driver.attach_check(
-        cdp_url="x", connect=lambda url: _Browser([SCHWAB]), observe=lambda page: {}
+        cdp_url="x",
+        connect=lambda url: _Browser([SCHWAB]),
+        observe=lambda page: ({}, None),
     )
     assert result["ok"] is False
+
+
+def _attach(tmp_path: Path, post_data: str | None) -> dict[str, object]:
+    return driver.attach_check(
+        cdp_url="x",
+        connect=lambda url: _Browser([SCHWAB]),
+        observe=lambda page: ({"Authorization": "t"}, post_data),
+        capture_body_out=tmp_path / "body.json",
+    )
+
+
+def test_captured_body_is_filtered_create_only_and_feeds_make_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    raw = json.dumps({**BODY, "accountNumber": "123456789", "token": "x"})
+    result = _attach(tmp_path, raw)
+    saved = json.loads((tmp_path / "body.json").read_text(encoding="utf-8"))
+    assert saved == BODY and result["holdings_body_keys"] == sorted(BODY)
+    assert "123456789" not in json.dumps(result)
+    with pytest.raises(driver.DriverError, match="already exists"):
+        _attach(tmp_path, raw)
+    args = _args(tmp_path, **{"--holdings-body": str(tmp_path / "body.json")})
+    assert driver.main(args) == 0
+
+
+def test_no_observed_holdings_request_is_refused_with_the_operator_action(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(driver.DriverError, match="no HoldingV2 request.*STOP"):
+        _attach(tmp_path, None)
+    assert not (tmp_path / "body.json").exists()
+
+
+@pytest.mark.parametrize("post_data", ["", "[]", "not json", '{"token": "x"}'])
+def test_unusable_observed_body_is_refused(tmp_path: Path, post_data: str) -> None:
+    with pytest.raises(driver.DriverError):
+        _attach(tmp_path, post_data)
+    assert not (tmp_path / "body.json").exists()
