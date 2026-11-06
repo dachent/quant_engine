@@ -3015,6 +3015,48 @@ def _write_exact(path: Path, content: bytes) -> None:
         handle.write(content)
 
 
+def observed_end_table(
+    strategies: Iterable[Mapping[str, Any]], as_of: date
+) -> list[dict[str, Any]]:
+    """Each strategy's last observed date against the as-of: a read-only table for the operator.
+
+    A row's end is the shorter of its model and its account series, so a lag is not by itself a fault;
+    it is what the operator reads after a build instead of remembering which strategies lag.
+    """
+
+    rows: list[dict[str, Any]] = []
+    for item in strategies:
+        end: str | None = None
+        for holder in (
+            item.get("return_reconciliation"),
+            item.get("account_live_return_summary"),
+            item,
+        ):
+            if isinstance(holder, Mapping) and isinstance(
+                holder.get("observed_end"), str
+            ):
+                end = holder["observed_end"]
+                break
+        rows.append(
+            {
+                "as_of_date": as_of.isoformat(),
+                "lag_days": (as_of - date.fromisoformat(end)).days if end else None,
+                "observed_end": end,
+                "strategy_id": item.get("strategy_id"),
+            }
+        )
+    return rows
+
+
+def print_observed_end_table(table: Iterable[Mapping[str, Any]]) -> None:
+    for row in table:
+        print(
+            f"observed_end {row['strategy_id']}: {row['observed_end']} "
+            f"(as-of {row['as_of_date']}, lag {row['lag_days']} d)",
+            file=sys.stderr,
+        )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--p123-generation-root", type=Path, required=True)
@@ -3059,9 +3101,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ImplementationReconciliationError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     payload = json.loads(content)
+    table = observed_end_table(
+        payload["strategies"], date.fromisoformat(str(payload["as_of_date"]))
+    )
+    print_observed_end_table(table)
     print(
         json.dumps(
             {
+                "observed_end_vs_as_of": table,
                 "output": str(args.output),
                 "reconciliation_id": payload["reconciliation_id"],
                 "strategies": [item["strategy_id"] for item in payload["strategies"]],
