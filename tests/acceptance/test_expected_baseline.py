@@ -62,6 +62,10 @@ HISTORICAL_V3_PATH = (
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
 )
+# Owner-declared delivery cutoffs (AGENTS.md): 2026-09-17 for R1/R2/R2.1/R2.2,
+# 2026-11-06 for R3 onward. A new cutoff needs a new owner instruction recorded
+# in AGENTS.md before it is added here.
+DELIVERY_CUTOFFS = frozenset({"2026-09-17", "2026-11-06"})
 CONTRACT_POINTER_PATH = "contracts/portfolio-financial-mvp-source-v1.json"
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 COMMIT_HEX = re.compile(r"[0-9a-f]{40}")
@@ -80,6 +84,22 @@ def _load(path: Path = BASELINE_PATH) -> dict[str, Any]:
 
 def _rows(doc: dict[str, Any]) -> list[dict[str, Any]]:
     return [*doc["metrics"], *doc["not_derivable"]]
+
+
+def _assert_delivery_cutoff(cutoff: object) -> None:
+    assert cutoff in DELIVERY_CUTOFFS, (
+        f"baseline cutoff {cutoff!r} is not an owner-declared delivery cutoff "
+        f"{sorted(DELIVERY_CUTOFFS)}: a new owner instruction must be recorded "
+        "in AGENTS.md first"
+    )
+
+
+def test_delivery_cutoff_gate_rejects_other_dates() -> None:
+    for good in sorted(DELIVERY_CUTOFFS):
+        _assert_delivery_cutoff(good)
+    for bad in ("2026-12-31", "2026-09-18", "", None):
+        with pytest.raises(AssertionError, match="AGENTS.md"):
+            _assert_delivery_cutoff(bad)
 
 
 def _root_manifest_cutoff() -> str | None:
@@ -136,6 +156,7 @@ def test_header_schema() -> None:
     cutoff = doc["cutoff"]
     assert isinstance(cutoff, str)
     assert date.fromisoformat(cutoff).isoformat() == cutoff, cutoff
+    _assert_delivery_cutoff(cutoff)
     root_cutoff = _root_manifest_cutoff()
     if root_cutoff is not None:
         assert cutoff == root_cutoff, (cutoff, root_cutoff)

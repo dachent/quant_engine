@@ -3433,11 +3433,22 @@ def test_the_report_producers_own_block_is_verified_by_the_validator(
 # baseline must hold the oracle rows the bound verification reads.
 
 
+# Owner-declared delivery cutoffs (AGENTS.md): 2026-09-17 for R1/R2/R2.1/R2.2,
+# 2026-11-06 for R3 onward. A new cutoff needs a new owner instruction recorded
+# in AGENTS.md before it is added here.
+DELIVERY_CUTOFFS = frozenset({"2026-09-17", "2026-11-06"})
+
+
 def _real_context() -> checks.Context:
     baseline = json.loads(
         (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").read_text(
             encoding="utf-8"
         )
+    )
+    assert baseline["cutoff"] in DELIVERY_CUTOFFS, (
+        f"baseline cutoff {baseline['cutoff']!r} is not an owner-declared delivery "
+        f"cutoff {sorted(DELIVERY_CUTOFFS)}: a new owner instruction must be "
+        "recorded in AGENTS.md first"
     )
     return checks.Context(
         SimpleNamespace(report={}, panel={}),  # type: ignore[arg-type]
