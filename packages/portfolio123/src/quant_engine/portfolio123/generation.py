@@ -316,6 +316,10 @@ def _gate_inputs(
             "expected books have no transaction capture: " + ", ".join(missing)
         )
     for book, reason in supersede_books.items():
+        if book not in expected:
+            raise Portfolio123GenerationError(
+                f"book {book} cannot be superseded unless it is an expected book"
+            )
         if book not in captured:
             raise Portfolio123GenerationError(
                 f"book {book} cannot be superseded without a transaction capture"
@@ -741,31 +745,36 @@ def _enforce_transaction_gate(
     for book in sorted(books):
         old = _object(books[book], "previous book")
         new = stats.get(book)
-        problems: list[str] = []
+        # A superseded book may change its series (row count, first date); it can never lose
+        # its last transaction date or disappear.
+        hard: list[str] = []
+        waivable: list[str] = []
         if new is None:
-            problems.append("no transactions")
+            hard.append("no transactions")
         else:
-            if new["rows"] < old["rows"]:
-                problems.append(f"rows {new['rows']} < {old['rows']}")
             if old["last_date"] and (
                 new["last_date"] is None or new["last_date"] < old["last_date"]
             ):
-                problems.append(f"last date {new['last_date']} < {old['last_date']}")
+                hard.append(f"last date {new['last_date']} < {old['last_date']}")
+            if new["rows"] < old["rows"]:
+                waivable.append(f"rows {new['rows']} < {old['rows']}")
             if old["first_date"] and new["first_date"] != old["first_date"]:
-                problems.append(
+                waivable.append(
                     f"first date {new['first_date']} != {old['first_date']}"
                 )
-        if not problems:
-            continue
         if book in supersede:
-            if book not in captured or new is None or new["rows"] == 0:
-                failures.append(f"{book}: supersede needs captured transactions")
-            else:
-                waived[book] = {"previous": old, "reason": supersede[book]}
-            continue
-        failures.append(f"{book}: " + ", ".join(problems))
+            if hard:
+                failures.append(f"{book}: " + ", ".join(hard) + " (not waivable)")
+            elif waivable:
+                waived[book] = {
+                    "previous": old,
+                    "reason": supersede[book],
+                    "waived": waivable,
+                }
+        elif hard or waivable:
+            failures.append(f"{book}: " + ", ".join([*hard, *waivable]))
     for book in sorted(supersede):
-        if book not in captured:
+        if book not in captured or book not in stats:
             failures.append(f"{book}: supersede needs captured transactions")
     if failures:
         raise Portfolio123GenerationError(

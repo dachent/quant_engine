@@ -161,7 +161,7 @@ def test_thin_download_after_a_full_generation_is_refused_per_book(
         har, {"101": _full(67, "2026-09-01"), "303": _full(50, "2026-09-10")}
     )
     message = _refused(legacy, har, data, date(2026, 9, 12))
-    assert "101: rows 67 < 1176, last date 2026-09-01 < 2026-09-11" in message
+    assert "101: last date 2026-09-01 < 2026-09-11, rows 67 < 1176" in message
     assert "303: last date 2026-09-10 < 2026-09-11" in message
     assert previous in message
     assert _current(data) == previous
@@ -271,30 +271,83 @@ def test_non_iso_capture_date_is_refused(tmp_path: Path) -> None:
 
 def test_supersede_waives_one_captured_book_and_is_recorded(tmp_path: Path) -> None:
     legacy, har, data = _inputs(tmp_path)
-    _stage_downloads(har, {"101": _full(2452, "2026-09-01")})
+    old_series = _full(2452, "2026-09-01").replace(
+        "2025-05-01,,CASH", "2008-09-26,,CASH"
+    )
+    _stage_downloads(har, {"101": old_series})
     _generate(legacy, har, data)
     capture = _capture(tmp_path, "cap", {"101": _full(2394)})
-    assert "101: rows 2394 < 2452" in _refused(
-        legacy, har, data, date(2026, 9, 12), transaction_captures=[capture]
+    message = _refused(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 12),
+        transaction_captures=[capture],
+        expected_books=["101"],
     )
-    reason = "09-02 download was another series"
+    assert "101: rows 2394 < 2452, first date 2025-05-01 != 2008-09-26" in message
+    reason = (
+        "capture series is the live MVP2 book (start 2025-05-09, 1,000,000 start cash); "
+        "the 09-02 download is a different series (2008-09-26 start, 20,000 start cash)"
+    )
     generation_id = _generate(
         legacy,
         har,
         data,
         date(2026, 9, 12),
         transaction_captures=[capture],
+        expected_books=["101"],
         supersede_books={"101": reason},
     )
     superseded = _catalog(data, generation_id)["transaction_gate"]["superseded"]  # type: ignore[index]
     assert superseded["101"]["reason"] == reason
     assert superseded["101"]["previous"]["rows"] == 2452
-    with pytest.raises(Portfolio123GenerationError, match="cannot be superseded"):
+    assert superseded["101"]["waived"] == [
+        "rows 2394 < 2452",
+        "first date 2025-05-01 != 2008-09-26",
+    ]
+
+
+def test_supersede_never_waives_a_lost_last_date_or_a_missing_book(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    old_series = _full(50, "2026-09-11").replace("2025-05-01,,CASH", "2008-09-26,,CASH")
+    _stage_downloads(har, {"101": old_series, "202": _full(5)})
+    _generate(legacy, har, data)
+    stale = _capture(tmp_path, "stale", {"101": _full(20, "2026-09-01"), "202": HEADER})
+    message = _refused(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 12),
+        transaction_captures=[stale],
+        expected_books=["101", "202"],
+        supersede_books={"101": "different series", "202": "different series"},
+    )
+    assert "101: last date 2026-09-01 < 2026-09-11 (not waivable)" in message
+    assert "202: no transactions (not waivable)" in message
+
+
+def test_supersede_needs_an_expected_captured_book(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    capture = _capture(tmp_path, "cap", {"101": _full(5)})
+    with pytest.raises(Portfolio123GenerationError, match="unless it is an expected"):
         create_cutover_plan(
             legacy,
             har,
             data,
             as_of_date=date(2026, 9, 13),
+            transaction_captures=[capture],
+            supersede_books={"101": "not expected"},
+        )
+    with pytest.raises(Portfolio123GenerationError, match="expected books have no"):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 13),
+            expected_books=["101"],
             supersede_books={"101": "no capture"},
         )
 

@@ -128,10 +128,16 @@ python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as
   count, first date, and last date. `stage` and `publish` refuse, listing every
   failing book, when a book has fewer rows, an earlier last date, a different first
   date, or no transactions at all. There are no accepted gaps on live accounts.
-- `--supersede-book` waives that comparison for one captured book with a stated
-  reason (for example a previous generation that held another series). It needs a
-  capture with rows, and the reason and the previous figures are recorded under
-  `transaction_gate.superseded` in `portfolio123-generation.json`.
+- `--supersede-book ID=REASON` waives only the row-count and first-date checks for
+  one book whose previous generation held another series. The book must be an
+  `--expected-book` with a capture file that has rows. A lost last transaction date
+  or a book missing from the new generation is never waivable. The reason must state
+  both series, for example: `capture series is the live MVP2 book (start 2025-05-09,
+  1,000,000 start cash); the 09-02 download is a different series (2008-09-26 start,
+  20,000 start cash)`. The reason, the previous figures and the waived checks are
+  recorded under `transaction_gate.superseded` in `portfolio123-generation.json`, a
+  hash-bound artifact of the generation, and the plan carries the flag too. With no
+  flag the gate refuses.
 
 Schema 1 plans keep rebuilding under adapter 1.0.0; new plans build under 1.1.0.
 
