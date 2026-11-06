@@ -23,7 +23,7 @@ generation, admission, or any existing module.
 | Responses | `responses.py` | Classifies success, warn/poll, retry-later (1001, 1009, 1018, 1021), incomplete (1004), settlement-not-ready (1005), P&L-not-ready (1006 to 1008), request errors, malformed or HTML bodies. Every refusal stages no statement. |
 | Raw staging | `staging.py` | Create-only under a caller-supplied absolute root; run directories and files are never overwritten; manifest lists every file with SHA-256 and size. |
 | Normalizer | `normalize.py` | Strict reader (`parse_flex_file`) for activity statements; masked account labels (SHA-256[:16]), NAV, row counts, weekday gaps, hashed security keys. No raw account id, cash amount, or execution detail. |
-| Verifier | `verify.py` | Shares no parser with the normalizer: re-hashes files, re-scans the raw XML, recomputes the whole normalized document, requires byte equality. Stable reason codes only. |
+| Verifier | `verify.py` | Shares no parser with the normalizer: re-hashes files, re-scans the raw XML, recomputes the whole normalized document, requires byte equality, and refuses an activity run with any weekday gap (`coverage-gaps`). Stable reason codes only. |
 | Resolver | `securities.py` | `sha256(conid)[:24]` keys (test-proven equal to the ledger `security-ibkr-<hash>` ids). A key resolves only when exactly one symbol and one assetCategory are observed; otherwise MISSING_SYMBOL, MISSING_ASSET_CATEGORY, AMBIGUOUS or NOT_OBSERVED, reported by key. |
 
 ## Commands
@@ -161,13 +161,89 @@ the request (two observations; the rule is inferred). The 50 days named for the 
 not delivered. A statement of the same query pulled on Saturday 2026-11-07 would therefore cover
 2026-10-08 to 2026-11-06, a window inside the 31-day cap that needs no override.
 
-For R3 that gives two plans: one request of the saved query's own window (no `window_override`,
-`window_from` 2026-10-08, `window_to` 2026-11-06), and, for the older 2026-09-19 to 2026-10-07, one
-plan of 13 one-day override requests (above). If the owner later changes the saved query's period
-in the portal, an override request is unaffected (the request sets its window, and a one-day
-request has been seen to return exactly that day), and a request without an override fails loudly:
-the normalizer and verifier refuse any statement outside the planned window, and report any
-uncovered weekday inside it.
+## R3 pull shape: one all-override plan
+
+The primary IBKR plan for R3 sets every window itself, so it depends on neither the pull day nor
+the saved query's own window (and a Sunday pull, or a rerun, is the same plan): one
+`activity-history` request per trading day, `fd` = `td` = that day, from the day after the prior
+generation's last statement (2026-09-21, the Monday after 2026-09-18) through the cutoff
+(2026-11-06): 13 requests for 2026-09-21 to 2026-10-07 and 22 for 2026-10-08 to 2026-11-06, 35 in
+all (the cap is 40; `max_send_requests` in the evidence equals 35, `max_get_attempts` at least 6),
+one plan and one evidence file, `window_override` true on every request, no weekend day and no
+listed non-trading day in the plan. The 2026-11-06 request is the last increment: no separate
+`activity-current-increment` request is made.
+
+- **Time.** Each request is a SendRequest (under a second), a 20 second wait and a GetStatement
+  (a second or two for 2 MB), about 22 seconds sequentially, so 35 requests are about 13 minutes
+  when every report is ready at the first poll. The rate limit alone (10 calls a minute per token,
+  at least 35 sends and 35 gets) puts the floor at 7 minutes. Each 1019 poll adds its wait
+  (40, 80, then 120 seconds) and each connection retry adds 5, 15, 30 or 60 seconds. The worst
+  case per request is nine attempts that all answer 1019: 20 + 40 + 80 + 6 x 120 = 860 seconds, so
+  the worst case for 35 requests is about 8.4 hours; neither the evidence nor the receipt limits the
+  wall time, only the attempt counts. Requests are not pipelined: the SendRequests are independent
+  and could be sent ahead (the 10 calls a minute limit still applies to all calls), which would
+  approach the 7 minute floor, but each request is its own run directory and receipt reservation
+  under single-use evidence, and a refusal stops the plan at that request, which is simpler to
+  reason about than several requests in flight.
+- **A stop leaves a prefix.** The plan stops at the first refusal and does not attempt the rest;
+  the requests already staged are kept. Continuing needs new evidence for a plan of the remaining
+  days.
+- **Cross-check, not a dependency.** The saved query's own window (the last 30 calendar days, a
+  non-override `activity-history` request of 2026-10-08 to 2026-11-06 for a Saturday 2026-11-07
+  pull, a separate plan with its own evidence) can be pulled and compared with the 22 one-day
+  statements of the same days; nothing waits for it. If the owner changes the saved query's period
+  in the portal an override request is unaffected, and a request without an override fails loudly
+  (the normalizer and verifier refuse any statement outside the planned window).
+
+## Coverage must be complete
+
+- **Capture verify.** `verify` refuses an activity run with any weekday gap: every expected account
+  must have a statement for every requested trading day (the plan lists the non-trading days), and
+  an account outside the expected scope is refused. The refusal is `coverage-gaps` and says how
+  many accounts and weekdays are missing; `verify --allow-gaps` reads a run's gaps without
+  accepting it (inspection only). `normalize` still reports `coverage.status` and the gap list.
+- **Generation.** `_flex_history_coverage` (generation admission) checks each account's history
+  against the others: an account whose last statement is before the last weekday on or before the
+  newest statement of the generation is refused (`an account's Flex history does not reach the
+  latest statement day: missing weekday statement for account-...: <last> to <latest>`), unless that
+  exact atom is a `declared_general_exclusions` entry (a retired account the owner ruled outside the
+  strategy perimeter). Gaps between an account's statement days are reported as before. The check
+  compares with the newest statement in the build; the capture verify above is what checks that the
+  statements reach the cutoff.
+
+## R3 generation spec (skeleton from the R2.1 spec)
+
+The model is the R2.1 spec (`dataIBKR/config/ibkr-generation-spec-refresh-20260903.json`, schema
+version 2; the 4becf8c2 generation's own spec was not read here). Its inventory: 8
+`PRIMARY_FLEX_ACTIVITY` XMLs (the monthly legacy files 2025-12-31 to 2026-07-14), the
+`REFRESH_FLEX_ACTIVITY` runs, exactly one `TWS_CURRENT_SNAPSHOT` JSON, and the secondary,
+rendered, binary and schema references. The builder (`generation.py`) requires at least 28
+sources, exactly eight primary XMLs, at least one refresh XML and exactly one TWS snapshot, and
+refuses a duplicate account and day among the primaries and a refresh overlap that is not
+identical. For R3:
+
+- **Primary and references:** the 8 primary XMLs and the secondary, rendered, binary and schema
+  references of the R2.1 spec, unchanged.
+- **Refresh:** the retained refresh runs of R2.1, then the 35 new one-day statements (one source
+  each, `as_of_date` the statement day), named so that the XML root holds exactly the manifest's
+  identities by sha256 and size (`AllAccounts_Accounting_XML_<yyyymmdd>.xml`).
+- **TWS:** the plan has no TWS step. The generation still needs exactly one snapshot, so the
+  retained 2026-07-31 snapshot (`source-runs/tws-20260731T044406Z-2bfafea8/snapshot.json`) is
+  carried as the R2.1 spec carried it, with the TWS-state coverage gap it already produces; a new
+  TWS capture is not part of R3 and is the owner's call.
+- **Declared exclusions:** the R2.1 catalog records one account ending on 2026-06-30
+  (`account-2d0a996c...`) and a between-days gap for another; with the end rule above the R3 build
+  refuses the first unless the spec declares its exact atom (`missing weekday statement for
+  account-2d0a996c...: 2026-06-30 to 2026-11-06`) with the owner's provenance, and reports the
+  second as before. The spec's `declared_zero_activity_accounts` is carried.
+- **The increment:** the 2026-11-06 statement is already in the refresh set. The builders also take
+  one `--ibkr-current-xml`; giving them the same 2026-11-06 file is an identical overlap, which the
+  generation accepts among refresh sources and the attribution builder merges its MTM daily detail by day, symbol and
+  conid (it refuses only conflicting values); whether the reconciliation builder dedupes the same
+  trade ids is UNVERIFIED, so confirm it on the first run or decide that the increment is the
+  newest file only.
+- **Who and when:** the release session assembles the spec after the pull and verification (P2/P3),
+  from the verified runs; it needs no owner time except the declared-exclusion provenance.
 
 ## GetStatement retries (connection-class failures)
 

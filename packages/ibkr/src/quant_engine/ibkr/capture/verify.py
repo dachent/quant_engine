@@ -222,7 +222,9 @@ def _returns_requested_window(
     return True
 
 
-def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
+def verify_run(
+    run_dir: Path, normalized_path: Path, *, allow_gaps: bool = False
+) -> VerificationReport:
     checks: list[str] = []
     manifest_bytes = (
         (run_dir / _MANIFEST).read_bytes() if (run_dir / _MANIFEST).is_file() else b""
@@ -393,6 +395,16 @@ def verify_run(run_dir: Path, normalized_path: Path) -> VerificationReport:
             missing = [d.isoformat() for d in wanted if d.isoformat() not in have]
             if missing:
                 gaps[label] = missing
+    if gaps and not allow_gaps:
+        # an activity run is verified only when every expected account has a statement for
+        # every requested trading day (the plan lists the non-trading days); a gap on a live
+        # account is an error, not a coverage status to read later
+        days = sorted({day for missing in gaps.values() for day in missing})
+        raise VerificationError(
+            "coverage-gaps",
+            f"{len(gaps)} account(s) lack {len(days)} requested weekday(s), "
+            f"first {days[0]}, last {days[-1]}",
+        )
     rows.sort(key=lambda row: (row["account_label"], json.dumps(row, sort_keys=True)))
     expected_document = {
         "schema": "ibkr-capture-normalized-v1",

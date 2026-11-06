@@ -88,6 +88,11 @@ def _parser() -> argparse.ArgumentParser:
     verify = commands.add_parser("verify", help="independently verify one run")
     verify.add_argument("run_dir", type=Path)
     verify.add_argument("normalized", type=Path)
+    verify.add_argument(
+        "--allow-gaps",
+        action="store_true",
+        help="report weekday gaps instead of refusing the run (read-only inspection)",
+    )
     symbols = commands.add_parser("symbols", help="build the conid symbol table")
     symbols.add_argument("--normalized", type=Path, action="append", required=True)
     symbols.add_argument(
@@ -126,7 +131,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
         elif args.command == "verify":
-            report = verify_run(args.run_dir, args.normalized)
+            report = verify_run(
+                args.run_dir, args.normalized, allow_gaps=args.allow_gaps
+            )
             _emit(
                 {
                     "checks": list(report.checks),

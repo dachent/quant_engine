@@ -358,3 +358,30 @@ def test_a_repeated_role_runs_one_request_per_day_and_each_run_verifies(
         output = tmp_path / f"n{index}.json"
         normalize_run(run_dir, output)
         assert verify_run(run_dir, output).status == "VERIFIED"
+
+
+def test_the_all_override_plan_for_the_r3_gap_fits_one_plan_and_ignores_the_pull_day() -> (
+    None
+):
+    days = weekday_range(date(2026, 9, 21), date(2026, 11, 6))
+    assert len(days) == 35
+    for pull in (date(2026, 11, 7), date(2026, 11, 8), date(2026, 11, 9)):
+        plan = RequestPlan(
+            pull,
+            tuple(CaptureRequest("activity-history", day, day, True) for day in days),
+            LABELS,
+        )
+        assert plan_from_document(plan.to_document()) == plan
+    # a request for the pull day itself is still refused (a day is final only after it closes)
+    with pytest.raises(PlanError, match="before the pull date"):
+        plan_from_document(
+            RequestPlan(
+                date(2026, 11, 6),
+                (
+                    CaptureRequest(
+                        "activity-history", date(2026, 11, 6), date(2026, 11, 6), True
+                    ),
+                ),
+                LABELS,
+            ).to_document()
+        )
