@@ -93,7 +93,12 @@ recovery authority. Any inventory or byte difference fails closed.
 
 The HAR download of a model book can be thin or the wrong series (the 2026-09-02
 download held 67 of 1,176 2026 rows for the primary book, and six temporary books
-had none). The model-book events that the implementation builders read come only
+had none; seven of its eight `strategy_<id>_transactions.csv` held another
+strategy's rows, matched by exact row overlap with the 2026-07-31 pull). A
+transaction CSV carries no book id, so the id is only the filename: pull each book
+from its own page (`port_summary.jsp?portid=<book id>`, the id the page shows),
+save the export as `strategy_<that id>_transactions.csv`, and never rename or batch
+the files afterwards. The model-book events that the implementation builders read come only
 from `tables/har_transactions.parquet`, so a thin table gives a thin seed. Plan
 schema 2 therefore reads the full per-book transaction captures and refuses a
 generation that shrinks any book.
