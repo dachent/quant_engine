@@ -8,6 +8,10 @@
 ``add``      build the NEXT root from a verified one with extra files: each ``--file LOGICAL=SOURCE`` copies
              a source file byte for byte to a registered release-input path of the new root (a path the
              root already holds is refused without ``--replace``); prints the new manifest sha256 (the pin).
+``new-cutoff``  build a NEW root at a stated cutoff from a verified source root plus explicit
+             ``--file ENTRY=PATH`` replacements/additions and ``--drop ENTRY``; refuses to seal while a
+             cutoff-dependent entry (``CUTOFF_DEPENDENT`` in ``core.release_inputs``) is carried unreplaced
+             unless ``--carry-stale ENTRY=REASON`` names it; create-only output, loader-verified, deterministic.
 ``rebind-predecessor``  build the NEXT root from a verified one: its disclosure inputs'
              ``predecessor_comparison`` is derived from the committed ``CURRENT_RELEASE`` and its
              panel's ``dashboard_data.json`` (never typed); prints the new manifest sha256 (the pin).
@@ -19,9 +23,12 @@ input is a refusal (exit 1), never a fallback to a repo copy.
 from __future__ import annotations
 
 import argparse
+import datetime
+import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +44,7 @@ from quant_engine.core import (
     RELEASE_INPUTS_POLICY as POLICY,
     ReleaseInputs,
     ReleaseInputsError,
+    is_cutoff_dependent_release_input as is_cutoff_dependent,
     build_release_inputs_manifest as build_manifest,
     classify_release_input as classify,
     load_release_inputs,
@@ -204,6 +212,24 @@ def _stale_references(
     return hits
 
 
+def _checked_logical(logical: str) -> str:
+    """A safe relative path the registry names as a release input, or a refusal."""
+
+    # the registry patterns cross "/", so a path with ".." would still classify
+    if (
+        logical.startswith("/")
+        or "\\" in logical
+        or ":" in logical
+        or any(part in ("", ".", "..") for part in logical.split("/"))
+    ):
+        raise ReleaseInputsError(
+            f"release input path is not a safe relative path: {logical!r}"
+        )
+    if classify(logical) != RELEASE_INPUT:
+        raise ReleaseInputsError(f"{logical} is not a release input in the registry")
+    return logical
+
+
 def _add(args: argparse.Namespace) -> int:
     loaded = _load(args)
     additions: dict[str, Path] = {}
@@ -211,20 +237,7 @@ def _add(args: argparse.Namespace) -> int:
         logical, separator, source = item.partition("=")
         if not separator or not logical or not source:
             raise ReleaseInputsError(f"--file wants LOGICAL=SOURCE, got {item!r}")
-        # the registry patterns cross "/", so a path with ".." would still classify
-        if (
-            logical.startswith("/")
-            or "\\" in logical
-            or ":" in logical
-            or any(part in ("", ".", "..") for part in logical.split("/"))
-        ):
-            raise ReleaseInputsError(
-                f"release input path is not a safe relative path: {logical!r}"
-            )
-        if classify(logical) != RELEASE_INPUT:
-            raise ReleaseInputsError(
-                f"{logical} is not a release input in the registry"
-            )
+        _checked_logical(logical)
         if logical in additions:
             raise ReleaseInputsError(f"{logical} is named twice")
         if logical in loaded.paths and not args.replace:
@@ -281,6 +294,179 @@ def _add(args: argparse.Namespace) -> int:
                 },
                 "manifest_sha256": pin,
             }
+        )
+    )
+    return 0
+
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_BASELINE_ENTRY = "acceptance/expected-baseline.json"
+
+
+def _strict_date(value: str) -> str:
+    if not _ISO_DATE.fullmatch(value):
+        raise ReleaseInputsError(f"--cutoff is not a YYYY-MM-DD date: {value!r}")
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise ReleaseInputsError(f"--cutoff is not a real date: {value!r}") from exc
+    return value
+
+
+def _pairs(items: Sequence[str], flag: str, what: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for item in items:
+        left, separator, right = item.partition("=")
+        if not separator or not left or not right:
+            raise ReleaseInputsError(f"{flag} wants {what}, got {item!r}")
+        _checked_logical(left)
+        if left in out:
+            raise ReleaseInputsError(f"{left} is named twice in {flag}")
+        out[left] = right
+    return out
+
+
+def _new_cutoff(args: argparse.Namespace) -> int:
+    cutoff = _strict_date(args.cutoff)
+    loaded = load_release_inputs(args.root, args.manifest_sha256)
+    files = _pairs(args.file, "--file", "ENTRY=PATH")
+    if args.baseline is not None:
+        if _BASELINE_ENTRY in files:
+            raise ReleaseInputsError(
+                f"{_BASELINE_ENTRY} is named twice (--baseline and --file)"
+            )
+        files[_BASELINE_ENTRY] = str(args.baseline)
+    stale = _pairs(args.carry_stale, "--carry-stale", "ENTRY=REASON")
+    drops: set[str] = set()
+    for name in args.drop:
+        _checked_logical(name)
+        if name in drops:
+            raise ReleaseInputsError(f"{name} is named twice in --drop")
+        if name not in loaded.paths:
+            raise ReleaseInputsError(f"--drop {name}: the source root does not hold it")
+        drops.add(name)
+    sources: dict[str, Path] = {}
+    for logical, source in files.items():
+        path = Path(source)
+        if path.is_symlink() or not path.is_file():
+            raise ReleaseInputsError(f"{source} is not a regular file")
+        if logical in drops:
+            raise ReleaseInputsError(f"{logical} is both replaced and dropped")
+        sources[logical] = path
+        if fnmatch.fnmatchcase(logical, "acceptance/expected-baseline*.json"):
+            try:
+                header = json.loads(path.read_bytes()).get("cutoff")
+            except (ValueError, AttributeError) as exc:
+                raise ReleaseInputsError(f"{source} is not a JSON baseline") from exc
+            if header != cutoff:
+                raise ReleaseInputsError(
+                    f"baseline {source} declares cutoff {header!r}, not {cutoff}"
+                )
+    carry: dict[str, str] = {}
+    for pattern, reason in stale.items():
+        if not reason.strip():
+            raise ReleaseInputsError(f"--carry-stale {pattern}: the reason is empty")
+        wild = any(char in pattern for char in "*?[")
+        hits = [name for name in loaded.paths if fnmatch.fnmatchcase(name, pattern)]
+        if not hits:
+            raise ReleaseInputsError(
+                f"--carry-stale {pattern}: the source root holds no such entry"
+            )
+        for name in hits:
+            if name in drops or name in sources:
+                if wild:
+                    continue
+                raise ReleaseInputsError(
+                    f"--carry-stale {name}: it is replaced or dropped, so it is not carried"
+                )
+            if not is_cutoff_dependent(name):
+                if wild:
+                    continue
+                raise ReleaseInputsError(
+                    f"--carry-stale {name}: it is not cutoff-dependent"
+                )
+            carry.setdefault(name, reason)
+    stale = carry
+    carried = [
+        name for name in loaded.paths if name not in drops and name not in sources
+    ]
+    carried_dependent = [name for name in carried if is_cutoff_dependent(name)]
+    if cutoff != loaded.cutoff:
+        unresolved = [name for name in carried_dependent if name not in stale]
+        if unresolved:
+            raise ReleaseInputsError(
+                f"cutoff-dependent entries of the {loaded.cutoff} root would be carried unchanged "
+                f"into {cutoff}: replace them (--file ENTRY=PATH), drop them (--drop ENTRY) or "
+                "name them (--carry-stale ENTRY=REASON):\n  CARRIED_UNCHANGED "
+                + "\n  CARRIED_UNCHANGED ".join(unresolved)
+            )
+    out = args.out
+    if _nested(out, loaded.root) or _nested(loaded.root, out):
+        raise ReleaseInputsError(
+            "the new root must be a separate directory: it is, lies inside or contains the source root"
+        )
+    if os.path.lexists(out):
+        raise ReleaseInputsError(f"target exists (create-only): {out}")
+    inside = REPO_ROOT.resolve()
+    if out.resolve() == inside or inside in out.resolve().parents:
+        raise ReleaseInputsError(
+            "the release-inputs root must be outside the repository"
+        )
+    paths = sorted({*carried, *sources})
+    if not paths:
+        raise ReleaseInputsError("the new root would hold no entries")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f"{out.name}.building-", dir=out.parent))
+    try:
+        for name in paths:
+            target = staging.joinpath(*name.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(
+                sources[name] if name in sources else loaded.path(name), target
+            )
+        _, pin = build_manifest(staging, paths, cutoff=cutoff)
+        built = load_release_inputs(staging, pin)
+        if built.cutoff != cutoff or built.paths != tuple(paths):
+            raise ReleaseInputsError("the sealed root does not match the request")
+        for name in paths:
+            want = (
+                hashlib.sha256(sources[name].read_bytes()).hexdigest()
+                if name in sources
+                else loaded.sha256(name)
+            )
+            if built.sha256(name) != want:
+                raise ReleaseInputsError(
+                    f"{name} differs from its source (the source changed while it was copied)"
+                )
+        os.replace(staging, out)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)  # our own staging directory
+        raise
+    print(
+        json.dumps(
+            {
+                "status": "new_cutoff",
+                "cutoff": cutoff,
+                "source_cutoff": loaded.cutoff,
+                "source_manifest_sha256": loaded.manifest_sha256,
+                "entries": len(paths),
+                "replaced": {
+                    n: built.sha256(n) for n in sorted(sources) if n in loaded.paths
+                },
+                "added": {
+                    n: built.sha256(n) for n in sorted(sources) if n not in loaded.paths
+                },
+                "dropped": sorted(drops),
+                "carried_unchanged": {
+                    n: stale.get(n, "") for n in sorted(carried_dependent)
+                },
+                "warnings": [
+                    f"CARRIED_UNCHANGED {n}: {stale.get(n) or 'same cutoff'}"
+                    for n in sorted(carried_dependent)
+                ],
+                "manifest_sha256": pin,
+            },
+            indent=1,
         )
     )
     return 0
@@ -433,6 +619,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     add.add_argument(
         "--replace", action="store_true", help="swap a path the root holds"
     )
+    new = commands.add_parser("new-cutoff")
+    new.add_argument("--root", type=Path, required=True, help="the source root")
+    new.add_argument("--manifest-sha256", required=True, help="the source root's pin")
+    new.add_argument(
+        "--cutoff", required=True, help="the NEW root's cutoff (YYYY-MM-DD)"
+    )
+    new.add_argument(
+        "--out", type=Path, required=True, help="the new root (must not exist)"
+    )
+    new.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        metavar="ENTRY=PATH",
+        help="an entry and the file whose bytes it takes (replaces or adds)",
+    )
+    new.add_argument("--drop", action="append", default=[], metavar="ENTRY")
+    new.add_argument(
+        "--carry-stale",
+        action="append",
+        default=[],
+        metavar="ENTRY=REASON",
+        help="carry a cutoff-dependent entry unchanged, with the reason (ENTRY may be a registry-style glob)",
+    )
+    new.add_argument(
+        "--baseline",
+        type=Path,
+        help="shorthand for --file acceptance/expected-baseline.json=PATH (its cutoff header must match)",
+    )
     rebind = commands.add_parser("rebind-predecessor")
     rebind.add_argument("--root", type=Path, required=True)
     rebind.add_argument("--manifest-sha256", required=True)
@@ -452,6 +667,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "census": _census,
         "extract": _extract,
         "add": _add,
+        "new-cutoff": _new_cutoff,
         "verify": _verify,
         "path": _path,
         "rebind-predecessor": _rebind_predecessor,
