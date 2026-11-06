@@ -1997,3 +1997,31 @@ def test_rescale_check_refuses_malformed_input(tmp_path: Path) -> None:
         driver.rescale_check(new, [previous], 0.0)
     with pytest.raises(driver.DriverError, match="not a directory"):
         driver.rescale_check(new, [tmp_path / "missing"])
+
+
+def test_rescale_check_uses_the_last_day_of_a_retained_adjusted_history(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "adjusted.json"
+    rows = [
+        # dividend-adjusted earlier days differ from the raw close; the last day equals it
+        {"Ticker": "SPXL", "Date": "2026-09-16T00:00:00", "Close": 99.0},
+        {"Ticker": "SPXL", "Date": "2026-09-17T00:00:00", "Close": 101.0},
+        {"Ticker": "OTHER", "Date": "2026-09-17T00:00:00", "Close": 10.0},
+    ]
+    artifact.write_text(json.dumps({"rows": rows}))
+    new = tmp_path / "new"
+    _closes_file(new, "SPXL", {"2026-09-16": 100.0, "2026-09-17": 101.0})
+    _closes_file(new, "OTHER", {"2026-09-17": 5.0})
+    previous = tmp_path / "previous"
+    previous.mkdir()
+    report = driver.rescale_check(new, [previous], adjusted_json=[artifact])
+    by_symbol = {row["symbol"]: row for row in report["symbols"]}
+    assert by_symbol["SPXL"]["status"] == "ok"
+    assert by_symbol["SPXL"]["basis"] == "adjusted_last_day"
+    assert by_symbol["SPXL"]["days_compared"] == 1
+    assert report["rescaled"] == ["OTHER"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    with pytest.raises(driver.DriverError, match="not a history artifact"):
+        driver.rescale_check(new, [previous], adjusted_json=[bad])

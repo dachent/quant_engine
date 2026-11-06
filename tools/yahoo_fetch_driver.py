@@ -798,6 +798,7 @@ def rescale_check(
     closes_dir: Path,
     previous_dirs: Sequence[Path],
     tolerance: float = RESCALE_TOLERANCE,
+    adjusted_json: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """New official closes against the closes a retained earlier pull holds for the same days.
 
@@ -807,6 +808,11 @@ def rescale_check(
     the cutoff), so the retained pull is the witness: any overlapping day whose close differs by
     more than ``tolerance`` (relative) is a rescale, reported with the largest ratio.  A symbol the
     retained pulls never held is listed as ``not_in_previous`` and is not checked.
+
+    ``adjusted_json`` are retained ``history_adjusted`` artifacts (OHLC rescaled by the dividend
+    factor, so only their last day equals the raw close): for a symbol with no raw pull the last
+    day of such an artifact is compared (``basis`` ``adjusted_last_day``); a split after that pull
+    still shows, a dividend does not.
     """
 
     if not tolerance > 0:
@@ -829,6 +835,17 @@ def rescale_check(
             previous.setdefault(item.name[: -len(_OFFICIAL_SUFFIX)], {}).update(
                 closes(item)
             )
+    adjusted: dict[str, dict[str, float]] = {}
+    for path in adjusted_json:
+        try:
+            artifact = json.loads(path.read_bytes().decode("utf-8"))
+            for row in artifact["rows"]:
+                if row.get("Close") is not None:
+                    adjusted.setdefault(str(row["Ticker"]), {})[
+                        str(row["Date"])[:10]
+                    ] = float(row["Close"])
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+            raise DriverError(f"{path.name} is not a history artifact") from None
     names = sorted(
         item.name[: -len(_OFFICIAL_SUFFIX)]
         for item in closes_dir.glob(f"*{_OFFICIAL_SUFFIX}")
@@ -839,6 +856,10 @@ def rescale_check(
     for name in names:
         new = closes(closes_dir / f"{name}{_OFFICIAL_SUFFIX}")
         old = previous.get(name)
+        basis = "raw"
+        if old is None and name in adjusted:
+            last = max(adjusted[name])
+            old, basis = {last: adjusted[name][last]}, "adjusted_last_day"
         if old is None:
             rows.append({"symbol": name, "status": "not_in_previous"})
             continue
@@ -852,6 +873,7 @@ def rescale_check(
             {
                 "symbol": name,
                 "status": "RESCALED" if change > tolerance else "ok",
+                "basis": basis,
                 "days_compared": len(shared),
                 "worst_day": worst,
                 "worst_relative_change": round(change, 8),
@@ -2912,6 +2934,9 @@ def _parser() -> argparse.ArgumentParser:
     rescale.add_argument("--previous-dir", type=Path, action="append", required=True)
     rescale.add_argument("--tolerance", type=float, default=RESCALE_TOLERANCE)
     rescale.add_argument(
+        "--previous-adjusted-json", type=Path, action="append", default=[]
+    )
+    rescale.add_argument(
         "--require-previous",
         action="store_true",
         help="also exit 1 for a symbol no retained pull holds (it is always reported)",
@@ -3078,7 +3103,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             return 0
         if args.command == "rescale-check":
-            outcome = rescale_check(args.closes_dir, args.previous_dir, args.tolerance)
+            outcome = rescale_check(
+                args.closes_dir,
+                args.previous_dir,
+                args.tolerance,
+                args.previous_adjusted_json,
+            )
             print(json.dumps(outcome, indent=2, sort_keys=True))
             if outcome["not_in_previous"]:
                 print(
