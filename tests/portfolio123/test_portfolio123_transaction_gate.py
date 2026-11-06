@@ -6,6 +6,7 @@ from datetime import date
 import hashlib
 import json
 from pathlib import Path
+import re
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -112,6 +113,46 @@ def _stage_downloads(har: Path, books: dict[str, str]) -> None:
         )
 
 
+def _auto(har: Path, options: dict[str, object]) -> dict[str, object]:
+    """Supply a PASS identity decision per captured book and exclude the other HAR ids."""
+
+    captures = [Path(str(item)) for item in options.get("transaction_captures", [])]  # type: ignore[attr-defined]
+    if not captures:
+        return options
+    captured: set[str] = set()
+    decisions = []
+    for capture in captures:
+        books = sorted(
+            re.match(r"strategy_(\d+)_", path.name).group(1)  # type: ignore[union-attr]
+            for path in (capture / "raw").glob("strategy_*_transactions.csv")
+        )
+        captured |= set(books)
+        sha = hashlib.sha256(
+            (capture / "capture-manifest.json").read_bytes()
+        ).hexdigest()
+        decisions.append(
+            {
+                "schema": "p123-book-identity-decisions/1",
+                "capture_manifest_sha256": sha,
+                "books": {book: {"decision": "PASS"} for book in books},
+            }
+        )
+    har_ids = {
+        re.match(r"strategy_(\d+)_", path.name).group(1)  # type: ignore[union-attr]
+        for path in (har / "downloads").glob("strategy_*_*.csv")
+    }
+    reason = "downloads are not recaptured here; seed role: none (test book)"
+    given = dict(options.get("untrusted_har_ids", {}))  # type: ignore[call-overload]
+    return {
+        **options,
+        "identity_decisions": options.get("identity_decisions", decisions),
+        "untrusted_har_ids": {
+            **{book: reason for book in sorted(har_ids - captured)},
+            **given,
+        },
+    }
+
+
 def _generate(
     legacy: Path,
     har: Path,
@@ -119,7 +160,9 @@ def _generate(
     day: date = date(2026, 9, 11),
     **options: object,
 ) -> str:
-    planned = create_cutover_plan(legacy, har, data, as_of_date=day, **options)  # type: ignore[arg-type]
+    planned = create_cutover_plan(
+        legacy, har, data, as_of_date=day, **_auto(har, options)
+    )  # type: ignore[arg-type]
     plan = Path(str(planned["plan_path"]))
     generation_id = str(stage_candidate(plan)["generation_id"])
     publish_candidate(plan, generation_id)
@@ -127,7 +170,9 @@ def _generate(
 
 
 def _refused(legacy: Path, har: Path, data: Path, day: date, **options: object) -> str:
-    planned = create_cutover_plan(legacy, har, data, as_of_date=day, **options)  # type: ignore[arg-type]
+    planned = create_cutover_plan(
+        legacy, har, data, as_of_date=day, **_auto(har, options)
+    )  # type: ignore[arg-type]
     with pytest.raises(Portfolio123GenerationError) as refused:
         stage_candidate(Path(str(planned["plan_path"])))
     return str(refused.value)
@@ -310,7 +355,9 @@ def test_publish_refuses_when_current_moved_after_planning(tmp_path: Path) -> No
         har,
         data,
         as_of_date=date(2026, 9, 12),
-        transaction_captures=[_capture(tmp_path, "b", {"101": _full(6)})],
+        **_auto(
+            har, {"transaction_captures": [_capture(tmp_path, "b", {"101": _full(6)})]}
+        ),  # type: ignore[arg-type]
     )
     moved = _generate(
         legacy,
@@ -500,17 +547,20 @@ def test_captured_book_takes_perf_from_the_capture_and_drops_its_downloads(
     assert (
         min(row["Date"] for row in curve if row["_entity_id"] == "101") == "2025-05-09"
     )
-    assert any(
-        row["_entity_id"] == "303" for row in curve
-    )  # an uncaptured book is untouched
-    holdings = pq.read_table(tables / "har_holdings.parquet").to_pylist()
-    assert not any(row["_entity_id"] == "101" for row in holdings)
+    # 303 is a HAR download id that is not recaptured: excluded as untrusted, not kept silently.
+    assert not any(row["_entity_id"] == "303" for row in curve)
+    untrusted = _catalog(data, generation_id)["transaction_gate"]["untrusted_har_ids"]  # type: ignore[index]
+    assert set(untrusted) == {"303", "999"}
+    # Every holdings download belonged to a captured or excluded id, so none is carried.
+    assert not (tables / "har_holdings.parquet").exists()
     dropped = _catalog(data, generation_id)["transaction_gate"]["dropped_har_downloads"]  # type: ignore[index]
     assert dropped == {
         "101": [
             "downloads/strategy_101_holdings.csv",
             "downloads/strategy_101_perf.csv",
-        ]
+        ],
+        "303": ["downloads/strategy_303_perf.csv"],
+        "999": ["downloads/strategy_999_holdings.csv"],
     }
 
 
@@ -647,6 +697,132 @@ def test_transaction_exempt_book_is_recorded_and_never_substituted(
             transaction_captures=[other],
             transaction_exempt_books={"909": reason},
         )
+
+
+def _decisions(capture: Path, **decisions: str) -> dict[str, object]:
+    books = {
+        re.match(r"strategy_(\d+)_", path.name).group(1): {"decision": "PASS"}  # type: ignore[union-attr]
+        for path in (capture / "raw").glob("strategy_*_transactions.csv")
+    }
+    for book, decision in decisions.items():
+        books[book] = {"decision": decision}
+    return {
+        "schema": "p123-book-identity-decisions/1",
+        "capture_manifest_sha256": hashlib.sha256(
+            (capture / "capture-manifest.json").read_bytes()
+        ).hexdigest(),
+        "books": books,
+    }
+
+
+SEED_ROLE = "excluded: no capture this cycle; seed role: carried HAR rows are dropped"
+
+
+def test_har_download_ids_must_be_recaptured_or_excluded(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    _stage_downloads(har, {"101": _full(5), "202": _full(5)})
+    capture = _capture(tmp_path, "cap", {"101": _full(5)})
+    options: dict[str, object] = {
+        "transaction_captures": [capture],
+        "identity_decisions": [_decisions(capture)],
+    }
+    with pytest.raises(
+        Portfolio123GenerationError, match="neither recaptured nor excluded"
+    ) as refused:
+        create_cutover_plan(legacy, har, data, as_of_date=date(2026, 9, 11), **options)  # type: ignore[arg-type]
+    assert "202" in str(refused.value) and "999" in str(refused.value)
+    assert "101" not in str(refused.value).split(":", 1)[1]
+    for bad, match in (
+        ({"202": "short"}, "downstream seed role"),
+        ({"404": SEED_ROLE}, "no HAR download to exclude"),
+        ({"101": SEED_ROLE}, "cannot also be untrusted"),
+    ):
+        with pytest.raises(Portfolio123GenerationError, match=match):
+            create_cutover_plan(
+                legacy,
+                har,
+                data,
+                as_of_date=date(2026, 9, 11),
+                untrusted_har_ids={"999": SEED_ROLE, "202": SEED_ROLE, **bad},
+                **options,  # type: ignore[arg-type]
+            )
+
+
+def test_untrusted_id_is_dropped_recorded_and_skips_the_drop_gate(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    _stage_downloads(har, {"202": _full(343, "2026-09-01")})
+    _generate(legacy, har, data)
+    capture = _capture(tmp_path, "cap", {"101": _full(5)})
+    generation_id = _generate(
+        legacy,
+        har,
+        data,
+        date(2026, 9, 12),
+        transaction_captures=[capture],
+        untrusted_har_ids={"202": SEED_ROLE, "999": SEED_ROLE},
+    )
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    assert gate["untrusted_har_ids"] == {"202": SEED_ROLE, "999": SEED_ROLE}  # type: ignore[index]
+    rows = pq.read_table(
+        data / "generations" / generation_id / "tables/har_transactions.parquet"
+    ).to_pylist()
+    assert {row["_entity_id"] for row in rows} == {"101"}
+
+
+def test_identity_decisions_gate_every_captured_book(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    capture = _capture(tmp_path, "cap", {"101": _full(5), "202": _full(5)})
+    base: dict[str, object] = {
+        "transaction_captures": [capture],
+        "untrusted_har_ids": {"999": SEED_ROLE},
+    }
+
+    def plan(**more: object) -> None:
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 11),
+            **base,
+            **more,  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(Portfolio123GenerationError, match="not for a capture"):
+        plan(
+            identity_decisions=[
+                {**_decisions(capture), "capture_manifest_sha256": "0" * 64}
+            ]
+        )
+    with pytest.raises(Portfolio123GenerationError, match="has no identity decision"):
+        plan(identity_decisions=[])
+    with pytest.raises(Portfolio123GenerationError, match="decision is FAIL"):
+        plan(identity_decisions=[_decisions(capture, **{"202": "FAIL"})])
+    with pytest.raises(
+        Portfolio123GenerationError, match="REVIEW needs an accepted reason"
+    ):
+        plan(identity_decisions=[_decisions(capture, **{"202": "REVIEW"})])
+    with pytest.raises(Portfolio123GenerationError, match="needs a REVIEW decision"):
+        plan(
+            identity_decisions=[_decisions(capture)],
+            identity_review_accepted={"202": "no page record, cash-only book"},
+        )
+    generation_id = _generate(
+        legacy,
+        har,
+        data,
+        transaction_captures=[capture],
+        untrusted_har_ids={"999": SEED_ROLE},
+        identity_decisions=[_decisions(capture, **{"202": "REVIEW"})],
+        identity_review_accepted={"202": "no page record, cash-only book"},
+    )
+    decided = _catalog(data, generation_id)["transaction_gate"]  # type: ignore[index]
+    assert decided["identity_decisions"]["202"]["decision"] == "REVIEW"  # type: ignore[index]
+    assert decided["identity_decisions"]["202"]["accepted_review"] == (  # type: ignore[index]
+        "no page record, cash-only book"
+    )
+    assert decided["identity_decisions"]["101"]["decision"] == "PASS"  # type: ignore[index]
 
 
 def test_schema_one_plans_still_rebuild_under_the_legacy_adapter(

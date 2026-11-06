@@ -62,6 +62,28 @@ def _parser() -> argparse.ArgumentParser:
         help="JSON {previous_generation_id, books: {ID: {...}}} proving the predecessor held "
         "another strategy's rows under that id",
     )
+    plan.add_argument(
+        "--untrusted-har-id",
+        action="append",
+        default=[],
+        metavar="ID=REASON",
+        help="HAR download id not recaptured: its downloads/ rows are dropped; the reason "
+        "states the id's downstream seed role",
+    )
+    plan.add_argument(
+        "--identity-decisions",
+        type=Path,
+        action="append",
+        default=[],
+        help="book-identity-decisions.json of a capture (tools/p123_book_identity_check.py)",
+    )
+    plan.add_argument(
+        "--accept-identity-review",
+        action="append",
+        default=[],
+        metavar="ID=REASON",
+        help="accept a REVIEW identity decision for one captured book with a reason",
+    )
     stage = commands.add_parser("stage")
     stage.add_argument("plan", type=Path)
     for command in (
@@ -72,6 +94,18 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("plan", type=Path)
         command.add_argument("generation_id")
     return parser
+
+
+def _pairs(
+    parser: argparse.ArgumentParser, items: list[str], flag: str
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in items:
+        book, _, reason = item.partition("=")
+        if book in result or not reason:
+            parser.error(f"{flag} needs a unique ID=REASON")
+        result[book] = reason
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -90,6 +124,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if book in exempt or not reason:
                 parser.error("--no-transactions-book needs a unique ID=REASON")
             exempt[book] = reason
+        untrusted = _pairs(parser, args.untrusted_har_id, "--untrusted-har-id")
+        accepted = _pairs(
+            parser, args.accept_identity_review, "--accept-identity-review"
+        )
+        decisions = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in args.identity_decisions
+        ]
         corrections: dict[str, dict[str, str]] = {}
         if args.identity_correction is not None:
             record = json.loads(args.identity_correction.read_text(encoding="utf-8"))
@@ -109,6 +151,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             supersede_books=supersede,
             transaction_exempt_books=exempt,
             identity_corrections=corrections,
+            untrusted_har_ids=untrusted,
+            identity_decisions=decisions,
+            identity_review_accepted=accepted,
         )
     elif args.command == "stage":
         result = stage_candidate(args.plan)

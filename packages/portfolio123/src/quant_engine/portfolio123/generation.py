@@ -46,6 +46,7 @@ _CAPTURE_LABEL = re.compile(r"^transaction-capture-[1-9][0-9]*$")
 _CAPTURE_TRANSACTIONS = re.compile(r"^raw/strategy_([0-9]+)_transactions\.csv$")
 _CAPTURE_PERF = re.compile(r"^raw/strategy_([0-9]+)_perf\.csv$")
 _BOOK_ID = re.compile(r"^[0-9]+$")
+_MIN_REASON_CHARS = 20
 _ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _CAPTURE_MANIFEST = "capture-manifest.json"
 _TRANSACTIONS_TABLE = "tables/har_transactions.parquet"
@@ -358,6 +359,10 @@ def _gate_inputs(
     supersede_books: Mapping[str, str],
     transaction_exempt_books: Mapping[str, str],
     identity_corrections: Mapping[str, Mapping[str, str]],
+    untrusted_har_ids: Mapping[str, str],
+    identity_decisions: Sequence[Mapping[str, Any]],
+    identity_review_accepted: Mapping[str, str],
+    har_download_ids: Sequence[str],
 ) -> dict[str, Any]:
     captured: dict[str, str] = {}
     captured_perf: dict[str, str] = {}
@@ -446,11 +451,28 @@ def _gate_inputs(
                 f"book {book} replacement rowset hash is invalid"
             )
         corrections[book] = dict(sorted(record.items()))
+    untrusted = _untrusted_ids(
+        untrusted_har_ids, captured, captured_perf, har_download_ids
+    )
+    decisions = _identity_decisions(
+        sources, captured, identity_decisions, identity_review_accepted
+    )
+    if captured:
+        # No silent permuted rows: the 2026-09-02 download set held other strategies' rows
+        # under seven of its eight ids, so every id of the HAR download set is recaptured
+        # (capture, perf and an identity decision) or excluded with a stated reason.
+        uncovered = sorted(set(har_download_ids) - set(captured) - set(untrusted))
+        if uncovered:
+            raise Portfolio123GenerationError(
+                "HAR download ids neither recaptured nor excluded as untrusted: "
+                + ", ".join(uncovered)
+            )
     return {
         "captured_books": dict(sorted(captured.items())),
         "captured_perf_books": dict(sorted(captured_perf.items())),
         "expected_books": expected,
         "identity_corrections": corrections,
+        "identity_decisions": decisions,
         "previous": previous,
         # Publishing refuses when a CURRENT-sourced predecessor is no longer CURRENT.
         "previous_source": (
@@ -460,7 +482,92 @@ def _gate_inputs(
         ),
         "supersede": dict(sorted(supersede_books.items())),
         "transaction_exempt_books": dict(sorted(transaction_exempt_books.items())),
+        "untrusted_har_ids": untrusted,
     }
+
+
+def _untrusted_ids(
+    reasons: Mapping[str, str],
+    captured: Mapping[str, str],
+    captured_perf: Mapping[str, str],
+    har_download_ids: Sequence[str],
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for book, reason in sorted(reasons.items()):
+        if _BOOK_ID.fullmatch(str(book)) is None:
+            raise Portfolio123GenerationError("book IDs must be numeric")
+        if book in captured or book in captured_perf:
+            raise Portfolio123GenerationError(
+                f"book {book} is recaptured, so it cannot also be untrusted"
+            )
+        if book not in har_download_ids:
+            raise Portfolio123GenerationError(
+                f"book {book} has no HAR download to exclude"
+            )
+        if len(reason.strip()) < _MIN_REASON_CHARS:
+            raise Portfolio123GenerationError(
+                f"book {book} exclusion needs a reason that states its downstream seed role"
+            )
+        result[book] = reason
+    return result
+
+
+def _identity_decisions(
+    sources: Sequence[Mapping[str, Any]],
+    captured: Mapping[str, str],
+    decision_files: Sequence[Mapping[str, Any]],
+    review_accepted: Mapping[str, str],
+) -> dict[str, dict[str, Any]]:
+    """Every captured book needs a PASS identity decision for these capture bytes."""
+
+    if not captured:
+        if decision_files or review_accepted:
+            raise Portfolio123GenerationError(
+                "identity decisions need a transaction capture"
+            )
+        return {}
+    by_manifest: dict[str, str] = {}
+    for source in sources:
+        label = str(source["label"])
+        if not _CAPTURE_LABEL.fullmatch(label):
+            continue
+        for item in _objects(source["files"], "files"):
+            if item["relative_path"] == _CAPTURE_MANIFEST:
+                by_manifest[str(item["sha256"])] = label
+    by_label: dict[str, Mapping[str, Any]] = {}
+    for decided in decision_files:
+        owner = by_manifest.get(str(decided.get("capture_manifest_sha256")))
+        if decided.get("schema") != "p123-book-identity-decisions/1" or owner is None:
+            raise Portfolio123GenerationError(
+                "identity decisions are not for a capture of this plan"
+            )
+        by_label[owner] = decided
+    result: dict[str, dict[str, Any]] = {}
+    for book, path in sorted(captured.items()):
+        record: Mapping[str, Any] = by_label.get(path.split("/", 1)[0], {})
+        item = record.get("books", {}).get(book)
+        if not isinstance(item, dict):
+            raise Portfolio123GenerationError(f"book {book} has no identity decision")
+        decision = item.get("decision")
+        reason = review_accepted.get(book, "").strip()
+        if decision != "PASS" and not (decision == "REVIEW" and reason):
+            raise Portfolio123GenerationError(
+                f"book {book} identity decision is {decision}"
+                + (" (REVIEW needs an accepted reason)" if decision == "REVIEW" else "")
+            )
+        result[book] = {
+            "accepted_review": reason or None,
+            "decision": decision,
+            "decisions_sha256": hashlib.sha256(
+                canonical_json_bytes(record)
+            ).hexdigest(),
+        }
+    for book in review_accepted:
+        if book not in result or result[book]["decision"] != "REVIEW":
+            raise Portfolio123GenerationError(
+                f"book {book} review acceptance needs a REVIEW decision"
+            )
+    return result
 
 
 def create_cutover_plan(
@@ -475,6 +582,9 @@ def create_cutover_plan(
     supersede_books: Mapping[str, str] | None = None,
     transaction_exempt_books: Mapping[str, str] | None = None,
     identity_corrections: Mapping[str, Mapping[str, str]] | None = None,
+    untrusted_har_ids: Mapping[str, str] | None = None,
+    identity_decisions: Sequence[Mapping[str, Any]] = (),
+    identity_review_accepted: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Hash every approved input and create a private content-addressed plan.
 
@@ -486,7 +596,10 @@ def create_cutover_plan(
     (default: the data root's CURRENT) unless it is named in ``supersede_books`` with a
     reason (row count and first date only), or in ``identity_corrections`` with a
     hash-bound record proving the predecessor held another strategy's rows under that
-    id. ``transaction_exempt_books`` names expected books with no transaction export
+    id. With captures, every id of the HAR root's ``downloads/`` set must be recaptured
+    (capture, perf and a PASS identity decision from ``tools/p123_book_identity_check.py``
+    for these capture bytes) or excluded in ``untrusted_har_ids`` with a reason stating
+    its downstream seed role. ``transaction_exempt_books`` names expected books with no transaction export
     (for example a designer model) and a reason; they must have no capture file.
     """
 
@@ -542,6 +655,23 @@ def create_cutover_plan(
         dict(supersede_books or {}),
         dict(transaction_exempt_books or {}),
         {book: dict(record) for book, record in (identity_corrections or {}).items()},
+        dict(untrusted_har_ids or {}),
+        list(identity_decisions),
+        dict(identity_review_accepted or {}),
+        sorted(
+            {
+                match.group(2)
+                for item in _objects(sources[1]["files"], "HAR files")
+                if item["disposition"] == "HAR_DERIVED_CSV"
+                and str(item["relative_path"]).startswith("downloads/")
+                and (
+                    match := _ENTITY.match(
+                        PurePosixPath(str(item["relative_path"])).name
+                    )
+                )
+                and match.group(1).casefold() == "strategy"
+            }
+        ),
     )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),
@@ -891,6 +1021,7 @@ def _enforce_transaction_gate(
     supersede = _object(gate.get("supersede"), "supersede")
     corrections = _object(gate.get("identity_corrections", {}), "corrections")
     exempt = _object(gate.get("transaction_exempt_books", {}), "exempt books")
+    untrusted = _object(gate.get("untrusted_har_ids", {}), "untrusted ids")
     previous = gate.get("previous")
     books = (
         _object(_object(previous, "previous")["books"], "previous books")
@@ -914,6 +1045,8 @@ def _enforce_transaction_gate(
     for book in sorted(books):
         old = _object(books[book], "previous book")
         new = stats.get(book)
+        if book in untrusted:
+            continue  # the predecessor's rows under this id are excluded, not compared
         if book in corrections:
             record = _object(corrections[book], "correction")
             if new is None:
@@ -977,12 +1110,16 @@ def _enforce_transaction_gate(
         ),
         "expected_books": list(gate.get("expected_books", [])),
         "identity_corrected": corrected,
+        "identity_decisions": dict(
+            sorted(dict(gate.get("identity_decisions", {})).items())
+        ),
         "previous_generation_id": (
             _object(previous, "previous")["generation_id"] if previous else None
         ),
         "status": "PASS",
         "superseded": waived,
         "transaction_exempt_books": dict(sorted(exempt.items())),
+        "untrusted_har_ids": dict(sorted(untrusted.items())),
     }
 
 
@@ -1026,6 +1163,9 @@ def _build_outputs(
         else None
     )
     captured = dict(gate["captured_books"]) if gate is not None else {}
+    dropping = set(captured) | (
+        set(gate.get("untrusted_har_ids", {})) if gate is not None else set()
+    )
     excluded: Counter[str] = Counter()
     excluded_perf: Counter[str] = Counter()
     dropped_downloads: dict[str, list[str]] = defaultdict(list)
@@ -1035,7 +1175,7 @@ def _build_outputs(
         relative = _text(item["relative_path"], "relative_path")
         family = _family(relative)
         entity = _ENTITY.match(PurePosixPath(relative).name)
-        if entity and entity.group(2) in captured and relative.startswith("downloads/"):
+        if entity and entity.group(2) in dropping and relative.startswith("downloads/"):
             # The browser-download set of a captured book is never trusted: the 2026-09-02
             # set held other strategies' rows under these ids. Its HAR page-derived csv/
             # rows stay; the capture supplies transactions and the equity curve.

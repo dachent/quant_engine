@@ -130,7 +130,7 @@ python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as
   --transaction-capture CAPTURE_DIR [--transaction-capture OTHER_DIR] \
   --expected-book BOOK_ID [--expected-book ...] \
   [--previous-generation-id ID] [--supersede-book BOOK_ID=REASON] \
-  [--identity-correction CORRECTION_JSON] [--no-transactions-book BOOK_ID=REASON]
+  [--identity-correction CORRECTION_JSON] [--no-transactions-book BOOK_ID=REASON] \n  --identity-decisions DECISIONS_JSON [--untrusted-har-id BOOK_ID=REASON] \n  [--accept-identity-review BOOK_ID=REASON]
 ```
 
 - `--expected-book` names every managed or shared book the cycle must cover. The plan
@@ -168,6 +168,18 @@ python tools/portfolio123_generation.py plan LEGACY_ROOT HAR_ROOT DATA_ROOT --as
   export (for example a designer model). It must have no capture file, so another
   book's export is never substituted, and is recorded under
   `transaction_gate.transaction_exempt_books`.
+
+- No silent permuted rows. With a capture, every book id of the HAR root's `downloads/`
+  set must be recaptured (transaction, perf and an identity decision) or excluded with
+  `--untrusted-har-id ID=REASON`; the plan refuses otherwise and lists the ids. An
+  excluded id's `downloads/` rows are dropped, it is skipped by the drop gate, and its
+  reason (at least 20 characters, stating the id's downstream seed role) is recorded under
+  `transaction_gate.untrusted_har_ids`. An id cannot be both.
+- `--identity-decisions DECISIONS_JSON` (repeatable, one per capture directory) is the
+  `book-identity-decisions.json` that `tools/p123_book_identity_check.py` wrote for the same
+  `capture-manifest.json` bytes. Every captured book needs a PASS decision; a REVIEW
+  decision needs `--accept-identity-review ID=REASON`; FAIL refuses. The decisions are
+  recorded under `transaction_gate.identity_decisions`.
 
 ### Per-book identity check
 
