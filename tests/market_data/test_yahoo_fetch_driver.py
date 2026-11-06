@@ -1184,6 +1184,8 @@ def test_cli_offline_probe_and_apply(tmp_path: Path) -> None:
                 str(stage / "cli-probe"),
                 "--out",
                 str(out),
+                "--cutoff",
+                CUTOFF,
             ]
         )
         == 0
@@ -1202,6 +1204,8 @@ def test_cli_offline_probe_and_apply(tmp_path: Path) -> None:
                 str(stage / "cli-probe"),
                 "--out",
                 str(out),
+                "--cutoff",
+                CUTOFF,
             ]
         )
         == 1
@@ -1544,3 +1548,114 @@ def test_the_whole_shipped_config_parses_with_the_new_group(tmp_path: Path) -> N
     ids = [group.group_id for group in config.groups]
     assert len(ids) == len(set(ids)) == len(json.loads(raw)["groups"]) == 16
     assert "spxl-raw-history" in ids and "qsi-daily" in ids
+
+
+def test_a_command_that_reads_live_data_or_writes_the_fetch_config_needs_a_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = tmp_path / "c.json"
+    cfg.write_bytes(_config())
+    gov = tmp_path / "g.json"
+    gov.write_text("{}")
+    base = ["--config", str(cfg), "--stage-root", str(tmp_path / "s"), "--run-id", "r"]
+    for argv in (
+        ["fetch", *base, "--governance", str(gov)],
+        ["probe", *base],
+        [
+            "apply-admissions",
+            "--config",
+            str(cfg),
+            "--probe-run",
+            str(tmp_path),
+            "--out",
+            str(tmp_path / "o"),
+        ],
+    ):
+        assert driver.main(argv) == 1
+        assert "needs --cutoff" in capsys.readouterr().err
+    # an offline probe, config-check and verify do not need one, and config-check says where it came from
+    assert driver.main(["config-check", "--config", str(cfg)]) == 0
+    assert json.loads(capsys.readouterr().out)["cutoff_source"] == "config_default"
+    assert driver.main(["config-check", "--config", str(cfg), "--cutoff", CUTOFF]) == 0
+    assert json.loads(capsys.readouterr().out)["cutoff_source"] == "cli"
+
+
+def test_a_fetch_before_the_cutoff_day_has_closed_is_refused_before_any_evidence_is_spent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    cfg = tmp_path / "c.json"
+    cfg.write_bytes(_config())
+    gov = tmp_path / "g.json"
+    gov.write_text("{}")
+
+    def spent(*args: Any, **kwargs: Any) -> int:
+        raise AssertionError("the evidence was consumed")
+
+    monkeypatch.setattr(driver, "authorize_live", spent)
+    code = driver.main(
+        [
+            "fetch",
+            "--config",
+            str(cfg),
+            "--stage-root",
+            str(tmp_path / "s"),
+            "--run-id",
+            "r",
+            "--governance",
+            str(gov),
+            "--cutoff",
+            today,
+        ]
+    )
+    assert code == 1
+    assert "not a closed UTC day" in capsys.readouterr().err
+
+
+def test_the_closed_day_rule_is_the_utc_date_of_the_start_timestamp() -> None:
+    config = driver.parse_config(_config())  # through = the cutoff, a Friday
+    through = config.cutoff
+    # 23:59:59 UTC on the cutoff day is still open (Friday 18:59 ET after the November clock change)
+    open_ = datetime(
+        through.year, through.month, through.day, 23, 59, 59, tzinfo=timezone.utc
+    )
+    closed = open_ + timedelta(seconds=1)
+    with pytest.raises(driver.DriverError, match="not a closed UTC day"):
+        driver.require_closed_days(config, open_)
+    driver.require_closed_days(config, closed)
+    # the clock is compared in UTC whatever zone it is expressed in
+    eastern = closed.astimezone(ZoneInfo("America/New_York"))
+    driver.require_closed_days(config, eastern)
+
+
+def test_a_config_the_driver_resolved_can_be_read_back_by_the_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """apply-admissions writes the resolved config; fetch and config-check must accept it."""
+
+    manifest = _tt_manifest(tmp_path, ["AAA", "BRK.B"], ["BNY", "DUK"])
+    source = driver.parse_config(_derived_config(), tt_source_manifest=manifest)
+    resolved = tmp_path / "r3-config.json"
+    resolved.write_bytes(source.effective_bytes)
+    assert (
+        driver.main(["config-check", "--config", str(resolved), "--cutoff", CUTOFF])
+        == 0
+    )
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["config_sha256"] == source.sha256
+    assert printed["cutoff"] == CUTOFF
+    # without the cutoff the CLI still reads it, and a different cutoff is refused loudly
+    assert driver.main(["config-check", "--config", str(resolved)]) == 0
+    capsys.readouterr()
+    assert (
+        driver.main(
+            ["config-check", "--config", str(resolved), "--cutoff", "2026-09-17"]
+        )
+        == 1
+    )
+    assert "derived for cutoff" in capsys.readouterr().err
+    # the unresolved source config is not accepted as resolved
+    with pytest.raises(
+        driver.DriverError, match="derivations are written by the driver"
+    ):
+        driver.parse_config(source.effective_bytes, tt_source_manifest=manifest)

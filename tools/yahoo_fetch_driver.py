@@ -1592,6 +1592,31 @@ def preflight(
     return skipped
 
 
+def require_closed_days(config: Config, now: datetime) -> None:
+    """Refuse a fetch whose clock has not passed the end of every group's ``through`` day.
+
+    The rule ``run_fetch`` applies (a ``through`` date is closed only once the UTC date of the
+    fetch's start timestamp is later) is checked here too, before any governance evidence is
+    consumed: the evidence is single use, and the run would otherwise be rejected after it was
+    spent.  ``now`` is the one timestamp the live command freezes before the evidence is read.
+    """
+
+    today = now.astimezone(timezone.utc).date()
+    late = sorted(
+        {
+            f"{g.group_id} (through {g.through})"
+            for g in config.groups
+            if g.through >= today
+        }
+    )
+    if late:
+        raise DriverError(
+            "a through date is not a closed UTC day at "
+            f"{now.astimezone(timezone.utc).isoformat()}: {', '.join(late)}; start the fetch "
+            "when the UTC date is later than the cutoff (00:00 UTC), before any evidence is spent"
+        )
+
+
 def run_fetch(
     config: Config,
     *,
@@ -2645,17 +2670,50 @@ def _config_bytes(path: Path) -> bytes:
 
 
 def _load_config(args: argparse.Namespace) -> Config:
+    raw = _config_bytes(args.config)
+    resolved = False
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        document = None  # parse_config names the problem
+    if isinstance(document, dict) and "derivations" in document:
+        # a config the driver itself resolved (apply-admissions writes one): its derived symbols
+        # and starts are already in it for the cutoff it names
+        resolved = True
+        if args.cutoff is not None and args.cutoff != document.get("cutoff"):
+            raise DriverError(
+                f"the resolved config was derived for cutoff {document.get('cutoff')}, "
+                f"not {args.cutoff}"
+            )
     return parse_config(
-        _config_bytes(args.config),
+        raw,
         cutoff_override=args.cutoff,
         tt_source_manifest=args.tt_source_manifest,
         schwab_positions=args.schwab_positions,
+        resolved=resolved,
     )
+
+
+def _require_explicit_cutoff(args: argparse.Namespace) -> None:
+    """The config's own cutoff is only a default: a command that reads live data or writes the
+    config a fetch will use must be told the cutoff, so a literal run cannot spend single-use
+    evidence on an old delivery's date."""
+
+    command = args.command
+    if command in ("fetch", "apply-admissions") or (
+        command == "probe" and getattr(args, "recorded_dir", None) is None
+    ):
+        if args.cutoff is None:
+            raise DriverError(
+                f"{command} needs --cutoff (the config's own cutoff is only a default; "
+                "use the date `config-check --cutoff` printed)"
+            )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        _require_explicit_cutoff(args)
         if args.command == "config-check":
             config = _load_config(args)
             print(
@@ -2663,6 +2721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     {
                         "config_sha256": config.sha256,
                         "cutoff": config.cutoff.isoformat(),
+                        "cutoff_source": "cli" if args.cutoff else "config_default",
                         "groups": [g.group_id for g in config.groups],
                         "resolution": [
                             {
@@ -2753,6 +2812,7 @@ def _live(args: argparse.Namespace) -> int:  # pragma: no cover - live only
     now = datetime.now(timezone.utc)
     if args.command == "fetch":
         preflight(config, allow_unresolved=args.allow_unresolved)
+        require_closed_days(config, now)
     budget = authorize_live(
         args.governance.read_bytes(),
         config=config,

@@ -78,6 +78,44 @@ through, and the pin handed to the release driver is the rebound root's, not thi
 `add` again from the same root with the same bytes gives the same pin; a rebound root is never the
 input of a later `add`.
 
+## Run order and the clock (R3)
+
+Commands, in order (`D` is the cutoff, the delivery date; every command that reads live data or
+writes the config a fetch will use now refuses to run without `--cutoff`: the shipped config's own
+`cutoff` (2026-09-17) is only a default, and `config-check` prints `cutoff_source` to say which one
+is in effect):
+
+1. `config-check --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS`
+   prints `config_sha256` (the hash of the EFFECTIVE config: cutoff, derived symbols and starts and
+   resolutions included, not a hash of the file), `cutoff`, `cutoff_source` (`cli`), the group ids
+   and the resolution table. The probe evidence names this `config_sha256` and `D`.
+2. `probe --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS
+   --run-id R3-PROBE --stage-root STAGE --governance PROBE_EVIDENCE`, then `verify STAGE/R3-PROBE`.
+3. `apply-admissions --config CONFIG --cutoff D --tt-source-manifest TT --schwab-positions POSITIONS
+   --probe-run STAGE/R3-PROBE --out STAGE/r3-config.json` writes the resolved config (derived symbols
+   and `derivations` included; the probe must have judged exactly this effective config).
+4. `config-check --config STAGE/r3-config.json --cutoff D` prints the NEW `config_sha256`: the fetch
+   evidence names that hash and `D`, not the hash of either file. The resolved config is read back as
+   it is (its derived symbols are the ones in it; a `--cutoff` that is not the one it was derived for
+   is refused).
+5. `fetch --config STAGE/r3-config.json --cutoff D --run-id R3-YAHOO --stage-root STAGE --governance
+   FETCH_EVIDENCE [--allow-unresolved]`, then `verify STAGE/R3-YAHOO`, which must print `VERIFIED`.
+
+The clock: the fetch refuses a group whose `through` day has not closed, and a day is closed only
+once the UTC date of the fetch's start timestamp is later than it (`run_fetch`:
+`group.through >= now.astimezone(utc).date()`; `require_closed_days` applies the same comparison
+before any evidence is read). The live command freezes that timestamp once, before it reads the
+evidence, so the fetch may start no earlier than `00:00:00` UTC on the day after `D`: for
+`D` = Friday 2026-11-06 that is 2026-11-07T00:00:00Z = Friday 19:00 EST (US daylight time ended
+2026-11-01, so Eastern is UTC-5). A start at 18:59 ET is refused. Governance evidence is also
+checked against that timestamp (`valid_from_utc` <= start <= `valid_until_utc`, at most 24 hours),
+so the fetch evidence needs `valid_from_utc` at or before 2026-11-07T00:00:00Z. The evidence is
+single use and is consumed before the run starts, which is why the closed-day check now runs first:
+a start that is too early is refused with the evidence unspent. `config-check`, `probe` and
+`apply-admissions` do not apply the rule (the code has no closed-day check in them), so they can
+run before 19:00 ET; whether the probe's reference prices need the close of `D` is not established
+here. `verify` applies the closed-day rule at its own clock as well.
+
 ## Official closes for the Schwab ingest
 
 A daily `yfinance` group with `history` and `official_closes: {}` also emits
