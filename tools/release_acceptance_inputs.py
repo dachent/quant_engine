@@ -170,9 +170,73 @@ _DRIVE = re.compile(r"^[A-Za-z]:")
 class AcceptanceInputsError(Exception):
     """A refusal. ``code`` is the message class; ``str(error)`` is ``CODE: detail``."""
 
-    def __init__(self, code: str, detail: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        *,
+        headline: str | None = None,
+        fix: str | None = None,
+    ) -> None:
         super().__init__(f"{code}: {detail}")
         self.code = code
+        self.headline = detail if headline is None else headline
+        self.fix = fix
+
+
+class RefusedInputsError(AcceptanceInputsError):
+    """Several refusals reported together; ``items`` is every ``(code, headline, fix)``."""
+
+    def __init__(self, items: Sequence[tuple[str, str, str | None]]) -> None:
+        lines = [f"{len(items)} inputs are refused; fix all of them and rerun:"]
+        groups: dict[tuple[str, str | None], list[str]] = {}
+        for code, headline, fix in items:
+            # captures that share one fix (a provider's directory) are listed under it once
+            groups.setdefault((code, fix), []).append(headline)
+        for number, ((code, fix), heads) in enumerate(groups.items(), 1):
+            lines.append(f"  {number}. [{code}] {heads[0]}")
+            lines.extend(f"     and: {extra}" for extra in heads[1:])
+            if fix:
+                lines.append(f"     {fix}")
+        super().__init__(items[0][0], "\n".join(lines))
+        self.items = tuple(items)
+
+
+@dataclass
+class Refusals:
+    """Refusals collected over one build so that one error names every input to fix.
+
+    A single refusal is raised exactly as it would have been alone; two or more become one
+    :class:`RefusedInputsError` that lists them all. Nothing is weakened: whatever refused before
+    still refuses, the list only stops at the end instead of at the first.
+    """
+
+    items: list[tuple[str, str, str | None]] = field(default_factory=list)
+
+    def add(self, code: str, headline: str, fix: str | None = None) -> None:
+        item = (code, headline, fix)
+        if item not in self.items:
+            self.items.append(item)
+
+    def add_error(self, error: AcceptanceInputsError) -> None:
+        if isinstance(error, RefusedInputsError):
+            for code, headline, fix in error.items:
+                self.add(code, headline, fix)
+        else:
+            self.add(error.code, error.headline, error.fix)
+
+    def raise_any(self) -> None:
+        if not self.items:
+            return
+        if len(self.items) == 1:
+            code, headline, fix = self.items[0]
+            raise AcceptanceInputsError(
+                code,
+                headline if fix is None else f"{headline}; {fix}",
+                headline=headline,
+                fix=fix,
+            )
+        raise RefusedInputsError(self.items)
 
 
 def _sha256(data: bytes) -> str:
@@ -336,8 +400,46 @@ def _verified(path: Path, sha: str, size: int | None, what: str) -> None:
         )
 
 
+def _ref_label(path: Path, roots: Mapping[str, Path] | None) -> str:
+    """``KEY:relative`` of a directory under a declared root (``qe`` first), else its path."""
+
+    if roots:
+        for key in (QE_KEY, *sorted(k for k in roots if k != QE_KEY)):
+            if key not in roots:
+                continue
+            parts = _under(path, roots[key])
+            if parts:
+                return f"{key}:{'/'.join(parts)}"
+    return f"{path.as_posix()} (under no declared root: add --root KEY=DIR first)"
+
+
+def _narrowing_dirs(found: Sequence[Path]) -> list[Path]:
+    """One directory per candidate such that each holds that candidate (split below the common parent)."""
+
+    parents = [tuple(p.parent.parts) for p in found]
+    common = 0
+    while (
+        all(len(q) > common for q in parents) and len({q[common] for q in parents}) == 1
+    ):
+        common += 1
+    dirs: list[Path] = []
+    for parts in parents:
+        chosen = Path(*parts[: common + 1])
+        if chosen not in dirs:
+            dirs.append(chosen)
+    return dirs
+
+
 def find_by_content(
-    directory: Path, sha: str, size: int, name: str | None, what: str
+    directory: Path,
+    sha: str,
+    size: int,
+    name: str | None,
+    what: str,
+    *,
+    provider: str | None = None,
+    roots: Mapping[str, Path] | None = None,
+    narrowable: bool = True,
 ) -> Path:
     """The one file below ``directory`` with this content (and name, when given).
 
@@ -371,9 +473,22 @@ def find_by_content(
             "MISSING", f"{what}: no file with the manifest's name, size and sha256"
         )
     if len(found) > 1:
+        shown = ", ".join(p.relative_to(directory).as_posix() for p in found[:3])
+        headline = f"{what}: {len(found)} files match ({shown})"
+        who = provider or "PROVIDER"
+        options = " | ".join(
+            f"--artifact-dir {who}={_ref_label(d, roots)}"
+            for d in _narrowing_dirs(found)
+        )
+        fix = (
+            f"narrow the search with one of: {options} "
+            f"(the directory must hold every {who} capture)"
+            if narrowable
+            else f"two copies sit under the generation directory {directory.as_posix()}; "
+            "--artifact-dir does not apply to a normalized output, remove the stray copy"
+        )
         raise AcceptanceInputsError(
-            "AMBIGUOUS_FILE",
-            f"{what}: {len(found)} files match ({', '.join(str(p.relative_to(directory)) for p in found[:3])})",
+            "AMBIGUOUS_FILE", f"{headline}; {fix}", headline=headline, fix=fix
         )
     return found[0]
 
@@ -606,6 +721,7 @@ def artifact_file(
     artifact_id: str,
     search: Path | None,
     what: str,
+    roots: Mapping[str, Path] | None = None,
 ) -> tuple[Path, str, int, Mapping[str, Any]]:
     """The bytes of one manifest artifact: ``(path, sha256, size, record)``."""
 
@@ -622,7 +738,16 @@ def artifact_file(
         )
     if artifact_id.startswith("normalized/"):
         # a generation's normalized outputs sit beside its manifest, under their own file name
-        path = find_by_content(generation.directory, sha, size, None, what)
+        path = find_by_content(
+            generation.directory,
+            sha,
+            size,
+            None,
+            what,
+            provider=generation.provider,
+            roots=roots,
+            narrowable=False,
+        )
     else:
         path = find_by_content(
             search if search is not None else generation.root,
@@ -630,6 +755,8 @@ def artifact_file(
             size,
             artifact_id.rsplit("/", 1)[-1],
             what,
+            provider=generation.provider,
+            roots=roots,
         )
     return path, sha, size, record
 
@@ -645,12 +772,21 @@ def _schema_label(record: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _day_of(document: Mapping[str, Any], key: str, cutoff: str, what: str) -> None:
-    if document.get(key) != cutoff:
-        raise AcceptanceInputsError(
-            "CUTOFF_MISMATCH",
-            f"{what}: {key} is {document.get(key)!r}, the cycle cutoff is {cutoff}",
-        )
+def _day_mismatch(
+    document: Mapping[str, Any], keys: Sequence[str], cutoff: str, what: str
+) -> str | None:
+    """Why a document's own day field(s) are not the cutoff, or ``None`` when all equal it."""
+
+    wrong = [
+        f"{key} is {document.get(key)!r}" for key in keys if document.get(key) != cutoff
+    ]
+    if not wrong:
+        return None
+    return f"{what}: {', '.join(wrong)}, the cycle cutoff is {cutoff}"
+
+
+def _replace_flag(role: str, wanted: str) -> str:
+    return f"supply a cutoff-dated replacement with: --file {role}=KEY:REL  (KEY:REL = {wanted})"
 
 
 def _artifact_dirs(items: Sequence[str], roots: Mapping[str, Path]) -> dict[str, Path]:
@@ -844,6 +980,45 @@ def build_acceptance_inputs(
     ledger_generation: Path,
     artifact_dirs: Mapping[str, Path],
 ) -> dict[str, Any]:
+    """The manifest; every cutoff mismatch and ambiguous capture is reported in one refusal."""
+
+    refusals = Refusals()
+    try:
+        document = _acceptance_inputs(
+            refusals=refusals,
+            resolved=resolved,
+            resolved_sha256=resolved_sha256,
+            roots=roots,
+            placer=placer,
+            predecessor_bytes=predecessor_bytes,
+            predecessor_sha256=predecessor_sha256,
+            baseline_pointers=baseline_pointers,
+            files=files,
+            ledger_generation=ledger_generation,
+            artifact_dirs=artifact_dirs,
+        )
+    except AcceptanceInputsError as exc:
+        refusals.add_error(exc)
+        refusals.raise_any()
+        raise
+    refusals.raise_any()
+    return document
+
+
+def _acceptance_inputs(
+    *,
+    refusals: Refusals,
+    resolved: Mapping[str, Any],
+    resolved_sha256: str,
+    roots: Mapping[str, Path],
+    placer: Placer,
+    predecessor_bytes: bytes,
+    predecessor_sha256: str | None,
+    baseline_pointers: Path | None,
+    files: Mapping[str, Path],
+    ledger_generation: Path,
+    artifact_dirs: Mapping[str, Path],
+) -> dict[str, Any]:
     cutoff = resolved["cutoff"]
     digest = _sha256(predecessor_bytes)
     if predecessor_sha256 is not None and predecessor_sha256 != digest:
@@ -875,7 +1050,17 @@ def build_acceptance_inputs(
     document = _object(
         _read_json(declared, "declared cutoff manifest"), "declared cutoff manifest"
     )
-    _day_of(document, "calculation_cutoff_date", cutoff, "declared cutoff manifest")
+    problem = _day_mismatch(
+        document, ("calculation_cutoff_date",), cutoff, "declared cutoff manifest"
+    )
+    if problem:
+        refusals.add(
+            "CUTOFF_MISMATCH",
+            problem,
+            _replace_flag(
+                DECLARED_CUTOFF, f"a declared-cutoff manifest dated {cutoff}"
+            ),
+        )
     entries.append(
         _entry(
             DECLARED_CUTOFF,
@@ -893,8 +1078,18 @@ def build_acceptance_inputs(
         )
     sha, size = _pinned(crosswalk, "crosswalk")
     document = _object(_read_json(crosswalk, "crosswalk"), "crosswalk")
-    _day_of(document, "calculation_cutoff_date", cutoff, "crosswalk")
-    _day_of(document, "as_of_date", cutoff, "crosswalk")
+    problem = _day_mismatch(
+        document, ("calculation_cutoff_date", "as_of_date"), cutoff, "crosswalk"
+    )
+    if problem:
+        refusals.add(
+            "CUTOFF_MISMATCH",
+            problem,
+            _replace_flag(
+                CROSSWALK,
+                f"a crosswalk named one of {', '.join(CROSSWALK_NAMES)} dated {cutoff}",
+            ),
+        )
     entries.append(
         _entry(
             CROSSWALK,
@@ -935,10 +1130,21 @@ def build_acceptance_inputs(
         provider = role.partition("_")[0]
         if provider not in generations:
             generations[provider] = load_generation(resolved, provider, cutoff)
-        path, sha, size, record = artifact_file(
-            generations[provider], artifact_id, artifact_dirs.get(provider), role
-        )
+        try:
+            path, sha, size, record = artifact_file(
+                generations[provider],
+                artifact_id,
+                artifact_dirs.get(provider),
+                role,
+                roots,
+            )
+        except AcceptanceInputsError as exc:
+            if exc.code != "AMBIGUOUS_FILE":
+                raise
+            refusals.add_error(exc)
+            continue
         located[role] = (path, sha, size, record)
+    refusals.raise_any()
     native = generations[NATIVE_PROVIDER]
     if native.finalized_through != cutoff:
         # the derivation seats do not agree on a later date (one takes it, one requires the cutoff),
@@ -1099,6 +1305,77 @@ def _release_input(
         raise AcceptanceInputsError("RELEASE_INPUTS", f"{role}: {exc}") from exc
 
 
+# role -> (day fields the file itself must carry, what a replacement must be)
+def _sleeve_role_rule(role: str, cutoff: str) -> tuple[str, str]:
+    if role == "quantbase_declared_inputs":
+        return (
+            "data_cutoff",
+            f"a Quantbase declared-inputs file with data_cutoff {cutoff}",
+        )
+    if role == "ibkr_declared_inputs":
+        return (
+            "window.last_day",
+            f"an IBKR declared-inputs file whose window.last_day is {cutoff}",
+        )
+    if role == "crosswalk":
+        return (
+            "calculation_cutoff_date",
+            f"a crosswalk with calculation_cutoff_date {cutoff}",
+        )
+    return "", "a nested-strategy tag map"
+
+
+def _sleeve_default(
+    role: str,
+    default: str,
+    files: Mapping[str, Path],
+    roots: Mapping[str, Path],
+    release_inputs: tuple[Path, str] | None,
+    cutoff: str,
+    refusals: Refusals,
+) -> tuple[Path, str] | None:
+    """The file of one defaulted role and its sha256, or ``None`` after recording why it is refused.
+
+    A default comes from the release-inputs root; its own cutoff is compared with the cycle's
+    here, before the file is pinned. A stale default is never used.
+    """
+
+    explicit = role in files
+    _key, wanted = _sleeve_role_rule(role, cutoff)
+    flag = _replace_flag(role, wanted)
+    origin = "given with --file" if explicit else f"default {default}"
+    try:
+        path = (
+            files[role]
+            if explicit
+            else _release_input(roots[REPO_KEY], default, release_inputs, cutoff, role)
+        )
+    except AcceptanceInputsError as exc:
+        refusals.add(exc.code, f"{exc.headline} ({origin})", flag)
+        return None
+    sha, _ = _pinned(path, role)
+    document = _object(_read_json(path, role), role)
+    problem: str | None
+    if role == "quantbase_declared_inputs":
+        problem = _day_mismatch(document, ("data_cutoff",), cutoff, role)
+    elif role == "ibkr_declared_inputs":
+        window = document.get("window")
+        last = window.get("last_day") if isinstance(window, dict) else None
+        problem = (
+            None
+            if last == cutoff
+            else f"{role}: window.last_day is {last!r}, the cycle cutoff is {cutoff}"
+        )
+    elif role == "crosswalk":
+        problem = _day_mismatch(document, ("calculation_cutoff_date",), cutoff, role)
+    else:
+        problem = None
+    if problem:
+        refusals.add("CUTOFF_MISMATCH", f"{problem} ({origin})", flag)
+        return None
+    return path, sha
+
+
 def build_sleeve_inputs(
     *,
     resolved: Mapping[str, Any],
@@ -1108,43 +1385,69 @@ def build_sleeve_inputs(
     artifact_dirs: Mapping[str, Path],
     release_inputs: tuple[Path, str] | None = None,
 ) -> dict[str, Any]:
+    """The sleeve-inputs document; every stale default and ambiguous capture is reported at once."""
+
+    refusals = Refusals()
+    try:
+        document = _sleeve_inputs(
+            refusals, resolved, roots, placer, files, artifact_dirs, release_inputs
+        )
+    except AcceptanceInputsError as exc:
+        refusals.add_error(exc)
+        refusals.raise_any()
+        raise
+    refusals.raise_any()
+    return document
+
+
+def _sleeve_inputs(
+    refusals: Refusals,
+    resolved: Mapping[str, Any],
+    roots: Mapping[str, Path],
+    placer: Placer,
+    files: Mapping[str, Path],
+    artifact_dirs: Mapping[str, Path],
+    release_inputs: tuple[Path, str] | None,
+) -> dict[str, Any]:
     cutoff = resolved["cutoff"]
+    # the defaulted files first: their own cutoff is checked before anything is pinned
+    chosen: dict[str, tuple[Path, str]] = {}
+    for role, default in SLEEVE_FILE_DEFAULTS.items():
+        found = _sleeve_default(
+            role, default, files, roots, release_inputs, cutoff, refusals
+        )
+        if found is not None:
+            chosen[role] = found
     inputs: dict[str, dict[str, str]] = {}
     generations: dict[str, Generation] = {}
+    located: dict[str, tuple[Path, str]] = {}
     for role, artifact_id in SLEEVE_ARTIFACTS.items():
         provider = role.partition("_")[0]
         if provider not in generations:
             generations[provider] = load_generation(resolved, provider, cutoff)
         generation = generations[provider]
-        path, sha, _size, _record = artifact_file(
-            generation, artifact_id, artifact_dirs.get(provider), role
-        )
+        try:
+            path, sha, _size, _record = artifact_file(
+                generation, artifact_id, artifact_dirs.get(provider), role, roots
+            )
+        except AcceptanceInputsError as exc:
+            if exc.code != "AMBIGUOUS_FILE":
+                raise
+            refusals.add_error(exc)
+            continue
+        located[role] = (path, sha)
+    refusals.raise_any()
+    for role, (path, sha) in located.items():
+        generation = generations[role.partition("_")[0]]
         under_root = _under(path, generation.root)
         stage_parts = (
-            (provider, *under_root)
+            (generation.provider, *under_root)
             if under_root is not None
-            else (provider, "artifacts", path.name)
+            else (generation.provider, "artifacts", path.name)
         )
         root_name, relative = placer.place(path, sha, stage_parts, allow_repo=True)
         inputs[role] = {"path": relative, "root": root_name, "sha256": sha}
-    for role, default in SLEEVE_FILE_DEFAULTS.items():
-        path = files.get(role) or _release_input(
-            roots[REPO_KEY], default, release_inputs, cutoff, role
-        )
-        sha, _ = _pinned(path, role)
-        document = _object(_read_json(path, role), role)
-        if role == "quantbase_declared_inputs":
-            _day_of(document, "data_cutoff", cutoff, role)
-        elif role == "ibkr_declared_inputs":
-            window = document.get("window")
-            last = window.get("last_day") if isinstance(window, dict) else None
-            if last != cutoff:
-                raise AcceptanceInputsError(
-                    "CUTOFF_MISMATCH",
-                    f"{role}: window.last_day is {last!r}, the cycle cutoff is {cutoff}",
-                )
-        elif role == "crosswalk":
-            _day_of(document, "calculation_cutoff_date", cutoff, role)
+    for role, (path, sha) in chosen.items():
         root_name, relative = placer.place(
             path, sha, ("sleeves", path.name), allow_repo=True
         )
