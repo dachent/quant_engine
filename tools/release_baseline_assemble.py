@@ -8,12 +8,13 @@ row by one rule only: both derivers returned it and they agree.
     release_baseline_assemble.py --derive-a A.json --derive-b B.json --manifest M.json
         --head SHA --cutoff YYYY-MM-DD --generated-utc TS
         (--admission-decision-text TEXT | --admission-decision-file FILE)
-        [--template FILE] [--strict-reasons] --out FILE
+        [--template FILE] [--data-root DIR ...] [--strict-reasons] --out FILE
 
 Row rule (the comparison the retained assemblers used; units and tolerances are those of
 ``tests/acceptance/test_expected_baseline.py``):
 
-* derivable in both: ``unit`` and ``as_of`` equal; USD within 0.01, ratio within 1e-8 (``Decimal``, no
+* derivable in both: ``unit`` and ``as_of`` equal, and ``as_of`` an ISO date not after the cutoff (a
+  missing or null one is refused: all 165 R2.2 metric rows carry one); USD within 0.01, ratio within 1e-8 (``Decimal``, no
   float), ``list`` as sets of strings, ``count``/``date``/``status`` equal as strings; any other unit is
   refused. The row carries A's value as ``expected`` (never averaged).
 * not derivable in both: the row goes to ``not_derivable`` with both reasons. The two derivers write their
@@ -24,13 +25,15 @@ Row rule (the comparison the retained assemblers used; units and tolerances are 
 Header refusals: a derivation that is not ``qe-cp-derivation/1`` or is the wrong side; a manifest, A or B
 whose cutoff differs from ``--cutoff``; A or B whose ``code_commit`` differs from the other or from
 ``--head`` (a ``+dirty`` stamp is refused); a manifest whose sha256 is not the one A (and B, when it names
-one) recorded; different strategy-basis declarations; one input path pinned to two digests.
+one) recorded; different strategy-basis declarations; one input path pinned to two digests; a manifest schema other than
+``qe-cp-acceptance-inputs/2`` or ``/3`` (the versions both derivers accept).
 
 Nothing is read from the clock or from a previous baseline. ``--generated-utc`` is required. Header text
 (``schema``, ``metric_spec``, ``spec_version``, ``release_rule``, ``control``, ``conventions``) is the
 committed ``DEFAULT_HEADER``; ``--template`` may replace any of it, and may supply the ordered
 ``authority_pointer`` list (each digest must be one an input pinned, and every pinned digest must appear).
-A template never supplies rows: one that carries ``metrics`` or ``not_derivable`` is refused.
+With ``--data-root`` (repeatable; REQUIRED when a template sets ``authority_pointer``) every pointer path is
+resolved under a root and the file's bytes must hash to the claimed digest. A template never supplies rows: one that carries ``metrics`` or ``not_derivable`` is refused.
 
 The output is created, never replaced, and is a pure function of the inputs.
 """
@@ -52,7 +55,10 @@ from typing import Any
 from quant_engine.core import check_entry_interpreter, strict_json_loads
 
 DERIVATION_SCHEMA = "qe-cp-derivation/1"
-MANIFEST_SCHEMA_PREFIX = "qe-cp-acceptance-inputs/"
+# The versions both derivers accept (acceptance/derive_a and derive_b read only these two).
+SUPPORTED_MANIFEST_SCHEMAS = frozenset(
+    {"qe-cp-acceptance-inputs/2", "qe-cp-acceptance-inputs/3"}
+)
 CONTRACT_PATH = "contracts/portfolio-financial-mvp-source-v1.json"
 CONTRACT_FAMILY = "financial_source_contract"
 
@@ -201,7 +207,7 @@ def _check_header(
         date.fromisoformat(cutoff)
     except ValueError as exc:
         raise AssemblyError("USAGE", f"--cutoff {cutoff!r} is not a date") from exc
-    if not str(manifest.get("schema", "")).startswith(MANIFEST_SCHEMA_PREFIX):
+    if manifest.get("schema") not in SUPPORTED_MANIFEST_SCHEMAS:
         raise AssemblyError(
             "MANIFEST_SCHEMA", f"manifest schema is {manifest.get('schema')!r}"
         )
@@ -349,10 +355,68 @@ def _pointers(
     return pointers
 
 
+def _as_of_problem(
+    x: Mapping[str, Any], y: Mapping[str, Any], cutoff: str
+) -> str | None:
+    """Why a derivable row's ``as_of`` cannot be admitted, or ``None``.
+
+    Every derivable row must name the day its value is as of: an ISO date that is not after the
+    cutoff. In the R2.2 world every one of the 165 metric rows carries one (the latest observation on
+    or before the cutoff, e.g. 2026-07-17 for a stale account, and the cutoff itself for the rest), so a
+    missing or null ``as_of`` has no legitimate case here and is refused, as is a date after the cutoff.
+    """
+
+    for side, row in (("a", x), ("b", y)):
+        raw = row.get("as_of")
+        try:
+            day = date.fromisoformat(raw) if isinstance(raw, str) else None
+        except ValueError:
+            day = None
+        if day is None:
+            return f"derive {side} as_of {raw!r} is missing or not an ISO date"
+        if day > date.fromisoformat(cutoff):
+            return f"derive {side} as_of {raw} is after the cutoff {cutoff}"
+    return None
+
+
+def _verify_pointer_bytes(
+    pointers: Sequence[Mapping[str, str]], data_roots: Sequence[Path]
+) -> None:
+    """Each pointer path must resolve to a file under a data root whose bytes have the claimed digest."""
+
+    resolved = [root.resolve() for root in data_roots]
+    problems: list[str] = []
+    for pointer in pointers:
+        found: Path | None = None
+        for root in resolved:
+            candidate = root.joinpath(*PurePosixPath(pointer["path"]).parts)
+            try:
+                inside = candidate.resolve().is_relative_to(root)
+            except OSError:
+                inside = False
+            if inside and candidate.is_file():
+                found = candidate
+                break
+        if found is None:
+            problems.append(f"{pointer['path']}: not a file under any --data-root")
+            continue
+        digest = hashlib.sha256()
+        with found.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != pointer["sha256"]:
+            problems.append(
+                f"{pointer['path']}: bytes hash to {digest.hexdigest()}, not {pointer['sha256']}"
+            )
+    if problems:
+        raise AssemblyError("POINTER_BYTES", "\n".join(problems))
+
+
 def _merge_rows(
     a: tuple[dict[RowKey, dict[str, Any]], dict[RowKey, dict[str, Any]]],
     b: tuple[dict[RowKey, dict[str, Any]], dict[RowKey, dict[str, Any]]],
     strict_reasons: bool,
+    cutoff: str,
     problems: list[str],
 ) -> tuple[
     list[tuple[RowKey, dict[str, Any], dict[str, Any]]], list[tuple[RowKey, str, str]]
@@ -377,6 +441,8 @@ def _merge_rows(
                 problems.append(f"{key}: unit {unit!r} vs {y.get('unit')!r}")
             elif unit not in TOLERANCES and unit not in EXACT_UNITS:
                 problems.append(f"{key}: unit {unit!r} has no comparison rule")
+            elif (bad := _as_of_problem(x, y, cutoff)) is not None:
+                problems.append(f"{key}: {bad}")
             elif x.get("as_of") != y.get("as_of"):
                 problems.append(
                     f"{key}: as_of {x.get('as_of')!r} vs {y.get('as_of')!r}"
@@ -432,6 +498,7 @@ def assemble(
     decision: bytes,
     template: bytes | None = None,
     strict_reasons: bool = False,
+    data_roots: Sequence[Path] = (),
 ) -> bytes:
     """The bytes of ``expected-baseline.json``, or an ``AssemblyError`` naming every refusal."""
 
@@ -455,11 +522,18 @@ def assemble(
         **{k: v for k, v in (supplied or {}).items() if k in DEFAULT_HEADER},
     }
     pointers = _pointers(pins, supplied, _contract_sha(man))
+    if supplied is not None and "authority_pointer" in supplied and not data_roots:
+        raise AssemblyError(
+            "DATA_ROOT",
+            "a template that sets authority_pointer needs --data-root, to verify each path's bytes",
+        )
+    if data_roots:
+        _verify_pointer_bytes(pointers, data_roots)
 
     problems: list[str] = []
     rows_a = _side_rows(a, "a", problems)
     rows_b = _side_rows(b, "b", problems)
-    agreed, undone = _merge_rows(rows_a, rows_b, strict_reasons, problems)
+    agreed, undone = _merge_rows(rows_a, rows_b, strict_reasons, cutoff, problems)
     if problems:
         raise AssemblyError(
             "DISAGREEMENT",
@@ -592,6 +666,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--template", type=Path, help="header text and authority_pointer order only"
     )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        action="append",
+        default=[],
+        help="directory the pointer paths resolve under (repeatable); every pointer's bytes are "
+        "hashed against its digest; required with a template that sets authority_pointer",
+    )
     parser.add_argument("--strict-reasons", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     return parser
@@ -620,6 +702,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             decision=decision,
             template=args.template.read_bytes() if args.template is not None else None,
             strict_reasons=args.strict_reasons,
+            data_roots=args.data_root,
         )
         _create_only(args.out, data)
     except AssemblyError as exc:

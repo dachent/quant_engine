@@ -6,6 +6,8 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -423,29 +425,154 @@ def test_manifest_without_exactly_one_contract_is_refused() -> None:
     assert _refusal({**files, "manifest": raw, "derive_a": _dump(a)}).code == "CONTRACT"
 
 
-def test_pointer_outside_the_data_root_is_refused_without_a_template() -> None:
+def _real_world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, bytes], Path, bytes]:
+    """A world whose pins are the digests of real files under ``tmp_path/root``, plus an FX file."""
+
+    root = tmp_path / "root"
+    contents = {
+        LEDGER: b"ledger bytes",
+        tool.CONTRACT_PATH: b"contract bytes",
+        "evidence/fx/rates.csv": b"rates bytes",
+    }
+    for rel, data in contents.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    sha = {rel: hashlib.sha256(data).hexdigest() for rel, data in contents.items()}
+    monkeypatch.setattr(sys.modules[__name__], "LEDGER_SHA", sha[LEDGER])
+    monkeypatch.setattr(sys.modules[__name__], "CONTRACT_SHA", sha[tool.CONTRACT_PATH])
     files = _build()
     for side in ("derive_a", "derive_b"):
         doc = json.loads(files[side])
-        doc["inputs"].append({"path": "scratch/fx/rates.csv", "sha256": "3" * 64})
+        doc["inputs"].append(
+            {"path": "scratch/fx/rates.csv", "sha256": sha["evidence/fx/rates.csv"]}
+        )
         files[side] = _dump(doc)
-    error = _refusal(files)
-    assert error.code == "POINTER_PATH" and "scratch/fx/rates.csv" in error.detail
     template = _dump(
         {
             "authority_pointer": [
-                {"path": "evidence/fx/rates.csv", "sha256": "3" * 64},
-                {"path": tool.CONTRACT_PATH, "sha256": CONTRACT_SHA},
-                {"path": LEDGER, "sha256": LEDGER_SHA},
+                {
+                    "path": "evidence/fx/rates.csv",
+                    "sha256": sha["evidence/fx/rates.csv"],
+                },
+                {"path": tool.CONTRACT_PATH, "sha256": sha[tool.CONTRACT_PATH]},
+                {"path": LEDGER, "sha256": sha[LEDGER]},
             ]
         }
     )
-    pointers = _doc(files, template=template)["metrics"][0]["authority_pointer"]
+    return files, root, template
+
+
+def test_pointer_outside_the_data_root_needs_a_template_and_a_data_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files, root, template = _real_world(tmp_path, monkeypatch)
+    error = _refusal(files)
+    assert error.code == "POINTER_PATH" and "scratch/fx/rates.csv" in error.detail
+    assert _refusal(files, template=template).code == "DATA_ROOT"
+    pointers = _doc(files, template=template, data_roots=[root])["metrics"][0][
+        "authority_pointer"
+    ]
     assert [p["path"] for p in pointers] == [
         "evidence/fx/rates.csv",
         tool.CONTRACT_PATH,
         LEDGER,
     ]
+
+
+def test_remapped_pointer_bytes_must_exist_and_hash_to_the_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files, root, template = _real_world(tmp_path, monkeypatch)
+    (root / "evidence/fx/rates.csv").write_bytes(b"tampered")
+    error = _refusal(files, template=template, data_roots=[root])
+    assert error.code == "POINTER_BYTES" and "evidence/fx/rates.csv" in error.detail
+    (root / "evidence/fx/rates.csv").unlink()
+    error = _refusal(files, template=template, data_roots=[root])
+    assert (
+        error.code == "POINTER_BYTES"
+        and "not a file under any --data-root" in error.detail
+    )
+    # a digest reassigned to a path that does not exist is refused, whatever the path spells
+    moved = json.loads(template)
+    moved["authority_pointer"][0]["path"] = "evidence/nowhere/other.csv"
+    assert (
+        _refusal(files, template=_dump(moved), data_roots=[root]).code
+        == "POINTER_BYTES"
+    )
+
+
+def test_data_roots_are_searched_in_order_and_cannot_be_escaped_by_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files, root, template = _real_world(tmp_path, monkeypatch)
+    split = tmp_path / "second"
+    (split / "contracts").mkdir(parents=True)
+    (root / tool.CONTRACT_PATH).replace(split / tool.CONTRACT_PATH)
+    assert _refusal(files, template=template, data_roots=[root]).code == "POINTER_BYTES"
+    assert _doc(files, template=template, data_roots=[root, split])
+    # with roots and no template, the pins themselves are verified
+    plain = _build()
+    assert _refusal(plain, data_roots=[root]).code == "POINTER_BYTES"
+
+
+def test_cli_requires_a_data_root_with_a_pointer_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tool, "check_entry_interpreter", lambda *_: None)
+    files, root, template = _real_world(tmp_path, monkeypatch)
+    paths = _stage(tmp_path, files)
+    tpl = tmp_path / "template.json"
+    tpl.write_bytes(template)
+    out = tmp_path / "out.json"
+    assert (
+        tool.main(_argv(paths, out, "--template", str(tpl))) == 1 and not out.exists()
+    )
+    assert (
+        tool.main(_argv(paths, out, "--template", str(tpl), "--data-root", str(root)))
+        == 0
+    )
+
+
+def test_as_of_must_be_a_date_not_after_the_cutoff() -> None:
+    for bad in ("2026-11-07", "2027-01-01", "garbage", None, 20261106):
+        rows_a, rows_b = copy.deepcopy(ROWS_A), copy.deepcopy(ROWS_B)
+        rows_a[2]["as_of"] = rows_b[2]["as_of"] = bad  # both sides agree on it
+        error = _refusal(_build(a_rows=rows_a, b_rows=rows_b))
+        assert error.code == "DISAGREEMENT" and "as_of" in error.detail, bad
+    missing_a, missing_b = copy.deepcopy(ROWS_A), copy.deepcopy(ROWS_B)
+    del missing_a[2]["as_of"], missing_b[2]["as_of"]
+    assert "as_of" in _refusal(_build(a_rows=missing_a, b_rows=missing_b)).detail
+    early_a, early_b = copy.deepcopy(ROWS_A), copy.deepcopy(ROWS_B)
+    early_a[2]["as_of"] = early_b[2]["as_of"] = (
+        "2026-07-17"  # a stale account: before the cutoff
+    )
+    assert (
+        _doc(_build(a_rows=early_a, b_rows=early_b))["metrics"][1]["as_of"]
+        == "2026-07-17"
+    )
+
+
+def test_only_the_supported_manifest_schemas_are_accepted() -> None:
+    files = _build()
+    for version, accepted in (
+        ("2", True),
+        ("3", True),
+        ("4", False),
+        ("garbage", False),
+        ("1", False),
+    ):
+        manifest = _manifest()
+        manifest["schema"] = f"qe-cp-acceptance-inputs/{version}"
+        raw = _dump(manifest)
+        a = json.loads(files["derive_a"])
+        a["inputs_manifest"]["sha256"] = hashlib.sha256(raw).hexdigest()
+        swapped = {**files, "manifest": raw, "derive_a": _dump(a)}
+        if accepted:
+            assert _doc(swapped)
+        else:
+            assert _refusal(swapped).code == "MANIFEST_SCHEMA", version
 
 
 def test_template_supplies_header_text_only_and_pointers_must_cover_the_pins() -> None:
@@ -467,12 +594,10 @@ def test_template_supplies_header_text_only_and_pointers_must_cover_the_pins() -
         {"authority_pointer": [{"path": tool.CONTRACT_PATH, "sha256": CONTRACT_SHA}]}
     )
     assert _refusal(files, template=short).code == "POINTER_TEMPLATE"
-    assert "authority_pointer" not in _doc(
-        files,
-        template=_dump(
-            {"authority_pointer": _doc(files)["metrics"][0]["authority_pointer"]}
-        ),
+    pointer_only = _dump(
+        {"authority_pointer": _doc(files)["metrics"][0]["authority_pointer"]}
     )
+    assert _refusal(files, template=pointer_only).code == "DATA_ROOT"
 
 
 def test_usage_errors_are_refused() -> None:
@@ -626,8 +751,31 @@ def test_reproduces_the_r22_release_baseline_byte_for_byte(tmp_path: Path) -> No
         tool.assemble(**files, **common)
     assert refused.value.code == "POINTER_PATH"
     # The retained pointer list carries the data-root copies of those files, in the order the earlier
-    # assemblers appended them. Only its paths and order are used; the digests must equal the pins.
+    # assemblers appended them. Only its paths and order are used, and --data-root makes the assembler
+    # hash each file it names: the QE root holds every file but the repository contract, which is the
+    # CRLF form of the file at main 865bf905 (its digest is the pinned one).
     template = _dump({"authority_pointer": pointers})
-    built = tool.assemble(**files, **common, template=template)
+    with pytest.raises(tool.AssemblyError) as unrooted:
+        tool.assemble(**files, **common, template=template)
+    assert unrooted.value.code == "DATA_ROOT"
+    contract_root = tmp_path / "repo"
+    contract = contract_root / tool.CONTRACT_PATH
+    contract.parent.mkdir(parents=True)
+    shown = subprocess.run(
+        ["git", "show", f"865bf905:{tool.CONTRACT_PATH}"],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        check=False,
+    )
+    if shown.returncode != 0:
+        pytest.skip(
+            "main 865bf905 is not in this clone, so the R2.2 contract bytes are unavailable"
+        )
+    lf = shown.stdout.replace(b"\r\n", b"\n")
+    contract.write_bytes(lf.replace(b"\n", b"\r\n"))
+    roots = [_EVIDENCE.parent, contract_root]
+    built = tool.assemble(**files, **common, template=template, data_roots=roots)
     assert built == target
-    assert tool.assemble(**files, **common, template=template) == built
+    assert (
+        tool.assemble(**files, **common, template=template, data_roots=roots) == built
+    )

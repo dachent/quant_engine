@@ -402,19 +402,21 @@ both derivations with the previous baseline, which cannot exist at a new cutoff;
 ```
 release_baseline_assemble.py --derive-a A.json --derive-b B.json --manifest M.json --head SHA --cutoff D
     --generated-utc TS (--admission-decision-text TEXT | --admission-decision-file FILE)
-    [--template FILE] [--strict-reasons] --out FILE
+    [--template FILE] [--data-root DIR ...] [--strict-reasons] --out FILE
 ```
 
 - A row is admitted only when both derivers return it and agree. USD within 0.01, ratio within 1e-8
   (`Decimal`), `list` as sets of strings, `count`/`date`/`status` equal as text; `unit` and `as_of` must be
-  equal; any other unit is refused. `expected` is A's value. Both not derivable: the row goes to
+  equal; `as_of` must be an ISO date not after the cutoff (a missing or null one is refused: all 165 R2.2 metric
+  rows carry one, `not_derivable` rows carry none); any other unit is refused. `expected` is A's value. Both not derivable: the row goes to
   `not_derivable` with both reasons (independent derivers word them differently, so equal text is required
   only with `--strict-reasons`). Anything else (value disagreement, derivable on one side only, a row on one
   side only, a duplicate) is listed, and no file is written.
 - Also refused: a derivation that is not `qe-cp-derivation/1` or is the wrong side; a manifest, A or B whose
   cutoff differs from `--cutoff`; A and B `code_commit` differing from each other or from `--head`
   (including `+dirty`); a manifest sha256 that is not the one A (and B, when it records one) read;
-  different strategy-basis declarations; one input path pinned to two digests; zero agreed metric rows.
+  different strategy-basis declarations; a manifest schema other than `qe-cp-acceptance-inputs/2` or `/3` (the
+  versions both derivers accept); one input path pinned to two digests; zero agreed metric rows.
 - Nothing comes from the clock or from a previous baseline. `--generated-utc` is required (ISO 8601 with an
   offset). The admission-decision text is hashed as given; state what was decided and by whom. The output is
   created, never replaced, and is a pure function of its inputs (two runs give identical bytes).
@@ -428,10 +430,13 @@ release_baseline_assemble.py --derive-a A.json --derive-b B.json --manifest M.js
 - `--template FILE` is the one place a previous baseline's text may enter, and never rows: a JSON object whose
   `schema`, `metric_spec`, `spec_version`, `release_rule`, `control`, `conventions` replace the defaults and
   whose `authority_pointer` list fixes the pointer paths and order. Its digests must equal the pinned inputs'
-  exactly. A template with `metrics` or `not_derivable` is refused. It is needed when an input lies outside
+  exactly, and `--data-root` is then REQUIRED: each pointer path is resolved under a root (repeatable, searched in
+  order, links may not leave it) and the file's bytes must hash to the claimed digest, so a digest cannot be moved to
+  another or a missing path. `--data-root` without a template verifies the pinned paths the same way. A template with `metrics` or `not_derivable` is refused. It is needed when an input lies outside
   the data root (the R2.2 FX files were under `scratch/`; stage them under the data root instead, as
   `release_acceptance_inputs.py --stage-dir` does) and for byte-identity with an older baseline's pointer order.
 - Reproduction: on the restated R2.2 derivations (`r3-plan/ai624/restated-baseline-r22`) with head
-  `110fe44d...` the tool, given the retained pointer list as template, writes the R2.2 release baseline
+  `110fe44d...` the tool, given the retained pointer list as template and `--data-root <QE root> --data-root <dir with
+  contracts/portfolio-financial-mvp-source-v1.json = the CRLF bytes of main 865bf905>`, writes the R2.2 release baseline
   (`ri-r22v9`, sha256 `35f7851f...`) byte for byte (`tests/acceptance/test_release_baseline_assemble.py`; skipped
   without the evidence).
