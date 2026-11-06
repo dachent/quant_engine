@@ -174,6 +174,20 @@ one plan and one evidence file, `window_override` true on every request, no week
 listed non-trading day in the plan. The 2026-11-06 request is the last increment: no separate
 `activity-current-increment` request is made.
 
+- **Attempt budget (pinned).** The session waits BEFORE every GetStatement attempt, the first
+  included (20, 40, 80, then 120 seconds), so the evidence's `max_get_attempts` is also the bound on
+  scheduled waiting per request: 6 attempts are 20 + 40 + 80 + 3 x 120 = 500 seconds and 9 are
+  860 seconds. Use `max_get_attempts` 6 for the R3 plan (the lowest value the authorization
+  accepts for an override plan). Worst case before transport time and pacing: 35 x 500 s = 17,500 s
+  (4 h 51 min 40 s) at 6, and 35 x 860 s = 30,100 s (8 h 21 min 40 s) at 9; each GetStatement can
+  also hold the connection up to the 180 second read timeout, and the 10 calls a minute pacing adds
+  to both. These are bounds, not expectations (one poll per request is the observed case).
+- **Readiness deadline.** `live --deadline-utc TIME` (an ISO time with an offset) stops the plan
+  from STARTING a request once the time has passed: it stops with the staged prefix and a
+  `NOT_ATTEMPTED` / `DEADLINE_REACHED` summary and spends no evidence on the unattempted days. A
+  request already under way is not cut short (its remaining waits, at most the budget above, still
+  run). The plan owner sets the deadline from the time the pull may finish; a late finish moves
+  the release's later steps, or the remaining days are pulled as a new plan.
 - **Time.** Each request is a SendRequest (under a second), a 20 second wait and a GetStatement
   (a second or two for 2 MB), about 22 seconds sequentially, so 35 requests are about 13 minutes
   when every report is ready at the first poll. The rate limit alone (10 calls a minute per token,
@@ -212,6 +226,26 @@ listed non-trading day in the plan. The 2026-11-06 request is the last increment
   compares with the newest statement in the build; the capture verify above is what checks that the
   statements reach the cutoff.
 
+## Account scope: closed versus uncaptured
+
+Two different lists must agree before the plan is hashed: the plan's `expected_account_labels`
+(what the capture verification requires, per request: every expected account has a statement for
+every requested trading day, and no account outside the list may appear) and the generation spec's
+`declared_general_exclusions` (what the generation builder accepts as history that stops early).
+They are independent: a generation exclusion does not relax the capture check. For the retired
+account that ended 2026-06-30 (`account-2d0a996c...` in the R2.1 catalog):
+
+1. Decide with the owner's provenance whether it is closed (no statements after its last day) or
+   merely not captured; that decision is evidence, not an inference from the missing days.
+2. If it is closed, leave its label OUT of the plan's `expected_account_labels` before the plan hash
+   and the evidence are made: if the response then contains statements for it, the capture refuses
+   it as outside the scope, which is the check that the account really is quiet. If it is still
+   live, its label stays in, and every missing day refuses the run, as it should.
+3. Bind the generation exclusion separately (the exact atom `missing weekday statement for
+   account-2d0a996c...: 2026-06-30 to <latest>` in the spec), and let the generation's end rule
+   check the union per account (the retained history plus the new days) against the newest
+   statement of the build.
+
 ## R3 generation spec (skeleton from the R2.1 spec)
 
 The model is the R2.1 spec (`dataIBKR/config/ibkr-generation-spec-refresh-20260903.json`, schema
@@ -244,7 +278,15 @@ identical. For R3:
   trade ids is UNVERIFIED, so confirm it on the first run or decide that the increment is the
   newest file only.
 - **Who and when:** the release session assembles the spec after the pull and verification (P2/P3),
-  from the verified runs; it needs no owner time except the declared-exclusion provenance.
+  from the verified runs; it needs no owner time except the declared-exclusion provenance. The
+  skeleton above is a list, not a file: the sha256 and size of each new statement exist only after
+  the capture, so the spec is written from the verified runs and the generation builder's own
+  checks (hashes, role counts, the end rule) are the gate; no template with placeholder hashes is
+  shipped.
+- **A refusal mid-plan.** The staged prefix is verified and kept run by run; the remaining days
+  are a new plan (its own hash, comment and evidence; the first plan's evidence does not cover
+  it). The generation is built only once the union of the prefix and the remaining runs reaches the
+  cutoff for every account (a test rehearses the prefix, the new plan and its evidence).
 
 ## GetStatement retries (connection-class failures)
 

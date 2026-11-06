@@ -172,3 +172,98 @@ def test_a_plan_without_an_override_keeps_any_budget(tmp_path: Path) -> None:
     receipts.mkdir()
     evidence = write_evidence(tmp_path, plan, max_get=1)
     authorize_live_read(evidence, plan=plan, receipt_root=receipts, now=lambda: NOW)
+
+
+# ---------------------------------------------- readiness deadline and the staged prefix
+
+
+def _days_plan(count: int, first: date = date(2026, 10, 5)) -> RequestPlan:
+    days = weekday_range(first, date(2026, 12, 31))[:count]
+    return RequestPlan(
+        date(2026, 11, 3),
+        tuple(CaptureRequest("activity-history", day, day, True) for day in days),
+        (account_label(ACCOUNT_ONE),),
+    ), days
+
+
+def test_no_request_starts_after_the_readiness_deadline(tmp_path: Path) -> None:
+    from datetime import datetime, timedelta
+
+    plan, days = _days_plan(3)
+    responses: list[bytes] = []
+    for day in days:
+        responses += [send_ok(), activity_xml((ACCOUNT_ONE,), [day])]
+    harness = Harness(tmp_path, responses, plan=plan)
+    ticks = iter([NOW, NOW, NOW + timedelta(hours=2)] + [NOW + timedelta(hours=2)] * 40)
+
+    def moving_now() -> datetime:
+        return next(ticks)
+
+    summaries = harness._capture(
+        harness.plan,
+        governance=harness.governance,
+        credentials=harness.credentials,
+        http_get=harness.http,
+        wait=harness.waits.append,
+        stage=harness._stage,
+        user_agent="quant-engine-synthetic-test",
+        now=moving_now,
+        clock=lambda: 1000.0 + len(harness.http.calls) * 5.0,
+        deadline=NOW + timedelta(hours=1),
+    )
+    assert [s.status for s in summaries] == ["STAGED", "NOT_ATTEMPTED"]
+    assert (
+        summaries[1].refusal_kind == "DEADLINE_REACHED"
+        and summaries[1].request_index == 1
+    )
+    # one SendRequest only; the unattempted days used no evidence
+    assert sum(1 for url, _ in harness.http.calls if url.endswith("/SendRequest")) == 1
+    receipt = json.loads(next(harness.receipts.iterdir()).read_text())
+    assert receipt["send_requests_used"] == [0]
+    assert len(harness.run_dirs()) == 1
+
+
+def test_a_refusal_leaves_a_verifiable_prefix_and_a_remaining_days_plan_with_new_evidence(
+    tmp_path: Path,
+) -> None:
+    plan, days = _days_plan(4)
+    responses: list[bytes] = [
+        send_ok(),
+        activity_xml((ACCOUNT_ONE,), [days[0]]),
+        send_ok(),
+        activity_xml((ACCOUNT_ONE,), [days[1]]),
+        send_ok(),
+        service_error("1018"),  # refused on the third day
+    ]
+    harness = Harness(tmp_path, responses, plan=plan)
+    summaries = harness.run()
+    assert [s.status for s in summaries] == ["STAGED", "STAGED", "REFUSED"]
+    dirs = harness.run_dirs()
+    assert len(dirs) == 3
+    # the staged prefix normalizes and verifies run by run
+    for index, run_dir in enumerate(dirs[:2]):
+        output = tmp_path / f"n{index}.json"
+        normalize_run(run_dir, output)
+        assert verify_run(run_dir, output).status == "VERIFIED"
+    # the remaining days are a new plan with its own hash and its own single-use evidence
+    remaining = RequestPlan(
+        plan.pull_date,
+        plan.requests[2:],
+        plan.expected_account_labels,
+    )
+    assert remaining.sha256 != plan.sha256 and len(remaining.requests) == 2
+    receipts = tmp_path / "receipts2"
+    receipts.mkdir()
+    evidence = write_evidence(tmp_path, remaining, name="evidence2.json", max_get=6)
+    governance = authorize_live_read(
+        evidence, plan=remaining, receipt_root=receipts, now=lambda: NOW
+    )
+    assert governance.max_send_requests == 2
+    # the original plan's evidence does not cover it
+    with pytest.raises(GovernanceError):
+        authorize_live_read(
+            write_evidence(tmp_path, plan, name="evidence3.json", max_get=6),
+            plan=remaining,
+            receipt_root=receipts,
+            now=lambda: NOW,
+        )

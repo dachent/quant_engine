@@ -49,6 +49,7 @@ def run_live(
     wait: Callable[[float], None] = time.sleep,
     now: Callable[[], datetime] | None = None,
     sources: Mapping[str, Any] | None = None,
+    deadline: datetime | None = None,
 ) -> list[RunSummary]:
     """The governed live path: governance first, credentials second, then I/O."""
 
@@ -68,7 +69,17 @@ def run_live(
         stage=stage,
         user_agent=user_agent,
         now=now,
+        deadline=deadline,
     )
+
+
+def _aware_time(text: str) -> datetime:
+    value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        raise argparse.ArgumentTypeError(
+            "the deadline needs a UTC offset (for example Z)"
+        )
+    return value
 
 
 def _emit(payload: Mapping[str, Any]) -> None:
@@ -106,6 +117,12 @@ def _parser() -> argparse.ArgumentParser:
     live.add_argument("--receipt-root", type=Path, required=True)
     live.add_argument("--staging-root", type=Path, required=True)
     live.add_argument("--user-agent", required=True)
+    live.add_argument(
+        "--deadline-utc",
+        type=_aware_time,
+        default=None,
+        help="readiness deadline (ISO time with an offset): no request starts after it",
+    )
     return parser
 
 
@@ -167,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 receipt_root=args.receipt_root,
                 staging_root=args.staging_root,
                 user_agent=args.user_agent,
+                deadline=args.deadline_utc,
             )
             _emit(
                 {

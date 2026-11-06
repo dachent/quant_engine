@@ -90,8 +90,16 @@ def capture_plan(
     user_agent: str,
     now: Callable[[], datetime] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    deadline: datetime | None = None,
 ) -> list[RunSummary]:
-    """Run the plan under governance; stop at the first refusal."""
+    """Run the plan under governance; stop at the first refusal.
+
+    ``deadline`` (a timezone-aware time) is the readiness deadline of the whole plan: a request
+    is not started once it has passed, so the plan stops with the staged prefix and a
+    ``NOT_ATTEMPTED`` summary, and the rest needs a new plan and new evidence.  A request already
+    under way is not cut short: its remaining waits (at most the evidence's GetStatement budget)
+    still run.
+    """
 
     if governance.plan_sha256 != plan.sha256:
         raise CaptureError("governance was consumed for a different plan")
@@ -104,6 +112,13 @@ def capture_plan(
     summaries: list[RunSummary] = []
     for index, request in enumerate(plan.requests):
         query = get_query(request.query)
+        if deadline is not None and current() >= deadline:
+            summaries.append(
+                RunSummary(
+                    "", index, query.name, "NOT_ATTEMPTED", 0, "DEADLINE_REACHED"
+                )
+            )
+            break
         query_id = credentials[query.query_field].reveal()
         in_use = (service_param, query_id)
         stamp = current().astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
