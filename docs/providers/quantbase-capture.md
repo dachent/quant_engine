@@ -414,6 +414,55 @@ page-set `jwt` header in `Network.requestWillBeSent` (the tool warns
 that response bodies stay readable after `loadingFinished` for large fund series,
 and which extra routes the real pages call beyond the reviewed table.
 
+## CDP navigator (`tools/quantbase_cdp_navigator.py`)
+
+An unattended capture needs the pages loaded without anyone clicking. The navigator
+drives the owner's already-signed-in Quantbase tab through a FIXED list of read-only
+pages while the passive recorder above (a separate process, started first) records
+the traffic. The navigator records nothing and keeps no header, cookie or body.
+
+```powershell
+python tools/quantbase_cdp_navigator.py --cdp-url http://127.0.0.1:9333 --allowlist <allowlist.json> --allowlist-sha256 <sha256>
+```
+
+- Allow-list: a JSON file (data, not code): `schema_version` 1, optional
+  `dwell_seconds` (default 5, max 120), and `pages`, a list of `{label, url,
+  dwell_seconds?}`. The tool prints the file's sha256 first; `--allowlist-sha256`
+  pins it and a mismatch is refused before any connection. Every URL must be https on
+  exactly `app.getquantbase.com` (no userinfo, port, fragment, placeholder, `..`),
+  must contain none of the recorder's `MUTATION_WORDS` (imported, not copied) and
+  must not look like a login path. `qbapi3.com` is never a navigation target.
+- CDP messages: only `Target.getTargets`, `Target.attachToTarget`, `Page.enable`
+  and `Page.navigate` (with exactly one allow-listed `url` and nothing else). No
+  `Input.*`, `Runtime.*`, `Fetch.*`, `Network.*` or `Page.reload`; anything else is
+  refused in the transport guard. The CDP URL must be loopback.
+- Flow: attach to the one page whose URL starts with `https://app.getquantbase.com/`
+  (none: STOP; more than one: refused), navigate to each URL in order, wait for
+  `Page.loadEventFired` (timeout recorded, run continues), dwell, then read the tab
+  URL back. Output is one JSON line per step (`ok` or `timeout`, `redirected_in_app`)
+  and a summary; exit 0, or 1 if any step timed out.
+- STOP rule: if after any navigation the tab is off `app.getquantbase.com`, on a
+  login/sign-in path, gone, or any CDP call fails or errors, the tool navigates no
+  further, prints `STOP_REAUTH` (stderr) and a `stop` line with a reason code, and
+  exits 3. Refusals (bad allow-list, pin, CDP URL, two tabs) exit 2.
+- Pairing: start the recorder, then the navigator; stop the recorder (Ctrl-C) after
+  the navigator's summary and run the recorder's `verify`. The recorder's
+  `expected_responses` per capability count repeats, so each page is loaded once.
+
+Allow-list data derived offline from the retained Quantbase HARs (page paths only,
+ids masked; no HAR content is copied):
+
+| File | Status |
+| --- | --- |
+| `docs/providers/quantbase-navigator-allowlist.derived.json` | VERIFIED as document loads in the HARs: `/dashboard`, `/account-activity`, `/profile`, `/fund/details/Volatis%20Strategy` (the fund page keys on the fund NAME, not an id) |
+| `docs/providers/quantbase-navigator-allowlist.template.json` | UNVERIFIED, refused until filled: `/invest`, `/funds`, `/projections` were seen only as `_next/data` requests (client-side routing), never as a document load; `{fund_name}` for any other fund's page cannot be known offline and the operator supplies it |
+
+`/sign-in` appears in the HARs and is deliberately excluded. UNVERIFIED items: that
+a direct load of `/invest`, `/funds` or `/projections` works and fires the same API
+calls; the fund names beyond Volatis Strategy; the dwell needed for the API calls to
+finish on a slow connection (10 s is a guess); behaviour of a live browser (the
+tests use a fake CDP transport only).
+
 ## Declared contract extension (`build_quantbase_contract`)
 
 `quant_engine.web_contracts.build_quantbase_contract(extension)` widens the reviewed

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "note": "UNVERIFIED TEMPLATE, refused by the navigator until every placeholder is replaced. The operator fills real values. /invest, /funds and /projections were seen only as _next/data requests (client-side routing), never as a document load. {fund_name} is the fund name path segment of /fund/details/<name>; only the Volatis Strategy page appears in the retained HARs.",
+  "dwell_seconds": 10,
+  "pages": [
+    {"label": "invest", "url": "https://app.getquantbase.com/invest"},
+    {"label": "funds", "url": "https://app.getquantbase.com/funds"},
+    {"label": "projections", "url": "https://app.getquantbase.com/projections"},
+    {"label": "fund-other", "url": "https://app.getquantbase.com/fund/details/{fund_name}"}
+  ]
+}
