@@ -3124,8 +3124,9 @@ def _replay_schwab_patched_navs(
         ),
         "Schwab derivation record",
     )
-    # An account the derivation rolled back to the day carries its pinned transaction rows; the
-    # holdings it was priced from are the capture's, rolled back by the same function.
+    # The transaction files of the derivation are bound by hash (altering or dropping one after
+    # the declaration is a mismatch here). The holdings an account was priced from are the
+    # capture's, rolled back to the day by the same function the derivation used.
     import schwab_rollback
 
     (end,) = [
@@ -3146,11 +3147,11 @@ def _replay_schwab_patched_navs(
             ),
             "Schwab replay transaction rows",
         )
-    if {
+    if not {
         a
         for a, r in record.items()
         if isinstance(r, dict) and r.get("rolled_back_rows")
-    } != set(rows_of):
+    } <= set(rows_of):
         raise ProviderLedgerError("schwab replay transactions differ from the record")
     for account_id, rows in rows_of.items():
         try:

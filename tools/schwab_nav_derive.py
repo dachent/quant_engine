@@ -486,16 +486,13 @@ def declare(
     symbols = sorted(
         {s for row in patched for s in rolled[row["account_id"]].quantities}
     )
+    # the files the roll-back and the after-D rows were read from: pin them
     transactions = [
-        {
-            "account_id": row["account_id"],
-            **_pin(
-                run_dir
-                / f"transactions/normalized/wch/transactions/{row['account_id']}.json"
-            ),
-        }
-        for row in report
-        if record[row["account_id"]].get("rolled_back_rows")
+        {"account_id": account, **_pin(path)}
+        for account in sorted(held)
+        if (
+            path := run_dir / f"transactions/normalized/wch/transactions/{account}.json"
+        ).is_file()
     ]
     return {
         "roots": spec_doc["roots"],
