@@ -376,3 +376,84 @@ def test_a_slash_symbol_is_read_from_the_dot_named_close_file(tmp_path: Path) ->
         derive_tool.DeriveError, match="no official close file for BRK/B"
     ):
         _derive(run, closes)
+
+
+# -- an account that traded or moved cash on D can fail the prior-day cross-check honestly -----------
+
+STALE = "account-00000000000000a2"
+FLAT = "account-00000000000000f1"
+
+
+def _transactions(run: Path, account: str, *days: str) -> None:
+    folder = run / "transactions/normalized/wch/transactions"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{account}.json").write_text(
+        json.dumps([{"transactionDate": day, "action": "Buy"} for day in days]),
+        encoding="utf-8",
+    )
+
+
+def test_a_failed_prior_closure_on_an_active_account_names_the_rows_and_the_waiver(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path, stale_native=(1000.0, 1000.0))
+    _transactions(run, STALE, "09/17/2026", "09/17/2026", "09/16/2026")
+    with pytest.raises(
+        derive_tool.DeriveError,
+        match=r"2 transaction row\(s\) are dated 2026-09-17.*--waive-prior-closure",
+    ):
+        _derive(run, closes)
+
+
+def test_a_waiver_skips_the_prior_closure_for_an_active_account_and_is_recorded(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path, stale_native=(1000.0, 1000.0))
+    _transactions(run, STALE, "09/17/2026")
+    record, report = _derive(run, closes, waivers={STALE: "bought AAA on D"})
+    # the derived D value is the end-of-D holdings at the D closes, whatever traded on D
+    assert record[STALE]["official_0917"] == "1055.50"
+    assert record[STALE]["prior_closure"] == derive_tool.PRIOR_CLOSURE_WAIVED
+    assert record[STALE]["waiver_reason"] == "bought AAA on D"
+    assert record[STALE]["transaction_rows_on_day"] == "1"
+    row = next(r for r in report if r["account_id"] == STALE)
+    assert row["status"] == derive_tool.STATUS_PATCH
+    assert row["prior_closure"] == derive_tool.PRIOR_CLOSURE_WAIVED
+
+
+def test_a_flat_account_with_a_cash_flow_on_the_day_needs_the_waiver(
+    tmp_path: Path,
+) -> None:
+    # native NAV 5.00 on D-1 and (stale) on D; a deposit on D left 10.00 of cash
+    run, closes = _world(tmp_path, flat_native=(5.0, 5.0))
+    _transactions(run, FLAT, "09/17/2026")
+    with pytest.raises(derive_tool.DeriveError, match="1 transaction row"):
+        _derive(run, closes)
+    record, report = _derive(run, closes, waivers={FLAT: "deposit on D"})
+    assert record[FLAT]["official_0917"] == "10.00"
+    flat = next(r for r in report if r["account_id"] == FLAT)
+    assert flat["status"] == derive_tool.STATUS_PATCH
+
+
+def test_a_waiver_for_an_account_without_transactions_on_the_day_is_refused(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path, stale_native=(1000.0, 1000.0))
+    _transactions(run, STALE, "09/16/2026")
+    with pytest.raises(
+        derive_tool.DeriveError, match="a waiver needs transactions dated"
+    ):
+        _derive(run, closes, waivers={STALE: "no"})
+
+
+def test_a_waiver_naming_an_unknown_account_is_refused(tmp_path: Path) -> None:
+    run, closes = _world(tmp_path)
+    with pytest.raises(derive_tool.DeriveError, match="outside the crosswalk"):
+        _derive(run, closes, waivers={"account-0000000000000099": "x"})
+
+
+def test_waivers_are_account_equals_reason_and_never_repeated() -> None:
+    assert derive_tool._waivers(["a=because", "b=c d"]) == {"a": "because", "b": "c d"}
+    for bad in (["a"], ["=x"], ["a="], ["a=x", "a=y"]):
+        with pytest.raises(derive_tool.DeriveError):
+            derive_tool._waivers(bad)

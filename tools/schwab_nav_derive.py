@@ -51,6 +51,7 @@ DEFAULT_TOLERANCE = Decimal("0.05")
 STATUS_FLAT = "FLAT_NO_PATCH"
 STATUS_PATCH = "STALE_CARRY_PATCHED"
 STATUS_AGREES = "NATIVE_AGREES_WITH_OFFICIAL"
+PRIOR_CLOSURE_WAIVED = "WAIVED_ACTIVE_ON_DAY"
 # the ledger replay's rounding label (provider_ledger._SCHWAB_REPLAY_ROUNDING); a test pins the two together
 REPLAY_ROUNDING = "SUM_QUANTITY_X_CLOSE_QUANTIZE_0.01_HALF_EVEN_PLUS_CASH"
 
@@ -155,6 +156,21 @@ def official_value(
     return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN) + cash
 
 
+def transactions_on(run_dir: Path, account: str, day: date) -> int:
+    """Rows of the run's captured transaction history dated ``day`` (0 when the run holds none)."""
+
+    path = run_dir / f"transactions/normalized/wch/transactions/{account}.json"
+    if not path.is_file():
+        return 0
+    rows = _list(strict_json_loads(path.read_bytes(), label="transactions"), "rows")
+    stamp = f"{day:%m/%d/%Y}"
+    return sum(
+        1
+        for row in rows
+        if isinstance(row, dict) and str(row.get("transactionDate")) == stamp
+    )
+
+
 def derive(
     *,
     run_dir: Path,
@@ -163,9 +179,22 @@ def derive(
     day: date,
     prior_day: date,
     tolerance: Decimal = DEFAULT_TOLERANCE,
+    waivers: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, str]], list[dict[str, str]]]:
-    """The derivation record and the per-account closure report."""
+    """The derivation record and the per-account closure report.
 
+    The derived value of day D is quantity x official close + cash of the captured (end of D) holdings,
+    correct whatever traded on D. The prior-day closure only cross-checks the holdings, closes and
+    crosswalk against the native NAV of D-1, and assumes D-1 held what D holds. An account with
+    transactions dated D can fail that cross-check honestly; the operator then names it in ``waivers``
+    (account to reason), which is accepted only for an account with transactions on D, skips the prior
+    closure and the flat-account cash equality for it, and is recorded in the record and the report.
+    """
+
+    waivers = dict(waivers or {})
+    unknown = sorted(set(waivers) - set(crosswalk.values()))
+    if unknown:
+        raise DeriveError(f"a waiver names accounts outside the crosswalk: {unknown}")
     if prior_day >= day:
         raise DeriveError("the prior day must precede the day")
     held = read_holdings(
@@ -193,17 +222,31 @@ def derive(
         native_day, native_prior = history[day], history[prior_day]
         official_day = official_value(quantities, cash, closes, day, account)
         official_prior = official_value(quantities, cash, closes, prior_day, account)
-        if abs(official_prior - native_prior) > tolerance:
+        rows_on_day = transactions_on(run_dir, account, day)
+        waived = account in waivers
+        if waived and rows_on_day == 0:
+            raise DeriveError(
+                f"{account}: a waiver needs transactions dated {day}, the run holds none"
+            )
+        hint = (
+            f"; {rows_on_day} transaction row(s) are dated {day}, so the account may have changed "
+            f"since {prior_day}: review them and name the account in --waive-prior-closure"
+            if rows_on_day and not waived
+            else ""
+        )
+        if not waived and abs(official_prior - native_prior) > tolerance:
             raise DeriveError(
                 f"{account}: the official value {official_prior} of {prior_day} differs from the "
-                f"captured NAV {native_prior} by more than {tolerance}"
+                f"captured NAV {native_prior} by more than {tolerance}{hint}"
             )
-        if not quantities:
+        if not quantities and not waived:
             if not (native_day == native_prior == cash):
                 raise DeriveError(
                     f"{account}: a flat account's native NAV of {prior_day} and {day} "
-                    f"({native_prior}, {native_day}) must both equal its cash {cash}"
+                    f"({native_prior}, {native_day}) must both equal its cash {cash}{hint}"
                 )
+            status = STATUS_FLAT
+        elif not quantities and native_day == cash and native_prior == cash:
             status = STATUS_FLAT
         elif native_day == native_prior and official_day != native_day:
             status = STATUS_PATCH
@@ -214,20 +257,26 @@ def derive(
                 f"{account}: the native NAV {native_day} of {day} differs from the official value "
                 f"{official_day} by more than {tolerance} and is not a carry of {prior_day}"
             )
-        record[account] = {
+        entry = {
             f"official_{day_tag}": str(official_day),
             f"official_{prior_tag}": str(official_prior),
             f"nav_file_{prior_tag}": str(native_prior),
             "cash": str(cash),
         }
-        report.append(
-            {
-                "account_id": account,
-                "native_day": str(native_day),
-                "official_day": str(official_day),
-                "status": status,
-            }
-        )
+        row = {
+            "account_id": account,
+            "native_day": str(native_day),
+            "official_day": str(official_day),
+            "status": status,
+        }
+        if waived:
+            entry["prior_closure"] = PRIOR_CLOSURE_WAIVED
+            entry["waiver_reason"] = waivers[account]
+            entry["transaction_rows_on_day"] = str(rows_on_day)
+            row["prior_closure"] = PRIOR_CLOSURE_WAIVED
+            row["waiver_reason"] = waivers[account]
+        record[account] = entry
+        report.append(row)
     return record, report
 
 
@@ -257,6 +306,7 @@ def declare(
     tolerance: Decimal,
     derivation: Path,
     spec: Path,
+    waivers: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """The source-branch finality evidence: the spec's roots and NAV sources plus the derived patch.
 
@@ -271,6 +321,7 @@ def declare(
         day=day,
         prior_day=prior_day,
         tolerance=tolerance,
+        waivers=waivers,
     )
     if strict_json_loads(derivation.read_bytes(), label="derivation record") != record:
         raise DeriveError(
@@ -329,6 +380,18 @@ def declare(
     }
 
 
+def _waivers(items: Sequence[str]) -> dict[str, str]:
+    waivers: dict[str, str] = {}
+    for item in items:
+        account, separator, reason = item.partition("=")
+        if not separator or not account.strip() or not reason.strip():
+            raise DeriveError("a waiver is ACCOUNT=REASON with a stated reason")
+        if account in waivers:
+            raise DeriveError(f"the waiver for {account} is given twice")
+        waivers[account] = reason.strip()
+    return waivers
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -340,6 +403,13 @@ def _parser() -> argparse.ArgumentParser:
         run.add_argument("--day", required=True)
         run.add_argument("--prior-day", required=True)
         run.add_argument("--tolerance", default=str(DEFAULT_TOLERANCE))
+        run.add_argument(
+            "--waive-prior-closure",
+            action="append",
+            default=[],
+            metavar="ACCOUNT=REASON",
+            help="skip the prior-day closure for an account with transactions dated D (recorded)",
+        )
         run.add_argument("--out", type=Path, required=True)
         if name == "derive":
             run.add_argument("--report", type=Path)
@@ -365,6 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "day": date.fromisoformat(args.day),
             "prior_day": date.fromisoformat(args.prior_day),
             "tolerance": _decimal(args.tolerance, "tolerance"),
+            "waivers": _waivers(args.waive_prior_closure),
         }
         if args.command == "declare":
             evidence = declare(**common, derivation=args.derivation, spec=args.spec)
