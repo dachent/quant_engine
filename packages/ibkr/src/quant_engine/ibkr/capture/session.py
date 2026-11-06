@@ -23,7 +23,7 @@ import time
 from .credentials import TOKEN_FIELD, SecretValue
 from quant_engine.ibkr.flex import GET_STATEMENT_URL, SEND_REQUEST_URL, HttpGet
 
-from ._util import sha256_hex
+from ._util import compact_date, sha256_hex
 from .catalog import SERVICE_VERSION, get_query
 from .governance import LiveReadGovernance
 from .plan import RequestPlan
@@ -34,6 +34,10 @@ from .transport import Pacer, TransportError
 MANIFEST_SCHEMA = "ibkr-capture-manifest-v1"
 _POLL_INITIAL_SECONDS = 20.0
 _POLL_MAX_SECONDS = 120.0
+# Waits before asking the same GetStatement again after a connection-class failure (name
+# resolution, reset, timeout).  The reference code already exists, so the SendRequest is never
+# repeated; each retry spends one of the evidence's GetStatement attempts.
+_TRANSPORT_BACKOFF_SECONDS = (5.0, 15.0, 30.0, 60.0)
 KIND_POLL_EXHAUSTED = "POLL_EXHAUSTED"
 KIND_TRANSPORT_FAILURE = "TRANSPORT_FAILURE"
 
@@ -86,8 +90,16 @@ def capture_plan(
     user_agent: str,
     now: Callable[[], datetime] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    deadline: datetime | None = None,
 ) -> list[RunSummary]:
-    """Run the plan under governance; stop at the first refusal."""
+    """Run the plan under governance; stop at the first refusal.
+
+    ``deadline`` (a timezone-aware time) is the readiness deadline of the whole plan: a request
+    is not started once it has passed, so the plan stops with the staged prefix and a
+    ``NOT_ATTEMPTED`` summary, and the rest needs a new plan and new evidence.  A request already
+    under way is not cut short: its remaining waits (at most the evidence's GetStatement budget)
+    still run.
+    """
 
     if governance.plan_sha256 != plan.sha256:
         raise CaptureError("governance was consumed for a different plan")
@@ -100,6 +112,13 @@ def capture_plan(
     summaries: list[RunSummary] = []
     for index, request in enumerate(plan.requests):
         query = get_query(request.query)
+        if deadline is not None and current() >= deadline:
+            summaries.append(
+                RunSummary(
+                    "", index, query.name, "NOT_ATTEMPTED", 0, "DEADLINE_REACHED"
+                )
+            )
+            break
         query_id = credentials[query.query_field].reveal()
         in_use = (service_param, query_id)
         stamp = current().astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -121,6 +140,13 @@ def capture_plan(
             },
             "created_utc": stamp,
         }
+        send_params = {"q": query_id, "t": service_param, "v": SERVICE_VERSION}
+        if request.window_override:
+            # the request sets the window (IBKR: fd/td yyyymmdd, up to 365 days; the catalog
+            # keeps each request to its own maximum), and the manifest records what was sent
+            send_params["fd"] = compact_date(request.window_from)
+            send_params["td"] = compact_date(request.window_to)
+            base["send_window"] = {"fd": send_params["fd"], "td": send_params["td"]}
         attempts: list[dict[str, object]] = []
 
         def refuse(
@@ -128,28 +154,22 @@ def capture_plan(
             code: str | None,
             body: bytes | None,
             count: int,
+            detail: str | None = None,
         ) -> RunSummary:
             if body is not None:
                 run.write_new("refusal-response.xml", body)
-            _finish(
-                run,
-                base,
-                status="REFUSED",
-                attempts=attempts,
-                refusal={"kind": kind, "error_code": code},
-            )
+            refusal: dict[str, object] = {"kind": kind, "error_code": code}
+            if detail is not None:
+                refusal["detail"] = detail
+            _finish(run, base, status="REFUSED", attempts=attempts, refusal=refusal)
             return RunSummary(run_id, index, query.name, "REFUSED", count, kind, code)
 
         governance.reserve_send(index)
         pacer.before_call()
         try:
-            send_body = http_get(
-                SEND_REQUEST_URL,
-                {"q": query_id, "t": service_param, "v": SERVICE_VERSION},
-                headers,
-            )
-        except TransportError:
-            summaries.append(refuse(KIND_TRANSPORT_FAILURE, None, None, 0))
+            send_body = http_get(SEND_REQUEST_URL, send_params, headers)
+        except TransportError as exc:
+            summaries.append(refuse(KIND_TRANSPORT_FAILURE, None, None, 0, str(exc)))
             break
         _guard_echo(send_body, in_use)
         run.write_new("send-response.xml", send_body)
@@ -166,8 +186,11 @@ def capture_plan(
         base["get_url"] = get_url
         base["send_url"] = SEND_REQUEST_URL
         outcome: RunSummary | None = None
+        next_wait = _POLL_INITIAL_SECONDS
+        polls = 0
+        transport_failures = 0
         for attempt in range(1, governance.max_get_attempts + 1):
-            wait(min(_POLL_INITIAL_SECONDS * (2 ** (attempt - 1)), _POLL_MAX_SECONDS))
+            wait(next_wait)
             governance.reserve_get(index)
             pacer.before_call()
             try:
@@ -176,9 +199,26 @@ def capture_plan(
                     {"q": reference, "t": service_param, "v": SERVICE_VERSION},
                     headers,
                 )
-            except TransportError:
-                outcome = refuse(KIND_TRANSPORT_FAILURE, None, None, attempt)
-                break
+            except TransportError as exc:
+                attempts.append(
+                    {
+                        "step": STEP_GET,
+                        "attempt": attempt,
+                        "kind": KIND_TRANSPORT_FAILURE,
+                        "code": None,
+                        "detail": str(exc),
+                    }
+                )
+                if not exc.retryable:
+                    outcome = refuse(
+                        KIND_TRANSPORT_FAILURE, None, None, attempt, str(exc)
+                    )
+                    break
+                transport_failures += 1
+                next_wait = _TRANSPORT_BACKOFF_SECONDS[
+                    min(transport_failures, len(_TRANSPORT_BACKOFF_SECONDS)) - 1
+                ]
+                continue
             _guard_echo(body, in_use)
             response = classify_response(body, step=STEP_GET)
             attempts.append(
@@ -191,6 +231,8 @@ def capture_plan(
                 }
             )
             if response.kind is ResponseKind.POLL_AGAIN:
+                polls += 1
+                next_wait = min(_POLL_INITIAL_SECONDS * (2**polls), _POLL_MAX_SECONDS)
                 continue
             if response.kind is ResponseKind.REPORT:
                 run.write_new("statement.xml", body)
@@ -200,9 +242,18 @@ def capture_plan(
             outcome = refuse(response.kind.value, response.error_code, body, attempt)
             break
         else:
-            outcome = refuse(
-                KIND_POLL_EXHAUSTED, "1019", None, governance.max_get_attempts
-            )
+            if attempts and attempts[-1].get("kind") == KIND_TRANSPORT_FAILURE:
+                outcome = refuse(
+                    KIND_TRANSPORT_FAILURE,
+                    None,
+                    None,
+                    governance.max_get_attempts,
+                    f"get attempts exhausted: {attempts[-1]['detail']}",
+                )
+            else:
+                outcome = refuse(
+                    KIND_POLL_EXHAUSTED, "1019", None, governance.max_get_attempts
+                )
         summaries.append(outcome)
         if outcome.status != "STAGED":
             break

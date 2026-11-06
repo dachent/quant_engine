@@ -26,7 +26,15 @@ Opener = Callable[[request.Request, float], IO[bytes]]
 
 
 class TransportError(RuntimeError):
-    """A sanitized transport failure (never carries the URL or parameters)."""
+    """A sanitized transport failure (never carries the URL or parameters).
+
+    ``retryable`` is true for the connection class (name resolution, reset, timeout): the same
+    GetStatement may be asked again.  An HTTP status, a refused host or an oversize body is not.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class _NoRedirect(request.HTTPRedirectHandler):
@@ -66,8 +74,17 @@ class UrllibHttpGet:
                 body = response.read(MAX_RESPONSE_BYTES + 1)
         except urlerror.HTTPError as exc:
             raise TransportError(f"the service answered HTTP {exc.code}") from None
-        except (urlerror.URLError, OSError, ValueError):
-            raise TransportError("the service request failed") from None
+        except (urlerror.URLError, OSError, ValueError) as exc:
+            # exception classes only (a name-resolution failure reads URLError/gaierror): never
+            # the message, the URL or the parameters, which can carry the token
+            reason = getattr(exc, "reason", None)
+            kind = type(exc).__name__
+            if reason is not None:
+                kind += "/" + type(reason).__name__
+            raise TransportError(
+                f"the service request failed ({kind}) at {parts.hostname}",
+                retryable=not isinstance(exc, ValueError),
+            ) from None
         if len(body) > MAX_RESPONSE_BYTES:
             raise TransportError("the service response exceeds the size bound")
         return body

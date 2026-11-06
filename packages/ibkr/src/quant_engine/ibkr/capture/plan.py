@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 import json
 import re
 from typing import Any
@@ -13,7 +13,9 @@ from ._util import canonical_json_bytes, parse_iso_date, require_keys, sha256_he
 from .catalog import WINDOW_SINGLE_DAY, get_query
 
 PLAN_SCHEMA_VERSION = 1
-MAX_REQUESTS = 12
+# Each request costs a SendRequest and at least one GetStatement after a 20 second wait, and the
+# service allows 10 calls a minute per token, so forty requests are about a quarter of an hour.
+MAX_REQUESTS = 40
 _LABEL = re.compile(r"^[0-9a-f]{16}$")
 
 
@@ -26,6 +28,10 @@ class CaptureRequest:
     query: str
     window_from: date
     window_to: date
+    # True: SendRequest carries the window as fd/td (yyyymmdd), so the request, not the saved
+    # query, sets the date range.  False (absent from a plan document): the saved query's own
+    # window applies and the plan only records what the operator expects.
+    window_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,8 @@ class RequestPlan:
                     "query": item.query,
                     "window_from": item.window_from.isoformat(),
                     "window_to": item.window_to.isoformat(),
+                    # emitted only when set, so a plan without an override keeps its hash
+                    **({"window_override": True} if item.window_override else {}),
                 }
                 for item in self.requests
             ],
@@ -63,8 +71,8 @@ class RequestPlan:
 
 def _validate(plan: RequestPlan) -> None:
     if not 1 <= len(plan.requests) <= MAX_REQUESTS:
-        raise PlanError("a plan holds between one and twelve requests")
-    seen: set[str] = set()
+        raise PlanError(f"a plan holds between one and {MAX_REQUESTS} requests")
+    by_role: dict[str, list[CaptureRequest]] = {}
     for item in plan.requests:
         try:
             query = get_query(item.query)
@@ -81,11 +89,29 @@ def _validate(plan: RequestPlan) -> None:
             # Flex finalizes a day only after it closes; never ask for a day that
             # is not at least one calendar day behind the pull.
             raise PlanError("a request window must end before the pull date")
-        if item.query in seen:
-            # The saved query, not the driver, fixes the window: one role, one
-            # request per plan.
+        by_role.setdefault(item.query, []).append(item)
+    for requests in by_role.values():
+        if len(requests) == 1:
+            continue
+        if not all(item.window_override for item in requests):
+            # Without an override the saved query, not the driver, fixes the window:
+            # one role, one request per plan.
             raise PlanError("a query role is used more than once in a plan")
-        seen.add(item.query)
+        ordered = sorted(requests, key=lambda item: item.window_from)
+        if any(
+            later.window_from <= earlier.window_to
+            for earlier, later in zip(ordered, ordered[1:])
+        ):
+            raise PlanError("requests of one role must not overlap")
+    skipped = set(plan.known_non_trading_days)
+    for item in plan.requests:
+        if item.window_override and not any(
+            (item.window_from + timedelta(days=offset)).weekday() < 5
+            and item.window_from + timedelta(days=offset) not in skipped
+            for offset in range((item.window_to - item.window_from).days + 1)
+        ):
+            # a window with no trading day returns no statement: leave it out of the plan
+            raise PlanError("a request window holds no trading day")
     if not plan.expected_account_labels:
         raise PlanError("a plan must name its expected account scope")
     if len(set(plan.expected_account_labels)) != len(plan.expected_account_labels):
@@ -122,14 +148,21 @@ def plan_from_document(document: Mapping[str, Any]) -> RequestPlan:
             raise ValueError("plan lists are malformed")
         requests = []
         for entry in raw_requests:
-            row = require_keys(entry, "request", {"query", "window_from", "window_to"})
+            keys = {"query", "window_from", "window_to"}
+            override = isinstance(entry, dict) and "window_override" in entry
+            row = require_keys(
+                entry, "request", keys | {"window_override"} if override else keys
+            )
             if not isinstance(row["query"], str):
                 raise ValueError("request query must be a string")
+            if override and row["window_override"] is not True:
+                raise ValueError("window_override is true or absent")
             requests.append(
                 CaptureRequest(
                     row["query"],
                     parse_iso_date(row["window_from"], "window_from"),
                     parse_iso_date(row["window_to"], "window_to"),
+                    override,
                 )
             )
         if not all(isinstance(label, str) for label in raw_labels):
