@@ -61,6 +61,7 @@ import re
 import sys
 from typing import Any, Sequence
 
+from quant_engine.core import InterpreterRefusal, require_current_interpreter
 from quant_engine.portfolio123 import book_rowset_fingerprint, previous_generation_books
 
 _START_STRING = re.compile(r"Start\s+(\d{1,2})/(\d{1,2})/(\d{4})")
@@ -536,6 +537,11 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    try:
+        require_current_interpreter("the P123 book identity check")
+    except InterpreterRefusal as exc:
+        print(f"p123-book-identity-check: FAIL: {exc}", file=sys.stderr)
+        return 2
     report = check_capture(
         args.capture,
         books=args.book or None,
