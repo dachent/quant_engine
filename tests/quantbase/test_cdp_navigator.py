@@ -723,3 +723,45 @@ def test_the_template_is_refused_until_the_operator_fills_the_placeholder() -> N
     with pytest.raises(NavigatorError, match="URL_HAS_PLACEHOLDER"):
         parse_allowlist(path.read_bytes())
     assert "UNVERIFIED" in path.read_text(encoding="utf-8")
+
+
+TEMPLATE = (
+    REPOSITORY_ROOT / "docs/providers/quantbase-navigator-allowlist.template.json"
+)
+
+
+def test_template_filled_in_by_the_operator_is_accepted() -> None:
+    raw = TEMPLATE.read_bytes().replace(b"{fund_name}", b"Example%20Fund")
+    parsed = parse_allowlist(raw)
+    assert [p.label for p in parsed.pages][-1] == "fund-other"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"label": "x", "url": f"{APP}/fund/details/{{fund_name}}"},
+        {"label": "x", "url": f"{APP}/fund/details/%7Bfund_name%7D"},
+        {"label": "{fund_name}", "url": f"{APP}/profile"},
+        {"label": "x", "url": f"{APP}/fund/details/{{anything}}"},
+        {"label": "x", "url": f"{APP}/p?q={{id}}"},
+    ],
+)
+def test_any_leftover_placeholder_in_label_or_url_is_refused(
+    entry: dict[str, str],
+) -> None:
+    pages = [{"label": "ok", "url": f"{APP}/dashboard"}, entry]
+    with pytest.raises(NavigatorError) as caught:
+        parse_allowlist(allowlist_bytes(pages))
+    assert caught.value.code in {
+        "URL_HAS_PLACEHOLDER",
+        "ALLOWLIST_LABEL_INVALID",
+        "URL_MUTATION_LIKE",
+    }
+
+
+def test_cli_refuses_the_unfilled_template_before_connecting(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, lines, connected, browser = cli(tmp_path, raw=TEMPLATE.read_bytes())
+    assert code == 2 and connected == [] and browser.sent == [] and lines == []
+    assert "REFUSED URL_HAS_PLACEHOLDER" in capsys.readouterr().out

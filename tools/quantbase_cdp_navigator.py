@@ -148,7 +148,8 @@ def validate_url(url: object) -> str:
         raise NavigatorError("URL_OFF_ORIGIN")
     if parts.fragment or "#" in url:
         raise NavigatorError("URL_HAS_FRAGMENT")
-    if "{" in url or "}" in url:
+    decoded_once = unquote(url)
+    if "{" in decoded_once or "}" in decoded_once:
         raise NavigatorError("URL_HAS_PLACEHOLDER")
     if ".." in unquote(parts.path).split("/"):
         raise NavigatorError("URL_PATH_UNSAFE")
