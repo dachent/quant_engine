@@ -121,6 +121,89 @@ so one call returns every account; `balances.historical` is a `GET` with an empt
 `query`, scoped per account by `Schwab-Client-Ids`; `transactions.history` is the
 reviewed POST. `body` is `null` for the two requests the driver builds itself.
 
+### Generating and checking the evidence
+
+`make-evidence` writes the evidence for you (create-only; the driver fills the
+`catalog` and `terms` hashes and the three fixed request entries) and then runs
+the same checks `capture` runs, deleting the file if any fails:
+
+```powershell
+python tools/schwab_capture_driver.py make-evidence --output <evidence.json> `
+  --cutoff 2026-11-06 --account-count <N> --holdings-body <body.json> `
+  --review-identity <name> --review-reference <issue-comment-url> `
+  --issued-at <RFC3339> --expires-at <RFC3339> --max-requests <M>
+```
+
+`check-evidence <evidence.json> [--receipt-root <dir>]` re-runs every
+authorization check against the real clock without writing a receipt, so it never
+consumes the evidence; with `--receipt-root` it also reports `already_consumed`.
+Run it just before `capture`. `issued_at` must be in the past and `expires_at` in
+the future when `capture` runs. `capture` itself is unchanged and still the only
+thing that consumes evidence.
+
+### Crosswalk and the first-minute live check
+
+`build-crosswalk --selected-source-root <dir> --out <crosswalk.json>` writes the
+restricted `{"crosswalk": [...]}` file from the retained terminal targets
+(create-only; prints only the account count and the file hash, never an id). It
+is exactly what `capture` compares to the targets, so the two cannot disagree.
+The approved evidence `--account-count` must equal that count (the retained
+`refresh-20260902` root, manifest sha256 `1b57aa1d...ba858fd0`, yields 8).
+
+`attach-check --cdp-url http://127.0.0.1:9223` is the live check to run before
+the single-use capture: it attaches, requires exactly one `client.schwab.com`
+page, reloads it and reads one of the SPA's own API requests (the same step
+`capture` starts with), and prints `ok`, `governed_requests: 0` and the observed
+header names (never values). It needs no evidence and consumes nothing.
+
+#### The holdings body, read from the page itself
+
+No retained capture holds a Holdings-V2 request body (the 2026-07-31 HARs contain
+the SPA bundle, which has only key names). `attach-check --cdp-url <url>
+--capture-body-out <body.json> [--wait-seconds 20]` records the body of the
+page's OWN HoldingV2 POST while it reloads the page (a passive
+`request.post_data` read; no request of ours, no header, cookie or token is
+stored or printed). The body is reduced to the keys the gate allows and written
+create-only; the output lists the key names and the file hash. Feed the file to
+`make-evidence --holdings-body`.
+
+If no HoldingV2 request is seen within the wait window the command refuses and
+writes nothing. The operator then opens the Schwab positions/holdings page by
+read-only navigation in the same browser and runs `attach-check` again, or STOPs
+and uses the retained UI method below.
+
+#### Account-set compare
+
+With `--crosswalk <crosswalk.json>`, `attach-check` also reads the response of that
+same HoldingV2 request (only the `accounts[].accountId` list is kept; no balance
+or position leaves the function) and compares the set to the crosswalk. It
+reports `accounts_on_page`, `accounts_in_crosswalk` and `account_set_matches`;
+on a difference it refuses, naming crosswalk accounts missing on the page by
+internal id and extra page accounts only by an 8-character hash, never a
+provider id. Run it before issuing evidence; `--account-count` must equal the
+matched count.
+
+#### Fallback: the retained UI method (R2.1)
+
+If the driver's first live use fails, the documented fallback is the method that
+produced `source-runs/r21-schwab-0917-official`: the "All Brokerage Accounts"
+page's own HoldingV2 call (HTTP 200) saved as `all-brokerage-positions.json`, with
+`capture-receipt.json` (selected UI perimeter, source path, file hashes), the
+selected-account transactions, `official-nav-derivation.json` and the
+`finality/` and `normalized/` directories. Ledger finality for a fresh capture
+then comes from the same chain as the driver's output: derive, ingest and
+declare (above), with the declared evidence wired into the cycle manifest. The
+fallback needs its own review and the owner's say-so; it is not interchangeable
+with a driver run without that.
+
+#### Re-issuing evidence in the capture window
+
+Evidence is single use and a failed run is not resumed, so a second evidence is a
+new file with a new review comment. The cycle is `make-evidence` (writes and
+validates) then `check-evidence`, each well under a second; the time is the review
+comment and the `--issued-at`/`--expires-at` values, not the tools. Use a fresh
+`--output` path each time.
+
 ## Credentials
 
 None. Capture attaches over CDP to the owner's already-authenticated browser and
@@ -346,7 +429,7 @@ directory outside the world.
    --prior-day 2026-11-05 --out <ev>/schwab-nav-derivation.json --report <ev>/schwab-nav-report.json`
    (add `--waive-prior-closure ACCOUNT=REASON` only for an account the run shows transactions on D for; see below).
 4. `python tools/schwab_capture_ingest.py ingest <run> --crosswalk <xw> --cutoff 2026-11-06 --official-closes-dir
-   <yahoo run> --config <ingest config> --output-root <ingest root> --base-spec <base spec> --spec-out
+   <closes> --config <ingest config> --output-root <ingest root> --base-spec <base spec> --spec-out
    <ev>/schwab-composed-spec.json --derivation-record <ev>/schwab-nav-derivation.json`.
 5. `python tools/schwab_generation.py stage <ev>/schwab-composed-spec.json <dataSchwab root>` (then `publish` with the
    accepted generation id), giving the generation id and `generation.json` sha256.
