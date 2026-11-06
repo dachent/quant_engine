@@ -78,6 +78,10 @@ CASH_ONLY_ACTIONS = frozenset(
 # A quantity that is added after D is not a price-able holding at D.
 REFUSED_ACTIONS = frozenset({"Stock Split", "Spin-off"})
 SUPPORTED_ACTIONS = frozenset(SHARE_ACTIONS) | CASH_ONLY_ACTIONS
+# The only actions recorded rather than undone when they carry neither a quantity nor an amount.
+# None occurs in the retained history; any other action with blank values goes through
+# ``parse_effect`` and is refused (a blank Stock Split must not pass as a note).
+INFORMATIONAL_ACTIONS = frozenset({"Memo"})
 
 
 @dataclass(frozen=True)
@@ -232,11 +236,12 @@ def roll_back(
             straddled[action] = straddled.get(action, 0) + 1
             if straddlers == STRADDLERS_IN_D:
                 continue
-        if not (
-            str(row.get("shareQuantity") or "").strip()
-            or str(row.get("amount") or "").strip()
+        if (
+            str(row.get("action") or "?") in INFORMATIONAL_ACTIONS
+            and not str(row.get("shareQuantity") or "").strip()
+            and not str(row.get("amount") or "").strip()
         ):
-            action = str(row.get("action") or "?")
+            action = str(row.get("action"))
             inert[action] = inert.get(action, 0) + 1
             continue
         effect = parse_effect(account, row)

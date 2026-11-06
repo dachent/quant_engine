@@ -786,3 +786,28 @@ def test_the_transactions_the_guard_read_are_pinned_and_checked_by_the_ledger(
     path.unlink()
     with pytest.raises(Exception, match="regular file"):
         ledger._schwab_source_derived_patch(evidence, DAY, catalog)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("action", ["Stock Split", "Spin-off", "Merger", "Mystery"])
+def test_a_corporate_action_with_blank_values_is_not_a_note(
+    tmp_path: Path, action: str
+) -> None:
+    run, closes = _world(tmp_path)
+    _rows(
+        run,
+        STALE,
+        [
+            {
+                "transactionDate": "09/18/2026",
+                "effectiveDate": "09/18/2026",
+                "action": action,
+                "symbol": "AAA",
+                "shareQuantity": "",
+                "amount": "",
+            }
+        ],
+    )
+    with pytest.raises(
+        derive_tool.DeriveError, match=f"a {action} row dated 2026-09-18"
+    ):
+        _derive(run, closes)
