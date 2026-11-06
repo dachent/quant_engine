@@ -251,3 +251,110 @@ def test_the_nav_check_keys_on_the_row_element_not_on_its_wrapper(
     output = tmp_path / "n.json"
     normalize_run(run_dir, output)
     assert verify_run(run_dir, output).status == "VERIFIED"
+
+
+def _days(start: date, count: int) -> list[date]:
+    return weekday_range(start, date(2026, 12, 31))[:count]
+
+
+def _one_day_plan(days: list[date], **extra: object) -> RequestPlan:
+    return RequestPlan(
+        pull_date=date(2026, 11, 3),
+        requests=tuple(
+            CaptureRequest("activity-history", day, day, True) for day in days
+        ),
+        expected_account_labels=LABELS,
+        **extra,  # type: ignore[arg-type]
+    )
+
+
+def test_override_plans_may_repeat_a_role_with_disjoint_windows() -> None:
+    plan = _one_day_plan(_days(date(2026, 10, 5), 3))
+    assert plan_from_document(plan.to_document()) == plan
+    assert len(plan.requests) == 3
+
+
+def test_a_role_still_may_not_repeat_without_an_override_or_on_overlap() -> None:
+    plain = [
+        CaptureRequest("activity-history", date(2026, 10, 5), date(2026, 10, 9)),
+        CaptureRequest("activity-history", date(2026, 10, 12), date(2026, 10, 16)),
+    ]
+    document = RequestPlan(date(2026, 11, 3), tuple(plain), LABELS).to_document()
+    with pytest.raises(PlanError, match="more than once"):
+        plan_from_document(document)
+    mixed = [
+        CaptureRequest("activity-history", date(2026, 10, 5), date(2026, 10, 9)),
+        CaptureRequest(
+            "activity-history", date(2026, 10, 12), date(2026, 10, 12), True
+        ),
+    ]
+    document = RequestPlan(date(2026, 11, 3), tuple(mixed), LABELS).to_document()
+    with pytest.raises(PlanError, match="more than once"):
+        plan_from_document(document)
+    overlapping = _one_day_plan(_days(date(2026, 10, 5), 2)).to_document()
+    overlapping["requests"][1]["window_from"] = "2026-10-05"
+    with pytest.raises(PlanError, match="must not overlap"):
+        plan_from_document(overlapping)
+
+
+def test_an_override_window_without_a_trading_day_is_refused_at_plan_time() -> None:
+    saturday = RequestPlan(
+        date(2026, 11, 3),
+        (
+            CaptureRequest(
+                "activity-history", date(2026, 10, 10), date(2026, 10, 11), True
+            ),
+        ),
+        LABELS,
+    ).to_document()
+    with pytest.raises(PlanError, match="no trading day"):
+        plan_from_document(saturday)
+    holiday = RequestPlan(
+        date(2026, 11, 3),
+        (
+            CaptureRequest(
+                "activity-history", date(2026, 10, 12), date(2026, 10, 12), True
+            ),
+        ),
+        LABELS,
+        known_non_trading_days=(date(2026, 10, 12),),
+    ).to_document()
+    with pytest.raises(PlanError, match="no trading day"):
+        plan_from_document(holiday)
+    # without an override the old behaviour stands: the window is only recorded
+    weekend_plain = RequestPlan(
+        date(2026, 11, 3),
+        (CaptureRequest("activity-history", date(2026, 10, 10), date(2026, 10, 11)),),
+        LABELS,
+    ).to_document()
+    assert plan_from_document(weekend_plain).requests[0].window_override is False
+
+
+def test_the_request_cap_is_forty() -> None:
+    forty = _one_day_plan(_days(date(2026, 8, 3), 40))
+    assert len(plan_from_document(forty.to_document()).requests) == 40
+    with pytest.raises(PlanError, match="between one and 40"):
+        plan_from_document(_one_day_plan(_days(date(2026, 8, 3), 41)).to_document())
+
+
+def test_a_repeated_role_runs_one_request_per_day_and_each_run_verifies(
+    tmp_path: Path,
+) -> None:
+    days = _days(date(2026, 10, 5), 3)
+    plan = _one_day_plan(days)
+    responses: list[bytes] = []
+    for day in days:
+        responses += [send_ok(), activity_xml((ACCOUNT_ONE,), [day])]
+    harness = Harness(tmp_path, responses, plan=plan)
+    summaries = harness.run()
+    assert [s.status for s in summaries] == ["STAGED"] * 3
+    sent = [
+        params for url, params in harness.http.calls if url.endswith("/SendRequest")
+    ]
+    assert [(p["fd"], p["td"]) for p in sent] == [
+        (d.strftime("%Y%m%d"),) * 2 for d in days
+    ]
+    for index, run_dir in enumerate(harness.run_dirs()):
+        output = tmp_path / f"n{index}.json"
+        normalize_run(run_dir, output)
+        assert verify_run(run_dir, output).status == "VERIFIED"

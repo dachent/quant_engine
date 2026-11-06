@@ -70,8 +70,22 @@ document without the key keeps its hash.
 - **One month per request.** The catalog keeps every request to at most 31 days
   (`activity-history`, `security-reference`) or one day (`activity-current-increment`), well inside
   IBKR's 365 days. The reason is the owner's experience that larger requests hang and never
-  deliver (owner-reported, not IBKR-documented). A longer span is several plans or several
-  requests, never one larger window.
+  deliver (owner-reported, not IBKR-documented). A longer span is several requests, never one
+  larger window. The evidence for the size is thin: the only multi-day statements ever delivered
+  came from the saved query's own 30-day window (47 MB for four accounts, two polls); nothing
+  larger has been delivered, and no override larger than one day has.
+- **Several requests of one role.** A plan that overrides the window may hold many requests of one
+  role (the once-per-role rule existed because the saved query, not the plan, fixed the window).
+  Every request of that role must set `window_override`, the windows must not overlap, and a plan
+  holds at most 40 requests. Each request is a SendRequest and at least one GetStatement after a
+  20 second wait, and the service allows 10 calls a minute per token, so 40 requests take about a
+  quarter of an hour. One plan means one evidence file for the whole set; every request's returned
+  window is verified separately. Use one request per trading day for a long span (about 1.8 MB for
+  four accounts per day): for 2026-09-19 to 2026-10-07 that is the 13 trading days from 09-21 to
+  10-07. A window with no trading day (a weekend or a listed non-trading day) is refused when the
+  plan is read, because it returns no statement: leave it out of the plan and list holidays in
+  `known_non_trading_days`. Inside a longer window a listed non-trading weekday is expected, not a
+  gap; any other weekday without a statement is reported as a gap, as before.
 - **What is recorded and checked.** The plan records the requested window; the manifest records
   `send_window` (`fd`, `td`) as sent; the normalizer and the verifier refuse any statement outside
   the requested window, and for a request that set its window they require what came back to be
@@ -113,13 +127,38 @@ saved query, SendRequest `v=3` with `fd=td=20261103` was accepted and the first 
 second time well over three minutes after the first, in 0.7 seconds each (a refusal at SendRequest,
 not a slow generation). A 7-day request (`fd=20261026`, `td=20261101`) was then accepted, but the
 first GetStatement failed at the transport layer (the cause was not recorded) and was not retried.
-Nothing larger than one day has delivered; one request of each size is too little evidence to say
-whether the 1001 is size-related or transient. The saved query returned 49 sections as direct children of each statement, among them
+A period override (`p=1`, 2026-11-05 21:01 ET) was accepted at SendRequest and its first
+GetStatement also failed at the transport layer (not retried; `p=3` and `p=19` were not attempted),
+so `p` has never delivered a statement and this driver does not send it. Nothing larger than one
+day has delivered through an override; one request of each size is too little evidence to say
+whether the 1001 and the failed retrievals are size-related or transient. The saved query returned 49 sections as direct children of each statement, among them
 every wrapper and element of the activity list above; the NAV row sits inside the wrapper
 `EquitySummaryInBase`, the same structure as the retained legacy monthly XML (one statement per
 account and day, 88 wrappers with 88 rows in the 2026-04 file), so the existing saved query
 satisfies the activity roles and needs no portal edit. (An earlier reading of this probe took the
 wrapper for a different section; it was wrong.)
+
+## What the saved query's own window is (retained pulls, 2026-09)
+
+The two retained real pulls (`dataIBKR/source-runs`, 2026-09-02 and 2026-09-03; one SendRequest
+and two GetStatement attempts each) are recorded with `days_back` 30 and 50, but the legacy capture
+tool never sent it: it called `fetch_report(query_id)`, which sends only `q`, `t` and `v`, and
+wrote `days_back` into the manifest as the operator's intent. Both statement files hold exactly 30
+calendar days (88 statements: four accounts times 22 weekdays, every statement `fromDate` equal to
+`toDate`), so the saved query itself is a "last 30 calendar days" window: the pull made at 22:24
+ET on 2026-09-02 returned 2026-08-03 to 2026-09-01 and the pull made at 00:29 ET on 2026-09-03
+returned 2026-08-04 to 2026-09-02, that is `D-30` to `D-1` with `D` the Eastern calendar date of
+the request (two observations; the rule is inferred). The 50 days named for the 09-02 pull were
+not delivered. A statement of the same query pulled on Saturday 2026-11-07 would therefore cover
+2026-10-08 to 2026-11-06, a window inside the 31-day cap that needs no override.
+
+For R3 that gives two plans: one request of the saved query's own window (no `window_override`,
+`window_from` 2026-10-08, `window_to` 2026-11-06), and, for the older 2026-09-19 to 2026-10-07, one
+plan of 13 one-day override requests (above). If the owner later changes the saved query's period
+in the portal, an override request is unaffected (the request sets its window, and a one-day
+request has been seen to return exactly that day), and a request without an override fails loudly:
+the normalizer and verifier refuse any statement outside the planned window, and report any
+uncovered weekday inside it.
 
 ## Preflight (before the real pulls)
 
