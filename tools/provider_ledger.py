@@ -8545,6 +8545,9 @@ def _quantbase_flow_coverage(
     }
 
 
+_MATRIXPORT_MAX_CAPTURE_LAG_DAYS = 3
+
+
 def _matrixport_flow_coverage(
     manifest: GenerationManifest,
     catalog: Mapping[str, Any],
@@ -8688,7 +8691,14 @@ def _matrixport_flow_coverage(
         "matrixport observed_boundary_date",
     )
     capture_observed_at = max(capture_times)
-    if capture_observed_at.date() != observed_boundary:
+    # The history endpoints end at the run window (the cutoff day), so a capture made up to
+    # three days after that day (a Friday cutoff pulled through Monday) still observed every
+    # row up to the boundary; one made before the boundary day, or later, did not.
+    if not (
+        observed_boundary
+        <= capture_observed_at.date()
+        <= observed_boundary + timedelta(days=_MATRIXPORT_MAX_CAPTURE_LAG_DAYS)
+    ):
         raise ProviderLedgerError("Matrixport wallet coverage boundary differs")
     if max(deposit_times) > capture_observed_at:
         raise ProviderLedgerError("Matrixport wallet deposit postdates its capture")

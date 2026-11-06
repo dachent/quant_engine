@@ -23,8 +23,10 @@ from .pipeline import (
     live_auth_test,
     _credential_identity,
     recorded_credential_identity,
+    MAX_UNLABELLED_GAP_HOURS,
     SNAPSHOT_PATHS,
     inherited_snapshot_captures,
+    late_capture_fact,
     recorded_capture_label,
     recorded_captures,
     recorded_cutoff,
@@ -201,8 +203,16 @@ def _extract(args: argparse.Namespace) -> int:
     return 0
 
 
-def _require_recorded_cutoff(run_dir: Path, run_id: str, cutoff: str | None) -> None:
-    """A cutoff-bound run must match the cutoff asked for and end inside it."""
+def _require_recorded_cutoff(
+    run_dir: Path, run_id: str, cutoff: str | None
+) -> dict[str, Any] | None:
+    """A cutoff-bound run must match the cutoff asked for and end inside it.
+
+    Returns the late-capture fact (captured times after the cutoff day's end, with the gap in
+    hours) when there is one: it is recorded, not approved.  A gap above
+    ``MAX_UNLABELLED_GAP_HOURS`` or a capture time that was never recorded still needs the
+    ``captured_after_cutoff_label``.
+    """
 
     storage = RunStorage(run_dir / "state" / DATABASE_NAME)
     try:
@@ -210,7 +220,7 @@ def _require_recorded_cutoff(run_dir: Path, run_id: str, cutoff: str | None) -> 
     finally:
         storage.close()
     if run is None:
-        return
+        return None
     recorded = recorded_cutoff(run)
     if cutoff is not None and recorded != cutoff:
         raise CredentialError("The run was not bound to the requested cutoff")
@@ -225,23 +235,46 @@ def _require_recorded_cutoff(run_dir: Path, run_id: str, cutoff: str | None) -> 
         missing = [path for path in SNAPSHOT_PATHS if path not in captures]
         if missing and run["status"] == "COMPLETED":
             raise CredentialError("The run did not record its capture times")
-        late = [path for path, at_ms in captures.items() if at_ms > limit]
-        if late and recorded_capture_label(run) is None:
+        fact = late_capture_fact(captures, limit)
+        if (
+            fact is not None
+            and fact["gap_hours"] > MAX_UNLABELLED_GAP_HOURS
+            and recorded_capture_label(run) is None
+        ):
             raise CredentialError(
-                "Current-state requests were captured after the cutoff day "
-                "and the evidence carries no captured_after_cutoff_label"
+                f"Current-state requests were captured {fact['gap_hours']} h after the "
+                f"cutoff day (more than {MAX_UNLABELLED_GAP_HOURS} h) and the evidence "
+                "carries no captured_after_cutoff_label"
             )
-        inherited_late = [
-            (dataset, base_id)
-            for dataset, base_id, at_ms in inherited_snapshot_captures(run_dir, run_id)
-            if at_ms is None or at_ms > limit
-        ]
-        if inherited_late and recorded_capture_label(run) is None:
+        inherited = inherited_snapshot_captures(run_dir, run_id)
+        if any(at_ms is None for _dataset, _base, at_ms in inherited):
+            if recorded_capture_label(run) is None:
+                raise CredentialError(
+                    "Inherited current-state rows were captured without a recorded "
+                    "capture time and the evidence carries no captured_after_cutoff_label"
+                )
+        inherited_fact = late_capture_fact(
+            {
+                f"{dataset}:{base_id}": at_ms
+                for dataset, base_id, at_ms in inherited
+                if at_ms is not None
+            },
+            limit,
+        )
+        if (
+            inherited_fact is not None
+            and inherited_fact["gap_hours"] > MAX_UNLABELLED_GAP_HOURS
+            and recorded_capture_label(run) is None
+        ):
             raise CredentialError(
-                "Inherited current-state rows were captured after the cutoff day "
-                "(or without a recorded capture time) and the evidence carries no "
+                "Inherited current-state rows were captured "
+                f"{inherited_fact['gap_hours']} h after the cutoff day (more than "
+                f"{MAX_UNLABELLED_GAP_HOURS} h) and the evidence carries no "
                 "captured_after_cutoff_label"
             )
+        facts = [item for item in (fact, inherited_fact) if item is not None]
+        return max(facts, key=lambda item: item["gap_hours"]) if facts else None
+    return None
 
 
 def _verify(
@@ -250,7 +283,7 @@ def _verify(
     validate_run_id(run_id)
     run_dir = _workspace() / "output" / run_id
     _require_recorded_credentials(run_dir, run_id, config_path)
-    _require_recorded_cutoff(run_dir, run_id, cutoff)
+    late_capture = _require_recorded_cutoff(run_dir, run_id, cutoff)
     result = verify_run(run_dir, _secret_needles(config_path))
     release_path = run_dir / "reports" / "release_status.json"
     try:
@@ -263,6 +296,9 @@ def _verify(
             "verification_ok": result["ok"],
         }
     )
+    if late_capture is not None:
+        release["late_capture"] = late_capture
+        result["late_capture"] = late_capture
     atomic_write(
         release_path,
         (canonical_json(release) + "\n").encode("utf-8"),

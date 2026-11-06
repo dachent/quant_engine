@@ -7851,6 +7851,69 @@ def test_matrixport_wallet_history_admits_source_bound_zero_flow_coverage(
     assert authoritative.effective_end == date(2026, 8, 16)
 
 
+@pytest.mark.parametrize(
+    ("captured", "accepted"),
+    [
+        ("2026-08-16", True),
+        ("2026-08-19", True),
+        ("2026-08-15", False),
+        ("2026-08-20", False),
+    ],
+)
+def test_matrixport_wallet_coverage_capture_lag_is_bounded(
+    tmp_path: Path, captured: str, accepted: bool
+) -> None:
+    run_id = "matrixport-source"
+    run_root = tmp_path / "output" / run_id
+    csv_root = run_root / "csv"
+    reports_root = run_root / "reports"
+    csv_root.mkdir(parents=True)
+    reports_root.mkdir(parents=True)
+    wallet_path = csv_root / "wallet_deposits.csv"
+    wallet_path.write_text(
+        "amount,created_at_utc,currency,state,transaction_id\n"
+        "1,2025-12-05T15:42:18+00:00,USDC,confirmed,wallet-1\n",
+        encoding="utf-8-sig",
+    )
+    coverage_path = csv_root / "coverage.csv"
+    coverage_path.write_text(
+        "details_json,endpoint,status,terminal_reason,updated_at_utc\n"
+        '"{""raw_rows"":1}",GET https://mapi.matrixport.com/mapi/v1/wallet/deposits,'
+        "complete_to_observed_boundary,structured_parameter_rejections_dispositioned,"
+        f"{captured}T12:00:00+00:00\n"
+        '"{""raw_rows"":0}",GET https://mapi.matrixport.com/mapi/v1/wallet/withdrawals,'
+        "complete_to_observed_boundary,structured_parameter_rejections_dispositioned,"
+        f"{captured}T12:01:00+00:00\n",
+        encoding="utf-8-sig",
+    )
+    dispositions_path = csv_root / "wallet_currency_dispositions.csv"
+    dispositions_path.write_text("currency,dataset,disposition\n", encoding="utf-8-sig")
+    request_manifest_path = reports_root / "request_manifest.jsonl"
+    request_manifest_path.write_text("{}\n", encoding="utf-8")
+    manifest = _make_two_artifact_manifest(
+        {
+            "csv/coverage.csv": coverage_path,
+            "csv/wallet_currency_dispositions.csv": dispositions_path,
+            "csv/wallet_deposits.csv": wallet_path,
+            "reports/request_manifest.jsonl": request_manifest_path,
+        }
+    )
+    catalog = {
+        "catalog_schema_version": 2,
+        "observed_boundary_date": "2026-08-16",
+        "source_run_id": run_id,
+    }
+    account = {"account-d2e5821e608e25f1"}
+    if accepted:
+        result = ledger._matrixport_flow_coverage(manifest, catalog, tmp_path, account)
+        assert result["account-d2e5821e608e25f1"]["effective_end"] == "2026-08-16"
+    else:
+        with pytest.raises(
+            ledger.ProviderLedgerError, match="wallet coverage boundary differs"
+        ):
+            ledger._matrixport_flow_coverage(manifest, catalog, tmp_path, account)
+
+
 def test_matrixport_parity_derived_opening_nav_does_not_admit_capital_anchor(
     tmp_path: Path,
 ) -> None:
