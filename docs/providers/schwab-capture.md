@@ -377,3 +377,12 @@ Refusals and the fallback for each (evidence of a capture is single-use, so a re
 
 A waiver does not change the derived value: it is the end-of-D holdings at the D closes (correct whatever traded on D); it
 only skips the cross-check that D-1 held what D holds, which an account active on D cannot pass.
+
+`derive` values a held symbol from `<SYMBOL>_yahoo_daily.csv` of the same spelling (`/` written as `.`). It does not apply the
+ingest configuration's `symbol_aliases` or `cash_equivalent_symbols`: the ledger's exact replay has no such rule, so a record
+that used them could not be replayed. A held symbol that needs either refuses with `no official close file for <symbol>`; run
+`yahoo_fetch_driver.py held-check --ingest-config <ingest config>` right after the capture, which lists aliased and
+cash-equivalent holdings, before the Yahoo evidence is minted.
+
+The ledger accepts a selected cutoff row that repeats the row before only for an account the pinned holdings capture shows
+flat (no position rows) whose cash equals that row; the derivation record is never the authority for that.

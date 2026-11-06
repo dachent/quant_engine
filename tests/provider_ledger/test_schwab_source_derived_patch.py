@@ -140,44 +140,83 @@ def test_a_moved_row_without_a_patch_is_accepted() -> None:
     _check(patch, "account-a", {PRIOR: Decimal("1000.5"), END: Decimal("1001")})
 
 
-def test_a_flat_account_repeating_its_cash_is_accepted_only_with_the_record(
-    tmp_path: Path,
-) -> None:
-    record = _write(
-        tmp_path / "flat-record.json", {"account-f": {"official_1106": "3.81"}}
-    )
-    declaration = _declaration(tmp_path)
-    declaration["derivation_record"] = _pin(record)
-    declaration["patches"] = []
-    declaration["native_balances"] = []
-    declaration["replay"]["positions_capture"] = _pin(
-        _write(tmp_path / "none.json", {"accounts": []})
-    )
-    patch = ledger._schwab_source_derived_patch(
-        {"derived_patch": declaration}, END, CATALOG
-    )
-    flat = {PRIOR: Decimal("3.81"), END: Decimal("3.81")}
-    _check(patch, "account-f", flat)
-    with pytest.raises(ledger.ProviderLedgerError, match="repeats its prior day"):
-        _check(patch, "account-g", flat)
+FLAT_CATALOG = {
+    "journal_counterparty_crosswalk": {
+        "entries": [
+            {"account_id": "account-f", "native_suffix": "456"},
+            {"account_id": "account-n", "native_suffix": "789"},
+        ]
+    }
+}
 
 
-def test_a_record_that_disagrees_with_the_repeated_value_is_refused(
-    tmp_path: Path,
-) -> None:
-    record = _write(tmp_path / "bad-record.json", {"account-f": {"official_1106": "4"}})
+def _flat_world(tmp_path: Path, flat_cash: float, held_row: bool = False) -> Any:
+    """Holdings for a flat account (cash only) and a non-flat one, no patches declared."""
+
+    holdings = _write(
+        tmp_path / "flat-holdings.json",
+        {
+            "accounts": [
+                {
+                    "accountId": "EXT456",
+                    "groupedPositions": [
+                        {
+                            "securityType": 9,
+                            "holdingsRows": [{"marketValue": {"val": flat_cash}}],
+                        }
+                    ],
+                },
+                {
+                    "accountId": "EXT789",
+                    "groupedPositions": [
+                        {
+                            "securityType": 1,
+                            "holdingsRows": [
+                                {"symbol": {"symbol": "AAA"}, "qty": {"qty": 10}}
+                            ],
+                        },
+                        {
+                            "securityType": 9,
+                            "holdingsRows": [{"marketValue": {"val": 100.5}}],
+                        },
+                    ],
+                },
+            ]
+        },
+    )
     declaration = _declaration(tmp_path)
-    declaration["derivation_record"] = _pin(record)
     declaration["patches"] = []
     declaration["native_balances"] = []
-    declaration["replay"]["positions_capture"] = _pin(
-        _write(tmp_path / "none.json", {"accounts": []})
+    declaration["replay"]["positions_capture"] = _pin(holdings)
+    return ledger._schwab_source_derived_patch(
+        {"derived_patch": declaration}, END, FLAT_CATALOG
     )
-    patch = ledger._schwab_source_derived_patch(
-        {"derived_patch": declaration}, END, CATALOG
-    )
+
+
+def test_a_flat_account_repeating_its_cash_is_accepted_when_the_holdings_show_it_flat(
+    tmp_path: Path,
+) -> None:
+    patch = _flat_world(tmp_path, 3.81)
+    assert patch.flat_cash == {"account-f": Decimal("3.81")}
+    _check(patch, "account-f", {PRIOR: Decimal("3.81"), END: Decimal("3.81")})
+
+
+def test_a_flat_account_whose_cash_differs_from_the_repeated_value_is_refused(
+    tmp_path: Path,
+) -> None:
+    patch = _flat_world(tmp_path, 4)
     with pytest.raises(ledger.ProviderLedgerError, match="repeats its prior day"):
         _check(patch, "account-f", {PRIOR: Decimal("3.81"), END: Decimal("3.81")})
+
+
+def test_a_non_flat_account_repeating_its_prior_day_is_refused_whatever_the_record_says(
+    tmp_path: Path,
+) -> None:
+    # the record names the repeated value as official, but the pinned holdings show positions
+    patch = _flat_world(tmp_path, 3.81)
+    assert "account-n" not in patch.flat_cash
+    with pytest.raises(ledger.ProviderLedgerError, match="repeats its prior day"):
+        _check(patch, "account-n", {PRIOR: Decimal("1055.5"), END: Decimal("1055.5")})
 
 
 def test_the_replay_is_exact_a_changed_patched_value_is_refused(tmp_path: Path) -> None:
