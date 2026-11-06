@@ -36,6 +36,22 @@ stale or incomplete. A hand list on such a group is refused. The derivation (man
 sha256, end, inception) is written into the effective config, so the config hash binds
 it, and `verify` re-parses the staged config as already resolved.
 
+## Raw SPXL history (builder input)
+
+The group `spxl-raw-history` fetches `SPXL` daily from its inception (`start` 2008-11-01,
+first bar 2008-11-05) through the cutoff with `datasets: ["history"]` only, so the run
+holds `artifacts/yahoo-spxl-raw-history-history.json` (`provider` yahoo, `transport`
+yfinance, `dataset` history, raw `Close` beside `Adj Close`) and its sibling manifest, and
+no `history_adjusted` file. That one file is the governed input of
+`--spxl-market-data` (`portfolio_implementation_reconciliation.py`, which refuses any
+dataset but `history`) and `--grizzly-market-data`
+(`portfolio_implementation_return_attribution.py`); the Grizzly price extension of
+`portfolio_strategy_history.py` reads the same shape. The guards are `min_rows` 4400 and
+`max_missing_weekdays` 180 (the 2008-11-05..2026-09-17 span has 4,662 weekdays and 169 market
+holidays). Record the file's sha256 from the run manifest as the release input; do not
+convert a CSV by hand. The `qsi-daily` and `vtma-spxl-60m` groups also carry `SPXL`
+for their own consumers and are unchanged.
+
 ## Official closes for the Schwab ingest
 
 A daily `yfinance` group with `history` and `official_closes: {}` also emits

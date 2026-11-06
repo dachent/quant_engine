@@ -1474,3 +1474,59 @@ def test_official_manifest_is_bound_to_files_and_times(tmp_path: Path) -> None:
         driver.DriverError, match="official-closes-manifest.json differs"
     ):
         driver.verify_run(run2)
+
+
+# ------------------------------------------------ R3 raw SPXL history (gate b)
+
+SHIPPED_CONFIG = (
+    Path(__file__).resolve().parents[2]
+    / "docs/providers/yahoo-fetch/r3-batch-a.config.json"
+)
+
+
+def _shipped_spxl_group() -> dict[str, Any]:
+    groups = json.loads(SHIPPED_CONFIG.read_bytes())["groups"]
+    (group,) = [item for item in groups if item["group_id"] == "spxl-raw-history"]
+    return group
+
+
+def test_the_shipped_config_names_a_raw_daily_spxl_history_group() -> None:
+    group = _shipped_spxl_group()
+    assert group["symbols"] == ["SPXL"] and group["interval"] == "1d"
+    assert group["through"] == "cutoff"
+    # raw only: the builders refuse a history_adjusted SPXL file
+    assert group["datasets"] == ["history"]
+    parsed = driver.parse_config(_config([group])).groups[0]
+    assert parsed.datasets == ("history",)
+    # the proof's SPXL file starts at the fund's inception (2008-11-05)
+    assert parsed.start <= date(2008, 11, 5)
+
+
+def test_the_raw_spxl_file_is_accepted_by_every_builder_reader(
+    tmp_path: Path,
+) -> None:
+    import portfolio_implementation_reconciliation as reconciliation
+    import portfolio_implementation_return_attribution as attribution
+    import portfolio_strategy_history as history
+
+    run = _fetch(tmp_path, _config([_shipped_spxl_group()]), run_id="spxl")
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    spxl = [name for name in manifest["files"] if "spxl-raw-history" in name]
+    assert spxl and not any("history_adjusted" in name for name in spxl)
+    (artifact_name,) = [name for name in spxl if name.endswith("history.json")]
+    artifact = run / artifact_name
+    payload = json.loads(artifact.read_text())
+    assert (payload["provider"], payload["transport"], payload["dataset"]) == (
+        "yahoo",
+        "yfinance",
+        "history",
+    )
+    cutoff = date.fromisoformat(CUTOFF)
+    prices = reconciliation._market_prices(artifact, accepted_as_of=cutoff)
+    assert min(prices) <= date(2008, 11, 5) and max(prices) == cutoff
+    assert len(prices) > 4400
+    rows = attribution._market_rows(artifact, accepted_as_of=cutoff)
+    assert max(rows["SPXL"]) == cutoff
+    extension, _ = history._yahoo_price_extension(artifact, "spxl-raw-history")
+    assert max(extension["SPXL"]) == cutoff
