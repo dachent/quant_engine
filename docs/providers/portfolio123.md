@@ -223,6 +223,15 @@ the equity at D is the cash amount (closure, not interpolation); the decisions f
 reach. Any deviation (equity not the cash amount, a cash row after D, no book reaching D) fails
 with those numbers.
 No consumer reads a Portfolio123 holdings table; positions at D are an audit record.
+The BINDING decisions file of a cycle is the standalone `tools/p123_book_identity_check.py`
+run after the fetch, on the same capture directory, with `--as-of D`, `--reference-index` (the
+2026-07-31 `source-index.json`) and without `--require-reference`: a book absent from the
+reference pull is REVIEW there and is accepted per book with `plan --accept-identity-review
+ID=REASON`. The fetcher's own `book-identity-decisions.json` (run with `--no-reference --as-of D`)
+is the preliminary stop-gate: FAIL stops the run, REVIEW is recorded, exit 4. The plan consumes
+the standalone file through `--identity-decisions`; it is bound to the capture-manifest bytes
+(`capture_manifest_sha256`) and to the plan's as-of date, and a file for other bytes or another
+date is refused.
 Always run the identity check with `--as-of D`, D being the plan's as-of date: the plan
 refuses a decisions file whose `settings.as_of` is not the plan's as-of date, so a book
 without a holdings export fails I5D instead of reaching REVIEW.

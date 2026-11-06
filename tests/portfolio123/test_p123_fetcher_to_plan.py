@@ -149,3 +149,50 @@ def test_the_run_command_requires_the_cutoff(
     )
     assert code == 2
     assert capsys.readouterr().out.strip() == "REFUSED AS_OF_REQUIRED"
+
+
+def test_the_standalone_as_of_decisions_file_is_the_one_the_plan_consumes(
+    tmp_path: Path,
+) -> None:
+    from tools import p123_book_identity_check as identity
+
+    root = _fetch(tmp_path, date(2026, 9, 11))
+    out = tmp_path / "binding"
+    code = identity.main(
+        [str(root / "capture"), "--out", str(out), "--as-of", "2026-09-11"]
+    )
+    assert code == 0
+    (written,) = out.glob("book-identity-decisions-*-asof-2026-09-11.json")
+    manifest_sha = hashlib.sha256(
+        (root / "capture" / "capture-manifest.json").read_bytes()
+    ).hexdigest()
+    assert (
+        written.name
+        == f"book-identity-decisions-{manifest_sha[:12]}-asof-2026-09-11.json"
+    )
+    decisions = json.loads(written.read_text(encoding="utf-8"))
+    assert decisions["capture_manifest_sha256"] == manifest_sha
+    legacy, har, data = _inputs(tmp_path / "world")
+    planned = create_cutover_plan(
+        legacy,
+        har,
+        data,
+        as_of_date=date(2026, 9, 11),
+        transaction_captures=[root / "capture"],
+        identity_decisions=[decisions],
+        untrusted_har_ids={"999": HAR_REASON},
+    )
+    stage_candidate(Path(str(planned["plan_path"])))
+    other = {**decisions, "capture_manifest_sha256": "0" * 64}
+    with pytest.raises(
+        Portfolio123GenerationError, match="not for a capture of this plan"
+    ):
+        create_cutover_plan(
+            legacy,
+            har,
+            data,
+            as_of_date=date(2026, 9, 11),
+            transaction_captures=[root / "capture"],
+            identity_decisions=[other],
+            untrusted_har_ids={"999": HAR_REASON},
+        )
