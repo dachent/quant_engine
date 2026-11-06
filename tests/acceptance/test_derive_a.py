@@ -4111,7 +4111,7 @@ def test_v3_native_matrixport_extension_invalid_evidence_fails_closed(
                 "observed_boundary_date"
                 if mutation == "catalog_boundary"
                 else "source_run_id"
-            ] = "2026-01-10" if mutation == "catalog_boundary" else "different-run"
+            ] = "2026-02-01" if mutation == "catalog_boundary" else "different-run"
             _mp_native_put(tmp_path, manifest, key, data)
         elif key == "requests":
             # Outer pin changes; native generation artifact pin deliberately does not.

@@ -144,10 +144,13 @@ The fact is not a closure: the daily valuation anchors its opening share gap on 
 current holding (`valuation.py` 576), so the D share count is the share count at
 capture and a share event between the cutoff and the capture is not visible
 (history windows end at the cutoff). A reviewer reads `gap_hours` for that exposure.
-The wallet coverage `updated_at_utc` date that `provider_ledger.py` (8535-8545)
-requires to equal the observed boundary date is not written by this package (no
-`updated_at_utc` in `packages/matrixport`), so whether a late wallet coverage file
-passes it is UNVERIFIED here.
+The wallet coverage `updated_at_utc` is the real clock at the moment the endpoint's coverage
+row is written (`storage.py` 431; the pipeline passes no time), so a late pull makes it a later date
+than the cutoff day. `provider_ledger.py` `_matrixport_flow_coverage` and the acceptance replica
+`derive_a` require that date to be the observed boundary day up to three days after it (a Friday
+cutoff pulled through Monday); a date before the boundary, or more than three days after it, is
+refused with `Matrixport wallet coverage boundary differs`. The history endpoints end at the
+run window (the cutoff day), so a later capture observed every row up to the boundary.
 
 Receipt transitions are durable before a live request is permitted. On POSIX,
 the adapter fsyncs the receipt's containing directory after exclusive creation

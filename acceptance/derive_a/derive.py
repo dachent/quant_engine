@@ -2621,7 +2621,7 @@ def _v3_native_matrixport(
             raise InputError(
                 f"{tag}: coverage for {endpoint} has no UTC capture timestamp"
             )
-        if updated.date() != boundary:
+        if not boundary <= updated.date() <= boundary + dt.timedelta(days=3):
             raise InputError(
                 f"{tag}: coverage for {endpoint} captured "
                 f"{updated.date().isoformat()} does not match the catalog "
