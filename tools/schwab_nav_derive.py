@@ -34,7 +34,7 @@ import argparse
 import csv
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 import io
 import json
@@ -171,6 +171,66 @@ def transactions_on(run_dir: Path, account: str, day: date) -> int:
     )
 
 
+def _row_date(account: str, text: str) -> date:
+    """The first date of a ``transactionDate`` or ``effectiveDate`` value (the driver reads both formats)."""
+
+    for pattern in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text.split()[0], pattern).date()
+        except (ValueError, IndexError):
+            continue
+    raise DeriveError(f"{account}: a captured transaction row has an unreadable date")
+
+
+def rows_after(run_dir: Path, account: str, day: date) -> list[dict[str, Any]]:
+    """Rows of the run's captured history posted or effective after ``day``."""
+
+    path = run_dir / f"transactions/normalized/wch/transactions/{account}.json"
+    if not path.is_file():
+        return []
+    rows = _list(strict_json_loads(path.read_bytes(), label="transactions"), "rows")
+    found: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        dates = [_row_date(account, str(row.get("transactionDate")))]
+        if str(row.get("effectiveDate") or "").strip():
+            dates.append(_row_date(account, str(row["effectiveDate"])))
+        if max(dates) > day:  # posted or effective after the day
+            found.append(row)
+    return found
+
+
+def _after_day_guard(
+    run_dir: Path, account: str, day: date
+) -> dict[str, dict[str, int]]:
+    """Counts by action of the rows posted after ``day``, split into rows that can change the
+    account's quantity or cash (a quantity or an amount is present) and rows that cannot.
+
+    The derived value prices the capture-time holdings at the close of ``day``; a row posted after
+    ``day`` that moved shares or cash means those holdings are not the holdings of ``day``, so the
+    derivation refuses instead of assuming nothing changed. Rows with neither a quantity nor an
+    amount are recorded and do not stop it."""
+
+    effect: dict[str, int] = {}
+    inert: dict[str, int] = {}
+    for row in rows_after(run_dir, account, day):
+        moves = bool(str(row.get("shareQuantity") or "").strip()) or bool(
+            str(row.get("amount") or "").strip()
+        )
+        counts = effect if moves else inert
+        action = str(row.get("action") or "?")
+        counts[action] = counts.get(action, 0) + 1
+    if effect:
+        listing = ", ".join(f"{k} x{v}" for k, v in sorted(effect.items()))
+        raise DeriveError(
+            f"{account}: {sum(effect.values())} transaction row(s) posted or effective after {day} change its "
+            f"quantity or cash ({listing}), so the capture-time holdings are not the holdings of "
+            f"{day}; this derivation does not roll them back"
+        )
+    return {"informational": inert}
+
+
 def derive(
     *,
     run_dir: Path,
@@ -222,6 +282,7 @@ def derive(
         native_day, native_prior = history[day], history[prior_day]
         official_day = official_value(quantities, cash, closes, day, account)
         official_prior = official_value(quantities, cash, closes, prior_day, account)
+        after_day = _after_day_guard(run_dir, account, day)["informational"]
         rows_on_day = transactions_on(run_dir, account, day)
         waived = account in waivers
         if waived and rows_on_day == 0:
@@ -269,6 +330,10 @@ def derive(
             "official_day": str(official_day),
             "status": status,
         }
+        if after_day:
+            entry["after_day_informational_rows"] = ", ".join(
+                f"{k} x{v}" for k, v in sorted(after_day.items())
+            )
         if waived:
             entry["prior_closure"] = PRIOR_CLOSURE_WAIVED
             entry["waiver_reason"] = waivers[account]
@@ -338,6 +403,14 @@ def declare(
         crosswalk,
     )
     symbols = sorted({s for row in patched for s in held[row["account_id"]][0]})
+    # the guard concluded "nothing after D moved this account" from these files: pin them
+    transactions = [
+        {"account_id": account, **_pin(path)}
+        for account in sorted(held)
+        if (
+            path := run_dir / f"transactions/normalized/wch/transactions/{account}.json"
+        ).is_file()
+    ]
     return {
         "roots": spec_doc["roots"],
         "sources": [
@@ -358,6 +431,7 @@ def declare(
                 ],
                 "cash_security_type": CASH_SECURITY_TYPE,
                 "rounding": REPLAY_ROUNDING,
+                **({"transactions": transactions} if transactions else {}),
             },
             "native_balances": [
                 {

@@ -3054,7 +3054,7 @@ def _replay_schwab_patched_navs(
 
     replay = _object(patch["replay"], "Schwab replay")
     if (
-        set(replay) != _SCHWAB_REPLAY_KEYS
+        not _SCHWAB_REPLAY_KEYS <= set(replay) <= _SCHWAB_REPLAY_KEYS | {"transactions"}
         or replay["rounding"] != _SCHWAB_REPLAY_ROUNDING
         or replay["cash_security_type"] != 9
     ):
@@ -3124,6 +3124,18 @@ def _replay_schwab_patched_navs(
         ),
         "Schwab derivation record",
     )
+    # the transaction files the derivation's after-D guard read: bound by hash, so altering or
+    # dropping one after the declaration is a mismatch here
+    pinned_accounts: set[str] = set()
+    for pin in _objects(replay.get("transactions", []), "Schwab replay transactions"):
+        pinned = _text(pin.get("account_id"), "Schwab replay transactions account")
+        if pinned in pinned_accounts or pinned not in held:
+            raise ProviderLedgerError("schwab replay transactions scope differs")
+        pinned_accounts.add(pinned)
+        _schwab_pinned_bytes(
+            {k: pin.get(k) for k in ("path", "sha256", "size_bytes")},
+            "replay transactions",
+        )
     for entry in entries.values():
         quantities, cash = held.get(entry["account_id"], ({}, Decimal(0)))
         if entry["account_id"] not in held:
