@@ -212,6 +212,16 @@ _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
         "start_endpoint_sha256": "d3c4e152375d1ee77ded278b0123b29580f23c45dbbfe857b79cbad0f850b015",
         "subscription_events_in_span": 0,
     },
+    {
+        "end_endpoint_sha256": "a0ca192d82b01c0c4c32c1d0ecbdda138a540076bb50ff0ee67f1b456e84f3cc",
+        "missing_source_date": "2026-10-16",
+        "return": "-0.0204398304819813105429510786",
+        "span_days": 2,
+        "span_end_date": "2026-10-17",
+        "span_start_date": "2026-10-15",
+        "start_endpoint_sha256": "fae9f34630fbec0a3a97823c0d576af78ca1f1f5fcb10fc09770ae73c3689d88",
+        "subscription_events_in_span": 0,
+    },
 )
 _HISTORY_AUTHORITY_COMMIT: Final = "9881627d999f3a1535c5e1d7a8b5aa31c9462db4"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (

@@ -850,11 +850,72 @@ def _utc_day(value: str) -> date:
     return parsed.date()
 
 
+# The 2026-01-27 and 2026-07-03 omissions were accepted on 2026-08-14 (issue #287) under this
+# provenance; a generation or contract bound to a cutoff before the later declaration still
+# carries it.
+_MATRIXPORT_LEGACY_GAP_PROVENANCE: Final = "owner-accepted 2026-08-14, issue #287"
+_MATRIXPORT_LEGACY_GAP_DATES: Final = frozenset({date(2026, 1, 27), date(2026, 7, 3)})
+
+
+def _matrixport_gap_applies(missing: date, admission_cutoff: date | None) -> bool:
+    """A declared gap binds only when the endpoint after it is inside the admission cutoff.
+
+    NAV observations after the cutoff are discarded before gaps are measured, so a declared gap
+    whose following endpoint is later (or the cutoff day itself) is not an interior gap of the
+    admitted series and must not require endpoints, receipts or a declared==observed match.
+    """
+
+    return admission_cutoff is None or missing + timedelta(days=1) <= admission_cutoff
+
+
+def _matrixport_policy_for_cutoff(
+    policy: Mapping[str, Any], admission_cutoff: date | None
+) -> dict[str, Any]:
+    """The contract's declared-gap policy restricted to the gaps that apply at the cutoff."""
+
+    result = dict(policy)
+    raw_dates = policy.get("declared_missing_source_dates")
+    receipts = policy.get("span_return_receipts")
+    if (
+        admission_cutoff is None
+        or not isinstance(raw_dates, list)
+        or not isinstance(receipts, list)
+    ):
+        return result
+    kept = [
+        value
+        for value in raw_dates
+        if isinstance(value, str)
+        and _matrixport_gap_applies(date.fromisoformat(value), admission_cutoff)
+    ]
+    omitted = sorted(
+        item.isoformat()
+        for item in _matrixport_expected_gap_endpoints(
+            frozenset(date.fromisoformat(value) for value in kept)
+        )
+    )
+    result["declared_missing_source_dates"] = sorted(kept)
+    result["omitted_return_dates"] = omitted
+    result["unavailable_return_dates"] = sorted({*kept, *omitted})
+    result["span_return_receipts"] = [
+        item
+        for item in receipts
+        if isinstance(item, dict) and item.get("missing_source_date") in set(kept)
+    ]
+    return result
+
+
 def _matrixport_declared_missing_dates(
     manifest: Mapping[str, Any],
     expected_policy: Mapping[str, Any] | None = None,
+    admission_cutoff: date | None = None,
 ) -> frozenset[date]:
-    """Return manifest-declared omissions, optionally bound to product authority."""
+    """Return manifest-declared omissions, optionally bound to product authority.
+
+    With an admission cutoff only the gaps that apply at it (see ``_matrixport_gap_applies``)
+    are returned and compared with the product authority; an undeclared gap inside the cutoff is
+    still refused by the caller's declared==observed comparison.
+    """
 
     coverage = manifest.get("coverage")
     if not isinstance(coverage, dict) or (
@@ -867,6 +928,9 @@ def _matrixport_declared_missing_dates(
         raise TargetSeriesError("Matrixport declared exclusions are absent")
     dates_by_kind: dict[str, set[date]] = {kind: set() for kind in MATRIXPORT_GAP_KINDS}
     authorities: set[tuple[str, str]] = set()
+    seen_dates_by_kind: dict[str, set[date]] = {
+        kind: set() for kind in MATRIXPORT_GAP_KINDS
+    }
     for raw in exclusions:
         if not isinstance(raw, dict):
             raise TargetSeriesError("Matrixport declared exclusion is invalid")
@@ -887,7 +951,6 @@ def _matrixport_declared_missing_dates(
             or not reason
         ):
             raise TargetSeriesError("Matrixport declared exclusion authority differs")
-        authorities.add((provenance, reason))
         try:
             missing_date = date.fromisoformat(rendered_date)
         except ValueError as exc:
@@ -896,8 +959,12 @@ def _matrixport_declared_missing_dates(
             ) from exc
         if item != f"{kind}:{missing_date.isoformat()}":
             raise TargetSeriesError("Matrixport declared exclusion item is invalid")
-        if missing_date in dates_by_kind[kind]:
+        if missing_date in seen_dates_by_kind[kind]:
             raise TargetSeriesError("Matrixport declared exclusion is duplicated")
+        seen_dates_by_kind[kind].add(missing_date)
+        if not _matrixport_gap_applies(missing_date, admission_cutoff):
+            continue
+        authorities.add((provenance, reason))
         dates_by_kind[kind].add(missing_date)
     accepted = dates_by_kind[MATRIXPORT_GAP_KINDS[0]]
     if any(dates_by_kind[kind] != accepted for kind in MATRIXPORT_GAP_KINDS[1:]):
@@ -905,6 +972,9 @@ def _matrixport_declared_missing_dates(
     if len(authorities) > 1:
         raise TargetSeriesError("Matrixport declared exclusion authority differs")
     if expected_policy is not None:
+        expected_policy = _matrixport_policy_for_cutoff(
+            expected_policy, admission_cutoff
+        )
         raw_expected_dates = expected_policy.get("declared_missing_source_dates")
         if not isinstance(raw_expected_dates, list) or any(
             not isinstance(value, str) for value in raw_expected_dates
@@ -919,7 +989,14 @@ def _matrixport_declared_missing_dates(
             expected_policy.get("reason"),
         )
         expected_authorities = {expected_authority} if expected_dates else set()
-        if accepted != expected_dates or authorities != expected_authorities:
+        legacy_authorities = (
+            {(_MATRIXPORT_LEGACY_GAP_PROVENANCE, str(expected_policy.get("reason")))}
+            if expected_dates and expected_dates <= _MATRIXPORT_LEGACY_GAP_DATES
+            else None
+        )
+        if accepted != expected_dates or (
+            authorities != expected_authorities and authorities != legacy_authorities
+        ):
             raise TargetSeriesError(
                 "Matrixport declared exclusions differ from product authority"
             )
@@ -1273,6 +1350,15 @@ def _matrixport_returns(
     declared_gap_policy: Mapping[str, Any] | None = None,
     admission_cutoff: date | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
+    declared_missing_dates = frozenset(
+        item
+        for item in declared_missing_dates
+        if _matrixport_gap_applies(item, admission_cutoff)
+    )
+    if declared_gap_policy is not None:
+        declared_gap_policy = _matrixport_policy_for_cutoff(
+            declared_gap_policy, admission_cutoff
+        )
     holdings = [
         row
         for row in _csv_rows(
@@ -1734,7 +1820,9 @@ def build_matrixport_targets(
     subscription_artifact = _verify_artifact(
         subscription_path, artifacts, "csv/subscription_details.csv"
     )
-    declared_missing_dates = _matrixport_declared_missing_dates(manifest)
+    declared_missing_dates = _matrixport_declared_missing_dates(
+        manifest, admission_cutoff=admission_cutoff
+    )
 
     base, existing = _base_rows(
         base_targets, series_id, replace_existing=replace_existing
@@ -4954,9 +5042,6 @@ def build_layered_history_generation(
     if not isinstance(matrixport_gap_policy, dict):
         raise TargetSeriesError("Matrixport product gap policy is absent")
     _matrixport_return_transform(matrixport_gap_policy)
-    matrixport_missing_dates = _matrixport_declared_missing_dates(
-        matrixport_manifest, matrixport_gap_policy
-    )
     robuxio_correction = corrections["robuxio-account-live-after-funding"]
     robuxio_interval = robuxio_correction.get("interval")
     if not isinstance(robuxio_interval, dict):
@@ -4969,6 +5054,11 @@ def build_layered_history_generation(
         )
     except ValueError as exc:
         raise TargetSeriesError("Robuxio account-live cutoff is invalid") from exc
+    matrixport_missing_dates = _matrixport_declared_missing_dates(
+        matrixport_manifest,
+        matrixport_gap_policy,
+        admission_cutoff=matrixport_admission_cutoff,
+    )
     robuxio_series = series_by_strategy.get("robuxio-crypto")
     if robuxio_series is None:
         raise TargetSeriesError("provider ledger lacks Robuxio mapping")
@@ -4976,7 +5066,9 @@ def build_layered_history_generation(
         robuxio_live = []
         robuxio_coverage = {
             "account_live_start": robuxio_interval["effective_start"],
-            "source_gap_policy": matrixport_gap_policy,
+            "source_gap_policy": _matrixport_policy_for_cutoff(
+                matrixport_gap_policy, matrixport_admission_cutoff
+            ),
         }
     else:
         robuxio_live, robuxio_coverage = _matrixport_returns(
@@ -4993,8 +5085,8 @@ def build_layered_history_generation(
     raw_gap_policy = robuxio_coverage.get("source_gap_policy")
     if not isinstance(raw_gap_policy, dict):
         raise TargetSeriesError("Matrixport source gap policy is absent")
-    if raw_gap_policy != sources["matrixport-account-generation"].get(
-        "declared_gap_policy"
+    if raw_gap_policy != _matrixport_policy_for_cutoff(
+        matrixport_gap_policy, matrixport_admission_cutoff
     ):
         raise TargetSeriesError(
             "Matrixport source gap policy differs from product authority"
@@ -7092,8 +7184,24 @@ def validate_layered_history_generation(
     if not isinstance(matrixport_gap_policy, dict):
         raise TargetSeriesError("Matrixport product gap policy is absent")
     _matrixport_return_transform(matrixport_gap_policy)
+    try:
+        validated_matrixport_cutoff = (
+            accepted_as_of
+            if current_admission is not None
+            else date.fromisoformat(
+                str(
+                    corrections["robuxio-account-live-after-funding"]["interval"][
+                        "observed_end"
+                    ]
+                )
+            )
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TargetSeriesError("Robuxio account-live cutoff is invalid") from exc
     matrixport_missing_dates = _matrixport_declared_missing_dates(
-        source_manifests["matrixport"], matrixport_gap_policy
+        source_manifests["matrixport"],
+        matrixport_gap_policy,
+        admission_cutoff=validated_matrixport_cutoff,
     )
     matrixport_omitted_return_dates = _matrixport_expected_gap_endpoints(
         matrixport_missing_dates
@@ -7101,14 +7209,15 @@ def validate_layered_history_generation(
     matrixport_unavailable_return_dates = frozenset(
         matrixport_missing_dates | matrixport_omitted_return_dates
     )
+    cutoff_gap_policy = _matrixport_policy_for_cutoff(
+        matrixport_gap_policy, validated_matrixport_cutoff
+    )
     expected_matrixport_gap_policy = _matrixport_source_gap_policy(
         matrixport_missing_dates,
         matrixport_omitted_return_dates,
-        matrixport_gap_policy,
+        cutoff_gap_policy,
     )
-    if expected_matrixport_gap_policy != sources["matrixport-account-generation"].get(
-        "declared_gap_policy"
-    ):
+    if expected_matrixport_gap_policy != cutoff_gap_policy:
         raise TargetSeriesError(
             "Matrixport source gap policy differs from product authority"
         )
