@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
@@ -191,6 +191,30 @@ def _http_date(value: object, label: str) -> str | None:
     if observed.tzinfo is None:
         raise BuilderError(f"{label} last-modified header lacks a timezone")
     return observed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def capture_bound_utc(cutoff: date) -> datetime:
+    """First instant a capture no longer records ``cutoff``: the next weekday at 13:30Z.
+
+    TuringTrader publishes a day's data the next morning and live holdings do not change until
+    the next regular session opens.  Holidays are ignored (the bound is never late, and may be
+    early).  The consumer carries the same rule (a test keeps the two equal).
+    """
+
+    day = cutoff + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return datetime.combine(day, time(13, 30), tzinfo=timezone.utc)
+
+
+def _instant(value: str, label: str) -> datetime:
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise BuilderError(f"{label} is not a timestamp: {value}") from exc
+    if moment.tzinfo is None:
+        raise BuilderError(f"{label} has no UTC offset: {value}")
+    return moment
 
 
 def _day(value: str, label: str) -> date:
@@ -626,7 +650,8 @@ def _provenance(
     *,
     legacy: bool,
     min_capture_date: str,
-    max_capture_date: str | None,
+    cutoff: str | None,
+    capture_bound: str | None,
     slugs: Sequence[str],
     chart_last: date,
     vane: Mapping[str, Any],
@@ -638,7 +663,9 @@ def _provenance(
     live_inception: str,
 ) -> dict[str, Any]:
     bounds: dict[str, Any] = (
-        {} if max_capture_date is None else {"max_capture_date": max_capture_date}
+        {}
+        if cutoff is None or capture_bound is None
+        else {"capture_bound_utc": capture_bound, "cutoff": cutoff}
     )
     return {
         **bounds,
@@ -690,13 +717,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     legacy = bool(args.accept_legacy_capture_shape)
     slugs = _slugs(args.slugs)
     min_day = _day(args.min_capture_date, "--min-capture-date")
-    max_day = (
-        None
-        if args.max_capture_date is None
-        else _day(args.max_capture_date, "--max-capture-date")
-    )
-    if max_day is not None and max_day < min_day:
-        raise BuilderError("--max-capture-date is before --min-capture-date")
+    cutoff = None if args.cutoff is None else _day(args.cutoff, "--cutoff")
+    bound = None if cutoff is None else capture_bound_utc(cutoff)
     inception = _day(args.live_inception, "--live-inception").isoformat()
     version = str(args.portfolio_version or "").strip()
     if not version:
@@ -732,13 +754,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                 f"{item.role} capture is older than the minimum date: "
                 f"{item.captured_at_utc} < {min_day}"
             )
-        if (
-            max_day is not None
-            and _day(item.captured_at_utc[:10], "capture date") > max_day
-        ):
+        if bound is not None and _instant(item.captured_at_utc, "capture") >= bound:
             raise BuilderError(
-                f"{item.role} capture is after the maximum date: "
-                f"{item.captured_at_utc} > {max_day}"
+                f"{item.role} capture is not before the capture bound of cutoff "
+                f"{cutoff}: {item.captured_at_utc} >= {bound.isoformat()}"
             )
     records = _gather(captures, capture_dir, slugs, legacy=legacy)
     comp = records[GLOBAL_OBJECT]
@@ -750,13 +769,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             f"{comp.last_modified_utc}"
         )
     if (
-        max_day is not None
+        bound is not None
         and comp.last_modified_utc is not None
-        and _day(comp.last_modified_utc[:10], "last-modified") > max_day
+        and _instant(comp.last_modified_utc, "last-modified") >= bound
     ):
         raise BuilderError(
-            f"portfolio-comp last-modified is after the maximum date: "
-            f"{comp.last_modified_utc}"
+            "portfolio-comp last-modified is not before the capture bound: "
+            f"{comp.last_modified_utc} >= {bound.isoformat()}"
         )
     if comp.last_modified_utc is None and not legacy:
         raise BuilderError("portfolio-comp.json lacks a last-modified header")
@@ -795,12 +814,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             f"{vane_prov['captured_at_utc']} < {vane_day}"
         )
     if (
-        max_day is not None
-        and _day(str(vane_prov["captured_at_utc"])[:10], "vane capture") > max_day
+        bound is not None
+        and _instant(str(vane_prov["captured_at_utc"]), "vane capture") >= bound
     ):
         raise BuilderError(
-            "market-vane status is after the maximum date: "
-            f"{vane_prov['captured_at_utc']} > {max_day}"
+            "market-vane status is not before the capture bound: "
+            f"{vane_prov['captured_at_utc']} >= {bound.isoformat()}"
         )
     vane_prov["min_date"] = vane_day.isoformat()
 
@@ -884,7 +903,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             records,
             legacy=legacy,
             min_capture_date=min_day.isoformat(),
-            max_capture_date=None if max_day is None else max_day.isoformat(),
+            cutoff=None if cutoff is None else cutoff.isoformat(),
+            capture_bound=None if bound is None else bound.isoformat(),
             slugs=slugs,
             chart_last=chart_last,
             vane=vane_prov,
@@ -999,10 +1019,10 @@ def verify_dir(out_dir: Path) -> dict[str, Any]:
     for item in provenance.get("captures", []):
         if _day(str(item["captured_at_utc"])[:10], "capture date") < min_day:
             raise BuilderError("capture is older than the recorded minimum date")
-        if "max_capture_date" in provenance and _day(
-            str(item["captured_at_utc"])[:10], "capture date"
-        ) > _day(str(provenance["max_capture_date"]), "max_capture_date"):
-            raise BuilderError("capture is after the recorded maximum date")
+        if "capture_bound_utc" in provenance and _instant(
+            str(item["captured_at_utc"]), "capture"
+        ) >= _instant(str(provenance["capture_bound_utc"]), "capture_bound_utc"):
+            raise BuilderError("capture is not before the recorded capture bound")
     price = manifest.get("price_tape")
     if not isinstance(price, dict):
         raise BuilderError("manifest lacks the price tape binding")
@@ -1119,8 +1139,11 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--out-dir", required=True)
     b.add_argument("--min-capture-date", required=True, help="YYYY-MM-DD")
     b.add_argument(
-        "--max-capture-date",
-        help="YYYY-MM-DD: refuse a capture, comp last-modified or vane stamp dated after it",
+        "--cutoff",
+        help=(
+            "YYYY-MM-DD: refuse a capture, comp last-modified or vane stamp at or after "
+            "the next weekday 13:30Z (the earliest US open after the cutoff)"
+        ),
     )
     b.add_argument("--portfolio-version", required=True)
     b.add_argument("--live-inception", required=True, help="YYYY-MM-DD")

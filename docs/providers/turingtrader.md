@@ -59,21 +59,29 @@ approved provider issue. Recovery is non-destructive: leave the rejected
 branch, capture placeholders, and unrelated untracked files unchanged and do
 not advance any provider, strategy, portfolio, or publication pointer.
 
-## Capture date and the live holdings fallbacks
+## Capture instant and the live holdings fallbacks
 
-The portfolio-holdings and comp pages are live at capture, so a late capture is not a record of
-the cutoff day. The consumer (`with_truncated_row_fallbacks` in
-`tools/portfolio_implementation_reconciliation.py`) therefore refuses the two `LIVE_*`
-fallbacks for a truncated holdings row unless the captures that supply them, recorded in the manifest
-provenance (`capture_provenance.captures[]` by `role`), are dated on or before the accepted as-of day:
-the `json` capture for `LIVE_PORTFOLIO_HOLDINGS`, the `json` and `txt` captures for
-`LIVE_HOLDINGS_OVERRIDE` (the text capture holds the rebalance marker). A later market-vane capture
-is ignored, and a missing capture date for a needed role refuses the fallback. Complete rows and the dated fallbacks
-(`LAST_COMPLETE_ROW`, `NEXT_COMPLETE_ROW`) are not affected. The protection for a cutoff of D is
-therefore a capture taken on D itself: after a later capture, a truncated row that needs a live
-fallback stops the run instead of reading post-cutoff holdings.
+The portfolio-holdings and comp pages are live at capture, and TuringTrader publishes a trading
+day's data the next morning (the `last-update.txt` stamp, for example 2026-11-06T06:46Z, covers data
+through the previous day). A capture for a Friday cutoff D is therefore taken on the weekend, and
+live holdings do not change until the next regular session opens. A capture records the cutoff
+state if it was taken before `capture_bound_utc(D)`: the next weekday after D at 13:30Z (the
+earliest US open). For a Friday D that allows Saturday, Sunday and Monday before 13:30Z; for a
+Tuesday D, Wednesday before 13:30Z. Holidays are ignored, so a holiday next weekday makes the true
+open later than the bound: the bound is conservative-early, never late, and can refuse a capture
+that would have been valid.
 
-The manifest builder takes an optional `--max-capture-date D` (a date): it refuses a capture, the
-comp last-modified stamp or the market-vane capture dated after D (a capture on D passes), records
-`max_capture_date` in the provenance, and `verify` re-checks it. Without the flag the builder is
-unchanged.
+The consumer (`with_truncated_row_fallbacks` in
+`tools/portfolio_implementation_reconciliation.py`) refuses the two `LIVE_*` fallbacks for a
+truncated holdings row unless the captures that supply them, recorded in the manifest provenance
+(`capture_provenance.captures[]` by `role`), are before that instant: the `json` capture for
+`LIVE_PORTFOLIO_HOLDINGS`, the `json` and `txt` captures for `LIVE_HOLDINGS_OVERRIDE` (the text
+capture holds the rebalance marker). A later market-vane capture is ignored, a missing capture
+instant for a needed role refuses the fallback, and each applied live fallback records the
+`capture_bound_utc` that was applied. Complete rows and the dated fallbacks (`LAST_COMPLETE_ROW`,
+`NEXT_COMPLETE_ROW`) are not affected.
+
+The manifest builder takes an optional `--cutoff D`: it refuses a capture, the comp last-modified
+stamp or the market-vane capture at or after the same bound, records `cutoff` and
+`capture_bound_utc` in the provenance, and `verify` re-checks it. Without the flag the builder is
+unchanged. The bound rule is written once in each of the two modules and a test keeps them equal.

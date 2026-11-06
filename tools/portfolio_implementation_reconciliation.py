@@ -13,7 +13,7 @@ import sys
 import copy
 import csv
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -1209,6 +1209,23 @@ _LIVE_FALLBACK_CAPTURE_ROLES: Final = {
 }
 
 
+def tt_capture_bound_utc(cutoff: date) -> datetime:
+    """The first instant a TuringTrader capture is no longer a record of ``cutoff``.
+
+    TuringTrader publishes a trading day's data the next morning, so the capture for a Friday
+    cutoff is taken on the weekend; live holdings do not change until the next regular session
+    opens.  The bound is the next weekday after ``cutoff`` at 13:30Z (the earliest US open).
+    Holidays are ignored: a holiday next weekday only makes the true open later, so the bound is
+    never late, and can only refuse a capture that would have been valid.  The same rule is in
+    tools/tt_source_manifest_builder.py (a test keeps the two equal).
+    """
+
+    day = cutoff + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return datetime.combine(day, time(13, 30), tzinfo=timezone.utc)
+
+
 def with_truncated_row_fallbacks(
     manifest: Mapping[str, Any], accepted_as_of: date
 ) -> Mapping[str, Any]:
@@ -1234,11 +1251,12 @@ def with_truncated_row_fallbacks(
 
     The two ``LIVE_*`` fallbacks read the live holdings as they were when the
     source was captured, so they describe the cutoff only if the captures that
-    supply them were taken on or before it (the JSON capture, and for the
-    override also the text capture holding the rebalance marker): one dated
-    after ``accepted_as_of``, or a manifest that records no date for it,
-    refuses them, because a rebalance after the cutoff would otherwise be read
-    as the cutoff state.  A later market-vane capture does not matter.
+    supply them were taken before ``tt_capture_bound_utc(accepted_as_of)`` (the
+    JSON capture, and for the override also the text capture holding the
+    rebalance marker): one at or after that instant, or a manifest that records
+    no instant for it, refuses them, because a rebalance after the next open
+    would otherwise be read as the cutoff state.  The bound applied is recorded
+    on each applied live fallback.  A later market-vane capture does not matter.
     The dated fallbacks and rows that are complete are not affected.
     """
     provenance = manifest.get("capture_provenance")
@@ -1261,21 +1279,23 @@ def with_truncated_row_fallbacks(
         )
 
     captures = provenance.get("captures") if isinstance(provenance, dict) else None
-    capture_days: dict[str, list[date]] = {}
+    capture_bound = tt_capture_bound_utc(accepted_as_of)
+    capture_instants: dict[str, list[datetime]] = {}
     for item in captures if isinstance(captures, list) else []:
         stamp = item.get("captured_at_utc") if isinstance(item, dict) else None
         try:
-            capture_days.setdefault(str(item.get("role")), []).append(
-                date.fromisoformat(str(stamp)[:10])
-            )
+            instant = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if instant.tzinfo is None:
+                raise ValueError("capture instant has no offset")
+            capture_instants.setdefault(str(item.get("role")), []).append(instant)
         except (ValueError, AttributeError):
-            capture_days = {}
+            capture_instants = {}
             break
 
     def live_capture_after_cutoff() -> ImplementationReconciliationError:
         return ImplementationReconciliationError(
-            "TuringTrader live holdings fallback needs every capture dated on or "
-            "before the accepted as-of date"
+            "TuringTrader live holdings fallback needs every supplying capture "
+            f"before {capture_bound.isoformat()} (the next open after the as-of date)"
         )
 
     applied: list[dict[str, str]] = []
@@ -1291,10 +1311,12 @@ def with_truncated_row_fallbacks(
             raise refuse()
         if fallback.get("kind") in _LIVE_FALLBACK_CAPTURE_ROLES:
             roles = _LIVE_FALLBACK_CAPTURE_ROLES[str(fallback.get("kind"))]
-            days = [day for role in roles for day in capture_days.get(role, [])]
+            instants = [
+                moment for role in roles for moment in capture_instants.get(role, [])
+            ]
             if (
-                not all(role in capture_days for role in roles)
-                or max(days) > accepted_as_of
+                not all(role in capture_instants for role in roles)
+                or max(instants) >= capture_bound
             ):
                 raise live_capture_after_cutoff()
         snapshots = component["dated_holdings"]["snapshots"]
@@ -1364,6 +1386,11 @@ def with_truncated_row_fallbacks(
                 "fallback": str(kind),
                 "observed_date": observed,
                 "slug": str(flag["slug"]),
+                **(
+                    {"capture_bound_utc": capture_bound.isoformat()}
+                    if kind in _LIVE_FALLBACK_CAPTURE_ROLES
+                    else {}
+                ),
             }
         )
     repaired["applied_truncated_row_fallbacks"] = applied

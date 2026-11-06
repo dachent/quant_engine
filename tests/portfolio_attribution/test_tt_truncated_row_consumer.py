@@ -224,7 +224,7 @@ def test_live_holdings_override_only_repairs_the_latest_row(tmp_path: Path) -> N
         reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
 
 
-LATE = [{"captured_at_utc": "2026-09-02T00:30:00Z", "role": "json"}]
+LATE = [{"captured_at_utc": "2026-09-02T13:30:00Z", "role": "json"}]
 
 
 @pytest.mark.parametrize(
@@ -236,10 +236,13 @@ def test_live_fallbacks_refuse_a_capture_after_the_cutoff(
 ) -> None:
     manifest = _manifest(tmp_path, flag, captures=LATE)
     with pytest.raises(
-        reconciliation.ImplementationReconciliationError, match="on or before"
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
     ):
         reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
-    with pytest.raises(attribution.ReturnAttributionError, match="on or before"):
+    with pytest.raises(
+        attribution.ReturnAttributionError, match="supplying capture before"
+    ):
         attribution._tt_target_snapshots(manifest, COMPONENTS, accepted_as_of=SECOND)
 
 
@@ -248,7 +251,8 @@ def test_live_fallback_refuses_a_manifest_with_no_capture_date(tmp_path: Path) -
         tmp_path, {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}}, captures=[]
     )
     with pytest.raises(
-        reconciliation.ImplementationReconciliationError, match="on or before"
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
     ):
         reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
 
@@ -279,8 +283,8 @@ def test_only_the_captures_that_supply_the_fallback_are_checked(
     tmp_path: Path,
 ) -> None:
     early = {"captured_at_utc": "2026-09-01T10:00:00Z", "role": "json"}
-    late_vane = {"captured_at_utc": "2026-09-03T00:00:00Z", "role": "vane"}
-    late_txt = {"captured_at_utc": "2026-09-03T00:00:00Z", "role": "txt"}
+    late_vane = {"captured_at_utc": "2026-09-03T14:00:00Z", "role": "vane"}
+    late_txt = {"captured_at_utc": "2026-09-03T14:00:00Z", "role": "txt"}
     live = {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}}
     for captures in ([early, late_vane], [early, late_txt, late_vane]):
         manifest = _manifest(tmp_path, live, captures=captures)
@@ -293,7 +297,8 @@ def test_only_the_captures_that_supply_the_fallback_are_checked(
         captures=[early, late_vane],
     )
     with pytest.raises(
-        reconciliation.ImplementationReconciliationError, match="on or before"
+        reconciliation.ImplementationReconciliationError,
+        match="supplying capture before",
     ):
         reconciliation.with_truncated_row_fallbacks(override, SECOND)
     ok_txt = {"captured_at_utc": "2026-09-01T10:01:00Z", "role": "txt"}
@@ -305,3 +310,61 @@ def test_only_the_captures_that_supply_the_fallback_are_checked(
     )
     repaired = reconciliation.with_truncated_row_fallbacks(manifest, SECOND)
     assert _weights(repaired) == {"BIL": 0.5, "SPY": 0.5}
+
+
+FRIDAY = date(2026, 9, 4)
+LIVE = {"fallback": {"kind": "LIVE_PORTFOLIO_HOLDINGS"}}
+
+
+@pytest.mark.parametrize(
+    ("stamp", "passes"),
+    [
+        ("2026-09-04T21:00:00Z", True),
+        ("2026-09-05T07:00:00Z", True),
+        ("2026-09-06T23:00:00Z", True),
+        ("2026-09-07T12:00:00Z", True),
+        ("2026-09-07T13:29:59Z", True),
+        ("2026-09-07T13:30:00Z", False),
+        ("2026-09-07T14:00:00Z", False),
+    ],
+)
+def test_a_friday_cutoff_accepts_the_weekend_capture(
+    tmp_path: Path, stamp: str, passes: bool
+) -> None:
+    manifest = _manifest(
+        tmp_path, LIVE, captures=[{"captured_at_utc": stamp, "role": "json"}]
+    )
+    if passes:
+        repaired = reconciliation.with_truncated_row_fallbacks(manifest, FRIDAY)
+        assert repaired["applied_truncated_row_fallbacks"][0]["capture_bound_utc"] == (
+            "2026-09-07T13:30:00+00:00"
+        )
+    else:
+        with pytest.raises(
+            reconciliation.ImplementationReconciliationError, match="before 2026-09-07"
+        ):
+            reconciliation.with_truncated_row_fallbacks(manifest, FRIDAY)
+
+
+def test_a_weekday_cutoff_allows_the_next_morning_before_the_open_only() -> None:
+    tuesday = date(2026, 9, 1)
+    assert reconciliation.tt_capture_bound_utc(tuesday).isoformat() == (
+        "2026-09-02T13:30:00+00:00"
+    )
+    assert reconciliation.tt_capture_bound_utc(FRIDAY).isoformat() == (
+        "2026-09-07T13:30:00+00:00"
+    )
+    assert reconciliation.tt_capture_bound_utc(date(2026, 9, 5)).isoformat() == (
+        "2026-09-07T13:30:00+00:00"
+    )
+
+
+def test_the_builder_and_the_consumer_share_the_bound() -> None:
+    builder = _load(
+        "tt_builder_for_bound", TOOLS_ROOT / "tt_source_manifest_builder.py"
+    )
+    for offset in range(14):
+        day = date(2026, 9, 1 + offset)
+        assert builder.capture_bound_utc(day) == reconciliation.tt_capture_bound_utc(
+            day
+        )
