@@ -1659,3 +1659,147 @@ def test_a_config_the_driver_resolved_can_be_read_back_by_the_cli(
         driver.DriverError, match="derivations are written by the driver"
     ):
         driver.parse_config(source.effective_bytes, tt_source_manifest=manifest)
+
+
+# ------------------------------------------------ held closes: D and the previous trading day
+
+
+def _row(close: str) -> list[str]:
+    return ["1", "1", "1", close, close, "0", "0"]
+
+
+def test_official_coverage_needs_every_symbol_on_the_cutoff_and_the_previous_trading_day() -> (
+    None
+):
+    cutoff = date(2026, 10, 9)
+    full = {"2026-10-07": _row("7"), "2026-10-08": _row("8"), "2026-10-09": _row("9")}
+    # a market holiday on the 8th: no symbol has a bar, the previous trading day is the 7th
+    holiday = {"2026-10-07": _row("7"), "2026-10-09": _row("9")}
+    coverage, failures = driver.official_coverage(
+        {"AAA": holiday, "BBB": holiday}, cutoff
+    )
+    assert failures == []
+    assert coverage["names"]["AAA"]["previous_bar"] == "2026-10-07"
+    assert coverage["names"]["AAA"]["previous_close"] == "7"
+    # one symbol lacks the 8th that another has: it is named, with the day
+    _, failures = driver.official_coverage({"AAA": full, "BBB": holiday}, cutoff)
+    assert failures == [
+        "official close for BBB has no bar on the previous trading day 2026-10-08 before 2026-10-09"
+    ]
+    # a symbol with only the cutoff bar fails on the previous day, and one without the cutoff bar fails too
+    only_cutoff = {"2026-10-09": _row("9")}
+    _, failures = driver.official_coverage({"AAA": full, "CCC": only_cutoff}, cutoff)
+    assert any(
+        "CCC has no bar on the previous trading day" in item for item in failures
+    )
+    _, failures = driver.official_coverage({"AAA": {"2026-10-08": _row("8")}}, cutoff)
+    assert any("has no bar on 2026-10-09" in item for item in failures)
+
+
+def test_a_held_symbol_without_the_previous_trading_day_rejects_the_run(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "NEW"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    with pytest.raises(driver.DriverError, match="rejected"):
+        driver.run_fetch(
+            config,
+            stage_root=tmp_path / "s",
+            run_id="no-previous",
+            yf=FakeYF(start_after={"NEW": date.fromisoformat(CUTOFF)}),
+            chart=FakeChart(),
+            now=NOW,
+        )
+    rejected = (tmp_path / "s" / "no-previous.REJECTED.json").read_text()
+    assert "NEW has no bar on the previous trading day" in rejected
+
+
+def test_the_official_manifest_carries_the_previous_trading_day_close(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    run = driver.run_fetch(
+        config,
+        stage_root=tmp_path / "s",
+        run_id="held-previous",
+        yf=FakeYF(),
+        chart=FakeChart(),
+        now=NOW,
+    )
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+    sidecar = json.loads(
+        (run / "official-closes/official-closes-manifest.json").read_text()
+    )
+    (entry,) = sidecar["files"]
+    rows = [
+        r.split(",")
+        for r in (run / "official-closes/SPY_yahoo_daily.csv")
+        .read_text()
+        .splitlines()[1:]
+    ]
+    assert entry["cutoff_bar"] == rows[-1][0] == CUTOFF
+    assert entry["previous_bar"] == rows[-2][0]
+    assert entry["previous_close"] == rows[-2][4]
+    # the file the derive step reads is date..close per symbol, listed with its sha256
+    assert entry["sha256"] == driver.sha256_hex(
+        (run / "official-closes/SPY_yahoo_daily.csv").read_bytes()
+    )
+
+
+def _held_config_excluding(*excluded: str) -> bytes:
+    group = _group("held-closes", symbols_from="schwab-positions", datasets=["history"])
+    del group["symbols"], group["start"]
+    group.update(
+        start_offset_days_before_through=10,
+        min_rows=5,
+        official_closes={},
+        exclude_symbols=list(excluded),
+    )
+    return _config([group])
+
+
+def test_a_cash_equivalent_holding_can_be_left_out_of_the_held_closes(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "SWVXX", "BRK/B"])
+    config = driver.parse_config(
+        _held_config_excluding("SWVXX"), schwab_positions=positions
+    )
+    group = config.groups[0]
+    assert group.symbols == ("BRK-B", "SPY")
+    assert group.official_names == {"BRK-B": "BRK.B", "SPY": "SPY"}
+    (derivation,) = json.loads(config.effective_bytes)["derivations"].values()
+    assert derivation["excluded"] == ["SWVXX"] and "SWVXX" not in derivation["symbols"]
+    # an excluded symbol that is not held is ignored (selling it never blocks a fetch)
+    other = driver.parse_config(
+        _held_config_excluding("SWVXX"), schwab_positions=_positions(tmp_path, ["SPY"])
+    )
+    assert other.groups[0].symbols == ("SPY",)
+    # the exclusion is part of the effective config, so it is part of the evidence hash
+    assert (
+        config.sha256
+        != driver.parse_config(_held_config(), schwab_positions=positions).sha256
+    )
+    with pytest.raises(driver.DriverError, match="every held symbol is excluded"):
+        driver.parse_config(
+            _held_config_excluding("SPY"),
+            schwab_positions=_positions(tmp_path, ["SPY"]),
+        )
+
+
+def test_exclude_symbols_is_for_the_schwab_derived_group_only(tmp_path: Path) -> None:
+    manifest = _tt_manifest(tmp_path, ["AAA"], ["BNY"])
+    group = _group(
+        "tt-daily", symbols_from="tt-source-manifest", exclude_symbols=["AAA"]
+    )
+    del group["symbols"], group["start"]
+    group.update(symbols_must_include=["BNY"], start_offset_days_before_inception=7)
+    with pytest.raises(driver.DriverError, match="schwab-positions only"):
+        driver.parse_config(_config([group]), tt_source_manifest=manifest)
+
+
+def test_the_shipped_held_closes_group_excludes_the_sweep_fund() -> None:
+    groups = json.loads(SHIPPED_CONFIG.read_bytes())["groups"]
+    (held,) = [g for g in groups if g["group_id"] == "held-closes"]
+    assert held["exclude_symbols"] == ["SWVXX"] and held["through"] == "cutoff"

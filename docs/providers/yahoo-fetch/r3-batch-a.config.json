@@ -15,6 +15,9 @@
       "group_id": "held-closes",
       "kind": "yfinance",
       "symbols_from": "schwab-positions",
+      "exclude_symbols": [
+        "SWVXX"
+      ],
       "start_offset_days_before_through": 10,
       "interval": "1d",
       "through": "cutoff",

@@ -324,6 +324,7 @@ _DERIVED_OPTIONAL = {
     "symbols_must_include",
     "start_offset_days_before_inception",
     "start_offset_days_before_through",
+    "exclude_symbols",
 }
 _DERIVED_SOURCES = frozenset({"tt-source-manifest", "schwab-positions"})
 _GROUP_OPTIONAL = {
@@ -688,6 +689,10 @@ def _materialize(
             raise DriverError(f"{gid}: symbols_from is unsupported")
         if "symbols" in group or "start" in group:
             raise DriverError(f"{gid}: a derived group must not list symbols or start")
+        if "exclude_symbols" in group and source != "schwab-positions":
+            raise DriverError(
+                f"{gid}: exclude_symbols applies to schwab-positions only"
+            )
         if source == "schwab-positions":
             if schwab_positions is None:
                 raise DriverError(
@@ -707,15 +712,35 @@ def _materialize(
                     f"{gid}: start_offset_days_before_through is required"
                 )
             held = derive_schwab_positions(schwab_positions)
+            excluded_raw = group.get("exclude_symbols", [])
+            if (
+                not isinstance(excluded_raw, list)
+                or not all(isinstance(item, str) and item for item in excluded_raw)
+                or len(set(excluded_raw)) != len(excluded_raw)
+            ):
+                raise DriverError(f"{gid}: exclude_symbols must be a list of symbols")
+            # cash-equivalent holdings (a sweep money-market fund valued at its stated NAV)
+            # are named by their Schwab symbol; one that is not held is ignored, so selling
+            # it never blocks a fetch, and the symbols actually left out are recorded
+            excluded = sorted(
+                provider
+                for provider, schwab in held["names"].items()
+                if schwab in excluded_raw or provider in excluded_raw
+            )
+            symbols = [item for item in held["symbols"] if item not in excluded]
+            names = {k: v for k, v in held["names"].items() if k not in excluded}
+            if not symbols:
+                raise DriverError(f"{gid}: every held symbol is excluded")
             derivations[f"{source}:{end_s.isoformat()}"] = {
                 "positions_sha256": held["positions_sha256"],
                 "end": end_s.isoformat(),
-                "symbols": held["symbols"],
+                "symbols": symbols,
+                **({"excluded": excluded} if excluded_raw else {}),
             }
-            group["symbols"] = list(held["symbols"])
+            group["symbols"] = symbols
             group["start"] = (end_s - timedelta(days=offset_s)).isoformat()
             if "official_closes" in group:
-                group["official_closes"] = {"names": dict(held["names"])}
+                group["official_closes"] = {"names": names}
             continue
         if tt_manifest is None:
             raise DriverError(
@@ -1445,6 +1470,11 @@ def official_manifest(
         body = bodies[f"official-closes/{name}_yahoo_daily.csv"]
         days = sorted(merged[name])
         at_cutoff = merged[name].get(cutoff.isoformat())
+        before = [
+            day for rows in merged.values() for day in rows if day < cutoff.isoformat()
+        ]
+        previous = max(before) if before else None
+        at_previous = None if previous is None else merged[name].get(previous)
         entries.append(
             {
                 "symbol": name,
@@ -1455,6 +1485,8 @@ def official_manifest(
                 "last_bar": days[-1],
                 "cutoff_bar": None if at_cutoff is None else cutoff.isoformat(),
                 "cutoff_close": None if at_cutoff is None else at_cutoff[3],
+                "previous_bar": None if at_previous is None else previous,
+                "previous_close": None if at_previous is None else at_previous[3],
             }
         )
     return pretty(
@@ -1498,17 +1530,31 @@ def official_coverage(
 ) -> tuple[dict[str, Any], list[str]]:
     failures = []
     names: dict[str, Any] = {}
+    # the previous trading day is the newest day before the cutoff on which any symbol has a bar
+    # (a market holiday has no bar for any symbol); every symbol must have its close on it too
+    earlier = [
+        day for rows in merged.values() for day in rows if day < cutoff.isoformat()
+    ]
+    previous = max(earlier) if earlier else None
     for name in sorted(merged):
         days = sorted(merged[name])
         at_cutoff = merged[name].get(cutoff.isoformat())
+        at_previous = None if previous is None else merged[name].get(previous)
         names[name] = {
             "first": days[0],
             "last": days[-1],
             "cutoff_close": None if at_cutoff is None else at_cutoff[3],
             "cutoff_adjclose": None if at_cutoff is None else at_cutoff[4],
+            "previous_bar": None if at_previous is None else previous,
+            "previous_close": None if at_previous is None else at_previous[3],
         }
         if at_cutoff is None:
             failures.append(f"official close for {name} has no bar on {cutoff}")
+        if previous is None or at_previous is None:
+            failures.append(
+                f"official close for {name} has no bar on the previous trading day "
+                f"{previous} before {cutoff}"
+            )
     return {"column": "close = raw daily Close", "names": names}, failures
 
 

@@ -127,7 +127,10 @@ daily Close (`raw/<group>/history.csv` column `Close`, text copied unchanged; Ya
 `Close` is split-adjusted, not dividend-adjusted) and `adjclose` is `Adj Close`. The
 `history_adjusted` artifact has `Close = Adj Close` and must never feed a valuation.
 Files from several groups are merged into one directory; two groups disagreeing on a
-bar refuse the run, and every name must have a bar on the cutoff date. A group with
+bar refuse the run, and every name must have a bar on the cutoff date and on the previous
+trading day (the newest day before the cutoff on which any symbol has a bar, so a market
+holiday is not one; a held symbol that lacks it rejects the run and is named with the day). A
+group with
 `symbols_from: "schwab-positions"` takes its symbols from `--schwab-positions
 <run>/normalized/positions.json` (`/` and `.` become `-` for Yahoo; the file name is the
 Schwab symbol with `/` written as `.`). `verify` rebuilds each file from the raw CSV and
@@ -138,9 +141,22 @@ rejects any difference.
 UTC form, `completed >= started` and that the fetch started after the cutoff day closed.
 `official-closes/official-closes-manifest.json` sits beside the files so the ingest need
 not open the run: per file the symbol, sha256, size, first and last bar, the cutoff bar
-and its raw close, plus the run id, cutoff, config hash and the same two timestamps;
+and its raw close, the previous trading day's bar and raw close (`previous_bar`,
+`previous_close`), plus the run id, cutoff, config hash and the same two timestamps;
 `verify` rebuilds it from the files and the header. The file name is the ingest's alias
 key: the Schwab symbol with `/` written as `.` (`BRK/B` -> `BRK.B_yahoo_daily.csv`).
+
+For R3 the `held-closes` group takes every symbol of the Schwab run's `positions.json` (the
+derived valuation of day D needs the closes of D and of the previous trading day, which the
+fetch now requires for every one of them) except those named in the group's `exclude_symbols`
+(Schwab symbols; shipped: `SWVXX`, the sweep money-market fund the R2.1 pull list valued at its
+stated $1.00 NAV as cash, so it is not fetched). An excluded symbol that is not held is ignored,
+the symbols actually left out are recorded in the config's derivations, and the exclusion is part
+of the effective config hash the evidence names. The derive step reads the per-symbol
+`<SYMBOL>_yahoo_daily.csv` (header `date,open,high,low,close,adjclose,volume,dividend`; `date`
+and `close` are the columns it needs) and the sidecar's per-file sha256. Whether every Schwab
+position other than `SWVXX` is a Yahoo-served symbol is not established here: a symbol Yahoo does
+not serve rejects the run (and the evidence), so check the held list against the probe first.
 
 ## Symbol resolution and admission
 
