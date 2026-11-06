@@ -466,7 +466,59 @@ def _rows(run: Path, account: str, rows: list[dict[str, str]]) -> None:
     (folder / f"{account}.json").write_text(json.dumps(rows), encoding="utf-8")
 
 
-def test_a_row_posted_after_d_that_moves_shares_or_cash_stops_the_derivation(
+SELL_AFTER_D = {
+    "transactionDate": "09/18/2026",
+    "effectiveDate": "09/18/2026",
+    "action": "Sell",
+    "symbol": "AAA",
+    "shareQuantity": "1",
+    "amount": "$96.00",
+}
+
+
+def test_a_capture_taken_after_d_is_rolled_back_to_d_before_pricing(
+    tmp_path: Path,
+) -> None:
+    # captured: 10 AAA and 100.50 cash after a Sell of 1 AAA for 96.00 posted the day after D;
+    # at the close of D the account held 11 AAA and 4.50 cash
+    run, closes = _world(tmp_path, stale_native=(994.5, 994.5))
+    _rows(run, STALE, [SELL_AFTER_D])
+    record, report = _derive(run, closes)
+    assert record[STALE]["official_0917"] == "1055.00"  # 11 x 95.50 + 4.50
+    assert record[STALE]["cash"] == "4.50"
+    assert record[STALE]["rolled_back_rows"] == "Sell x1"
+    assert next(r for r in report if r["account_id"] == STALE)["status"] == (
+        derive_tool.STATUS_PATCH
+    )
+    assert "rolled_back_rows" not in record[MOVED]
+
+
+def test_a_roll_back_that_disagrees_with_the_native_history_stops_with_the_numbers(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path)  # native 1000.5 on both days
+    _rows(run, STALE, [SELL_AFTER_D])
+    with pytest.raises(derive_tool.DeriveError, match=r"differs from the captured NAV"):
+        _derive(run, closes)
+
+
+@pytest.mark.parametrize("action", ["Stock Split", "Spin-off", "Merger", "Mystery"])
+def test_an_action_outside_the_table_after_d_is_refused_by_name(
+    tmp_path: Path, action: str
+) -> None:
+    run, closes = _world(tmp_path)
+    _rows(
+        run,
+        STALE,
+        [{**SELL_AFTER_D, "action": action}],
+    )
+    with pytest.raises(
+        derive_tool.DeriveError, match=f"a {action} row dated 2026-09-18"
+    ):
+        _derive(run, closes)
+
+
+def test_a_row_posted_after_d_with_an_effective_date_on_or_before_d_is_refused(
     tmp_path: Path,
 ) -> None:
     run, closes = _world(tmp_path)
@@ -474,25 +526,19 @@ def test_a_row_posted_after_d_that_moves_shares_or_cash_stops_the_derivation(
         run,
         STALE,
         [
-            {"transactionDate": "09/18/2026", "action": "Sell", "shareQuantity": "1"},
-            {"transactionDate": "09/18/2026", "action": "Sell", "amount": "$5.00"},
             {
-                "transactionDate": "09/19/2026",
-                "action": "Cash Dividend",
+                "transactionDate": "09/18/2026 as of 09/17/2026",
+                "effectiveDate": "09/17/2026",
+                "action": "Bank Interest",
                 "amount": "$1",
-            },
-            {"transactionDate": "09/17/2026", "action": "Buy", "shareQuantity": "1"},
+            }
         ],
     )
-    with pytest.raises(
-        derive_tool.DeriveError,
-        match=r"account-00000000000000a2: 3 transaction row\(s\) posted or effective after 2026-09-17 "
-        r"change its quantity or cash \(Cash Dividend x1, Sell x2\)",
-    ):
+    with pytest.raises(derive_tool.DeriveError, match="straddles 2026-09-17"):
         _derive(run, closes)
 
 
-def test_a_row_posted_after_d_with_no_quantity_or_amount_is_recorded_not_refused(
+def test_a_row_after_d_with_no_quantity_or_amount_is_recorded_not_rolled_back(
     tmp_path: Path,
 ) -> None:
     run, closes = _world(tmp_path)
@@ -501,17 +547,16 @@ def test_a_row_posted_after_d_with_no_quantity_or_amount_is_recorded_not_refused
         STALE,
         [
             {"transactionDate": "09/18/2026", "action": "Memo", "shareQuantity": ""},
-            {"transactionDate": "09/18/2026 as of 09/17/2026", "action": "Memo"},
+            {"transactionDate": "09/18/2026", "action": "Memo"},
         ],
     )
     record, _ = _derive(run, closes)
     assert record[STALE]["after_day_informational_rows"] == "Memo x2"
+    assert "rolled_back_rows" not in record[STALE]
     assert "after_day_informational_rows" not in record[MOVED]
 
 
-def test_rows_on_or_before_d_and_a_run_without_transactions_are_unchanged(
-    tmp_path: Path,
-) -> None:
+def test_rows_on_or_before_d_do_not_change_the_derivation(tmp_path: Path) -> None:
     run, closes = _world(tmp_path)
     base, _ = _derive(run, closes)
     _rows(
@@ -520,7 +565,7 @@ def test_rows_on_or_before_d_and_a_run_without_transactions_are_unchanged(
         [{"transactionDate": "09/17/2026", "action": "Buy", "shareQuantity": "1"}],
     )
     with_rows, _ = _derive(run, closes, waivers={STALE: "bought AAA on D"})
-    assert "after_day_informational_rows" not in with_rows[STALE]
+    assert "rolled_back_rows" not in with_rows[STALE]
     assert base[MOVED] == with_rows[MOVED]
 
 
@@ -531,21 +576,41 @@ def test_an_unreadable_posting_date_is_refused(tmp_path: Path) -> None:
         _derive(run, closes)
 
 
-def test_an_effective_date_after_d_counts_even_when_the_posting_date_is_not(
+def test_a_symbol_sold_in_full_after_d_is_priced_at_d_from_its_own_close_file(
     tmp_path: Path,
 ) -> None:
-    run, closes = _world(tmp_path)
+    run, closes = _world(tmp_path, stale_native=(1043.5, 1043.5))
+    (closes / "CCC_yahoo_daily.csv").write_text(
+        "date,close\n2026-09-16,10.00\n2026-09-17,11.00\n", encoding="utf-8"
+    )
     _rows(
         run,
         STALE,
         [
             {
-                "transactionDate": "09/17/2026",
-                "action": "Bank Interest",
-                "amount": "$1",
-                "effectiveDate": "09/19/2026",
-            }
+                **SELL_AFTER_D,
+                "symbol": "CCC",
+                "shareQuantity": "2",
+                "amount": "$22.00",
+            },
+            {
+                **SELL_AFTER_D,
+                "symbol": "AAA",
+                "shareQuantity": "0.5",
+                "amount": "$0.00",
+            },
         ],
     )
-    with pytest.raises(derive_tool.DeriveError, match="Bank Interest x1"):
+    # D holdings: 10.5 AAA, 2 CCC, cash 78.50: 1043.50 at the D-1 closes, 1103.25 at D
+    record, _ = _derive(run, closes)
+    assert record[STALE]["cash"] == "78.50"
+    assert record[STALE]["rolled_back_rows"] == "Sell x2"
+
+
+def test_a_symbol_without_a_close_file_at_d_stops_the_derivation(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path)
+    _rows(run, STALE, [{**SELL_AFTER_D, "symbol": "CCC", "shareQuantity": "2"}])
+    with pytest.raises(derive_tool.DeriveError, match="no official close file for CCC"):
         _derive(run, closes)

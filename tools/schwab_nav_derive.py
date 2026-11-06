@@ -34,7 +34,7 @@ import argparse
 import csv
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime
+from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal
 import io
 import json
@@ -45,6 +45,7 @@ from typing import Any
 from quant_engine.core import check_entry_interpreter, strict_json_loads
 
 import schwab_capture_driver as driver
+from schwab_rollback import RolledBack, RollbackError, roll_back
 
 CASH_SECURITY_TYPE = 9
 DEFAULT_TOLERANCE = Decimal("0.05")
@@ -171,64 +172,14 @@ def transactions_on(run_dir: Path, account: str, day: date) -> int:
     )
 
 
-def _row_date(account: str, text: str) -> date:
-    """The first date of a ``transactionDate`` or ``effectiveDate`` value (the driver reads both formats)."""
-
-    for pattern in ("%m/%d/%Y", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(text.split()[0], pattern).date()
-        except (ValueError, IndexError):
-            continue
-    raise DeriveError(f"{account}: a captured transaction row has an unreadable date")
-
-
-def rows_after(run_dir: Path, account: str, day: date) -> list[dict[str, Any]]:
-    """Rows of the run's captured history posted or effective after ``day``."""
+def account_rows(run_dir: Path, account: str) -> list[dict[str, Any]]:
+    """The run's captured transaction rows of one account (empty when the run holds none)."""
 
     path = run_dir / f"transactions/normalized/wch/transactions/{account}.json"
     if not path.is_file():
         return []
     rows = _list(strict_json_loads(path.read_bytes(), label="transactions"), "rows")
-    found: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        dates = [_row_date(account, str(row.get("transactionDate")))]
-        if str(row.get("effectiveDate") or "").strip():
-            dates.append(_row_date(account, str(row["effectiveDate"])))
-        if max(dates) > day:  # posted or effective after the day
-            found.append(row)
-    return found
-
-
-def _after_day_guard(
-    run_dir: Path, account: str, day: date
-) -> dict[str, dict[str, int]]:
-    """Counts by action of the rows posted after ``day``, split into rows that can change the
-    account's quantity or cash (a quantity or an amount is present) and rows that cannot.
-
-    The derived value prices the capture-time holdings at the close of ``day``; a row posted after
-    ``day`` that moved shares or cash means those holdings are not the holdings of ``day``, so the
-    derivation refuses instead of assuming nothing changed. Rows with neither a quantity nor an
-    amount are recorded and do not stop it."""
-
-    effect: dict[str, int] = {}
-    inert: dict[str, int] = {}
-    for row in rows_after(run_dir, account, day):
-        moves = bool(str(row.get("shareQuantity") or "").strip()) or bool(
-            str(row.get("amount") or "").strip()
-        )
-        counts = effect if moves else inert
-        action = str(row.get("action") or "?")
-        counts[action] = counts.get(action, 0) + 1
-    if effect:
-        listing = ", ".join(f"{k} x{v}" for k, v in sorted(effect.items()))
-        raise DeriveError(
-            f"{account}: {sum(effect.values())} transaction row(s) posted or effective after {day} change its "
-            f"quantity or cash ({listing}), so the capture-time holdings are not the holdings of "
-            f"{day}; this derivation does not roll them back"
-        )
-    return {"informational": inert}
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def derive(
@@ -263,7 +214,17 @@ def derive(
         ),
         crosswalk,
     )
-    symbols = sorted({s for quantities, _ in held.values() for s in quantities})
+    rolled_by_account: dict[str, RolledBack] = {}
+    for account, (quantities, cash) in held.items():
+        try:
+            rolled_by_account[account] = roll_back(
+                account, account_rows(run_dir, account), quantities, cash, day
+            )
+        except RollbackError as exc:
+            raise DeriveError(str(exc)) from exc
+    symbols = sorted(
+        {s for rolled in rolled_by_account.values() for s in rolled.quantities}
+    )
     closes = {symbol: read_closes(closes_dir, symbol) for symbol in symbols}
     day_tag, prior_tag = f"{day:%m%d}", f"{prior_day:%m%d}"
     record: dict[str, dict[str, str]] = {}
@@ -280,9 +241,11 @@ def derive(
                 f"{account}: the native history lacks {prior_day} or {day}"
             )
         native_day, native_prior = history[day], history[prior_day]
+        rolled = rolled_by_account[account]
+        quantities, cash = rolled.quantities, rolled.cash
+        after_day = rolled.informational
         official_day = official_value(quantities, cash, closes, day, account)
         official_prior = official_value(quantities, cash, closes, prior_day, account)
-        after_day = _after_day_guard(run_dir, account, day)["informational"]
         rows_on_day = transactions_on(run_dir, account, day)
         waived = account in waivers
         if waived and rows_on_day == 0:
@@ -330,6 +293,10 @@ def derive(
             "official_day": str(official_day),
             "status": status,
         }
+        if rolled.rows_rolled_back:
+            entry["rolled_back_rows"] = ", ".join(
+                f"{k} x{v}" for k, v in sorted(rolled.rows_rolled_back.items())
+            )
         if after_day:
             entry["after_day_informational_rows"] = ", ".join(
                 f"{k} x{v}" for k, v in sorted(after_day.items())
