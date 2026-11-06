@@ -121,8 +121,15 @@ def read_holdings(
     return held
 
 
+def close_file(closes_dir: Path, symbol: str) -> Path:
+    """The Yahoo close file of a held symbol: the Schwab spelling with '/' written as '.'
+    (BRK/B -> BRK.B_yahoo_daily.csv), as the Yahoo driver names it."""
+
+    return closes_dir / f"{symbol.replace('/', '.')}_yahoo_daily.csv"
+
+
 def read_closes(closes_dir: Path, symbol: str) -> dict[date, Decimal]:
-    path = closes_dir / f"{symbol}_yahoo_daily.csv"
+    path = close_file(closes_dir, symbol)
     if not path.is_file():
         raise DeriveError(f"no official close file for {symbol}")
     rows = csv.DictReader(io.StringIO(path.read_bytes().decode("utf-8-sig")))
@@ -295,7 +302,7 @@ def declare(
             "replay": {
                 "positions_capture": _pin(run_dir / "raw/holdings.v2.json"),
                 "closes": [
-                    {"symbol": symbol, **_pin(closes_dir / f"{symbol}_yahoo_daily.csv")}
+                    {"symbol": symbol, **_pin(close_file(closes_dir, symbol))}
                     for symbol in symbols
                 ],
                 "cash_security_type": CASH_SECURITY_TYPE,

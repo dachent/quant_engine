@@ -358,3 +358,21 @@ def test_native_equal_to_official_on_a_carry_is_not_patched(tmp_path: Path) -> N
     record, report = _derive(run, closes, tolerance=Decimal("100"))
     stale = next(row for row in report if row["account_id"].endswith("a2"))
     assert stale["status"] == derive_tool.STATUS_AGREES
+
+
+def test_a_slash_symbol_is_read_from_the_dot_named_close_file(tmp_path: Path) -> None:
+    run, closes = _world(tmp_path)
+    holdings = run / "raw/holdings.v2.json"
+    holdings.write_text(
+        holdings.read_text(encoding="utf-8").replace('"AAA"', '"BRK/B"'),
+        encoding="utf-8",
+    )
+    (closes / "AAA_yahoo_daily.csv").rename(closes / "BRK.B_yahoo_daily.csv")
+    assert derive_tool.close_file(closes, "BRK/B").name == "BRK.B_yahoo_daily.csv"
+    record, _ = _derive(run, closes)
+    assert record["account-00000000000000a2"]["official_0917"] == "1055.50"
+    (closes / "BRK.B_yahoo_daily.csv").rename(closes / "BRK_B_yahoo_daily.csv")
+    with pytest.raises(
+        derive_tool.DeriveError, match="no official close file for BRK/B"
+    ):
+        _derive(run, closes)
