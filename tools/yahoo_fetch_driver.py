@@ -731,12 +731,16 @@ def held_check(
             ) from exc
         if not isinstance(aliases, dict) or not isinstance(cash, list):
             raise DriverError("the ingest config symbol maps have the wrong shape")
+        # the ingest spells a symbol as Schwab does (BRK/B); the file name writes it BRK.B
         names = {row["symbol"] for row in rows}
+        dotted = {
+            str(key).replace("/", "."): str(value) for key, value in aliases.items()
+        }
         report["aliased_by_ingest"] = {
-            symbol: str(aliases[symbol]) for symbol in sorted(names & set(aliases))
+            symbol: dotted[symbol] for symbol in sorted(names & set(dotted))
         }
         report["cash_equivalent_by_ingest"] = sorted(
-            names & {str(item) for item in cash}
+            names & {str(item).replace("/", ".") for item in cash}
         )
     return report
 

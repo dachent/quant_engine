@@ -1849,7 +1849,7 @@ def test_held_check_lists_what_the_ingest_aliases_or_values_as_cash(
             {
                 "schema_version": 1,
                 "price_ratio_tolerance": "0.1",
-                "symbol_aliases": {"BRK.B": "BRK-B", "OLD": "NEW"},
+                "symbol_aliases": {"BRK/B": "BRK-B", "OLD": "NEW"},
                 "cash_equivalent_symbols": ["MMKT", "GONE"],
                 "price_ratio_exceptions": {},
             }
