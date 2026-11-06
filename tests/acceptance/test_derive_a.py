@@ -473,6 +473,7 @@ def _run(
         code_commit="test",
         layout=LAYOUT,
         expected_sha256={} if expected_sha256 is None else expected_sha256,
+        declared_cutoff=day(CUTOFF),
     )
 
 
@@ -1142,6 +1143,7 @@ def _run_manifest(root: Path, manifest: dict[str, Any]) -> Any:
         cutoff=day(CUTOFF),
         model="test",
         code_commit="test",
+        declared_cutoff=day(CUTOFF),
         manifest=loaded,
     )
 
@@ -1303,6 +1305,7 @@ def test_inputs_manifest_excludes_layout_and_expected_sha256(tmp_path: Path) -> 
             cutoff=day(CUTOFF),
             model="test",
             code_commit="test",
+            declared_cutoff=day(CUTOFF),
             manifest=loaded,
             layout=LAYOUT,
         )
@@ -1313,6 +1316,7 @@ def test_inputs_manifest_excludes_layout_and_expected_sha256(tmp_path: Path) -> 
             cutoff=day(CUTOFF),
             model="test",
             code_commit="test",
+            declared_cutoff=day(CUTOFF),
             manifest=loaded,
             expected_sha256={},
         )
@@ -1323,9 +1327,9 @@ def test_cli_inputs_manifest_end_to_end(
 ) -> None:
     """M4 (PR #492 review minor): the cli.py ``--inputs`` wiring was untested.
     main() must load the manifest, hand it to derive() and write the output
-    document. The cutoff comes from --cutoff (the synthetic 2026-01-10, not
-    2026-09-17) and equals the manifest, ledger and crosswalk dates, so the R7
-    gate passes and rows are derived."""
+    document. The synthetic cutoff is not the declared 2026-09-17, so the R7
+    gate fails closed (still exit 0 with a written document) -- this exercises
+    the wiring, not the arithmetic."""
     manifest = _manifest_tree(tmp_path)
     manifest_path = tmp_path / "inputs.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -1347,12 +1351,8 @@ def test_cli_inputs_manifest_end_to_end(
         ]
     )
     assert code == 0
-    assert "0 metrics" not in capsys.readouterr().out
+    assert "0 metrics" in capsys.readouterr().out
     document = json.loads(out.read_text(encoding="utf-8"))
-    assert document["metrics"]
-    assert not any(
-        "INPUT_CUTOFF_MISMATCH" in row["reason"] for row in document["not_derivable"]
-    )
     assert document["inputs_manifest"]["path"] == manifest_path.as_posix()
     assert document["inputs_manifest"]["not_read"] == [
         "m/account-strategy-manifest.json"
@@ -2470,6 +2470,7 @@ def _run_v3(root: Path, manifest: dict[str, Any] | None = None) -> Any:
         cutoff=day(CUTOFF),
         model="test",
         code_commit="test",
+        declared_cutoff=day(CUTOFF),
         manifest=loaded,
     )
 
@@ -2584,6 +2585,7 @@ def test_v3_selected_contract_comes_from_the_manifest_not_the_repo(
             cutoff=day(CUTOFF),
             model="test",
             code_commit="test",
+            declared_cutoff=day(CUTOFF),
             manifest=loaded,
         )
 
@@ -3388,6 +3390,7 @@ def test_v3_manifest_excludes_layout_and_expected_sha256(tmp_path: Path) -> None
             cutoff=day(CUTOFF),
             model="test",
             code_commit="test",
+            declared_cutoff=day(CUTOFF),
             manifest=loaded,
             layout={},
         )
@@ -3396,8 +3399,6 @@ def test_v3_manifest_excludes_layout_and_expected_sha256(tmp_path: Path) -> None
 def test_cli_v3_manifest_wiring(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The CLI --cutoff (synthetic 2026-01-10) equals every input date, so the R7
-    # gate passes for a non-2026-09-17 cutoff on the v3 manifest wiring.
     manifest = _manifest_tree_v3(tmp_path)
     manifest_path = tmp_path / "inputs-v3.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -3423,6 +3424,8 @@ def test_cli_v3_manifest_wiring(
     document = json.loads(out.read_text(encoding="utf-8"))
     assert document["inputs_manifest"]["schema"] == "qe-cp-acceptance-inputs/3"
     assert document["authority"]["fx_generation"] == V3_GENERATION
+    # --cutoff, manifest, ledger, crosswalk and the owner-declared cutoff
+    # artifact agree on the synthetic 2026-01-10: the gate passes.
     assert not any(
         "INPUT_CUTOFF_MISMATCH" in row["reason"] for row in document["not_derivable"]
     )
@@ -4873,16 +4876,17 @@ def test_v3_coverage_end_follows_a_withheld_cash_line(tmp_path: Path) -> None:
     assert (COVERAGE_METRIC, QB_ENTITY) in _reasons(document)
 
 
-# ------------------------------------------------ cutoff comes from the run, never a constant
+# ------------------------- the owner-declared cutoff artifact is the independent gate
 
 
-def _cli_argv(tmp_path: Path, manifest_path: Path, *cutoff: str) -> list[str]:
+def _cli_argv(tmp_path: Path, manifest_path: Path, cutoff: str) -> list[str]:
     return [
         "--qe-root",
         str(tmp_path),
         "--out",
         str(tmp_path / "out" / "expected.json"),
-        *cutoff,
+        "--cutoff",
+        cutoff,
         "--model",
         "test",
         "--code-commit",
@@ -4892,18 +4896,117 @@ def _cli_argv(tmp_path: Path, manifest_path: Path, *cutoff: str) -> list[str]:
     ]
 
 
+def _cli_v3(tmp_path: Path, manifest: dict[str, Any], cutoff: str) -> dict[str, Any]:
+    manifest_path = tmp_path / "inputs-v3.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert cli.main(_cli_argv(tmp_path, manifest_path, cutoff)) == 0
+    document: dict[str, Any] = json.loads(
+        (tmp_path / "out" / "expected.json").read_text(encoding="utf-8")
+    )
+    return document
+
+
+def _set_owner_cutoff(tmp_path: Path, manifest: dict[str, Any], day_text: str) -> None:
+    data = json.dumps({"calculation_cutoff_date": day_text, "rows": []}).encode()
+    entry = next(e for e in manifest["inputs"] if e["family"] == "declared_cutoff_date")
+    _write_bytes(tmp_path, entry["path"], data)
+    entry["sha256"] = hashlib.sha256(data).hexdigest()
+    entry["bytes"] = len(data)
+
+
 def test_no_builtin_declared_cutoff_constant() -> None:
     assert not hasattr(derive, "DECLARED_CUTOFF")
-    assert "declared_cutoff" not in derive.derive.__annotations__
 
 
 def test_cli_requires_cutoff(tmp_path: Path) -> None:
     manifest_path = tmp_path / "inputs.json"
-    manifest_path.write_text(json.dumps(_manifest_tree(tmp_path)), encoding="utf-8")
+    manifest_path.write_text(json.dumps(_manifest_tree_v3(tmp_path)), encoding="utf-8")
+    argv = _cli_argv(tmp_path, manifest_path, CUTOFF)
+    del argv[argv.index("--cutoff") : argv.index("--cutoff") + 2]
     with pytest.raises(SystemExit) as raised:
-        cli.main(_cli_argv(tmp_path, manifest_path))
+        cli.main(argv)
     assert raised.value.code == 2
-    assert not (tmp_path / "out" / "expected.json").exists()
+
+
+def test_owner_declared_artifact_equal_to_cutoff_derives(tmp_path: Path) -> None:
+    document = _cli_v3(tmp_path, _manifest_tree_v3(tmp_path), CUTOFF)
+    assert CUTOFF != "2026-09-17"
+    assert document["metrics"]
+    assert not any(
+        "INPUT_CUTOFF_MISMATCH" in row["reason"] for row in document["not_derivable"]
+    )
+    assert f"the declared cutoff {CUTOFF}" in json.dumps(document)
+
+
+def test_owner_declared_artifact_absent_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree_v3(tmp_path)
+    manifest["inputs"] = [
+        e for e in manifest["inputs"] if e["family"] != "declared_cutoff_date"
+    ]
+    document = _cli_v3(tmp_path, manifest, CUTOFF)
+    assert document["metrics"] == []
+    assert document["not_derivable"]
+    assert all(
+        "R7 INPUT_CUTOFF_MISMATCH" in r["reason"]
+        and "owner-declared cutoff artifact absent from inputs manifest" in r["reason"]
+        for r in document["not_derivable"]
+    )
+
+
+def test_owner_declared_artifact_naming_another_date_fails_closed(
+    tmp_path: Path,
+) -> None:
+    # Every other input and --cutoff agree on 2026-01-10; only the owner's
+    # artifact differs, so the run argument cannot be its own authority.
+    manifest = _manifest_tree_v3(tmp_path)
+    _set_owner_cutoff(tmp_path, manifest, "2026-09-17")
+    document = _cli_v3(tmp_path, manifest, CUTOFF)
+    assert document["metrics"] == []
+    assert all(
+        "owner-declared cutoff artifact calculation_cutoff_date 2026-09-17 != "
+        f"{CUTOFF}" in r["reason"]
+        for r in document["not_derivable"]
+    )
+
+
+def test_owner_declared_artifact_agreeing_with_09_17_adds_no_owner_mismatch(
+    tmp_path: Path,
+) -> None:
+    # Declaring and running the same date derives whatever that date is: here
+    # the artifact and --cutoff say 09-17, while ledger/crosswalk say 01-10, so
+    # only those inputs trip the gate; the owner artifact itself does not.
+    manifest = _manifest_tree_v3(tmp_path)
+    _set_owner_cutoff(tmp_path, manifest, "2026-09-17")
+    document = _cli_v3(tmp_path, manifest, "2026-09-17")
+    reasons = " ".join(r["reason"] for r in document["not_derivable"])
+    assert "owner-declared cutoff artifact" not in reasons
+    assert "provider-ledger.as_of_date" in reasons
+
+
+def test_owner_declared_artifact_unparseable_cutoff_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest_tree_v3(tmp_path)
+    _set_owner_cutoff(tmp_path, manifest, "not-a-date")
+    document = _cli_v3(tmp_path, manifest, CUTOFF)
+    assert document["metrics"] == []
+    assert all(
+        "lacks a valid calculation_cutoff_date" in r["reason"]
+        for r in document["not_derivable"]
+    )
+
+
+def test_v2_manifest_without_artifact_fails_closed_from_cli(tmp_path: Path) -> None:
+    # Legacy v2 manifests cannot carry the artifact: the CLI fails closed.
+    manifest_path = tmp_path / "inputs.json"
+    manifest_path.write_text(json.dumps(_manifest_tree(tmp_path)), encoding="utf-8")
+    assert cli.main(_cli_argv(tmp_path, manifest_path, CUTOFF)) == 0
+    document = json.loads((tmp_path / "out" / "expected.json").read_text("utf-8"))
+    assert document["metrics"] == []
+    assert all(
+        "owner-declared cutoff artifact absent" in r["reason"]
+        for r in document["not_derivable"]
+    )
 
 
 @pytest.mark.parametrize("builder", ["v2", "v3"])
@@ -4917,82 +5020,24 @@ def test_manifest_without_cutoff_fails_closed(tmp_path: Path, builder: str) -> N
         del manifest["cutoff"]
         document = _run_v3(tmp_path, manifest)
     assert document["metrics"] == []
-    assert document["not_derivable"]
     assert all(
-        "inputs manifest cutoff None" in row["reason"]
-        for row in document["not_derivable"]
+        "inputs manifest cutoff None" in r["reason"] for r in document["not_derivable"]
     )
 
 
-@pytest.mark.parametrize("builder", ["v2", "v3"])
-def test_cli_cutoff_differs_from_manifest_fails_closed(
-    tmp_path: Path, builder: str
-) -> None:
-    manifest = (
-        _manifest_tree(tmp_path) if builder == "v2" else _manifest_tree_v3(tmp_path)
-    )
-    manifest_path = tmp_path / "inputs.json"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    # --cutoff 2026-01-09 against a manifest (and ledger, crosswalk) at 2026-01-10.
-    code = cli.main(_cli_argv(tmp_path, manifest_path, "--cutoff", "2026-01-09"))
-    assert code == 0
-    document = json.loads((tmp_path / "out" / "expected.json").read_text("utf-8"))
-    assert document["metrics"] == []
-    assert document["not_derivable"]
-    assert all(
-        "R7 INPUT_CUTOFF_MISMATCH" in row["reason"]
-        and f"inputs manifest cutoff {CUTOFF} != 2026-01-09" in row["reason"]
-        for row in document["not_derivable"]
-    )
-
-
-def test_cli_2026_09_17_is_not_a_silent_default(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "inputs.json"
-    manifest_path.write_text(json.dumps(_manifest_tree(tmp_path)), encoding="utf-8")
-    code = cli.main(_cli_argv(tmp_path, manifest_path, "--cutoff", "2026-09-17"))
-    assert code == 0
-    document = json.loads((tmp_path / "out" / "expected.json").read_text("utf-8"))
-    assert document["metrics"] == []
-    assert all(
-        f"inputs manifest cutoff {CUTOFF} != 2026-09-17" in row["reason"]
-        for row in document["not_derivable"]
-    )
-
-
-def test_non_0917_cutoff_end_to_end_passes_the_gate(tmp_path: Path) -> None:
-    # Consistent synthetic tree at 2026-01-10: derived, not fail closed, and the
-    # cutoff gate note carries the supplied cutoff.
-    manifest_path = tmp_path / "inputs.json"
-    manifest_path.write_text(json.dumps(_manifest_tree(tmp_path)), encoding="utf-8")
-    code = cli.main(_cli_argv(tmp_path, manifest_path, "--cutoff", CUTOFF))
-    assert code == 0
-    document = json.loads((tmp_path / "out" / "expected.json").read_text("utf-8"))
-    assert document["metrics"]
-    assert not any(
-        "INPUT_CUTOFF_MISMATCH" in row["reason"] for row in document["not_derivable"]
-    )
-    notes = json.dumps(document)
-    assert f"the declared cutoff {CUTOFF}" in notes
-
-
-@pytest.mark.parametrize("mutation", ["crosswalk_cutoff", "ledger_as_of"])
-def test_input_dates_checked_against_supplied_cutoff(
-    tmp_path: Path, mutation: str
-) -> None:
-    # A consistent tree at 2026-01-10 is NOT accepted when only one input moves.
+def test_manifestless_call_without_declared_cutoff_fails_closed(tmp_path: Path) -> None:
     _synthetic_root(tmp_path)
-    if mutation == "crosswalk_cutoff":
-        _write(
-            tmp_path,
-            derive.CROSSWALK,
-            json.dumps(_crosswalk(calculation_cutoff_date="2026-01-11")),
-        )
-    else:
-        ledger = _ledger()
-        ledger["as_of_date"] = "2026-01-09"
-        _write(tmp_path, derive.LEDGER, json.dumps(ledger))
-    document = _run(tmp_path)
+    document = derive.derive(
+        tmp_path,
+        _synthetic_repo(tmp_path),
+        cutoff=day(CUTOFF),
+        model="test",
+        code_commit="test",
+        layout=LAYOUT,
+        expected_sha256={},
+    )
     assert document["metrics"] == []
     assert all(
-        "R7 INPUT_CUTOFF_MISMATCH" in r["reason"] for r in document["not_derivable"]
+        "owner-declared cutoff artifact absent" in r["reason"]
+        for r in document["not_derivable"]
     )
