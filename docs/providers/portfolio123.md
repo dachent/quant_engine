@@ -214,6 +214,9 @@ shares). The book is refused, with the numbers, only when data is missing (no ho
 export, an unreadable date, an unknown row type after D) or the closure fails; the decisions
 file records `positions_as_of` (positions digest, rolled-back rows by type, splits after D).
 No consumer reads a Portfolio123 holdings table; positions at D are an audit record.
+Always run the identity check with `--as-of D`, D being the plan's as-of date: the plan
+refuses a decisions file whose `settings.as_of` is not the plan's as-of date, so a book
+without a holdings export fails I5D instead of reaching REVIEW.
 In a schema 2 generation the HAR-derived `transactions`, `equity_curve` and
 `period_performance` rows dated after the cutoff are excluded and counted in
 `har_excluded_after_as_of`, like the capture rows.

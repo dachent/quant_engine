@@ -113,7 +113,9 @@ def _stage_downloads(har: Path, books: dict[str, str]) -> None:
         )
 
 
-def _auto(har: Path, options: dict[str, object]) -> dict[str, object]:
+def _auto(
+    har: Path, options: dict[str, object], day: date = date(2026, 9, 11)
+) -> dict[str, object]:
     """Supply a PASS identity decision per captured book and exclude the other HAR ids."""
 
     captures = [Path(str(item)) for item in options.get("transaction_captures", [])]  # type: ignore[attr-defined]
@@ -134,6 +136,7 @@ def _auto(har: Path, options: dict[str, object]) -> dict[str, object]:
             {
                 "schema": "p123-book-identity-decisions/1",
                 "capture_manifest_sha256": sha,
+                "settings": {"as_of": day.isoformat()},
                 "books": {book: {"decision": "PASS"} for book in books},
             }
         )
@@ -161,7 +164,7 @@ def _generate(
     **options: object,
 ) -> str:
     planned = create_cutover_plan(
-        legacy, har, data, as_of_date=day, **_auto(har, options)
+        legacy, har, data, as_of_date=day, **_auto(har, options, day)
     )  # type: ignore[arg-type]
     plan = Path(str(planned["plan_path"]))
     generation_id = str(stage_candidate(plan)["generation_id"])
@@ -171,7 +174,7 @@ def _generate(
 
 def _refused(legacy: Path, har: Path, data: Path, day: date, **options: object) -> str:
     planned = create_cutover_plan(
-        legacy, har, data, as_of_date=day, **_auto(har, options)
+        legacy, har, data, as_of_date=day, **_auto(har, options, day)
     )  # type: ignore[arg-type]
     with pytest.raises(Portfolio123GenerationError) as refused:
         stage_candidate(Path(str(planned["plan_path"])))
@@ -384,7 +387,9 @@ def test_publish_refuses_when_current_moved_after_planning(tmp_path: Path) -> No
         data,
         as_of_date=date(2026, 9, 12),
         **_auto(
-            har, {"transaction_captures": [_capture(tmp_path, "b", {"101": _full(6)})]}
+            har,
+            {"transaction_captures": [_capture(tmp_path, "b", {"101": _full(6)})]},
+            date(2026, 9, 12),
         ),  # type: ignore[arg-type]
     )
     moved = _generate(
@@ -742,11 +747,28 @@ def _decisions(capture: Path, **decisions: str) -> dict[str, object]:
         books[book] = {"decision": decision}
     return {
         "schema": "p123-book-identity-decisions/1",
+        "settings": {"as_of": "2026-09-11"},
         "capture_manifest_sha256": hashlib.sha256(
             (capture / "capture-manifest.json").read_bytes()
         ).hexdigest(),
         "books": books,
     }
+
+
+def test_identity_decisions_must_be_made_with_the_plans_as_of(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    options = _auto(har, {"transaction_captures": [capture]})
+    for settings in ({}, {"as_of": None}, {"as_of": "2026-09-10"}):
+        decision = {**_decisions(capture), "settings": settings}
+        with pytest.raises(Portfolio123GenerationError, match="--as-of 2026-09-11"):
+            create_cutover_plan(
+                legacy,
+                har,
+                data,
+                as_of_date=date(2026, 9, 11),
+                **{**options, "identity_decisions": [decision]},  # type: ignore[arg-type]
+            )
 
 
 SEED_ROLE = "excluded: no capture this cycle; seed role: carried HAR rows are dropped"
@@ -899,7 +921,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             expected_books=["101", "202"],
             book_inventory=INVENTORY,
             **base,  # type: ignore[arg-type]
@@ -910,7 +932,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             book_inventory=unlisted,
             **base,  # type: ignore[arg-type]
         )
@@ -919,7 +941,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             book_inventory={**INVENTORY, "101": {"role": "x", "route": "skip"}},
             **base,  # type: ignore[arg-type]
         )
@@ -928,7 +950,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             book_inventory={**INVENTORY, "909": {"role": "x", "route": "exempt"}},
             **base,  # type: ignore[arg-type]
         )

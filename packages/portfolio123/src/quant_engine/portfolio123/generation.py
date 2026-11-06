@@ -372,6 +372,7 @@ def _gate_inputs(
     identity_review_accepted: Mapping[str, str],
     har_download_ids: Sequence[str],
     book_inventory: Mapping[str, Mapping[str, str]],
+    as_of: date,
 ) -> dict[str, Any]:
     captured: dict[str, str] = {}
     captured_perf: dict[str, str] = {}
@@ -483,7 +484,7 @@ def _gate_inputs(
         untrusted_har_ids, captured, captured_perf, har_download_ids
     )
     decisions = _identity_decisions(
-        sources, captured, identity_decisions, identity_review_accepted
+        sources, captured, identity_decisions, identity_review_accepted, as_of
     )
     if book_inventory:
         # The frozen inventory names every book the cycle knows: each captured id and
@@ -601,8 +602,10 @@ def _identity_decisions(
     captured: Mapping[str, str],
     decision_files: Sequence[Mapping[str, Any]],
     review_accepted: Mapping[str, str],
+    as_of: date,
 ) -> dict[str, dict[str, Any]]:
-    """Every captured book needs a PASS identity decision for these capture bytes."""
+    """Every captured book needs a PASS identity decision for these capture bytes, made
+    with ``--as-of`` equal to the plan's as-of date (so the roll-back check I5D ran)."""
 
     if not captured:
         if decision_files or review_accepted:
@@ -624,6 +627,13 @@ def _identity_decisions(
         if decided.get("schema") != "p123-book-identity-decisions/1" or owner is None:
             raise Portfolio123GenerationError(
                 "identity decisions are not for a capture of this plan"
+            )
+        made_for = (decided.get("settings") or {}).get("as_of")
+        if made_for != as_of.isoformat():
+            raise Portfolio123GenerationError(
+                f"identity decisions were made with as_of {made_for}, the plan is "
+                f"{as_of.isoformat()}: rerun the identity check with --as-of "
+                f"{as_of.isoformat()}"
             )
         by_label[owner] = decided
     result: dict[str, dict[str, Any]] = {}
@@ -773,6 +783,7 @@ def create_cutover_plan(
             }
         ),
         inventory,
+        as_of_date,
     )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),
