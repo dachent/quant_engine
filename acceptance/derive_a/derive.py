@@ -152,7 +152,6 @@ PERFORMANCE_POLICY = "contracts/portfolio-performance-policy-v1.json"
 MVP_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
 FLOW_POLICY = "contracts/account-strategy-flow-classification-policy-v1.json"
 CONTRACTS = (PERFORMANCE_POLICY, MVP_CONTRACT, FLOW_POLICY)
-DECLARED_CUTOFF = dt.date(2026, 9, 17)
 
 # --------------------------------------------------------------------- v3 (R6 v3 / R8)
 #
@@ -471,12 +470,14 @@ WINDOWED = {
     "mwr.strategy",
 }
 
-CONVENTION_NOTES = (
-    "R7 cutoff gate: the declared cutoff 2026-09-17 (metric spec fixed fact) must "
+CUTOFF_GATE_NOTE = (
+    "R7 cutoff gate: the declared cutoff {cutoff} (metric spec fixed fact) must "
     "equal the selected cutoff, crosswalk.calculation_cutoff_date, crosswalk."
     "as_of_date and provider-ledger.as_of_date; any mismatch fails closed and every "
     "metric is emitted as not_derivable. The account-strategy manifest is a "
-    "production output and is not read.",
+    "production output and is not read."
+)
+CONVENTION_NOTES = (
     "Windows: contracts/portfolio-performance-policy-v1.json defines no window ids; "
     "only ITD is derived (spec minimum).",
     "R1/R2 membership: contracts/portfolio-hwm-policy-v4.json membership_policy."
@@ -3903,6 +3904,41 @@ def _coverage_entity(strategy_id: str, holders: Sequence[str]) -> str:
     return f"{strategy_id}|{provider}|{account}"
 
 
+def _owner_declared_cutoff(
+    qe_root: Path, manifest: InputsManifest | None, declared: dt.date | None
+) -> tuple[dt.date | None, str]:
+    """The cutoff the owner declared, independent of the run argument.
+
+    Returns ``(date, "")`` or ``(None, why it is unavailable)``.
+    """
+
+    if manifest is None or manifest.epoch_metadata is None:
+        if declared is not None:
+            return declared, ""
+        if manifest is None:
+            return None, "absent: no inputs manifest and no declared cutoff supplied"
+        return None, (
+            f"absent from inputs manifest {manifest.path} "
+            "(no declared_cutoff_date entry; legacy v1/v2 inputs carry none)"
+        )
+    path, digest, size = manifest.epoch_metadata
+    metadata = read_input(qe_root, path, {path: digest})
+    if size is not None and metadata.size != size:
+        raise InputError("epoch metadata byte count differs from manifest")
+    try:
+        document = json.loads(metadata.data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, f"{path} is not JSON"
+    day = (
+        iso_date(document.get("calculation_cutoff_date"))
+        if isinstance(document, dict)
+        else None
+    )
+    if day is None:
+        return None, f"{path} lacks a valid calculation_cutoff_date"
+    return day, ""
+
+
 def derive(
     qe_root: Path,
     repo_root: Path,
@@ -3912,7 +3948,7 @@ def derive(
     code_commit: str,
     expected_sha256: Mapping[str, str] | None = None,
     layout: Mapping[str, str] | None = None,
-    declared_cutoff: dt.date = DECLARED_CUTOFF,
+    declared_cutoff: dt.date | None = None,
     manifest: InputsManifest | None = None,
     sleeve_inputs: Path | None = None,
     sleeves_only: bool = False,
@@ -3926,6 +3962,11 @@ def derive(
     manifest is mutually exclusive with both (fail closed), since it must
     override them and silent overwriting would hide a conflicting source
     selection.
+
+    The owner-declared cutoff is an independent authority: for a v3 manifest it
+    is ``calculation_cutoff_date`` of the pinned ``declared_cutoff_date``
+    artifact; ``declared_cutoff`` stands in only when no artifact is
+    available (synthetic tests; the CLI never supplies it). Absent, or different from ``cutoff``, the run fails closed.
     """
 
     if sleeves_only and sleeve_inputs is None:
@@ -4087,7 +4128,7 @@ def _derive(
     code_commit: str,
     expected_sha256: Mapping[str, str] | None,
     layout: Mapping[str, str] | None,
-    declared_cutoff: dt.date,
+    declared_cutoff: dt.date | None,
     manifest: InputsManifest | None,
     sleeve_document: dict[str, Any] | None = None,
     sleeve_parents: Mapping[str, str] | None = None,
@@ -4189,12 +4230,15 @@ def _derive(
     statuses = parse_membership_status(contract_bytes[MVP_CONTRACT])
     output = Output()
     restated_rows: list[str] = []
-    notes = list(CONVENTION_NOTES)
+    notes = [CUTOFF_GATE_NOTE.format(cutoff=cutoff), *CONVENTION_NOTES]
     if v3 and authority is not None:
         notes.extend(V3_CONVENTION_NOTES)
         notes.extend(authority.notes)
+    owner_declared, owner_absent = _owner_declared_cutoff(
+        qe_root, manifest, declared_cutoff
+    )
     mismatches = [
-        f"{name} {value} != {declared_cutoff}"
+        f"{name} {value} != {cutoff}"
         for name, value in (
             ("selected cutoff", cutoff),
             ("crosswalk.calculation_cutoff_date", crosswalk.calculation_cutoff_date),
@@ -4202,8 +4246,15 @@ def _derive(
             ("provider-ledger.as_of_date", ledger.as_of_date),
         )
         + ((("inputs manifest cutoff", manifest.cutoff),) if manifest else ())
-        if value != declared_cutoff
+        if value != cutoff
     ]
+    if owner_declared is None:
+        mismatches.append(f"owner-declared cutoff artifact {owner_absent}")
+    elif owner_declared != cutoff:
+        mismatches.append(
+            f"owner-declared cutoff artifact calculation_cutoff_date "
+            f"{owner_declared} != {cutoff}"
+        )
     if mismatches:
         reason = "R7 INPUT_CUTOFF_MISMATCH (fail closed): " + "; ".join(mismatches)
         notes.append(reason)
