@@ -629,6 +629,11 @@
       1
     ],
     [
+      "provider_ledger",
+      "schwab_rollback",
+      1
+    ],
+    [
       "quantbase_cdp_navigator",
       "quantbase_cdp_har_recorder",
       1
@@ -734,8 +739,18 @@
       1
     ],
     [
+      "schwab_capture_ingest",
+      "schwab_nav_derive",
+      1
+    ],
+    [
       "schwab_nav_derive",
       "schwab_capture_driver",
+      1
+    ],
+    [
+      "schwab_nav_derive",
+      "schwab_rollback",
       1
     ],
     [
