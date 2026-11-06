@@ -371,6 +371,9 @@ MODE_NEXT_SESSION = "NEXT_SESSION_PRE_OPEN"
 MODE_SAME_DAY = "SAME_DAY_POST_CLOSE"
 MODE_BEFORE_CLOSE = "BEFORE_CLOSE"
 MODE_OUTSIDE = "OUTSIDE_STANDARD_WINDOW"
+# Any capture after the first date following the cutoff close: the account is rolled back to the
+# cutoff close from its own transactions (tools/schwab_rollback.py), so no label is needed.
+MODE_LATE = "LATER_DAY_ROLLED_BACK"
 WINDOW_END_LOCAL_TIME = time(20, 0)
 
 
@@ -437,7 +440,7 @@ def assess_timing(
     ):
         mode = MODE_NEXT_SESSION
     else:
-        mode = MODE_OUTSIDE
+        mode = MODE_LATE
     lag = Decimal((captured - cutoff.close_utc).total_seconds()) / Decimal(3600)
     timing = CaptureTiming(
         captured_at=captured,
@@ -452,17 +455,16 @@ def assess_timing(
         if not is_trading_day(cutoff.as_of_date):
             raise DriverError("cutoff date is not a trading day")
         if mode == MODE_BEFORE_CLOSE:
-            raise DriverError("capture precedes the declared cutoff close")
+            raise DriverError(
+                "capture precedes the declared cutoff close: the closing data of "
+                "the cutoff day does not exist yet"
+            )
         if mode == MODE_SAME_DAY:
             raise DriverError(
-                "same-day post-close capture needs an approved exception label"
-            )
-        if mode == MODE_OUTSIDE:
-            if capture_day == first_next and captured < window_end:
-                raise DriverError("capture is after the next session open")
-            raise DriverError(
-                "capture is outside the first-next-date window (cutoff plus one "
-                "calendar date, before 20:00 New York)"
+                "same-day capture: the balance history ends the day before the "
+                "capture, so the cutoff-day balance row is not available yet; "
+                "capture on a later day; a same-day capture needs an approved "
+                "exception label"
             )
     return timing
 
@@ -565,10 +567,10 @@ def _provider_date(value: object, name: str) -> date:
 
 
 def _as_of_fields(
-    as_of: date, cutoff: Cutoff, exception_label: str | None
+    as_of: date, cutoff: Cutoff, exception_label: str | None, *, late: bool = False
 ) -> dict[str, object]:
     offset = (as_of - cutoff.as_of_date).days
-    if offset != 0 and exception_label is None:
+    if offset != 0 and exception_label is None and not late:
         raise DriverError("as-of date differs from the declared cutoff close")
     return {
         "as_of_date": as_of.isoformat(),
@@ -581,6 +583,7 @@ def _as_of_basis(timing: CaptureTiming) -> str:
     return {
         MODE_NEXT_SESSION: "CAPTURED_AFTER_CLOSE_BEFORE_NEXT_SESSION_OPEN",
         MODE_SAME_DAY: "CAPTURED_SAME_DAY_AFTER_CLOSE_LABELLED",
+        MODE_LATE: "CAPTURED_LATER_DAY_ROLLED_BACK_TO_CUTOFF",
     }.get(timing.mode, "CAPTURED_OUTSIDE_STANDARD_WINDOW_LABELLED")
 
 
@@ -711,7 +714,9 @@ def normalize_holdings(
                     refuse("market_value_differs_from_quantity_times_price")
                     continue
                 try:
-                    as_of_fields = _as_of_fields(as_of, cutoff, label)
+                    as_of_fields = _as_of_fields(
+                        as_of, cutoff, label, late=timing.mode == MODE_LATE
+                    )
                 except DriverError:
                     refuse("as_of_differs_from_cutoff_close")
                     continue
@@ -835,7 +840,7 @@ def normalize_balances(
                 "account_id": internal,
                 "account_value_usd": _dec_text(observed[selected]),
                 "series_last_date": max(observed).isoformat(),
-                **_as_of_fields(selected, cutoff, label),
+                **_as_of_fields(selected, cutoff, label, late=timing.mode == MODE_LATE),
             }
         )
     if not rows:
@@ -1539,12 +1544,19 @@ load_json_file = _load
 
 
 def _check_as_of(
-    row: Mapping[str, Any], cutoff: date, label: object, name: str
+    row: Mapping[str, Any],
+    cutoff: date,
+    label: object,
+    name: str,
+    *,
+    late: bool = False,
 ) -> None:
     offset = (date.fromisoformat(str(row["as_of_date"])) - cutoff).days
     if row.get("as_of_offset_days") != offset:
         raise DriverError(f"{name} offset is inconsistent")
-    if offset != 0 and (label is None or row.get("as_of_exception_label") != label):
+    if offset != 0 and (
+        row.get("as_of_exception_label") != label or (label is None and not late)
+    ):
         raise DriverError(f"{name} differs from the cutoff without its label")
     if offset == 0 and row.get("as_of_exception_label") is not None:
         raise DriverError(f"{name} carries a label without an offset")
@@ -1623,7 +1635,14 @@ def _verify_run(
         market_value = _decimal_or_none(row.get("market_value_usd"))
         if quantity is None or quantity == 0 or market_value is None:
             raise DriverError("held position lacks a quantity or market value")
-        _check_as_of(row, cutoff.as_of_date, label, "position")
+        _check_as_of(
+            row,
+            cutoff.as_of_date,
+            label,
+            "position",
+            late=_object(positions.get("capture"), "capture").get("capture_mode")
+            == MODE_LATE,
+        )
     capture = _object(positions.get("capture"), "capture")
     captured = _aware_utc(capture.get("captured_at_utc"), "captured_at_utc")
     if assess_timing(captured, cutoff, exception_label=label).to_dict() != capture:
@@ -1652,7 +1671,14 @@ def _verify_run(
     for brow in brows:
         if _decimal_or_none(brow.get("account_value_usd")) is None:
             raise DriverError("balance value is null")
-        _check_as_of(brow, cutoff.as_of_date, label, "balance")
+        _check_as_of(
+            brow,
+            cutoff.as_of_date,
+            label,
+            "balance",
+            late=_object(balances.get("capture"), "capture").get("capture_mode")
+            == MODE_LATE,
+        )
     transactions = _object(manifest["transactions"], "transactions")
     if sorted(transactions) != accounts or not all(
         _object(v, "transaction summary").get("terminal") is True

@@ -31,10 +31,11 @@ python tools/schwab_nav_derive.py declare --run-dir R --crosswalk C --closes-dir
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import hashlib
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal
 import io
 import json
@@ -82,6 +83,34 @@ def _list(value: object, name: str) -> list[Any]:
     return value
 
 
+def _is_zero(row: Mapping[str, Any]) -> bool:
+    quantity = row.get("qty")
+    return isinstance(quantity, dict) and quantity.get("qty") in (0, "0", 0.0)
+
+
+def rows_after_exist(run_dir: Path, accounts: Sequence[str], day: date) -> bool:
+    """Whether any captured transaction row is posted or effective after ``day``."""
+
+    for account in accounts:
+        for row in account_rows(run_dir, account):
+            for key in ("transactionDate", "effectiveDate"):
+                if (
+                    str(row.get(key) or "").strip()
+                    and _row_date(account, row[key]) > day
+                ):
+                    return True
+    return False
+
+
+def _row_date(account: str, text: object) -> date:
+    for pattern in ("%m/%d/%Y", "%Y-%m-%d"):  # the driver reads both
+        try:
+            return datetime.strptime(str(text).split()[0], pattern).date()
+        except (ValueError, IndexError):
+            continue
+    raise DeriveError(f"{account}: a captured transaction row has an unreadable date")
+
+
 def read_holdings(
     raw: object, crosswalk: Mapping[str, str]
 ) -> dict[str, tuple[dict[str, Decimal], Decimal]]:
@@ -102,6 +131,8 @@ def read_holdings(
                 _mapping(group, "holdings group").get("holdingsRows"), "holdings rows"
             ):
                 if group.get("securityType") == CASH_SECURITY_TYPE:
+                    if row.get("marketValue") is None and _is_zero(row):
+                        continue  # an emptied cash-group row carries no value
                     cash += _decimal(
                         _mapping(row.get("marketValue"), "market value").get("val"),
                         "cash value",
@@ -182,6 +213,95 @@ def account_rows(run_dir: Path, account: str) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
+def rolled_holdings(
+    run_dir: Path,
+    held: Mapping[str, tuple[dict[str, Decimal], Decimal]],
+    day: date,
+) -> dict[str, RolledBack]:
+    """Every account's holdings at the close of ``day``, rolled back from the capture."""
+
+    rolled: dict[str, RolledBack] = {}
+    for account, (quantities, cash) in held.items():
+        try:
+            rolled[account] = roll_back(
+                account, account_rows(run_dir, account), quantities, cash, day
+            )
+        except RollbackError as exc:
+            raise DeriveError(str(exc)) from exc
+    return rolled
+
+
+def _like(original: object, value: Decimal) -> object:
+    """``value`` written the way the response wrote its number (string, int or float)."""
+
+    if isinstance(original, str):
+        return format(value, "f")
+    if value == value.to_integral_value() and not isinstance(original, float):
+        return int(value)
+    return float(value)
+
+
+def apply_rollback(
+    raw: object,
+    crosswalk: Mapping[str, str],
+    rolled: Mapping[str, RolledBack],
+) -> tuple[dict[str, Any], int]:
+    """A copy of the raw holdings response whose quantities and cash are the rolled-back ones.
+
+    Rows keep their shape; a position rolled to zero keeps a zero-quantity row (counted in the second
+    result, for the caller to reconcile). A position the capture never listed (sold in full after the
+    day) cannot be given a row the provider never sent, and the cash change needs the account's one
+    quantity-less cash summary row: both refuse.
+    """
+
+    document = copy.deepcopy(dict(_mapping(raw, "holdings")))
+    zeroed = 0
+    for account in _list(document.get("accounts"), "holdings accounts"):
+        internal = crosswalk[
+            str(_mapping(account, "holdings account").get("accountId"))
+        ]
+        after = rolled[internal]
+        symbols_seen: set[str] = set()
+        summary: list[dict[str, Any]] = []
+        cash_now = Decimal(0)
+        for group in _list(account.get("groupedPositions"), "holdings groups"):
+            for row in _list(group.get("holdingsRows"), "holdings rows"):
+                if group.get("securityType") == CASH_SECURITY_TYPE:
+                    if row.get("marketValue") is None and _is_zero(row):
+                        continue
+                    cash_now += _decimal(row["marketValue"]["val"], "cash value")
+                    if "qty" not in row and row.get("rowType") == 3:
+                        summary.append(row)
+                    continue
+                symbol = row.get("dataSymbol")
+                if not isinstance(symbol, str) or not symbol.strip():
+                    symbol = _mapping(row.get("symbol"), "symbol").get("symbol")
+                key = after.quantities.get(str(symbol), Decimal(0))
+                symbols_seen.add(str(symbol))
+                if _decimal(row["qty"]["qty"], "quantity") != key:
+                    row["qty"]["qty"] = _like(row["qty"]["qty"], key)
+                    if key == 0:
+                        zeroed += 1
+        absent = sorted(set(after.quantities) - symbols_seen)
+        if absent:
+            raise DeriveError(
+                f"{internal}: held at the close but absent from the capture (sold in full "
+                f"after it): {','.join(absent)}; the capture has no row to bind them to"
+            )
+        delta = after.cash - cash_now
+        if delta:
+            if len(summary) != 1:
+                raise DeriveError(
+                    f"{internal}: the cash changed by {delta} since the close but the "
+                    f"capture has {len(summary)} cash summary rows, not one"
+                )
+            value = summary[0]["marketValue"]
+            value["val"] = _like(
+                value["val"], _decimal(value["val"], "cash value") + delta
+            )
+    return document, zeroed
+
+
 def derive(
     *,
     run_dir: Path,
@@ -214,14 +334,7 @@ def derive(
         ),
         crosswalk,
     )
-    rolled_by_account: dict[str, RolledBack] = {}
-    for account, (quantities, cash) in held.items():
-        try:
-            rolled_by_account[account] = roll_back(
-                account, account_rows(run_dir, account), quantities, cash, day
-            )
-        except RollbackError as exc:
-            raise DeriveError(str(exc)) from exc
+    rolled_by_account = rolled_holdings(run_dir, held, day)
     symbols = sorted(
         {s for rolled in rolled_by_account.values() for s in rolled.quantities}
     )
@@ -369,7 +482,21 @@ def declare(
         ),
         crosswalk,
     )
-    symbols = sorted({s for row in patched for s in held[row["account_id"]][0]})
+    rolled = rolled_holdings(run_dir, held, day)
+    symbols = sorted(
+        {s for row in patched for s in rolled[row["account_id"]].quantities}
+    )
+    transactions = [
+        {
+            "account_id": row["account_id"],
+            **_pin(
+                run_dir
+                / f"transactions/normalized/wch/transactions/{row['account_id']}.json"
+            ),
+        }
+        for row in report
+        if record[row["account_id"]].get("rolled_back_rows")
+    ]
     return {
         "roots": spec_doc["roots"],
         "sources": [
@@ -390,6 +517,7 @@ def declare(
                 ],
                 "cash_security_type": CASH_SECURITY_TYPE,
                 "rounding": REPLAY_ROUNDING,
+                **({"transactions": transactions} if transactions else {}),
             },
             "native_balances": [
                 {

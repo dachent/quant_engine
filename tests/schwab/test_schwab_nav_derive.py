@@ -277,8 +277,15 @@ def _ledger() -> object:
     return provider_ledger
 
 
-def _declared(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
-    run, closes = _world(tmp_path)
+def _declared(
+    tmp_path: Path,
+    *,
+    stale_native: tuple[float, float] = (1000.5, 1000.5),
+    rows: list[dict[str, str]] | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    run, closes = _world(tmp_path, stale_native=stale_native)
+    if rows:
+        _rows(run, "account-00000000000000a2", rows)
     record, _ = _derive(run, closes)
     derivation = tmp_path / "derivation.json"
     derivation.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
@@ -614,3 +621,40 @@ def test_a_symbol_without_a_close_file_at_d_stops_the_derivation(
     _rows(run, STALE, [{**SELL_AFTER_D, "symbol": "CCC", "shareQuantity": "2"}])
     with pytest.raises(derive_tool.DeriveError, match="no official close file for CCC"):
         _derive(run, closes)
+
+
+def test_a_rolled_back_derivation_is_replayed_exactly_by_the_ledger(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger()
+    evidence, catalog = _declared(
+        tmp_path, stale_native=(994.5, 994.5), rows=[SELL_AFTER_D]
+    )
+    replay = evidence["derived_patch"]["replay"]  # type: ignore[index]
+    assert [p["account_id"] for p in replay["transactions"]] == [
+        "account-00000000000000a2"
+    ]
+    patch = ledger._schwab_source_derived_patch(evidence, DAY, catalog)  # type: ignore[attr-defined]
+    values = {PRIOR: Decimal("994.5"), DAY: Decimal("1055.00")}
+    ledger._check_schwab_source_cutoff_row(  # type: ignore[attr-defined]
+        patch, "account-00000000000000a2", values, DAY
+    )
+
+
+def test_the_ledger_refuses_a_replay_whose_transactions_are_altered_or_dropped(
+    tmp_path: Path,
+) -> None:
+    ledger = _ledger()
+    evidence, catalog = _declared(
+        tmp_path, stale_native=(994.5, 994.5), rows=[SELL_AFTER_D]
+    )
+    pinned = Path(evidence["derived_patch"]["replay"]["transactions"][0]["path"])  # type: ignore[index]
+    original = pinned.read_text(encoding="utf-8")
+    pinned.write_text(original.replace('"$96.00"', '"$97.00"'), encoding="utf-8")
+    with pytest.raises(Exception, match="(?i)pin|sha|differ"):
+        ledger._schwab_source_derived_patch(evidence, DAY, catalog)  # type: ignore[attr-defined]
+    pinned.write_text(original, encoding="utf-8")
+    dropped = json.loads(json.dumps(evidence))
+    del dropped["derived_patch"]["replay"]["transactions"]
+    with pytest.raises(Exception, match="differ"):
+        ledger._schwab_source_derived_patch(dropped, DAY, catalog)  # type: ignore[attr-defined]

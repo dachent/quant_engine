@@ -88,6 +88,7 @@ from quant_engine.schwab import (
 )
 
 import schwab_capture_driver as driver
+import schwab_nav_derive as derive_tool
 
 
 ADAPTER_VERSION = "schwab-capture-ingest-1"
@@ -592,11 +593,15 @@ def _capture_binding(
     if recomputed != capture or balance_recomputed != balance_capture:
         raise IngestError("capture timing differs from the capture time it records")
     utc_date = date.fromisoformat(str(capture["capture_date_utc"]))
-    if label is None and (
-        capture["capture_mode"] != driver.MODE_NEXT_SESSION
-        or balance_capture["capture_mode"] != driver.MODE_NEXT_SESSION
-        or utc_date != cutoff.as_of_date + timedelta(days=1)
-        or capture["capture_date_new_york"] != utc_date.isoformat()
+    if (
+        label is None
+        and capture["capture_mode"] != driver.MODE_LATE  # rolled back: no +1 rule
+        and (
+            capture["capture_mode"] != driver.MODE_NEXT_SESSION
+            or balance_capture["capture_mode"] != driver.MODE_NEXT_SESSION
+            or utc_date != cutoff.as_of_date + timedelta(days=1)
+            or capture["capture_date_new_york"] != utc_date.isoformat()
+        )
     ):
         raise IngestError(
             "an unlabelled run must be captured on the first date after the "
@@ -660,11 +665,12 @@ def ingest(
     if set(manifest["accounts"]) != accounts or len(accounts) != len(crosswalk):
         raise IngestError("crosswalk scope differs from the driver run")
     capture = _capture_binding(positions, balances, cutoff, label)
-    if capture["capture_mode"] not in (driver.MODE_NEXT_SESSION, driver.MODE_SAME_DAY):
-        raise IngestError(
-            "a capture outside the first-next-date and same-day modes cannot be "
-            "bound: it exceeds the proven +1 pattern"
-        )
+    if capture["capture_mode"] not in (
+        driver.MODE_NEXT_SESSION,
+        driver.MODE_SAME_DAY,
+        driver.MODE_LATE,
+    ):
+        raise IngestError("the capture mode cannot be bound")
     snapshot_at = driver.aware_utc(capture["captured_at_utc"], "captured_at_utc")
     observed_basis = OBSERVED_AT_BASIS
     as_of = snapshot_at.date()
@@ -720,11 +726,32 @@ def ingest(
         {config.symbol_aliases.get(s, s) for s in symbols} & set(close_set.closes)
     )
 
-    raw_holdings, dropped_position_rows = _without_zero_quantity_rows(
-        strict_json_loads(
-            (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
-        )
+    raw_response = strict_json_loads(
+        (run_dir / "raw/holdings.v2.json").read_bytes(), label="raw holdings"
     )
+    # the capture is the account at capture time; the binding is the account at the cutoff close
+    undone: dict[str, Any] = {}
+    noted: dict[str, Any] = {}
+    rolled: dict[str, Any] = {}
+    rolled_zero_rows = 0
+    try:
+        if derive_tool.rows_after_exist(run_dir, sorted(accounts), cutoff.as_of_date):
+            rolled = derive_tool.rolled_holdings(
+                run_dir,
+                derive_tool.read_holdings(raw_response, crosswalk),
+                cutoff.as_of_date,
+            )
+            undone = {a: r for a, r in rolled.items() if r.rows_rolled_back}
+            noted = {
+                a: r for a, r in rolled.items() if r.rows_rolled_back or r.informational
+            }
+        if undone:
+            raw_response, rolled_zero_rows = derive_tool.apply_rollback(
+                raw_response, crosswalk, rolled
+            )
+    except derive_tool.DeriveError as exc:
+        raise IngestError(str(exc)) from exc
+    raw_holdings, dropped_position_rows = _without_zero_quantity_rows(raw_response)
     try:
         read = read_holdings_v2_current_snapshot(
             raw_holdings,
@@ -743,15 +770,20 @@ def ingest(
     # count must reconcile with the verified driver run (summaries, sweeps and
     # the zero-quantity rows the driver omitted).
     zero_cash_rows = read.sweep_vehicle_count - len(sweeps) - len(cash_rows)
-    if zero_cash_rows < 0 or dropped_position_rows + zero_cash_rows != positions.get(
-        "zero_quantity_rows_omitted"
-    ):
+    omitted = dropped_position_rows - rolled_zero_rows + zero_cash_rows
+    if zero_cash_rows < 0 or omitted != positions.get("zero_quantity_rows_omitted"):
         raise IngestError("snapshot rows differ from the verified driver run")
-    zero_quantity_rows = dropped_position_rows + zero_cash_rows
+    zero_quantity_rows = omitted
     snapshot = replace(read, sweep_vehicle_count=len(sweeps))
     if any(_market_value_status(row) != "AVAILABLE" for row in snapshot.positions):
         raise IngestError("a held position has no market value after valuation")
     expected = _positions_by_identity(held)
+    if undone:  # the positions of the cutoff close, not of the capture
+        expected = {
+            (account, symbol): quantity
+            for account, after in sorted(rolled.items())
+            for symbol, quantity in sorted(after.quantities.items())
+        }
     observed = {
         (str(row["account_id"]), str(row["symbol"])): Decimal(str(row["quantity"]))
         for row in snapshot.positions
@@ -909,6 +941,20 @@ def ingest(
         "transaction_manifest": tx_rule,
         "unverified_shapes": list(driver.UNVERIFIED_SHAPES),
     }
+    if noted:  # absent otherwise: an ordinary binding is unchanged
+        binding["roll_back"] = {
+            "to": cutoff.as_of_date.isoformat(),
+            "basis": "CAPTURE_MINUS_POSTED_TRANSACTIONS_AFTER_THE_CUTOFF_CLOSE",
+            "accounts": {
+                account: {
+                    "after_cutoff_rows_not_applied": dict(
+                        sorted(r.informational.items())
+                    ),
+                    "rows_rolled_back": dict(sorted(r.rows_rolled_back.items())),
+                }
+                for account, r in sorted(noted.items())
+            },
+        }
     _write_new(output_root / "ingest-binding.json", driver.canonical_bytes(binding))
     return binding
 
