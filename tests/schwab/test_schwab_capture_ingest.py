@@ -1500,3 +1500,240 @@ def test_a_fetch_that_started_before_the_cutoff_close_is_refused(
     )
     with pytest.raises(ingest.IngestError, match="fetched before the cutoff close"):
         _ingest(tmp_path, run_dir, closes_dir=closes)
+
+
+# --------------------------------------------------------------------------- #
+# A native cutoff row that repeats the row before is a stale carry
+# --------------------------------------------------------------------------- #
+
+
+def _carry_balances() -> dict[str, Any]:
+    return {
+        "histories": {
+            "6/11/2031": {"AccountValue": 990},
+            "6/12/2031": {"AccountValue": 1000.5},
+            "6/13/2031": {"AccountValue": 1000.5},
+        }
+    }
+
+
+def _record(official: str) -> dict[str, Any]:
+    return {internal: {"official_0613": official} for internal in _crosswalk().values()}
+
+
+def test_a_stale_carry_cutoff_row_is_refused_without_a_derivation_record(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    with pytest.raises(ingest.IngestError, match="repeats its prior day"):
+        _ingest(tmp_path, run_dir)
+
+
+def test_a_stale_carry_cutoff_row_is_replaced_by_the_derived_value(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    binding = _ingest(tmp_path, run_dir, derivation=_record("1010.25"))
+    nav = binding["nav"]
+    assert isinstance(nav, dict)
+    assert {tuple(v["derived_cutoff_row"].items()) for v in nav.values()} == {
+        (("derived", "1010.25"), ("native", "1000.5"))
+    }
+    lines = (
+        next((tmp_path / "ingest/nav").glob("*.csv"))
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    assert lines[-1].endswith(",2031-06-13,1010.25")
+    assert lines[-2].endswith(",2031-06-12,1000.5")
+
+
+def test_a_carry_the_record_confirms_is_kept_and_not_marked_derived(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    binding = _ingest(tmp_path, run_dir, derivation=_record("1000.5"))
+    nav = binding["nav"]
+    assert isinstance(nav, dict)
+    assert all("derived_cutoff_row" not in v for v in nav.values())
+    csv_text = next((tmp_path / "ingest/nav").glob("*.csv")).read_text(encoding="utf-8")
+    assert csv_text.splitlines()[-1].endswith(",2031-06-13,1000.5")
+
+
+def test_a_derivation_record_without_the_cutoff_day_is_refused(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    bad = {k: {"official_0612": "1"} for k in _record("1")}
+    with pytest.raises(ingest.IngestError, match="repeats its prior day"):
+        _ingest(tmp_path, run_dir, derivation=bad)
+
+
+# --------------------------------------------------------------------------- #
+# The Saturday scenario end to end: stale-carry cutoff rows, 8 accounts
+# --------------------------------------------------------------------------- #
+
+
+def _saturday_balances() -> dict[str, Any]:
+    # every account holds 4 x SYNn at an official 24.00 on 06-12 and 25.00 on 06-13 plus 12.50 cash:
+    # official NAV 108.50 on 06-12 and 112.50 on 06-13; the native 06-13 row carries 06-12 (stale)
+    return {
+        "histories": {
+            "6/11/2031": {"AccountValue": 100.0},
+            "6/12/2031": {"AccountValue": 108.5},
+            "6/13/2031": {"AccountValue": 108.5},
+        }
+    }
+
+
+def test_the_saturday_scenario_derive_ingest_declare_and_ledger_finality(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+    from datetime import date
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    import provider_ledger as ledger
+    import schwab_nav_derive as derive_tool
+
+    run_dir = _run(tmp_path, FakeTransport(balances=_saturday_balances()))
+    yahoo_run = _closes(tmp_path)
+    closes = yahoo_run  # the fixture returns the official-closes directory itself
+    day, prior = date(2031, 6, 13), date(2031, 6, 12)
+
+    # 1. derive: all eight accounts are stale carries and are patched to the official value
+    record, report = derive_tool.derive(
+        run_dir=run_dir,
+        crosswalk=_crosswalk(),
+        closes_dir=closes,
+        day=day,
+        prior_day=prior,
+    )
+    assert {row["status"] for row in report} == {derive_tool.STATUS_PATCH}
+    assert {row["official_day"] for row in report} == {"112.50"}
+    derivation = tmp_path / "derivation.json"
+    derivation.write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+
+    # 2. ingest: refused without the record, derived row written with it
+    with pytest.raises(ingest.IngestError, match="repeats its prior day"):
+        _ingest(
+            tmp_path,
+            run_dir,
+            closes_dir=yahoo_run,
+            output_root=tmp_path / "refused-ingest",
+        )
+    binding = _ingest(tmp_path, run_dir, closes_dir=yahoo_run, derivation=record)
+    nav = binding["nav"]
+    assert isinstance(nav, dict) and len(nav) == 8
+    assert {tuple(v["derived_cutoff_row"].items()) for v in nav.values()} == {
+        (("derived", "112.50"), ("native", "108.5"))
+    }
+
+    # 3. declare: the source-branch evidence from the composed spec
+    spec = tmp_path / "composed-spec.json"
+    spec.write_bytes(
+        ingest.compose_spec(tmp_path / "ingest", _base_spec(tmp_path), _crosswalk())
+    )
+    evidence = derive_tool.declare(
+        run_dir=run_dir,
+        crosswalk=_crosswalk(),
+        closes_dir=closes,
+        day=day,
+        prior_day=prior,
+        tolerance=derive_tool.DEFAULT_TOLERANCE,
+        derivation=derivation,
+        spec=spec,
+    )
+    assert len(evidence["derived_patch"]["patches"]) == 8
+
+    # 4. ledger finality at the cutoff: what the generation would carry from the ingest's NAV CSVs
+    def finality(evidence_doc: dict[str, Any], nav_dir: Path) -> dict[str, Any]:
+        artifacts, rows, accounts = [], [], []
+        for account in _crosswalk().values():
+            data = (nav_dir / f"{account}.csv").read_bytes()
+            artifact_id = f"ingest/nav/{account}.csv"
+            artifacts.append(
+                SimpleNamespace(
+                    artifact_id=artifact_id,
+                    schema_name=ingest.NAV_SCHEMA_NAME,
+                    sha256=hashlib.sha256(data).hexdigest(),
+                    size_bytes=len(data),
+                )
+            )
+            accounts.append({"account_id": account})
+            for line in data.decode("utf-8").splitlines()[1:]:
+                _, _, when, value = line.split(",")
+                rows.append(
+                    {
+                        "account_id": account,
+                        "as_of_date": when,
+                        "nav": {"value": value},
+                        "source_artifact_id": artifact_id,
+                    }
+                )
+        catalog = {
+            "accounts": accounts,
+            "nav_observations": rows,
+            "journal_counterparty_crosswalk": {
+                "entries": [
+                    {"account_id": internal, "native_suffix": external[-3:]}
+                    for external, internal in _crosswalk().items()
+                ]
+            },
+        }
+        evidence_doc = dict(evidence_doc)
+        evidence_doc["sources"] = [
+            {
+                **source,
+                "expected_sha256": next(
+                    a.sha256
+                    for a in artifacts
+                    if a.artifact_id == source["artifact_id"]
+                ),
+                "expected_size_bytes": next(
+                    a.size_bytes
+                    for a in artifacts
+                    if a.artifact_id == source["artifact_id"]
+                ),
+            }
+            for source in evidence_doc["sources"]
+        ]
+        context = ledger._FinalityContext(
+            {},
+            Path("."),
+            b"",
+            "",
+            0,
+            SimpleNamespace(artifacts=artifacts),
+            catalog,
+            Path("."),
+            day,
+            {
+                "basis": "SELECTED_SOURCE_DATE_LABELS",
+                "provider_finality_guarantee": False,
+            },
+            evidence_doc,
+        )
+        return ledger._finality_schwab(context)
+
+    nav_dir = tmp_path / "ingest" / "nav"
+    result = finality(evidence, nav_dir)
+    assert (
+        result["basis"] == "SELECTED_HISTORICAL_NAV_LABEL_WITH_DECLARED_DERIVED_PATCH"
+    )
+    assert result["provider_finality_guarantee"] is False
+
+    # 5. the same finality over carried rows and no record is refused by the ledger
+    carried = tmp_path / "carried-nav"
+    carried.mkdir()
+    for account in _crosswalk().values():
+        text = (nav_dir / f"{account}.csv").read_text(encoding="utf-8")
+        (carried / f"{account}.csv").write_text(
+            text.replace(",2031-06-13,112.50", ",2031-06-13,108.5"), encoding="utf-8"
+        )
+    bare = {
+        "roots": {**evidence["roots"], ingest.ROOT_NAV: str(carried)},
+        "sources": evidence["sources"],
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="repeats its prior day"):
+        finality(bare, carried)
+    assert Decimal("112.50") != Decimal("108.5")
