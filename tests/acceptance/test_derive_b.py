@@ -1599,6 +1599,14 @@ def custody_authority_files(
         ),
         "contract.json": json.dumps(
             {
+                "source_segments": [
+                    {
+                        "source_id": "portfolio-fx-rates",
+                        "current_generation": {
+                            "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa"
+                        },
+                    }
+                ],
                 "financial_outcomes": [
                     {
                         "outcome_id": "INVESTED_CAPITAL",
@@ -1609,7 +1617,7 @@ def custody_authority_files(
                             },
                         },
                     }
-                ]
+                ],
             }
         ),
     }
@@ -4746,6 +4754,29 @@ def test_oracle_v3_b_owner_receipt_a_must_bind_the_fund_scoped_body(tmp_path: Pa
     )
 
     with pytest.raises(derivation.ManifestError, match="receipt A does not bind"):
+        derivation.derive(tmp_path, manifest)
+
+
+def test_oracle_v3_b_fx_generation_must_match_the_contract_named_generation(
+    tmp_path: Path,
+):
+    """The FX generation id is bound to the contract, not to a code constant."""
+    derivation = load_derivation_module()
+    manifest, paths, entries = custody_v3_fixture(tmp_path, amended_custody_policy())
+    derivation.derive(tmp_path, manifest)
+
+    contract_path = paths["contract.json"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["source_segments"][0]["current_generation"]["generation_id"] = "0" * 64
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    for index, entry in enumerate(entries):
+        if entry["path"] == str(contract_path):
+            updated = pinned_entry(contract_path)
+            updated["family"] = "financial_source_contract"
+            entries[index] = updated
+    with pytest.raises(
+        derivation.ManifestError, match="FX generation does not cover the cutoff"
+    ):
         derivation.derive(tmp_path, manifest)
 
 

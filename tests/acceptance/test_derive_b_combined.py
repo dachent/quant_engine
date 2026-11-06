@@ -446,6 +446,8 @@ def test_cli_perimeter_refusal_exits_2(
         "argv",
         [
             "derive.py",
+            "--cutoff",
+            "2026-09-17",
             "--qe-root",
             str(tmp_path),
             "--out",
