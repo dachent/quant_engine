@@ -322,6 +322,7 @@ def check_book(
             as_of,
             holdings_symbols=len(held) if names["holdings"].is_file() else None,
             mismatched=len(differs),
+            terminal=perf_print["last_date"],
         )
         checks.append(_check("I5D", status, detail))
     # I6
@@ -443,6 +444,7 @@ def _positions_as_of(
     *,
     holdings_symbols: int | None,
     mismatched: int,
+    terminal: str | None,
 ) -> tuple[dict[str, Any], str, str]:
     """Positions at ``as_of``: the net signed shares of rows dated on or before it.
 
@@ -450,7 +452,9 @@ def _positions_as_of(
     ``as_of`` gives the positions at ``as_of`` exactly when I5 closed at T, because every
     row, a SPLIT included, enters that identity as its exported signed shares.  Refused,
     with the numbers, only when data is missing (no holdings export, an unreadable date,
-    an unknown row type among the rolled-back rows) or the closure fails."""
+    an unknown row type among the rolled-back rows), the capture does not reach ``as_of``
+    (the last perf date is before it, so the export is not a later state of the book) or the
+    closure fails."""
     net: dict[str, float] = defaultdict(float)
     rolled: dict[str, int] = defaultdict(int)
     splits: list[dict[str, str]] = []
@@ -490,7 +494,15 @@ def _positions_as_of(
         "rolled_back_rows": dict(sorted(rolled.items())),
     }
     facts["splits_after_as_of"] = splits
+    facts["capture_last_perf_date"] = terminal
     numbers = f"rolled back {dict(sorted(rolled.items()))}, splits {splits}"
+    if terminal is None or terminal < as_of.isoformat():
+        return (
+            facts,
+            "FAIL",
+            f"the capture ends {terminal}, before as-of {as_of}: its holdings are not a "
+            f"later state of the book; {numbers}",
+        )
     if refusals:
         return facts, "FAIL", "; ".join(sorted(set(refusals))[:5]) + f"; {numbers}"
     if holdings_symbols is None:
