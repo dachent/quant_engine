@@ -204,7 +204,8 @@ the adjustment record covers days up to D only). The retained earlier pull is th
 file on the days both hold, and exits 1 if any symbol's close differs by more than the tolerance
 (`RESCALED`, with the worst day and the ratio) or shares no day with the retained pull
 (`no_overlap`: the check proved nothing). A symbol the retained pulls never held is listed as
-`not_in_previous` and is not checked. The `held-closes` window starts 60 days before the cutoff so
+`not_in_previous`, warned about on stderr and not checked (`--require-previous` makes it exit 1
+too, for a run where every symbol must have a retained pull). The `held-closes` window starts 60 days before the cutoff so
 that it overlaps a retained pull that ended at the previous cutoff (R2.1 ended 2026-09-17); run
 the check after the fetch and before the Schwab ingest. Run it on the Saturday pull too: it is a
 no-op when nothing happened and the only gate if a symbol split between the previous pull and D.

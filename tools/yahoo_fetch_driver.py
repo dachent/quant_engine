@@ -2911,6 +2911,11 @@ def _parser() -> argparse.ArgumentParser:
     rescale.add_argument("--closes-dir", type=Path, required=True)
     rescale.add_argument("--previous-dir", type=Path, action="append", required=True)
     rescale.add_argument("--tolerance", type=float, default=RESCALE_TOLERANCE)
+    rescale.add_argument(
+        "--require-previous",
+        action="store_true",
+        help="also exit 1 for a symbol no retained pull holds (it is always reported)",
+    )
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
     )
@@ -3075,6 +3080,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "rescale-check":
             outcome = rescale_check(args.closes_dir, args.previous_dir, args.tolerance)
             print(json.dumps(outcome, indent=2, sort_keys=True))
+            if outcome["not_in_previous"]:
+                print(
+                    "Warning: no retained pull holds these symbols, so they are NOT checked "
+                    "for a rescale: " + ", ".join(outcome["not_in_previous"]),
+                    file=sys.stderr,
+                )
             if outcome["rescaled"] or outcome["no_overlap"]:
                 print(
                     "Error: closes rescaled against the retained pull (a split after it) or "
@@ -3083,7 +3094,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            return 0
+            return 1 if args.require_previous and outcome["not_in_previous"] else 0
         if args.command == "verify":
             print(
                 json.dumps(

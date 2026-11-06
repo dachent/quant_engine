@@ -1973,10 +1973,13 @@ def test_rescale_check_catches_a_split_after_the_retained_pull(
     assert by_symbol["SAME"]["status"] == "ok"
     assert by_symbol["SPLIT"]["ratio_new_over_previous"] == 0.5
     assert "SPLIT" in captured.err and "GONE" in captured.err
-    # the clean case exits 0
+    # the clean case exits 0; a symbol no retained pull holds is warned about, and refused
+    # only when the operator requires every symbol to have a previous pull
     (new / "SPLIT_yahoo_daily.csv").unlink()
     (new / "GONE_yahoo_daily.csv").unlink()
     assert driver.main(argv) == 0
+    assert "NEWCO" in capsys.readouterr().err
+    assert driver.main([*argv, "--require-previous"]) == 1
     capsys.readouterr()
 
 
