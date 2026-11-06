@@ -350,6 +350,129 @@ always records that warning at the end.
 manifest. Nothing in this section was run against the live site: the proof is a
 fake CDP transport replaying synthetic events built from the known route templates.
 
+## Unattended allowlisted fetch (`tools/p123_cdp_fetcher.py`)
+
+For a capture with nobody at the keyboard, the fetcher attaches to the owner's
+already-signed-in tab (loopback debug port only), navigates it to a FIXED list of
+read-only export URLs, and keeps the downloaded bytes unmodified. It never types the
+password; a signed-out session is a stop, not a login.
+
+Routes (all reviewed `GET`, query key `portid` only, already in `PORTFOLIO123_CONTRACT`
+and in `capture.py`; the screen calls `PORTFOLIO123_CONTRACT.route`):
+
+| Kind | Route | Download name (browser) | Saved as | Next step |
+|---|---|---|---|---|
+| `transactions_csv` | `/p123/DownloadPortTrans?portid=<id>` | `P123_SimTran_*.csv` | `raw/strategy_<id>_transactions.csv` | `stage-file --capability transactions.download` |
+| `perf_csv` | `/p123/DownloadPortPerf?portid=<id>` | `P123_PortPerf_*.csv` | `raw/strategy_<id>_perf.csv` | read by the generation (PG6), no staging capability |
+| `holdings_csv` | `/p123/DownloadPortHoldings?portid=<id>` | `P123_PortHoldings_*.csv` | `raw/strategy_<id>_holdings.csv` | optional; makes identity check I5 decisive |
+
+The perf route was found offline, not guessed. The preserved 2026-09 HARs show 89
+responses of `GET /p123/DownloadPortPerf?portid=` as `200 text/csv`, `attachment`, named
+`P123_PortPerf_<strategy name>.csv` (one unauthenticated call returned `401 text/html`
+and no file), and the 2026-09-12 capture script (`p123_har_capture.py`, preserved under
+`ops/preserved-scripts`) saved the same route as `strategy_<id>_perf.csv`. No new
+contract route was needed. Transactions downloads are named `P123_SimTran_*`. The
+sibling `/spr/strategy/portmodel/{id}/perf` JSON route is not used.
+
+Allowlist: data, not code. `make-allowlist` writes a canonical JSON (schema_version 1;
+`books[{id, kinds}]`, `designer_models[]`, `drive_files[]`, origin) and prints its sha256;
+every `run`/`drive` takes `--allowlist` and `--allowlist-sha256` and refuses a file whose
+bytes differ (`ALLOWLIST_PIN_MISMATCH`). The real list (book ids, the two designer
+models, a Drive file id) lives with the owner outside the repository, not in a commit.
+
+```powershell
+python tools/p123_cdp_fetcher.py make-allowlist --out <allowlist.json> --book <id> [--book <id> ...] `
+  [--designer-model <id>] [--drive-file-id <id>] [--kind perf_csv ...]
+python tools/p123_cdp_fetcher.py run --cdp-url http://127.0.0.1:9333 --allowlist <allowlist.json> `
+  --allowlist-sha256 <printed hash> --download-dir <new dir> --skip-designer-models `
+  [--reference-index <older run>/artifacts/source-index.json] [--require-identity-pass]
+python tools/p123_cdp_fetcher.py drive --cdp-url http://127.0.0.1:9333 --allowlist <allowlist.json> `
+  --allowlist-sha256 <printed hash> --download-dir <new dir> --file-id <id>
+```
+
+`--download-dir` must not exist (absolute, outside Git, not in synced scratch). The
+fetcher creates `capture/raw/` (the saved files and `capture/capture-manifest.json`, the
+layout `portfolio123_generation.py plan --transaction-capture` reads), `incoming/` (the
+browser's download target, empty between files), `p123-fetch-manifest.json` (value-free:
+per file sha256, size, row count, stage capability, identity decision; never contents),
+and `book-identity-decisions.json` (restricted: it carries the check's dates and amounts).
+
+Safety rules, pinned by `tests/portfolio123/test_p123_cdp_fetcher.py`:
+
+- Transport allow-list: `Target.setDiscoverTargets`, `Target.attachToTarget`,
+  `Page.navigate` to an exact allowlisted URL, and `Browser.setDownloadBehavior`
+  (`allowAndName`, events on, the one download directory; `default` on exit). `Runtime.*`,
+  `Fetch.*`, `Network.*` and `Input.*` are refused before they leave the process.
+- Refused before sending: not https, off-origin or userinfo, a mutation word (the
+  recorder's `MUTATION_WORDS`), a URL that is not exactly an allowlist entry or not a
+  reviewed contract route.
+- Stops, exit 3, files already saved are kept and the manifest says `STOPPED`:
+  `STOP_REAUTH` (the tab is on a login page or off `www.portfolio123.com`, or no download
+  starts after navigation, which is how the preserved HARs show a signed-out session),
+  `STOP_DOWNLOAD_NOT_EXACT` (URL, `P123_*` name prefix, `.csv`, a single completed
+  download, a non-empty file whose size equals the bytes received, and nothing else in the
+  directory), `STOP_IDENTITY_FAIL` (below). Exit 2 is `REFUSED <CODE>` before anything was
+  sent.
+
+Book identity check. After the last file of each book lands (the check needs both
+transactions and perf, so it cannot run after the first file), the fetcher calls
+`check_capture` of `tools/p123_book_identity_check.py` on `capture/` with the books landed
+so far (so I8, no shared trade rows across books, is cumulative) and the capture manifest
+(I1). A `FAIL` stops all later books. `REVIEW` (warnings only, which is every book while no
+`p123_investment_resource.json` page record and no holdings export are present) is
+recorded and the run continues; `--require-identity-pass` stops on it. **This needs PR 827:**
+the module is loaded by file path so this tool still imports and passes CI without it, but
+`run` refuses with `IDENTITY_CHECK_UNAVAILABLE` (there is no skip flag) until that module
+and its `quant_engine.portfolio123` dependency are on the branch. `drive` does not use it.
+
+Pairing with the staging CLI. Per saved transactions file, with the same signed-in
+session's capture time:
+
+```powershell
+python -m quant_engine.portfolio123.capture_cli stage-file --staging-root <root> --run-id <run> `
+  --input <download-dir>\capture\raw\strategy_<id>_transactions.csv --captured-at <rfc3339> `
+  --capability transactions.download
+python -m quant_engine.portfolio123.capture_cli verify --staging-root <root> --run-id <run>
+```
+
+Perf and holdings are not catalogued capabilities: they travel in the `capture/` directory
+for the generation, bound by `capture-manifest.json`.
+
+Google Drive mode. `drive` navigates the one tab to
+`https://drive.google.com/uc?export=download&id=<file id>` for an id in the allowlist
+`drive_files`, and accepts the download only when its reported start URL is https on
+`drive.google.com`, `drive.usercontent.google.com`, or `doc-<label>-docs.googleusercontent.com`
+(one anchored pattern). It needs a tab that is blank or already on those hosts; it will not
+reuse the Portfolio123 tab. The bytes are saved as `capture/files/drive_<id><ext>`
+(extension from the reported name, the name itself is not stored) with a sha256 manifest.
+
+Stop rule for an unattended run: on any `STOP_*` the run ends, nothing is retried, no
+second login or alternative transport is tried, and the owner decides. A partial directory
+is evidence of what was saved, not a complete capture.
+
+Designer models are NOT fetched. `/spr/strategy/model/<id>?dm=true` is a JSON page, so
+the browser shows it instead of downloading it, and reading its body needs a CDP call
+outside the allow-list. A run whose allowlist lists designer models refuses with
+`DESIGNER_MODEL_NEEDS_BODY_READ` unless `--skip-designer-models` is given, and then lists
+them under `designer_models_not_fetched`. The smallest alternative is `Network.enable` plus
+`Network.getResponseBody` on the attached tab (both already used passively by the
+recorder), reading only the one allowlisted document response; that widening is the
+owner's decision and is not in this tool.
+
+UNVERIFIED, never exercised live (the proof is a fake CDP transport):
+
+- Whether a `Page.navigate` to a download route in the current Edge/Chrome emits
+  `Browser.downloadWillBegin`/`downloadProgress` with `allowAndName` on the browser-level
+  session exactly as scripted (the preserved 2026-09-12 run saved downloads by the same
+  navigation but through the browser's default folder).
+- Whether any interstitial appears (a download prompt, a Drive virus-scan confirmation
+  for large files, a consent banner). Any of them looks like "no download started" and
+  stops.
+- Session lifetime: how long the signed-in tab survives an unattended run; a signed-out
+  session is a `STOP_REAUTH` mid-run with a partial directory.
+- Transaction and perf row counts versus the page, which only the identity check
+  (`I3`, `I4`) and the generation transaction gate judge.
+
 ## HTML transactions list (`transactions.account`)
 
 `GET /transact_list.jsp?portid=<id>&offset=<n>` (the first page may omit `offset`) is

@@ -228,6 +228,10 @@ _PATH_STAGES = {
     # Passive CDP listener for one attended Portfolio123 sitting; writes a
     # create-only run directory and a draft catalog diff, no stage reads it.
     "tools/p123_cdp_recorder.py": [],
+    # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
+    # hash-pinned allowlist of read-only exports into a create-only directory; the
+    # staging CLI and the generation read only the files and manifest they are handed.
+    "tools/p123_cdp_fetcher.py": [],
     # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
     # create-only run directory; no stage reads it, only a pinned run it is handed.
     "tools/grizzlybulls_capture.py": [],
