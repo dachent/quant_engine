@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -126,10 +127,10 @@ def test_check_evidence_cli_on_current_evidence(
     assert not roots.exists()
 
 
+@dataclass(frozen=True)
 class _Target:
-    def __init__(self, internal: str, provider: str) -> None:
-        self.internal_account_id = internal
-        self.provider_account_id = provider
+    internal_account_id: str
+    provider_account_id: str
 
 
 def test_build_crosswalk_is_create_only_and_never_prints_ids(
@@ -244,11 +245,11 @@ def _attach(tmp_path: Path, post_data: str | None) -> dict[str, object]:
 def test_captured_body_is_filtered_create_only_and_feeds_make_evidence(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    raw = json.dumps({**BODY, "accountNumber": "123456789", "token": "x"})
+    raw = json.dumps({**BODY, "acctLabel": "SYNTHETIC-label", "token": "x"})
     result = _attach(tmp_path, raw)
     saved = json.loads((tmp_path / "body.json").read_text(encoding="utf-8"))
     assert saved == BODY and result["holdings_body_keys"] == sorted(BODY)
-    assert "123456789" not in json.dumps(result)
+    assert "SYNTHETIC-label" not in json.dumps(result)
     with pytest.raises(driver.DriverError, match="already exists"):
         _attach(tmp_path, raw)
     args = _args(tmp_path, **{"--holdings-body": str(tmp_path / "body.json")})
