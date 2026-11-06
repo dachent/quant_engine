@@ -58,6 +58,25 @@ REGISTRY: Final[tuple[tuple[str, str], ...]] = (
     (".github/gitleaks-suppressions.json", POLICY),
 )
 
+# Release-input patterns that embed one cutoff's data (dated results, pins of dated files). A root
+# built for a new cutoff may not carry one of these over unreplaced without saying so
+# (``tools/release_inputs.py new-cutoff``). The other release inputs (historical baselines, the
+# base decomposition spec, the strategy-basis declaration and tag map) are not cutoff-bound.
+CUTOFF_DEPENDENT: Final[tuple[str, ...]] = (
+    "acceptance/expected-baseline.json",
+    "ops/mvp2-release/inputs/baseline/*",
+    "ops/mvp2-release/inputs/capital/*",
+    "ops/mvp2-release/inputs/current-epoch-crosswalk.json",
+    "ops/mvp2-release/inputs/hwm/*",
+    "ops/mvp2-release/inputs/implementation/*",
+    "ops/mvp2-release/inputs/receipts/*",
+    "ops/mvp2-release/inputs/seeds/*",
+    "ops/mvp2-release/inputs/sleeves/disclosure-inputs.json",
+    "ops/mvp2-release/inputs/sleeves/quantbase/*",
+    "ops/mvp2-release/inputs/sleeves/sleeve-declared-inputs.json",
+    "ops/mvp2-release/inputs/sleeves/sleeve-policy-manifest.json",
+)
+
 
 class ReleaseInputsError(ValueError):
     """The release inputs are missing, unpinned, tampered or outside the registry."""
@@ -70,6 +89,14 @@ def classify(path: str) -> str | None:
         if fnmatch.fnmatchcase(path, pattern):
             return disposition
     return None
+
+
+def is_cutoff_dependent(path: str) -> bool:
+    """A release input whose bytes are one cutoff's data (see :data:`CUTOFF_DEPENDENT`)."""
+
+    return classify(path) == RELEASE_INPUT and any(
+        fnmatch.fnmatchcase(path, pattern) for pattern in CUTOFF_DEPENDENT
+    )
 
 
 def sha256_file(path: Path) -> str:

@@ -336,6 +336,29 @@ that still names the old release or panel (`--allow-stale-references` lists them
 release is reported `already_current` and nothing is written. The predecessor set files (`predecessor_selected_inputs`,
 `predecessor_prep_spec`, `predecessor_ledger_spec`) are a separate input: the previous cycle's own seeds, not compared with `CURRENT_RELEASE`.
 
+A root with a NEW cutoff comes from `release_inputs.py new-cutoff` (the other subcommands keep the source root's cutoff; `add`'s
+`--cutoff` only filters). Run it BEFORE `rebind-predecessor`, whose `--cutoff` filter refuses a root still at the old cutoff:
+
+```
+python tools/release_inputs.py new-cutoff --root <R2.2 root, short path> --manifest-sha256 <R2.2 pin> --cutoff 2026-11-06 \
+  --baseline <expected-baseline.json> \
+  --file ops/mvp2-release/inputs/baseline/baseline-declared-inputs.json=<path> \
+  --file ops/mvp2-release/inputs/current-epoch-crosswalk.json=<path> \
+  --file ops/mvp2-release/inputs/hwm/calendar-authority.json=<path>   (one --file per replaced or added entry) \
+  [--drop <entry>] [--carry-stale <entry or glob>=<reason>] --out <new root, must not exist>
+```
+
+Every entry of the source root is carried byte for byte unless a `--file` replaces it or a `--drop` removes it; entry names and the
+registry check are those of `add` (a name the root holds is replaced without `--replace`; a new one is added). `--baseline PATH`
+is `--file acceptance/expected-baseline.json=PATH` and is refused when the baseline's `cutoff` header differs from `--cutoff` (a
+`--file` for any `acceptance/expected-baseline*.json` gets the same check). The release-input patterns that embed one cutoff's data are
+`CUTOFF_DEPENDENT` in `core/release_inputs.py`; when `--cutoff` differs from the source's, the command refuses to seal while any of
+them is carried unreplaced, listing each as `CARRIED_UNCHANGED <entry>`, unless `--carry-stale ENTRY=REASON` names it (the reason is
+printed back; a registry-style glob is allowed). The output directory must not exist (no empty directory either), lie outside the
+repository and the source root, and is published by one rename after the loader has verified it; the printed `manifest_sha256` is the
+pin. The root is deterministic: the same source, entries and cutoff give the same pin, and the same cutoff with no entries reproduces the
+source pin.
+
 Three stale inputs each cost R2 hours; the driver refuses them at the first stage that could use them:
 
 - **Predecessor vs CURRENT_RELEASE** (`selected-inputs`, `predecessor_check`): the disclosure inputs'
