@@ -6,23 +6,16 @@ import copy
 from datetime import date
 from decimal import Decimal
 import hashlib
-import importlib.util
+
 import json
 from pathlib import Path
-import sys
+
 from typing import Any
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location(
-    "provider_ledger_schwab_source_patch_test", ROOT / "tools" / "provider_ledger.py"
-)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("unable to load provider-ledger builder")
-ledger = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = ledger
-SPEC.loader.exec_module(ledger)
+import provider_ledger as ledger
+
 
 END = date(2026, 11, 6)
 PRIOR = date(2026, 11, 5)

@@ -272,18 +272,9 @@ def test_the_command_writes_create_only_and_reports_the_closure(
 
 
 def _ledger() -> object:
-    import importlib.util
-    import sys
+    import provider_ledger
 
-    root = Path(__file__).resolve().parents[2]
-    spec = importlib.util.spec_from_file_location(
-        "provider_ledger_for_nav_derive_test", root / "tools" / "provider_ledger.py"
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return provider_ledger
 
 
 def _declared(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
