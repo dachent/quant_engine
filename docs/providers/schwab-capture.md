@@ -306,3 +306,29 @@ exists. A refused run leaves no binding and needs a new output root.
   would let one approval authorise an open-ended number of reads.
 - The holdings request start time, not only the response time, must lie inside
   the allowed window after the close.
+
+## The cutoff-day NAV: derive, ingest, declare
+
+The native `balances.historical` row for the cutoff day D can be a stale carry of the day before (R2.1: every
+non-flat account, captured after the New York close). A carry cannot be the cutoff day's NAV, so the order
+of a capture whose series ends at D is: capture and verify the run, fetch the official closes of every held
+symbol for D and the day before, then (all committed tools, Python 3.11 venv, no scratch script):
+
+1. `python tools/schwab_nav_derive.py derive --run-dir <verified run> --crosswalk <crosswalk> --closes-dir <closes>
+   --day D --prior-day <D-1> --out <derivation.json> [--report <report.json>]` writes the derivation record
+   (per account `official_<MMDD>` for D and the day before, `nav_file_<MMDD>`, `cash`; the value is the sum of
+   quantity x official close rounded to cents half-even plus the cash rows, exactly what the ledger replays) and
+   refuses on a missing close, a prior-day closure beyond `--tolerance` (default 0.05; R2.1 saw 0.02), a flat
+   (cash-only) account whose native NAV is not exactly its cash, or a non-flat account whose native D disagrees
+   with the official value without being a carry of D-1.
+2. `python tools/schwab_capture_ingest.py ingest ... --derivation-record <derivation.json>` writes the derived D
+   row into the NAV CSVs of the stale-carry accounts and records it (`derived_cutoff_row`, native and derived
+   value) in the binding. Without the record a carried cutoff row is refused.
+3. After composing the spec, `python tools/schwab_nav_derive.py declare ... --derivation <derivation.json> --spec
+   <composed spec> --out <finality evidence>` writes the source-branch finality evidence (the spec's roots and
+   NAV sources plus the pinned `derived_patch`); it re-derives the record from the run and refuses a file that
+   differs. The provider ledger replays the patch exactly (no tolerance) and refuses a selected cutoff row equal
+   to the row before unless the pinned record states the same official value (a flat account).
+
+The labelled same-day mode (series ending D-1) has no cutoff row and needs none of this; a same-day NAV for D
+there is not produced by any tool.

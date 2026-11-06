@@ -1500,3 +1500,68 @@ def test_a_fetch_that_started_before_the_cutoff_close_is_refused(
     )
     with pytest.raises(ingest.IngestError, match="fetched before the cutoff close"):
         _ingest(tmp_path, run_dir, closes_dir=closes)
+
+
+# --------------------------------------------------------------------------- #
+# A native cutoff row that repeats the row before is a stale carry
+# --------------------------------------------------------------------------- #
+
+
+def _carry_balances() -> dict[str, Any]:
+    return {
+        "histories": {
+            "6/11/2031": {"AccountValue": 990},
+            "6/12/2031": {"AccountValue": 1000.5},
+            "6/13/2031": {"AccountValue": 1000.5},
+        }
+    }
+
+
+def _record(official: str) -> dict[str, Any]:
+    return {internal: {"official_0613": official} for internal in _crosswalk().values()}
+
+
+def test_a_stale_carry_cutoff_row_is_refused_without_a_derivation_record(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    with pytest.raises(ingest.IngestError, match="repeats its prior day"):
+        _ingest(tmp_path, run_dir)
+
+
+def test_a_stale_carry_cutoff_row_is_replaced_by_the_derived_value(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    binding = _ingest(tmp_path, run_dir, derivation=_record("1010.25"))
+    nav = binding["nav"]
+    assert isinstance(nav, dict)
+    assert {tuple(v["derived_cutoff_row"].items()) for v in nav.values()} == {
+        (("derived", "1010.25"), ("native", "1000.5"))
+    }
+    lines = (
+        next((tmp_path / "ingest/nav").glob("*.csv"))
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    assert lines[-1].endswith(",2031-06-13,1010.25")
+    assert lines[-2].endswith(",2031-06-12,1000.5")
+
+
+def test_a_carry_the_record_confirms_is_kept_and_not_marked_derived(
+    tmp_path: Path,
+) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    binding = _ingest(tmp_path, run_dir, derivation=_record("1000.5"))
+    nav = binding["nav"]
+    assert isinstance(nav, dict)
+    assert all("derived_cutoff_row" not in v for v in nav.values())
+    csv_text = next((tmp_path / "ingest/nav").glob("*.csv")).read_text(encoding="utf-8")
+    assert csv_text.splitlines()[-1].endswith(",2031-06-13,1000.5")
+
+
+def test_a_derivation_record_without_the_cutoff_day_is_refused(tmp_path: Path) -> None:
+    run_dir = _run(tmp_path, FakeTransport(balances=_carry_balances()))
+    bad = {k: {"official_0612": "1"} for k in _record("1")}
+    with pytest.raises(ingest.IngestError, match="repeats its prior day"):
+        _ingest(tmp_path, run_dir, derivation=bad)
