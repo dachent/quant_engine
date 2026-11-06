@@ -199,13 +199,46 @@ CAPTURE_DIR --out OUT_DIR [--reference-index OLDER_RUN/artifacts/source-index.js
 checks every book of a capture as its files land (`--no-manifest --raw-subdir ""` reads a
 legacy downloads folder; `--cross-check DIR` and `--compare-prior DIR` compare the trade rows
 with other capture directories and with an older or HAR download set, `--require-reference`
-and `--reference-tolerance` bind the reference tie) and writes
+and `--reference-tolerance` bind the reference tie: every row of the older pull must be in the new
+file with its multiplicity, zero missing by default, compared on every field except the symbol because
+the export retags tickers (`^yy`, renames), the count of rows under another symbol is reported) and writes
 `book-identity-decisions-<manifest sha prefix>.json` (create-only per capture bytes) with the
 row-set digests, the net-share reconstruction and a PASS, REVIEW or FAIL per book; it exits
 non-zero unless every book is PASS. The checks and field definitions (page inception,
 the `Start MM/DD/YYYY` string of the page name, cash start, perf start) are in the tool's
 docstring. In particular a live book whose transactions precede its page inception is
 correct, and the holdings export must equal the net shares of its transactions.
+
+For a pull dated after the cutoff D, `--as-of D` adds I5D: the positions at D are the net
+signed shares of the rows dated on or before D, which equals the T holdings export rolled
+back by the later rows exactly when I5 closes at T (a SPLIT enters as its exported signed
+shares). The book is refused, with the numbers, only when data is missing (no holdings
+export, an unreadable date, an unknown row type after D) or the closure fails; the decisions
+file records `positions_as_of` (positions digest, rolled-back rows by type, splits after D).
+A cash-only book (transactions are exactly one CASH row, no holdings rows) passes I5D when its
+perf equity equals the cash amount throughout, the cash row is dated on or before D and another
+book of the same capture has a perf curve reaching D: with no instruments nothing accrues, so
+the equity at D is the cash amount (closure, not interpolation); the decisions file records
+`cash_only_flat_through_as_of`, the equity range, the first and last perf dates and the capture
+reach. A cash-only book whose equity moves (a simulation book: a curve but no exported instruments)
+is REVIEW, `positions_not_determinable`, accepted per book at plan time; a cash row after D,
+unreadable equity or no book reaching D fails with those numbers.
+No consumer reads a Portfolio123 holdings table; positions at D are an audit record.
+The BINDING decisions file of a cycle is the standalone `tools/p123_book_identity_check.py`
+run after the fetch, on the same capture directory, with `--as-of D`, `--reference-index` (the
+2026-07-31 `source-index.json`) and without `--require-reference`: a book absent from the
+reference pull is REVIEW there and is accepted per book with `plan --accept-identity-review
+ID=REASON`. The fetcher's own `book-identity-decisions.json` (run with `--no-reference --as-of D`)
+is the preliminary stop-gate: FAIL stops the run, REVIEW is recorded, exit 4. The plan consumes
+the standalone file through `--identity-decisions`; it is bound to the capture-manifest bytes
+(`capture_manifest_sha256`) and to the plan's as-of date, and a file for other bytes or another
+date is refused.
+Always run the identity check with `--as-of D`, D being the plan's as-of date: the plan
+refuses a decisions file whose `settings.as_of` is not the plan's as-of date, so a book
+without a holdings export fails I5D instead of reaching REVIEW.
+In a schema 2 generation the HAR-derived `transactions`, `equity_curve` and
+`period_performance` rows dated after the cutoff are excluded and counted in
+`har_excluded_after_as_of`, like the capture rows.
 
 Schema 1 plans keep rebuilding under adapter 1.0.0; new plans build under 1.1.0.
 

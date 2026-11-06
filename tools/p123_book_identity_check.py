@@ -30,8 +30,11 @@ I7 against the page record: series start is not after the page inception; the se
    is correct and passes.
 I8 no two books share trade rows (CASH rows excluded): more than 5% of the smaller set fails.
 I9 against a reference pull (``--reference-index``): every older row of the same id is in
-   the new file, up to ``--reference-tolerance`` (default 1%) missing, and the cash start is
-   equal; ``--require-reference`` makes a missing reference a failure.
+   the new file with its multiplicity (a row held twice in the reference must be held twice;
+   rows are compared on every field except the symbol, which the export retags, and the
+   number of rows under another symbol is reported), zero missing unless ``--reference-tolerance`` allows a fraction (recorded in the decisions
+   file), and the cash start is equal; ``--require-reference`` makes a missing reference a
+   failure.
 I8x ``--cross-check DIR`` (other capture directories of the same pull) fails, and
    ``--compare-prior DIR`` (an older or HAR download set) warns, when the new book's trade
    rows appear under ANOTHER id there: the permutation the 2026-09-02 set carried.
@@ -52,7 +55,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 import hashlib
 import json
@@ -68,7 +71,7 @@ _START_STRING = re.compile(r"Start\s+(\d{1,2})/(\d{1,2})/(\d{4})")
 _NON_SHARE_TYPES = {"CASH", "DIV", "INT", "FEE"}
 _SHARES_TOLERANCE = 0.5
 _OVERLAP_FAIL = 0.05
-_REFERENCE_MISSING = 0.01
+_REFERENCE_MISSING = 0.0
 _PAGE_POSITIONS_TOLERANCE = 5
 _START_WINDOW_DAYS = 7
 
@@ -146,10 +149,25 @@ def _cash_start(rows: Sequence[dict[str, str]]) -> tuple[str, float | None] | No
     return None if cash is None else (cash["Date"], _number(cash.get("Amount")))
 
 
+def _trade_counts(
+    rows: Sequence[dict[str, str]], *, symbol: bool = True
+) -> Counter[str]:
+    """Trade-row keys with multiplicity (CASH rows excluded), the symbol optional."""
+    return Counter(
+        json.dumps(
+            {k: v for k, v in row.items() if v != "" and (symbol or k != "Symbol")},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for row in rows
+        if row.get("Type") != "CASH"
+    )
+
+
 def _reference(
     index: Path | None, book: str
-) -> tuple[set[str], tuple[str, float | None] | None] | None:
-    """Trade-row keys and cash start of the same id in an earlier pull (a ``source-index.json`` run)."""
+) -> tuple[list[dict[str, str]], tuple[str, float | None] | None] | None:
+    """Trade rows and cash start of the same id in an earlier pull (a ``source-index.json`` run)."""
 
     if index is None:
         return None
@@ -159,7 +177,7 @@ def _reference(
             continue
         path = run / "objects" / entry["sha256"][:2] / entry["sha256"]
         rows = _rows(path)
-        return _trade_keys(rows), _cash_start(rows)
+        return rows, _cash_start(rows)
     return None
 
 
@@ -173,6 +191,8 @@ def check_book(
     trade_keys: set[str],
     require_reference: bool = False,
     tolerance: float = _REFERENCE_MISSING,
+    as_of: date | None = None,
+    capture_reach: str | None = None,
 ) -> dict[str, Any]:
     checks: list[dict[str, str]] = []
     names = {
@@ -295,6 +315,19 @@ def check_book(
         )
     else:
         checks.append(_check("I5", "WARN", "no holdings export to reconstruct against"))
+    # I5D
+    positions_as_of: dict[str, Any] | None = None
+    if as_of is not None:
+        positions_as_of, status, detail = _positions_as_of(
+            tx,
+            as_of,
+            holdings_symbols=len(held) if names["holdings"].is_file() else None,
+            mismatched=len(differs),
+            terminal=perf_print["last_date"],
+            cash_only=_cash_only(tx, perf, len(holdings)),
+            capture_reach=capture_reach,
+        )
+        checks.append(_check("I5D", status, detail))
     # I6
     positions = _number(perf[-1].get("# Positions")) if perf else None
     if names["holdings"].is_file() and positions is not None:
@@ -367,16 +400,25 @@ def check_book(
                 )
             )
         else:
-            reference_keys, reference_cash = reference
-            missing_rows = len(reference_keys - trade_keys)
-            share = missing_rows / len(reference_keys) if reference_keys else 0.0
+            reference_rows, reference_cash = reference
+            # A multiset comparison on every field except the symbol: a row held twice in
+            # the reference must be held twice, and a ticker rename or ``^yy`` retag between
+            # the two exports (set at export time) does not make a row absent.
+            reference_counts = _trade_counts(reference_rows, symbol=False)
+            missing_rows = sum(
+                (reference_counts - _trade_counts(tx, symbol=False)).values()
+            )
+            renamed = sum((_trade_counts(reference_rows) - _trade_counts(tx)).values())
+            total = sum(reference_counts.values())
+            share = missing_rows / total if total else 0.0
             same_start = reference_cash is None or reference_cash == _cash_start(tx)
             checks.append(
                 _check(
                     "I9",
                     "PASS" if share <= tolerance and same_start else "FAIL",
-                    f"{missing_rows} of {len(reference_keys)} reference trade rows absent "
-                    f"({share:.2%}); cash start "
+                    f"{missing_rows} of {total} reference trade rows absent "
+                    f"({share:.2%}, tolerance {tolerance:.2%}; {renamed} rows carry "
+                    f"another symbol); cash start "
                     + ("equals" if same_start else "differs from")
                     + " the reference",
                 )
@@ -388,11 +430,192 @@ def check_book(
         "fingerprints": {"perf": perf_print, "transactions": tx_print},
         "holdings_reconstruction": recon,
         "page_record": page_facts,
+        "positions_as_of": positions_as_of,
         "series_start": {
             "cash_amount": cash_amount,
             "date": cash_day.isoformat() if cash_day else None,
         },
     }
+
+
+_SHARE_TYPES = {"BUY", "SELL", "SHORT", "COVER", "SPLIT"}
+
+
+def _positions_as_of(
+    tx: Sequence[dict[str, str]],
+    as_of: date,
+    *,
+    holdings_symbols: int | None,
+    mismatched: int,
+    terminal: str | None,
+    cash_only: dict[str, Any] | None = None,
+    capture_reach: str | None = None,
+) -> tuple[dict[str, Any], str, str]:
+    """Positions at ``as_of``: the net signed shares of rows dated on or before it.
+
+    The holdings export describes the capture day T; rolling back the rows dated after
+    ``as_of`` gives the positions at ``as_of`` exactly when I5 closed at T, because every
+    row, a SPLIT included, enters that identity as its exported signed shares.  Refused,
+    with the numbers, only when data is missing (no holdings export, an unreadable date,
+    an unknown row type among the rolled-back rows), the capture does not reach ``as_of``
+    (the last perf date is before it, so the export is not a later state of the book) or the
+    closure fails."""
+    net: dict[str, float] = defaultdict(float)
+    rolled: dict[str, int] = defaultdict(int)
+    splits: list[dict[str, str]] = []
+    refusals: list[str] = []
+    for row in tx:
+        kind = row.get("Type") or ""
+        day = _day(row.get("Date"))
+        if day is None:
+            refusals.append(f"unreadable date {row.get('Date')!r}")
+            continue
+        if day > as_of:
+            rolled[kind] += 1
+            if kind == "SPLIT":
+                splits.append(
+                    {
+                        "date": day.isoformat(),
+                        "shares": row.get("Shares") or "",
+                        "symbol": row.get("Symbol") or "",
+                    }
+                )
+            if kind not in _SHARE_TYPES | _NON_SHARE_TYPES:
+                refusals.append(f"unknown row type {kind!r} dated {day}")
+            continue
+        shares = _number(row.get("Shares"))
+        if kind in _NON_SHARE_TYPES or shares is None or not row.get("Symbol"):
+            continue
+        net[row["Symbol"]] += shares
+    open_net = {
+        s: round(v, 6) for s, v in sorted(net.items()) if abs(v) > _SHARES_TOLERANCE
+    }
+    facts: dict[str, Any] = {
+        "as_of": as_of.isoformat(),
+        "open_symbols": len(open_net),
+        "positions_sha256": hashlib.sha256(
+            json.dumps(open_net, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "rolled_back_rows": dict(sorted(rolled.items())),
+    }
+    facts["splits_after_as_of"] = splits
+    facts["capture_last_perf_date"] = terminal
+    if cash_only is not None:
+        return _cash_only_positions(facts, as_of, cash_only, terminal, capture_reach)
+    numbers = f"rolled back {dict(sorted(rolled.items()))}, splits {splits}"
+    if terminal is None or terminal < as_of.isoformat():
+        return (
+            facts,
+            "FAIL",
+            f"the capture ends {terminal}, before as-of {as_of}: its holdings are not a "
+            f"later state of the book; {numbers}",
+        )
+    if refusals:
+        return facts, "FAIL", "; ".join(sorted(set(refusals))[:5]) + f"; {numbers}"
+    if holdings_symbols is None:
+        return (
+            facts,
+            "FAIL",
+            f"no holdings export at T to close the roll-back; {numbers}",
+        )
+    if mismatched:
+        return (
+            facts,
+            "FAIL",
+            f"the roll-back cannot close: {mismatched} of {holdings_symbols} symbols "
+            f"differ at T; {numbers}",
+        )
+    return (
+        facts,
+        "PASS",
+        f"{sum(rolled.values())} rows after {as_of} rolled back and I5 closed at T over "
+        f"{holdings_symbols} symbols ({numbers}); {len(open_net)} open symbols at {as_of}",
+    )
+
+
+def _cash_only(
+    tx: Sequence[dict[str, str]], perf: Sequence[dict[str, str]], holdings_rows: int
+) -> dict[str, Any] | None:
+    """A book with no instruments, defined from its own files: the transactions are exactly
+    one CASH row and the holdings export has no rows.  None for any other book."""
+    if len(tx) != 1 or tx[0].get("Type") != "CASH" or holdings_rows:
+        return None
+    equities = [_number(row.get("Total Equity")) for row in perf]
+    dates = [row.get("Date") or "" for row in perf]
+    return {
+        "cash_amount": _number(tx[0].get("Amount")),
+        "cash_date": tx[0].get("Date") or "",
+        "equities": equities,
+        "first_date": min(dates, default=None),
+        "last_date": max(dates, default=None),
+    }
+
+
+def _cash_only_positions(
+    facts: dict[str, Any],
+    as_of: date,
+    cash_only: dict[str, Any],
+    terminal: str | None,
+    capture_reach: str | None,
+) -> tuple[dict[str, Any], str, str]:
+    """I5D for a cash-only book: closure, not interpolation (PASS when flat); a moving
+    curve with no exported instruments is REVIEW; everything else fails.
+
+    With no instruments there is nothing to roll back and nothing accrues, so the book's
+    equity can change only through a transaction row.  The transactions export of the same
+    pull lists every row to the capture day; it holds the one start CASH row.  That equity
+    equals the cash amount through the whole perf history and the capture itself reaches
+    ``as_of`` (another book of the pull has a perf curve to or past it), so the equity at
+    ``as_of`` is the cash amount.  A cash row after ``as_of``, unreadable equity or a
+    capture that does not reach ``as_of`` fails with the numbers."""
+    amount = cash_only["cash_amount"]
+    equities = [value for value in cash_only["equities"] if value is not None]
+    facts["cash_only_flat_through_as_of"] = False
+    facts["cash_only"] = {
+        "capture_reach": capture_reach,
+        "cash_amount": amount,
+        "equity_max": max(equities) if equities else None,
+        "equity_min": min(equities) if equities else None,
+        "first_date": cash_only["first_date"],
+        "last_perf_date": cash_only["last_date"],
+    }
+    numbers = (
+        f"cash {amount} dated {cash_only['cash_date']}, perf equity "
+        f"{facts['cash_only']['equity_min']}..{facts['cash_only']['equity_max']} "
+        f"{cash_only['first_date']}..{cash_only['last_date']}, capture reach {capture_reach}"
+    )
+    if amount is None or str(cash_only["cash_date"]) > as_of.isoformat():
+        return (
+            facts,
+            "FAIL",
+            f"cash-only book: no usable cash row by {as_of}; {numbers}",
+        )
+    if not equities or len(equities) != len(cash_only["equities"]):
+        return facts, "FAIL", f"cash-only book: unreadable perf equity; {numbers}"
+    if capture_reach is None or capture_reach < as_of.isoformat():
+        return (
+            facts,
+            "FAIL",
+            f"cash-only book: no book of this capture reaches as-of {as_of}; {numbers}",
+        )
+    if any(abs(value - amount) > 0.01 for value in equities):
+        # A simulation book: its curve moves, but no instruments are exported (one CASH row,
+        # an empty holdings export), so its positions at as-of are not in the files.  The
+        # operator accepts that per book with a reason; nothing reads these positions.
+        facts["positions_not_determinable"] = True
+        return (
+            facts,
+            "WARN",
+            "no instruments exported; positions at as-of not determinable from the "
+            f"files (equity moves, so the book holds something); {numbers}",
+        )
+    facts["cash_only_flat_through_as_of"] = True
+    facts["equity_at_as_of"] = amount
+    return (
+        facts,
+        "PASS",
+        f"cash-only book flat through {as_of}: equity {amount}, no instruments; {numbers}",
+    )
 
 
 def _decision(checks: Sequence[dict[str, str]]) -> str:
@@ -422,6 +645,7 @@ def check_capture(
     reference_tolerance: float = _REFERENCE_MISSING,
     cross_checks: Sequence[tuple[Path, str]] = (),
     prior_checks: Sequence[tuple[Path, str]] = (),
+    as_of: date | None = None,
 ) -> dict[str, Any]:
     raw = capture / raw_subdir if raw_subdir else capture
     listed = _manifest(capture) if use_manifest else None
@@ -437,6 +661,15 @@ def check_capture(
         }
     )
     selected = list(books) if books else found
+    reach = max(
+        (
+            row.get("Date") or ""
+            for book in found
+            if (raw / f"strategy_{book}_perf.csv").is_file()
+            for row in _rows(raw / f"strategy_{book}_perf.csv")
+        ),
+        default=None,
+    )
     pages = _page_records(raw)
     keys = {
         book: _trade_keys(_rows(raw / f"strategy_{book}_transactions.csv"))
@@ -454,6 +687,8 @@ def check_capture(
             trade_keys=keys[book],
             require_reference=require_reference,
             tolerance=reference_tolerance,
+            as_of=as_of,
+            capture_reach=reach or None,
         )
         for book in selected
     ]
@@ -500,6 +735,7 @@ def check_capture(
         result["decision"] = _decision(result["checks"])
     return {
         "settings": {
+            "as_of": as_of.isoformat() if as_of else None,
             "reference_tolerance": reference_tolerance,
             "require_reference": require_reference,
         },
@@ -549,6 +785,12 @@ def _parser() -> argparse.ArgumentParser:
         help="data root; prints the predecessor fingerprints per book",
     )
     parser.add_argument("--previous-generation-id")
+    parser.add_argument(
+        "--as-of",
+        type=date.fromisoformat,
+        help="cutoff D (YYYY-MM-DD): roll the T holdings back to D from the transactions "
+        "and record the positions at D (I5D)",
+    )
     return parser
 
 
@@ -569,6 +811,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         reference_tolerance=args.reference_tolerance,
         cross_checks=[(path, args.cross_raw_subdir) for path in args.cross_check],
         prior_checks=[(path, args.prior_raw_subdir) for path in args.compare_prior],
+        as_of=args.as_of,
     )
     if args.previous_generation_root is not None:
         previous = previous_generation_books(
@@ -578,6 +821,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     # One file per capture bytes: a re-run on the same bytes must reproduce it exactly.
     tag = str(report["capture_manifest_sha256"] or "no-manifest")[:12]
+    if args.as_of is not None:
+        tag += f"-asof-{args.as_of.isoformat()}"
     target = args.out / f"book-identity-decisions-{tag}.json"
     content = json.dumps(report, indent=1, sort_keys=True)
     if target.exists() and target.read_text(encoding="utf-8") != content:
