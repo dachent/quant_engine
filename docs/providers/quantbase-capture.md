@@ -255,7 +255,10 @@ given; a label given when nothing is late is no longer refused (it widens nothin
 The only snapshot a number reads is `accounts.csv` `settled_balance`: the fund facts
 builder rolls it back to the cutoff by the cash effect of every activity row dated
 after the cutoff (transfers, fund fills, dividends, AUM and partner fees) and compares
-the result with the declared residual, so a late capture closes like an on-time one;
+the result with the declared residual (the builder accepts rows after the cutoff in
+`account_activity.csv`; `quantbase_har_to_csv.py` still drops them from that file, so a
+late pull converted today fails the residual closure with the numbers, fail-closed; a
+sidecar of the dropped rows through the converter, plan and release stages is NOT built);
 `closure.account.cash.post_cutoff_cash_rolled_back` records the amount when it is not
 zero. Activity and accounts are assumed to come from one capture session; if they are
 not, the residual check fails loudly. A fund fill after the cutoff in a sleeve fund (an
