@@ -675,13 +675,21 @@ def derive_schwab_positions(positions_path: Path) -> dict[str, Any]:
 _OFFICIAL_SUFFIX = "_yahoo_daily.csv"
 
 
-def held_check(positions_path: Path, served_dirs: Sequence[Path]) -> dict[str, Any]:
+def held_check(
+    positions_path: Path,
+    served_dirs: Sequence[Path],
+    ingest_config: Path | None = None,
+) -> dict[str, Any]:
     """Held symbols of a Schwab run against the symbols a retained Yahoo pull already served.
 
     Offline and before any evidence is minted: a held symbol no retained pull ever served is the
     one a live fetch could fail on (a run with a symbol Yahoo does not serve is rejected after the
     single-use evidence is spent).  ``served_before`` means a ``<SYMBOL>_yahoo_daily.csv`` exists in
-    one of the given directories; it says nothing about the symbol today.
+    one of the given directories; it says nothing about the symbol today.  With the Schwab ingest
+    config (``symbol_aliases``, ``cash_equivalent_symbols``) it also lists the held symbols the
+    ingest spells differently or values at 1.00 with no close: the driver fetches a cash-equivalent
+    position that appears in ``positions.json`` for nothing, and writes an aliased symbol's file
+    under the held spelling, not the alias target the ingest looks for.
     """
 
     held = derive_schwab_positions(positions_path)
@@ -701,11 +709,36 @@ def held_check(positions_path: Path, served_dirs: Sequence[Path]) -> dict[str, A
         }
         for provider, schwab in sorted(held["names"].items())
     ]
-    return {
+    report: dict[str, Any] = {
         "positions_sha256": held["positions_sha256"],
         "held": rows,
         "never_served": [row["symbol"] for row in rows if not row["served_before"]],
     }
+    if ingest_config is not None:
+        try:
+            document = json.loads(ingest_config.read_bytes().decode("utf-8"))
+            aliases = document["symbol_aliases"]
+            cash = document["cash_equivalent_symbols"]
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+        ) as exc:
+            raise DriverError(
+                "the ingest config is unreadable or lacks its symbol maps"
+            ) from exc
+        if not isinstance(aliases, dict) or not isinstance(cash, list):
+            raise DriverError("the ingest config symbol maps have the wrong shape")
+        names = {row["symbol"] for row in rows}
+        report["aliased_by_ingest"] = {
+            symbol: str(aliases[symbol]) for symbol in sorted(names & set(aliases))
+        }
+        report["cash_equivalent_by_ingest"] = sorted(
+            names & {str(item) for item in cash}
+        )
+    return report
 
 
 def _materialize(
@@ -2723,6 +2756,12 @@ def _parser() -> argparse.ArgumentParser:
     held.add_argument("--positions", type=Path, required=True)
     held.add_argument("--served-dir", type=Path, action="append", default=[])
     held.add_argument("--allow-unseen", action="store_true")
+    held.add_argument(
+        "--ingest-config",
+        type=Path,
+        default=None,
+        help="Schwab ingest config: also list held symbols it aliases or values as cash",
+    )
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
     )
@@ -2850,7 +2889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"staged {path}")
             return 0
         if args.command == "held-check":
-            report = held_check(args.positions, args.served_dir)
+            report = held_check(args.positions, args.served_dir, args.ingest_config)
             print(json.dumps(report, indent=2, sort_keys=True))
             if report["never_served"] and not args.allow_unseen:
                 print(

@@ -173,7 +173,12 @@ Before any evidence is minted (the Schwab capture has produced the held list): r
 It is offline and lists the held symbols that no retained pull ever served (a
 `<SYMBOL>_yahoo_daily.csv` in a given directory), and exits 1 if there is any, so a symbol Yahoo
 does not serve is found before it can reject a run and spend the single-use evidence;
-`--allow-unseen` reports without refusing. The retained R2.1 pulls
+`--allow-unseen` reports without refusing. With `--ingest-config INGEST.json` (the Schwab ingest
+config) it also names the held symbols that config aliases (`aliased_by_ingest`, symbol to the
+file spelling the ingest looks for, which the driver does not write: it names the file by the held
+symbol) or values at 1.00 as cash (`cash_equivalent_by_ingest`: a cash-equivalent that appears in
+`positions.json` is fetched for nothing and belongs in `exclude_symbols`); both are reports, not
+refusals, so they can be decided before Saturday. The retained R2.1 pulls
 (`dataPortfolio/source-runs/r21-schwab-0917-closes-20261030` and `inputs/spy-spxl-yahoo`) served
 all 15 non-cash symbols of the R2.1 09-17 capture (BIL, CL, DGP, ERX, IBIT, NEE, PEP, PG, SOXL,
 SPXL, SPY, TQQQ, UDOW, UPRO, XLE; the "38 positions" of that pull list are rows across accounts,

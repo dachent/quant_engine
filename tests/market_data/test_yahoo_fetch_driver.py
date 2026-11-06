@@ -1833,3 +1833,38 @@ def test_held_check_names_the_held_symbols_no_retained_pull_served(
     (served / "NEWCO_yahoo_daily.csv").write_text("date,close\n")
     assert driver.main(argv) == 0
     assert json.loads(capsys.readouterr().out)["never_served"] == []
+
+
+def test_held_check_lists_what_the_ingest_aliases_or_values_as_cash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    positions = _positions(tmp_path, ["SPY", "BRK/B", "MMKT"])
+    served = tmp_path / "served"
+    served.mkdir()
+    for name in ("SPY", "BRK.B", "MMKT"):
+        (served / f"{name}_yahoo_daily.csv").write_text("date,close\n")
+    config = tmp_path / "ingest.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "price_ratio_tolerance": "0.1",
+                "symbol_aliases": {"BRK.B": "BRK-B", "OLD": "NEW"},
+                "cash_equivalent_symbols": ["MMKT", "GONE"],
+                "price_ratio_exceptions": {},
+            }
+        )
+    )
+    argv = ["held-check", "--positions", str(positions), "--served-dir", str(served)]
+    assert driver.main([*argv, "--ingest-config", str(config)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    # only the symbols actually held are named, with the spelling the ingest would look for
+    assert report["aliased_by_ingest"] == {"BRK.B": "BRK-B"}
+    assert report["cash_equivalent_by_ingest"] == ["MMKT"]
+    # without the config the report has neither key; a broken config is refused
+    assert driver.main(argv) == 0
+    assert "aliased_by_ingest" not in json.loads(capsys.readouterr().out)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    assert driver.main([*argv, "--ingest-config", str(bad)]) == 1
+    assert "ingest config" in capsys.readouterr().err
