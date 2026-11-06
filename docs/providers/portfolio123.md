@@ -199,7 +199,9 @@ CAPTURE_DIR --out OUT_DIR [--reference-index OLDER_RUN/artifacts/source-index.js
 checks every book of a capture as its files land (`--no-manifest --raw-subdir ""` reads a
 legacy downloads folder; `--cross-check DIR` and `--compare-prior DIR` compare the trade rows
 with other capture directories and with an older or HAR download set, `--require-reference`
-and `--reference-tolerance` bind the reference tie) and writes
+and `--reference-tolerance` bind the reference tie: every row of the older pull must be in the new
+file with its multiplicity, zero missing by default, compared on every field except the symbol because
+the export retags tickers (`^yy`, renames), the count of rows under another symbol is reported) and writes
 `book-identity-decisions-<manifest sha prefix>.json` (create-only per capture bytes) with the
 row-set digests, the net-share reconstruction and a PASS, REVIEW or FAIL per book; it exits
 non-zero unless every book is PASS. The checks and field definitions (page inception,

@@ -30,8 +30,11 @@ I7 against the page record: series start is not after the page inception; the se
    is correct and passes.
 I8 no two books share trade rows (CASH rows excluded): more than 5% of the smaller set fails.
 I9 against a reference pull (``--reference-index``): every older row of the same id is in
-   the new file, up to ``--reference-tolerance`` (default 1%) missing, and the cash start is
-   equal; ``--require-reference`` makes a missing reference a failure.
+   the new file with its multiplicity (a row held twice in the reference must be held twice;
+   rows are compared on every field except the symbol, which the export retags, and the
+   number of rows under another symbol is reported), zero missing unless ``--reference-tolerance`` allows a fraction (recorded in the decisions
+   file), and the cash start is equal; ``--require-reference`` makes a missing reference a
+   failure.
 I8x ``--cross-check DIR`` (other capture directories of the same pull) fails, and
    ``--compare-prior DIR`` (an older or HAR download set) warns, when the new book's trade
    rows appear under ANOTHER id there: the permutation the 2026-09-02 set carried.
@@ -52,7 +55,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 import hashlib
 import json
@@ -68,7 +71,7 @@ _START_STRING = re.compile(r"Start\s+(\d{1,2})/(\d{1,2})/(\d{4})")
 _NON_SHARE_TYPES = {"CASH", "DIV", "INT", "FEE"}
 _SHARES_TOLERANCE = 0.5
 _OVERLAP_FAIL = 0.05
-_REFERENCE_MISSING = 0.01
+_REFERENCE_MISSING = 0.0
 _PAGE_POSITIONS_TOLERANCE = 5
 _START_WINDOW_DAYS = 7
 
@@ -146,10 +149,25 @@ def _cash_start(rows: Sequence[dict[str, str]]) -> tuple[str, float | None] | No
     return None if cash is None else (cash["Date"], _number(cash.get("Amount")))
 
 
+def _trade_counts(
+    rows: Sequence[dict[str, str]], *, symbol: bool = True
+) -> Counter[str]:
+    """Trade-row keys with multiplicity (CASH rows excluded), the symbol optional."""
+    return Counter(
+        json.dumps(
+            {k: v for k, v in row.items() if v != "" and (symbol or k != "Symbol")},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for row in rows
+        if row.get("Type") != "CASH"
+    )
+
+
 def _reference(
     index: Path | None, book: str
-) -> tuple[set[str], tuple[str, float | None] | None] | None:
-    """Trade-row keys and cash start of the same id in an earlier pull (a ``source-index.json`` run)."""
+) -> tuple[list[dict[str, str]], tuple[str, float | None] | None] | None:
+    """Trade rows and cash start of the same id in an earlier pull (a ``source-index.json`` run)."""
 
     if index is None:
         return None
@@ -159,7 +177,7 @@ def _reference(
             continue
         path = run / "objects" / entry["sha256"][:2] / entry["sha256"]
         rows = _rows(path)
-        return _trade_keys(rows), _cash_start(rows)
+        return rows, _cash_start(rows)
     return None
 
 
@@ -378,16 +396,25 @@ def check_book(
                 )
             )
         else:
-            reference_keys, reference_cash = reference
-            missing_rows = len(reference_keys - trade_keys)
-            share = missing_rows / len(reference_keys) if reference_keys else 0.0
+            reference_rows, reference_cash = reference
+            # A multiset comparison on every field except the symbol: a row held twice in
+            # the reference must be held twice, and a ticker rename or ``^yy`` retag between
+            # the two exports (set at export time) does not make a row absent.
+            reference_counts = _trade_counts(reference_rows, symbol=False)
+            missing_rows = sum(
+                (reference_counts - _trade_counts(tx, symbol=False)).values()
+            )
+            renamed = sum((_trade_counts(reference_rows) - _trade_counts(tx)).values())
+            total = sum(reference_counts.values())
+            share = missing_rows / total if total else 0.0
             same_start = reference_cash is None or reference_cash == _cash_start(tx)
             checks.append(
                 _check(
                     "I9",
                     "PASS" if share <= tolerance and same_start else "FAIL",
-                    f"{missing_rows} of {len(reference_keys)} reference trade rows absent "
-                    f"({share:.2%}); cash start "
+                    f"{missing_rows} of {total} reference trade rows absent "
+                    f"({share:.2%}, tolerance {tolerance:.2%}; {renamed} rows carry "
+                    f"another symbol); cash start "
                     + ("equals" if same_start else "differs from")
                     + " the reference",
                 )

@@ -316,6 +316,38 @@ def test_reference_pull_must_be_contained_and_share_the_cash_start(
     assert _status(report, "101", "I9") == "FAIL"
 
 
+def test_reference_rows_are_compared_with_multiplicity_and_zero_missing(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")  # one BUY of A101 on 2025-05-12
+    _manifest(capture)
+    twice = [("2025-05-12", "A101", "BUY", "100")] * 2
+    reference = _reference(tmp_path, _tx("2025-05-09", "1,000,000.00", twice))
+    report = ic.check_capture(capture, reference_index=reference)
+    assert (
+        _status(report, "101", "I9") == "FAIL"
+    )  # held once, the reference holds it twice
+    detail = next(
+        c["detail"] for c in report["books"]["101"]["checks"] if c["check"] == "I9"
+    )
+    assert "1 of 2 reference trade rows absent" in detail
+    renamed = _tx(
+        "2025-05-09", "1,000,000.00", [("2025-05-12", "OLDSYM", "BUY", "100")]
+    )
+    moved = ic.check_capture(
+        capture, reference_index=_reference(tmp_path / "r2", renamed)
+    )
+    assert _status(moved, "101", "I9") == "PASS"  # same row under another symbol
+    assert "1 rows carry another symbol" in next(
+        c["detail"] for c in moved["books"]["101"]["checks"] if c["check"] == "I9"
+    )
+    lenient = ic.check_capture(
+        capture, reference_index=reference, reference_tolerance=0.5
+    )
+    assert _status(lenient, "101", "I9") == "PASS"
+
+
 def test_cli_writes_one_decisions_file_per_capture_bytes_and_exits_by_decision(
     tmp_path: Path,
 ) -> None:
@@ -385,7 +417,7 @@ def test_required_reference_and_recorded_tolerance(tmp_path: Path) -> None:
     assert _status(report, "101", "I9") == "FAIL"
     assert report["settings"] == {
         "as_of": None,
-        "reference_tolerance": 0.01,
+        "reference_tolerance": 0.0,
         "require_reference": True,
     }
     strict = ic.check_capture(
