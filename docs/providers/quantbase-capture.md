@@ -395,7 +395,12 @@ whose HAR already exists (create-only) and a corrupt journal, drops a half-writt
 last line (warning `JOURNAL_LAST_LINE_TRUNCATED`), and writes the HAR and the manifest
 with `recovered: true` and the warning `RECOVERED_FROM_JOURNAL`. `verify` then
 checks the recovered run like any other. A finished run keeps its journal, hash-bound
-in the manifest, and `verify` requires the HAR to equal it.
+in the manifest, and `verify` requires the HAR to equal it. A legacy-workspace quarantine
+(`provider_security_quarantine.py plan-quantbase`) selects the HAR and `journal.jsonl`
+(category `AUTHENTICATED_HAR_JOURNAL`) together, because both hold the `jwt` header values;
+the value-free `manifest.json` stays and keeps the provenance (HAR hash, journal hash, per-entry
+body and request hashes). The recorder `verify` of that run is no longer possible once the HAR
+is quarantined, as before; restore from the quarantine to re-verify.
 
 `propose-contract --run-root <run> [--run-root <run> ...] --out <new dir>` verifies the
 runs, then lists the observed unreviewed same-origin GET route templates and query key
