@@ -118,6 +118,16 @@ PORTFOLIO123_CONTRACT = ProviderContract(
             "/app/account/positions/{account_id}",
             path_pattern=r"/app/account/positions/[1-9][0-9]*",
         ),
+        # The account's investment list (one record per book: assetUid, assetName,
+        # inceptionDt, posCnt, ...). ``f`` is 1 and ``s`` is a 13-digit millisecond
+        # cache-buster; both are positive integers. Reviewed offline: 78 preserved HAR
+        # responses, all ``GET`` 200 ``application/json``, and the 2026-09-12 capture
+        # saved the response as ``raw/p123_investment_resource.json``.
+        _endpoint(
+            "investment.resource-list",
+            "/app/investment/resource",
+            query_keys=frozenset({"f", "s"}),
+        ),
     ),
     sensitive_fields=frozenset(
         {

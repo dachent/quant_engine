@@ -306,3 +306,83 @@ exists. A refused run leaves no binding and needs a new output root.
   would let one approval authorise an open-ended number of reads.
 - The holdings request start time, not only the response time, must lie inside
   the allowed window after the close.
+
+## The cutoff-day NAV: derive, ingest, declare
+
+The native `balances.historical` row for the cutoff day D can be a stale carry of the day before (R2.1: every
+non-flat account, captured after the New York close). A carry cannot be the cutoff day's NAV, so the order
+of a capture whose series ends at D is: capture and verify the run, fetch the official closes of every held
+symbol for D and the day before, then (all committed tools, Python 3.11 venv, no scratch script):
+
+1. `python tools/schwab_nav_derive.py derive --run-dir <verified run> --crosswalk <crosswalk> --closes-dir <closes>
+   --day D --prior-day <D-1> --out <derivation.json> [--report <report.json>]` writes the derivation record
+   (per account `official_<MMDD>` for D and the day before, `nav_file_<MMDD>`, `cash`; the value is the sum of
+   quantity x official close rounded to cents half-even plus the cash rows, exactly what the ledger replays) and
+   refuses on a missing close, a prior-day closure beyond `--tolerance` (default 0.05; R2.1 saw 0.02), a flat
+   (cash-only) account whose native NAV is not exactly its cash, or a non-flat account whose native D disagrees
+   with the official value without being a carry of D-1.
+2. `python tools/schwab_capture_ingest.py ingest ... --derivation-record <derivation.json>` writes the derived D
+   row into the NAV CSVs of the stale-carry accounts and records it (`derived_cutoff_row`, native and derived
+   value) in the binding. Without the record a carried cutoff row is refused.
+3. After composing the spec, `python tools/schwab_nav_derive.py declare ... --derivation <derivation.json> --spec
+   <composed spec> --out <finality evidence>` writes the source-branch finality evidence (the spec's roots and
+   NAV sources plus the pinned `derived_patch`); it re-derives the record from the run and refuses a file that
+   differs. The provider ledger replays the patch exactly (no tolerance) and refuses a selected cutoff row equal
+   to the row before unless the pinned record states the same official value (a flat account).
+
+The labelled same-day mode (series ending D-1) has no cutoff row and needs none of this; a same-day NAV for D
+there is not produced by any tool.
+
+### The exact chain for a capture whose series ends at D (R3: D = 2026-11-06, prior day 2026-11-05)
+
+Python 3.11 venv for every command; `<run>` is the verified driver run, `<xw>` the crosswalk file, `<closes>` the
+Yahoo run's `official-closes` directory (files `<SYMBOL>_yahoo_daily.csv`, `/` written as `.`), `<ev>` an evidence
+directory outside the world.
+
+1. `python tools/schwab_capture_driver.py verify ...` (existing) accepts the run.
+2. The Yahoo run supplies a close for D and the prior trading day for every held non-cash symbol
+   (`yahoo_fetch_driver.py held-check` lists symbols no retained pull served, before evidence is minted).
+3. `python tools/schwab_nav_derive.py derive --run-dir <run> --crosswalk <xw> --closes-dir <closes> --day 2026-11-06
+   --prior-day 2026-11-05 --out <ev>/schwab-nav-derivation.json --report <ev>/schwab-nav-report.json`
+   (add `--waive-prior-closure ACCOUNT=REASON` only for an account the run shows transactions on D for; see below).
+4. `python tools/schwab_capture_ingest.py ingest <run> --crosswalk <xw> --cutoff 2026-11-06 --official-closes-dir
+   <yahoo run> --config <ingest config> --output-root <ingest root> --base-spec <base spec> --spec-out
+   <ev>/schwab-composed-spec.json --derivation-record <ev>/schwab-nav-derivation.json`.
+5. `python tools/schwab_generation.py stage <ev>/schwab-composed-spec.json <dataSchwab root>` (then `publish` with the
+   accepted generation id), giving the generation id and `generation.json` sha256.
+6. `python tools/schwab_nav_derive.py declare --run-dir <run> --crosswalk <xw> --closes-dir <closes> --day 2026-11-06
+   --prior-day 2026-11-05 --derivation <ev>/schwab-nav-derivation.json --spec <ev>/schwab-composed-spec.json
+   --out <ev>/schwab-finality.json` (the same `--waive-prior-closure` arguments as step 3: it re-derives and refuses a
+   derivation file that differs).
+7. The cycle manifest's `providers.schwab` names that generation and evidence; `declare` does not edit it:
+   `generation` `{"mode": "explicit", "generation_id": <id>}`, `manifest_sha256` = the `generation.json` sha256,
+   `finality_source` `CYCLE_MANIFEST_NATIVE`, `finalized_through` `2026-11-06`, `finality_evidence`
+   `{"path": {"root_key": ..., "relative": ...}, "sha256": <sha256 of schwab-finality.json>}` with the file under a
+   declared root. A wrong pin, path or id refuses at `release_cycle_manifest.py` resolution (`HASH_MISMATCH`,
+   `PATH_ESCAPES_ROOT`, `ID_MISMATCH`, `FINALITY_EVIDENCE_REQUIRED`) and `release_ledger_spec.py` copies the pins and
+   `finalized_through`; the provider ledger is the first refusal only for the content (a stale carry, a patch that does not
+   replay exactly), not for this wiring.
+
+Refusals and the fallback for each (evidence of a capture is single-use, so a refusal is read, never retried blindly):
+
+| Refusal | Cause | Fallback, within 30 minutes |
+|---|---|---|
+| `no official close file for X` / `X has no official close for D` | a held symbol the Yahoo run did not serve | none after the fact (the Yahoo evidence is single-use): `held-check` before the fetch; else the owner decides |
+| `the native history lacks D-1 or D` | the capture did not end at D | not recoverable by a tool: the labelled same-day mode or a new capture, owner decision |
+| `the official value ... of D-1 differs from the captured NAV ... by more than 0.05` | a wrong close/holding/crosswalk, or an account that traded on D | read the message: it names the D transaction rows if any; review them and waive that account with a reason (recorded as `prior_closure`, `waiver_reason`, row count); with no D rows it is an input error, do not waive |
+| `a flat account's native NAV ... must both equal its cash` | a cash flow on D, or a wrong cash row | as above (waiver needs D transactions) |
+| `the native NAV ... differs from the official value ... and is not a carry` | native D is a fresh value that disagrees with the closes | input error: check the closes first; no waiver |
+| `an unlabelled cutoff NAV repeats its prior day` at ingest, or `repeats its prior day without a derived patch` at the ledger | the derivation was not passed to the ingest, or the evidence omits the account | rerun steps 4-6 with the record; never edit a NAV CSV |
+| `schwab derived patch replay differs` at the ledger | the pinned holdings, closes or record do not reproduce the derived value exactly | rebuild the record with `derive`; the ledger has no tolerance |
+
+A waiver does not change the derived value: it is the end-of-D holdings at the D closes (correct whatever traded on D); it
+only skips the cross-check that D-1 held what D holds, which an account active on D cannot pass.
+
+`derive` values a held symbol from `<SYMBOL>_yahoo_daily.csv` of the same spelling (`/` written as `.`). It does not apply the
+ingest configuration's `symbol_aliases` or `cash_equivalent_symbols`: the ledger's exact replay has no such rule, so a record
+that used them could not be replayed. A held symbol that needs either refuses with `no official close file for <symbol>`; run
+`yahoo_fetch_driver.py held-check --ingest-config <ingest config>` right after the capture, which lists aliased and
+cash-equivalent holdings, before the Yahoo evidence is minted.
+
+The ledger accepts a selected cutoff row that repeats the row before only for an account the pinned holdings capture shows
+flat (no position rows) whose cash equals that row; the derivation record is never the authority for that.
