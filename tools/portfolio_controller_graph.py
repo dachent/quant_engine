@@ -238,6 +238,8 @@ _PATH_STAGES = {
     # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
     # create-only run directory; no stage reads it, only a pinned run it is handed.
     "tools/grizzlybulls_capture.py": [],
+    # Operator capture step for the TuringTrader public objects; no stage impact.
+    "tools/tt_public_capture.py": [],
     # Offline signal-vs-fill comparison report; informational, never a stage input.
     "tools/grizzlybulls_schwab_crosscheck.py": [],
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
