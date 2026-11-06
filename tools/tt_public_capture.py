@@ -117,9 +117,9 @@ class UrllibTransport:
 
 
 def redact(text: str, tokens: Sequence[str]) -> str:
-    for token in tokens:
-        if token:
-            text = text.replace(token, "[REDACTED]")
+    for value in tokens:
+        if value:
+            text = text.replace(value, "[REDACTED]")
     return _QUERY_TOKEN_RE.sub(r"\1[REDACTED]", text)
 
 
@@ -236,7 +236,7 @@ def _fetch(
     timeout: float,
 ) -> dict[str, Any]:
     name, rel, storage, key = item
-    secret = list(tokens.values())
+    known = list(tokens.values())
     record: dict[str, Any] = {
         "group": group,
         "object": name,
@@ -248,7 +248,7 @@ def _fetch(
             f"{BASE}{storage}?alt=media&token={tokens[key]}", timeout
         )
     except Exception as error:  # network or transport failure
-        record["error"] = redact(f"{type(error).__name__}: {error}", secret)[:200]
+        record["error"] = redact(f"{type(error).__name__}: {error}", known)[:200]
         return record
     record["http_status"] = response.status
     if response.status != 200:
