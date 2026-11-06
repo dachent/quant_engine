@@ -382,6 +382,7 @@ def test_a_slash_symbol_is_read_from_the_dot_named_close_file(tmp_path: Path) ->
 
 STALE = "account-00000000000000a2"
 FLAT = "account-00000000000000f1"
+MOVED = "account-00000000000000b3"
 
 
 def _transactions(run: Path, account: str, *days: str) -> None:
@@ -457,3 +458,94 @@ def test_waivers_are_account_equals_reason_and_never_repeated() -> None:
     for bad in (["a"], ["=x"], ["a="], ["a=x", "a=y"]):
         with pytest.raises(derive_tool.DeriveError):
             derive_tool._waivers(bad)
+
+
+def _rows(run: Path, account: str, rows: list[dict[str, str]]) -> None:
+    folder = run / "transactions/normalized/wch/transactions"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{account}.json").write_text(json.dumps(rows), encoding="utf-8")
+
+
+def test_a_row_posted_after_d_that_moves_shares_or_cash_stops_the_derivation(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path)
+    _rows(
+        run,
+        STALE,
+        [
+            {"transactionDate": "09/18/2026", "action": "Sell", "shareQuantity": "1"},
+            {"transactionDate": "09/18/2026", "action": "Sell", "amount": "$5.00"},
+            {
+                "transactionDate": "09/19/2026",
+                "action": "Cash Dividend",
+                "amount": "$1",
+            },
+            {"transactionDate": "09/17/2026", "action": "Buy", "shareQuantity": "1"},
+        ],
+    )
+    with pytest.raises(
+        derive_tool.DeriveError,
+        match=r"account-00000000000000a2: 3 transaction row\(s\) posted or effective after 2026-09-17 "
+        r"change its quantity or cash \(Cash Dividend x1, Sell x2\)",
+    ):
+        _derive(run, closes)
+
+
+def test_a_row_posted_after_d_with_no_quantity_or_amount_is_recorded_not_refused(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path)
+    _rows(
+        run,
+        STALE,
+        [
+            {"transactionDate": "09/18/2026", "action": "Memo", "shareQuantity": ""},
+            {"transactionDate": "09/18/2026 as of 09/17/2026", "action": "Memo"},
+        ],
+    )
+    record, _ = _derive(run, closes)
+    assert record[STALE]["after_day_informational_rows"] == "Memo x2"
+    assert "after_day_informational_rows" not in record[MOVED]
+
+
+def test_rows_on_or_before_d_and_a_run_without_transactions_are_unchanged(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path)
+    base, _ = _derive(run, closes)
+    _rows(
+        run,
+        STALE,
+        [{"transactionDate": "09/17/2026", "action": "Buy", "shareQuantity": "1"}],
+    )
+    with_rows, _ = _derive(run, closes, waivers={STALE: "bought AAA on D"})
+    assert "after_day_informational_rows" not in with_rows[STALE]
+    assert base[MOVED] == with_rows[MOVED]
+
+
+def test_an_unreadable_posting_date_is_refused(tmp_path: Path) -> None:
+    run, closes = _world(tmp_path)
+    _rows(run, STALE, [{"transactionDate": "yesterday", "action": "Buy"}])
+    with pytest.raises(derive_tool.DeriveError, match="unreadable date"):
+        _derive(run, closes)
+
+
+def test_an_effective_date_after_d_counts_even_when_the_posting_date_is_not(
+    tmp_path: Path,
+) -> None:
+    run, closes = _world(tmp_path)
+    _rows(
+        run,
+        STALE,
+        [
+            {
+                "transactionDate": "09/17/2026",
+                "action": "Bank Interest",
+                "amount": "$1",
+                "effectiveDate": "09/19/2026",
+            }
+        ],
+    )
+    with pytest.raises(derive_tool.DeriveError, match="Bank Interest x1"):
+        _derive(run, closes)
