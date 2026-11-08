@@ -216,14 +216,33 @@ def test_capture_before_close_and_late_capture_are_refused_without_label() -> No
         _normalize(
             _holdings(), captured_at=datetime(2031, 6, 13, 19, 0, tzinfo=timezone.utc)
         )
-    with pytest.raises(driver.DriverError, match="outside the first-next-date"):
-        _normalize(_holdings(), captured_at=AFTER_CLOSE + timedelta(days=3))
+    # a later-day capture needs no label: the account is rolled back to the close instead
+    late = _normalize(_holdings(), captured_at=AFTER_CLOSE + timedelta(days=3))
+    assert late["exception_label"] is None
+    assert late["capture"]["capture_mode"] == driver.MODE_LATE  # type: ignore[index]
+    assert late["as_of_basis"] == "CAPTURED_LATER_DAY_ROLLED_BACK_TO_CUTOFF"
     labelled = _normalize(
         _holdings(),
         captured_at=AFTER_CLOSE + timedelta(days=3),
         exception_label="LATE_CAPTURE_LABELLED",
     )
     assert labelled["exception_label"] == "LATE_CAPTURE_LABELLED"
+
+
+def test_a_later_day_capture_records_quotes_dated_after_the_cutoff_without_a_label() -> (
+    None
+):
+    # the quoted price date is informational: the value comes from the official closes
+    result = _normalize(
+        _holdings(price_date="06/16/2031"),
+        captured_at=AFTER_CLOSE + timedelta(days=3),
+    )
+    rows = _positions(result)
+    assert {row["as_of_offset_days"] for row in rows} == {3}
+    assert {row["as_of_exception_label"] for row in rows} == {None}
+    # ... but not on a capture that is not a later day
+    with pytest.raises(driver.DriverError, match="as_of_differs_from_cutoff_close"):
+        _normalize(_holdings(price_date="06/16/2031"))
 
 
 @pytest.mark.parametrize("label", ["lower", "A", "HAS SPACE", 5])
@@ -1032,38 +1051,51 @@ def test_first_next_date_captures_are_accepted(cutoff: str, captured: datetime) 
 
 
 @pytest.mark.parametrize(
+    ("cutoff", "captured"),
+    [
+        ("2031-06-13", _utc_ny(2031, 6, 14, 20)),  # Saturday evening
+        ("2031-06-13", _utc_ny(2031, 6, 14, 20, 30)),
+        ("2031-06-13", _utc_ny(2031, 6, 15, 12)),  # Sunday
+        ("2031-06-13", _utc_ny(2031, 6, 16, 8)),  # Monday pre-open
+        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 29)),
+        ("2031-06-13", _utc_ny(2031, 6, 16, 10)),  # Monday after the open
+        ("2031-06-13", _utc_ny(2031, 6, 17, 8)),
+        ("2031-06-10", _utc_ny(2031, 6, 11, 9, 30)),  # after the next session open
+        ("2031-06-10", _utc_ny(2031, 6, 11, 10)),
+        ("2031-06-10", _utc_ny(2031, 6, 12, 8)),
+        ("2026-09-04", _utc_ny(2026, 9, 8, 8)),
+        ("2026-09-04", _utc_ny(2026, 9, 7, 12)),
+        ("2026-04-02", _utc_ny(2026, 4, 6, 8)),
+    ],
+)
+def test_a_capture_after_the_first_next_date_needs_no_label(
+    cutoff: str, captured: datetime
+) -> None:
+    # the weekday, the 20:00 window and the open were ceremony: the account is rolled back to
+    # the close from its own transactions and the closure checks decide
+    assert _mode(cutoff, captured) == driver.MODE_LATE
+
+
+@pytest.mark.parametrize(
     ("cutoff", "captured", "message"),
     [
-        ("2031-06-13", _utc_ny(2031, 6, 14, 20), "outside the first-next-date"),
-        ("2031-06-13", _utc_ny(2031, 6, 14, 20, 30), "outside the first-next-date"),
-        ("2031-06-13", _utc_ny(2031, 6, 15, 12), "outside the first-next-date"),  # Sun
-        ("2031-06-13", _utc_ny(2031, 6, 16, 8), "outside the first-next-date"),  # Mon
-        ("2031-06-13", _utc_ny(2031, 6, 16, 9, 29), "outside the first-next-date"),
-        ("2031-06-13", _utc_ny(2031, 6, 16, 10), "outside the first-next-date"),
-        ("2031-06-13", _utc_ny(2031, 6, 17, 8), "outside the first-next-date"),
-        ("2031-06-10", _utc_ny(2031, 6, 11, 9, 30), "after the next session open"),
-        ("2031-06-10", _utc_ny(2031, 6, 11, 10), "after the next session open"),
-        ("2031-06-10", _utc_ny(2031, 6, 12, 8), "outside the first-next-date"),
-        ("2026-09-04", _utc_ny(2026, 9, 8, 8), "outside the first-next-date"),
-        ("2026-09-04", _utc_ny(2026, 9, 7, 12), "outside the first-next-date"),
-        ("2026-04-02", _utc_ny(2026, 4, 6, 8), "outside the first-next-date"),
-        ("2031-06-13", _utc_ny(2031, 6, 13, 16, 0), "same-day post-close"),
-        ("2031-06-13", _utc_ny(2031, 6, 13, 23, 59), "same-day post-close"),
-        ("2031-06-13", _utc_ny(2031, 6, 13, 15, 59), "precedes"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 16, 0), "same-day capture"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 23, 59), "balance row is not available"),
+        ("2031-06-13", _utc_ny(2031, 6, 13, 15, 59), "does not exist yet"),
         ("2031-06-14", _utc_ny(2031, 6, 15, 8), "not a trading day"),  # Saturday
         ("2026-09-07", _utc_ny(2026, 9, 8, 8), "not a trading day"),  # Labor Day
     ],
 )
-def test_other_capture_modes_are_refused_without_the_label(
+def test_captures_without_the_data_are_refused_without_the_label(
     cutoff: str, captured: datetime, message: str
 ) -> None:
     with pytest.raises(driver.DriverError, match=message):
         _mode(cutoff, captured)
     # with the label the mode is recorded rather than refused
     assert _mode(cutoff, captured, "OWNER_APPROVED_EXCEPTION") in {
-        driver.MODE_OUTSIDE,
         driver.MODE_SAME_DAY,
         driver.MODE_BEFORE_CLOSE,
+        driver.MODE_LATE,
         driver.MODE_NEXT_SESSION,
     }
 

@@ -121,6 +121,71 @@ so one call returns every account; `balances.historical` is a `GET` with an empt
 `query`, scoped per account by `Schwab-Client-Ids`; `transactions.history` is the
 reviewed POST. `body` is `null` for the two requests the driver builds itself.
 
+## Late pull: the capture is rolled back to the cutoff close
+
+A capture is the account at capture time T. Any capture taken after the cutoff close D
+(Saturday, Sunday, Monday, any later day, at any hour) is bound without an exception
+label: `tools/schwab_rollback.py` takes the captured quantities and cash back to the close of
+D by undoing the rows of the run's own transaction history that are posted after D, and the
+closure checks decide whether the result is right. `derive` prices the rolled-back
+holdings; `ingest` binds them (the snapshot carries the rolled-back quantities and cash) and
+records `roll_back` (rows undone and rows after D that carry no quantity or amount, per
+account) in the binding; `declare` pins the transaction files and the ledger replays the
+same function (`replay.transactions`). A capture with no row after D is bound exactly as
+before.
+
+The rule was fitted to retained bytes, not assumed (the 2026-01-19, 04-12, 07-17 and 09-04
+position exports against the 3,299 retained transaction rows, all eight accounts, tolerances
+1e-6 shares and 0.005 cash; `tests/schwab/test_schwab_rollback_retained.py`, skipped when the
+sources are not mounted). Five rolled-back pairs reproduce the earlier snapshot exactly
+(quantities and cash, 876 to 2,080 rows each):
+
+| Row type | Share effect forward | Cash effect forward |
+|---|---|---|
+| Buy, Reinvest Shares | `+abs(shareQuantity)` | `amount` (signed, fees netted) |
+| Sell | `-abs(shareQuantity)` | `amount` |
+| Journal, Journaled Shares, Security Transfer | `shareQuantity` as signed | `amount` when present |
+| dividends of every kind, reinvest legs, interest, fees, MoneyLink, bank transfer, wire, funds received, cash in lieu | none | `amount` |
+
+* **Which rows:** posted after D (first date of `transactionDate`) and effective after D
+  (`effectiveDate`). The retained bytes cannot tell the two dates apart (none of the 68 rows
+  whose posting and effective dates differ straddles a snapshot date), so a row posted after D
+  with an effective date on or before D, or the reverse, is refused by name rather than
+  guessed. A month-end D pulled late can hit this: Bank Interest rows are posted the next
+  business day "as of" month end.
+* **Trade date, not settle date:** the snapshot cash is trade-date cash (a Buy on 2026-04-10
+  that settles 04-13 is already inside the 04-12 cash row; settle-date accounting fails).
+* **Symbols** join with `.` and `/` removed (`BRK.B` in the snapshot, `BRKB` in the rows).
+
+Refused, each naming account, action and date: Stock Split and Spin-off (a quantity added
+after D, while Yahoo `Close` is split-adjusted), any action outside the table, a row whose
+quantity or amount does not fit its action, a negative rolled-back quantity, a position held
+at D that the capture never listed (sold in full after D), and a cash change when the account
+has not exactly one cash summary row. The closure checks of `derive` stay: the rolled-back
+value against the native balance of D and of D-1, tolerance 0.05; the waiver option is unchanged and is not needed for a
+roll-back.
+
+**Refusals removed, and why each protected nothing.** The driver's `assess_timing` and the
+ingest no longer refuse a capture for its weekday, its hour (the 20:00 New York window), the
+next session's open, the first-New-York-date rule, a missing label, or mode
+(`OUTSIDE_STANDARD_WINDOW` is now `LATER_DAY_ROLLED_BACK`, bound as is). The holdings rows'
+quoted price date may differ from D without a label (it is informational; the value comes
+from the official closes). Each of these guarded the assumption that the capture equals the
+account at D; the roll-back removes the assumption and the closures test the numbers. Kept:
+a capture before the cutoff close (the closing data does not exist), a same-day capture
+(the balance history ends the day before the capture, so the cutoff-day balance row does not
+exist; a label still admits the D-1 row), a cutoff that is not a trading day, a missing D
+balance row or official close, an account-set mismatch, any closure failure.
+
+**Unverified.** Stock Split, Spin-off, Cash In Lieu, Journaled Shares and Security Transfer
+signs sit before every retained snapshot, and Journal-with-symbol nets to zero in every
+window; settle-date cash for trades that straddle a snapshot; which of posting and effective
+date the broker's own accounting follows; an account whose sweep fund is reported as a
+position at T but as cash at D (or the reverse); a Monday native D balance row (it is
+checked against the rolled-back value, not assumed).
+
+## Live capture tooling: evidence, crosswalk, attach check
+
 ### Generating and checking the evidence
 
 `make-evidence` writes the evidence for you (create-only; the driver fills the

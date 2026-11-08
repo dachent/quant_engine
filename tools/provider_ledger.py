@@ -3124,18 +3124,56 @@ def _replay_schwab_patched_navs(
         ),
         "Schwab derivation record",
     )
-    # the transaction files the derivation's after-D guard read: bound by hash, so altering or
-    # dropping one after the declaration is a mismatch here
-    pinned_accounts: set[str] = set()
+    # The transaction files of the derivation are bound by hash (altering or dropping one after
+    # the declaration is a mismatch here). The holdings an account was priced from are the
+    # capture's, rolled back to the day by the same function the derivation used.
+    import schwab_rollback
+
+    (end,) = [
+        _day(d, "Schwab patched date")
+        for d in _strings(patch["patched_dates"], "dates")
+    ]
+    rows_of: dict[str, list[dict[str, Any]]] = {}
     for pin in _objects(replay.get("transactions", []), "Schwab replay transactions"):
         pinned = _text(pin.get("account_id"), "Schwab replay transactions account")
-        if pinned in pinned_accounts or pinned not in held:
+        if pinned in rows_of or pinned not in held:
             raise ProviderLedgerError("schwab replay transactions scope differs")
-        pinned_accounts.add(pinned)
-        _schwab_pinned_bytes(
-            {k: pin.get(k) for k in ("path", "sha256", "size_bytes")},
-            "replay transactions",
+        rows_of[pinned] = _objects(
+            json.loads(
+                _schwab_pinned_bytes(
+                    {k: pin.get(k) for k in ("path", "sha256", "size_bytes")},
+                    "replay transactions",
+                )
+            ),
+            "Schwab replay transaction rows",
         )
+    if not {
+        a
+        for a, r in record.items()
+        if isinstance(r, dict) and r.get("rolled_back_rows")
+    } <= set(rows_of):
+        raise ProviderLedgerError("schwab replay transactions differ from the record")
+    for account_id, rows in rows_of.items():
+        try:
+            stated_reading = _object(record.get(account_id, {}), "derivation row").get(
+                "straddler_reading"
+            )
+            rolled = schwab_rollback.roll_back(
+                account_id,
+                rows,
+                *held[account_id],
+                end,
+                {
+                    None: schwab_rollback.STRADDLERS_REFUSED,
+                    "IN_D": schwab_rollback.STRADDLERS_IN_D,
+                    "OUT_D": schwab_rollback.STRADDLERS_OUT_D,
+                }[stated_reading],
+            )
+        except schwab_rollback.RollbackError as exc:
+            raise ProviderLedgerError(
+                f"schwab replay roll-back refused: {exc}"
+            ) from exc
+        held[account_id] = (rolled.quantities, rolled.cash)
     for entry in entries.values():
         quantities, cash = held.get(entry["account_id"], ({}, Decimal(0)))
         if entry["account_id"] not in held:
