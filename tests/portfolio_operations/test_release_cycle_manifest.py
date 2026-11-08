@@ -471,3 +471,139 @@ def test_link_like_recognises_symlink_and_junction_reparse_tags_but_not_cloud_pl
     ):
         monkeypatch.setattr(Path, "lstat", lambda self, tag=tag: Stat(tag))
         assert tool._is_link_tag(plain) is expected, hex(tag)
+
+
+# -- cutoff consistency check: the cutoff is the last complete NYSE day at refresh start ------
+
+
+def _declared(cycle: dict[str, Any], cutoff: str, started: str, **extra: Any) -> None:
+    cycle["manifest"].update(cutoff=cutoff, refresh_started_at_utc=started, **extra)
+
+
+@pytest.mark.parametrize(
+    ("started", "expected"),
+    [
+        (
+            "2026-01-02T22:00:00Z",
+            "2026-01-02",
+        ),  # Friday 17:00 New York, session complete
+        ("2026-01-02T15:00:00Z", "2025-12-31"),  # Fri pre-close
+        ("2026-01-03T15:00:00Z", "2026-01-02"),  # Saturday
+        ("2026-01-04T23:30:00Z", "2026-01-02"),  # Sunday
+        (
+            "2026-01-05T14:00:00Z",
+            "2026-01-02",
+        ),  # Monday 09:00 New York, before the close
+        ("2026-01-05T22:00:00Z", "2026-01-05"),  # Monday after the close
+        ("2026-01-19T22:00:00Z", "2026-01-16"),  # MLK Monday, market holiday
+        ("2026-01-20T14:00:00Z", "2026-01-16"),  # the Tuesday after it, pre-close
+        (
+            "2026-01-06T04:30:00Z",
+            "2026-01-05",
+        ),  # Monday 23:30 New York but Tuesday in UTC
+    ],
+)
+def test_expected_cutoff_is_the_last_complete_nyse_day(
+    started: str, expected: str
+) -> None:
+    assert tool.expected_cutoff(started).isoformat() == expected
+
+
+def test_friday_declaration_with_friday_cutoff_passes_and_is_recorded(
+    cycle: dict[str, Any],
+) -> None:
+    _declared(cycle, "2026-01-02", "2026-01-02T22:00:00Z")
+    assert _resolve(cycle)["cutoff_check"] == {
+        "status": "MATCHES_LAST_COMPLETE_NYSE_DAY",
+        "refresh_started_at_utc": "2026-01-02T22:00:00Z",
+        "expected_cutoff": "2026-01-02",
+        "declared_cutoff": "2026-01-02",
+    }
+
+
+def test_a_monday_pull_for_a_cycle_started_friday_keeps_friday(
+    cycle: dict[str, Any],
+) -> None:
+    # the check reads the declared refresh start, never the pull (captured_at_utc, a Sunday here)
+    _declared(cycle, "2026-01-02", "2026-01-02T23:00:00Z")
+    assert _resolve(cycle)["cutoff_check"]["status"] == "MATCHES_LAST_COMPLETE_NYSE_DAY"
+
+
+def test_mismatch_without_an_owner_instruction_refuses_with_both_dates_and_the_flag(
+    cycle: dict[str, Any],
+) -> None:
+    _declared(cycle, "2026-01-01", "2026-01-05T14:00:00Z")
+    with pytest.raises(tool.CycleManifestError) as info:
+        _resolve(cycle)
+    assert info.value.code == "CUTOFF_MISMATCH"
+    text = str(info.value)
+    assert "2026-01-01" in text and "2026-01-02" in text
+    assert "cutoff_owner_instruction" in text
+
+
+def test_mismatch_with_an_owner_instruction_passes_and_records_the_string(
+    cycle: dict[str, Any],
+) -> None:
+    _declared(
+        cycle,
+        "2026-01-01",
+        "2026-01-05T14:00:00Z",
+        cutoff_owner_instruction="owner 2026-01-05: cut at 01-01",
+    )
+    assert _resolve(cycle)["cutoff_check"] == {
+        "status": "OWNER_INSTRUCTION",
+        "refresh_started_at_utc": "2026-01-05T14:00:00Z",
+        "expected_cutoff": "2026-01-02",
+        "declared_cutoff": "2026-01-01",
+        "owner_instruction": "owner 2026-01-05: cut at 01-01",
+    }
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_a_blank_owner_instruction_is_a_schema_refusal(
+    cycle: dict[str, Any], text: str
+) -> None:
+    _declared(
+        cycle, "2026-01-01", "2026-01-05T14:00:00Z", cutoff_owner_instruction=text
+    )
+    _refused(cycle, "SCHEMA")
+
+
+def test_an_owner_instruction_without_a_refresh_start_is_refused(
+    cycle: dict[str, Any],
+) -> None:
+    cycle["manifest"]["cutoff_owner_instruction"] = "owner said so"
+    _refused(cycle, "CUTOFF_CHECK_NEEDS_REFRESH_START")
+
+
+def test_a_naive_refresh_start_is_refused(cycle: dict[str, Any]) -> None:
+    _declared(cycle, "2026-01-02", "2026-01-02T22:00:00")
+    _refused(cycle, "SCHEMA")
+
+
+def test_legacy_manifest_without_refresh_start_resolves_with_unchanged_output(
+    cycle: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # R2.x style: cutoff 2026-09-17 (a Thursday), no refresh start
+    cycle["manifest"].update(cutoff="2026-09-17", evaluated_on="2026-09-18")
+    resolved = _resolve(cycle)
+    assert "cutoff_check" not in resolved
+    assert resolved["cutoff"] == "2026-09-17"
+    assert tool.dumps(resolved) == tool.dumps(_resolve(cycle))
+    tool._note_legacy(resolved)
+    assert "NOT_CHECKED_LEGACY" in capsys.readouterr().err
+
+
+def test_a_new_cycle_cannot_skip_the_cutoff_check_by_omitting_the_refresh_start(
+    cycle: dict[str, Any],
+) -> None:
+    # after the last legacy cutoff (2026-09-17) the check is required, so omission is no bypass
+    cycle["manifest"].update(cutoff="2026-11-06", evaluated_on="2026-11-07")
+    with pytest.raises(tool.CycleManifestError) as refused:
+        _resolve(cycle)
+    assert refused.value.code == "CUTOFF_CHECK_REQUIRED"
+    assert "2026-09-17" in str(refused.value) and "refresh_started_at_utc" in str(
+        refused.value
+    )
+    cycle["manifest"]["refresh_started_at_utc"] = "2026-11-07T14:00:00Z"
+    assert _resolve(cycle)["cutoff_check"]["status"] == tool.CUTOFF_OK

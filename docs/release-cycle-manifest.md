@@ -67,6 +67,39 @@ release_cycle_manifest.py print-ids --manifest M [--manifest-sha256 H] --root K=
 hash and generation. `resolve` writes the resolved-cycle JSON create-only to `--out` (an existing
 file is a refusal) or prints it. `print-ids` prints one JSON line. Exit 0 ok, 1 refusal, 2 usage.
 
+## Cutoff consistency check
+
+Policy: the delivery cutoff is the end of the last complete NYSE trading day (America/New_York;
+a weekend or market holiday resolves to the previous session; a trading day counts as complete
+from its 16:00 close), resolved once when the refresh starts and fixed for the cycle. Any other
+cutoff needs an explicit owner instruction recorded in the cycle. The check lives in
+`check_declared_cutoff` (`validate` and `resolve` both run it) and uses
+`quant_engine.core.market_calendar` for the calendar. It reads no clock: the declared
+`refresh_started_at_utc` is the only time it uses, so a Monday pull for a cycle started on Friday
+keeps Friday. `captured_at_utc` (the pull) plays no part.
+
+| Manifest field | Meaning |
+|---|---|
+| `refresh_started_at_utc` (optional, ISO-8601 with offset) | when the refresh started; turns the check on |
+| `cutoff_owner_instruction` (optional, non-blank text) | the owner instruction (quote or reference) that makes a different `cutoff` intended; recorded verbatim |
+
+Outcomes (the resolved cycle carries `cutoff_check`: `status`, `refresh_started_at_utc`,
+`expected_cutoff`, `declared_cutoff`, and `owner_instruction` when overridden):
+
+* `cutoff` equals the expected day: `MATCHES_LAST_COMPLETE_NYSE_DAY`.
+* it differs and `cutoff_owner_instruction` is set: `OWNER_INSTRUCTION`; the check never blocks a
+  recorded instruction.
+* it differs and there is no instruction: refused, `CUTOFF_MISMATCH`, naming both dates and the
+  field to add. Example: `declared cutoff 2026-01-01 is not the last complete NYSE trading day
+  2026-01-02 as of refresh start 2026-01-05T14:00:00Z; if the owner instructed this cutoff, add
+  "cutoff_owner_instruction": "<the owner instruction, quoted or referenced>" to the cycle manifest`.
+* `cutoff_owner_instruction` without `refresh_started_at_utc`: `CUTOFF_CHECK_NEEDS_REFRESH_START`.
+
+Legacy manifests (no `refresh_started_at_utc` and a `cutoff` not after 2026-09-17: R1-R2.2) still validate and resolve; a manifest with a later cutoff and no `refresh_started_at_utc` is refused (`CUTOFF_CHECK_REQUIRED`), so omission is no bypass. The check is not
+run (`NOT_CHECKED_LEGACY`, printed as a NOTE on stderr); the resolved file gets no new key, so its
+bytes are identical to what the tool wrote before the check existed. A new cycle declares the
+refresh start. Ad hoc closures and early (13:00) closes are not modelled by the calendar.
+
 ## Outputs (resolved-cycle file, `qe-release-resolved-cycle/1`)
 
 Keys: `schema_version`, `cycle_id`, `cutoff`, `evaluated_on`, `captured_at_utc`,
@@ -145,6 +178,8 @@ Every refusal is `release-cycle-manifest: FAIL: <CODE>: <detail>` on stderr, exi
 | `DATE_INVALID` | `cutoff`, `evaluated_on`, `finalized_through` or `captured_at_utc` is not a real date or timestamp (impossible calendar date, time or offset) |
 | `DATE_PRECISION_LOST` | `captured_at_utc` carries a non-zero fraction finer than a microsecond, which the ledger cannot hold |
 | `DATE_ORDER` | `cutoff` is after `evaluated_on` |
+| `CUTOFF_MISMATCH` | `cutoff` is not the last complete NYSE trading day at `refresh_started_at_utc` and no `cutoff_owner_instruction` is recorded |
+| `CUTOFF_CHECK_NEEDS_REFRESH_START` | `cutoff_owner_instruction` is present without `refresh_started_at_utc` |
 | `PATH_ESCAPES_ROOT` | a `relative` is absolute, has `..`, backslash, drive letter, empty part, or resolves (symlink) outside its root |
 | `UNKNOWN_ROOT` | a root key is not bound by the run |
 | `ROOTS` / `ROOT_MISSING` | malformed `--root`, duplicate key with two directories, root not an existing absolute directory |
