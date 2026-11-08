@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 
@@ -407,3 +407,12 @@ def test_exception_text_is_value_free_and_bounded() -> None:
     )
     assert text.startswith("ValueError: Failed for account #")
     assert "123456789" not in text and "\n" not in text and len(text) <= 160
+
+
+def test_transaction_date_reads_the_as_of_shape_and_errors_value_free() -> None:
+    assert driver._txn_date("08/31/2026") == date(2026, 8, 31)
+    assert driver._txn_date("11/05/2026 as of 11/04/2026") == date(2026, 11, 5)
+    assert driver._txn_date("2026-11-05") == date(2026, 11, 5)
+    with pytest.raises(driver.DriverError) as bad:
+        driver._txn_date("Pending 11/05/2026 123456")
+    assert "123456" not in str(bad.value) and "shape" in str(bad.value)

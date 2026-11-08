@@ -566,7 +566,8 @@ def _provider_date(value: object, name: str) -> date:
             return datetime.strptime(text, pattern).date()
         except ValueError:
             continue
-    raise DriverError(f"{name} has an unsupported date format")
+    shape = re.sub(r"[0-9]", "9", re.sub(r"[A-Za-z]{4,}", "word", text))[:40]
+    raise DriverError(f"{name} has an unsupported date format (shape {shape!r})")
 
 
 def _as_of_fields(
@@ -1721,7 +1722,11 @@ def run_capture(
 
 
 def _txn_date(value: object) -> date:
-    return _provider_date(value, "transaction date")
+    # Schwab posts as-of rows as "MM/DD/YYYY as of MM/DD/YYYY": the posting date is the first
+    # date (the rule of tools/schwab_rollback.py); the raw text, with its as-of date, stays in
+    # the retained row.
+    first = _text(value, "transaction date").split(" as of ", 1)[0]
+    return _provider_date(first, "transaction date")
 
 
 def _bind_transactions(
