@@ -74,6 +74,7 @@ _OVERLAP_FAIL = 0.05
 _REFERENCE_MISSING = 0.0
 _PAGE_POSITIONS_TOLERANCE = 5
 _START_WINDOW_DAYS = 7
+_START_GAP_DAYS = 7
 
 
 def _number(value: str | None) -> float | None:
@@ -242,9 +243,14 @@ def check_book(
     perf_day = _day(perf[0]["Date"]) if perf else None
     perf_equity = _number(perf[0].get("Total Equity")) if perf else None
     # I3
+    i3_gap: int | None = None
     if cash is None or not perf:
         checks.append(_check("I3", "FAIL", "no CASH start row or no perf rows"))
-    elif (perf_day != cash_day and any(r.get("Type") != "CASH" for r in tx)) or (
+    elif (
+        perf_day != cash_day
+        and any(r.get("Type") != "CASH" for r in tx)
+        and not _start_gap_ok(perf_day, cash_day, perf_equity, cash_amount)
+    ) or (
         cash_amount is not None
         and perf_equity is not None
         and abs(perf_equity - cash_amount) > 0.01
@@ -255,6 +261,19 @@ def check_book(
                 "FAIL",
                 f"perf starts {perf_day} with equity {perf_equity}; "
                 f"transactions start {cash_day} with cash {cash_amount}",
+            )
+        )
+    elif perf_day != cash_day and any(r.get("Type") != "CASH" for r in tx):
+        # The perf curve starts on the last trading day before the first transaction row
+        # (a year-end boundary: Thu 1998-12-31 curve start, first row Sat 1999-01-02), with
+        # the identical start amount.
+        i3_gap = (cash_day - perf_day).days  # type: ignore[operator]
+        checks.append(
+            _check(
+                "I3",
+                "PASS",
+                f"perf starts {perf_day}, transactions start {cash_day} ({i3_gap} days "
+                f"later, within {_START_GAP_DAYS}); equal start amount {cash_amount}",
             )
         )
     elif perf_day != cash_day:
@@ -435,6 +454,7 @@ def check_book(
             "cash_amount": cash_amount,
             "date": cash_day.isoformat() if cash_day else None,
         },
+        "i3_start_gap_days": i3_gap,
     }
 
 
@@ -530,6 +550,24 @@ def _positions_as_of(
         "PASS",
         f"{sum(rolled.values())} rows after {as_of} rolled back and I5 closed at T over "
         f"{holdings_symbols} symbols ({numbers}); {len(open_net)} open symbols at {as_of}",
+    )
+
+
+def _start_gap_ok(
+    perf_day: date | None,
+    cash_day: date | None,
+    perf_equity: float | None,
+    cash_amount: float | None,
+) -> bool:
+    """The perf curve starts up to ``_START_GAP_DAYS`` calendar days before the first
+    transaction row (never after it) and the two start amounts are identical."""
+    if perf_day is None or cash_day is None:
+        return False
+    if perf_equity is None or cash_amount is None:
+        return False
+    return (
+        0 < (cash_day - perf_day).days <= _START_GAP_DAYS
+        and abs(perf_equity - cash_amount) <= 0.01
     )
 
 

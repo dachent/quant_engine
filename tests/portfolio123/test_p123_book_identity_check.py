@@ -504,3 +504,41 @@ def test_a_cash_only_book_alone_in_a_capture_that_ends_early_fails(
         c["detail"] for c in report["books"]["505"]["checks"] if c["check"] == "I5D"
     )
     assert "no book of this capture reaches as-of" in detail
+
+
+def _i3(tmp_path: Path, **book: str) -> tuple[str, dict[str, object]]:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101", **book)
+    _manifest(capture)
+    report = ic.check_capture(capture)
+    return _status(report, "101", "I3"), report["books"]["101"]
+
+
+def test_i3_accepts_a_perf_start_a_few_days_before_the_first_row_with_equal_amounts(
+    tmp_path: Path,
+) -> None:
+    # The 1049274 shape: curve starts Thu 1998-12-31, first row Sat 1999-01-02.
+    status, book = _i3(tmp_path, start="1999-01-02", perf_start="1998-12-31")
+    assert status == "PASS"
+    assert book["i3_start_gap_days"] == 2
+    seven, book = _i3(tmp_path / "seven", start="1999-01-07", perf_start="1998-12-31")
+    assert seven == "PASS" and book["i3_start_gap_days"] == 7
+
+
+def test_i3_keeps_the_failure_for_unequal_amounts_wide_gaps_and_a_row_before_the_curve(
+    tmp_path: Path,
+) -> None:
+    status, book = _i3(
+        tmp_path / "amount",
+        start="1999-01-02",
+        perf_start="1998-12-31",
+        perf_equity="999,000.00",
+    )
+    assert status == "FAIL" and book["i3_start_gap_days"] is None
+    assert (
+        _i3(tmp_path / "wide", start="1999-01-08", perf_start="1998-12-31")[0] == "FAIL"
+    )
+    assert (
+        _i3(tmp_path / "before", start="1998-12-30", perf_start="1998-12-31")[0]
+        == "FAIL"
+    )
