@@ -327,6 +327,9 @@ _PATH_STAGES = {
     "tools/quantbase_har_to_csv.py": [],
     "tools/quantbase_cdp_har_recorder.py": [],
     "tools/quantbase_cdp_navigator.py": [],
+    # moves provider legacy files carrying session material into a quarantine root; an
+    # operator step that reads no admitted source and writes no delivery artifact
+    "tools/provider_security_quarantine.py": [],
     "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
