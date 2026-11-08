@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 import csv
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import json
 import os
@@ -1130,6 +1130,62 @@ def _har_day(row: Mapping[str, str], family: str, column: str) -> date:
         ) from None
 
 
+def _cut_managed_performance(
+    rows: Sequence[dict[str, str]], as_of: date
+) -> Counter[str]:
+    """Cut each managed-performance series at ``as_of``; return the observations removed.
+
+    The series is one capture of field/value rows per entity: ``date`` (first day),
+    ``dateLast`` (last day) and ``data`` (one observation per weekday from ``date`` through
+    ``dateLast``), with ``panels`` naming the graphs.  Every reader expands that weekday
+    calendar with no cutoff of its own, so a series ending after ``as_of`` is truncated to
+    its last weekday on or before ``as_of`` (``data`` and ``dateLast`` rewritten).  A series
+    that ends on or before ``as_of`` is left byte for byte as captured.  A series that
+    starts after ``as_of`` or whose observation count is not its weekday calendar cannot be
+    truncated and refuses."""
+    groups: dict[tuple[str, str], dict[str, dict[str, str]]] = defaultdict(dict)
+    for row in rows:
+        key = (row.get("_entity_id", ""), row.get("_source_artifact", ""))
+        groups[key].setdefault(row.get("field", ""), row)
+    removed: Counter[str] = Counter()
+    for (entity, _artifact), fields in sorted(groups.items()):
+        if not {"data", "date", "dateLast"} <= set(fields):
+            continue
+        try:
+            first = date.fromisoformat(fields["date"]["value"])
+            last = date.fromisoformat(fields["dateLast"]["value"])
+        except ValueError:
+            continue  # the readers refuse an unreadable interval themselves
+        if last <= as_of:
+            continue
+        if first > as_of:
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} starts {first}, after as_of {as_of}"
+            )
+        try:
+            data = json.loads(fields["data"]["value"])
+        except ValueError:
+            data = None
+        calendar = [
+            first + timedelta(days=offset)
+            for offset in range((last - first).days + 1)
+            if (first + timedelta(days=offset)).weekday() < 5
+        ]
+        if not isinstance(data, list) or len(data) != len(calendar):
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} cannot be cut at as_of {as_of}: "
+                "the observations are not its weekday calendar"
+            )
+        keep = sum(1 for day in calendar if day <= as_of)
+        for row in fields.values():
+            if row["field"] == "data":
+                row["value"] = json.dumps(data[:keep], separators=(",", ":"))
+            elif row["field"] == "dateLast":
+                row["value"] = calendar[keep - 1].isoformat()
+        removed[entity] += len(data) - keep
+    return removed
+
+
 def _enforce_transaction_gate(
     gate: Mapping[str, Any],
     rows: Iterable[Mapping[str, str]],
@@ -1351,6 +1407,11 @@ def _build_outputs(
                     kept.append(row)
             rows_by_family[family].extend(kept)
             dataset_rows[family] += len(kept)
+    if gate is not None:
+        for perf_entity, cut in _cut_managed_performance(
+            rows_by_family.get("managed_performance", []), as_of
+        ).items():
+            har_excluded["managed_performance"][perf_entity] += cut
     gate_report = (
         _enforce_transaction_gate(
             gate,
