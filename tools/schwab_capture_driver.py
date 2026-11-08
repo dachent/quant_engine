@@ -55,7 +55,6 @@ import json
 import os
 from pathlib import Path
 import re
-import sys
 import threading
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -1294,7 +1293,7 @@ class CdpTransport:  # pragma: no cover - live only, never run by the repository
         self, path: str, body: Mapping[str, object], provider_account_id: str
     ) -> tuple[int, object]:
         if path == HOLDINGS_V2_PATH and self._holdings_from_page and self._page:
-            return _read_page_holdings_response(self._page)
+            return _read_page_holdings_response(self._page, body)
         if path == HOLDINGS_V2_PATH and self._holdings_replay is not None:
             # exactly the page's own request: its headers (the scoping header as the SPA sends
             # it) and its body text, which equals the approved body (``check_observed_body``)
@@ -1378,6 +1377,12 @@ def replay_headers(observed: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+def _canon_json(value: object) -> str:
+    """Type-aware equality: ``True`` and ``1`` are different JSON values."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def check_observed_body(post_data: object, approved: Mapping[str, object]) -> str:
     """The page's raw Holdings-V2 body text, accepted only when it equals the approved body.
 
@@ -1394,11 +1399,13 @@ def check_observed_body(post_data: object, approved: Mapping[str, object]) -> st
         raise
     except Exception as exc:
         raise DriverError("the observed HoldingV2 body is not strict JSON") from exc
-    if parsed != dict(approved):
+    if _canon_json(parsed) != _canon_json(dict(approved)):
         only_page = sorted(set(parsed) - set(approved))
         only_evidence = sorted(set(approved) - set(parsed))
         values = sorted(
-            k for k in set(parsed) & set(approved) if parsed[k] != approved[k]
+            k
+            for k in set(parsed) & set(approved)
+            if _canon_json(parsed[k]) != _canon_json(approved[k])
         )
         raise DriverError(
             "the page's own HoldingV2 body differs from the approved evidence body "
@@ -1460,7 +1467,9 @@ def value_free_error(exc: BaseException) -> str:
 _ORIGIN_PAGES = "https://client.schwab.com/"
 
 
-def _read_page_holdings_response(page: Any) -> tuple[int, object]:  # pragma: no cover
+def _read_page_holdings_response(
+    page: Any, approved: Mapping[str, object]
+) -> tuple[int, object]:  # pragma: no cover
     """Let the SPA send its OWN Holdings-V2 request (a reload of the page) and read the response:
     nothing of ours is replayed. One request (the governed reservation already counted it)."""
 
@@ -1496,6 +1505,9 @@ def _read_page_holdings_response(page: Any) -> tuple[int, object]:  # pragma: no
             "the page did not send its own HoldingV2 request in 30 seconds"
         )
     response = seen[0]
+    # the body of the request the page actually sent must equal the approved body, else the
+    # response is discarded unread (the reservation is already made: fail closed)
+    check_observed_body(response.request.post_data, approved)
     try:
         return int(response.status), response.json()
     except Exception as exc:
@@ -1562,18 +1574,15 @@ def _write_new(
 
 
 def _error_hint(raw: object) -> str:
-    """A value-free hint of a failed response: its top-level key names and a short message text
-    with long digit runs masked (never an account id or amount)."""
+    """Key names of a failed response only (identifier-shaped, bounded): the provider's message
+    text can carry names, symbols and amounts and is never emitted."""
 
     if not isinstance(raw, dict):
         return ""
-    text = ""
-    for key in ("message", "error", "errorMessage", "title", "detail", "description"):
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            text = re.sub(r"\d{4,}", "#", value.strip())[:120]
-            break
-    return f" (response keys {sorted(str(k) for k in raw)[:8]}; text {text!r})"
+    keys = sorted(
+        k for k in raw if isinstance(k, str) and re.fullmatch(r"[A-Za-z_]{1,32}", k)
+    )
+    return f" (response keys {keys[:8]})"
 
 
 def _single_ok(status: int, name: str, raw: object = None) -> None:
@@ -2063,9 +2072,7 @@ def capture_live(
 ) -> dict[str, object]:  # pragma: no cover - live only
     """Refuses without governance evidence; never called by the repository tests."""
 
-    checked = validate_evidence(
-        evidence
-    )  # every authorization check, nothing consumed yet
+    checked = validate_evidence(evidence)
     approved = next(
         (r.body for r in checked.requests if r.capability == "holdings.v2"), None
     )
@@ -2075,6 +2082,7 @@ def capture_live(
         sync_playwright = importlib.import_module("playwright.sync_api").sync_playwright
     except ImportError as exc:
         raise DriverError("Playwright is required for live Schwab capture") from exc
+    replay_mode = os.environ.get("QE_SCHWAB_HOLDINGS_REPLAY") == "1"
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(cdp_url)
         if not browser.contexts:
@@ -2085,28 +2093,25 @@ def capture_live(
         ]
         if not pages:
             raise DriverError("open an authenticated Schwab page before capture")
-        observed_headers = _observe_headers(pages[0])
-        page_request = _observe_holdings_request(pages[0])
-        if page_request is None:
-            raise DriverError(
-                "the page's own HoldingV2 request was not observed (nothing was consumed): "
-                "open the all-accounts holdings page (read-only navigation) and run again"
-            )
-        text = check_observed_body(page_request[1], approved or {})
-        replay = (replay_headers(page_request[0]), text)
-        print(  # value-free
-            f"schwab holdings request: page's own, {len(replay[0])} headers replayed",
-            file=sys.stderr,
-        )
+        # reserve (consume the evidence, count the requests) BEFORE any page reload: every read
+        # the SPA makes on a reload happens under a durable reservation
         governance = authorize_live_read(evidence, receipt_root=receipt_root)
+        observed_headers = _observe_headers(pages[0])
+        replay = None
+        if replay_mode:
+            page_request = _observe_holdings_request(pages[0])
+            if page_request is None:
+                raise DriverError("the page's own HoldingV2 request was not observed")
+            text = check_observed_body(page_request[1], approved or {})
+            replay = (replay_headers(page_request[0]), text)
         transport = CdpTransport(
             context,
             observed_headers,
             replay,
             pages[0],
-            # primary: the SPA sends its own request and the response is read, nothing replayed;
-            # the in-page replay is an explicit alternative (default off)
-            holdings_from_page=os.environ.get("QE_SCHWAB_HOLDINGS_REPLAY") != "1",
+            # primary: the SPA sends its own request, its body is checked against the approved
+            # body and the response is read; the in-page replay is an explicit alternative
+            holdings_from_page=not replay_mode,
         )
         return run_capture(
             transport=transport,

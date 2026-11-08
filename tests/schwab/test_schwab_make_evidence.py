@@ -416,3 +416,12 @@ def test_transaction_date_reads_the_as_of_shape_and_errors_value_free() -> None:
     with pytest.raises(driver.DriverError) as bad:
         driver._txn_date("Pending 11/05/2026 123456")
     assert "123456" not in str(bad.value) and "shape" in str(bad.value)
+
+
+def test_body_equality_is_type_aware_and_error_hint_is_keys_only() -> None:
+    with pytest.raises(driver.DriverError, match="values differ for"):
+        driver.check_observed_body('{"isNWE":1}', {"isNWE": True})
+    hint = driver._error_hint(
+        {"message": "Hi John AAPL $12.34", "ErrorCode": "x", "a b": 1}
+    )
+    assert "John" not in hint and "12.34" not in hint and "ErrorCode" in hint
