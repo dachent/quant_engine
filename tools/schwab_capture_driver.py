@@ -111,6 +111,8 @@ _HOLDINGS_BODY_KEYS = frozenset(
     {
         "entitlement",
         "featureFlags",
+        "ff",
+        "fs",
         "fetchSettings",
         "groupByCallPut",
         "groupBySecurityType",
