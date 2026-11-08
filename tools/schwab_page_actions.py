@@ -30,6 +30,9 @@ TRADING = re.compile(
 _BLOCKED_TYPES = frozenset({"submit", "password"})
 
 
+_FACTS_SCRIPT = "e => ({type: e.type || null, href: e.href || null})"
+
+
 class ActionRefused(ValueError):
     """The action targets a trading control or leaves the Schwab window."""
 
@@ -59,14 +62,23 @@ class SchwabPage:
 
     def _control(self, role: str, name: str) -> Any:
         refuse_if_trading(name)
-        control = self._page.get_by_role(role, name=name).first
-        kind = control.get_attribute("type")
+        # exact: a substring match could resolve a control whose full name holds a blocked term
+        control = self._page.get_by_role(role, name=name, exact=True).first
+        # the EFFECTIVE type and the resolved href (a typeless <button> in a form submits)
+        facts = control.evaluate(_FACTS_SCRIPT)
+        kind = facts.get("type") if isinstance(facts, dict) else None
+        href = facts.get("href") if isinstance(facts, dict) else None
         if isinstance(kind, str) and kind.casefold() in _BLOCKED_TYPES:
             raise ActionRefused(
                 f"refused: a {kind} control (label {label_hash(name)}) is never touched"
             )
+        if isinstance(href, str) and href and not href.startswith(ALLOWED_PREFIX):
+            raise ActionRefused(
+                f"refused: a link leaving {ALLOWED_PREFIX} (label {label_hash(name)})"
+            )
         refuse_if_trading(
             control.inner_text(),
+            href,
             control.get_attribute("aria-label"),
             control.get_attribute("value"),
             control.get_attribute("href"),

@@ -19,6 +19,12 @@ class Control:
     def get_attribute(self, name: str) -> str | None:
         return self.attributes.get(name)
 
+    def evaluate(self, script: str) -> dict[str, str | None]:
+        return {
+            "type": self.attributes.get("effective_type", self.attributes.get("type")),
+            "href": self.attributes.get("resolved_href", self.attributes.get("href")),
+        }
+
     def inner_text(self) -> str:
         return self.attributes.get("text") or ""
 
@@ -62,7 +68,8 @@ class Page:
         self.visited: list[str] = []
         self.mouse = Mouse()
 
-    def get_by_role(self, role: str, name: str) -> Control:
+    def get_by_role(self, role: str, name: str, exact: bool = False) -> Control:
+        assert exact is True
         return self.control
 
     def goto(self, url: str, wait_until: str) -> None:
@@ -176,3 +183,22 @@ def test_there_is_no_typing_api() -> None:
 
 
 def _unused(_: Any) -> None: ...
+
+
+def test_a_typeless_form_button_is_a_submit_and_refused() -> None:
+    page, control = _page(effective_type="submit", text="Continue")
+    with pytest.raises(actions.ActionRefused):
+        page.click("button", "Continue")
+    assert control.clicked == 0
+
+
+def test_a_link_leaving_the_schwab_origin_is_refused() -> None:
+    page, control = _page(resolved_href="https://example.org/x", text="Docs")
+    with pytest.raises(actions.ActionRefused):
+        page.click("link", "Docs")
+    assert control.clicked == 0
+    ok, c2 = _page(
+        resolved_href="https://client.schwab.com/app/accounts", text="Accounts"
+    )
+    ok.click("link", "Accounts")
+    assert c2.clicked == 1
