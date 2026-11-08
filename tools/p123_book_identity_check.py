@@ -28,7 +28,8 @@ I7 against the page record: series start is not after the page inception; the se
    is not after, and within 7 days of, the strategy start string; the holdings count is
    within 5 of ``posCnt`` (warning).  A live book whose transactions precede its inception
    is correct and passes.
-I8 no two books share trade rows (CASH rows excluded): more than 5% of the smaller set fails.
+I8 no two books share trade rows (CASH rows excluded): at least 50% of the smaller set fails
+   (a duplicate or permutation), more than 5% is a warning with the counts recorded.
 I9 against a reference pull (``--reference-index``): every older row of the same id is in
    the new file with its multiplicity (a row held twice in the reference must be held twice;
    rows are compared on every field except the symbol, which the export retags, and the
@@ -71,6 +72,7 @@ _START_STRING = re.compile(r"Start\s+(\d{1,2})/(\d{1,2})/(\d{4})")
 _NON_SHARE_TYPES = {"CASH", "DIV", "INT", "FEE"}
 _SHARES_TOLERANCE = 0.5
 _OVERLAP_FAIL = 0.05
+_OVERLAP_DUPLICATE = 0.5
 _REFERENCE_MISSING = 0.0
 _PAGE_POSITIONS_TOLERANCE = 5
 _START_WINDOW_DAYS = 7
@@ -656,6 +658,21 @@ def _cash_only_positions(
     )
 
 
+def _overlap_status(shared: int, smaller: int, duplicate_status: str) -> str | None:
+    """Graded I8: a book that shares at least half of the smaller book's trade rows is a
+    duplicate or permutation (the 2026-09-02 set shared all 188 rows of two books);
+    a small overlap is review (two EU strategy books of the same family shared 9 of 188,
+    an AI book and its derivative 51 of 787); at most 5% passes."""
+    if not smaller or shared == 0:
+        return None
+    share = shared / smaller
+    if share >= _OVERLAP_DUPLICATE:
+        return duplicate_status
+    if share > _OVERLAP_FAIL:
+        return "WARN"
+    return None
+
+
 def _decision(checks: Sequence[dict[str, str]]) -> str:
     statuses = {c["status"] for c in checks}
     return (
@@ -735,16 +752,21 @@ def check_capture(
         for right in selected[index + 1 :]:
             smaller = min(len(keys[left]), len(keys[right]))
             shared = len(keys[left] & keys[right])
-            if smaller and shared / smaller > _OVERLAP_FAIL:
+            status = _overlap_status(shared, smaller, "FAIL")
+            if status is not None:
                 for book, other in ((left, right), (right, left)):
                     by_book[book]["checks"].append(
                         _check(
                             "I8",
-                            "FAIL",
-                            f"{shared} trade rows shared with book {other}",
+                            status,
+                            f"{shared} of {smaller} trade rows ({shared / smaller:.1%} of "
+                            f"the smaller book) shared with book {other}",
                         )
                     )
-                    by_book[book]["decision"] = "FAIL"
+                    by_book[book].setdefault("i8_shared_rows", {})[other] = {
+                        "shared": shared,
+                        "smaller_book_rows": smaller,
+                    }
     for result in results:
         if not any(c["check"] == "I8" for c in result["checks"]):
             result["checks"].append(
@@ -761,12 +783,15 @@ def check_capture(
             for other, other_keys in sorted(others.items()):
                 smaller = min(len(keys[book]), len(other_keys))
                 shared = len(keys[book] & other_keys)
-                if other != book and smaller and shared / smaller > _OVERLAP_FAIL:
+                overlap = _overlap_status(shared, smaller, status)
+                if other != book and overlap is not None:
                     by_book[book]["checks"].append(
                         _check(
                             "I8x",
-                            status,
-                            f"{shared} trade rows shared with book {other} in {directory.name}",
+                            overlap,
+                            f"{shared} of {smaller} trade rows ({shared / smaller:.1%} of "
+                            f"the smaller book) shared with book {other} in "
+                            f"{directory.name}",
                         )
                     )
     for result in results:
