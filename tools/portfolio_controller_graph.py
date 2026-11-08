@@ -204,6 +204,8 @@ _PATH_STAGES = {
     "tools/release_provenance_spec.py": [],
     "tools/release_post_commit.py": [],
     "tools/release_acceptance_inputs.py": [],
+    # assembles expected-baseline.json from the two derivations alone; an operator step, no delivery artifact
+    "tools/release_baseline_assemble.py": [],
     # Layered history, dependence and attribution feed the attribution stage and every
     # stage after it.
     "tools/release_pre_chain.py": list(_STAGE_ORDER[2:]),
