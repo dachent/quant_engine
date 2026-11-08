@@ -85,3 +85,52 @@ The manifest builder takes an optional `--cutoff D`: it refuses a capture, the c
 stamp or the market-vane capture at or after the same bound, records `cutoff` and
 `capture_bound_utc` in the provenance, and `verify` re-checks it. Without the flag the builder is
 unchanged. The bound rule is written once in each of the two modules and a test keeps them equal.
+
+## Public object capture tool
+
+`tools/tt_public_capture.py` is the governed replacement for the three hand
+scripts that captured the TuringTrader public objects (authority: #283 comment
+5515808323; #699 comment 6536613285). It only issues HTTP GET requests for
+Firebase Storage objects and stores the raw response bytes unchanged.
+
+One run captures three groups into subdirectories of a new output directory:
+`json/` (portfolio-comp plus per slug performance-chart, performance-table,
+holdings-history, portfolio-holdings), `txt/` (per slug last-update and
+last-rebalance) and `vane/` (tt-market-vane status). The output directory must
+not exist; the tool is create-only. `capture-manifest.json` is written last and
+holds per-group capture times, the cutoff, the freshness result, each object
+with status, bytes, sha256, ETag and Last-Modified (URLs carry no token), and a
+sorted sha256 list.
+
+Each of `json/`, `txt/` and `vane/` also holds its own `capture-manifest.json` in
+the shape `tools/tt_source_manifest_builder.py` reads (one `captured_at_utc`
+string plus that group's object rows). Point the builder at those
+subdirectories: `json/` as its capture directory, `txt/` as `--txt-capture-dir`
+and `vane/` as `--vane-capture-dir`. File names and bytes are unchanged.
+
+The output directory must also lie outside every git repository (checked before
+anything is created), because it receives the real provider bodies.
+
+    python tools/tt_public_capture.py capture --out DIR --cutoff YYYY-MM-DD --tokens-file FILE
+
+Tokens (public, allochist, holdings; 36-character UUIDs) are read from a JSON
+object in `--tokens-file`, which must lie outside every git repository, or from
+the environment variables TT_PUBLIC_TOKEN, TT_ALLOCHIST_TOKEN and
+TT_HOLDINGS_TOKEN. They are never written, printed or recorded, and errors are
+redacted. Today the operator extracts them from the retained 2026-09-02 driver
+(`audit/coding/2026-09-02_kimi_w2-execution/_scratch/tt_live_capture.py` under
+the OneDrive quant engine root) into a temporary tokens file outside the
+repository, and deletes that file after the run.
+
+Freshness for cutoff D: TuringTrader publishes each trading day's data the next
+morning (about 06:50Z). Every performance-chart must end on D and every
+last-update stamp must be at or after D+1 06:00Z. Otherwise the tool exits 3,
+names each object with the found and required value, and still keeps the
+capture with manifest status STALE. Exit codes: 0 complete and fresh, 1 an
+object failed, 2 refusal or usage error, 3 stale, 4 partial groups.
+
+`--groups` may select a subset, but an omitted group is never captured or
+freshness-checked, so the manifest then has status PARTIAL_GROUPS with
+`omitted_groups` listed, never COMPLETE, and the exit code is 4 unless
+`--allow-partial` is given (the status stays PARTIAL_GROUPS and the exit code is
+0). A failed object (1) or stale freshness (3) takes precedence.
