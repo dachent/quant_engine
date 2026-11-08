@@ -1177,6 +1177,12 @@ def _cut_managed_performance(
                 "the observations are not its weekday calendar"
             )
         keep = sum(1 for day in calendar if day <= as_of)
+        if keep == 0:
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} has no weekday observation on or "
+                f"before as_of {as_of} (interval {first}..{last}, first weekday "
+                f"{calendar[0] if calendar else 'none: the interval is a weekend'})"
+            )
         for row in fields.values():
             if row["field"] == "data":
                 row["value"] = json.dumps(data[:keep], separators=(",", ":"))
