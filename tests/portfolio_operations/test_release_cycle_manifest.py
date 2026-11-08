@@ -592,3 +592,18 @@ def test_legacy_manifest_without_refresh_start_resolves_with_unchanged_output(
     assert tool.dumps(resolved) == tool.dumps(_resolve(cycle))
     tool._note_legacy(resolved)
     assert "NOT_CHECKED_LEGACY" in capsys.readouterr().err
+
+
+def test_a_new_cycle_cannot_skip_the_cutoff_check_by_omitting_the_refresh_start(
+    cycle: dict[str, Any],
+) -> None:
+    # after the last legacy cutoff (2026-09-17) the check is required, so omission is no bypass
+    cycle["manifest"].update(cutoff="2026-11-06", evaluated_on="2026-11-07")
+    with pytest.raises(tool.CycleManifestError) as refused:
+        _resolve(cycle)
+    assert refused.value.code == "CUTOFF_CHECK_REQUIRED"
+    assert "2026-09-17" in str(refused.value) and "refresh_started_at_utc" in str(
+        refused.value
+    )
+    cycle["manifest"]["refresh_started_at_utc"] = "2026-11-07T14:00:00Z"
+    assert _resolve(cycle)["cutoff_check"]["status"] == tool.CUTOFF_OK

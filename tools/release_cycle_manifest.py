@@ -51,6 +51,9 @@ CUTOFF_OVERRIDE_FIELD = "cutoff_owner_instruction"
 CUTOFF_OK = "MATCHES_LAST_COMPLETE_NYSE_DAY"
 CUTOFF_OVERRIDDEN = "OWNER_INSTRUCTION"
 CUTOFF_LEGACY = "NOT_CHECKED_LEGACY"
+# R1, R2, R2.1 and R2.2 were declared before the rule existed: a manifest whose cutoff is not after
+# this date may omit refresh_started_at_utc; any later cutoff must carry it (or an owner instruction).
+LEGACY_LAST_CUTOFF = date(2026, 9, 17)
 
 GENERATION_MANIFEST = "GENERATION_MANIFEST"
 SELECTED_SOURCE_ARTIFACT = "SELECTED_SOURCE_ARTIFACT"
@@ -191,6 +194,13 @@ def check_declared_cutoff(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
             raise CycleManifestError(
                 "CUTOFF_CHECK_NEEDS_REFRESH_START",
                 f"{CUTOFF_OVERRIDE_FIELD} is only meaningful with refresh_started_at_utc",
+            )
+        if _day(manifest["cutoff"], "cutoff") > LEGACY_LAST_CUTOFF:
+            raise CycleManifestError(
+                "CUTOFF_CHECK_REQUIRED",
+                f"cutoff {manifest['cutoff']} is after {LEGACY_LAST_CUTOFF} (the last cycle declared "
+                "before the rule): declare refresh_started_at_utc so it can be checked against the "
+                "last complete NYSE trading day",
             )
         return None
     expected = expected_cutoff(started).isoformat()

@@ -95,7 +95,7 @@ Outcomes (the resolved cycle carries `cutoff_check`: `status`, `refresh_started_
   "cutoff_owner_instruction": "<the owner instruction, quoted or referenced>" to the cycle manifest`.
 * `cutoff_owner_instruction` without `refresh_started_at_utc`: `CUTOFF_CHECK_NEEDS_REFRESH_START`.
 
-Legacy manifests (R2.x: no `refresh_started_at_utc`) still validate and resolve. The check is not
+Legacy manifests (no `refresh_started_at_utc` and a `cutoff` not after 2026-09-17: R1-R2.2) still validate and resolve; a manifest with a later cutoff and no `refresh_started_at_utc` is refused (`CUTOFF_CHECK_REQUIRED`), so omission is no bypass. The check is not
 run (`NOT_CHECKED_LEGACY`, printed as a NOTE on stderr); the resolved file gets no new key, so its
 bytes are identical to what the tool wrote before the check existed. A new cycle declares the
 refresh start. Ad hoc closures and early (13:00) closes are not modelled by the calendar.
