@@ -18,7 +18,10 @@ checkpoints, issue descriptions, PR text and skill defaults:
   A successful extraction, coherent older generation, passing component suite or
   new build date alone is not closure. Preserve documented publication lag,
   fixed-history boundaries and owner-approved unavailable observations.
-- This MVP delivery's owner-selected financial data cutoff is **EOD 2026-09-17**.
+- Cutoff = EOD of the last complete NYSE trading day (America/New_York; weekend/holiday ->
+  previous session), resolved once at refresh start and fixed for the cycle; the cycle's
+  owner-declared cutoff artifact records it (tooling requires it == --cutoff). Any other
+  cutoff needs an explicit owner instruction. R1-R2.2: 2026-09-17. R3: 2026-11-06.
   Keep financial observation dates, provider finality, source capture timestamps,
   source-generation provenance dates, and execution/calculation timestamps distinct.
   A later capture or execution timestamp does not change the financial cutoff;
@@ -35,8 +38,8 @@ checkpoints, issue descriptions, PR text and skill defaults:
   minimum across unrelated closed epochs, fixed histories or publication dates.
   Declare limiting sources and bind these declarations into the real QC receipt
   and report/panel metadata. A date-only source must not receive an invented
-  time. Identifying a later common EOD does not change this delivery's fixed
-  EOD2026-09-17 selection without a new owner instruction.
+  time. Identifying a later common EOD does not change the cutoff without a new owner
+  instruction.
 - If any required capture or input QC remains pending, keep the source phase
   open in the governing issue. Do not report the input phase complete or resume
   downstream work. Resume it only after the missing source evidence is obtained
