@@ -167,6 +167,7 @@ def _panel() -> dict[str, Any]:
             "series": series,
             "current_week": {"is_partial": True, "data_through_date": "2026-03-05"},
         },
+        "meta": {"source_clock": {"selected_financial_cutoff": "2026-03-05"}},
         "account_manifest": {"calculation_cutoff_date": "2026-03-05", "rows": rows},
         "capital": {"systematic": "174.50"},
         "hwm_governed_proof": {
@@ -364,10 +365,16 @@ _OLD_R22_PULL = {
 }
 
 
-def _panel_at(cutoff: str) -> dict[str, Any]:
+def _panel_at(cutoff: str, weekly_as_of: str | None = None) -> dict[str, Any]:
+    """A panel whose selected financial cutoff is ``cutoff``.
+
+    The weekly source date may differ (later source coverage).
+    """
+
     panel = _panel()
-    panel["weekly_returns"]["as_of_date"] = cutoff
+    panel["weekly_returns"]["as_of_date"] = weekly_as_of or cutoff
     panel["account_manifest"] = None
+    panel["meta"] = {"source_clock": {"selected_financial_cutoff": cutoff}}
     return panel
 
 
@@ -400,6 +407,32 @@ def test_pull_ends_at_the_build_cutoff_and_the_verifier_rejects_a_stale_end() ->
     stale["benchmarks"][1]["required_pull"]["minimum_window"][1] = "2026-09-17"
     with pytest.raises(tab.PerformanceTabError):
         tab.verify_performance_tab(stale, panel)
+
+
+def test_later_weekly_coverage_does_not_move_the_pull() -> None:
+    panel = _panel_at("2026-09-17", weekly_as_of="2026-10-29")
+    block = tab.build_performance_tab(panel)
+    assert block["as_of"] == "2026-10-29"
+    for benchmark in block["benchmarks"]:
+        assert benchmark["required_pull"]["to_date"] == "2026-09-17"
+        assert benchmark["required_pull"]["minimum_window"][1] == "2026-09-17"
+    tab.verify_performance_tab(block, panel)
+    moved = copy.deepcopy(block)
+    moved["benchmarks"][0]["required_pull"]["to_date"] = "2026-10-29"
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(moved, panel)
+
+
+def test_pull_fails_closed_without_a_selected_cutoff() -> None:
+    panel = _panel_at("2026-09-17")
+    block = tab.build_performance_tab(panel)
+    del panel["meta"]
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(block, panel)
+    absent = tab.build_performance_tab(panel)
+    assert absent["benchmarks"][0]["required_pull"]["to_date"] is None
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(absent, panel)
 
 
 # ------------------------------------------------------------ slices

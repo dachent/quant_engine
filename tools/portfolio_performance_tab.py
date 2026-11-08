@@ -112,15 +112,40 @@ _REQUIRED_PULL_BASE: Final[dict[str, Any]] = {
 def required_pull(cutoff: Any) -> dict[str, Any]:
     """The pull the owner must approve, ending at the build's cutoff.
 
-    The cutoff is the weekly returns' ``as_of_date`` (the common end date the
-    report truncated every series to); the builder and the verifier both read it
-    from the panel, never from a constant.
+    An absent cutoff yields a null end date, which the verifier rejects.
+
+    The cutoff is the delivery's selected financial cutoff (see
+    ``_selected_cutoff``), not the weekly returns' ``as_of_date``, which may
+    advance with later source coverage.
     """
 
     pull = dict(_REQUIRED_PULL_BASE)
     pull["to_date"] = cutoff
     pull["minimum_window"] = [_PULL_WINDOW_START, cutoff]
     return {key: pull[key] for key in _PULL_KEY_ORDER}
+
+
+def _selected_cutoff(panel: Mapping[str, Any]) -> str | None:
+    """The governed selected financial cutoff the panel declares, else ``None``.
+
+    ``meta.source_clock.selected_financial_cutoff`` (equal to the report's
+    ``calculation_cutoff_date``, checked when the panel is built), else the
+    account manifest's ``calculation_cutoff_date``.  Both builder and verifier
+    read this one function.
+    """
+
+    clock = _mapping(_mapping(panel.get("meta")).get("source_clock"))
+    manifest = _mapping(panel.get("account_manifest"))
+    for value in (
+        clock.get("selected_financial_cutoff"),
+        manifest.get("calculation_cutoff_date"),
+    ):
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value).isoformat()
+            except ValueError:
+                return None
+    return None
 
 
 _PULL_KEY_ORDER: Final = (
@@ -1247,6 +1272,7 @@ def _benchmark_entry(
     since: str,
     note: str,
     daily: Mapping[str, Any] | None = None,
+    cutoff: str | None = None,
 ) -> dict[str, Any]:
     row = _benchmark_row(weekly, series_id)
     if row is not None:
@@ -1283,7 +1309,7 @@ def _benchmark_entry(
         "substitute": None,
         "source": None,
         "required_pull": {
-            **required_pull(weekly.get("as_of_date")),
+            **required_pull(cutoff),
             "from_date": since,
             "note": note,
         },
@@ -1454,6 +1480,7 @@ def build_performance_tab(
                 since,
                 note,
                 _mapping(daily_benchmarks).get(series_id) if daily_benchmarks else None,
+                _selected_cutoff(panel),
             )
             for series_id, ticker, since, note in _BENCHMARKS
         ],
@@ -2610,12 +2637,13 @@ def verify_performance_tab(
                 raise _fail("benchmark first/last week or daily status differs")
             continue
         pull = _mapping(benchmark.get("required_pull"))
+        selected = _selected_cutoff(panel)
         if (
             benchmark.get("status") != "UNAVAILABLE"
             or pull.get("source_id") != "yahoo-adjusted-etf-daily"
-            or pull.get("to_date") != weekly.get("as_of_date")
-            or pull.get("minimum_window")
-            != [_PULL_WINDOW_START, weekly.get("as_of_date")]
+            or selected is None
+            or pull.get("to_date") != selected
+            or pull.get("minimum_window") != [_PULL_WINDOW_START, selected]
             or benchmark.get("first_week") is not None
             or _mapping(benchmark.get("daily")).get("status") != "UNAVAILABLE"
         ):
