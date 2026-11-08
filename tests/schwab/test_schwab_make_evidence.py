@@ -334,3 +334,51 @@ def test_check_evidence_refuses_an_unworkable_budget(
     path.write_text(json.dumps(document), encoding="utf-8")
     assert driver.main(["check-evidence", str(path)]) == 2
     assert "cannot complete a capture" in capsys.readouterr().out
+
+
+def test_replay_headers_drop_only_the_transport_managed_ones() -> None:
+    observed = {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",
+        "Cookie": "c",
+        "content-length": "9",
+        "Host": "h",
+        ":authority": "x",
+        "Schwab-Env": "e",
+    }
+    assert driver.replay_headers(observed) == {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",  # an empty scoping header is kept as the page sends it
+        "Schwab-Env": "e",
+    }
+
+
+def test_the_page_body_is_replayed_only_when_it_equals_the_approved_body() -> None:
+    raw = '{"isNWE":false}'
+    assert driver.check_observed_body(raw, {"isNWE": False}) == raw
+    with pytest.raises(driver.DriverError) as extra:
+        driver.check_observed_body(
+            '{"isNWE":false,"accountsFilter":["SECRET"]}', {"isNWE": False}
+        )
+    assert "accountsFilter" in str(extra.value) and "SECRET" not in str(extra.value)
+    with pytest.raises(driver.DriverError, match="only in the evidence: \\['isNWE'\\]"):
+        driver.check_observed_body("{}", {"isNWE": False})
+    with pytest.raises(driver.DriverError, match=r"values differ for: \['isNWE'\]"):
+        driver.check_observed_body('{"isNWE":true}', {"isNWE": False})
+    for bad in (None, "", "not json", "[]"):
+        with pytest.raises(driver.DriverError):
+            driver.check_observed_body(bad, {"isNWE": False})
+
+
+def test_attach_check_names_the_body_keys_the_evidence_filter_drops(
+    tmp_path: Path,
+) -> None:
+    body = json.dumps({**BODY, "someOtherKey": 1})
+    result = driver.attach_check(
+        cdp_url="x",
+        connect=lambda url: _Browser([SCHWAB]),
+        observe=lambda page: ({"Authorization": "t"}, body, None),
+        capture_body_out=tmp_path / "b.json",
+    )
+    assert result["holdings_body_dropped_keys"] == ["someOtherKey"]
+    assert driver.dropped_body_keys("not json") == []
