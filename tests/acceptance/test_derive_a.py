@@ -3399,9 +3399,6 @@ def test_v3_manifest_excludes_layout_and_expected_sha256(tmp_path: Path) -> None
 def test_cli_v3_manifest_wiring(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The CLI passes the declared 2026-09-17 cutoff, so the synthetic tree fails
-    # the R7 gate (exit 0 with a fail-closed document): this proves the v3
-    # manifest wiring and the v3 fail-closed row set, not the arithmetic.
     manifest = _manifest_tree_v3(tmp_path)
     manifest_path = tmp_path / "inputs-v3.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -3423,16 +3420,15 @@ def test_cli_v3_manifest_wiring(
         ]
     )
     assert code == 0
-    assert "0 metrics" in capsys.readouterr().out
+    assert "0 metrics" not in capsys.readouterr().out
     document = json.loads(out.read_text(encoding="utf-8"))
     assert document["inputs_manifest"]["schema"] == "qe-cp-acceptance-inputs/3"
     assert document["authority"]["fx_generation"] == V3_GENERATION
-    reasons = _reasons(document)
-    assert (
-        "R7 INPUT_CUTOFF_MISMATCH"
-        in reasons[("capital.strategy_cash.cutoff", "volatis-strategy")]
+    # --cutoff, manifest, ledger, crosswalk and the owner-declared cutoff
+    # artifact agree on the synthetic 2026-01-10: the gate passes.
+    assert not any(
+        "INPUT_CUTOFF_MISMATCH" in row["reason"] for row in document["not_derivable"]
     )
-    assert ("weight.strategy.cutoff", "strat-one") in reasons
 
 
 # ------------------------------------ v3 native governance / generation controls
@@ -4878,3 +4874,170 @@ def test_v3_coverage_end_follows_a_withheld_cash_line(tmp_path: Path) -> None:
     assert ("capital.strategy_cash.cutoff", "volatis-strategy") in _reasons(document)
     assert (COVERAGE_METRIC, QB_ENTITY) not in _index(document)
     assert (COVERAGE_METRIC, QB_ENTITY) in _reasons(document)
+
+
+# ------------------------- the owner-declared cutoff artifact is the independent gate
+
+
+def _cli_argv(tmp_path: Path, manifest_path: Path, cutoff: str) -> list[str]:
+    return [
+        "--qe-root",
+        str(tmp_path),
+        "--out",
+        str(tmp_path / "out" / "expected.json"),
+        "--cutoff",
+        cutoff,
+        "--model",
+        "test",
+        "--code-commit",
+        "test",
+        "--inputs",
+        str(manifest_path),
+    ]
+
+
+def _cli_v3(tmp_path: Path, manifest: dict[str, Any], cutoff: str) -> dict[str, Any]:
+    manifest_path = tmp_path / "inputs-v3.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert cli.main(_cli_argv(tmp_path, manifest_path, cutoff)) == 0
+    document: dict[str, Any] = json.loads(
+        (tmp_path / "out" / "expected.json").read_text(encoding="utf-8")
+    )
+    return document
+
+
+def _set_owner_cutoff(tmp_path: Path, manifest: dict[str, Any], day_text: str) -> None:
+    data = json.dumps({"calculation_cutoff_date": day_text, "rows": []}).encode()
+    entry = next(e for e in manifest["inputs"] if e["family"] == "declared_cutoff_date")
+    _write_bytes(tmp_path, entry["path"], data)
+    entry["sha256"] = hashlib.sha256(data).hexdigest()
+    entry["bytes"] = len(data)
+
+
+def test_no_builtin_declared_cutoff_constant() -> None:
+    assert not hasattr(derive, "DECLARED_CUTOFF")
+
+
+def test_cli_requires_cutoff(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "inputs.json"
+    manifest_path.write_text(json.dumps(_manifest_tree_v3(tmp_path)), encoding="utf-8")
+    argv = _cli_argv(tmp_path, manifest_path, CUTOFF)
+    del argv[argv.index("--cutoff") : argv.index("--cutoff") + 2]
+    with pytest.raises(SystemExit) as raised:
+        cli.main(argv)
+    assert raised.value.code == 2
+
+
+def test_owner_declared_artifact_equal_to_cutoff_derives(tmp_path: Path) -> None:
+    document = _cli_v3(tmp_path, _manifest_tree_v3(tmp_path), CUTOFF)
+    assert CUTOFF != "2026-09-17"
+    assert document["metrics"]
+    assert not any(
+        "INPUT_CUTOFF_MISMATCH" in row["reason"] for row in document["not_derivable"]
+    )
+    assert f"the declared cutoff {CUTOFF}" in json.dumps(document)
+
+
+def test_owner_declared_artifact_absent_fails_closed(tmp_path: Path) -> None:
+    manifest = _manifest_tree_v3(tmp_path)
+    manifest["inputs"] = [
+        e for e in manifest["inputs"] if e["family"] != "declared_cutoff_date"
+    ]
+    document = _cli_v3(tmp_path, manifest, CUTOFF)
+    assert document["metrics"] == []
+    assert document["not_derivable"]
+    assert all(
+        "R7 INPUT_CUTOFF_MISMATCH" in r["reason"]
+        and "owner-declared cutoff artifact absent from inputs manifest" in r["reason"]
+        for r in document["not_derivable"]
+    )
+
+
+def test_owner_declared_artifact_naming_another_date_fails_closed(
+    tmp_path: Path,
+) -> None:
+    # Every other input and --cutoff agree on 2026-01-10; only the owner's
+    # artifact differs, so the run argument cannot be its own authority.
+    manifest = _manifest_tree_v3(tmp_path)
+    _set_owner_cutoff(tmp_path, manifest, "2026-09-17")
+    document = _cli_v3(tmp_path, manifest, CUTOFF)
+    assert document["metrics"] == []
+    assert all(
+        "owner-declared cutoff artifact calculation_cutoff_date 2026-09-17 != "
+        f"{CUTOFF}" in r["reason"]
+        for r in document["not_derivable"]
+    )
+
+
+def test_owner_declared_artifact_agreeing_with_09_17_adds_no_owner_mismatch(
+    tmp_path: Path,
+) -> None:
+    # Declaring and running the same date derives whatever that date is: here
+    # the artifact and --cutoff say 09-17, while ledger/crosswalk say 01-10, so
+    # only those inputs trip the gate; the owner artifact itself does not.
+    manifest = _manifest_tree_v3(tmp_path)
+    _set_owner_cutoff(tmp_path, manifest, "2026-09-17")
+    document = _cli_v3(tmp_path, manifest, "2026-09-17")
+    reasons = " ".join(r["reason"] for r in document["not_derivable"])
+    assert "owner-declared cutoff artifact" not in reasons
+    assert "provider-ledger.as_of_date" in reasons
+
+
+def test_owner_declared_artifact_unparseable_cutoff_fails_closed(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest_tree_v3(tmp_path)
+    _set_owner_cutoff(tmp_path, manifest, "not-a-date")
+    document = _cli_v3(tmp_path, manifest, CUTOFF)
+    assert document["metrics"] == []
+    assert all(
+        "lacks a valid calculation_cutoff_date" in r["reason"]
+        for r in document["not_derivable"]
+    )
+
+
+def test_v2_manifest_without_artifact_fails_closed_from_cli(tmp_path: Path) -> None:
+    # Legacy v2 manifests cannot carry the artifact: the CLI fails closed.
+    manifest_path = tmp_path / "inputs.json"
+    manifest_path.write_text(json.dumps(_manifest_tree(tmp_path)), encoding="utf-8")
+    assert cli.main(_cli_argv(tmp_path, manifest_path, CUTOFF)) == 0
+    document = json.loads((tmp_path / "out" / "expected.json").read_text("utf-8"))
+    assert document["metrics"] == []
+    assert all(
+        "owner-declared cutoff artifact absent" in r["reason"]
+        for r in document["not_derivable"]
+    )
+
+
+@pytest.mark.parametrize("builder", ["v2", "v3"])
+def test_manifest_without_cutoff_fails_closed(tmp_path: Path, builder: str) -> None:
+    if builder == "v2":
+        manifest = _manifest_tree(tmp_path)
+        del manifest["cutoff"]
+        document = _run_manifest(tmp_path, manifest)
+    else:
+        manifest = _manifest_tree_v3(tmp_path)
+        del manifest["cutoff"]
+        document = _run_v3(tmp_path, manifest)
+    assert document["metrics"] == []
+    assert all(
+        "inputs manifest cutoff None" in r["reason"] for r in document["not_derivable"]
+    )
+
+
+def test_manifestless_call_without_declared_cutoff_fails_closed(tmp_path: Path) -> None:
+    _synthetic_root(tmp_path)
+    document = derive.derive(
+        tmp_path,
+        _synthetic_repo(tmp_path),
+        cutoff=day(CUTOFF),
+        model="test",
+        code_commit="test",
+        layout=LAYOUT,
+        expected_sha256={},
+    )
+    assert document["metrics"] == []
+    assert all(
+        "owner-declared cutoff artifact absent" in r["reason"]
+        for r in document["not_derivable"]
+    )
