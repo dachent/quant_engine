@@ -246,12 +246,13 @@ def check_book(
     perf_equity = _number(perf[0].get("Total Equity")) if perf else None
     # I3
     i3_gap: int | None = None
+    first_row = min((d for d in (_day(r.get("Date")) for r in tx) if d), default=None)
     if cash is None or not perf:
         checks.append(_check("I3", "FAIL", "no CASH start row or no perf rows"))
     elif (
         perf_day != cash_day
         and any(r.get("Type") != "CASH" for r in tx)
-        and not _start_gap_ok(perf_day, cash_day, perf_equity, cash_amount)
+        and not _start_gap_ok(perf_day, cash_day, first_row, perf_equity, cash_amount)
     ) or (
         cash_amount is not None
         and perf_equity is not None
@@ -262,7 +263,8 @@ def check_book(
                 "I3",
                 "FAIL",
                 f"perf starts {perf_day} with equity {perf_equity}; "
-                f"transactions start {cash_day} with cash {cash_amount}",
+                f"transactions start {cash_day} with cash {cash_amount}; "
+                f"earliest transaction row {first_row}",
             )
         )
     elif perf_day != cash_day and any(r.get("Type") != "CASH" for r in tx):
@@ -558,12 +560,16 @@ def _positions_as_of(
 def _start_gap_ok(
     perf_day: date | None,
     cash_day: date | None,
+    first_row: date | None,
     perf_equity: float | None,
     cash_amount: float | None,
 ) -> bool:
     """The perf curve starts up to ``_START_GAP_DAYS`` calendar days before the first
-    transaction row (never after it) and the two start amounts are identical."""
-    if perf_day is None or cash_day is None:
+    transaction row (never after it: the earliest row of ANY type, not only the CASH row,
+    must not precede the curve) and the two start amounts are identical."""
+    if perf_day is None or cash_day is None or first_row is None:
+        return False
+    if first_row < perf_day:
         return False
     if perf_equity is None or cash_amount is None:
         return False

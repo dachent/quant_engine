@@ -576,3 +576,17 @@ def test_i8_is_graded_by_the_share_of_the_smaller_book(tmp_path: Path) -> None:
         _status(_overlap(tmp_path / "half", own=20, shared=10), "101", "I8") == "FAIL"
     )
     assert _status(_overlap(tmp_path / "all", own=20, shared=20), "202", "I8") == "FAIL"
+
+
+def test_i3_gap_is_measured_from_the_earliest_row_of_any_type(tmp_path: Path) -> None:
+    # The CASH row is 2 days after the curve start, but a BUY is dated BEFORE the curve.
+    status, book = _i3(
+        tmp_path,
+        start="1999-01-02",
+        perf_start="1998-12-31",
+        trades=[("1998-12-30", "A101", "BUY", "100")],
+        held={"A101": "100.0"},
+    )
+    assert status == "FAIL" and book["i3_start_gap_days"] is None
+    detail = next(c["detail"] for c in book["checks"] if c["check"] == "I3")  # type: ignore[attr-defined]
+    assert "earliest transaction row 1998-12-30" in detail
