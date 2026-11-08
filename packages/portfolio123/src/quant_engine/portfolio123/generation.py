@@ -1180,7 +1180,8 @@ def _cut_managed_performance(
         if keep == 0:
             raise Portfolio123GenerationError(
                 f"managed performance of entity {entity} has no weekday observation on or "
-                f"before as_of {as_of} (first weekday {calendar[0]})"
+                f"before as_of {as_of} (interval {first}..{last}, first weekday "
+                f"{calendar[0] if calendar else 'none: the interval is a weekend'})"
             )
         for row in fields.values():
             if row["field"] == "data":

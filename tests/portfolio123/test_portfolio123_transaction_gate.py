@@ -1072,3 +1072,17 @@ def test_a_weekend_start_with_no_weekday_before_as_of_is_refused(
         Portfolio123GenerationError, match="no weekday observation on or before as_of"
     ):
         _generate(legacy, har, data, date(2026, 9, 12), transaction_captures=[capture])
+
+
+def test_an_interval_that_is_entirely_a_weekend_is_refused_not_indexed(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    # Saturday..Sunday with no observation: the weekday calendar is empty and data=[].
+    _managed_performance(har, "2026-09-12", "2026-09-13", 0)
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    with pytest.raises(
+        Portfolio123GenerationError,
+        match=r"no weekday observation on or before as_of.*the interval is a weekend",
+    ):
+        _generate(legacy, har, data, date(2026, 9, 12), transaction_captures=[capture])
