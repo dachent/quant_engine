@@ -1253,7 +1253,9 @@ class CdpTransport:  # pragma: no cover - live only, never run by the repository
         observed_headers: Mapping[str, str],
         holdings_replay: tuple[Mapping[str, str], str] | None = None,
         page: Any = None,
+        holdings_from_page: bool = False,
     ) -> None:
+        self._holdings_from_page = holdings_from_page
         self._page = page
         self._context = context
         self._holdings_replay = holdings_replay  # in memory only, never stored
@@ -1290,6 +1292,8 @@ class CdpTransport:  # pragma: no cover - live only, never run by the repository
     def post(
         self, path: str, body: Mapping[str, object], provider_account_id: str
     ) -> tuple[int, object]:
+        if path == HOLDINGS_V2_PATH and self._holdings_from_page and self._page:
+            return _read_page_holdings_response(self._page)
         if path == HOLDINGS_V2_PATH and self._holdings_replay is not None:
             # exactly the page's own request: its headers (the scoping header as the SPA sends
             # it) and its body text, which equals the approved body (``check_observed_body``)
@@ -1441,6 +1445,37 @@ def _observe_holdings_request(
     finally:
         page.remove_listener("request", on_request)
     return seen[0] if seen else None
+
+
+def _read_page_holdings_response(page: Any) -> tuple[int, object]:  # pragma: no cover
+    """Let the SPA send its OWN Holdings-V2 request (a reload of the page) and read the response:
+    nothing of ours is replayed. One request (the governed reservation already counted it)."""
+
+    seen: list[Any] = []
+
+    def on_response(response: Any) -> None:
+        request = response.request
+        if request.method == "POST" and request.url.endswith(HOLDINGS_V2_PATH):
+            seen.append(response)
+
+    page.on("response", on_response)
+    try:
+        page.reload(wait_until="domcontentloaded")
+        waited = 0.0
+        while not seen and waited < 30:
+            page.wait_for_timeout(500)
+            waited += 0.5
+    finally:
+        page.remove_listener("response", on_response)
+    if not seen:
+        raise DriverError(
+            "the page did not send its own HoldingV2 request in 30 seconds"
+        )
+    response = seen[0]
+    try:
+        return int(response.status), response.json()
+    except Exception as exc:
+        raise DriverError("the page's own HoldingV2 response is not JSON") from exc
 
 
 def _observe_headers(page: Any) -> dict[str, str]:  # pragma: no cover - live only
@@ -2034,7 +2069,13 @@ def capture_live(
             file=sys.stderr,
         )
         governance = authorize_live_read(evidence, receipt_root=receipt_root)
-        transport = CdpTransport(context, observed_headers, replay, pages[0])
+        transport = CdpTransport(
+            context,
+            observed_headers,
+            replay,
+            pages[0],
+            holdings_from_page=os.environ.get("QE_SCHWAB_HOLDINGS_FROM_PAGE") == "1",
+        )
         return run_capture(
             transport=transport,
             governance=governance,
