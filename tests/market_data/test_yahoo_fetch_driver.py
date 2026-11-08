@@ -2025,3 +2025,115 @@ def test_rescale_check_uses_the_last_day_of_a_retained_adjusted_history(
     bad.write_text("{}")
     with pytest.raises(driver.DriverError, match="not a history artifact"):
         driver.rescale_check(new, [previous], adjusted_json=[bad])
+
+
+def test_rescale_check_compares_every_retained_vintage_not_the_last_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    oldest, middle, latest = (
+        tmp_path / "oldest",
+        tmp_path / "middle",
+        tmp_path / "latest",
+    )
+    new = tmp_path / "new"
+    days = {"2026-09-16": 100.0, "2026-09-17": 101.0}
+    half = {day: close / 2 for day, close in days.items()}
+    # a split after the oldest pull: the later pulls already hold split-adjusted closes, so
+    # the new pull (also split-adjusted) matches them and only the oldest pull shows it
+    _closes_file(oldest, "SPLIT", days)
+    _closes_file(middle, "SPLIT", half)
+    _closes_file(latest, "SPLIT", half)
+    _closes_file(new, "SPLIT", half)
+    _closes_file(oldest, "CLEAN", days)
+    _closes_file(middle, "CLEAN", days)
+    _closes_file(latest, "CLEAN", days)
+    _closes_file(new, "CLEAN", days)
+    argv = ["rescale-check", "--closes-dir", str(new)]
+    for directory in (oldest, middle, latest):
+        argv += ["--previous-dir", str(directory)]
+    assert driver.main(argv) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["rescaled"] == ["SPLIT"]
+    assert report["retained_vintages_disagree"] == ["SPLIT"]
+    assert len(report["vintages_compared"]) == 6
+    by_symbol = {row["symbol"]: row for row in report["symbols"]}
+    split = by_symbol["SPLIT"]
+    assert split["status"] == "RESCALED"
+    assert split["rescaled_sources"] == [str(oldest / "SPLIT_yahoo_daily.csv")]
+    assert [item["status"] for item in split["vintages"]] == ["RESCALED", "ok", "ok"]
+    assert by_symbol["CLEAN"]["status"] == "ok"
+    assert "RETAINED_VINTAGES_DISAGREE" in captured.err
+    # argument order does not matter
+    argv_reversed = ["rescale-check", "--closes-dir", str(new)]
+    for directory in (latest, middle, oldest):
+        argv_reversed += ["--previous-dir", str(directory)]
+    assert driver.main(argv_reversed) == 1
+    capsys.readouterr()
+
+
+def test_rescale_check_flags_disagreeing_retained_vintages_even_if_new_matches_one(
+    tmp_path: Path,
+) -> None:
+    older, newer, new = tmp_path / "older", tmp_path / "newer", tmp_path / "new"
+    _closes_file(older, "AB", {"2026-09-17": 10.0})
+    _closes_file(newer, "AB", {"2026-09-17": 10.0, "2026-10-01": 11.0})
+    _closes_file(new, "AB", {"2026-09-17": 10.0, "2026-10-01": 11.0})
+    adjusted = tmp_path / "adjusted.json"
+    adjusted.write_text(
+        json.dumps(
+            {"rows": [{"Ticker": "AB", "Date": "2026-09-17T00:00:00", "Close": 5.0}]}
+        )
+    )
+    report = driver.rescale_check(new, [older, newer], adjusted_json=[adjusted])
+    row = report["symbols"][0]
+    assert report["retained_vintages_disagree"] == ["AB"]
+    assert report["rescaled"] == ["AB"]
+    assert row["status"] == "RESCALED"
+    assert len(row["retained_vintages_disagree"]) == 2
+    # without the disagreeing artifact the same pulls are clean
+    clean = driver.rescale_check(new, [older, newer])
+    assert clean["rescaled"] == [] and clean["retained_vintages_disagree"] == []
+    # two retained pulls that disagree with each other, new matching neither, both reported
+    _closes_file(new, "AB", {"2026-09-17": 20.0})
+    both = driver.rescale_check(new, [older, newer])
+    assert both["rescaled"] == ["AB"]
+    assert both["symbols"][0]["rescaled_sources"] == [
+        str(older / "AB_yahoo_daily.csv"),
+        str(newer / "AB_yahoo_daily.csv"),
+    ]
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-3"])
+def test_rescale_check_refuses_non_finite_and_non_positive_closes(
+    tmp_path: Path, bad: str
+) -> None:
+    new, previous = tmp_path / "new", tmp_path / "previous"
+    _closes_file(new, "AB", {"2026-09-17": 10.0})
+    _closes_file(previous, "AB", {"2026-09-17": 10.0})
+    new_file = new / "AB_yahoo_daily.csv"
+    retained_file = previous / "AB_yahoo_daily.csv"
+    good_new, good_retained = new_file.read_bytes(), retained_file.read_bytes()
+    new_file.write_bytes(good_new.replace(b",10.0,10.0,", f",{bad},{bad},".encode()))
+    with pytest.raises(
+        driver.DriverError, match=r"AB_yahoo_daily\.csv 2026-09-17: close"
+    ):
+        driver.rescale_check(new, [previous])
+    new_file.write_bytes(good_new)
+    retained_file.write_bytes(
+        good_retained.replace(b",10.0,10.0,", f",{bad},{bad},".encode())
+    )
+    with pytest.raises(
+        driver.DriverError, match=r"AB_yahoo_daily\.csv 2026-09-17: close"
+    ):
+        driver.rescale_check(new, [previous])
+    retained_file.write_bytes(good_retained)
+    artifact = tmp_path / "adjusted.json"
+    literal = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}.get(bad, bad)
+    artifact.write_bytes(
+        b'{"rows": [{"Ticker": "AB", "Date": "2026-09-17T00:00:00", "Close": '
+        + literal.encode()
+        + b"}]}"
+    )
+    with pytest.raises(driver.DriverError, match=r"adjusted\.json 2026-09-17: close"):
+        driver.rescale_check(new, [previous], adjusted_json=[artifact])

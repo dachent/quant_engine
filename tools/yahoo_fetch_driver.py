@@ -818,34 +818,65 @@ def rescale_check(
     if not tolerance > 0:
         raise DriverError("the rescale tolerance must be positive")
 
+    def positive_close(value: Any, path: Path, day: str) -> float:
+        # float() accepts nan, inf and 0: a nan comparison is always false (the check would
+        # fall through to ok) and a zero retained close divides by zero
+        number = float(value)
+        if not math.isfinite(number) or number <= 0:
+            raise DriverError(
+                f"{path.name} {day}: close {value!r} is not a finite positive number"
+            )
+        return number
+
     def closes(path: Path) -> dict[str, float]:
         try:
             reader = csv.DictReader(io.StringIO(path.read_bytes().decode("utf-8")))
             if not {"date", "close"} <= set(reader.fieldnames or ()):
                 raise KeyError("date,close")
-            return {row["date"]: float(row["close"]) for row in reader if row["close"]}
+            return {
+                row["date"]: positive_close(row["close"], path, row["date"])
+                for row in reader
+                if row["close"]
+            }
+        except DriverError:
+            raise
         except (OSError, UnicodeDecodeError, KeyError, ValueError) as exc:
             raise DriverError(f"{path.name} is not an official-closes file") from exc
 
     if not closes_dir.is_dir() or any(not item.is_dir() for item in previous_dirs):
         raise DriverError("a closes directory is not a directory")
-    previous: dict[str, dict[str, float]] = {}
+    # every retained pull is its own vintage: a later pull must not hide a split that an
+    # earlier one still shows, so nothing is merged by argument order
+    vintages: dict[str, list[tuple[str, str, dict[str, float]]]] = {}
     for directory in previous_dirs:
         for item in sorted(directory.glob(f"*{_OFFICIAL_SUFFIX}")):
-            previous.setdefault(item.name[: -len(_OFFICIAL_SUFFIX)], {}).update(
-                closes(item)
+            vintages.setdefault(item.name[: -len(_OFFICIAL_SUFFIX)], []).append(
+                (str(item), "raw", closes(item))
             )
-    adjusted: dict[str, dict[str, float]] = {}
+    adjusted: dict[str, list[tuple[str, dict[str, float]]]] = {}
     for path in adjusted_json:
+        per_symbol: dict[str, dict[str, float]] = {}
         try:
             artifact = json.loads(path.read_bytes().decode("utf-8"))
             for row in artifact["rows"]:
                 if row.get("Close") is not None:
-                    adjusted.setdefault(str(row["Ticker"]), {})[
-                        str(row["Date"])[:10]
-                    ] = float(row["Close"])
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+                    day = str(row["Date"])[:10]
+                    per_symbol.setdefault(str(row["Ticker"]), {})[day] = positive_close(
+                        row["Close"], path, day
+                    )
+        except DriverError:
+            raise
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
             raise DriverError(f"{path.name} is not a history artifact") from None
+        for symbol, series in per_symbol.items():
+            adjusted.setdefault(symbol, []).append((str(path), series))
     names = sorted(
         item.name[: -len(_OFFICIAL_SUFFIX)]
         for item in closes_dir.glob(f"*{_OFFICIAL_SUFFIX}")
@@ -855,35 +886,95 @@ def rescale_check(
     rows: list[dict[str, Any]] = []
     for name in names:
         new = closes(closes_dir / f"{name}{_OFFICIAL_SUFFIX}")
-        old = previous.get(name)
-        basis = "raw"
-        if old is None and name in adjusted:
-            last = max(adjusted[name])
-            old, basis = {last: adjusted[name][last]}, "adjusted_last_day"
-        if old is None:
+        held: list[tuple[str, str, dict[str, float]]] = list(vintages.get(name, ()))
+        for source, series in adjusted.get(name, ()):
+            last = max(series)
+            held.append((source, "adjusted_last_day", {last: series[last]}))
+        if not held:
             rows.append({"symbol": name, "status": "not_in_previous"})
             continue
-        shared = sorted(set(new) & set(old))
-        if not shared:
-            rows.append({"symbol": name, "status": "no_overlap"})
-            continue
-        worst = max(shared, key=lambda day: abs(new[day] - old[day]) / abs(old[day]))
-        change = abs(new[worst] - old[worst]) / abs(old[worst])
-        rows.append(
-            {
-                "symbol": name,
-                "status": "RESCALED" if change > tolerance else "ok",
-                "basis": basis,
-                "days_compared": len(shared),
-                "worst_day": worst,
-                "worst_relative_change": round(change, 8),
-                "ratio_new_over_previous": round(new[worst] / old[worst], 8),
-            }
-        )
+        per_vintage: list[dict[str, Any]] = []
+        for source, basis, old in held:
+            shared = sorted(set(new) & set(old))
+            if not shared:
+                per_vintage.append(
+                    {"source": source, "basis": basis, "status": "no_overlap"}
+                )
+                continue
+            worst = max(
+                shared, key=lambda day: abs(new[day] - old[day]) / abs(old[day])
+            )
+            change = abs(new[worst] - old[worst]) / abs(old[worst])
+            per_vintage.append(
+                {
+                    "source": source,
+                    "basis": basis,
+                    "status": "RESCALED" if change > tolerance else "ok",
+                    "days_compared": len(shared),
+                    "worst_day": worst,
+                    "worst_relative_change": round(change, 8),
+                    "ratio_new_over_previous": round(new[worst] / old[worst], 8),
+                }
+            )
+        # two retained pulls that disagree on a shared day straddle a split (or a bad pull)
+        disagreements: list[dict[str, Any]] = []
+        for i, (source_a, _, old_a) in enumerate(held):
+            for source_b, _, old_b in held[i + 1 :]:
+                shared_ab = sorted(set(old_a) & set(old_b))
+                if not shared_ab:
+                    continue
+                day = max(
+                    shared_ab, key=lambda d: abs(old_a[d] - old_b[d]) / abs(old_a[d])
+                )
+                if abs(old_a[day] - old_b[day]) / abs(old_a[day]) > tolerance:
+                    disagreements.append(
+                        {
+                            "sources": [source_a, source_b],
+                            "day": day,
+                            "ratio_second_over_first": round(
+                                old_b[day] / old_a[day], 8
+                            ),
+                        }
+                    )
+        compared = [item for item in per_vintage if item["status"] != "no_overlap"]
+        entry: dict[str, Any] = {"symbol": name, "vintages": per_vintage}
+        if not compared:
+            entry["status"] = "no_overlap"
+        else:
+            top = max(compared, key=lambda item: item["worst_relative_change"])
+            rescaled = any(item["status"] == "RESCALED" for item in compared)
+            entry.update(
+                {
+                    "status": "RESCALED" if rescaled else "ok",
+                    "basis": top["basis"],
+                    "source": top["source"],
+                    "days_compared": top["days_compared"],
+                    "worst_day": top["worst_day"],
+                    "worst_relative_change": top["worst_relative_change"],
+                    "ratio_new_over_previous": top["ratio_new_over_previous"],
+                    "rescaled_sources": [
+                        item["source"]
+                        for item in compared
+                        if item["status"] == "RESCALED"
+                    ],
+                }
+            )
+        if disagreements:
+            entry["retained_vintages_disagree"] = disagreements
+            if entry["status"] == "ok":
+                entry["status"] = "RETAINED_VINTAGES_DISAGREE"
+        rows.append(entry)
     return {
         "tolerance": tolerance,
+        "vintages_compared": sorted(
+            {s for held_ in vintages.values() for s, _, _ in held_}
+            | {s for series in adjusted.values() for s, _ in series}
+        ),
         "symbols": rows,
         "rescaled": [row["symbol"] for row in rows if row["status"] == "RESCALED"],
+        "retained_vintages_disagree": [
+            row["symbol"] for row in rows if row.get("retained_vintages_disagree")
+        ],
         "no_overlap": [row["symbol"] for row in rows if row["status"] == "no_overlap"],
         "not_in_previous": [
             row["symbol"] for row in rows if row["status"] == "not_in_previous"
@@ -3116,11 +3207,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "for a rescale: " + ", ".join(outcome["not_in_previous"]),
                     file=sys.stderr,
                 )
-            if outcome["rescaled"] or outcome["no_overlap"]:
+            if (
+                outcome["rescaled"]
+                or outcome["no_overlap"]
+                or outcome["retained_vintages_disagree"]
+            ):
                 print(
-                    "Error: closes rescaled against the retained pull (a split after it) or "
-                    "sharing no day with it: "
-                    + ", ".join(outcome["rescaled"] + outcome["no_overlap"]),
+                    "Error: closes rescaled against a retained pull (a split after it), "
+                    "sharing no day with it, or retained pulls disagreeing with each other "
+                    "(RETAINED_VINTAGES_DISAGREE: a split between the two pulls): "
+                    + ", ".join(
+                        outcome["rescaled"]
+                        + outcome["no_overlap"]
+                        + [
+                            f"{s} (disagree)"
+                            for s in outcome["retained_vintages_disagree"]
+                        ]
+                    ),
                     file=sys.stderr,
                 )
                 return 1
