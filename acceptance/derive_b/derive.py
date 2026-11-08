@@ -31,7 +31,17 @@ getcontext().prec = 50
 # stand-in keeps that resolution working (no annotation is a ClassVar/InitVar).
 sys.modules.setdefault(__name__, types.ModuleType(__name__))
 
-CUTOFF = date(2026, 9, 17)
+# The built-in v1 input selection below (no inputs manifest) is pinned to this
+# one cutoff and its generations; nothing else may default to it.
+LEGACY_V1_CUTOFF = date(2026, 9, 17)
+# The ACTIVE declared cutoff.  The command line requires --cutoff and installs
+# it with set_cutoff() before any input is read; this initial value is only the
+# library/test-harness default and is never consulted by the command line.
+CUTOFF = LEGACY_V1_CUTOFF
+# Optional override of the stamped code_commit (--code-commit); None = checkout HEAD.
+CODE_COMMIT_OVERRIDE: str | None = None
+# Used only by default_input_paths() (the no-manifest v1 selection); with an
+# inputs manifest the ledger path and its pinned hash come from the manifest.
 LEDGER_PATH = Path(
     "dataPortfolio/provider-ledger/generations/"
     "3b1445eee410890d1e0d9259ad7543011959208f6091e059eb4daa7c1c8c5a1f/"
@@ -167,6 +177,18 @@ class ManifestError(ValueError):
     """An inputs manifest or a declared input fails closed verification."""
 
 
+def set_cutoff(value: date) -> None:
+    """Install the declared cutoff every cutoff-dependent rule reads."""
+    global CUTOFF
+    CUTOFF = value
+
+
+def set_code_commit(value: str | None) -> None:
+    """Override (or, with None, restore) the stamped code_commit."""
+    global CODE_COMMIT_OVERRIDE
+    CODE_COMMIT_OVERRIDE = value
+
+
 def _sleeve_engine() -> Engine:
     """Bind the sleeve derivation to this module's existing return engine."""
 
@@ -204,7 +226,17 @@ def _derive_sleeve_block(qe_root: Path, sleeve_inputs: Path) -> dict[str, object
 
 
 def default_input_paths() -> dict[str, Path]:
-    """Return the v1 input selection used when no inputs manifest is given."""
+    """Return the v1 input selection used when no inputs manifest is given.
+
+    That selection names the generations of the 2026-09-17 cutoff only, so any
+    other declared cutoff fails closed here instead of reading them.
+    """
+    if CUTOFF != LEGACY_V1_CUTOFF:
+        raise ManifestError(
+            f"the built-in v1 input selection serves only the "
+            f"{LEGACY_V1_CUTOFF.isoformat()} cutoff; declared cutoff "
+            f"{CUTOFF.isoformat()} requires an inputs manifest"
+        )
     return {
         "ledger": LEDGER_PATH,
         "crosswalk": CROSSWALK_PATH,
@@ -234,7 +266,7 @@ def load_inputs_manifest(path: Path) -> dict[str, object]:
     cutoff = manifest.get("cutoff")
     if cutoff != CUTOFF.isoformat():
         raise ManifestError(
-            f"inputs manifest cutoff {cutoff!r} differs from the fixed "
+            f"inputs manifest cutoff {cutoff!r} differs from the declared "
             f"{CUTOFF.isoformat()} cutoff"
         )
     entries = manifest.get("inputs")
@@ -365,6 +397,46 @@ def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str
     return resolved
 
 
+def verify_owner_declared_cutoff(manifest: dict[str, object], qe_root: Path) -> None:
+    """Bind the declared cutoff to the owner-declared cutoff artifact, fail closed.
+
+    The manifest must name exactly one ACCOUNT_MANIFEST_FAMILY entry; that file
+    must be readable, match its declared sha256 pin, and carry a
+    calculation_cutoff_date equal to the cutoff this run was asked to derive.
+    """
+    entries = manifest.get("inputs")
+    declared = [
+        entry
+        for entry in (entries if isinstance(entries, list) else [])
+        if isinstance(entry, dict) and entry.get("family") == ACCOUNT_MANIFEST_FAMILY
+    ]
+    if len(declared) != 1 or not isinstance(declared[0].get("path"), str):
+        raise ManifestError(
+            f"inputs manifest must name exactly one owner-declared cutoff "
+            f"artifact (family {ACCOUNT_MANIFEST_FAMILY}); found {len(declared)}"
+        )
+    path = resolve_input_path(qe_root, str(declared[0]["path"]))
+    pin = declared[0].get("sha256")
+    try:
+        if isinstance(pin, str) and file_sha256(path) != pin:
+            raise ManifestError(
+                f"owner-declared cutoff artifact {path} differs from its sha256 pin"
+            )
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError) as error:
+        raise ManifestError(
+            f"owner-declared cutoff artifact {path} is unreadable: {error}"
+        ) from error
+    named = (
+        document.get("calculation_cutoff_date") if isinstance(document, dict) else None
+    )
+    if named != CUTOFF.isoformat():
+        raise ManifestError(
+            f"owner-declared cutoff artifact names cutoff {named!r}, which differs "
+            f"from the requested {CUTOFF.isoformat()} cutoff"
+        )
+
+
 def native_matrixport_input_paths(
     manifest: dict[str, object], qe_root: Path
 ) -> dict[str, Path]:
@@ -460,6 +532,8 @@ def code_commit() -> str:
     derivation must still run, so the provenance field then carries an explicit
     sentinel instead of raising.
     """
+    if CODE_COMMIT_OVERRIDE is not None:
+        return CODE_COMMIT_OVERRIDE
     try:
         return _read_code_commit()
     except (OSError, ValueError):
@@ -2663,10 +2737,12 @@ def metric(
     value: object,
     unit: str,
     inputs_used: list[str],
-    as_of: str = CUTOFF.isoformat(),
+    as_of: str | None = None,
     window: str | None = None,
     notes: str = "",
 ) -> dict[str, object]:
+    if as_of is None:
+        as_of = CUTOFF.isoformat()
     result: dict[str, object] = {
         "metric_id": metric_id,
         "entity": entity,
@@ -2696,6 +2772,40 @@ def add_not_derivable(
     if window is not None:
         row["window"] = window
     output["not_derivable"].append(row)
+
+
+def contract_fx_generation_id(contract: object) -> str | None:
+    """The FX generation id the bound contract names (policy, never code)."""
+    segments = contract.get("source_segments", []) if isinstance(contract, dict) else []
+    for segment in segments if isinstance(segments, list) else []:
+        if (
+            isinstance(segment, dict)
+            and segment.get("source_id") == "portfolio-fx-rates"
+        ):
+            current = segment.get("current_generation")
+            generation_id = (
+                current.get("generation_id") if isinstance(current, dict) else None
+            )
+            if isinstance(generation_id, str) and re.fullmatch(
+                r"[0-9a-f]{64}", generation_id
+            ):
+                return generation_id
+    return None
+
+
+def contract_fx_manifest_sha256(contract: object) -> str | None:
+    """The FX generation-manifest sha256 pin the bound contract carries."""
+    segments = contract.get("source_segments", []) if isinstance(contract, dict) else []
+    for segment in segments if isinstance(segments, list) else []:
+        if (
+            isinstance(segment, dict)
+            and segment.get("source_id") == "portfolio-fx-rates"
+        ):
+            current = segment.get("current_generation")
+            pin = current.get("sha256") if isinstance(current, dict) else None
+            if isinstance(pin, str) and re.fullmatch(r"[0-9a-f]{64}", pin):
+                return pin
+    return None
 
 
 def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, Path]:
@@ -2837,13 +2947,21 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
         )
     coverage = generation.get("coverage", {})
     if (
-        generation.get("generation_id")
-        != "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa"
+        not isinstance(generation.get("generation_id"), str)
+        or generation.get("generation_id") != contract_fx_generation_id(contract)
         or generation.get("as_of_date") != CUTOFF.isoformat()
         or coverage.get("observed_end") != CUTOFF.isoformat()
         or coverage.get("status") != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
     ):
         raise ManifestError("v3 selected FX generation does not cover the cutoff")
+    fx_manifest_pin = contract_fx_manifest_sha256(contract)
+    if fx_manifest_pin is None or fx_manifest_pin != file_sha256(
+        by_family["fx_generation_manifest"]
+    ):
+        raise ManifestError(
+            "v3 selected FX generation manifest bytes do not match the contract "
+            "current_generation sha256 pin"
+        )
     artifacts = generation.get("artifacts", [])
     if not isinstance(artifacts, list):
         raise ManifestError("v3 selected FX generation lacks artifact records")
@@ -3212,7 +3330,7 @@ def derive(
                 "requires --sleeve-inputs"
             )
         declared_basis = load_strategy_basis(strategy_basis)
-    input_paths = default_input_paths()
+    input_paths = default_input_paths() if inputs_manifest is None else {}
     schema_v3 = False
     authority_paths: list[Path] = []
     authority_family_paths: dict[str, Path] = {}
@@ -3244,7 +3362,7 @@ def derive(
     if schema_v3:
         convention_notes.append(
             "R6 v3: selected raw USDT/USD closes are admitted through the "
-            "2026-09-17 cutoff; Matrixport owner flows use event-date FX."
+            f"{CUTOFF.isoformat()} cutoff; Matrixport owner flows use event-date FX."
         )
     fund_scoped_providers = fund_scoped_providers_from_authority(authority_family_paths)
     if schema_v3 and fund_scoped_providers:
@@ -3308,7 +3426,7 @@ def derive(
                 for path in paths
             ],
             "convention_notes": [
-                "R7: a selected input cutoff differs from the fixed 2026-09-17 cutoff."
+                f"R7: a selected input cutoff differs from the fixed {CUTOFF.isoformat()} cutoff."
             ],
             "metrics": [],
             "not_derivable": [
@@ -7511,6 +7629,23 @@ def main() -> None:
     parser.add_argument("--qe-root", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument(
+        "--cutoff",
+        required=True,
+        help=(
+            "declared financial cutoff (YYYY-MM-DD); must equal the inputs "
+            "manifest cutoff and the ledger/crosswalk dates, else the run fails "
+            "closed; there is no default"
+        ),
+    )
+    parser.add_argument(
+        "--code-commit",
+        default=None,
+        help=(
+            "stamp this value as code_commit instead of the checkout HEAD "
+            "(control runs pin a constant; default: the checkout HEAD)"
+        ),
+    )
+    parser.add_argument(
         "--inputs",
         type=Path,
         default=None,
@@ -7548,6 +7683,17 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    try:
+        declared_cutoff = date.fromisoformat(args.cutoff)
+    except ValueError:
+        declared_cutoff = None
+    if declared_cutoff is None or declared_cutoff.isoformat() != args.cutoff:
+        parser.exit(2, f"input error: --cutoff {args.cutoff!r} is not YYYY-MM-DD\n")
+    set_cutoff(declared_cutoff)
+    if args.code_commit is not None:
+        if not args.code_commit:
+            parser.exit(2, "input error: --code-commit is empty\n")
+        set_code_commit(args.code_commit)
     if args.sleeves_only and args.sleeve_inputs is None:
         parser.exit(2, "input error: --sleeves-only requires --sleeve-inputs\n")
     if args.strategy_basis is not None and args.sleeves_only:
@@ -7556,6 +7702,7 @@ def main() -> None:
     if args.inputs is not None:
         try:
             manifest = load_inputs_manifest(args.inputs)
+            verify_owner_declared_cutoff(manifest, args.qe_root)
         except ManifestError as error:
             parser.exit(1, f"error: {error}\n")
     try:
