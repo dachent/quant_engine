@@ -129,7 +129,9 @@ def test_quantbase_profile_selects_only_authenticated_and_account_artifacts(
     run = source / "capture-1"
     (run / "har").mkdir(parents=True)
     (run / "har" / "quantbase-session.har").write_bytes(b"jwt header values")
-    (run / "journal.jsonl").write_bytes(b'{"entry": "jwt header values"}\n')
+    (run / "journal.jsonl").write_bytes(
+        b'{"t": "header", "mode": "capture"}\n{"entry": "jwt header values"}\n'
+    )
     (run / "manifest.json").write_bytes(b'{"har_sha256": "x"}')
 
     result = quarantine.plan_quantbase(source, tmp_path / "quarantine")
@@ -154,6 +156,29 @@ def test_quantbase_profile_selects_only_authenticated_and_account_artifacts(
     assert (run / "manifest.json").is_file()
     assert (source / "RUNBOOK_QUANTBASE.md").is_file()
     assert (csv / "history.csv").is_file()
+
+
+def test_quantbase_discover_journal_stays_and_unreadable_header_is_selected(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "quantbase"
+    discover = source / "discover-1"
+    discover.mkdir(parents=True)
+    (discover / "journal.jsonl").write_bytes(
+        b'{"t": "header", "mode": "discover", "har_name": null}\n{"t": "route"}\n'
+    )
+    (discover / "manifest.json").write_bytes(b'{"mode": "discover"}')
+    broken = source / "broken-1"
+    broken.mkdir()
+    (broken / "journal.jsonl").write_bytes(b"not json\n")
+    (source / "quantbase_cookies.json").write_bytes(b"browser state")
+
+    result = quarantine.plan_quantbase(source, tmp_path / "quarantine")
+    plan = json.loads(Path(str(result["plan_path"])).read_text(encoding="utf-8"))
+    assert {row["relative_path"] for row in plan["entries"]} == {
+        "broken-1/journal.jsonl",
+        "quantbase_cookies.json",
+    }
 
 
 def test_alpaca_profile_quarantines_plaintext_reports_only(tmp_path: Path) -> None:

@@ -98,7 +98,27 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
-def _category(provider_id: str, label: str, relative: Path) -> str | None:
+def _journal_is_capture_mode(path: Path) -> bool:
+    """Decide from the recorder's header line (the first line, never a value).
+
+    Only a header that says ``discover`` leaves the journal in place. A capture
+    header, or a header that cannot be read as one, is treated as authenticated:
+    an unreadable journal must not escape quarantine.
+    """
+    try:
+        with path.open("rb") as handle:
+            first = handle.readline(65536)
+        header = json.loads(first)
+    except (OSError, ValueError):
+        return True
+    if isinstance(header, dict) and header.get("t") == "header":
+        return header.get("mode") != "discover"
+    return True
+
+
+def _category(
+    provider_id: str, label: str, relative: Path, source: Path | None = None
+) -> str | None:
     lowered = relative.as_posix().lower()
     name = relative.name.lower()
     if provider_id == "portfolio123" and label == "har-workspace":
@@ -121,9 +141,12 @@ def _category(provider_id: str, label: str, relative: Path) -> str | None:
         if "cookies" in name:
             return "AUTHENTICATED_SESSION_RISK"
         if name == "journal.jsonl":
-            # the recorder's per-run journal: a recorded entry line holds the full HAR entry,
-            # so it carries the same provider jwt header values as the HAR
-            return "AUTHENTICATED_HAR_JOURNAL"
+            # a capture-mode recorder journal holds the full HAR entries, so it carries the
+            # same provider jwt header values as the HAR; a discover-mode journal is
+            # value-free and stays
+            if source is not None and _journal_is_capture_mode(source):
+                return "AUTHENTICATED_HAR_JOURNAL"
+            return None
         if relative.suffix.lower() == ".png":
             return "ACCOUNT_SCREENSHOT_RISK"
         if name == "account_activity_api_response.json":
@@ -174,7 +197,7 @@ def _candidate_files(
         if not path.is_file():
             continue
         relative = path.relative_to(root)
-        category = _category(provider_id, label, relative)
+        category = _category(provider_id, label, relative, path)
         if category is not None:
             selected.append((relative, category))
     return sorted(selected, key=lambda item: item[0].as_posix().casefold())

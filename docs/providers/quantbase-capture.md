@@ -397,8 +397,10 @@ with `recovered: true` and the warning `RECOVERED_FROM_JOURNAL`. `verify` then
 checks the recovered run like any other. A finished run keeps its journal, hash-bound
 in the manifest, and `verify` requires the HAR to equal it. A legacy-workspace quarantine
 (`provider_security_quarantine.py plan-quantbase`) selects the HAR and `journal.jsonl`
-(category `AUTHENTICATED_HAR_JOURNAL`) together, because both hold the `jwt` header values;
-the value-free `manifest.json` stays and keeps the provenance (HAR hash, journal hash, per-entry
+(category `AUTHENTICATED_HAR_JOURNAL`) together for a capture-mode run, because both hold the
+`jwt` header values. The journal is classified by its first line (the recorder header): a
+`discover` header keeps the value-free journal in place, and a header that cannot be read as
+`discover` selects it (fail closed). The value-free `manifest.json` stays and keeps the provenance (HAR hash, journal hash, per-entry
 body and request hashes). The recorder `verify` of that run is no longer possible once the HAR
 is quarantined, as before; restore from the quarantine to re-verify.
 
