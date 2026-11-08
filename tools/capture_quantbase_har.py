@@ -374,7 +374,7 @@ def _load_intake(intake_dir: Path) -> tuple[Path, Manifest, dict[str, Any]]:
     return root, manifest, record
 
 
-_US_DATE: Final = re.compile(r"^([0-9]{1,2})/([0-9]{1,2})/([0-9]{4})(?:[ T].*)?$")
+_US_DATE: Final = re.compile(r"^([0-9]{1,2})/([0-9]{1,2})/([0-9]{4})$")
 
 
 def _parsed_date(value: object) -> date | None:
@@ -388,7 +388,7 @@ def _parsed_date(value: object) -> date | None:
             if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw):
                 stamp = float(raw)
             elif us := _US_DATE.match(raw):
-                # The dashboard series dates its rows m/d/Y (optionally with a time).
+                # The dashboard series dates its rows m/d/Y, the grammar the converter reads.
                 result = date(int(us[3]), int(us[1]), int(us[2]))
                 return result if 2000 <= result.year <= 2100 else None
             else:
@@ -421,6 +421,29 @@ def _walk_dates(
     elif isinstance(value, list):
         for item in value:
             _walk_dates(item, fields, found, unparsed)
+
+
+def _dashboard_series_days(extracted: Sequence[Any]) -> dict[str, list[date]]:
+    """Dated rows of each dashboard fund series (``funds_data[title].pricehistory``)."""
+    series: dict[str, list[date]] = {}
+    for item in extracted:
+        if item.capability != "portfolio.dashboard" or not isinstance(
+            item.response, dict
+        ):
+            continue
+        data = item.response.get("data")
+        funds = data.get("funds_data") if isinstance(data, dict) else None
+        if not isinstance(funds, dict):
+            continue
+        for title, fund in funds.items():
+            history = fund.get("pricehistory") if isinstance(fund, dict) else None
+            for row in history if isinstance(history, list) else []:
+                parsed = (
+                    _parsed_date(row.get("time")) if isinstance(row, dict) else None
+                )
+                if parsed is not None:
+                    series.setdefault(str(title), []).append(parsed)
+    return series
 
 
 def _record_count(response: object, path: str | None) -> int:
@@ -671,6 +694,19 @@ def _parse(
     }
     if manifest.cutoff not in observed:
         flags.append("CUTOFF_DATE_NOT_OBSERVED")
+    if "portfolio.dashboard" in manifest.nav_capabilities:
+        # The capability-wide observation above can be met by an unrelated or Total series;
+        # coverage is also reported for each fund series on its own.
+        by_series: dict[str, object] = {}
+        for title, days in sorted(_dashboard_series_days(extracted).items()):
+            ended = max(days)
+            by_series[title] = {
+                "observed_end": ended.isoformat(),
+                "observed_on_cutoff": manifest.cutoff in set(days),
+            }
+            if ended < manifest.cutoff:
+                flags.append("NAV_SERIES_ENDS_BEFORE_CUTOFF")
+        grid["cutoff_observation_by_series"] = by_series
     if unparsed[0]:
         flags.append("UNPARSED_DATE_VALUES")
     if session_files:

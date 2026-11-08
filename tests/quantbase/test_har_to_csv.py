@@ -90,7 +90,13 @@ def _bodies() -> dict[str, Any]:
             "value": ACCOUNT_VALUE,
             "cost_basis": "1.0",
             "profit_loss": "0.5",
-        }
+        },
+        {
+            "time": "10/07/2026",
+            "value": "10.5",
+            "cost_basis": "1.0",
+            "profit_loss": "0.6",
+        },
     ]
     holding = {
         "symbol": "SYN",
@@ -821,7 +827,9 @@ def test_observations_after_the_cutoff_are_excluded_and_counted(
         row[3] <= "2026-10-07T23"
         for row in _rows(csv_dir / "ssg_Volatis_Strategy_pricehistory.csv")[1:]
     )
-    assert len(_rows(csv_dir / "dashboard_Total_pricehistory.csv")) == 2
+    assert (
+        len(_rows(csv_dir / "dashboard_Total_pricehistory.csv")) == 3
+    )  # header + the two rows on or before the cutoff
     activity = _rows(csv_dir / "account_activity.csv")
     assert "late" not in {row[activity[0].index("id")] for row in activity[1:]}
     assert len(activity) == 3
@@ -1217,3 +1225,16 @@ def test_missing_data_still_refuses_after_the_drift_tolerance(tmp_path: Path) ->
 
     with pytest.raises(ERROR, match="lacks a fund id or title"):
         Case(tmp_path / "c", no_stats_id).convert(allow_provider_drift=True)
+
+
+def test_the_volatis_dashboard_series_must_carry_the_cutoff_day(tmp_path: Path) -> None:
+    def stale(bodies: dict[str, Any]) -> None:
+        funds = bodies["portfolio.dashboard"]["data"]["funds_data"]
+        funds[VOLATIS] = {
+            **funds[VOLATIS],
+            "pricehistory": [funds[VOLATIS]["pricehistory"][0]],  # ends 10/02, before D
+        }
+
+    # Total and the other fund still reach the cutoff day; they cannot stand in for Volatis.
+    with pytest.raises(ERROR, match="no observation on the cutoff day 2026-10-07"):
+        Case(tmp_path, stale).convert()

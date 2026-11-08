@@ -564,7 +564,7 @@ def _without_extra(
     return {key: record[key] for key in keys}
 
 
-def _user_profile(body: object, ignored: dict[str, set[str]] | None) -> bytes:
+def _user_profile(body: object, ignored: dict[str, set[str]] | None = None) -> bytes:
     users = _array(body, "users.profile")
     if len(users) != 1:
         raise QuantbaseCsvError("users.profile must hold exactly one user")
@@ -591,7 +591,7 @@ def _accounts(body: object) -> bytes:
 
 
 def _account_activity(
-    body: object, cutoff: _Cutoff, ignored: dict[str, set[str]] | None
+    body: object, cutoff: _Cutoff, ignored: dict[str, set[str]] | None = None
 ) -> bytes:
     header = HEADERS["account_activity"]
     allowed = frozenset(header) - {"activity_type"}
@@ -657,10 +657,21 @@ def _dashboard(
         name = f"dashboard_{stem}_pricehistory.csv"
         if name in files:
             raise QuantbaseCsvError("dashboard fund titles collide on file names")
-        files[name] = _csv_bytes(
-            HEADERS["dashboard_pricehistory"],
-            _price_rows(fund["pricehistory"], "dashboard.pricehistory", cutoff),
-        )
+        price_rows = _price_rows(fund["pricehistory"], "dashboard.pricehistory", cutoff)
+        if title == VOLATIS_TITLE:
+            # The Volatis value series is the live NAV window: it must carry the cutoff day
+            # itself, whatever other funds' series reach (an unrelated or Total series
+            # cannot stand in for it).
+            days = [
+                _observation_day(row[0], "dashboard.pricehistory") for row in price_rows
+            ]
+            if cutoff.day not in days:
+                raise QuantbaseCsvError(
+                    "the Volatis dashboard series has no observation on the cutoff day "
+                    f"{cutoff.day.isoformat()} (last on or before it: "
+                    f"{max(days).isoformat() if days else 'none'})"
+                )
+        files[name] = _csv_bytes(HEADERS["dashboard_pricehistory"], price_rows)
         holdings = _array(fund["holdings"], "dashboard.holdings")
         if holdings:
             files[f"dashboard_{stem}_holdings.csv"] = _csv_bytes(
@@ -780,7 +791,7 @@ def _invest(
     mode: str,
     dashboard: object,
     cutoff: _Cutoff,
-    ignored: dict[str, set[str]] | None,
+    ignored: dict[str, set[str]] | None = None,
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     document = _exact(body, frozenset({"pageProps", "__N_SSG"}), "funds.invest")
     props = _exact(

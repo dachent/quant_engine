@@ -200,7 +200,10 @@ def test_cutoff_after_newest_nav_fails_closed(tmp_path: Path) -> None:
 
 def test_us_formatted_dates_are_dated_values() -> None:
     assert intake._parsed_date("11/06/2026") == date(2026, 11, 6)
-    assert intake._parsed_date("1/5/2026 00:00:00") == date(2026, 1, 5)
+    assert intake._parsed_date("1/5/2026") == date(2026, 1, 5)
+    assert (
+        intake._parsed_date("1/5/2026 00:00:00") is None
+    )  # the converter reads m/d/Y only
     assert intake._parsed_date("13/45/2026") is None  # not a date: counted as unparsed
     assert intake._parsed_date("11/06/1999") is None  # outside 2000..2100
 
@@ -671,3 +674,41 @@ def test_interrupted_parse_resumes_over_identical_partial_output(
     (other / "normalized" / "records.json").write_bytes(b"{}")
     with pytest.raises(intake.QuantbaseHarIntakeError, match="partial parse output"):
         intake.parse_intake(other)
+
+
+def test_dashboard_coverage_is_reported_for_each_fund_series(tmp_path: Path) -> None:
+    # An unrelated series reaches the cutoff while the strategy series ends before it: the
+    # capability-wide observation is met, the per-series report and the flag show the gap.
+    def entry(days: dict[str, list[str]]) -> dict[str, Any]:
+        return _entry(
+            f"{API}/api/users/123/dashboard_data/",
+            {
+                "data": {
+                    "funds_data": {
+                        title: {
+                            "pricehistory": [
+                                {"time": day, "value": 1.0, "cost_basis": 1.0}
+                                for day in rows
+                            ]
+                        }
+                        for title, rows in days.items()
+                    },
+                    "top_wins": [],
+                }
+            },
+        )
+
+    case = _dashboard_case(tmp_path, ["10/07/2026"], cutoff="2026-10-07")
+    _write_har(
+        case.capture / "owner_b.har",
+        _activity(),
+        entry({"Strategy": ["10/05/2026", "10/06/2026"], "Total": ["10/07/2026"]}),
+    )
+    result = intake.parse_intake(case.stage())
+    report = json.loads(Path(result["report"]).read_bytes())
+    assert report["nav_grid"]["cutoff_observation"]["observed_on_cutoff"] is True
+    assert report["nav_grid"]["cutoff_observation_by_series"] == {
+        "Strategy": {"observed_end": "2026-10-06", "observed_on_cutoff": False},
+        "Total": {"observed_end": "2026-10-07", "observed_on_cutoff": True},
+    }
+    assert "NAV_SERIES_ENDS_BEFORE_CUTOFF" in result["flags"]
