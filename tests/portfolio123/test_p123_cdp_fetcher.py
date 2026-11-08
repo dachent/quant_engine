@@ -564,6 +564,8 @@ def test_post_discovery_failure_exits_3_with_a_manifest(
             "--download-dir",
             str(tmp_path / "out"),
             "--no-reference",
+            "--as-of",
+            "2026-09-11",
         ]
     )
     assert code == 3
@@ -851,6 +853,8 @@ def _cli_run(
             "--download-timeout",
             "10",
             "--no-reference",
+            "--as-of",
+            "2026-09-11",
         ]
     )
 
@@ -953,6 +957,7 @@ def test_identity_loader_is_guarded(
     result = check(tmp_path, ["5"], None)
     assert result["books"]["5"]["decision"] == "PASS"
     assert result["books"]["5"]["kw"] == [
+        "as_of",
         "books",
         "cross_checks",
         "prior_checks",
@@ -990,6 +995,8 @@ def test_cli_refuses_without_identity_check_before_any_connection(
             "--download-dir",
             str(tmp_path / "out"),
             "--no-reference",
+            "--as-of",
+            "2026-09-11",
         ]
     )
     assert code == 2
@@ -1463,6 +1470,8 @@ def test_designer_login_tab_exits_3_through_the_cli(
             "--download-timeout",
             "10",
             "--no-reference",
+            "--as-of",
+            "2026-09-11",
         ]
     )
     assert code == 3
@@ -1744,6 +1753,8 @@ def test_interpreter_other_than_3_11_is_refused(
             "--download-dir",
             str(tmp_path / "out"),
             "--no-reference",
+            "--as-of",
+            "2026-09-11",
         ]
     )
     assert code == 2

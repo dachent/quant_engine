@@ -32,6 +32,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 import csv
 from dataclasses import dataclass
+from datetime import date
 import hashlib
 import importlib
 import io
@@ -879,6 +880,7 @@ def load_identity_check(
     *,
     prior_dirs: Sequence[Path] = (),
     cross_dirs: Sequence[Path] = (),
+    as_of: date | None = None,
 ) -> IdentityCheck:
     """Import the per-book identity check by module path; refuse when it is absent.
 
@@ -887,7 +889,9 @@ def load_identity_check(
     Portfolio123 run (there is no skip flag). ``prior_dirs`` (older or HAR download
     sets, warn) and ``cross_dirs`` (other capture directories of the same pull, fail)
     feed the check's permutation comparison; a reference index makes a book absent from
-    the reference pull a failure. Run the fetcher from the repository root as
+    the reference pull a failure. ``as_of`` is the financial cutoff D: the check rolls the
+    holdings back to it (I5D) and the decisions file records it, which the generation plan
+    requires to equal its own as-of date. Run the fetcher from the repository root as
     ``python -m tools.p123_cdp_fetcher`` so the ``tools`` package is importable.
     """
 
@@ -922,6 +926,7 @@ def load_identity_check(
             require_reference=reference_index is not None,
             cross_checks=[(Path(item), "raw") for item in cross_dirs],
             prior_checks=[(Path(item), "") for item in prior_dirs],
+            as_of=as_of,
         )
         return result  # type: ignore[no-any-return]
 
@@ -1378,6 +1383,12 @@ def _parser() -> argparse.ArgumentParser:
                 default=[],
                 help="other capture directory of the same pull (shared rows fail)",
             )
+            item.add_argument(
+                "--as-of",
+                type=date.fromisoformat,
+                help="financial cutoff D (YYYY-MM-DD) the identity check rolls holdings "
+                "back to; required, and equal to the generation plan's as-of date",
+            )
             item.add_argument("--skip-designer-models", action="store_true")
         else:
             item.add_argument("--file-id", required=True)
@@ -1428,8 +1439,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return refusal
             if args.reference_index is None and not args.no_reference:
                 raise FetchRefused("REFERENCE_REQUIRED")
+            if args.as_of is None:
+                raise FetchRefused("AS_OF_REQUIRED", "pass --as-of D")
             check = load_identity_check(
-                prior_dirs=args.prior_dir, cross_dirs=args.cross_capture_dir
+                prior_dirs=args.prior_dir,
+                cross_dirs=args.cross_capture_dir,
+                as_of=args.as_of,
             )
             transport = connect(args.cdp_url)
             try:
