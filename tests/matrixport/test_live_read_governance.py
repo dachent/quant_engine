@@ -320,11 +320,11 @@ def test_run_reuses_the_exact_credentials_that_signed_live_requests(
         def __init__(self, workspace: Path, *, credentials=None, **_kwargs: object):
             selected = credentials or sequential_credentials()
             extractor_credentials.append(selected)
-            self.run_dir = workspace / "output" / "run-1"
+            self.run_dir = workspace / "output" / "20260901T000000.000Z"
 
         def extract(self):
             return SimpleNamespace(
-                run_id="run-1",
+                run_id="20260901T000000.000Z",
                 run_dir=self.run_dir,
                 request_count=1,
                 status="COMPLETED",

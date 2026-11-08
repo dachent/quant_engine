@@ -132,12 +132,17 @@ holding snapshot allows only `is_cleared`, `is_holding` and `product_id` (172-17
 the allowlist. They therefore reflect the moment of the call. Each call's UTC
 capture time is recorded in the run metadata (`captures`). `verify` refuses a
 cutoff-bound run that did not record capture times. A capture after the cutoff
-day's end (UTC) is recorded automatically as the `late_capture` fact (latest
-`captured_at`, `cutoff_end_ms`, `gap_hours`, the late paths) in the run metadata,
-in the `verify` output and in `release_status.json`; no approval is needed up to
-`MAX_UNLABELLED_GAP_HOURS` (72 h: a Friday cutoff and a pull through the following
-Monday UTC). Past that, or for inherited rows with no recorded capture time,
-`verify` refuses unless the evidence provenance carries an explicit
+day's end (UTC) is recorded automatically as the `late_capture` fact (latest and
+earliest `captured_at`, `cutoff_end_ms`, `gap_hours` from the latest capture, the
+union of late paths, and `inherited_late_paths` for snapshot rows an incremental run
+inherited from base runs) in the run metadata, in the `verify` output and in
+`release_status.json`; direct and inherited captures form one fact. The combined
+`run` command goes through the same gate as `verify`, so it records the fact and
+applies the same refusal. No approval is needed up to `MAX_UNLABELLED_GAP_HOURS`
+(72 h: a Friday cutoff and a pull through the following Monday UTC); the bound is
+compared on the raw millisecond difference, so a capture 1 ms past 72 h is refused
+without a label (`gap_hours` is rounded to four decimals for display only). Past that, or for inherited rows with no recorded capture
+time, `verify` refuses unless the evidence provenance carries an explicit
 `captured_after_cutoff_label` (`governance-evidence --captured-after-cutoff-label
 TEXT`), which is recorded in the run metadata (and must not change on `--resume`).
 The fact is not a closure: the daily valuation anchors its opening share gap on the

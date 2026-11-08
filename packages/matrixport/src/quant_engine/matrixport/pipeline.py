@@ -139,24 +139,55 @@ def recorded_capture_label(run: Mapping[str, Any]) -> str | None:
 MAX_UNLABELLED_GAP_HOURS = 72
 
 
-def late_capture_fact(
-    captures: Mapping[str, int], limit_ms: int
-) -> dict[str, Any] | None:
-    """The recorded fact of current-state requests captured after the cutoff day's end."""
+def late_capture_exceeds_bound(latest_captured_at_ms: int, limit_ms: int) -> bool:
+    """True when a capture is more than ``MAX_UNLABELLED_GAP_HOURS`` past the cutoff day's end.
 
-    late = {path: at_ms for path, at_ms in captures.items() if at_ms > limit_ms}
+    Compares the raw millisecond difference; the rounded ``gap_hours`` is for display only.
+    """
+
+    return latest_captured_at_ms - limit_ms > MAX_UNLABELLED_GAP_HOURS * 3_600_000
+
+
+def _utc_stamp(moment_ms: int) -> str:
+    stamp = datetime.fromtimestamp(moment_ms / 1000, timezone.utc)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def late_capture_fact(
+    captures: Mapping[str, int],
+    limit_ms: int,
+    inherited: Mapping[str, int] | None = None,
+) -> dict[str, Any] | None:
+    """The recorded fact of current-state requests captured after the cutoff day's end.
+
+    ``captures`` are the run's own requests; ``inherited`` are snapshot rows carried over
+    from base runs (key: ``dataset:base_run_id``).  Both feed ONE fact: the latest capture
+    time sets ``gap_hours``, the earliest is kept, ``late_paths`` is the union and
+    ``inherited_late_paths`` names the part that came from base runs.
+    """
+
+    direct_late = {path: at_ms for path, at_ms in captures.items() if at_ms > limit_ms}
+    inherited_late = {
+        path: at_ms for path, at_ms in (inherited or {}).items() if at_ms > limit_ms
+    }
+    late = {**direct_late, **inherited_late}
     if not late:
         return None
     latest = max(late.values())
-    stamp = datetime.fromtimestamp(latest / 1000, timezone.utc)
-    return {
+    earliest = min(late.values())
+    fact: dict[str, Any] = {
         "cutoff_end_ms": limit_ms,
         "latest_captured_at_ms": latest,
-        "latest_captured_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "latest_captured_at": _utc_stamp(latest),
+        "earliest_captured_at_ms": earliest,
+        "earliest_captured_at": _utc_stamp(earliest),
         "gap_hours": round((latest - limit_ms) / 3_600_000, 4),
         "late_paths": sorted(late),
         "valuation_share_count": "capture-time shares (no event after the cutoff is visible)",
     }
+    if inherited_late:
+        fact["inherited_late_paths"] = sorted(inherited_late)
+    return fact
 
 
 def recorded_captures(run: Mapping[str, Any]) -> dict[str, int]:

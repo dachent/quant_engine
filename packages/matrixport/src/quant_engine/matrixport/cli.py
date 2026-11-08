@@ -26,6 +26,7 @@ from .pipeline import (
     MAX_UNLABELLED_GAP_HOURS,
     SNAPSHOT_PATHS,
     inherited_snapshot_captures,
+    late_capture_exceeds_bound,
     late_capture_fact,
     recorded_capture_label,
     recorded_captures,
@@ -235,56 +236,71 @@ def _require_recorded_cutoff(
         missing = [path for path in SNAPSHOT_PATHS if path not in captures]
         if missing and run["status"] == "COMPLETED":
             raise CredentialError("The run did not record its capture times")
-        fact = late_capture_fact(captures, limit)
+        label = recorded_capture_label(run)
+        direct_late = [at_ms for at_ms in captures.values() if at_ms > limit]
         if (
-            fact is not None
-            and fact["gap_hours"] > MAX_UNLABELLED_GAP_HOURS
-            and recorded_capture_label(run) is None
+            direct_late
+            and late_capture_exceeds_bound(max(direct_late), limit)
+            and label is None
         ):
+            gap = round((max(direct_late) - limit) / 3_600_000, 4)
             raise CredentialError(
-                f"Current-state requests were captured {fact['gap_hours']} h after the "
+                f"Current-state requests were captured {gap} h after the "
                 f"cutoff day (more than {MAX_UNLABELLED_GAP_HOURS} h) and the evidence "
                 "carries no captured_after_cutoff_label"
             )
         inherited = inherited_snapshot_captures(run_dir, run_id)
         if any(at_ms is None for _dataset, _base, at_ms in inherited):
-            if recorded_capture_label(run) is None:
+            if label is None:
                 raise CredentialError(
                     "Inherited current-state rows were captured without a recorded "
                     "capture time and the evidence carries no captured_after_cutoff_label"
                 )
-        inherited_fact = late_capture_fact(
-            {
-                f"{dataset}:{base_id}": at_ms
-                for dataset, base_id, at_ms in inherited
-                if at_ms is not None
-            },
-            limit,
-        )
+        inherited_times = {
+            f"{dataset}:{base_id}": at_ms
+            for dataset, base_id, at_ms in inherited
+            if at_ms is not None
+        }
+        inherited_late = [at_ms for at_ms in inherited_times.values() if at_ms > limit]
         if (
-            inherited_fact is not None
-            and inherited_fact["gap_hours"] > MAX_UNLABELLED_GAP_HOURS
-            and recorded_capture_label(run) is None
+            inherited_late
+            and late_capture_exceeds_bound(max(inherited_late), limit)
+            and label is None
         ):
+            inherited_gap = round((max(inherited_late) - limit) / 3_600_000, 4)
             raise CredentialError(
                 "Inherited current-state rows were captured "
-                f"{inherited_fact['gap_hours']} h after the cutoff day (more than "
+                f"{inherited_gap} h after the cutoff day (more than "
                 f"{MAX_UNLABELLED_GAP_HOURS} h) and the evidence carries no "
                 "captured_after_cutoff_label"
             )
-        facts = [item for item in (fact, inherited_fact) if item is not None]
-        return max(facts, key=lambda item: item["gap_hours"]) if facts else None
+        return late_capture_fact(captures, limit, inherited_times)
     return None
 
 
 def _verify(
-    run_id: str, config_path: Path | None = None, cutoff: str | None = None
+    run_id: str,
+    config_path: Path | None = None,
+    cutoff: str | None = None,
+    *,
+    emit: bool = True,
+    secret_needles: list[bytes] | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    """Verify a run; the standalone ``verify`` and the combined ``run`` both use this.
+
+    ``secret_needles`` are the exact credentials that signed the run's requests (the
+    combined ``run`` command has them and must not read the credential source again).
+    """
+
     validate_run_id(run_id)
     run_dir = _workspace() / "output" / run_id
-    _require_recorded_credentials(run_dir, run_id, config_path)
+    if secret_needles is None:
+        _require_recorded_credentials(run_dir, run_id, config_path)
     late_capture = _require_recorded_cutoff(run_dir, run_id, cutoff)
-    result = verify_run(run_dir, _secret_needles(config_path))
+    result = verify_run(
+        run_dir,
+        _secret_needles(config_path) if secret_needles is None else secret_needles,
+    )
     release_path = run_dir / "reports" / "release_status.json"
     try:
         release = json.loads(release_path.read_text(encoding="utf-8"))
@@ -303,7 +319,8 @@ def _verify(
         release_path,
         (canonical_json(release) + "\n").encode("utf-8"),
     )
-    print(canonical_json(result))
+    if emit:
+        print(canonical_json(result))
     return (0 if result["ok"] else 2), result
 
 
@@ -399,28 +416,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             finally:
                 extractor.close()
             exported = export_run(_workspace(), extraction.run_id)
-            result = verify_run(
-                extraction.run_dir,
-                [
-                    credentials.key_identifier.encode("utf-8"),
-                    credentials.key_identifier.encode("utf-16le"),
-                    credentials.signing_material.encode("utf-8"),
-                    credentials.signing_material.encode("utf-16le"),
-                ],
-            )
             atomic_write(
                 extraction.run_dir / "reports" / "release_status.json",
                 (
                     canonical_json(
                         {
-                            "status": result["status"] if result["ok"] else "FAILED",
                             "extraction_status": extraction.status,
                             "export_status": "COMPLETED",
-                            "verification_ok": result["ok"],
                         }
                     )
                     + "\n"
                 ).encode("utf-8"),
+            )
+            _code, result = _verify(
+                extraction.run_id,
+                args.credentials_config,
+                args.cutoff,
+                emit=False,
+                secret_needles=[
+                    credentials.key_identifier.encode("utf-8"),
+                    credentials.key_identifier.encode("utf-16le"),
+                    credentials.signing_material.encode("utf-8"),
+                    credentials.signing_material.encode("utf-16le"),
+                ],
             )
             print(
                 canonical_json(
