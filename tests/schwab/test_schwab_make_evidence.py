@@ -399,3 +399,11 @@ def test_page_fetch_headers_drop_only_what_a_page_script_cannot_set() -> None:
         "Schwab-Client-Ids": "",
         "Content-Type": "application/json",
     }
+
+
+def test_exception_text_is_value_free_and_bounded() -> None:
+    text = driver.value_free_error(
+        ValueError("Failed for account 123456789 at 2026-11-08\n" + "x" * 400)
+    )
+    assert text.startswith("ValueError: Failed for account #")
+    assert "123456789" not in text and "\n" not in text and len(text) <= 160

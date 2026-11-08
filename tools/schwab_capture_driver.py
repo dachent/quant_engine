@@ -1318,7 +1318,9 @@ class CdpTransport:  # pragma: no cover - live only, never run by the repository
                 except DriverError:
                     raise
                 except Exception as exc:  # zero retry: no second request
-                    raise DriverError("the in-page holdings request failed") from exc
+                    raise DriverError(
+                        f"the in-page holdings request failed ({value_free_error(exc)})"
+                    ) from exc
             response = self._context.request.post(
                 _ORIGIN + path, headers=dict(headers), data=text
             )
@@ -1447,10 +1449,26 @@ def _observe_holdings_request(
     return seen[0] if seen else None
 
 
+def value_free_error(exc: BaseException) -> str:
+    """Exception class and message, digit runs of 4+ masked, first 160 characters."""
+
+    text = re.sub(r"\d{4,}", "#", str(exc)).replace("\n", " ")
+    return f"{type(exc).__name__}: {text}"[:160]
+
+
+_ORIGIN_PAGES = "https://client.schwab.com/"
+
+
 def _read_page_holdings_response(page: Any) -> tuple[int, object]:  # pragma: no cover
     """Let the SPA send its OWN Holdings-V2 request (a reload of the page) and read the response:
     nothing of ours is replayed. One request (the governed reservation already counted it)."""
 
+    try:  # settle first: a page still navigating destroys the execution context
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    if not str(page.url).startswith(_ORIGIN_PAGES):
+        raise DriverError("the page left client.schwab.com before the holdings read")
     seen: list[Any] = []
 
     def on_response(response: Any) -> None:
@@ -1465,8 +1483,13 @@ def _read_page_holdings_response(page: Any) -> tuple[int, object]:  # pragma: no
         while not seen and waited < 30:
             page.wait_for_timeout(500)
             waited += 0.5
+    except Exception as exc:
+        raise DriverError(f"holdings read failed ({value_free_error(exc)})") from exc
     finally:
-        page.remove_listener("response", on_response)
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
     if not seen:
         raise DriverError(
             "the page did not send its own HoldingV2 request in 30 seconds"
@@ -1475,7 +1498,9 @@ def _read_page_holdings_response(page: Any) -> tuple[int, object]:  # pragma: no
     try:
         return int(response.status), response.json()
     except Exception as exc:
-        raise DriverError("the page's own HoldingV2 response is not JSON") from exc
+        raise DriverError(
+            f"the page's own HoldingV2 response is not JSON ({value_free_error(exc)})"
+        ) from exc
 
 
 def _observe_headers(page: Any) -> dict[str, str]:  # pragma: no cover - live only
@@ -2074,7 +2099,9 @@ def capture_live(
             observed_headers,
             replay,
             pages[0],
-            holdings_from_page=os.environ.get("QE_SCHWAB_HOLDINGS_FROM_PAGE") == "1",
+            # primary: the SPA sends its own request and the response is read, nothing replayed;
+            # the in-page replay is an explicit alternative (default off)
+            holdings_from_page=os.environ.get("QE_SCHWAB_HOLDINGS_REPLAY") != "1",
         )
         return run_capture(
             transport=transport,
