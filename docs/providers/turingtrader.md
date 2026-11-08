@@ -75,6 +75,15 @@ holds per-group capture times, the cutoff, the freshness result, each object
 with status, bytes, sha256, ETag and Last-Modified (URLs carry no token), and a
 sorted sha256 list.
 
+Each of `json/`, `txt/` and `vane/` also holds its own `capture-manifest.json` in
+the shape `tools/tt_source_manifest_builder.py` reads (one `captured_at_utc`
+string plus that group's object rows). Point the builder at those
+subdirectories: `json/` as its capture directory, `txt/` as `--txt-capture-dir`
+and `vane/` as `--vane-capture-dir`. File names and bytes are unchanged.
+
+The output directory must also lie outside every git repository (checked before
+anything is created), because it receives the real provider bodies.
+
     python tools/tt_public_capture.py capture --out DIR --cutoff YYYY-MM-DD --tokens-file FILE
 
 Tokens (public, allochist, holdings; 36-character UUIDs) are read from a JSON
@@ -91,4 +100,10 @@ morning (about 06:50Z). Every performance-chart must end on D and every
 last-update stamp must be at or after D+1 06:00Z. Otherwise the tool exits 3,
 names each object with the found and required value, and still keeps the
 capture with manifest status STALE. Exit codes: 0 complete and fresh, 1 an
-object failed, 2 refusal or usage error, 3 stale.
+object failed, 2 refusal or usage error, 3 stale, 4 partial groups.
+
+`--groups` may select a subset, but an omitted group is never captured or
+freshness-checked, so the manifest then has status PARTIAL_GROUPS with
+`omitted_groups` listed, never COMPLETE, and the exit code is 4 unless
+`--allow-partial` is given (the status stays PARTIAL_GROUPS and the exit code is
+0). A failed object (1) or stale freshness (3) takes precedence.

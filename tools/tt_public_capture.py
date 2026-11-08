@@ -15,11 +15,25 @@ variables TT_PUBLIC_TOKEN, TT_ALLOCHIST_TOKEN and TT_HOLDINGS_TOKEN. Tokens are
 never written to disk, never printed, and never recorded: URLs in the manifest
 carry no token query and every error text is redacted.
 
-Output layout (create-only; an existing OUT is refused):
+Output layout (create-only; an existing OUT is refused, and so is an OUT that
+lies inside any git repository, because it receives the real provider bodies):
   json/  portfolio-comp.json and <slug>__<object>.json
+         capture-manifest.json   per-group manifest (builder shape)
   txt/   <slug>__last-update.txt and <slug>__last-rebalance.txt
+         capture-manifest.json   per-group manifest (builder shape)
   vane/  tt-market-vane__status.json
-  capture-manifest.json   written last
+         capture-manifest.json   per-group manifest (builder shape)
+  capture-manifest.json   top-level manifest, written last
+
+Point tools/tt_source_manifest_builder at json/, txt/ and vane/ (its capture
+directory, --txt-capture-dir and --vane-capture-dir): each per-group manifest
+carries one captured_at_utc string and the object rows exactly as that builder
+reads them. File names and bytes are the raw response bytes, unchanged.
+
+Groups: --groups may select a subset, but an omitted group is not captured, so
+the manifest status is PARTIAL_GROUPS (with omitted_groups listed) and the exit
+code is 4 unless --allow-partial is given. A failed object or stale freshness
+takes precedence over PARTIAL_GROUPS.
 
 Freshness for cutoff D: TuringTrader publishes each trading day's data the next
 morning (about 06:50Z). Every performance-chart object must end on date D and
@@ -28,7 +42,7 @@ the exact reason per object; the capture and manifest are still written with
 status STALE so the evidence is kept.
 
 Exit codes: 0 complete and fresh, 1 an object failed, 2 refusal or usage error,
-3 stale.
+3 stale, 4 partial groups (omitted groups, no --allow-partial).
 """
 
 from __future__ import annotations
@@ -82,7 +96,9 @@ _MIN_UPDATE_HOUR = 6
 STATUS_COMPLETE = "COMPLETE"
 STATUS_STALE = "STALE"
 STATUS_FAILED = "FAILED_OBJECTS"
-EXIT_OK, EXIT_FAILED, EXIT_REFUSED, EXIT_STALE = 0, 1, 2, 3
+STATUS_PARTIAL = "PARTIAL_GROUPS"
+EXIT_OK, EXIT_FAILED, EXIT_REFUSED, EXIT_STALE, EXIT_PARTIAL = 0, 1, 2, 3, 4
+GROUP_MANIFEST = "capture-manifest.json"
 
 Item = tuple[str, str, str, str]
 
@@ -327,16 +343,20 @@ def run_capture(
     transport: Transport,
     *,
     groups: Sequence[str] = GROUPS,
+    allow_partial: bool = False,
     timeout: float = 90.0,
     clock: Callable[[], datetime] = _now,
     stream: Any = None,
 ) -> tuple[int, dict[str, Any]]:
     stream = sys.stdout if stream is None else stream
+    if _inside_git_repo(out):
+        raise CaptureRefusal("output directory lies inside a git repository; refused")
     if out.exists():
         raise CaptureRefusal("output directory already exists; capture is create-only")
     out.mkdir(parents=True, exist_ok=False)
     for group in GROUPS:
-        (out / group).mkdir()
+        if group in groups:
+            (out / group).mkdir()
     captured_at: dict[str, str] = {}
     objects: list[dict[str, Any]] = []
     for group in GROUPS:
@@ -351,12 +371,21 @@ def run_capture(
                 f"\t{record.get('error')}",
                 file=stream,
             )
+    for group in captured_at:
+        rows = [o for o in objects if o["group"] == group]
+        group_payload = {"captured_at_utc": captured_at[group], "objects": rows}
+        (out / group / GROUP_MANIFEST).write_bytes(
+            (json.dumps(group_payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        )
+    omitted = [g for g in GROUPS if g not in groups]
     freshness = check_freshness(out, objects, cutoff)
     failed = [o for o in objects if "error" in o]
     if failed:
         status = STATUS_FAILED
     elif freshness["result"] == "STALE":
         status = STATUS_STALE
+    elif omitted:
+        status = STATUS_PARTIAL
     else:
         status = STATUS_COMPLETE
     manifest: dict[str, Any] = {
@@ -365,6 +394,7 @@ def run_capture(
         "authority": AUTHORITY,
         "cutoff": cutoff.isoformat(),
         "captured_at_utc": captured_at,
+        "omitted_groups": omitted,
         "freshness": freshness,
         "objects": objects,
         "sha256_list": sorted(
@@ -383,7 +413,16 @@ def run_capture(
         print(f"STALE {reason}", file=stream)
     for obj in failed:
         print(f"FAILED {obj['object']}: {obj['error']}", file=stream)
-    code = EXIT_FAILED if failed else EXIT_STALE if status == STATUS_STALE else EXIT_OK
+    if omitted:
+        print(f"PARTIAL omitted groups: {','.join(omitted)}", file=stream)
+    if failed:
+        code = EXIT_FAILED
+    elif status == STATUS_STALE:
+        code = EXIT_STALE
+    elif status == STATUS_PARTIAL and not allow_partial:
+        code = EXIT_PARTIAL
+    else:
+        code = EXIT_OK
     return code, manifest
 
 
@@ -395,6 +434,11 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--cutoff", required=True, help="YYYY-MM-DD")
     cap.add_argument("--tokens-file", type=Path, default=None)
     cap.add_argument("--groups", default=",".join(GROUPS))
+    cap.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="exit 0 when --groups omits groups (status stays PARTIAL_GROUPS)",
+    )
     cap.add_argument("--timeout", type=float, default=90.0)
     return parser
 
@@ -406,6 +450,10 @@ def main(argv: Sequence[str] | None = None, transport: Transport | None = None) 
         if not groups or any(g not in GROUPS for g in groups):
             raise CaptureRefusal("groups must be a subset of json,txt,vane")
         cutoff = parse_cutoff(args.cutoff)
+        if _inside_git_repo(args.out):
+            raise CaptureRefusal(
+                "output directory lies inside a git repository; refused"
+            )
         if args.out.exists():
             raise CaptureRefusal(
                 "output directory already exists; capture is create-only"
@@ -417,6 +465,7 @@ def main(argv: Sequence[str] | None = None, transport: Transport | None = None) 
             tokens,
             transport or UrllibTransport(),
             groups=groups,
+            allow_partial=args.allow_partial,
             timeout=args.timeout,
         )
     except CaptureRefusal as refusal:

@@ -15,6 +15,7 @@ TOKENS = {
     "allochist": "22222222-aaaa-4bbb-8ccc-000000000002",
     "holdings": "33333333-aaaa-4bbb-8ccc-000000000003",
 }
+LAST_MODIFIED = "Fri, 06 Nov 2026 06:49:34 GMT"
 FETCH_TIME = "2026-11-06T21:52:00+00:00"
 
 
@@ -46,7 +47,7 @@ class FakeTransport:
                     raise behaviour
                 return behaviour
         return tt.HttpResponse(
-            200, self.body_for(url), {"etag": '"abc"', "Last-Modified": "LM"}
+            200, self.body_for(url), {"etag": '"abc"', "Last-Modified": LAST_MODIFIED}
         )
 
 
@@ -78,7 +79,7 @@ def test_fresh_capture_table_and_byte_identity(tmp_path):
         body = (out / obj["file"]).read_bytes()
         assert obj["http_status"] == 200 and obj["bytes"] == len(body)
         assert obj["sha256"] == hashlib.sha256(body).hexdigest()
-        assert obj["etag"] == '"abc"' and obj["last_modified"] == "LM"
+        assert obj["etag"] == '"abc"' and obj["last_modified"] == LAST_MODIFIED
         assert "token" not in obj["url"]
         assert body == transport.body_for(obj["url"])
     assert (out / "json" / "tt-hot-sauce__holdings-history.json").exists()
@@ -267,3 +268,92 @@ def test_unreadable_chart_is_stale(tmp_path):
         "tt-hot-sauce__performance-chart.json: found unreadable chart; "
         "required last chart date == 2026-11-05"
     ]
+
+
+def _tokens_file(tmp_path: Path) -> Path:
+    holder = tmp_path / "keys"
+    holder.mkdir()
+    path = holder / "tokens.json"
+    path.write_bytes(json.dumps(TOKENS).encode())
+    return path
+
+
+def test_out_inside_git_repo_refused_before_anything_is_created(tmp_path, capsys):
+    repo = tmp_path / "checkout"
+    (repo / ".git").mkdir(parents=True)
+    out = repo / "captures" / "run"
+    transport = FakeTransport("11/05/2026", "2026-11-06T06:46Z")
+    code = tt.main(
+        [
+            "capture",
+            "--out",
+            str(out),
+            "--cutoff",
+            "2026-11-05",
+            "--tokens-file",
+            str(_tokens_file(tmp_path)),
+        ],
+        transport,
+    )
+    assert code == tt.EXIT_REFUSED
+    assert "inside a git repository" in capsys.readouterr().err
+    assert not (repo / "captures").exists() and transport.urls == []
+    with pytest.raises(tt.CaptureRefusal):
+        tt.run_capture(out, date(2026, 11, 5), TOKENS, transport)
+    assert not (repo / "captures").exists()
+
+
+def test_group_manifests_are_consumable_by_the_governed_builder(tmp_path):
+    from tools import tt_source_manifest_builder as builder
+
+    out, code, _, _ = run(tmp_path, FakeTransport("11/05/2026", "2026-11-06T06:46Z"))
+    assert code == 0
+    loaded = {
+        role: builder._load_capture(out / role, role, legacy=False)
+        for role in ("json", "txt", "vane")
+    }
+    assert len(loaded["json"].records) == 1 + 6 * 4
+    assert len(loaded["txt"].records) == 6 * 2
+    assert list(loaded["vane"].records) == ["tt-market-vane__status.json"]
+    for role, capture in loaded.items():
+        assert capture.captured_at_utc.endswith("Z")
+        group = json.loads((out / role / "capture-manifest.json").read_bytes())
+        assert isinstance(group["captured_at_utc"], str)
+        for record in capture.records.values():
+            assert record.http_status == 200
+            assert record.data == (out / role / record.filename).read_bytes()
+    assert "tt-hokey-pokey__last-update.txt" in loaded["txt"].records
+
+
+def test_subset_groups_are_partial_not_complete(tmp_path):
+    out = tmp_path / "cap"
+    stream = io.StringIO()
+    transport = FakeTransport("11/05/2026", "2026-11-06T06:46Z")
+    code, manifest = tt.run_capture(
+        out, date(2026, 11, 5), TOKENS, transport, groups=["vane"], stream=stream
+    )
+    assert code == tt.EXIT_PARTIAL == 4
+    assert manifest["status"] == "PARTIAL_GROUPS"
+    assert manifest["omitted_groups"] == ["json", "txt"]
+    assert "PARTIAL omitted groups: json,txt" in stream.getvalue()
+    assert (
+        len(transport.urls) == 1 and (out / "vane" / "capture-manifest.json").exists()
+    )
+    again = tmp_path / "cap2"
+    code2, manifest2 = tt.run_capture(
+        again,
+        date(2026, 11, 5),
+        TOKENS,
+        FakeTransport("11/05/2026", "2026-11-06T06:46Z"),
+        groups=["vane"],
+        allow_partial=True,
+        stream=io.StringIO(),
+    )
+    assert code2 == 0 and manifest2["status"] == "PARTIAL_GROUPS"
+
+
+def test_full_capture_lists_no_omitted_groups(tmp_path):
+    _, code, manifest, _ = run(
+        tmp_path, FakeTransport("11/05/2026", "2026-11-06T06:46Z")
+    )
+    assert code == 0 and manifest["omitted_groups"] == []
