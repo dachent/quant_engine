@@ -423,12 +423,15 @@ def test_later_weekly_coverage_does_not_move_the_pull() -> None:
         tab.verify_performance_tab(moved, panel)
 
 
-def test_pull_fails_closed_without_a_selected_cutoff() -> None:
-    panel = _panel_at("2026-09-17")
+def test_pull_uses_the_weekly_date_only_when_no_governed_cutoff_is_declared() -> None:
+    panel = _panel_at("2026-09-17", weekly_as_of="2026-10-29")
+    del panel[
+        "meta"
+    ]  # no source clock, no account manifest: no later-coverage claim exists
     block = tab.build_performance_tab(panel)
-    del panel["meta"]
-    with pytest.raises(tab.PerformanceTabError):
-        tab.verify_performance_tab(block, panel)
+    assert block["benchmarks"][0]["required_pull"]["to_date"] == "2026-10-29"
+    tab.verify_performance_tab(block, panel)
+    panel["weekly_returns"]["as_of_date"] = "not-a-date"
     absent = tab.build_performance_tab(panel)
     assert absent["benchmarks"][0]["required_pull"]["to_date"] is None
     with pytest.raises(tab.PerformanceTabError):

@@ -126,19 +126,22 @@ def required_pull(cutoff: Any) -> dict[str, Any]:
 
 
 def _selected_cutoff(panel: Mapping[str, Any]) -> str | None:
-    """The governed selected financial cutoff the panel declares, else ``None``.
+    """The cutoff of the benchmark pull: the governed selected financial cutoff the panel declares.
 
-    ``meta.source_clock.selected_financial_cutoff`` (equal to the report's
-    ``calculation_cutoff_date``, checked when the panel is built), else the
-    account manifest's ``calculation_cutoff_date``.  Both builder and verifier
-    read this one function.
+    ``meta.source_clock.selected_financial_cutoff`` (the clock the report replays), else the
+    account manifest's ``calculation_cutoff_date``; only a panel that declares neither (a candidate
+    built without a source clock, so with no later-coverage claim to separate from the cutoff)
+    falls back to the weekly returns' ``as_of_date``. Builder and verifier both read this one
+    function.
     """
 
     clock = _mapping(_mapping(panel.get("meta")).get("source_clock"))
     manifest = _mapping(panel.get("account_manifest"))
+    weekly = _mapping(panel.get("weekly_returns"))
     for value in (
         clock.get("selected_financial_cutoff"),
         manifest.get("calculation_cutoff_date"),
+        weekly.get("as_of_date"),
     ):
         if isinstance(value, str):
             try:
