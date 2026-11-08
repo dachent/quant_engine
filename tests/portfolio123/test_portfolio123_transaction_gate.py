@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from datetime import date
 import hashlib
 import json
@@ -985,3 +986,76 @@ def test_schema_one_plans_still_rebuild_under_the_legacy_adapter(
     )
     assert plan_artifact["schema"]["version"] == "1"
     assert verify_published(old_path, generation_id)["state"] == "VERIFIED_PUBLISHED"
+
+
+def _managed_performance(har: Path, first: str, last: str, count: int) -> None:
+    """A managed-performance capture: one [marker, Strategy, Total Value] row per weekday."""
+    data = json.dumps([[0, 100 + index, 1000 + index] for index in range(count)])
+    panels = json.dumps(
+        [{"graphs": [{"idx": 0, "s": "Strategy"}, {"idx": 1, "s": "Total Value"}]}]
+    )
+    (har / "csv").mkdir(exist_ok=True)
+    path = har / "csv" / "account_555_app_investment_perfdata.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["field", "value"])
+        for field, value in (
+            ("date", first),
+            ("dateLast", last),
+            ("data", data),
+            ("panels", panels),
+        ):
+            writer.writerow([field, value])
+
+
+def _performance_fields(data: Path, generation_id: str) -> dict[str, str]:
+    table = (
+        data / "generations" / generation_id / "tables/har_managed_performance.parquet"
+    )
+    return {row["field"]: row["value"] for row in pq.read_table(table).to_pylist()}
+
+
+@pytest.mark.parametrize(
+    ("last", "count", "kept", "removed"),
+    [
+        ("2026-09-14", 6, 5, 1),  # ends after as_of: cut to the last weekday <= as_of
+        ("2026-09-18", 10, 5, 5),
+        ("2026-09-11", 5, 5, 0),  # ends exactly on as_of: left as captured
+        ("2026-09-10", 4, 4, 0),  # ends before as_of: left as captured
+    ],
+)
+def test_managed_performance_is_cut_at_the_cutoff(
+    tmp_path: Path, last: str, count: int, kept: int, removed: int
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    _managed_performance(har, "2026-09-07", last, count)
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    generation_id = _generate(
+        legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+    )
+    fields = _performance_fields(data, generation_id)
+    series = json.loads(fields["data"])
+    assert len(series) == kept
+    assert series == [[0, 100 + index, 1000 + index] for index in range(kept)]
+    assert fields["dateLast"] == min(last, "2026-09-11")
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    expected = {"managed_performance": {"555": removed}} if removed else {}
+    assert {  # type: ignore[index]
+        family: counts
+        for family, counts in gate["har_excluded_after_as_of"].items()
+        if family == "managed_performance"
+    } == expected
+
+
+def test_a_managed_performance_that_cannot_be_cut_is_refused(tmp_path: Path) -> None:
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    for first, last, count, match in (
+        ("2026-09-14", "2026-09-18", 5, "starts 2026-09-14, after as_of"),
+        ("2026-09-07", "2026-09-14", 5, "not its weekday calendar"),
+    ):
+        legacy, har, data = _inputs(tmp_path / f"w{count}{first}")
+        _managed_performance(har, first, last, count)
+        with pytest.raises(Portfolio123GenerationError, match=match):
+            _generate(
+                legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+            )
