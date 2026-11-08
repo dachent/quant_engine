@@ -374,6 +374,9 @@ def _load_intake(intake_dir: Path) -> tuple[Path, Manifest, dict[str, Any]]:
     return root, manifest, record
 
 
+_US_DATE: Final = re.compile(r"^([0-9]{1,2})/([0-9]{1,2})/([0-9]{4})(?:[ T].*)?$")
+
+
 def _parsed_date(value: object) -> date | None:
     try:
         if isinstance(value, bool):
@@ -384,6 +387,10 @@ def _parsed_date(value: object) -> date | None:
             raw = value.strip()
             if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw):
                 stamp = float(raw)
+            elif us := _US_DATE.match(raw):
+                # The dashboard series dates its rows m/d/Y (optionally with a time).
+                result = date(int(us[3]), int(us[1]), int(us[2]))
+                return result if 2000 <= result.year <= 2100 else None
             else:
                 parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
                 return parsed.date() if 2000 <= parsed.year <= 2100 else None
@@ -644,8 +651,26 @@ def _parse(
         raise QuantbaseHarIntakeError("NAV capabilities hold no parseable dates")
     newest = max(nav_dates)
     if manifest.cutoff > newest:
-        raise QuantbaseHarIntakeError("cutoff is after the newest captured NAV date")
+        raise QuantbaseHarIntakeError(
+            f"cutoff {manifest.cutoff.isoformat()} is after the newest captured NAV "
+            f"date {newest.isoformat()}: no captured NAV observation on or after the "
+            "cutoff"
+        )
     grid, flags = _grid(manifest, newest)
+    observed = sorted(set(nav_dates))
+    grid["cutoff_observation"] = {
+        "first_on_or_after_cutoff": min(
+            day for day in observed if day >= manifest.cutoff
+        ).isoformat(),
+        "last_on_or_before_cutoff": (
+            max(day for day in observed if day <= manifest.cutoff).isoformat()
+            if any(day <= manifest.cutoff for day in observed)
+            else None
+        ),
+        "observed_on_cutoff": manifest.cutoff in observed,
+    }
+    if manifest.cutoff not in observed:
+        flags.append("CUTOFF_DATE_NOT_OBSERVED")
     if unparsed[0]:
         flags.append("UNPARSED_DATE_VALUES")
     if session_files:
