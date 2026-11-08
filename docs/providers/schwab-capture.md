@@ -184,6 +184,8 @@ date the broker's own accounting follows; an account whose sweep fund is reporte
 position at T but as cash at D (or the reverse); a Monday native D balance row (it is
 checked against the rolled-back value, not assumed).
 
+## Live capture tooling: evidence, crosswalk, attach check
+
 ### Generating and checking the evidence
 
 `make-evidence` writes the evidence for you (create-only; the driver fills the
