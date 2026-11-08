@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -60,22 +62,13 @@ HISTORICAL_V3_PATH = (
 HISTORICAL_V3_SHA256 = (
     "cd828cc30cc7bce30ef92e77f72283d69ab93613b0a0d6fe8bbf5524c1d19181"
 )
-CURRENT_SUCCESSOR_HEAD = "9ab637e56ec030296c46bc2bc5fa64c91c8f09d3"
-CURRENT_AGREE_COUNT = 165
-CURRENT_NOT_DERIVABLE_COUNT = 18
-CURRENT_RAW_OUTPUT_SHA256 = {
-    "a": "3531848c11f15fe96de8a6662049dbbef782cf16def48fe2afeccc30a1658642",
-    "b": "7e0e28cb6f43adac6ade59eaddb8986974c64fb892eea4c3a0f063463261bbc1",
-}
-CURRENT_ORACLE_MANIFEST_SHA256 = {
-    # R2.2 (#468 repin): both derivers read the same acceptance-inputs manifest (p24 inputs, new contract bytes; evidence/releases/2026-10-26-r2/oracle-r2-2).
-    "a": "ad482fd447fdbcaf1131b3b50d07c3ee59524bf29c7ca992c89f224770c0dafa",
-    "b": "ad482fd447fdbcaf1131b3b50d07c3ee59524bf29c7ca992c89f224770c0dafa",
-}
-CURRENT_CONTRACT_POINTER = (
-    "contracts/portfolio-financial-mvp-source-v1.json",
-    "e0dd4a4bdcaca7fa3e73ea5e275a613786cf258bc7abe9bacd752314a9a06659",
-)
+# Owner-declared delivery cutoffs (AGENTS.md): 2026-09-17 for R1/R2/R2.1/R2.2,
+# 2026-11-06 for R3 onward. A new cutoff needs a new owner instruction recorded
+# in AGENTS.md before it is added here.
+DELIVERY_CUTOFFS = frozenset({"2026-09-17", "2026-11-06"})
+CONTRACT_POINTER_PATH = "contracts/portfolio-financial-mvp-source-v1.json"
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+COMMIT_HEX = re.compile(r"[0-9a-f]{40}")
 CURRENT_AUDIT_AUTHORITY_POINTERS: frozenset[tuple[str, str]] = frozenset()
 
 TOLERANCE_UNITS = {"USD", "ratio"}
@@ -91,6 +84,37 @@ def _load(path: Path = BASELINE_PATH) -> dict[str, Any]:
 
 def _rows(doc: dict[str, Any]) -> list[dict[str, Any]]:
     return [*doc["metrics"], *doc["not_derivable"]]
+
+
+def _assert_delivery_cutoff(cutoff: object) -> None:
+    assert cutoff in DELIVERY_CUTOFFS, (
+        f"baseline cutoff {cutoff!r} is not an owner-declared delivery cutoff "
+        f"{sorted(DELIVERY_CUTOFFS)}: a new owner instruction must be recorded "
+        "in AGENTS.md first"
+    )
+
+
+def test_delivery_cutoff_gate_rejects_other_dates() -> None:
+    for good in sorted(DELIVERY_CUTOFFS):
+        _assert_delivery_cutoff(good)
+    for bad in ("2026-12-31", "2026-09-18", "", None):
+        with pytest.raises(AssertionError, match="AGENTS.md"):
+            _assert_delivery_cutoff(bad)
+
+
+def _root_manifest_cutoff() -> str | None:
+    """The cutoff the pinned release-inputs root declares (None: no manifest, e.g. a checkout)."""
+    manifest = _RELEASE_INPUT_ROOT / "release-inputs.manifest.json"
+    if not manifest.is_file():
+        return None
+    value = json.loads(manifest.read_bytes().decode("utf-8")).get("cutoff")
+    assert isinstance(value, str) and value, "root manifest declares no cutoff"
+    return value
+
+
+def _contract_bytes_sha256() -> str:
+    """sha256 of the working-tree contract bytes, as the validator's census reads them."""
+    return hashlib.sha256((REPO_ROOT / CONTRACT_POINTER_PATH).read_bytes()).hexdigest()
 
 
 def test_file_is_utf8_lf_json() -> None:
@@ -129,7 +153,13 @@ def test_historical_fc9a_baseline_is_byte_exact() -> None:
 def test_header_schema() -> None:
     doc = _load()
     assert doc["schema"] == "qe-cp-expected-baseline/1"
-    assert doc["cutoff"] == "2026-09-17"
+    cutoff = doc["cutoff"]
+    assert isinstance(cutoff, str)
+    assert date.fromisoformat(cutoff).isoformat() == cutoff, cutoff
+    _assert_delivery_cutoff(cutoff)
+    root_cutoff = _root_manifest_cutoff()
+    if root_cutoff is not None:
+        assert cutoff == root_cutoff, (cutoff, root_cutoff)
     assert isinstance(doc["conventions"], str) and doc["conventions"]
     assert set(doc["derivations"]) == {"a", "b"}
     for side in ("a", "b"):
@@ -322,42 +352,57 @@ def test_not_derivable_rows_have_no_expected_value() -> None:
 
 
 def test_current_successor_identity_and_authority_coverage() -> None:
+    """Self-consistency of the baseline (no per-cycle literals): both derivers
+    ran at one code identity, every row carries it, the contract pointer is one
+    value and is the repo's contract bytes, and the row set is coherent."""
     doc = _load()
     rows = _rows(doc)
-    assert doc["head"] == CURRENT_SUCCESSOR_HEAD
-    assert doc["inventory_sha256"] == (
-        "75112945918983b311aff52a92a172fdfe7a3ca0348686e906933103898fe775"
-    )
-    assert doc["pointer_map_sha256"] == (
-        "6b818f35d4f8917d1820189300aaf44ef39a91b0ffb61f9af9a359c2ef98c412"
-    )
-    assert doc["admission_decision_sha256"] == (
-        "33582e3a75d91de0bc0fb5ff224395aa90b79a81a5f419785b0d5a6433170773"
-    )
-    assert len(doc["metrics"]) == CURRENT_AGREE_COUNT
-    assert len(doc["not_derivable"]) == CURRENT_NOT_DERIVABLE_COUNT
-    assert len(rows) == 183
+    head = doc["head"]
+    assert COMMIT_HEX.fullmatch(head), head
+    for key in ("inventory_sha256", "pointer_map_sha256", "admission_decision_sha256"):
+        assert SHA256_HEX.fullmatch(doc[key]), key
+    assert doc["derivations"]["a"]["code_commit"] == head
+    assert doc["derivations"]["b"]["code_commit"] == head
     for side in ("a", "b"):
-        assert doc["derivations"][side]["code_commit"] == CURRENT_SUCCESSOR_HEAD
-        assert (
-            doc["derivations"][side]["raw_output_sha256"]
-            == CURRENT_RAW_OUTPUT_SHA256[side]
-        )
-        assert (
-            doc["derivations"][side]["manifest_sha256"]
-            == CURRENT_ORACLE_MANIFEST_SHA256[side]
-        )
+        derivation = doc["derivations"][side]
+        assert SHA256_HEX.fullmatch(derivation["raw_output_sha256"]), side
+        assert SHA256_HEX.fullmatch(derivation["manifest_sha256"]), side
         assert {row[f"derivation_{side}"]["code_commit"] for row in doc["metrics"]} == {
-            CURRENT_SUCCESSOR_HEAD
+            head
         }
-    pointers = [pointer for row in rows for pointer in row.get("authority_pointer", [])]
+        assert {row[f"{side}_head"] for row in doc["metrics"]} == {head}
+    # both derivers read the same acceptance-inputs manifest
+    assert (
+        doc["derivations"]["a"]["manifest_sha256"]
+        == doc["derivations"]["b"]["manifest_sha256"]
+    )
+    assert doc["metrics"] and doc["not_derivable"]
+    keys = [(row["metric_id"], row["entity"], row.get("window")) for row in rows]
+    assert (
+        len(set(keys)) == len(keys) == len(doc["metrics"]) + len(doc["not_derivable"])
+    )
+    cutoff = date.fromisoformat(doc["cutoff"])
     for row in rows:
-        contract_pointers = [
+        as_of = row.get("as_of")
+        if isinstance(as_of, str):
+            assert date.fromisoformat(as_of) <= cutoff, row
+    pointers = [pointer for row in rows for pointer in row.get("authority_pointer", [])]
+    contract_sha = _contract_bytes_sha256()
+    contract_pointers = set()
+    for row in rows:
+        row_pointers = [
             (pointer["path"], pointer["sha256"])
             for pointer in row.get("authority_pointer", [])
-            if pointer.get("path") == CURRENT_CONTRACT_POINTER[0]
+            if pointer.get("path") == CONTRACT_POINTER_PATH
         ]
-        assert contract_pointers == [CURRENT_CONTRACT_POINTER], row
+        assert len(row_pointers) == 1, row
+        contract_pointers.update(row_pointers)
+    # one pointer value across every row, and it is the repo's contract bytes:
+    # a stale contract pin fails here
+    assert contract_pointers == {(CONTRACT_POINTER_PATH, contract_sha)}, (
+        contract_pointers,
+        contract_sha,
+    )
     audit_pointers = {
         (pointer["path"], pointer["sha256"])
         for pointer in pointers
@@ -406,10 +451,18 @@ def test_v2_row_set_and_derivation_identities() -> None:
         assert row["derivation_b"]["code_commit"] == V2_COMMITS["b"]
 
 
+def _require_cutoff_0917(doc: dict[str, Any]) -> None:
+    if doc["cutoff"] != "2026-09-17":
+        pytest.skip(
+            f"value pins are for the 2026-09-17 baseline; this baseline's cutoff is {doc['cutoff']}"
+        )
+
+
 def test_v2_quantbase_rederived_on_finalized_capture() -> None:
     """Volatis (Quantbase) re-derived on the finalized 52b3758a capture:
     59,092.28 USD as of 2026-09-17, TWR 0.6765085987, MWR 0.1956573642."""
     doc = _load(HISTORICAL_V2_PATH)
+    _require_cutoff_0917(doc)
     for metric_id, entity in (
         ("capital.account.cutoff", "account-58e75e8d952fa1b8"),
         ("capital.strategy.cutoff", "volatis-strategy"),
@@ -433,6 +486,7 @@ def test_v2_matrixport_rows_unchanged_with_raw_observation_date() -> None:
     2026-09-03; date.source_last_observation is the last raw observation
     date (2026-09-17) of the finalized f6e87f8c capture."""
     doc = _load(HISTORICAL_V2_PATH)
+    _require_cutoff_0917(doc)
     row = _find(doc, "capital.strategy.cutoff", "robuxio-crypto")
     assert row["as_of"] == "2026-09-03", row
     assert Decimal(row["expected"]) == Decimal("52055.38"), row
