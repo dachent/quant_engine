@@ -1181,3 +1181,13 @@ def test_a_400_on_the_holdings_request_stops_the_run_and_the_evidence_stays_cons
     assert fake.calls == [("POST", HOLDINGS_PATH)] and governance.used_requests == 1
     with pytest.raises(driver.GovernanceError, match="already consumed"):
         _authorize(tmp_path, _evidence())
+
+
+def test_a_failed_response_hint_is_value_free() -> None:
+    hint = driver._error_hint(
+        {"message": "Account 123456789 not entitled for 2026-11-06", "code": "E1"}
+    )
+    assert "123456789" not in hint and "#" in hint and "['code', 'message']" in hint
+    assert driver._error_hint([1, 2]) == "" and driver._error_hint(None) == ""
+    with pytest.raises(driver.DriverError, match=r"status 400 \(response keys \['x'\]"):
+        driver._single_ok(400, "holdings", {"x": 1})

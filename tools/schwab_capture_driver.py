@@ -1498,9 +1498,26 @@ def _write_new(
     }
 
 
-def _single_ok(status: int, name: str) -> None:
+def _error_hint(raw: object) -> str:
+    """A value-free hint of a failed response: its top-level key names and a short message text
+    with long digit runs masked (never an account id or amount)."""
+
+    if not isinstance(raw, dict):
+        return ""
+    text = ""
+    for key in ("message", "error", "errorMessage", "title", "detail", "description"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            text = re.sub(r"\d{4,}", "#", value.strip())[:120]
+            break
+    return f" (response keys {sorted(str(k) for k in raw)[:8]}; text {text!r})"
+
+
+def _single_ok(status: int, name: str, raw: object = None) -> None:
     if status != 200:
-        raise DriverError(f"{name} request failed with status {status}")
+        raise DriverError(
+            f"{name} request failed with status {status}{_error_hint(raw)}"
+        )
 
 
 def run_capture(
@@ -1547,7 +1564,7 @@ def run_capture(
         holdings_req.path, dict(holdings_req.body or {}), ""
     )
     holdings_at = now()
-    _single_ok(status, "holdings")
+    _single_ok(status, "holdings", holdings_raw)
     artifacts.append(
         _write_new(run_dir, "raw/holdings.v2.json", _canonical(holdings_raw), "RAW")
     )
