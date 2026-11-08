@@ -233,9 +233,20 @@ create-only; the output lists the key names and the file hash. Feed the file to
 `make-evidence --holdings-body`.
 
 If no HoldingV2 request is seen within the wait window the command refuses and
-writes nothing. The operator then opens the Schwab positions/holdings page by
-read-only navigation in the same browser and runs `attach-check` again, or STOPs
+writes nothing. The operator (or an agent, with `tools/schwab_page_actions.py` below) opens
+the Schwab positions/holdings page in the same browser and runs `attach-check` again, or STOPs
 and uses the retained UI method below.
+
+#### Page actions in the signed-in window (`tools/schwab_page_actions.py`)
+
+`python tools/schwab_page_actions.py --cdp-url <url> navigate|click|scroll|select|download ...`
+drives the one signed-in `client.schwab.com` page for any non-trading read: navigate inside
+`https://client.schwab.com/`, click by role and name, scroll (at most 5,000 px per call), select an
+option, download (create-only, prints the file's SHA-256). The one guard: it refuses a control whose
+accessible name, text, aria-label, value, title or address, or a navigation path, matches
+trade / transfer / withdraw / deposit / order / buy / sell / submit / confirm payment, and it never
+touches a submit or password control. It has no typing API, so credentials and 2FA are never entered.
+Every action is logged value-free (verb, role, first 8 hex characters of the label's SHA-256).
 
 #### Account-set compare
 
