@@ -1250,7 +1250,9 @@ class CdpTransport:  # pragma: no cover - live only, never run by the repository
         context: Any,
         observed_headers: Mapping[str, str],
         holdings_replay: tuple[Mapping[str, str], str] | None = None,
+        page: Any = None,
     ) -> None:
+        self._page = page
         self._context = context
         self._holdings_replay = holdings_replay  # in memory only, never stored
         self._headers = {
@@ -1290,6 +1292,27 @@ class CdpTransport:  # pragma: no cover - live only, never run by the repository
             # exactly the page's own request: its headers (the scoping header as the SPA sends
             # it) and its body text, which equals the approved body (``check_observed_body``)
             headers, text = self._holdings_replay
+            if self._page is not None:
+                # from inside the page, as its own script would send it (an empty scoping header
+                # stays an empty header); the transport has zero retries, a failure raises
+                try:
+                    reply = self._page.evaluate(
+                        _PAGE_POST_SCRIPT,
+                        {
+                            "url": _ORIGIN + path,
+                            "headers": page_fetch_headers(headers),
+                            "body": text,
+                        },
+                    )
+                    status = int(reply["status"])
+                    try:
+                        return status, json.loads(reply["text"])
+                    except ValueError as exc:
+                        raise DriverError("Schwab response is not JSON") from exc
+                except DriverError:
+                    raise
+                except Exception as exc:  # zero retry: no second request
+                    raise DriverError("the in-page holdings request failed") from exc
             response = self._context.request.post(
                 _ORIGIN + path, headers=dict(headers), data=text
             )
@@ -1312,6 +1335,28 @@ _REPLAY_SKIPPED = frozenset(
         "user-agent",
     }
 )
+
+
+_PAGE_POST_SCRIPT = (
+    "async ({url, headers, body}) => {"
+    " const r = await fetch(url, {method: 'POST', headers, body, credentials: 'include'});"
+    " return {status: r.status, text: await r.text()}; }"
+)
+# header names a page script cannot set (the browser sets or refuses them itself)
+_FETCH_FORBIDDEN = frozenset(
+    {"origin", "referer", "upgrade-insecure-requests", "dnt", "te", "trailer", "via"}
+)
+
+
+def page_fetch_headers(replay: Mapping[str, str]) -> dict[str, str]:
+    """``replay`` minus the headers ``fetch`` cannot set from a page (sec-*, origin, referer...)."""
+
+    return {
+        name: value
+        for name, value in replay.items()
+        if name.casefold() not in _FETCH_FORBIDDEN
+        and not name.casefold().startswith(("sec-", "proxy-"))
+    }
 
 
 def replay_headers(observed: Mapping[str, str]) -> dict[str, str]:
@@ -1970,7 +2015,7 @@ def capture_live(
             file=sys.stderr,
         )
         governance = authorize_live_read(evidence, receipt_root=receipt_root)
-        transport = CdpTransport(context, observed_headers, replay)
+        transport = CdpTransport(context, observed_headers, replay, pages[0])
         return run_capture(
             transport=transport,
             governance=governance,

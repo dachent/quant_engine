@@ -382,3 +382,20 @@ def test_attach_check_names_the_body_keys_the_evidence_filter_drops(
     )
     assert result["holdings_body_dropped_keys"] == ["someOtherKey"]
     assert driver.dropped_body_keys("not json") == []
+
+
+def test_page_fetch_headers_drop_only_what_a_page_script_cannot_set() -> None:
+    replay = {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",
+        "Sec-Fetch-Mode": "cors",
+        "sec-ch-ua": "x",
+        "Origin": "o",
+        "Referer": "r",
+        "Content-Type": "application/json",
+    }
+    assert driver.page_fetch_headers(replay) == {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",
+        "Content-Type": "application/json",
+    }
