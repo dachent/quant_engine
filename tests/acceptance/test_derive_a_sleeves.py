@@ -814,3 +814,50 @@ def test_full_derive_hook_is_additive(
     assert result["metrics"][0] == old["metrics"][0]
     assert old["metrics"][1] not in result["metrics"]
     assert len(result["sleeve_derivation"]["epochs"]) == 2
+
+
+def test_a_late_capture_cash_is_rolled_back_to_the_cutoff(tmp_path: Path) -> None:
+    # Cash-only account as above, plus a deposit of 50 and a fee of 5 dated after the
+    # cutoff: a capture after the cutoff holds 80 + 50 - 5 = 125 and rolls back to 80.
+    dec = {
+        "data_cutoff": LAST,
+        "parent_account_id": "qb",
+        "funds": {},
+        "nav_total_exempt_days": [],
+        "closure_tolerance": {"nav_total": "0.02"},
+        "open_items": {"cash_residual": {"amount": "10", "tolerance": "0.01"}},
+    }
+    documents = {
+        "accounts.csv": "type,settled_balance\nalpaca,125\n",
+        "account_activity.csv": (
+            "activity_type,id,type,status,amount,created_at\n"
+            "transfer,deposit,DEPOSIT,C,100,2026-09-17T12:00:00Z\n"
+            "journal,fee,AUM_FEE,COMPLETE,10,2026-09-17T12:00:00Z\n"
+            "transfer,late-deposit,DEPOSIT,C,50,2026-09-19T12:00:00Z\n"
+            "journal,late-fee,AUM_FEE,COMPLETE,5,2026-09-19T12:00:00Z\n"
+        ),
+    }
+    for stem in (
+        "Crisis_Factor_Investing",
+        "Single_Index_Leveraged_In_and_Out",
+        "Volatis_Strategy",
+        "Total",
+    ):
+        documents[f"dashboard_{stem}_pricehistory.csv"] = (
+            "time,value,cost_basis,profit_loss\n09/17/2026,0,0,0\n"
+        )
+    data = {}
+    for name, contents in documents.items():
+        path = tmp_path / name
+        path.write_text(contents, encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as source:
+            data[name] = list(csv.DictReader(source))
+    with localcontext() as context:
+        context.prec = 28
+        facts = sleeves.quantbase_facts(dec, {"sleeves": []}, data)
+    cash = facts["closure"]["cash"]
+    assert cash["derived_cash"] == D("90")
+    assert cash["post_cutoff_cash_rolled_back"] == D("45")
+    assert cash["residual"] == D("10")
+    assert facts["refusals"] == []
+    assert facts["closure"]["rows_after_cutoff_excluded"] == 2

@@ -404,15 +404,8 @@ def _snapshot_plan_block(
         checked.append(entry)
     if len({str(item["file"]) for item in checked}) != len(checked):
         raise QuantbaseGenerationError("snapshot labels repeat a file")
-    late = any("gap_hours" in item for item in checked)
-    if late and exception is None:
-        raise QuantbaseGenerationError(
-            "a snapshot taken after the cutoff day end needs a labelled exception"
-        )
-    if exception is not None and (
-        _SNAPSHOT_EXCEPTION.fullmatch(exception) is None or not late
-    ):
-        raise QuantbaseGenerationError("snapshot exception label is invalid or unused")
+    if exception is not None and _SNAPSHOT_EXCEPTION.fullmatch(exception) is None:
+        raise QuantbaseGenerationError("snapshot exception label is invalid")
     return {
         "snapshot_labels": sorted(checked, key=lambda item: str(item["file"])),
         **({"snapshot_exception": exception} if exception is not None else {}),
@@ -807,7 +800,8 @@ def _snapshot_catalog_fields(
     }
     if "gap_hours" in label:
         fields["gap_hours_after_cutoff_end"] = label["gap_hours"]
-        fields["snapshot_exception"] = exception
+        if exception is not None:
+            fields["snapshot_exception"] = exception
     return fields
 
 

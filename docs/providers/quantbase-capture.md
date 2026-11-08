@@ -246,14 +246,24 @@ The `accounts.csv` fund `value` becomes `QuantbaseSleeve.snapshot_value`
 `projections_all_live_funds` exists in `tools`, `packages`, `acceptance`, `apps` or
 `ops/mvp2-release`. NAV comes only from the dated series
 (`dashboard_Volatis_Strategy_pricehistory.csv`) and activity. Because a balance
-snapshot taken after the cutoff day end would be compared with cutoff-bounded cash,
-`convert` and `verify` REFUSE any snapshot whose `captured_at` is after the cutoff
-day end unless `--snapshot-exception LABEL` is passed (label: 1-120 characters,
-`[A-Za-z0-9 ._:/#-]`, starting alphanumeric). The label is recorded in the report,
-the native manifest, the plan and the catalog's late snapshot rows, and an
-exception given when no snapshot is late is refused. R3 schedules the Quantbase
-capture on the cutoff day after the close, so the gap is zero and no exception is
-needed.
+snapshot taken after the cutoff day end is compared with cutoff-bounded cash,
+`convert` and `verify` RECORD any snapshot whose `captured_at` is after the cutoff
+day end with its `gap_hours` (report, native manifest, plan and the catalog's late
+snapshot rows); no label is needed. `--snapshot-exception LABEL` stays accepted (label:
+1-120 characters, `[A-Za-z0-9 ._:/#-]`, starting alphanumeric) and is recorded when
+given; a label given when nothing is late is no longer refused (it widens nothing).
+The only snapshot a number reads is `accounts.csv` `settled_balance`: the fund facts
+builder rolls it back to the cutoff by the cash effect of every activity row dated
+after the cutoff (transfers, fund fills, dividends, AUM and partner fees) and compares
+the result with the declared residual (the builder accepts rows after the cutoff in
+`account_activity.csv`; `quantbase_har_to_csv.py` still drops them from that file, so a
+late pull converted today fails the residual closure with the numbers, fail-closed; a
+sidecar of the dropped rows through the converter, plan and release stages is NOT built);
+`closure.account.cash.post_cutoff_cash_rolled_back` records the amount when it is not
+zero. Activity and accounts are assumed to come from one capture session; if they are
+not, the residual check fails loudly. A fund fill after the cutoff in a sleeve fund (an
+exited epoch) is still refused. R3 schedules the Quantbase capture on the cutoff day
+after the close, so the gap is zero and the roll-back amount is zero.
 
 An output directory that is a link, or whose `quantbase-har-csv` ancestor is a
 link, is refused.

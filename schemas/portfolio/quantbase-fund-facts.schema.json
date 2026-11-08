@@ -275,6 +275,7 @@
                 "partner_subscription_fees": {"$ref": "#/$defs/decimal"},
                 "derived_cash": {"$ref": "#/$defs/decimal"},
                 "provider_settled_cash": {"$ref": "#/$defs/decimal"},
+                "post_cutoff_cash_rolled_back": {"$ref": "#/$defs/decimal"},
                 "residual": {"$ref": "#/$defs/decimal"},
                 "declared_residual": {"$ref": "#/$defs/decimal"},
                 "residual_tolerance": {"$ref": "#/$defs/decimal"}
