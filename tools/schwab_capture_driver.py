@@ -1031,13 +1031,23 @@ def _parse_requests(value: object) -> tuple[ApprovedRequest, ...]:
     return tuple(sorted(approved, key=lambda item: item.capability))
 
 
-def authorize_live_read(
-    evidence_path: Path,
-    *,
-    receipt_root: Path,
-    now: Callable[[], datetime] | None = None,
-) -> LiveReadGovernance:
-    """Validate and consume one operator-supplied attestation (single use)."""
+@dataclass(frozen=True)
+class ValidatedEvidence:
+    evidence_sha256: str
+    cutoff: Cutoff
+    exception_label: str | None
+    account_count: int
+    requests: tuple[ApprovedRequest, ...]
+    max_requests: int
+    review: dict[str, str]
+    issued_at: datetime
+    expires_at: datetime
+
+
+def validate_evidence(
+    evidence_path: Path, *, now: Callable[[], datetime] | None = None
+) -> ValidatedEvidence:
+    """Every authorization check, with no receipt written (the offline verify)."""
 
     if not evidence_path.is_file() or evidence_path.is_symlink():
         raise GovernanceError("live-read governance evidence file is required")
@@ -1131,8 +1141,29 @@ def authorize_live_read(
         raise GovernanceError("governance max_requests must be an integer")
     if not 1 <= max_requests <= _MAX_REQUESTS or metering["retry_count"] != 0:
         raise GovernanceError("governance metering is outside the allowed range")
+    return ValidatedEvidence(
+        evidence_sha256=_sha256(payload),
+        cutoff=cutoff,
+        exception_label=label,
+        account_count=account_count,
+        requests=requests,
+        max_requests=max_requests,
+        review={"identity": identity.strip(), "reference": reference},
+        issued_at=issued,
+        expires_at=expires,
+    )
 
-    evidence_sha256 = _sha256(payload)
+
+def authorize_live_read(
+    evidence_path: Path,
+    *,
+    receipt_root: Path,
+    now: Callable[[], datetime] | None = None,
+) -> LiveReadGovernance:
+    """Validate and consume one operator-supplied attestation (single use)."""
+
+    checked = validate_evidence(evidence_path, now=now)
+    evidence_sha256, max_requests = checked.evidence_sha256, checked.max_requests
     receipt_root.mkdir(parents=True, exist_ok=True)
     receipt_path = receipt_root / f"{evidence_sha256}.json"
     try:
@@ -1162,12 +1193,12 @@ def authorize_live_read(
     return LiveReadGovernance(
         receipt_path=receipt_path,
         evidence_sha256=evidence_sha256,
-        cutoff=cutoff,
-        exception_label=label,
-        account_count=account_count,
-        requests=requests,
+        cutoff=checked.cutoff,
+        exception_label=checked.exception_label,
+        account_count=checked.account_count,
+        requests=checked.requests,
         max_requests=max_requests,
-        review={"identity": identity.strip(), "reference": reference},
+        review=checked.review,
     )
 
 
@@ -1824,6 +1855,311 @@ def capture_live(
         )
 
 
+def build_evidence(
+    *,
+    cutoff: Cutoff,
+    account_count: int,
+    holdings_body: Mapping[str, object],
+    review_identity: str,
+    review_reference: str,
+    issued_at: datetime,
+    expires_at: datetime,
+    max_requests: int,
+    exception_label: str | None = None,
+) -> dict[str, object]:
+    """The evidence document for one capture; the driver fills every hash."""
+
+    def request(capability: str, body: object) -> dict[str, object]:
+        entry = next(e for e in catalog() if e.capability == capability)
+        return {
+            "body": body,
+            "capability": capability,
+            "method": entry.method,
+            "path": entry.path,
+            "query": {},
+        }
+
+    return {
+        "authority": {
+            "expires_at": expires_at.astimezone(timezone.utc).isoformat(),
+            "issued_at": issued_at.astimezone(timezone.utc).isoformat(),
+            "status": "CURRENT",
+        },
+        "catalog": {"sha256": catalog_sha256()},
+        "cutoff": {
+            "as_of_date": cutoff.as_of_date.isoformat(),
+            "close_time_zone": CLOSE_TIME_ZONE,
+        },
+        "exception_label": exception_label,
+        "metering": {"max_requests": max_requests, "retry_count": 0},
+        "operation": "capture",
+        "review": {"identity": review_identity, "reference": review_reference},
+        "schema_version": SCHEMA_VERSION,
+        "scope": {
+            "account_count": account_count,
+            "requests": [
+                request("balances.historical", None),
+                request("holdings.v2", dict(holdings_body)),
+                request("transactions.history", None),
+            ],
+        },
+        "terms": {"sha256": TERMS_SHA256, "version": TERMS_VERSION},
+    }
+
+
+def _require_workable_budget(checked: ValidatedEvidence) -> None:
+    """A capture makes one holdings request, one balance request per account and at least one
+    transaction page per account; a smaller budget would consume the evidence and fail."""
+
+    needed = 1 + 2 * checked.account_count
+    if checked.max_requests < needed:
+        raise GovernanceError(
+            f"max_requests {checked.max_requests} cannot complete a capture of "
+            f"{checked.account_count} accounts (at least {needed})"
+        )
+
+
+def _evidence_summary(checked: ValidatedEvidence) -> dict[str, object]:
+    return {
+        "account_count": checked.account_count,
+        "as_of_date": checked.cutoff.as_of_date.isoformat(),
+        "catalog_sha256": catalog_sha256(),
+        "evidence_sha256": checked.evidence_sha256,
+        "expires_at": checked.expires_at.isoformat(),
+        "issued_at": checked.issued_at.isoformat(),
+        "max_requests": checked.max_requests,
+        "review": checked.review,
+        "terms_sha256": TERMS_SHA256,
+    }
+
+
+def _make_evidence(args: argparse.Namespace) -> dict[str, object]:
+    body = strict_json_loads(args.holdings_body.read_bytes(), label="holdings body")
+    issued = _aware_utc(args.issued_at, "issued_at")
+    document = build_evidence(
+        cutoff=parse_cutoff(args.cutoff),
+        account_count=args.account_count,
+        holdings_body=_object(body, "holdings body"),
+        review_identity=args.review_identity,
+        review_reference=args.review_reference,
+        issued_at=issued,
+        expires_at=_aware_utc(args.expires_at, "expires_at"),
+        max_requests=args.max_requests,
+        exception_label=args.exception_label,
+    )
+    payload = json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    try:
+        with args.output.open("xb") as handle:  # create-only, like the raw staging
+            handle.write(payload)
+    except FileExistsError as exc:
+        raise DriverError("output already exists") from exc
+    try:
+        # Same checks authorize runs, evaluated at issue time; none consumed.
+        checked = validate_evidence(args.output, now=lambda: issued)
+        _require_workable_budget(checked)
+    except DriverError:
+        args.output.unlink(missing_ok=True)
+        raise
+    return _evidence_summary(checked)
+
+
+def _check_evidence(args: argparse.Namespace) -> dict[str, object]:
+    checked = validate_evidence(args.evidence)
+    _require_workable_budget(checked)
+    summary = _evidence_summary(checked)
+    if args.receipt_root is not None:
+        summary["already_consumed"] = (
+            args.receipt_root / f"{checked.evidence_sha256}.json"
+        ).exists()
+    return summary
+
+
+def build_crosswalk(source_root: Path, output: Path) -> dict[str, object]:
+    """Write the restricted crosswalk the retained terminal targets define.
+
+    Create-only; the provider ids go to the file and never to stdout. The result
+    is exactly what ``run_capture`` compares against the targets, so a capture
+    cannot start from a crosswalk that disagrees with them.
+    """
+
+    try:
+        targets = _TRANSACTION_CAPTURE.load_retained_targets(source_root)
+    except (SchwabCaptureError, OSError, ValueError) as exc:
+        raise DriverError("retained targets could not be loaded") from exc
+    rows = sorted(
+        (
+            {
+                "external_account_id": t.provider_account_id,
+                "internal_account_id": t.internal_account_id,
+            }
+            for t in targets
+        ),
+        key=lambda row: row["internal_account_id"],
+    )
+    payload = json.dumps({"crosswalk": rows}, indent=2, sort_keys=True).encode()
+    parse_crosswalk(json.loads(payload))  # exact, one-to-one, no redaction
+    try:
+        with output.open("xb") as handle:
+            handle.write(payload + b"\n")
+    except FileExistsError as exc:
+        raise DriverError("output already exists") from exc
+    return {"account_count": len(rows), "output_sha256": _sha256(payload + b"\n")}
+
+
+def extract_holdings_body(post_data: object) -> dict[str, object]:
+    """The page's own HoldingV2 body, reduced to the keys the gate allows."""
+
+    if not isinstance(post_data, str) or not post_data.strip():
+        raise DriverError("the observed HoldingV2 request carried no body")
+    try:
+        parsed = strict_json_loads(post_data.encode("utf-8"), label="holdings body")
+    except Exception as exc:
+        raise DriverError("the observed HoldingV2 body is not strict JSON") from exc
+    kept = {k: v for k, v in _object(parsed, "holdings body").items()
+            if k in _HOLDINGS_BODY_KEYS}  # fmt: skip
+    return _parse_body("holdings.v2", kept) or {}
+
+
+def attach_check(
+    *,
+    cdp_url: str,
+    connect: Callable[[str], Any],
+    observe: Callable[[Any], tuple[dict[str, str], str | None, list[str] | None]],
+    capture_body_out: Path | None = None,
+    crosswalk: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Attach and observe the page's own requests; no governed request, no evidence.
+
+    ``observe`` reloads the Schwab page, reads one of the SPA's own API requests
+    (as ``capture`` does first) and, passively, the body of its own HoldingV2
+    POST. Header values are never returned or stored; only their names.
+    """
+
+    browser = connect(cdp_url)
+    if not browser.contexts:
+        raise DriverError("attached browser has no default context")
+    pages = [
+        page
+        for page in browser.contexts[0].pages
+        if page.url.startswith("https://client.schwab.com/")
+    ]
+    if len(pages) != 1:
+        raise DriverError(
+            f"expected exactly one client.schwab.com page, found {len(pages)}"
+        )
+    headers, post_data, page_accounts = observe(pages[0])
+    result: dict[str, object] = {
+        "authenticated_request_observed": "Authorization" in headers,
+        "governed_requests": 0,
+        "observed_header_names": sorted(headers),
+        "ok": "Authorization" in headers,
+        "schwab_pages": len(pages),
+    }
+    if capture_body_out is not None:
+        if post_data is None:
+            raise DriverError(
+                "no HoldingV2 request was observed in the wait window: open the "
+                "Schwab holdings/positions page (read-only navigation) and run "
+                "attach-check again, or STOP and use the retained UI method"
+            )
+        payload = _canonical(extract_holdings_body(post_data))
+        try:
+            with capture_body_out.open("xb") as handle:
+                handle.write(payload)
+        except FileExistsError as exc:
+            raise DriverError("output already exists") from exc
+        result["holdings_body_sha256"] = _sha256(payload)
+        result["holdings_body_keys"] = sorted(json.loads(payload))
+    if crosswalk is not None:
+        result.update(_compare_accounts(page_accounts, crosswalk))
+    return result
+
+
+def _compare_accounts(
+    page_accounts: list[str] | None, crosswalk: Mapping[str, str]
+) -> dict[str, object]:
+    """The page's account set against the crosswalk; ids and values never shown."""
+
+    if page_accounts is None:
+        raise DriverError(
+            "no HoldingV2 response was observed in the wait window: open the "
+            "Schwab holdings/positions page (read-only navigation) and run "
+            "attach-check again, or STOP and use the retained UI method"
+        )
+    page = set(page_accounts)
+    if len(page) != len(page_accounts):
+        raise DriverError("the page lists an account twice")
+    missing = sorted(crosswalk[x] for x in set(crosswalk) - page)
+    extra = sorted(_sha256(x.encode("utf-8"))[:8] for x in page - set(crosswalk))
+    report: dict[str, object] = {
+        "accounts_on_page": len(page),
+        "accounts_in_crosswalk": len(crosswalk),
+        "crosswalk_accounts_missing_on_page": missing,
+        "page_accounts_not_in_crosswalk_hash8": extra,
+    }
+    if missing or extra:
+        raise DriverError(
+            "the page's account set differs from the crosswalk: "
+            + json.dumps(report, sort_keys=True)
+        )
+    report["account_set_matches"] = True
+    return report
+
+
+def _observe_with_body(
+    page: Any, seconds: float
+) -> tuple[
+    dict[str, str], str | None, list[str] | None
+]:  # pragma: no cover - live only
+    seen: list[Any] = []
+
+    def on_response(response: Any) -> None:
+        request = response.request
+        if request.method == "POST" and request.url.endswith(HOLDINGS_V2_PATH):
+            seen.append(response)
+
+    page.on("response", on_response)
+    try:
+        headers = _observe_headers(page)
+        waited = 0.0
+        while not seen and waited < seconds:
+            page.wait_for_timeout(500)
+            waited += 0.5
+    finally:
+        page.remove_listener("response", on_response)
+    if not seen:
+        return headers, None, None
+    response = seen[0]
+    accounts: list[str] | None = None
+    try:  # only the account ids leave this function; values are dropped here
+        document = response.json()
+        rows = document.get("accounts") if isinstance(document, dict) else None
+        if isinstance(rows, list):
+            accounts = [str(r.get("accountId")) for r in rows if isinstance(r, dict)]
+    except Exception:
+        accounts = None
+    return headers, response.request.post_data, accounts
+
+
+def _attach_live(args: argparse.Namespace) -> dict[str, object]:  # pragma: no cover
+    try:
+        sync_playwright = importlib.import_module("playwright.sync_api").sync_playwright
+    except ImportError as exc:
+        raise DriverError("Playwright is required for live Schwab capture") from exc
+    with sync_playwright() as playwright:
+        return attach_check(
+            cdp_url=args.cdp_url,
+            connect=playwright.chromium.connect_over_cdp,
+            observe=lambda page: _observe_with_body(page, args.wait_seconds),
+            capture_body_out=args.capture_body_out,
+            crosswalk=(
+                parse_crosswalk(_load(args.crosswalk, "crosswalk"))
+                if args.crosswalk
+                else None
+            ),
+        )
+
+
 def _normalize_offline(args: argparse.Namespace) -> dict[str, object]:
     crosswalk = parse_crosswalk(_load(args.crosswalk, "crosswalk"))
     raw = strict_json_loads(args.raw_response.read_bytes(), label="raw holdings")
@@ -1866,6 +2202,40 @@ def _parser() -> argparse.ArgumentParser:
     normalize.add_argument("--cutoff", required=True)
     normalize.add_argument("--captured-at", required=True)
     normalize.add_argument("--exception-label")
+    make = sub.add_parser(
+        "make-evidence",
+        help="offline: write create-only governance evidence and validate it",
+    )
+    make.add_argument("--output", required=True, type=Path)
+    make.add_argument("--cutoff", required=True)
+    make.add_argument("--account-count", required=True, type=int)
+    make.add_argument("--holdings-body", required=True, type=Path)
+    make.add_argument("--review-identity", required=True)
+    make.add_argument("--review-reference", required=True)
+    make.add_argument("--issued-at", required=True)
+    make.add_argument("--expires-at", required=True)
+    make.add_argument("--max-requests", required=True, type=int)
+    make.add_argument("--exception-label")
+    check = sub.add_parser(
+        "check-evidence",
+        help="offline: run the authorization checks without consuming the evidence",
+    )
+    check.add_argument("evidence", type=Path)
+    check.add_argument("--receipt-root", type=Path)
+    crosswalk = sub.add_parser(
+        "build-crosswalk",
+        help="offline: write the restricted crosswalk from the retained targets",
+    )
+    crosswalk.add_argument("--selected-source-root", required=True, type=Path)
+    crosswalk.add_argument("--out", required=True, type=Path)
+    attach = sub.add_parser(
+        "attach-check",
+        help="live, no evidence: attach over CDP and observe the page's headers",
+    )
+    attach.add_argument("--cdp-url", required=True)
+    attach.add_argument("--capture-body-out", type=Path)
+    attach.add_argument("--crosswalk", type=Path)
+    attach.add_argument("--wait-seconds", type=float, default=20.0)
     verify = sub.add_parser("verify", help="re-check a staged run from its bytes")
     verify.add_argument("run_dir", type=Path)
     verify.add_argument("--crosswalk", type=Path)
@@ -1894,6 +2264,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "normalize-holdings":
             result = _normalize_offline(args)
+        elif args.command == "make-evidence":
+            result = _make_evidence(args)
+        elif args.command == "check-evidence":
+            result = _check_evidence(args)
+        elif args.command == "build-crosswalk":
+            result = build_crosswalk(args.selected_source_root, args.out)
+        elif args.command == "attach-check":  # pragma: no cover - live only
+            result = _attach_live(args)
         else:
             crosswalk = (
                 parse_crosswalk(_load(args.crosswalk, "crosswalk"))
