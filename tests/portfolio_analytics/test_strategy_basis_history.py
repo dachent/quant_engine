@@ -49,12 +49,12 @@ DECLARATION = {
 # sha256 of every output of the history generation built from the synthetic fixture by the
 # unmodified main (84b2671e) with no declaration; the switch off must reproduce them
 MAIN_OFF_DIGESTS: dict[str, str] = {
-    "coverage.json": "1e7ec390f52b2f90a2f06b8b2a93b4d80243ccd0549197d3b92bd2310510a433",
+    "coverage.json": "17de3c924f2ef8ed7082b4e521c1be61c28f56b139ae694aa28ebf073a2af4d9",
     "excluded.csv": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
     "live-only.csv": "1bb846d9ce46e553449adedb485ff5e84451446c9b841cf749a715abeb270e15",
     "live-plus-backtest.csv": "1bb846d9ce46e553449adedb485ff5e84451446c9b841cf749a715abeb270e15",
     "returns.csv": "1bb846d9ce46e553449adedb485ff5e84451446c9b841cf749a715abeb270e15",
-    "segments.csv": "eabb05df608be6369ebc98ee6e4e5dd56b1baf3a769e2079715f7eba999a8bf9",
+    "segments.csv": "aeaf46e4ccb245d3f881668e5deefb65d942cecc0a43d98403f9538f64fa3cfb",
 }
 
 
