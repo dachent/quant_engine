@@ -18,7 +18,7 @@
       "exclude_symbols": [
         "SWVXX"
       ],
-      "start_offset_days_before_through": 10,
+      "start_offset_days_before_through": 60,
       "interval": "1d",
       "through": "cutoff",
       "datasets": [

@@ -192,6 +192,36 @@ SPXL, SPY, TQQQ, UDOW, UPRO, XLE; the "38 positions" of that pull list are rows 
 16 symbols with `SWVXX`). A symbol that appears in the R3 capture and is not in those directories
 is "never served" and needs a read-only Yahoo chart request by hand before the evidence is minted.
 
+### Close vintage of a late fetch, and `rescale-check`
+
+R3 uses the raw daily `Close` (split-adjusted by Yahoo, not dividend-adjusted) for every
+official close; `Adj Close` is fetched beside it for history only and feeds no D close. A
+dividend after D cannot move `Close`; a split after D rescales every earlier close, D included.
+The request ends at D, so a pull after D cannot see a later split (the `split_event_count` in
+the adjustment record covers days up to D only). The retained earlier pull is the witness:
+`rescale-check --closes-dir NEW/official-closes --previous-dir DIR [--previous-dir DIR ...]
+[--tolerance 1e-4]` compares each new `<SYMBOL>_yahoo_daily.csv` with the same symbol's retained
+file on the days both hold, and exits 1 if any symbol's close differs by more than the tolerance
+(`RESCALED`, with the worst day and the ratio) or shares no day with the retained pull
+(`no_overlap`: the check proved nothing). A symbol the retained pulls never held is listed as
+`not_in_previous`, warned about on stderr and not checked (`--require-previous` makes it exit 1
+too, for a run where every symbol must have a retained pull).
+
+Every retained pull is its own vintage and is compared with the new closes separately (nothing is
+merged by argument order, so a later pull that already holds split-adjusted closes cannot hide a
+split that the oldest pull still shows). The report lists `vintages_compared` and, per symbol, a
+`vintages` entry for each retained file (and for the last day of each `--previous-adjusted-json`,
+`basis` `adjusted_last_day`) with its own status, worst day and ratio; `rescaled_sources` names
+the files that show the rescale, and the check exits 1 if any vintage does. Two retained
+vintages that disagree with each other on a shared day beyond the tolerance are reported as
+`RETAINED_VINTAGES_DISAGREE` (a split between the two pulls, or a bad pull) with the sources, day
+and ratio, and also exit 1. A close that is `nan`, infinite, zero or negative in a new file, a
+retained file or an adjusted json row is refused with a `DriverError` naming the file and date.
+The `held-closes` window starts 60 days before the cutoff so
+that it overlaps a retained pull that ended at the previous cutoff (R2.1 ended 2026-09-17); run
+the check after the fetch and before the Schwab ingest. Run it on the Saturday pull too: it is a
+no-op when nothing happened and the only gate if a symbol split between the previous pull and D.
+
 ## Symbol resolution and admission
 
 An id in `symbol_resolution` is fetched only through `resolved_ticker`, which requires
