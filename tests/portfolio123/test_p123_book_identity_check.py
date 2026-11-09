@@ -590,3 +590,44 @@ def test_i3_gap_is_measured_from_the_earliest_row_of_any_type(tmp_path: Path) ->
     assert status == "FAIL" and book["i3_start_gap_days"] is None
     detail = next(c["detail"] for c in book["checks"] if c["check"] == "I3")  # type: ignore[attr-defined]
     assert "earliest transaction row 1998-12-30" in detail
+
+
+def test_i3_a_trade_between_the_curve_start_and_the_cash_row_fails(
+    tmp_path: Path,
+) -> None:
+    # curve starts 1998-12-31, CASH row 1999-01-02 (gap 2), but a BUY sits on 1999-01-01.
+    status, book = _i3(
+        tmp_path,
+        start="1999-01-02",
+        perf_start="1998-12-31",
+        trades=[("1999-01-01", "A101", "BUY", "100")],
+        held={"A101": "100.0"},
+    )
+    assert status == "FAIL" and book["i3_start_gap_days"] is None
+
+
+def test_i8x_any_overlap_above_the_threshold_in_the_same_pull_fails(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    common = [(f"2025-07-{1 + i % 28:02d}", f"S{i}", "BUY", "5") for i in range(3)]
+    unique = [(f"2025-08-{1 + i % 28:02d}", f"U{i}", "BUY", "5") for i in range(17)]
+    _book(raw, "101", trades=[*common, *unique], held={})
+    _manifest(capture)
+    other = tmp_path / "other"
+    (other / "raw").mkdir(parents=True)
+    other_unique = [
+        (f"2025-09-{1 + i % 28:02d}", f"V{i}", "BUY", "5") for i in range(17)
+    ]
+    (other / "raw" / "strategy_909_transactions.csv").write_text(
+        _tx("2025-05-09", "1,000,000.00", [*common, *other_unique]), encoding="utf-8"
+    )
+    # 3 of 20 rows (15%) is graded WARN for an older set but FAIL for the same pull
+    assert (
+        _status(ic.check_capture(capture, cross_checks=[(other, "raw")]), "101", "I8x")
+        == "FAIL"
+    )
+    assert (
+        _status(ic.check_capture(capture, prior_checks=[(other, "raw")]), "101", "I8x")
+        == "WARN"
+    )
