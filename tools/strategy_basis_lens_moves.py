@@ -250,7 +250,13 @@ def build_table(
     unchanged_unavailable: list[dict[str, Any]] = []
     for sleeve in sorted(sleeve_rows, key=key):
         account = account_by_key.get(key(sleeve))
-        if account is not None and account["status"] == sleeve["status"]:
+        # unchanged: the same status, or unavailable on both lanes (the reason may differ, as
+        # when the account lane lacks time-ordered folds and the shorter sleeve lane lacks
+        # train history): nothing was lost on the sleeve basis, so it is not a diminished row
+        if account is not None and (
+            account["status"] == sleeve["status"]
+            or (_unavailable(account["status"]) and _unavailable(sleeve["status"]))
+        ):
             if _unavailable(sleeve["status"]):
                 unchanged_unavailable.append(
                     {

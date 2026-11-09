@@ -212,6 +212,50 @@ def test_a_model_unavailable_on_both_lanes_is_not_a_move_but_is_listed(
     _schema().validate(table)
 
 
+def test_a_model_unavailable_on_both_lanes_for_different_reasons_is_not_a_finding(
+    lanes: dict[str, Any],
+) -> None:
+    """The account lane lacks time-ordered folds, the shorter sleeve lane lacks train history.
+
+    Nothing was lost on the sleeve basis, so the model is listed as unavailable on both lanes
+    and is neither a status move nor a diminished row.
+    """
+
+    sleeve = [
+        {**row, "status": "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY"}
+        for row in lanes["sleeve"]
+    ]
+    account = [
+        {**row, "status": "UNAVAILABLE_INSUFFICIENT_TIME_ORDERED_CV"}
+        for row in lanes["account"]
+    ]
+    table = moves.build_table(sleeve, account, series_id=SERIES)
+
+    assert table["rows"] == [] and table["findings"] == []
+    both = table["summary"]["unavailable_on_both_lanes"]
+    assert len(both) == 2
+    assert {item["status"] for item in both} == {
+        "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY"
+    }
+    assert "No synthetic-strategy lens model changes" in table["sentence"]
+    _schema().validate(table)
+
+
+def test_an_available_account_model_that_is_unavailable_on_the_sleeve_stays_a_move(
+    lanes: dict[str, Any],
+) -> None:
+    sleeve = [
+        {**row, "status": "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY"}
+        for row in lanes["sleeve"]
+    ]
+    account = [{**row, "status": "AVAILABLE"} for row in lanes["account"]]
+
+    table = moves.build_table(sleeve, account, series_id=SERIES)
+
+    assert len(table["rows"]) == 2 and table["findings"] == []
+    assert table["summary"]["unavailable_on_both_lanes"] == []
+
+
 def test_no_account_lane_figure_is_absent_after_restatement(
     lanes: dict[str, Any],
 ) -> None:
