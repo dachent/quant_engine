@@ -606,6 +606,14 @@ ROUTES: tuple[Route, ...] = (
         "InvestmentPerformanceCtrl",
     ),
     Route(
+        "book_port_summary",
+        "/port_summary.jsp?portid={id}",
+        "/port_summary.jsp?portid={id}",
+        "book_{id}_port_summary.html",
+        "html",
+        "<title>Summary - ",
+    ),
+    Route(
         "investment_holdings_csv",
         "/app/investment/details?id={id}",
         "/app/investment/holdings.csv?id={id}&v=basic",
