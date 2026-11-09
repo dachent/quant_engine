@@ -53,6 +53,21 @@ def facts(**extra: Any) -> dict[str, Any]:
         "Confirm payment",
         "confirm_payment",
         "ConfirmPayment",
+        "Delete portfolio",
+        "removeItem",
+        "Cancel subscription",
+        "Unsubscribe",
+        "Close account",
+        "Save changes",
+        "Apply Changes",
+        "Change password",
+        "reset-password",
+        "Update profile",
+        "Update email",
+        "Update settings",
+        "Link broker",
+        "Disconnect your broker",
+        "connectBroker",
     ],
 )
 def test_trading_text_is_matched(text: str) -> None:
@@ -63,7 +78,25 @@ def test_trading_text_is_matched(text: str) -> None:
 
 @pytest.mark.parametrize(
     "text",
-    ["Holdings", "Border", "Account activity", "Statements", "Download CSV", "", None],
+    [
+        "Holdings",
+        "Border",
+        "Account activity",
+        "Statements",
+        "Download CSV",
+        "Performance",
+        "Transactions",
+        "Export",
+        "Download",
+        "Expand row",
+        "Close",
+        "Link to fund page",
+        "Connected accounts",
+        "Update date",
+        "Settings",
+        "",
+        None,
+    ],
 )
 def test_plain_reads_are_not_matched(text: object) -> None:
     assert not guard.matches_trading(text)

@@ -1221,3 +1221,17 @@ def test_the_action_log_is_emitted_in_the_summary_and_on_refusal(
     (entry,) = lines[-1]["actions"]
     assert entry["action"] == "click" and len(entry["label_sha8"]) == 8
     assert "Open" not in json.dumps(lines[-1]["actions"])
+
+
+@pytest.mark.parametrize(
+    "name", ["Delete portfolio", "Save changes", "Cancel subscription", "Link broker"]
+)
+def test_the_guard_refuses_account_changing_clicks_in_the_allowlist(name: str) -> None:
+    with pytest.raises(NavigatorError, match="ALLOWLIST_ACTION_TRADING_REFUSED"):
+        parse_allowlist(allowlist_bytes(click_pages(name)))
+
+
+@pytest.mark.parametrize("name", ["Performance", "Holdings", "Transactions", "Export"])
+def test_tabs_and_exports_stay_allowed(name: str) -> None:
+    allowlist = parse_allowlist(allowlist_bytes(click_pages(name)))
+    assert allowlist.pages[0].actions[0].name == name

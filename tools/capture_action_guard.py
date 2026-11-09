@@ -4,7 +4,9 @@ Allowed in a signed-in window, for any non-trading read: navigate, click, scroll
 There is no other restriction. The guard refuses exactly this:
 
 * a control whose accessible name, text, aria-label, value, title or href matches the trading
-  pattern (trade, transfer, withdraw, deposit, order, buy, sell, submit, confirm payment). The
+  pattern (trade, transfer, withdraw, deposit, order, buy, sell, submit, confirm payment) or an
+  account-changing one (delete, remove, cancel, unsubscribe, close account, save/apply changes,
+  change/reset password, update profile/email/settings, link/unlink/connect/disconnect broker). The
   match is on tokens after normalization (camelCase and punctuation split, case folded), so a
   word that merely contains ``order`` as a suffix (``border``) is not a match;
 * a submit control, an image submit or a password control. A ``<button>`` with no ``type`` inside
@@ -40,6 +42,40 @@ TRADING_WORDS = (
     "submit",
     "confirm payment",
 )
+# Account-changing controls (the owner's own limit: never change account settings). Same guard,
+# same refusal path. Single words match as whole-token prefixes; phrases match consecutive tokens.
+MUTATION_WORDS = (
+    "delete",
+    "remove",
+    "cancel",
+    "unsubscribe",
+    "close account",
+    "save changes",
+    "apply changes",
+    "change password",
+    "reset password",
+    "update profile",
+    "update email",
+    "update settings",
+    "update password",
+    "link broker",
+    "unlink broker",
+    "connect broker",
+    "disconnect broker",
+)
+_MUTATION_STEMS = ("delet", "remov", "cancel", "unsubscrib")
+_MUTATION_PHRASES = (
+    ("close", "account"),
+    ("save", "changes"),
+    ("apply", "changes"),
+    ("change", "password"),
+    ("reset", "password"),
+    ("update", "profile"),
+    ("update", "email"),
+    ("update", "settings"),
+    ("update", "password"),
+)
+_BROKER_VERBS = ("link", "unlink", "connect", "disconnect")
 # Short words match as whole-token prefixes (trades, trading, orders, buyer, sells); the long,
 # unambiguous ones also match glued into a longer token (placetransfer, xsubmitx).
 _PREFIX_STEMS = ("trade", "trading", "order", "buy", "sell")
@@ -80,6 +116,13 @@ def matches_trading(text: object) -> bool:
         if word == "confirm" and words[index + 1 : index + 2] == ["payment"]:
             return True
         if word == "confirmpayment":
+            return True
+        if word.startswith(_MUTATION_STEMS):
+            return True
+        following = words[index + 1 : index + 2]
+        if (word, *following) in _MUTATION_PHRASES:
+            return True
+        if word in _BROKER_VERBS and "broker" in words[index + 1 : index + 3]:
             return True
     return False
 
