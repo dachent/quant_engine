@@ -70,7 +70,14 @@ def _bodies() -> dict[str, Any]:
     order = dict.fromkeys(activity_keys)
     order.update(id="o-1", transaction="t-1", filled_at="2026-10-02T01:00:00Z")
     filled = dict.fromkeys(activity_keys)
-    filled.update(id="t-1", fund="7", fund_title=VOLATIS, type="BUY", amount="5")
+    filled.update(
+        id="t-1",
+        fund="7",
+        fund_title=VOLATIS,
+        type="BUY",
+        amount="5",
+        time="2026-10-02T02:00:00Z",
+    )
     stat = dict.fromkeys(converter.HEADERS["fund_stats"], "s")
     stat.update(id=7, title=VOLATIS, scenarios=[{"a": 1}], live=True, partner=None)
     mark = {"days_ago": 3, "fund_id": 7, "percentage": 1.5}
@@ -1238,3 +1245,72 @@ def test_the_volatis_dashboard_series_must_carry_the_cutoff_day(tmp_path: Path) 
     # Total and the other fund still reach the cutoff day; they cannot stand in for Volatis.
     with pytest.raises(ERROR, match="no observation on the cutoff day 2026-10-07"):
         Case(tmp_path, stale).convert()
+
+
+def test_drift_tolerance_never_tolerates_a_missing_identity_amount_or_time(
+    tmp_path: Path,
+) -> None:
+    def drop(key: str, index: int = 1):  # type: ignore[no-untyped-def]
+        def mutate(bodies: dict[str, Any]) -> None:
+            _drift(bodies)
+            del bodies["accounts.activity"]["data"][index]["item"][key]
+
+        return mutate
+
+    for number, (key, index, match) in enumerate(
+        [
+            ("id", 1, "lacks required keys"),
+            ("amount", 1, "lacks required keys"),
+            ("time", 1, "lacks required keys"),
+            ("user", 0, "lacks required keys"),
+            ("time", 0, "lacks required keys"),
+        ]
+    ):
+        with pytest.raises(ERROR, match=match):
+            Case(tmp_path / f"m{number}", drop(key, index)).convert(
+                "account-level", allow_provider_drift=True
+            )
+
+
+def test_a_row_without_any_parseable_timestamp_is_refused_not_passed(
+    tmp_path: Path,
+) -> None:
+    def blank(bodies: dict[str, Any]) -> None:
+        item = bodies["accounts.activity"]["data"][1]["item"]
+        for field in converter._TIMESTAMP_FIELDS:
+            if field in item:
+                item[field] = None
+
+    for number, drift in enumerate((False, True)):
+        with pytest.raises(ERROR, match="no parseable timestamp"):
+            Case(tmp_path / f"b{number}", blank).convert(
+                "account-level", allow_provider_drift=drift
+            )
+
+
+def test_an_unknown_activity_type_and_a_missing_stats_column_refuse_under_drift(
+    tmp_path: Path,
+) -> None:
+    def unknown(bodies: dict[str, Any]) -> None:
+        _drift(bodies)
+        bodies["accounts.activity"]["data"][0]["type"] = "brand_new_type"
+
+    with pytest.raises(ERROR, match="no declared required keys"):
+        Case(tmp_path / "u", unknown).convert(
+            "account-level", allow_provider_drift=True
+        )
+
+    def stats(bodies: dict[str, Any]) -> None:
+        _drift(bodies)
+        required = sorted(
+            set(converter.HEADERS["fund_stats"])
+            - converter._STATS_OPTIONAL
+            - {"id", "title"}
+        )
+        del bodies["funds.invest"]["pageProps"]["fundStatsData"]["data"][0][required[0]]
+
+    with pytest.raises(ERROR, match="lacks required columns"):
+        Case(tmp_path / "s", stats).convert("account-level", allow_provider_drift=True)
+    # the 21 explicit optional columns and extra keys are still tolerated
+    Case(tmp_path / "ok", _drift).convert("account-level", allow_provider_drift=True)
+    assert len(converter._STATS_OPTIONAL) == 21

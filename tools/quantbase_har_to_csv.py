@@ -542,6 +542,89 @@ def _key_value(pairs: Sequence[tuple[str, object]]) -> bytes:
     return _csv_bytes(HEADERS["key_value"], [list(pair) for pair in pairs])
 
 
+# Drift tolerance may drop EXTRA provider keys and write the explicitly optional stats columns
+# empty; it never tolerates an absent identity, financial or timestamp column.  Every activity
+# type the provider is known to send must carry these keys (their values may be null); an
+# unknown type is refused rather than guessed.
+_ACTIVITY_REQUIRED: Final[dict[str, frozenset[str]]] = {
+    "filled_txn": frozenset(
+        {"id", "user", "amount", "amount_cents", "fund", "transaction_id", "time"}
+    ),
+    "order": frozenset(
+        {
+            "id",
+            "user",
+            "order_id",
+            "symbol",
+            "quantity",
+            "cost_basis",
+            "transaction",
+            "time",
+        }
+    ),
+    "journal": frozenset(
+        {
+            "id",
+            "user",
+            "account_id",
+            "amount",
+            "broker_journal_id",
+            "is_debit",
+            "status",
+            "created_at",
+        }
+    ),
+    "dividend": frozenset(
+        {
+            "id",
+            "user",
+            "alpaca_activity_id",
+            "amount",
+            "asset",
+            "symbol",
+            "per_share_amount",
+            "date",
+        }
+    ),
+    "transfer": frozenset(
+        {
+            "id",
+            "user",
+            "amount",
+            "amount_cents",
+            "origin_account_id",
+            "destination_account_id",
+            "created_at",
+        }
+    ),
+}
+_STATS_OPTIONAL: Final = frozenset(
+    {
+        "additional_details",
+        "bonds_experience_min",
+        "brokerage",
+        "correlation",
+        "correlation_market",
+        "created_at",
+        "crypto_experience_min",
+        "equity_experience_min",
+        "key_considerations",
+        "last_rebalance",
+        "leverage_experience_min",
+        "live",
+        "max_drawdown",
+        "min_investment",
+        "options_experience_min",
+        "portfolio_risks",
+        "qualitative_risk_score",
+        "rebalance_time",
+        "scenarios",
+        "sharpe_ratio",
+        "volatility",
+    }
+)
+
+
 def _without_extra(
     value: object,
     keys: frozenset[str],
@@ -611,12 +694,29 @@ def _account_activity(
             ignored.setdefault("accounts.activity.item", set()).update(
                 set(item) - allowed
             )
+        if ignored is not None:
+            required = _ACTIVITY_REQUIRED.get(record["type"])
+            if required is None:
+                raise QuantbaseCsvError(
+                    f"accounts.activity type {record['type']!r} has no declared required keys"
+                )
+            missing = sorted(required - set(item))
+            if missing:
+                raise QuantbaseCsvError(
+                    f"accounts.activity {record['type']} item lacks required keys: {missing}"
+                )
         days = [
             _observation_day(item[field], f"accounts.activity.{field}")
             for field in _TIMESTAMP_FIELDS
             if item.get(field) not in (None, "")
         ]
-        if days and not cutoff.keeps("account_activity", max(days)):
+        if not days:
+            # A row with no parseable timestamp cannot be placed against the cutoff: refused,
+            # never passed through the filter.
+            raise QuantbaseCsvError(
+                f"accounts.activity {record['type']} item has no parseable timestamp"
+            )
+        if not cutoff.keeps("account_activity", max(days)):
             continue
         rows.append(
             [
@@ -875,7 +975,13 @@ def _invest(
         # table and a few new ones: an absent column is written empty and its name
         # recorded, an extra one is dropped and its name recorded; the fund id and title
         # are required.
-        absent |= stat_keys - set(record)
+        lacking = stat_keys - set(record)
+        if ignored is not None and lacking - _STATS_OPTIONAL:
+            raise QuantbaseCsvError(
+                "fundStatsData.data[] lacks required columns: "
+                f"{sorted(lacking - _STATS_OPTIONAL)}"
+            )
+        absent |= lacking
         if ignored is not None and set(record) - stat_keys:
             ignored.setdefault("fundStatsData.data[]", set()).update(
                 set(record) - stat_keys
