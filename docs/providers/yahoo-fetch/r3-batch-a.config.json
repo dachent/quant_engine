@@ -154,7 +154,11 @@
       "start": "2024-10-01",
       "through": "cutoff",
       "min_rows": 470,
-      "max_missing_weekdays": 20
+      "calendar": "nyse",
+      "closed_days": [
+        "2025-01-09"
+      ],
+      "max_missing_weekdays": 0
     },
     {
       "group_id": "vol-qqq-gld-tqqq",
@@ -168,7 +172,8 @@
       "start": "2025-12-22",
       "through": "cutoff",
       "min_rows": 175,
-      "max_missing_weekdays": 12
+      "calendar": "nyse",
+      "max_missing_weekdays": 0
     },
     {
       "group_id": "rob-usd-daily",

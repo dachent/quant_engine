@@ -556,3 +556,16 @@ cash-equivalent holdings, before the Yahoo evidence is minted.
 
 The ledger accepts a selected cutoff row that repeats the row before only for an account the pinned holdings capture shows
 flat (no position rows) whose cash equals that row; the derivation record is never the authority for that.
+
+## Dry run before any governed run (rule for every live driver)
+
+Before a governed live run spends single-use evidence, an allowlist pin or an owner session:
+
+1. rehearse the identical command line and config against scratch output, with no governance
+   evidence, consuming nothing, and never into a release root or the intake being built;
+2. verify what the rehearsal staged with the same verifier the governed run uses;
+3. run the governed command only after a rehearsal of the same config and cutoff verified.
+
+A rehearsal's run ids start with `DRY-`, its outputs are never admitted, and a governed command
+refuses such an id. The Yahoo fetch driver has this natively (`dry-run`,
+`docs/providers/yahoo-fetch.md`, "Dry run first"). This driver has no native `dry-run` command yet (open work; no flag exists). Until it does, the rehearsal is the offline suite on the exact commit (`python -m pytest tests/schwab -q`, which replays the driver against fake transports and retained bytes) followed by the first-minute live check above, which reads nothing that needs evidence; the governed capture is the first run that spends it.

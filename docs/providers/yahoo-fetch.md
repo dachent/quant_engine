@@ -16,10 +16,19 @@ fiat mode already reads.
 `docs/providers/yahoo-fetch/r3-batch-a.config.json` is the R3 Batch A config. Keys:
 `cutoff` (ISO date; `--cutoff` overrides), `groups[]` (`group_id`, `kind`
 `yfinance|chart`, `symbols`, `interval`, `start`, `through` = `cutoff` or an inclusive
-ISO date, `calendar` `weekday|every_day`, `min_rows`, `max_missing_weekdays`, optional
-`datasets`, `artifact_profile` `tape|capture-v0`, `max_null_closes`,
+ISO date, `calendar` `weekday|every_day|nyse`, `min_rows`, `max_missing_weekdays`, optional
+`closed_days[]` (nyse only), `datasets`, `artifact_profile` `tape|capture-v0`, `max_null_closes`,
 `first_bar_tolerance_days`, `allowed_last_bar_lag_days`, `exceptions[]`), `limits`,
-`symbol_resolution[]`. The request end is always `through + 1 day` (exclusive). Unknown
+`symbol_resolution[]`.
+
+**Calendars.** `weekday` expects every Monday to Friday, so a group whose window holds market
+closures needed a guessed `max_missing_weekdays`. `nyse` expects exactly the NYSE sessions of
+`quant_engine.core.market_calendar` (weekends and the regular full-day closures): a session
+with no bar is missing, the closures are not, so the check is exact and
+`max_missing_weekdays` stays only as an upper bound (set it to 0). An ad hoc closure the calendar
+does not model (for example 2025-01-09) is declared per group in `closed_days` (distinct
+weekdays inside the window, `nyse` only); an undeclared one refuses the group. The shipped
+volatility groups use `nyse`. The request end is always `through + 1 day` (exclusive). Unknown
 keys are refused. `capture-v0` emits exactly the ten-key capture the FX tool reads
 (`provider, transport, dataset, tickers, columns, rows, start, end, interval, prepost`).
 
@@ -77,6 +86,20 @@ last operation: it copies every manifest path of the root it is given, so the ad
 through, and the pin handed to the release driver is the rebound root's, not this command's. Running
 `add` again from the same root with the same bytes gives the same pin; a rebound root is never the
 input of a later `add`.
+
+## Dry run first
+
+`dry-run --config CONFIG --cutoff D [--tt-source-manifest TT] [--schwab-positions POSITIONS]
+[--allow-unresolved] [--stage-root SCRATCH] [--run-id DRY-...] [--max-requests N]` rehearses the
+governed `fetch` of the same config and cutoff: the same groups, rules, staging and `verify`, with
+the public reads, and none of the governance. It reads and consumes no evidence, stages in a scratch
+directory (a fresh temporary one unless `--stage-root` is given; a given directory may hold only
+`DRY-` entries, so a release root or a governed stage is refused), uses a run id that starts with
+`DRY-` (a governed `make-evidence` or `fetch` refuses such an id, so a rehearsal can never be
+substituted for a governed run), and verifies what it staged before it prints the outcome
+(`status` `VERIFIED` or `REJECTED` with the failures, `evidence_consumed` false). It does not
+replace the approval: spend single-use evidence only after a dry run of the same config and cutoff
+verified. Every live driver follows this rule: rehearse first, with no evidence, in a scratch stage.
 
 ## Run order and the clock (R3)
 
@@ -258,6 +281,12 @@ than `max_null_closes`, or a `through` that is not a closed UTC day. Only an exp
 written into the coverage report. Empty data and duplicates cannot be waived, and a bar
 after `through` is refused (chart responses are trimmed into the derived file instead).
 
+One live bar is ignored, and only that one: Yahoo appends a bar stamped with the current time
+to an FX chart while the market is open, even for a window that ended in the past. A chart bar
+that is both off local midnight AND dated after the cutoff is skipped (counted as
+`live_bars_ignored`; the raw response is staged unmodified and the derived file drops it); an
+off-midnight bar on or before the cutoff still refuses.
+
 ## Staging
 
 Run layout under `<stage-root>/<run-id>/`: `raw/<group>/history.csv` (the validated raw
@@ -285,12 +314,13 @@ python tools/yahoo_fetch_driver.py config-check --config <config> [--cutoff D] [
 python tools/yahoo_fetch_driver.py probe  --config <config> --stage-root <root> --run-id <id> (--governance <evidence.json> | --recorded-dir <dir>) [--cutoff D] [--tt-source-manifest M]
 python tools/yahoo_fetch_driver.py apply-admissions --config <config> --probe-run <root>/<id> --out <new-config> [--cutoff D] [--tt-source-manifest M]
 python tools/yahoo_fetch_driver.py fetch  --config <config> --stage-root <root> --run-id <id> --governance <evidence.json> [--cutoff D] [--tt-source-manifest M] [--schwab-positions P] [--allow-unresolved]
+python tools/yahoo_fetch_driver.py dry-run --config <config> --cutoff D [--tt-source-manifest M] [--schwab-positions P] [--allow-unresolved] [--stage-root <scratch>] [--run-id DRY-id] [--max-requests N]
 python tools/yahoo_fetch_driver.py verify <root>/<id>
 python tools/yahoo_fetch_driver.py verify-retained --artifact A [--manifest M] --cutoff D --min-rows N --max-missing-weekdays N [--calendar every_day] [--kind chart --symbol S --start D --max-null-closes N [--derive-out path]] [--report path]
 ```
 
-`fetch` and `probe` are the only commands that touch the network, and only with
-governance evidence: single-use JSON naming `run_id`, `config_sha256` (printed by
+`fetch` and `probe` touch the network only with governance evidence, and `dry-run` is the
+evidence-free rehearsal of `fetch` (above): single-use JSON naming `run_id`, `config_sha256` (printed by
 `config-check`), `cutoff`, a quant_engine issue-comment URL as `review`, a UTC window of
 at most 24 h, and `max_requests` (1..5000, enforced on every transport call). `verify`
 re-derives hashes, config binding, coverage, rows against the raw bytes, and every
@@ -302,6 +332,13 @@ and never fetches.
 
 Never run live. The live transports (`LiveChart`, the yfinance module) are not exercised
 by the repository tests. Chart `period1/period2` padding assumes London-stamped
-`CCYUSD=X` pairs. Exchange holidays are not modelled: a holiday or a cross-exchange
-cutoff needs a label or a higher `max_missing_weekdays`. Hourly groups are checked by
-bar date only, not by bar time.
+`CCYUSD=X` pairs. Only the NYSE calendar is modelled (`calendar: nyse`); another exchange's
+holiday or a cross-exchange cutoff needs a label or a higher `max_missing_weekdays` under
+`weekday`. Hourly groups are checked by bar date only, not by bar time.
+
+The yfinance cache (its cookie and timezone sqlite files) is ONE directory for the whole process
+(`yf_cache_dir`, removed at exit), never one per group: yfinance binds its cache singleton to the
+first location it is given, and a directory deleted after the first group made every later group
+fail with `unable to open database file` (Windows). The adapter's cached results in it
+(`history_*.csv`, `current_snapshot_*.json`, `ticker_search_*.json`) are deleted before each group,
+so every group is a fresh read.

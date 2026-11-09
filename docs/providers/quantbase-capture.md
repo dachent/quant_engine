@@ -575,3 +575,16 @@ reviewed query validator (`users.profile`, `funds.statistics`,
 contract; the default is unchanged. No real route is declared in this change, and the
 intake driver does not load an extension yet: wiring `--contract-extension` into
 `capture_quantbase_har.py` is the step after the sitting's draft is reviewed.
+
+## Dry run before any governed run (rule for every live driver)
+
+Before a governed live run spends single-use evidence, an allowlist pin or an owner session:
+
+1. rehearse the identical command line and config against scratch output, with no governance
+   evidence, consuming nothing, and never into a release root or the intake being built;
+2. verify what the rehearsal staged with the same verifier the governed run uses;
+3. run the governed command only after a rehearsal of the same config and cutoff verified.
+
+A rehearsal's run ids start with `DRY-`, its outputs are never admitted, and a governed command
+refuses such an id. The Yahoo fetch driver has this natively (`dry-run`,
+`docs/providers/yahoo-fetch.md`, "Dry run first"). The navigator and recorder have no native `dry-run` command yet (open work; no flag exists). Their rehearsal is the "First-minute dry-run procedure" above, run against a throwaway recorder run root (never the run root the intake will be built from), checked against the expected capability counts before the governed run starts.
