@@ -366,6 +366,9 @@ _PATH_STAGES = {
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
     "tools/alpaca_generation.py": [],
+    # Operator CLI that builds, stages or publishes one IBKR generation candidate; consumers
+    # read only the generation they are handed, never this tool.
+    "tools/ibkr_generation.py": [],
     # Plans and stages the Portfolio123 generation (HAR roots and transaction captures);
     # consumers read only the generation they are handed, never this tool.
     "tools/portfolio123_generation.py": [],

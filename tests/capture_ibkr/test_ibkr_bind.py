@@ -196,6 +196,42 @@ def test_bind_spec_adds_verified_runs_with_their_real_hashes(tmp_path: Path) -> 
         )
 
 
+def test_bind_spec_flex_only_migrates_the_base_to_schema_four(tmp_path: Path) -> None:
+    days = weekday_range(date(2026, 10, 5), date(2026, 10, 6))
+    runs = _captured(tmp_path, days).run_dirs()
+    base = _base_spec(tmp_path)
+    spec = json.loads(base.read_text())
+    spec["schema_version"] = 2
+    spec["sources"].append(
+        {
+            **spec["sources"][0],
+            "artifact_id": "old/tws.json",
+            "role": "TWS_CURRENT_SNAPSHOT",
+        }
+    )
+    base.write_text(json.dumps(spec), encoding="utf-8")
+    out = tmp_path / "flex-only-spec.json"
+    bind_spec(
+        base_spec=base,
+        runs=runs,
+        root_id="data",
+        as_of=date(2026, 10, 6),
+        out=out,
+        flex_only=True,
+    )
+    bound = json.loads(out.read_text())
+    assert bound["schema_version"] == 4
+    assert bound["declared_zero_activity_accounts"] == []
+    assert "TWS_CURRENT_SNAPSHOT" not in {item["role"] for item in bound["sources"]}
+    assert len(bound["sources"]) == 3
+    # without the flag the base keeps its version and its TWS source
+    kept = tmp_path / "kept-spec.json"
+    bind_spec(
+        base_spec=base, runs=runs, root_id="data", as_of=date(2026, 10, 6), out=kept
+    )
+    assert json.loads(kept.read_text())["schema_version"] == 2
+
+
 def test_bind_spec_refuses_what_it_cannot_bind(tmp_path: Path) -> None:
     days = weekday_range(date(2026, 10, 5), date(2026, 10, 6))
     harness = _captured(tmp_path, days)

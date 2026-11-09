@@ -280,6 +280,19 @@ account that ended 2026-06-30 (`account-2d0a996c...` in the R2.1 catalog):
    check the union per account (the retained history plus the new days) against the newest
    statement of the build.
 
+## Flex-only generation (spec schema version 4)
+
+The TWS snapshot feeds no published number: NAV, positions, transactions and every ledger-ingested
+account fact come from Flex alone ("Flex is the sole data authority"). Spec schema version 4
+therefore drops the TWS source. It requires the primaries and at least one Flex refresh, refuses a
+`TWS_CURRENT_SNAPSHOT` source, and builds catalog schema 9, which carries no `tws_*` records,
+`tws-current-overlap` check, `TWS_CURRENT_STATE` coverage or `tws_current_state` fact type. The
+PARTIAL/COMPLETE decision reads the Flex coverage only; the declared-zero-activity Flex check is
+kept. Specs of schema versions 1 to 3 still build their catalog schema 8 byte-identically.
+
+`bind-spec --flex-only` is the producer path: it migrates a schema 2 or 3 base to schema 4 (drops
+the TWS source) while it adds the bound runs. Without the flag the base keeps its version.
+
 ## R3 generation spec (skeleton from the R2.1 spec)
 
 The model is the R2.1 spec (`dataIBKR/config/ibkr-generation-spec-refresh-20260903.json`, schema

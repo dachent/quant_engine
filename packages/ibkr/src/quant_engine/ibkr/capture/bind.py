@@ -27,7 +27,7 @@ from .staging import write_new_file
 from .verify import verify_run
 
 # the refresh-capable generation spec schemas (2 added the Flex refresh and TWS roles)
-SPEC_SCHEMA_VERSIONS = (2, 3)
+SPEC_SCHEMA_VERSIONS = (2, 3, 4)
 _REFRESH_ROLE = "REFRESH_FLEX_ACTIVITY"
 _ACTIVITY_SCHEMA = ("activity-flex", "3")
 
@@ -162,8 +162,13 @@ def bind_spec(
     exclusions: Mapping[str, str] | None = None,
     verify: bool = True,
     preflight: bool = False,
+    flex_only: bool = False,
 ) -> dict[str, Any]:
-    """Write ``out``: the base spec plus the runs as refresh sources, each with its real hash."""
+    """Write ``out``: the base spec plus the runs as refresh sources, each with its real hash.
+
+    ``flex_only`` migrates the base to spec schema 4: the TWS snapshot source is dropped and
+    the version set to 4 (Flex is the sole data authority).
+    """
 
     try:
         spec = json.loads(base_spec.read_text(encoding="utf-8"))
@@ -173,12 +178,16 @@ def bind_spec(
         not isinstance(spec, dict)
         or spec.get("schema_version") not in SPEC_SCHEMA_VERSIONS
     ):
-        raise BindError("the base spec must be schema version 2 or 3")
+        raise BindError("the base spec must be schema version 2, 3 or 4")
     roots = spec.get("roots")
     if not isinstance(roots, dict) or root_id not in roots:
         raise BindError("the root id is not in the base spec")
     root = Path(str(roots[root_id])).resolve()
     sources = list(spec["sources"])
+    if flex_only:
+        sources = [item for item in sources if item["role"] != "TWS_CURRENT_SNAPSHOT"]
+        spec["schema_version"] = 4
+        spec.setdefault("declared_zero_activity_accounts", [])
     known = {item["artifact_id"] for item in sources}
     added: list[dict[str, Any]] = []
     days: set[date] = set()
