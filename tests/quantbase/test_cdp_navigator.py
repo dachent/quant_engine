@@ -95,6 +95,8 @@ class FakeBrowser:
                     (c for c in self.controls.values() if (c["x"], c["y"]) == (x, y)),
                     None,
                 )
+            if value is None:
+                value = {"page_url": self.tabs[0]["url"], "tag": None}
         return {"result": {"type": "object", "value": value}}
 
     def send(self, message: dict[str, Any]) -> None:
@@ -1180,3 +1182,42 @@ def test_attempted_counts_a_navigation_that_errored() -> None:
     browser.fail = "Page.navigate"
     _, lines = run(browser, clock)
     assert lines[-1]["attempted"] == 1 and lines[-1]["ok"] == 0
+
+
+def test_a_page_that_left_the_origin_stops_the_click_and_the_scroll() -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open", page_url="https://elsewhere.example/")
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, click_pages("Open"))
+    assert input_sent(browser) == []
+    clock, browser = setup()
+    browser.under[(nav.WHEEL_X, nav.WHEEL_Y)] = {
+        "page_url": "https://elsewhere.example/",
+        "tag": None,
+    }
+    pages = [
+        {"label": "dashboard", "url": f"{APP}/dashboard", "actions": [{"scroll": 5}]}
+    ]
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, pages)
+    assert input_sent(browser) == []
+
+
+@pytest.mark.parametrize("field", ["labelled_by", "labels", "alt"])
+def test_the_computed_accessible_name_sources_are_guarded(field: str) -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open", **{field: "Buy now"})
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, click_pages("Open"))
+    assert input_sent(browser) == []
+
+
+def test_the_action_log_is_emitted_in_the_summary_and_on_refusal(
+    tmp_path: Path,
+) -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open")
+    _, lines = run(browser, clock, click_pages("Open"))
+    (entry,) = lines[-1]["actions"]
+    assert entry["action"] == "click" and len(entry["label_sha8"]) == 8
+    assert "Open" not in json.dumps(lines[-1]["actions"])

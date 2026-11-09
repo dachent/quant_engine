@@ -54,6 +54,8 @@ from capture_action_guard import (
     check_driving_message,
     click_by_name,
     matches_trading,
+    probe_at_point,
+    require_origin,
     wheel_params,
 )
 from quantbase_cdp_har_recorder import (
@@ -582,6 +584,7 @@ class Navigator:
                 "timeout": counts["timeout"],
                 "stopped": stopped or None,
                 "scroll": self._scroll,
+                "actions": self.log.entries,
             }
         )
         if stopped:
@@ -622,6 +625,12 @@ class Navigator:
         }
 
     def _wheel_event(self, delta: int) -> None:
+        try:
+            require_origin(
+                self._facts(probe_at_point(WHEEL_X, WHEEL_Y)), origin_prefix=APP_PREFIX
+            )
+        except ActionRefused as exc:
+            raise NavigatorError("ACTION_REFUSED", str(exc)) from None
         self.log.record("scroll", "page", str(delta))
         self._call(
             "Input.dispatchMouseEvent",
@@ -725,16 +734,18 @@ def main(
     except RecorderError as exc:
         print(f"REFUSED {exc.code}")
         return EXIT_REFUSED
+    navigator = Navigator(
+        transport,
+        allowlist,
+        emit=emit,
+        clock=clock,
+        load_timeout=args.load_timeout_seconds,
+        scroll=args.scroll,
+    )
     try:
-        return Navigator(
-            transport,
-            allowlist,
-            emit=emit,
-            clock=clock,
-            load_timeout=args.load_timeout_seconds,
-            scroll=args.scroll,
-        ).run()
+        return navigator.run()
     except NavigatorError as exc:
+        emit({"event": "actions", "actions": navigator.log.entries})
         print(f"REFUSED {exc.code}")
         return EXIT_REFUSED
     finally:

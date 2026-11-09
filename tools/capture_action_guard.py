@@ -107,6 +107,7 @@ def check_control(facts: Mapping[str, Any], *, origin_prefix: str) -> None:
     """Refuse the control described by ``facts`` (see :data:`FACTS_FIELDS`) or return."""
 
     name = str(facts.get("text") or facts.get("aria_label") or facts.get("name") or "")
+    require_origin(facts, origin_prefix=origin_prefix)
     kind = effective_type(facts)
     if kind in _BLOCKED_TYPES:
         raise ActionRefused(
@@ -123,9 +124,27 @@ def check_control(facts: Mapping[str, Any], *, origin_prefix: str) -> None:
         facts.get("name"),
         facts.get("value"),
         facts.get("title"),
+        facts.get("labelled_by"),
+        facts.get("labels"),
+        facts.get("alt"),
         facts.get("href_attr"),
         href,
     )
+
+
+def require_origin(facts: Mapping[str, Any] | None, *, origin_prefix: str) -> None:
+    """Refuse unless the probed document is on the tool's origin (checked before every input).
+
+    A probe that carries no ``page_url`` is not checked here; the live probes always carry it.
+    """
+
+    if facts is None:
+        raise ActionRefused("refused: the page origin could not be verified")
+    page_url = facts.get("page_url")
+    if page_url is not None and not (
+        isinstance(page_url, str) and page_url.startswith(origin_prefix)
+    ):
+        raise ActionRefused(f"refused: the page left {origin_prefix}")
 
 
 def check_url(url: str, *, origin_prefix: str) -> None:
@@ -158,15 +177,23 @@ FACTS_FIELDS = (
     "name",
     "value",
     "title",
+    "labelled_by",
+    "labels",
+    "alt",
+    "page_url",
     "href",
     "href_attr",
 )
 # Reads facts about one element and its nearest interactive ancestor; changes nothing.
-_FACTS_JS = """(target) => {
+_FACTS_JS = r"""(target) => {
   const el = target && target.closest
     ? (target.closest('a,button,input,select,summary,[role=button],[role=link],[role=tab]') || target)
     : null;
-  if (!el) { return null; }
+  if (!el) { return {page_url: location.href, tag: null}; }
+  const labelled = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+    .map((id) => { const n = document.getElementById(id); return n ? n.textContent : ''; })
+    .join(' ').trim().slice(0, 200);
+  const labels = el.labels ? Array.from(el.labels).map((l) => l.textContent).join(' ').trim().slice(0, 200) : '';
   const text = (el.innerText || el.textContent || '').trim().slice(0, 200);
   const r = el.getBoundingClientRect();
   return {
@@ -178,6 +205,10 @@ _FACTS_JS = """(target) => {
     name: el.getAttribute('name') || '',
     value: el.getAttribute('value') || '',
     title: el.getAttribute('title') || '',
+    labelled_by: labelled,
+    labels: labels,
+    alt: el.getAttribute('alt') || '',
+    page_url: location.href,
     href: el.href || '',
     href_attr: el.getAttribute('href') || '',
     x: Math.round(r.left + r.width / 2),

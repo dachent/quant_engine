@@ -1295,7 +1295,10 @@ class DrivableTransport(FakeTransport):
             if expression.startswith(prefix):
                 value = self.controls.get(json.loads(expression[len(prefix) : -1]))
             else:
-                value = next(iter(self.controls.values()), None)
+                value = next(
+                    iter(self.controls.values()),
+                    {"page_url": f"{BASE}/x", "tag": None},
+                )
             reply = {"id": message["id"], "result": {"result": {"value": value}}}
             self.inbound.appendleft(reply)
             return
@@ -1390,3 +1393,32 @@ def test_runs_recorded_before_driving_existed_still_verify(finished: Path) -> No
     manifest["safety"] = dict(LEGACY_SAFETY)
     (finished / "manifest.json").write_bytes(rec._canonical(manifest))
     assert verify_run(finished)["entries"] == 2
+
+
+def test_a_page_that_left_the_origin_stops_the_drive_plan(run_root: Path) -> None:
+    transport = DrivableTransport()
+    transport.controls["Open"] = drive_facts("Open", page_url="https://mail.example/")
+    with pytest.raises(RecorderError, match="DRIVE_ACTION_REFUSED"):
+        run_drive(transport, run_root, [{"click": "Open"}])
+    assert not [m for m in transport.sent if m["method"].startswith("Input.")]
+
+
+def test_a_refused_drive_plan_is_rejected_before_any_directory_or_connection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([{"click": "Buy shares"}]), encoding="utf-8")
+    root = tmp_path / "run"
+    code = rec.main(
+        [
+            "capture",
+            "--cdp-url",
+            "http://127.0.0.1:9",
+            "--output-root",
+            str(root),
+            "--drive-plan",
+            str(plan),
+        ]
+    )
+    assert code == 2 and "REFUSED DRIVE_PLAN_REFUSED" in capsys.readouterr().out
+    assert not root.exists()

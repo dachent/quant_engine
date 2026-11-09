@@ -1204,6 +1204,10 @@ class Listener:
                     self.drive_log.record("navigate", "url", value)
                     self._call("Page.navigate", {"url": value}, sid)
                 elif verb == "scroll":
+                    guard.require_origin(
+                        self._facts(guard.probe_at_point(300, 300), sid),
+                        origin_prefix=DRIVE_ORIGIN_PREFIX,
+                    )
                     self.drive_log.record("scroll", "page", str(value))
                     self._call(
                         "Input.dispatchMouseEvent",
@@ -1820,17 +1824,18 @@ def propose_catalog(
 
 
 def _live(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover
+    plan: tuple[tuple[str, Any], ...] = ()
+    if args.drive_plan is not None:  # validated before any directory or connection
+        try:
+            raw_plan = json.loads(args.drive_plan.read_text("utf-8"))
+        except (OSError, ValueError):
+            raise RecorderError("DRIVE_PLAN_INVALID") from None
+        plan = parse_drive_plan(raw_plan)
     recorder = Recorder(
         args.output_root, mode=args.command, include_identity=args.include_identity
     )
     transport = WebSocketTransport(args.cdp_url)
     try:
-        plan: tuple[tuple[str, Any], ...] = ()
-        if args.drive_plan is not None:
-            try:
-                plan = parse_drive_plan(json.loads(args.drive_plan.read_text("utf-8")))
-            except (OSError, ValueError):
-                raise RecorderError("DRIVE_PLAN_INVALID") from None
         listener = Listener(
             transport,
             recorder,
