@@ -127,6 +127,7 @@ ALLOWED_CDP_METHODS = frozenset(
 )
 DRIVE_ORIGIN_PREFIX = ORIGIN + "/"
 DEFAULT_DRIVE_DWELL_SECONDS = 5.0
+DEFAULT_DRIVE_SETTLE_SECONDS = 2.0
 MAX_DRIVE_STEPS = 200
 
 #: What the run directory says about itself; verify requires it unchanged.
@@ -1100,10 +1101,14 @@ class Listener:
         call_timeout: float = 20.0,
         drive_plan: Sequence[tuple[str, Any]] = (),
         drive_dwell: float = DEFAULT_DRIVE_DWELL_SECONDS,
+        drive_target_id: str | None = None,
+        drive_settle: float = DEFAULT_DRIVE_SETTLE_SECONDS,
     ) -> None:
         self._transport = GuardedTransport(transport)
         self._drive_plan = tuple(drive_plan)
         self._drive_dwell = drive_dwell
+        self._drive_target_id = drive_target_id
+        self._drive_settle = drive_settle
         self.drive_log = guard.ActionLog()
         self._recorder = recorder
         self._max_seconds = max_seconds
@@ -1171,16 +1176,37 @@ class Listener:
                 if message is not None:
                     self._dispatch(message)
                 if self._drive_plan and self._attached:
-                    plan, self._drive_plan = self._drive_plan, ()
-                    self._drive(plan, next(iter(self._attached.values())))
+                    sid = self._drive_session()
+                    if sid is not None:
+                        plan, self._drive_plan = self._drive_plan, ()
+                        self._drive(plan, sid)
         except RecorderError as exc:
             if exc.code != "CDP_CLOSED":
                 raise
             self._recorder.browser_closed = True
 
+    def _drive_session(self) -> str | None:
+        """The session of the tab to drive; never chosen by event order.
+
+        With an explicit ``--target-id`` that tab is driven once it is attached (None until
+        then). Without one, after a settle period the plan runs only if exactly one same-origin
+        page is attached; with several the run is refused and the candidates are listed (opaque
+        target ids only).
+        """
+
+        if self._drive_target_id is not None:
+            return self._attached.get(self._drive_target_id)
+        self._drain(self._drive_settle)
+        if len(self._attached) != 1:
+            print(
+                json.dumps({"drive_candidates": sorted(self._attached)}),
+                file=sys.stderr,
+            )
+            raise RecorderError("DRIVE_TARGET_AMBIGUOUS")
+        return next(iter(self._attached.values()))
+
     def _drain(self, seconds: float) -> None:
         """Keep recording for ``seconds`` while the page settles."""
-
         deadline = self._clock() + seconds
         while self._clock() < deadline:
             message = (
@@ -1853,6 +1879,7 @@ def _live(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover
             max_seconds=args.max_seconds,
             warn_after=args.warn_after_seconds,
             drive_plan=plan,
+            drive_target_id=args.target_id,
         )
         try:
             listener.run()
@@ -1915,6 +1942,12 @@ def _parser() -> argparse.ArgumentParser:
             default=DEFAULT_WARN_AFTER_SECONDS,
             help="warn once if nothing was recorded after this many seconds "
             "(default 30; 0 disables)",
+        )
+        item.add_argument(
+            "--target-id",
+            default=None,
+            help="drive-plan only: the CDP target id of the one tab to drive. Without it the "
+            "plan runs only when exactly one P123 page is open (else the candidates are listed)",
         )
         item.add_argument(
             "--drive-plan",
