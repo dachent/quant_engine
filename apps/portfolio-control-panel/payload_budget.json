@@ -8,9 +8,9 @@
     "blocks": {
       "decomposition_lenses": 237781076,
       "weekly_returns": 30550744,
-      "leverage_disclosures": 17594568,
-      "factor_analysis": 2339068,
-      "account_manifest": 1713348,
+      "leverage_disclosures": 19429280,
+      "factor_analysis": 2479776,
+      "account_manifest": 1740636,
       "invested_capital": 994122,
       "positions": 294222,
       "dependence_modes": 302277,
@@ -62,9 +62,9 @@
   "blocks": {
     "decomposition_lenses": 240159000,
     "weekly_returns": 30857000,
-    "leverage_disclosures": 17771000,
-    "factor_analysis": 2363000,
-    "account_manifest": 1731000,
+    "leverage_disclosures": 19624000,
+    "factor_analysis": 2505000,
+    "account_manifest": 1759000,
     "invested_capital": 1005000,
     "positions": 298000,
     "dependence_modes": 306000,
@@ -119,7 +119,10 @@
     "performance_tab": "R2.1 re-measure 381004 B (schema 3: union grid, flow-matched benchmarks), against 375785 B on the r21-integration panel the previous limit was cut from. The limit is re-cut at committed + 3% (393000 B, was 388000 B at 98.2% of committed) so the block has the same headroom every other block has.",
     "weekly_returns": "R2.1 re-measure 27773144 B against 27317555 B at R2 (+1.7%). Per-observation series are the block this budget exists to watch, so the limit is re-cut at committed + 3% (28607000 B, was 28138000 B at 97.4% of committed); further growth needs its own reason.",
     "strategy_underwriting": "R2.2 d7d26c09 measured 73615 B against 64495 B committed (+9120 B, +14.1%). The block holds seven rows and the growth is one layer: evidence_layers.implementation_reconciliation, which mirrors the strategy's implementation_reconciliation row and now carries the account-basis legs for the strategies whose implementation is bridged (grizzlybears-vtma 3054 to 7742 B, tt-portfolio 5849 to 10279 B on the 4dcb46c1 panel), while p123-ai-factor's layer is the sleeve bridge and falls from 14250 to 560 B. The mirror of the strategies row is existing design, not new duplication; trimming was declined because the layer is the disclosure the underwriting row stands on. The basis statements of R2.2 do not change this block. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block strategy_underwriting.",
-    "model_vs_actual": "R2.2 bae512c5 measured 138438 B and +1587 B more with the final-seat basis statements: the p123-ai-factor windows and epochs (10 rows, each +basis and basis_label, about 150 B) and its portfolio-bridge line now say they are the parent account's figures (the audit input measures the whole parent account, not the restated sleeve): 140025 B. No window, epoch or component is added or duplicated; the sleeve comparison stays in governed_reference. Trimming was declined because the label is the statement the owner's basis ruling requires. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block model_vs_actual; to be confirmed on the final build."
+    "model_vs_actual": "R2.2 bae512c5 measured 138438 B and +1587 B more with the final-seat basis statements: the p123-ai-factor windows and epochs (10 rows, each +basis and basis_label, about 150 B) and its portfolio-bridge line now say they are the parent account's figures (the audit input measures the whole parent account, not the restated sleeve): 140025 B. No window, epoch or component is added or duplicated; the sleeve comparison stays in governed_reference. Trimming was declined because the label is the statement the owner's basis ruling requires. Limit = measured + 1%, rounded up to 1000 B by tools/panel_payload_size.py --raise-block model_vs_actual; to be confirmed on the final build.",
+    "factor_analysis": "R3 generation db452885 measured 2479776 B against 2339068 B at the R3 projection (R2 b216a53e x 1.10): +140708 B (6.0%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (2505000 B, was 2363000 B) by tools/panel_payload_size.py --raise-all.",
+    "leverage_disclosures": "R3 generation db452885 measured 19429280 B against 17594568 B at the R3 projection (R2 b216a53e x 1.10): +1834712 B (10.4%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (19624000 B, was 17771000 B) by tools/panel_payload_size.py --raise-all.",
+    "account_manifest": "R3 generation db452885 measured 1740636 B against 1713348 B at the R3 projection (R2 b216a53e x 1.10): +27288 B (1.6%). The projection assumed 10 % growth for the 50 added days; the real figure also carries the live and stale lens statuses of the R3 data. The growth is data (the R3 window and statuses), not a code change: git diff F2..F3 touches none of the three blocks (F3 6128cf12). No entry is added or duplicated and trimming was declined. Limit = measured + 1%, rounded up to 1000 B (1759000 B, was 1731000 B) by tools/panel_payload_size.py --raise-all."
   },
   "unlisted_block_max_bytes": 50000,
   "other_blocks_max_bytes": 400000,
@@ -1469,6 +1472,32 @@
           "after": 47737329,
           "previous_limit": 44700000,
           "limit": 49171000
+        }
+      }
+    },
+    {
+      "generation": "db452885 (R3 real generation, measured with tools/panel_payload_size.py --raise-all)",
+      "margin": 0.01,
+      "rule": "limit = ceil(measured x (1 + margin) / 1000) x 1000",
+      "reason": "Restores measured + 1 % for the three blocks that the R3 projection (R2 x 1.10) under-sized: factor_analysis, leverage_disclosures, account_manifest. All other blocks stay at their R3-projection limits.",
+      "blocks": {
+        "factor_analysis": {
+          "before": 2339068,
+          "after": 2479776,
+          "previous_limit": 2363000,
+          "limit": 2505000
+        },
+        "leverage_disclosures": {
+          "before": 17594568,
+          "after": 19429280,
+          "previous_limit": 17771000,
+          "limit": 19624000
+        },
+        "account_manifest": {
+          "before": 1713348,
+          "after": 1740636,
+          "previous_limit": 1731000,
+          "limit": 1759000
         }
       }
     }
