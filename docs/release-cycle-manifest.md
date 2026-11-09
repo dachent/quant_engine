@@ -67,6 +67,39 @@ release_cycle_manifest.py print-ids --manifest M [--manifest-sha256 H] --root K=
 hash and generation. `resolve` writes the resolved-cycle JSON create-only to `--out` (an existing
 file is a refusal) or prints it. `print-ids` prints one JSON line. Exit 0 ok, 1 refusal, 2 usage.
 
+## Cutoff consistency check
+
+Policy: the delivery cutoff is the end of the last complete NYSE trading day (America/New_York;
+a weekend or market holiday resolves to the previous session; a trading day counts as complete
+from its 16:00 close), resolved once when the refresh starts and fixed for the cycle. Any other
+cutoff needs an explicit owner instruction recorded in the cycle. The check lives in
+`check_declared_cutoff` (`validate` and `resolve` both run it) and uses
+`quant_engine.core.market_calendar` for the calendar. It reads no clock: the declared
+`refresh_started_at_utc` is the only time it uses, so a Monday pull for a cycle started on Friday
+keeps Friday. `captured_at_utc` (the pull) plays no part.
+
+| Manifest field | Meaning |
+|---|---|
+| `refresh_started_at_utc` (optional, ISO-8601 with offset) | when the refresh started; turns the check on |
+| `cutoff_owner_instruction` (optional, non-blank text) | the owner instruction (quote or reference) that makes a different `cutoff` intended; recorded verbatim |
+
+Outcomes (the resolved cycle carries `cutoff_check`: `status`, `refresh_started_at_utc`,
+`expected_cutoff`, `declared_cutoff`, and `owner_instruction` when overridden):
+
+* `cutoff` equals the expected day: `MATCHES_LAST_COMPLETE_NYSE_DAY`.
+* it differs and `cutoff_owner_instruction` is set: `OWNER_INSTRUCTION`; the check never blocks a
+  recorded instruction.
+* it differs and there is no instruction: refused, `CUTOFF_MISMATCH`, naming both dates and the
+  field to add. Example: `declared cutoff 2026-01-01 is not the last complete NYSE trading day
+  2026-01-02 as of refresh start 2026-01-05T14:00:00Z; if the owner instructed this cutoff, add
+  "cutoff_owner_instruction": "<the owner instruction, quoted or referenced>" to the cycle manifest`.
+* `cutoff_owner_instruction` without `refresh_started_at_utc`: `CUTOFF_CHECK_NEEDS_REFRESH_START`.
+
+Legacy manifests (no `refresh_started_at_utc` and a `cutoff` not after 2026-09-17: R1-R2.2) still validate and resolve; a manifest with a later cutoff and no `refresh_started_at_utc` is refused (`CUTOFF_CHECK_REQUIRED`), so omission is no bypass. The check is not
+run (`NOT_CHECKED_LEGACY`, printed as a NOTE on stderr); the resolved file gets no new key, so its
+bytes are identical to what the tool wrote before the check existed. A new cycle declares the
+refresh start. Ad hoc closures and early (13:00) closes are not modelled by the calendar.
+
 ## Outputs (resolved-cycle file, `qe-release-resolved-cycle/1`)
 
 Keys: `schema_version`, `cycle_id`, `cutoff`, `evaluated_on`, `captured_at_utc`,
@@ -145,6 +178,8 @@ Every refusal is `release-cycle-manifest: FAIL: <CODE>: <detail>` on stderr, exi
 | `DATE_INVALID` | `cutoff`, `evaluated_on`, `finalized_through` or `captured_at_utc` is not a real date or timestamp (impossible calendar date, time or offset) |
 | `DATE_PRECISION_LOST` | `captured_at_utc` carries a non-zero fraction finer than a microsecond, which the ledger cannot hold |
 | `DATE_ORDER` | `cutoff` is after `evaluated_on` |
+| `CUTOFF_MISMATCH` | `cutoff` is not the last complete NYSE trading day at `refresh_started_at_utc` and no `cutoff_owner_instruction` is recorded |
+| `CUTOFF_CHECK_NEEDS_REFRESH_START` | `cutoff_owner_instruction` is present without `refresh_started_at_utc` |
 | `PATH_ESCAPES_ROOT` | a `relative` is absolute, has `..`, backslash, drive letter, empty part, or resolves (symlink) outside its root |
 | `UNKNOWN_ROOT` | a root key is not bound by the run |
 | `ROOTS` / `ROOT_MISSING` | malformed `--root`, duplicate key with two directories, root not an existing absolute directory |
@@ -370,9 +405,36 @@ above. Quantbase captures that the data root keeps only inside archives are not 
 root: assemble them with `release_quantbase_sources.py` (B7, which checks them against the sleeve policy
 manifest's pins) and pass that directory as `--artifact-dir quantbase=KEY:REL`; each file must still
 equal the generation manifest's own record. `ibkr_declared_inputs`, `quantbase_declared_inputs`, `tag_map` and `crosswalk` default to the
-governed files under `repo:ops/mvp2-release/inputs/` and can be replaced with `--file ROLE=KEY:REL`;
-the declared inputs must end at the cycle cutoff (`window.last_day`, `data_cutoff`) and the crosswalk
-must carry it.
+governed files of the release-inputs root (`--release-inputs-root` with
+`--release-inputs-manifest-sha256`; without them the checkout) and can be replaced with
+`--file ROLE=KEY:REL`; the declared inputs must end at the cycle cutoff (`window.last_day`,
+`data_cutoff`) and the crosswalk must carry it.
+
+### Cutoff-aware defaults and one error for everything to fix
+
+A default is never trusted for the cycle just because it exists. Before any default is pinned its own
+date is compared with the cycle cutoff (the root's cutoff, then `window.last_day` / `data_cutoff` /
+`calculation_cutoff_date` of the file), so the previous cycle's root cannot leak into a new cutoff.
+The builders do not stop at the first problem: every stale input (defaults and `--file` inputs alike)
+and every ambiguous provider family is collected, and one refusal lists all of them:
+
+```
+release-acceptance-inputs: FAIL: CUTOFF_MISMATCH: 3 inputs are refused; fix all of them and rerun:
+  1. [CUTOFF_MISMATCH] crosswalk: calculation_cutoff_date is '2026-09-02', the cycle cutoff is 2026-11-06 (default ops/mvp2-release/inputs/current-epoch-crosswalk.json)
+     supply a cutoff-dated replacement with: --file crosswalk=KEY:REL  (KEY:REL = a crosswalk with calculation_cutoff_date 2026-11-06)
+  2. [AMBIGUOUS_FILE] quantbase_accounts: 2 files match (source-runs/r/.staging/csv/accounts.csv, source-runs/r/artifacts/csv/accounts.csv)
+     and: quantbase_account_activity: 2 files match (...)
+     narrow the search with one of: --artifact-dir quantbase=world:.../r/.staging | --artifact-dir quantbase=world:.../r/artifacts (the directory must hold every quantbase capture)
+```
+
+A stale default names its role and the flag to replace it (`--file ibkr_declared_inputs=`,
+`--file quantbase_declared_inputs=`, `--file tag_map=`, `--file crosswalk=` for sleeve inputs;
+`--file declared_cutoff_date=` and `--file account_strategy_map_and_active_universe=` for the
+acceptance manifest). An ambiguous family lists its candidate files and one `--artifact-dir
+PROVIDER=KEY:REL` per candidate subtree (each directory holds exactly that candidate; a capture of the
+same provider shares one fix, printed once). A single problem is raised as itself, not as a list.
+Nothing is weakened: a stale default still refuses, a refusal still writes nothing, and a consistent
+cycle produces byte-identical outputs.
 
 ### Refusals
 
@@ -392,3 +454,51 @@ must carry it.
 | `RESOLVED_CYCLE`, `INPUT`, `UNKNOWN_ROLE`, `BASENAME`, `USAGE` | the resolved cycle is not a `qe-release-resolved-cycle/1` file; unreadable or non-JSON input; a `--file` name that is not a role of the command; a crosswalk basename the derivation does not place; malformed arguments |
 
 `acceptance/derive_a` no longer defaults `--cutoff`; the cycle's cutoff is always passed.
+
+## B10: expected-baseline assembler
+
+`tools/release_baseline_assemble.py` writes `acceptance/expected-baseline.json` from the two
+independent derivation outputs and nothing else. The retained R2.1/R2.2 assemblers (outside Git) compared
+both derivations with the previous baseline, which cannot exist at a new cutoff; this tool has no such input.
+
+```
+release_baseline_assemble.py --derive-a A.json --derive-b B.json --manifest M.json --head SHA --cutoff D
+    --generated-utc TS (--admission-decision-text TEXT | --admission-decision-file FILE)
+    [--template FILE] [--data-root DIR ...] [--strict-reasons] --out FILE
+```
+
+- A row is admitted only when both derivers return it and agree. USD within 0.01, ratio within 1e-8
+  (`Decimal`), `list` as sets of strings, `count`/`date`/`status` equal as text; `unit` and `as_of` must be
+  equal; `as_of` must be an ISO date not after the cutoff (a missing or null one is refused: all 165 R2.2 metric
+  rows carry one, `not_derivable` rows carry none); any other unit is refused. `expected` is A's value. Both not derivable: the row goes to
+  `not_derivable` with both reasons (independent derivers word them differently, so equal text is required
+  only with `--strict-reasons`). Anything else (value disagreement, derivable on one side only, a row on one
+  side only, a duplicate) is listed, and no file is written.
+- Also refused: a derivation that is not `qe-cp-derivation/1` or is the wrong side; a manifest, A or B whose
+  cutoff differs from `--cutoff`; A and B `code_commit` differing from each other or from `--head`
+  (including `+dirty`); a manifest sha256 that is not the one A (and B, when it records one) read;
+  different strategy-basis declarations; a manifest schema other than `qe-cp-acceptance-inputs/2` or `/3` (the
+  versions both derivers accept); one input path pinned to two digests; zero agreed metric rows.
+- Nothing comes from the clock or from a previous baseline. `--generated-utc` is required (ISO 8601 with an
+  offset). The admission-decision text is hashed as given; state what was decided and by whom. The output is
+  created, never replaced, and is a pure function of its inputs (two runs give identical bytes).
+- Sources of the fields: `head`, both `code_commit`s, `derivations.*.manifest_sha256` and `raw_output_sha256`
+  (the bytes of each file), the inventory hash (sorted row keys) and every row from the inputs and flags.
+  `authority_pointer` is the sorted union of the (path, sha256) pins in the manifest, A's inputs and B's
+  inputs; each path must be data-root relative (`contracts/`, `data*/`, `evidence/`, `schemas/`) and the
+  contract path must appear once, at the manifest's `financial_source_contract` digest.
+  `schema`, `metric_spec`, `spec_version`, `release_rule`, `control` and `conventions` are the committed
+  `DEFAULT_HEADER` (the R2.2 text, which is the only text the earlier assemblers carried over).
+- `--template FILE` is the one place a previous baseline's text may enter, and never rows: a JSON object whose
+  `schema`, `metric_spec`, `spec_version`, `release_rule`, `control`, `conventions` replace the defaults and
+  whose `authority_pointer` list fixes the pointer paths and order. Its digests must equal the pinned inputs'
+  exactly, and `--data-root` is then REQUIRED: each pointer path is resolved under a root (repeatable, searched in
+  order, links may not leave it) and the file's bytes must hash to the claimed digest, so a digest cannot be moved to
+  another or a missing path. `--data-root` without a template verifies the pinned paths the same way. A template with `metrics` or `not_derivable` is refused. It is needed when an input lies outside
+  the data root (the R2.2 FX files were under `scratch/`; stage them under the data root instead, as
+  `release_acceptance_inputs.py --stage-dir` does) and for byte-identity with an older baseline's pointer order.
+- Reproduction: on the restated R2.2 derivations (`r3-plan/ai624/restated-baseline-r22`) with head
+  `110fe44d...` the tool, given the retained pointer list as template and `--data-root <QE root> --data-root <dir with
+  contracts/portfolio-financial-mvp-source-v1.json = the CRLF bytes of main 865bf905>`, writes the R2.2 release baseline
+  (`ri-r22v9`, sha256 `35f7851f...`) byte for byte (`tests/acceptance/test_release_baseline_assemble.py`; skipped
+  without the evidence).

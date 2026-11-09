@@ -1149,13 +1149,21 @@ def _cut_managed_performance(
         groups[key].setdefault(row.get("field", ""), row)
     removed: Counter[str] = Counter()
     for (entity, _artifact), fields in sorted(groups.items()):
-        if not {"data", "date", "dateLast"} <= set(fields):
+        if "data" not in fields:
             continue
+        if not {"date", "dateLast"} <= set(fields):
+            # observations with no interval cannot be placed against the cutoff: never passed
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} has observations but no "
+                "date/dateLast interval"
+            )
         try:
             first = date.fromisoformat(fields["date"]["value"])
             last = date.fromisoformat(fields["dateLast"]["value"])
         except ValueError:
-            continue  # the readers refuse an unreadable interval themselves
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} has an unreadable interval"
+            ) from None
         if last <= as_of:
             continue
         if first > as_of:
@@ -1177,6 +1185,12 @@ def _cut_managed_performance(
                 "the observations are not its weekday calendar"
             )
         keep = sum(1 for day in calendar if day <= as_of)
+        if keep == 0:
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} has no weekday observation on or "
+                f"before as_of {as_of} (interval {first}..{last}, first weekday "
+                f"{calendar[0] if calendar else 'none: the interval is a weekend'})"
+            )
         for row in fields.values():
             if row["field"] == "data":
                 row["value"] = json.dumps(data[:keep], separators=(",", ":"))

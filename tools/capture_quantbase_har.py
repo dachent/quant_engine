@@ -374,6 +374,9 @@ def _load_intake(intake_dir: Path) -> tuple[Path, Manifest, dict[str, Any]]:
     return root, manifest, record
 
 
+_US_DATE: Final = re.compile(r"^([0-9]{1,2})/([0-9]{1,2})/([0-9]{4})$")
+
+
 def _parsed_date(value: object) -> date | None:
     try:
         if isinstance(value, bool):
@@ -384,6 +387,10 @@ def _parsed_date(value: object) -> date | None:
             raw = value.strip()
             if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw):
                 stamp = float(raw)
+            elif us := _US_DATE.match(raw):
+                # The dashboard series dates its rows m/d/Y, the grammar the converter reads.
+                result = date(int(us[3]), int(us[1]), int(us[2]))
+                return result if 2000 <= result.year <= 2100 else None
             else:
                 parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
                 return parsed.date() if 2000 <= parsed.year <= 2100 else None
@@ -414,6 +421,29 @@ def _walk_dates(
     elif isinstance(value, list):
         for item in value:
             _walk_dates(item, fields, found, unparsed)
+
+
+def _dashboard_series_days(extracted: Sequence[Any]) -> dict[str, list[date]]:
+    """Dated rows of each dashboard fund series (``funds_data[title].pricehistory``)."""
+    series: dict[str, list[date]] = {}
+    for item in extracted:
+        if item.capability != "portfolio.dashboard" or not isinstance(
+            item.response, dict
+        ):
+            continue
+        data = item.response.get("data")
+        funds = data.get("funds_data") if isinstance(data, dict) else None
+        if not isinstance(funds, dict):
+            continue
+        for title, fund in funds.items():
+            history = fund.get("pricehistory") if isinstance(fund, dict) else None
+            for row in history if isinstance(history, list) else []:
+                parsed = (
+                    _parsed_date(row.get("time")) if isinstance(row, dict) else None
+                )
+                if parsed is not None:
+                    series.setdefault(str(title), []).append(parsed)
+    return series
 
 
 def _record_count(response: object, path: str | None) -> int:
@@ -644,8 +674,39 @@ def _parse(
         raise QuantbaseHarIntakeError("NAV capabilities hold no parseable dates")
     newest = max(nav_dates)
     if manifest.cutoff > newest:
-        raise QuantbaseHarIntakeError("cutoff is after the newest captured NAV date")
+        raise QuantbaseHarIntakeError(
+            f"cutoff {manifest.cutoff.isoformat()} is after the newest captured NAV "
+            f"date {newest.isoformat()}: no captured NAV observation on or after the "
+            "cutoff"
+        )
     grid, flags = _grid(manifest, newest)
+    observed = sorted(set(nav_dates))
+    grid["cutoff_observation"] = {
+        "first_on_or_after_cutoff": min(
+            day for day in observed if day >= manifest.cutoff
+        ).isoformat(),
+        "last_on_or_before_cutoff": (
+            max(day for day in observed if day <= manifest.cutoff).isoformat()
+            if any(day <= manifest.cutoff for day in observed)
+            else None
+        ),
+        "observed_on_cutoff": manifest.cutoff in observed,
+    }
+    if manifest.cutoff not in observed:
+        flags.append("CUTOFF_DATE_NOT_OBSERVED")
+    if "portfolio.dashboard" in manifest.nav_capabilities:
+        # The capability-wide observation above can be met by an unrelated or Total series;
+        # coverage is also reported for each fund series on its own.
+        by_series: dict[str, object] = {}
+        for title, days in sorted(_dashboard_series_days(extracted).items()):
+            ended = max(days)
+            by_series[title] = {
+                "observed_end": ended.isoformat(),
+                "observed_on_cutoff": manifest.cutoff in set(days),
+            }
+            if ended < manifest.cutoff:
+                flags.append("NAV_SERIES_ENDS_BEFORE_CUTOFF")
+        grid["cutoff_observation_by_series"] = by_series
     if unparsed[0]:
         flags.append("UNPARSED_DATE_VALUES")
     if session_files:

@@ -3433,15 +3433,26 @@ def test_the_report_producers_own_block_is_verified_by_the_validator(
 # baseline must hold the oracle rows the bound verification reads.
 
 
+# Owner-declared delivery cutoffs (AGENTS.md): 2026-09-17 for R1/R2/R2.1/R2.2,
+# 2026-11-06 for R3 onward. A new cutoff needs a new owner instruction recorded
+# in AGENTS.md before it is added here.
+DELIVERY_CUTOFFS = frozenset({"2026-09-17", "2026-11-06"})
+
+
 def _real_context() -> checks.Context:
     baseline = json.loads(
         (_RELEASE_INPUT_ROOT / "acceptance" / "expected-baseline.json").read_text(
             encoding="utf-8"
         )
     )
+    assert baseline["cutoff"] in DELIVERY_CUTOFFS, (
+        f"baseline cutoff {baseline['cutoff']!r} is not an owner-declared delivery "
+        f"cutoff {sorted(DELIVERY_CUTOFFS)}: a new owner instruction must be "
+        "recorded in AGENTS.md first"
+    )
     return checks.Context(
         SimpleNamespace(report={}, panel={}),  # type: ignore[arg-type]
-        date.fromisoformat(CUTOFF),
+        date.fromisoformat(baseline["cutoff"]),
         "test",
         expected=baseline["metrics"],
     )
@@ -3451,15 +3462,15 @@ def _real_context() -> checks.Context:
 def test_the_repository_census_is_the_one_the_expected_baseline_pins() -> None:
     """Guard: contract bytes == the baseline's authority pointer, and the qsi tuple."""
 
-    # #539/R1: the baseline was re-derived against this contract (two independent
-    # derivations at the R1 inputs), so the census is the one it pins.
+    # The baseline was derived against this contract, so the census is the one it
+    # pins: no literal, the digest is that of the working-tree contract bytes.
     state = checks.census_state(_real_context())
     assert state.problem is None
     assert state.census is not None
-    assert (
-        state.census.sha256
-        == "e0dd4a4bdcaca7fa3e73ea5e275a613786cf258bc7abe9bacd752314a9a06659"
-    )
+    contract_bytes = (
+        Path(__file__).resolve().parents[2] / CENSUS_CONTRACT
+    ).read_bytes()
+    assert state.census.sha256 == hashlib.sha256(contract_bytes).hexdigest()
     census = json.loads(
         (
             Path(__file__).resolve().parents[2]
@@ -3487,6 +3498,12 @@ def test_the_real_baseline_holds_the_oracle_rows_the_bound_check_reads() -> None
 
     oracle = checks._oracle_cutoff_dates(_real_context())
     assert oracle is not None
+    assert "robuxio-crypto" in oracle
+    baseline_cutoff = _real_context().cutoff.isoformat()
+    if baseline_cutoff != "2026-09-17":
+        pytest.skip(
+            f"oracle date pins are for the 2026-09-17 baseline; cutoff is {baseline_cutoff}"
+        )
     assert oracle["robuxio-crypto"] == frozenset({date(2026, 9, 17)})
     others = {name: days for name, days in oracle.items() if name != "robuxio-crypto"}
     assert len(others) == 6

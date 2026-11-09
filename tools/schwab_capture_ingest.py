@@ -142,6 +142,19 @@ YAHOO_RUN_KIND = "yahoo-fetch-run"
 YAHOO_MANIFEST = "MANIFEST.json"
 YAHOO_SIDECAR = "official-closes-manifest.json"
 YAHOO_SIDECAR_KIND = "yahoo-official-closes-manifest"
+YAHOO_DRY_RUN_PREFIX = "DRY-"
+
+
+def _refuse_rehearsal(document: Mapping[str, object], run_name: str, what: str) -> None:
+    """A Yahoo dry run is a rehearsal: refuse it by its mode marker, its id or its directory."""
+    if (
+        document.get("mode") == "dry-run"
+        or str(document.get("run_id") or "").startswith(YAHOO_DRY_RUN_PREFIX)
+        or run_name.startswith(YAHOO_DRY_RUN_PREFIX)
+    ):
+        raise IngestError(f"{what} is a Yahoo dry-run rehearsal, not a governed run")
+
+
 PROVENANCE_VERIFIED = "VERIFIED_YAHOO_RUN_BINDING"
 PROVENANCE_UNVERIFIED = "UNVERIFIED_HISTORICAL_REPLAY_ONLY"
 
@@ -185,6 +198,7 @@ def _yahoo_run(
         raise IngestError(
             "official closes run manifest is not a Yahoo run for the cutoff"
         )
+    _refuse_rehearsal(manifest, run.name, "official closes run")
     files = driver.json_object(manifest.get("files"), "Yahoo run files")
     bound: set[str] = set()
     for name, record in files.items():
@@ -305,6 +319,7 @@ def _read_sidecar(
         or sidecar.get("cutoff") != day.isoformat()
     ):
         raise IngestError("official closes sidecar is not for this cutoff")
+    _refuse_rehearsal(sidecar, directory.parent.name, "official closes sidecar")
     started = _z_time(sidecar.get("fetch_started_utc"), "fetch_started_utc")
     completed = _z_time(sidecar.get("fetch_completed_utc"), "fetch_completed_utc")
     if completed < started:

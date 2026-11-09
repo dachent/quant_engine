@@ -121,6 +121,16 @@ so one call returns every account; `balances.historical` is a `GET` with an empt
 `query`, scoped per account by `Schwab-Client-Ids`; `transactions.history` is the
 reviewed POST. `body` is `null` for the two requests the driver builds itself.
 
+### What the receipt counts
+
+The receipt's `governed_requests` counts only the requests the driver sends through
+`LiveReadGovernance.reserve`. In the primary mode the holdings page is reloaded so the
+Schwab SPA sends its own Holdings-V2 request; that reload runs the SPA, whose other
+read-only page requests are not metered and are not in the count. The one request the
+driver reads from the page is still checked against the approved body before it is used.
+This was accepted by the owner and control as a documented boundary, with no driver
+change. For scale: R3 run `r3-schwab-1108-e` made 32 governed requests (maximum 60).
+
 ## Late pull: the capture is rolled back to the cutoff close
 
 A capture is the account at capture time T. Any capture taken after the cutoff close D
@@ -226,16 +236,27 @@ header names (never values). It needs no evidence and consumes nothing.
 No retained capture holds a Holdings-V2 request body (the 2026-07-31 HARs contain
 the SPA bundle, which has only key names). `attach-check --cdp-url <url>
 --capture-body-out <body.json> [--wait-seconds 20]` records the body of the
-page's OWN HoldingV2 POST while it reloads the page (a passive
-`request.post_data` read; no request of ours, no header, cookie or token is
+page's OWN HoldingV2 POST while it reloads the page (the body is read from
+`request.post_data`; no request of ours, no header, cookie or token is
 stored or printed). The body is reduced to the keys the gate allows and written
 create-only; the output lists the key names and the file hash. Feed the file to
 `make-evidence --holdings-body`.
 
 If no HoldingV2 request is seen within the wait window the command refuses and
-writes nothing. The operator then opens the Schwab positions/holdings page by
-read-only navigation in the same browser and runs `attach-check` again, or STOPs
+writes nothing. The operator (or an agent, with `tools/schwab_page_actions.py` below) opens
+the Schwab positions/holdings page in the same browser and runs `attach-check` again, or STOPs
 and uses the retained UI method below.
+
+#### Page actions in the signed-in window (`tools/schwab_page_actions.py`)
+
+`python tools/schwab_page_actions.py --cdp-url <url> navigate|click|scroll|select|download ...`
+drives the one signed-in `client.schwab.com` page for any non-trading read: navigate inside
+`https://client.schwab.com/`, click by role and name, scroll (at most 5,000 px per call), select an
+option, download (create-only, prints the file's SHA-256). The one guard: it refuses a control whose
+accessible name, text, aria-label, value, title or address, or a navigation path, matches
+trade / transfer / withdraw / deposit / order / buy / sell / submit / confirm payment, and it never
+touches a submit or password control. It has no typing API, so credentials and 2FA are never entered.
+Every action is logged value-free (verb, role, first 8 hex characters of the label's SHA-256).
 
 #### Account-set compare
 
@@ -268,6 +289,17 @@ new file with a new review comment. The cycle is `make-evidence` (writes and
 validates) then `check-evidence`, each well under a second; the time is the review
 comment and the `--issued-at`/`--expires-at` values, not the tools. Use a fresh
 `--output` path each time.
+
+### Rehearsal without a governed request
+
+`attach-check` is the only live step that sends no governed request (no evidence is consumed,
+nothing is stored but header names and the body hash). A read of the Holdings-V2 response is
+itself the first governed request, so it has no dry run: the governance reservation is made,
+the page sends its own request, and the body is checked against the approved body before the
+response is read. Everything after the bytes arrive is rehearsed offline instead:
+`tests/schwab/test_schwab_retained_pages_parse.py` runs the driver's date handling over every
+retained raw page of refresh-20260902 (including the `MM/DD/YYYY as of MM/DD/YYYY` shape) and,
+with `QE_SCHWAB_STAGED_RUN=<staging run dir>`, over the normalized rows of a staged run.
 
 ## Credentials
 
@@ -534,3 +566,16 @@ cash-equivalent holdings, before the Yahoo evidence is minted.
 
 The ledger accepts a selected cutoff row that repeats the row before only for an account the pinned holdings capture shows
 flat (no position rows) whose cash equals that row; the derivation record is never the authority for that.
+
+## Dry run before any governed run (rule for every live driver)
+
+Before a governed live run spends single-use evidence, an allowlist pin or an owner session:
+
+1. rehearse the identical command line and config against scratch output, with no governance
+   evidence, consuming nothing, and never into a release root or the intake being built;
+2. verify what the rehearsal staged with the same verifier the governed run uses;
+3. run the governed command only after a rehearsal of the same config and cutoff verified.
+
+A rehearsal's run ids start with `DRY-`, its outputs are never admitted, and a governed command
+refuses such an id. The Yahoo fetch driver has this natively (`dry-run`,
+`docs/providers/yahoo-fetch.md`, "Dry run first"). This driver has no native `dry-run` command yet (open work; no flag exists). Until it does, the rehearsal is the offline suite on the exact commit (`python -m pytest tests/schwab -q`, which replays the driver against fake transports and retained bytes) followed by the first-minute live check above, which reads nothing that needs evidence; the governed capture is the first run that spends it.

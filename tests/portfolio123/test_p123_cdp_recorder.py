@@ -1,4 +1,4 @@
-"""Offline proof of the passive Portfolio123 CDP recorder.
+"""Offline proof of the Portfolio123 CDP recorder (listener plus guarded driving).
 
 Everything here is synthetic: invented values in the field structure and route
 templates already known from preserved evidence (designer-model route,
@@ -14,6 +14,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
+import time
 from typing import Any
 
 import pytest
@@ -23,6 +25,7 @@ from tools import p123_cdp_recorder as rec
 from tools.p123_cdp_recorder import (
     ALLOWED_CDP_METHODS,
     GuardedTransport,
+    LEGACY_SAFETY,
     Listener,
     Recorder,
     RecorderError,
@@ -31,6 +34,7 @@ from tools.p123_cdp_recorder import (
     decode_message,
     encode_frame,
     merge_shapes,
+    parse_drive_plan,
     path_template,
     propose_catalog,
     shape_of,
@@ -650,17 +654,15 @@ def request_events(
     ]
 
 
-def test_guard_refuses_every_message_that_could_act_on_the_browser() -> None:
+def test_guard_refuses_every_message_that_could_type_or_intercept() -> None:
     inner = FakeTransport()
     guard = GuardedTransport(inner)
     for method in (
-        "Page.navigate",
         "Page.reload",
-        "Runtime.evaluate",
         "Runtime.callFunctionOn",
-        "Input.dispatchMouseEvent",
         "Input.dispatchKeyEvent",
         "Input.insertText",
+        "Input.dispatchTouchEvent",
         "Fetch.enable",
         "Fetch.continueRequest",
         "Network.getCookies",
@@ -680,7 +682,12 @@ def test_guard_refuses_every_message_that_could_act_on_the_browser() -> None:
         with pytest.raises(RecorderError, match="CDP_METHOD_REFUSED"):
             guard.send({"id": 1, "method": method, "params": {}})
     assert inner.sent == []
-    for method in sorted(ALLOWED_CDP_METHODS):
+    plain = ALLOWED_CDP_METHODS - {
+        "Page.navigate",
+        "Runtime.evaluate",
+        "Input.dispatchMouseEvent",
+    }
+    for method in sorted(plain):
         guard.send(
             {
                 "id": 1,
@@ -688,21 +695,71 @@ def test_guard_refuses_every_message_that_could_act_on_the_browser() -> None:
                 "params": {"requestId": "r", "targetId": "t"},
             }
         )
-    assert len(inner.sent) == len(ALLOWED_CDP_METHODS)
-    assert ALLOWED_CDP_METHODS == {
-        "Target.setDiscoverTargets",
-        "Target.attachToTarget",
-        "Network.enable",
-        "Network.getResponseBody",
+    assert len(inner.sent) == len(plain)
+    assert ALLOWED_CDP_METHODS == plain | {
+        "Page.navigate",
+        "Runtime.evaluate",
+        "Input.dispatchMouseEvent",
     }
 
 
-def test_tool_source_never_names_an_acting_cdp_method() -> None:
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"method": "Page.navigate", "params": {"url": "https://mail.example/"}},
+        {"method": "Page.navigate", "params": {"url": f"{BASE}/app/transfer"}},
+        {"method": "Page.navigate", "params": {"url": f"{BASE}/x", "referrer": "r"}},
+        {"method": "Runtime.evaluate", "params": {"expression": "document.cookie"}},
+        {
+            "method": "Runtime.evaluate",
+            "params": {"expression": "1", "returnByValue": True},
+        },
+        {"method": "Input.dispatchMouseEvent", "params": {"type": "keyDown"}},
+        {
+            "method": "Input.dispatchMouseEvent",
+            "params": {"type": "mousePressed", "x": 1, "y": 1, "button": "right"},
+        },
+    ],
+)
+def test_driving_messages_the_one_guard_refuses_never_leave(
+    message: dict[str, Any],
+) -> None:
+    inner = FakeTransport()
+    with pytest.raises(RecorderError, match="CDP_DRIVE_REFUSED"):
+        GuardedTransport(inner).send({"id": 1, **message})
+    assert inner.sent == []
+
+
+def test_driving_messages_the_one_guard_accepts_pass() -> None:
+    inner = FakeTransport()
+    guarded = GuardedTransport(inner)
+    guarded.send(
+        {"id": 1, "method": "Page.navigate", "params": {"url": f"{BASE}/app/screen"}}
+    )
+    guarded.send(
+        {
+            "id": 2,
+            "method": "Input.dispatchMouseEvent",
+            "params": {
+                "type": "mouseWheel",
+                "x": 3,
+                "y": 3,
+                "deltaX": 0,
+                "deltaY": 400,
+            },
+        }
+    )
+    assert [m["method"] for m in inner.sent] == [
+        "Page.navigate",
+        "Input.dispatchMouseEvent",
+    ]
+
+
+def test_tool_source_names_no_typing_cookie_or_header_method() -> None:
     source = Path(rec.__file__).read_text("utf-8")
     for name in (
-        "Page.navigate",
-        "Runtime.evaluate",
-        "Input.dispatch",
+        "Input.dispatchKey",
+        "Input.insertText",
         "Fetch.enable",
         "Network.getCookies",
         "Network.getAllCookies",
@@ -1200,3 +1257,279 @@ def test_warn_after_option_defaults_to_30() -> None:
         ["discover", "--cdp-url", "http://127.0.0.1:9333", "--output-root", "C:/x"]
     )
     assert args.warn_after_seconds == 30.0
+
+
+# --- driving the signed-in tab under the one guard ---------------------------
+
+
+def drive_facts(name: str, **extra: Any) -> dict[str, Any]:
+    facts: dict[str, Any] = {
+        "tag": "a",
+        "type": None,
+        "in_form": False,
+        "text": name,
+        "aria_label": "",
+        "name": "",
+        "value": "",
+        "title": "",
+        "href": f"{BASE}/app/screen/list",
+        "href_attr": "/app/screen/list",
+        "x": 40,
+        "y": 50,
+        "w": 80,
+        "h": 20,
+    }
+    facts.update(extra)
+    return facts
+
+
+class DrivableTransport(FakeTransport):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.targets = [{"targetId": "T1", "type": "page", "url": f"{BASE}/app/x"}]
+        self.controls: dict[str, dict[str, Any]] = {}
+
+    def send(self, message: dict[str, Any]) -> None:
+        if message["method"] == "Runtime.evaluate":
+            self.sent.append(message)
+            expression = message["params"]["expression"]
+            prefix = rec.guard._BY_NAME_PREFIX
+            if expression.startswith(prefix):
+                value = self.controls.get(json.loads(expression[len(prefix) : -1]))
+            else:
+                value = next(
+                    iter(self.controls.values()),
+                    {"page_url": f"{BASE}/x", "tag": None},
+                )
+            reply = {"id": message["id"], "result": {"result": {"value": value}}}
+            self.inbound.appendleft(reply)
+            return
+        super().send(message)
+
+
+def run_drive(
+    transport: FakeTransport,
+    run_root: Path,
+    plan: list[dict[str, Any]],
+    target_id: str | None = None,
+    settle: float = 0.0,
+) -> Listener:
+    listener = Listener(
+        transport,
+        Recorder(run_root, mode="discover"),
+        max_seconds=1.0 if settle else 0.0,
+        drive_plan=parse_drive_plan(plan),
+        drive_dwell=0.0,
+        drive_settle=settle,
+        drive_target_id=target_id,
+    )
+    listener.run()
+    return listener
+
+
+def test_a_drive_plan_navigates_scrolls_and_clicks_on_the_signed_in_tab(
+    run_root: Path,
+) -> None:
+    transport = DrivableTransport()
+    transport.controls["Screens"] = drive_facts("Screens")
+    plan = [
+        {"navigate": f"{BASE}/app/screen/list"},
+        {"scroll": 600},
+        {"click": "Screens"},
+    ]
+    listener = run_drive(transport, run_root, plan)
+    methods = [m["method"] for m in transport.sent]
+    assert methods.count("Page.navigate") == 1
+    mouse = [
+        m["params"]["type"]
+        for m in transport.sent
+        if m["method"] == "Input.dispatchMouseEvent"
+    ]
+    assert mouse == ["mouseWheel", "mouseMoved", "mousePressed", "mouseReleased"]
+    assert [e["action"] for e in listener.drive_log.entries] == [
+        "navigate",
+        "scroll",
+        "click",
+    ]
+    assert "Screens" not in json.dumps(listener.drive_log.entries)
+    assert all(m["sessionId"] == "S-T1" for m in transport.sent[2:])
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"aria_label": "Buy"},
+        {"value": "Place order"},
+        {"href": f"{BASE}/app/transfer"},
+        {"tag": "button", "type": "submit", "href": ""},
+        {"tag": "button", "type": None, "in_form": True, "href": ""},
+        {"tag": "input", "type": "password", "href": ""},
+        {"href": "https://mail.example/out"},
+    ],
+)
+def test_the_one_guard_still_refuses_trading_and_credential_controls(
+    run_root: Path, overrides: dict[str, Any]
+) -> None:
+    transport = DrivableTransport()
+    transport.controls["Open"] = drive_facts("Open", **overrides)
+    with pytest.raises(RecorderError, match="DRIVE_ACTION_REFUSED"):
+        run_drive(transport, run_root, [{"click": "Open"}])
+    assert not [m for m in transport.sent if m["method"].startswith("Input.")]
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        [{"click": "Buy shares"}],
+        [{"click": "Confirm payment"}],
+        [{"navigate": f"{BASE}/app/withdraw"}],
+        [{"navigate": "https://mail.example/"}],
+        [{"type": "hello"}],
+        [{"key": "Enter"}],
+        [{"scroll": 0}],
+        [{"scroll": True}],
+        [],
+        "navigate",
+    ],
+)
+def test_a_drive_plan_the_guard_would_refuse_is_refused_up_front(plan: Any) -> None:
+    with pytest.raises(RecorderError, match="DRIVE_PLAN_"):
+        parse_drive_plan(plan)
+
+
+def test_runs_recorded_before_driving_existed_still_verify(finished: Path) -> None:
+    manifest = json.loads((finished / "manifest.json").read_text("utf-8"))
+    manifest["safety"] = dict(LEGACY_SAFETY)
+    (finished / "manifest.json").write_bytes(rec._canonical(manifest))
+    assert verify_run(finished)["entries"] == 2
+
+
+def test_a_page_that_left_the_origin_stops_the_drive_plan(run_root: Path) -> None:
+    transport = DrivableTransport()
+    transport.controls["Open"] = drive_facts("Open", page_url="https://mail.example/")
+    with pytest.raises(RecorderError, match="DRIVE_ACTION_REFUSED"):
+        run_drive(transport, run_root, [{"click": "Open"}])
+    assert not [m for m in transport.sent if m["method"].startswith("Input.")]
+
+
+def test_a_refused_drive_plan_is_rejected_before_any_directory_or_connection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([{"click": "Buy shares"}]), encoding="utf-8")
+    root = tmp_path / "run"
+    code = rec.main(
+        [
+            "capture",
+            "--cdp-url",
+            "http://127.0.0.1:9",
+            "--output-root",
+            str(root),
+            "--drive-plan",
+            str(plan),
+        ]
+    )
+    assert code == 2 and "REFUSED DRIVE_PLAN_REFUSED" in capsys.readouterr().out
+    assert not root.exists()
+
+
+# --- dry-run rehearsal ---------------------------------------------------------
+
+
+def test_dry_run_is_verified_before_it_prints_and_is_never_admitted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rec, "WebSocketTransport", lambda url: FakeTransport({}))
+    root = tmp_path / "DRY-rehearsal"
+    code = rec.main(
+        ["dry-run", "--cdp-url", "http://127.0.0.1:9", "--output-root", str(root)]
+    )
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert code == 0 and out["dry_run"] is True and out["verified"] is True
+    assert out["run_id"] == "DRY-rehearsal"
+    assert verify_run(root)
+    # a draft is never built from a rehearsal, and a governed capture never writes into one
+    assert (
+        rec.main(
+            ["propose-catalog", "--discover", str(root), "--out", str(tmp_path / "o")]
+        )
+        == 2
+    )
+    assert "REFUSED DRY_RUN_NOT_ADMITTED" in capsys.readouterr().out
+    assert (
+        rec.main(
+            [
+                "capture",
+                "--cdp-url",
+                "http://127.0.0.1:9",
+                "--output-root",
+                str(tmp_path / "DRY-other"),
+            ]
+        )
+        == 2
+    )
+    assert "REFUSED DRY_ROOT_IN_GOVERNED_RUN" in capsys.readouterr().out
+
+
+def test_dry_run_refuses_a_root_that_is_not_dry(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = rec.main(
+        [
+            "dry-run",
+            "--cdp-url",
+            "http://127.0.0.1:9",
+            "--output-root",
+            str(tmp_path / "capture-1"),
+        ]
+    )
+    assert code == 2 and "REFUSED DRY_ROOT_NAME_NOT_DRY" in capsys.readouterr().out
+
+
+class IdleTransport(DrivableTransport):
+    """Stays open when nothing is queued (a live browser), so the settle period can elapse."""
+
+    def receive(self, timeout: float) -> dict[str, Any] | None:
+        if self.inbound:
+            return self.inbound.popleft()
+        time.sleep(0.01)
+        return None
+
+
+def two_tab_transport() -> DrivableTransport:
+    transport = IdleTransport()
+    transport.targets = [
+        {"targetId": "T1", "type": "page", "url": f"{BASE}/app/x"},
+        {"targetId": "T2", "type": "page", "url": f"{BASE}/app/y"},
+    ]
+    return transport
+
+
+def test_two_candidate_tabs_without_a_target_id_are_refused_and_listed(
+    run_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transport = two_tab_transport()
+    with pytest.raises(RecorderError, match="DRIVE_TARGET_AMBIGUOUS"):
+        run_drive(transport, run_root, [{"scroll": 300}], settle=0.05)
+    assert not [m for m in transport.sent if m["method"].startswith("Input.")]
+    assert json.loads(capsys.readouterr().err.strip())["drive_candidates"] == [
+        "T1",
+        "T2",
+    ]
+
+
+def test_an_explicit_target_id_drives_that_tab_whatever_the_event_order(
+    run_root: Path,
+) -> None:
+    for chosen in ("T1", "T2"):
+        transport = two_tab_transport()
+        shutil.rmtree(run_root, ignore_errors=True)
+        run_drive(transport, run_root, [{"scroll": 300}], target_id=chosen, settle=0.05)
+        wheel = [m for m in transport.sent if m["method"] == "Input.dispatchMouseEvent"]
+        assert [m["sessionId"] for m in wheel] == ["S-" + chosen]
+
+
+def test_a_target_id_that_is_never_attached_drives_nothing(run_root: Path) -> None:
+    transport = two_tab_transport()
+    run_drive(transport, run_root, [{"scroll": 300}], target_id="T9", settle=0.05)
+    assert not [m for m in transport.sent if m["method"].startswith("Input.")]

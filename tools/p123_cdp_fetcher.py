@@ -11,7 +11,7 @@ printed. Hand the files to the staging CLI afterwards (``docs/providers/p123-cap
 Transport allow-list, enforced before a message leaves the process: target discovery
 and attach, ``Page.navigate`` to an exact allowlisted URL, and
 ``Browser.setDownloadBehavior`` to the one new download directory. Nothing else:
-no ``Runtime.*``, no ``Fetch.*``, no ``Input.*``. One narrow widening exists for the
+no ``Fetch.*``, no ``Input.*``, and ``Runtime.evaluate`` only in a routes run (below). One narrow widening exists for the
 allowlisted designer-model JSON pages, which are shown rather than downloaded:
 ``Network.enable`` and ``Network.getResponseBody``, and a body is read only for the
 request id of the one exact allowlisted ``GET /spr/strategy/model/<id>?dm=true``.
@@ -73,6 +73,10 @@ ALLOWED_CDP_METHODS = frozenset(
         "Network.getResponseBody",
     }
 )
+#: ``Runtime.evaluate`` is allowed only in a routes run, and only for an expression that
+#: is byte-for-byte one of the pinned templates below (the probe, or one in-page GET of an
+#: exact allowlisted URL). No other ``Runtime.*`` method exists in the allow-list.
+INPAGE_CDP_METHODS = frozenset({"Runtime.evaluate"})
 #: Allowed only in a run that fetches designer models, and ``getResponseBody`` only for
 #: the request id of an exact allowlisted designer-model GET.
 NETWORK_CDP_METHODS = frozenset({"Network.enable", "Network.getResponseBody"})
@@ -172,6 +176,7 @@ class Allowlist:
     drive_files: tuple[str, ...]
     page_record: bool
     sha256: str
+    routes: tuple[tuple[str, int], ...] = ()
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -186,6 +191,25 @@ def _positive(value: object, what: str) -> int:
     ):
         raise FetchRefused("ALLOWLIST_INVALID", what)
     return value
+
+
+def _parse_routes(value: object) -> tuple[tuple[str, int], ...]:
+    if not isinstance(value, list):
+        raise FetchRefused("ALLOWLIST_INVALID", "routes")
+    pairs: list[tuple[str, int]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"kind", "id"}:
+            raise FetchRefused("ALLOWLIST_INVALID", "route entry")
+        kind = item["kind"]
+        if not isinstance(kind, str) or kind not in ROUTE_BY_NAME:
+            raise FetchRefused("ALLOWLIST_INVALID", "route kind")
+        pairs.append((kind, _positive(item["id"], "route id")))
+    if len(set(pairs)) != len(pairs):
+        raise FetchRefused("ALLOWLIST_INVALID", "duplicate route")
+    for kind, ident in pairs:
+        if kind == "designer_perf_full" and ("designer_model", ident) not in pairs:
+            raise FetchRefused("ALLOWLIST_INVALID", "curve needs its model route")
+    return tuple(pairs)
 
 
 def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
@@ -206,8 +230,10 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
         "drive_files",
         "page_record",
     }
-    if not isinstance(data, dict) or set(data) != keys:
+    if not isinstance(data, dict) or set(data) - {"routes", "page_gets"} != keys:
         raise FetchRefused("ALLOWLIST_INVALID", "keys")
+    if "routes" in data and "page_gets" in data:
+        raise FetchRefused("ALLOWLIST_INVALID", "routes and page_gets")
     if data["schema_version"] != ALLOWLIST_SCHEMA_VERSION:
         raise FetchRefused("ALLOWLIST_SCHEMA_UNSUPPORTED")
     if data["origin"] != ORIGIN:
@@ -249,7 +275,13 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
     if not isinstance(data["page_record"], bool):
         raise FetchRefused("ALLOWLIST_INVALID", "page_record")
     return Allowlist(
-        tuple(books), tuple(models), tuple(drive), data["page_record"], digest
+        tuple(books),
+        tuple(models),
+        tuple(drive),
+        data["page_record"],
+        digest,
+        # ``page_gets`` is the same list under its earlier name (PR 865's allowlists).
+        _parse_routes(data.get("routes", data.get("page_gets", []))),
     )
 
 
@@ -267,10 +299,15 @@ def build_allowlist_bytes(
     drive_ids: Sequence[str] = (),
     kinds: Sequence[str] | None = None,
     page_record: bool = False,
+    routes: Sequence[tuple[str, int]] = (),
 ) -> bytes:
     chosen = list(kinds) if kinds else [k.name for k in KINDS]
+    extra: dict[str, object] = (
+        {"routes": [{"kind": k, "id": i} for k, i in routes]} if routes else {}
+    )
     return canonical_bytes(
         {
+            **extra,
             "schema_version": ALLOWLIST_SCHEMA_VERSION,
             "origin": ORIGIN,
             "books": [{"id": b, "kinds": chosen} for b in book_ids],
@@ -452,6 +489,326 @@ def drive_tab_ok(url: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# In-page routes: JSON and CSV that only answer a ``fetch()`` made FROM the signed-in page
+#
+# Direct navigation to these URLs returns HTTP 400. Each one is requested by an exact,
+# pinned ``fetch`` expression run inside the tab, after the tab has been navigated to the
+# host page that normally issues the request. Bytes are saved unmodified.
+
+ACCOUNT_TABS: tuple[str, ...] = (
+    "about",
+    "investments",
+    "perf",
+    "positions",
+    "trans",
+    "broker",
+    "reports",
+    "notes",
+    "liquidated",
+)
+
+
+@dataclass(frozen=True)
+class Route:
+    """One reviewed in-page read: host page, request, saved name, expected shape."""
+
+    name: str
+    host_page: str
+    target: str
+    saved: str
+    shape: str  # json_object | json_list | json_any | csv | html | visit
+    check: str = ""
+
+
+ROUTES: tuple[Route, ...] = (
+    Route(
+        "designer_model",
+        "/app/r2g/summary?id={id}",
+        "/spr/strategy/model/{id}?dm=true",
+        "r2g_{id}_dm_true.json",
+        "json_object",
+        "portUid",
+    ),
+    Route(
+        "designer_perf_full",
+        "/app/r2g/summary?id={id}",
+        "/spr/strategy/model/{id}/perf?dm=true&init=true&years=25",
+        "r2g_{id}_perf-full.json",
+        "json_object",
+        "perfData",
+    ),
+    Route(
+        "designer_holdings",
+        "/app/r2g/summary?id={id}",
+        "/spr/strategy/model/{id}/holdings?dm=true",
+        "r2g_{id}_holdings.json",
+        "json_object",
+        "holdings",
+    ),
+    Route(
+        "investment_perfdata",
+        "/app/investment/details?id={id}",
+        "/app/investment/perf-data/{id}?init=1",
+        "strategy_{id}_app_investment_perfdata_init.json",
+        "json_object",
+        "data",
+    ),
+    Route(
+        "investment_perfdata_blank",
+        "/app/investment/details?id={id}",
+        "/app/investment/perf-data/{id}?init=",
+        "strategy_{id}_app_investment_perfdata_init_blank.json",
+        "json_any",
+    ),
+    Route(
+        "investment_perfdata_true",
+        "/app/investment/details?id={id}",
+        "/app/investment/perf-data/{id}?init=true",
+        "strategy_{id}_app_investment_perfdata_init_true.json",
+        "json_object",
+        "data",
+    ),
+    Route(
+        "investment_trans_resource",
+        "/app/investment/details?id={id}",
+        "/app/investment/transResource/{id}",
+        "strategy_{id}_app_investment_transresource.json",
+        "json_any",
+    ),
+    Route(
+        "investment_holdings",
+        "/app/investment/details?id={id}",
+        "/app/investment/holdings/{id}",
+        "strategy_{id}_app_investment_holdings.json",
+        "json_any",
+    ),
+    Route(
+        "investment_performance",
+        "/app/investment/details?id={id}",
+        "/spr/strategy/portmodel/{id}/perf",
+        "strategy_{id}_strategy_portmodel_perf.json",
+        "json_any",
+    ),
+    Route(
+        "investment_resource",
+        "/app/investment/details?id={id}",
+        "/app/investment/resource/{id}",
+        "strategy_{id}_app_investment_resource.json",
+        "json_object",
+        "assetUid",
+    ),
+    Route(
+        "investment_performance_page",
+        "/app/investment/details?id={id}",
+        "/app/investment/performance",
+        "strategy_{id}_app_investment_performance.html",
+        "html",
+        "InvestmentPerformanceCtrl",
+    ),
+    Route(
+        "investment_holdings_csv",
+        "/app/investment/details?id={id}",
+        "/app/investment/holdings.csv?id={id}&v=basic",
+        "strategy_{id}_app_investment_holdings_basic.csv",
+        "csv",
+        "Ticker,Name,Prev Close,1D (%),1D,Value,Weight,Shares,Return%,Avg Price,Return,#Days",
+    ),
+    Route(
+        "investment_trans_csv",
+        "/app/investment/details?id={id}",
+        "/app/investment/trans.csv?id={id}&type=&tickers=&fromDt=&toDt=",
+        "strategy_{id}_app_investment_trans.csv",
+        "csv",
+        "Date,Type,Ticker,Name,Shares,Price,Commiss,Amount,Note",
+    ),
+    Route(
+        "account_resource",
+        "/app/account/details?id={id}",
+        "/app/account/resource/{id}",
+        "account_{id}_app_account_resource.json",
+        "json_object",
+    ),
+    Route(
+        "account_positions",
+        "/app/account/details?id={id}",
+        "/app/account/positions/{id}",
+        "account_{id}_app_account_positions.json",
+        "json_list",
+    ),
+    # Visit only: the details page and each tab, nothing saved (the SPA shell carries no
+    # data; the data routes above are what the tabs request).
+    Route("account_pages", "/app/account/details?id={id}", "", "", "visit"),
+)
+ROUTE_BY_NAME = {item.name: item for item in ROUTES}
+
+PROBE_EXPRESSION = (
+    "JSON.stringify([location.origin,location.pathname+location.search,"
+    "document.readyState])"
+)
+
+
+def fetch_expression(url: str) -> str:
+    """The one pinned in-page GET: same origin, cookies, no redirect, bytes as base64."""
+
+    return (
+        "(async()=>{const r=await fetch("
+        + json.dumps(url)
+        + ",{method:'GET',credentials:'include',redirect:'error'});"
+        "const b=new Uint8Array(await r.arrayBuffer());let s='';"
+        "for(let i=0;i<b.length;i+=8192){s+=String.fromCharCode.apply("
+        "null,b.subarray(i,i+8192))}"
+        "return JSON.stringify({s:r.status,t:r.headers.get('content-type')||'',"
+        "u:r.url,b:btoa(s)})})()"
+    )
+
+
+def route_host_url(route: Route, ident: int) -> str:
+    return f"{ORIGIN}{route.host_page.format(id=ident)}"
+
+
+def route_target_url(route: Route, ident: int) -> str:
+    return f"{ORIGIN}{route.target.format(id=ident)}"
+
+
+def route_visit_urls(route: Route, ident: int) -> tuple[str, ...]:
+    host = route_host_url(route, ident)
+    return (host, *(f"{host}&t={tab}" for tab in ACCOUNT_TABS))
+
+
+def route_urls(allowlist: Allowlist) -> tuple[frozenset[str], frozenset[str]]:
+    """(navigable pages, fetchable URLs) for every allowlisted route entry."""
+
+    pages: set[str] = set()
+    fetches: set[str] = set()
+    for name, ident in allowlist.routes:
+        route = ROUTE_BY_NAME[name]
+        pages.add(route_host_url(route, ident))
+        if route.shape == "visit":
+            pages.update(route_visit_urls(route, ident))
+        else:
+            fetches.add(route_target_url(route, ident))
+    return frozenset(pages), frozenset(fetches)
+
+
+def screen_route_url(url: str, allowed: frozenset[str]) -> None:
+    """Raise FetchRefused unless ``url`` is exactly one allowlisted route URL."""
+
+    if not url.startswith("https://"):
+        raise FetchRefused("URL_NOT_HTTPS")
+    if not _origin_ok(url, frozenset({P123_HOST})):
+        raise FetchRefused("URL_OFF_ORIGIN")
+    parts = urlsplit(url)
+    text = (unquote_plus(parts.path) + "?" + unquote_plus(parts.query)).lower()
+    if _MUTATION_RE.search(text):
+        raise FetchRefused("URL_MUTATION_WORD")
+    if url not in allowed or parts.fragment:
+        raise FetchRefused("URL_NOT_ALLOWLISTED")
+
+
+def _provider_day(value: object) -> date | None:
+    """The model payload states dates as MM/DD/YYYY."""
+
+    parts = str(value).split("/")
+    try:
+        month, day, year = (int(item) for item in parts)
+        return date(year, month, day) if len(parts) == 3 else None
+    except ValueError:
+        return None
+
+
+def _check_designer_curve(
+    route: Route, ident: int, document: object, context: dict[int, date] | None
+) -> None:
+    """The perf curve must be the FULL curve: it starts on the model's inceptionDt.
+
+    The model is read first and its inceptionDt is kept in ``context``; a curve that starts
+    later (a truncated ``years`` window) is refused, never saved.
+    """
+
+    if route.name not in {"designer_model", "designer_perf_full"}:
+        return
+    if not isinstance(document, dict) or context is None:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "no model context")
+    if route.name == "designer_model":
+        inception = _provider_day(document.get("inceptionDt"))
+        if inception is None:
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "model inceptionDt unreadable")
+        context[ident] = inception
+        return
+    block = document.get("perfData")
+    start = block.get("date") if isinstance(block, dict) else None
+    try:
+        first = date.fromisoformat(str(start))
+    except ValueError as exc:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "curve start unreadable") from exc
+    expected = context.get(ident)
+    if expected is None:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "model not read before its curve")
+    if first != expected:
+        raise FetchStop(
+            "STOP_SHAPE_UNEXPECTED", "curve start differs from model inceptionDt"
+        )
+
+
+def validate_route_body(
+    route: Route,
+    ident: int,
+    content_type: str,
+    data: bytes,
+    context: dict[int, date] | None = None,
+) -> int | None:
+    """Fail closed unless ``data`` has exactly the reviewed shape; return CSV rows.
+
+    Errors name the check, never a value from the body.
+    """
+
+    html = "text/html" in content_type
+    if not data:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "empty body")
+    if html and route.shape != "html":
+        raise FetchStop("STOP_REAUTH", "an HTML page was served")
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "body is not UTF-8") from exc
+    if route.shape in {"json_object", "json_list", "json_any"}:
+        if "json" not in content_type:
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "response is not JSON")
+        try:
+            document = json.loads(text)
+        except ValueError as exc:
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "body is not JSON") from exc
+        want: tuple[type, ...] = {
+            "json_object": (dict,),
+            "json_list": (list,),
+            "json_any": (dict, list),
+        }[route.shape]
+        if not isinstance(document, want):
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "body has an unexpected JSON type")
+        if route.check and (
+            not isinstance(document, dict) or route.check not in document
+        ):
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "expected field missing")
+        if (
+            route.name == "designer_model"
+            and isinstance(document, dict)
+            and document.get("portUid") != ident
+        ):
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "model id differs")
+        _check_designer_curve(route, ident, document, context)
+        return None
+    if route.shape == "csv":
+        if html or text.splitlines()[0] != route.check:
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "unexpected CSV header")
+        return count_rows(data)
+    if route.shape == "html":
+        if not html or route.check not in text:
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "unexpected page fragment")
+        return None
+    raise FetchStop("STOP_SHAPE_UNEXPECTED", "route has no body")
+
+
+# ---------------------------------------------------------------------------
 # Guarded transport
 
 
@@ -477,7 +834,9 @@ class GuardedTransport:
         allowed_urls: frozenset[str],
         download_path: str,
         network_read: bool = False,
+        inpage_expressions: frozenset[str] = frozenset(),
     ) -> None:
+        self._inpage = inpage_expressions
         self._inner = inner
         self._urls = allowed_urls
         self._download_path = download_path
@@ -487,9 +846,19 @@ class GuardedTransport:
     def send(self, message: dict[str, Any]) -> None:
         method = message.get("method")
         params = message.get("params") or {}
-        if method not in ALLOWED_CDP_METHODS:
+        if method not in ALLOWED_CDP_METHODS and not (
+            self._inpage and method in INPAGE_CDP_METHODS
+        ):
             raise FetchRefused("CDP_METHOD_REFUSED", str(method))
-        if method in NETWORK_CDP_METHODS:
+        if method in INPAGE_CDP_METHODS:
+            if (
+                set(params) != {"expression", "awaitPromise", "returnByValue"}
+                or params["expression"] not in self._inpage
+                or params["awaitPromise"] is not True
+                or params["returnByValue"] is not True
+            ):
+                raise FetchRefused("CDP_EVALUATE_NOT_ALLOWLISTED")
+        elif method in NETWORK_CDP_METHODS:
             if not self._network_read:
                 raise FetchRefused("CDP_METHOD_REFUSED", str(method))
             if method == "Network.enable" and params:
@@ -574,12 +943,14 @@ class Session:
         download_timeout: float = 180.0,
         attach_wait: float = 5.0,
         network_read: bool = False,
+        inpage_expressions: frozenset[str] = frozenset(),
     ) -> None:
         self._transport = GuardedTransport(
             transport,
             allowed_urls=allowed_urls,
             download_path=str(incoming),
             network_read=network_read,
+            inpage_expressions=inpage_expressions,
         )
         self._incoming = incoming
         self._tab_ok = tab_ok
@@ -864,6 +1235,83 @@ class Session:
         with saved.open("xb") as handle:
             handle.write(data)
         return hashlib.sha256(data).hexdigest(), len(data)
+
+    # -- in-page reads (routes mode) ----------------------------------------
+    def _evaluate(self, expression: str) -> str:
+        result = self._call(
+            "Runtime.evaluate",
+            {"expression": expression, "awaitPromise": True, "returnByValue": True},
+            self._sid,
+        )
+        value = result.get("result")
+        if "exceptionDetails" in result or not isinstance(value, dict):
+            raise FetchStop("STOP_INPAGE_FAILED", "the in-page script failed")
+        text = value.get("value")
+        if not isinstance(text, str):
+            raise FetchStop("STOP_INPAGE_FAILED", "the in-page script returned no text")
+        return text
+
+    def visit(self, url: str, *, settle: float = 2.0) -> None:
+        """Navigate the tab to the exact page and wait until it has loaded."""
+
+        want = urlsplit(url)
+        self._call("Page.navigate", {"url": url}, self._sid)
+        deadline = self._clock() + self._download_timeout
+        while True:
+            if self._clock() > deadline:
+                raise FetchStop("STOP_REAUTH", "PAGE_NOT_LOADED (signed out or stuck)")
+            self._event(0.5)
+            self._check_tab()
+            try:
+                origin, where, state = json.loads(self._evaluate(PROBE_EXPRESSION))
+            except FetchStop as exc:
+                if exc.code in {"CDP_CALL_FAILED", "STOP_INPAGE_FAILED"}:
+                    continue  # the page is being replaced
+                raise
+            at = urlsplit(str(where))
+            if origin != ORIGIN or _LOGIN_WORD.search(at.path):
+                raise FetchStop("STOP_REAUTH", "the tab left the origin or is on login")
+            if (
+                at.path == want.path
+                and sorted(parse_qsl(at.query, keep_blank_values=True))
+                == sorted(parse_qsl(want.query, keep_blank_values=True))
+                and state == "complete"
+            ):
+                break
+        self._event(settle)
+
+    def fetch_in_page(
+        self,
+        url: str,
+        saved: Path,
+        route: Route,
+        ident: int,
+        context: dict[int, date] | None = None,
+    ) -> tuple[str, int, int | None]:
+        """GET ``url`` from inside the page and save the body unmodified."""
+
+        raw = self._evaluate(fetch_expression(url))
+        try:
+            reply = json.loads(raw)
+            status = int(reply["s"])
+            content_type = str(reply["t"]).lower()
+            final = str(reply["u"])
+            data = base64.b64decode(str(reply["b"]), validate=True)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise FetchStop("STOP_INPAGE_FAILED", "malformed in-page result") from exc
+        if final != url:
+            raise FetchStop("STOP_REAUTH", "the request was redirected")
+        if status in {401, 403}:
+            raise FetchStop("STOP_REAUTH", f"HTTP {status}")
+        if status != 200:
+            raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", f"HTTP {status}")
+        rows = validate_route_body(route, ident, content_type, data, context)
+        if saved.exists():
+            raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "destination exists")
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        with saved.open("xb") as handle:
+            handle.write(data)
+        return hashlib.sha256(data).hexdigest(), len(data), rows
 
 
 # ---------------------------------------------------------------------------
@@ -1251,6 +1699,153 @@ def run_p123(
     return manifest
 
 
+def _assert_dry_run_root(root: Path) -> None:
+    """A dry run lives under a scratch folder and never under a release or evidence root."""
+
+    names = {part.lower() for part in root.resolve().parts}
+    if "scratch" not in names:
+        raise FetchRefused("DRY_RUN_ROOT_NOT_SCRATCH")
+    if names & {"releases", "evidence"}:
+        raise FetchRefused("DRY_RUN_ROOT_IN_RELEASE")
+
+
+def run_routes(
+    transport: CdpTransport,
+    allowlist: Allowlist,
+    root: Path,
+    *,
+    dry_run: bool = False,
+    target_id: str | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    download_timeout: float = 180.0,
+    settle: float = 2.0,
+) -> dict[str, Any]:
+    """Read every allowlisted in-page route; same code path for a dry run.
+
+    A dry run differs only in where it writes: the root must be under a scratch folder,
+    the files land in ``dry-run-capture`` (never ``capture``, the name the staging and
+    generation steps read), and the manifest says it is not evidence. Nothing else
+    changes, so a dry run exercises exactly what the real run will do.
+    """
+
+    try:
+        require_current_interpreter("the P123 CDP fetcher")
+    except InterpreterRefusal as exc:
+        raise FetchRefused("INTERPRETER_REFUSED", str(exc)) from exc
+    if not allowlist.routes:
+        raise FetchRefused("ALLOWLIST_EMPTY", "no routes")
+    pages, fetches = route_urls(allowlist)
+    for url in pages | fetches:  # screen the whole allowlist before anything is sent
+        screen_route_url(url, pages | fetches)
+    if dry_run:
+        _assert_dry_run_root(root)
+    capture_name = "dry-run-capture" if dry_run else "capture"
+    try:
+        recorder.assert_output_root(root)
+    except recorder.RecorderError as exc:
+        raise FetchRefused(exc.code) from exc
+    root.mkdir(parents=True)
+    incoming = root / "incoming"
+    capture = root / capture_name
+    incoming.mkdir()
+    (capture / "raw").mkdir(parents=True)
+    session = Session(
+        transport,
+        allowed_urls=pages,
+        incoming=incoming,
+        tab_ok=p123_tab_ok,
+        tab_known=recorder.origin_allowed,
+        no_download_code="STOP_REAUTH",
+        clock=clock,
+        download_timeout=download_timeout,
+        inpage_expressions=frozenset(
+            {PROBE_EXPRESSION} | {fetch_expression(url) for url in fetches}
+        ),
+    )
+    landed: list[Landed] = []
+    records: list[dict[str, Any]] = []
+    visited: list[str] = []
+    stop: FetchStop | None = None
+    groups: dict[str, list[tuple[Route, int]]] = {}
+    inceptions: dict[int, date] = {}
+    # the model is read before its curve (stable sort keeps the rest of the order)
+    for name, ident in sorted(allowlist.routes, key=lambda e: e[0] != "designer_model"):
+        route = ROUTE_BY_NAME[name]
+        groups.setdefault(route_host_url(route, ident), []).append((route, ident))
+    try:
+        session.attach(target_id)
+        for host, entries in groups.items():
+            session.visit(host, settle=settle)
+            visited.append(urlsplit(host).path)
+            for route, ident in entries:
+                if route.shape == "visit":
+                    for url in route_visit_urls(route, ident)[1:]:
+                        session.visit(url, settle=settle)
+                        visited.append(
+                            urlsplit(url).path + "?t=" + url.rsplit("=", 1)[1]
+                        )
+                    continue
+                url = route_target_url(route, ident)
+                screen_route_url(url, fetches)
+                relative = f"raw/{route.saved.format(id=ident)}"
+                digest, size, rows = session.fetch_in_page(
+                    url, capture / relative, route, ident, inceptions
+                )
+                landed.append(
+                    Landed(route.name, str(ident), relative, digest, size, rows)
+                )
+                records.append(
+                    {
+                        "kind": route.name,
+                        "id": ident,
+                        "relative_path": relative,
+                        "sha256": digest,
+                        "size_bytes": size,
+                        "rows": rows,
+                    }
+                )
+                _replace(capture / "capture-manifest.json", _capture_manifest(landed))
+    except FetchStop as exc:
+        stop = exc
+    except FetchRefused as exc:
+        stop = FetchStop("STOP_REFUSED", exc.code)
+    finally:
+        session.release()
+    fetched = {(r["kind"], r["id"]) for r in records}
+    manifest: dict[str, Any] = {
+        "schema": SCHEMA,
+        "mode": "routes",
+        "dry_run": dry_run,
+        "evidence_eligible": not dry_run,
+        "status": "STOPPED" if stop else "COMPLETE",
+        "stop": {"code": stop.code, "detail": stop.detail} if stop else None,
+        "allowlist_sha256": allowlist.sha256,
+        "capture_directory": capture_name,
+        "routes": records,
+        "pages_visited": visited,
+        "routes_not_fetched": [
+            f"{name}:{ident}"
+            for name, ident in allowlist.routes
+            if ROUTE_BY_NAME[name].shape != "visit" and (name, ident) not in fetched
+        ],
+        "safety": {
+            "cdp_methods": sorted(
+                (ALLOWED_CDP_METHODS - NETWORK_CDP_METHODS) | INPAGE_CDP_METHODS
+            ),
+            "body_reads": "in-page GET of allowlisted routes only",
+            "input_events": False,
+        },
+    }
+    manifest["manifest_sha256"] = _write_new(
+        root
+        / ("p123-dry-run-manifest.json" if dry_run else "p123-fetch-manifest.json"),
+        canonical_bytes(manifest),
+    )
+    if stop:
+        manifest["_stop"] = stop
+    return manifest
+
+
 def run_drive(
     transport: CdpTransport,
     allowlist: Allowlist,
@@ -1343,11 +1938,40 @@ def _parser() -> argparse.ArgumentParser:
         help="also read the account investment list (the identity check's page record)",
     )
     make.add_argument(
+        "--route",
+        action="append",
+        default=[],
+        metavar="KIND:ID",
+        help="in-page route entry for the routes command, e.g. designer_model:123 "
+        "(kinds: " + ", ".join(r.name for r in ROUTES) + ")",
+    )
+    make.add_argument(
+        "--page-get",
+        action="append",
+        default=[],
+        metavar="KIND:ID",
+        help="alias of --route",
+    )
+    make.add_argument(
         "--kind",
         action="append",
         default=[],
         choices=[k.name for k in KINDS],
         help="export kinds per book (default: all three)",
+    )
+    routes_parser = sub.add_parser(
+        "routes", help="read the allowlisted in-page routes (see --dry-run)"
+    )
+    routes_parser.add_argument("--cdp-url", required=True)
+    routes_parser.add_argument("--allowlist", type=Path, required=True)
+    routes_parser.add_argument("--allowlist-sha256", required=True)
+    routes_parser.add_argument("--download-dir", type=Path, required=True)
+    routes_parser.add_argument("--target-id")
+    routes_parser.add_argument("--download-timeout", type=float)
+    routes_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="same code path into a scratch root; never evidence, never a release root",
     )
     for name in ("run", "drive"):
         item = sub.add_parser(name)
@@ -1390,6 +2014,12 @@ def _parser() -> argparse.ArgumentParser:
                 "back to; required, and equal to the generation plan's as-of date",
             )
             item.add_argument("--skip-designer-models", action="store_true")
+            item.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="screen the whole allowlist and print the plan; no browser and "
+                "nothing written (use `routes --dry-run` to rehearse a route read)",
+            )
         else:
             item.add_argument("--file-id", required=True)
     return parser
@@ -1401,6 +2031,10 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "mode": manifest["mode"],
         "manifest_sha256": manifest["manifest_sha256"],
     }
+    if manifest["mode"] == "routes":
+        out["dry_run"] = manifest["dry_run"]
+        out["routes"] = len(manifest["routes"])
+        out["routes_not_fetched"] = len(manifest["routes_not_fetched"])
     if manifest["mode"] == "p123":
         out["books"] = {
             book: {"files": len(item["files"]), "identity": item["identity"]}
@@ -1411,11 +2045,46 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def dry_run_plan(allowlist: Allowlist) -> dict[str, Any]:
+    """Screen every URL of the allowlist exactly as a run would; send nothing."""
+
+    exports = allowed_p123_urls(allowlist)
+    for url in exports:
+        screen_p123_url(url, exports)
+    designers = {designer_url(m): m for m in allowlist.designer_models}
+    for url in designers:
+        screen_designer_url(url, designers)
+    pages, fetches = route_urls(allowlist)
+    for url in pages | fetches:
+        screen_route_url(url, pages | fetches)
+    return {
+        "dry_run": True,
+        "allowlist_sha256": allowlist.sha256,
+        "exports": len(exports),
+        "designer_models": len(designers),
+        "routes": [f"{k}:{i}" for k, i in allowlist.routes],
+        "page_record": allowlist.page_record,
+    }
+
+
+def _route_arg(item: str) -> tuple[str, int]:
+    kind, _, ident = item.partition(":")
+    if kind not in ROUTE_BY_NAME or not ident.isdigit():
+        raise FetchRefused("ALLOWLIST_INVALID", "route argument")
+    return kind, _positive(int(ident), "route id")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "make-allowlist":
-            if not args.book and not args.designer_model and not args.drive_file_id:
+            routes = [_route_arg(item) for item in (*args.route, *args.page_get)]
+            if (
+                not args.book
+                and not args.designer_model
+                and not args.drive_file_id
+                and not routes
+            ):
                 raise FetchRefused("ALLOWLIST_EMPTY")
             payload = build_allowlist_bytes(
                 args.book,
@@ -1423,6 +2092,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.drive_file_id,
                 args.kind,
                 args.page_record,
+                routes,
             )
             parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
             digest = _write_new(args.out, payload)
@@ -1430,7 +2100,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         allowlist = load_allowlist(args.allowlist, args.allowlist_sha256)
         timeout = args.download_timeout
-        if args.command == "run":
+        extra: dict[str, Any] = {"download_timeout": timeout} if timeout else {}
+        if args.command == "run" and args.dry_run:
+            print(json.dumps(dry_run_plan(allowlist), sort_keys=True))
+            return 0
+        if args.command == "run" and allowlist.routes:
+            if allowlist.books or allowlist.designer_models or allowlist.page_record:
+                raise FetchRefused("ROUTES_MIXED_WITH_BOOKS", "use separate allowlists")
+            args.command = "routes"  # route-only allowlist: no identity check, no as-of
+            args.dry_run = False
+        if args.command == "routes":
+            refusal = check_entry_interpreter(
+                "the P123 CDP fetcher (in-page routes)", "p123-cdp-fetcher"
+            )
+            if refusal is not None:
+                return refusal
+            transport = connect(args.cdp_url)
+            try:
+                manifest = run_routes(
+                    transport,
+                    allowlist,
+                    args.download_dir,
+                    dry_run=args.dry_run,
+                    target_id=args.target_id,
+                    **extra,
+                )
+            finally:
+                transport.close()
+        elif args.command == "run":
             refusal = check_entry_interpreter(
                 "the P123 CDP fetcher (it runs the book identity check)",
                 "p123-cdp-fetcher",
@@ -1448,7 +2145,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             transport = connect(args.cdp_url)
             try:
-                extra: dict[str, Any] = {"download_timeout": timeout} if timeout else {}
                 manifest = run_p123(
                     transport,
                     allowlist,
@@ -1465,7 +2161,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             transport = connect(args.cdp_url)
             try:
-                extra = {"download_timeout": timeout} if timeout else {}
                 manifest = run_drive(
                     transport,
                     allowlist,

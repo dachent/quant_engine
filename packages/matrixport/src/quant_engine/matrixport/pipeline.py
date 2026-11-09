@@ -131,6 +131,65 @@ def recorded_capture_label(run: Mapping[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+# A current-state capture taken up to this long after the cutoff day's end is recorded as a
+# fact and needs no approval label (Friday cutoff, pull on the following Monday UTC).  The
+# D share count of the daily valuation is the share count at capture (``valuation.py``
+# anchors the opening gap on the current holding), so share events between the cutoff and the
+# capture are not visible; past this bound a person must say so with a label.
+MAX_UNLABELLED_GAP_HOURS = 72
+
+
+def late_capture_exceeds_bound(latest_captured_at_ms: int, limit_ms: int) -> bool:
+    """True when a capture is more than ``MAX_UNLABELLED_GAP_HOURS`` past the cutoff day's end.
+
+    Compares the raw millisecond difference; the rounded ``gap_hours`` is for display only.
+    """
+
+    return latest_captured_at_ms - limit_ms > MAX_UNLABELLED_GAP_HOURS * 3_600_000
+
+
+def _utc_stamp(moment_ms: int) -> str:
+    stamp = datetime.fromtimestamp(moment_ms / 1000, timezone.utc)
+    return stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def late_capture_fact(
+    captures: Mapping[str, int],
+    limit_ms: int,
+    inherited: Mapping[str, int] | None = None,
+) -> dict[str, Any] | None:
+    """The recorded fact of current-state requests captured after the cutoff day's end.
+
+    ``captures`` are the run's own requests; ``inherited`` are snapshot rows carried over
+    from base runs (key: ``dataset:base_run_id``).  Both feed ONE fact: the latest capture
+    time sets ``gap_hours``, the earliest is kept, ``late_paths`` is the union and
+    ``inherited_late_paths`` names the part that came from base runs.
+    """
+
+    direct_late = {path: at_ms for path, at_ms in captures.items() if at_ms > limit_ms}
+    inherited_late = {
+        path: at_ms for path, at_ms in (inherited or {}).items() if at_ms > limit_ms
+    }
+    late = {**direct_late, **inherited_late}
+    if not late:
+        return None
+    latest = max(late.values())
+    earliest = min(late.values())
+    fact: dict[str, Any] = {
+        "cutoff_end_ms": limit_ms,
+        "latest_captured_at_ms": latest,
+        "latest_captured_at": _utc_stamp(latest),
+        "earliest_captured_at_ms": earliest,
+        "earliest_captured_at": _utc_stamp(earliest),
+        "gap_hours": round((latest - limit_ms) / 3_600_000, 4),
+        "late_paths": sorted(late),
+        "valuation_share_count": "capture-time shares (no event after the cutoff is visible)",
+    }
+    if inherited_late:
+        fact["inherited_late_paths"] = sorted(inherited_late)
+    return fact
+
+
 def recorded_captures(run: Mapping[str, Any]) -> dict[str, int]:
     """Path -> UTC ms at which each current-state request was captured."""
 
@@ -1018,7 +1077,15 @@ class MatrixportExtractor:
             "captured_at_ms": moment,
             "captured_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         }
-        self.storage.merge_run_metadata(self.run_id, {"captures": captures})
+        update: dict[str, Any] = {"captures": captures}
+        if self.cutoff is not None:
+            fact = late_capture_fact(
+                {key: int(item["captured_at_ms"]) for key, item in captures.items()},
+                cutoff_end_ms(self.cutoff, 2**62),
+            )
+            if fact is not None:
+                update["late_capture"] = fact
+        self.storage.merge_run_metadata(self.run_id, update)
 
     def _offset(
         self,

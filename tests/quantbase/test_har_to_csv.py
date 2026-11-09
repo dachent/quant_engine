@@ -70,7 +70,14 @@ def _bodies() -> dict[str, Any]:
     order = dict.fromkeys(activity_keys)
     order.update(id="o-1", transaction="t-1", filled_at="2026-10-02T01:00:00Z")
     filled = dict.fromkeys(activity_keys)
-    filled.update(id="t-1", fund="7", fund_title=VOLATIS, type="BUY", amount="5")
+    filled.update(
+        id="t-1",
+        fund="7",
+        fund_title=VOLATIS,
+        type="BUY",
+        amount="5",
+        time="2026-10-02T02:00:00Z",
+    )
     stat = dict.fromkeys(converter.HEADERS["fund_stats"], "s")
     stat.update(id=7, title=VOLATIS, scenarios=[{"a": 1}], live=True, partner=None)
     mark = {"days_ago": 3, "fund_id": 7, "percentage": 1.5}
@@ -90,7 +97,13 @@ def _bodies() -> dict[str, Any]:
             "value": ACCOUNT_VALUE,
             "cost_basis": "1.0",
             "profit_loss": "0.5",
-        }
+        },
+        {
+            "time": "10/07/2026",
+            "value": "10.5",
+            "cost_basis": "1.0",
+            "profit_loss": "0.6",
+        },
     ]
     holding = {
         "symbol": "SYN",
@@ -341,8 +354,12 @@ class Case:
         self.intake = Path(str(staged["intake_dir"]))
         intake.parse_intake(self.intake)
 
-    def convert(self, mode: str = "public") -> dict[str, object]:
-        return converter.convert(self.intake, self.out, mode)
+    def convert(
+        self, mode: str = "public", *, allow_provider_drift: bool = False
+    ) -> dict[str, object]:
+        return converter.convert(
+            self.intake, self.out, mode, None, allow_provider_drift
+        )
 
     def output(self) -> Path:
         return self.out / "quantbase-har-csv" / self.intake.name
@@ -817,7 +834,9 @@ def test_observations_after_the_cutoff_are_excluded_and_counted(
         row[3] <= "2026-10-07T23"
         for row in _rows(csv_dir / "ssg_Volatis_Strategy_pricehistory.csv")[1:]
     )
-    assert len(_rows(csv_dir / "dashboard_Total_pricehistory.csv")) == 2
+    assert (
+        len(_rows(csv_dir / "dashboard_Total_pricehistory.csv")) == 3
+    )  # header + the two rows on or before the cutoff
     activity = _rows(csv_dir / "account_activity.csv")
     assert "late" not in {row[activity[0].index("id")] for row in activity[1:]}
     assert len(activity) == 3
@@ -1110,3 +1129,188 @@ def test_labels_are_absent_for_legacy_plans_and_exceptions_need_labels() -> None
     with pytest.raises(GEN_ERROR, match="needs snapshot labels"):
         generation._snapshot_plan_block(_DATASETS, None, "label")
     assert generation._snapshot_catalog_fields(None, None) == {}
+
+
+def _drift(bodies: dict[str, Any]) -> None:
+    """The 2026-11-08 provider shape: extra fields, null top wins, no fund id in the
+    price rows, fewer descriptor columns in the stats list."""
+    bodies["users.profile"][0]["mfa_required_for_withdrawals"] = True
+    for entry in bodies["accounts.activity"]["data"]:
+        entry["item"]["first_failed_at"] = None
+    bodies["portfolio.dashboard"]["data"]["top_wins"] = {
+        "biggest": None,
+        "longest": None,
+    }
+    props = bodies["funds.invest"]["pageProps"]
+    for row in props["fundPriceData"]:
+        del row["fund_id"]
+    for item in props["fundStatsData"]["data"]:
+        del item["sharpe_ratio"]
+        item["disclosure_type"] = "x"
+
+
+def test_provider_schema_drift_is_recorded_and_the_data_still_converts(
+    tmp_path: Path,
+) -> None:
+    case = Case(tmp_path, _drift)
+    with pytest.raises(ERROR, match="keys differ"):
+        case.convert("account-level")  # strict by default
+    case.convert("account-level", allow_provider_drift=True)
+    target = case.output()
+    report = json.loads((target / "conversion-report.json").read_bytes())
+    derivation = report["derivation"]
+    assert derivation["ignored_extra_fields"] == {
+        "accounts.activity.item": ["first_failed_at"],
+        "fundStatsData.data[]": ["disclosure_type"],
+        "users.profile[0]": ["mfa_required_for_withdrawals"],
+    }
+    assert derivation["allow_provider_drift"] is True
+    assert derivation["fund_stats_columns_absent"] == ["sharpe_ratio"]
+    assert "price_series_without_fund_id" not in derivation
+    csv_dir = target / "source" / "csv"
+    # The fund id comes from the stats list of the same response (title -> id).
+    series = _rows(csv_dir / "ssg_Volatis_Strategy_pricehistory.csv")
+    assert {row[1] for row in series[1:]} == {"7"}
+    stats = _rows(csv_dir / "ssg_all_funds_stats.csv")
+    column = stats[0].index("sharpe_ratio")
+    assert {row[column] for row in stats[1:]} == {""}
+    wins = dict(_rows(csv_dir / "dashboard_total_wins.csv")[1:])
+    assert wins["biggest_percentage"] == "" and wins["longest_fund_id"] == ""
+    assert "mfa_required_for_withdrawals" not in (
+        csv_dir / "user_profile.csv"
+    ).read_text(encoding="utf-8")
+    assert (
+        converter.verify_conversion(case.intake, case.out, "account-level", None, True)[
+            "state"
+        ]
+        == "VERIFIED"
+    )
+
+
+def test_a_fund_without_a_stats_id_keeps_an_empty_id_and_is_counted(
+    tmp_path: Path,
+) -> None:
+    def mutate(bodies: dict[str, Any]) -> None:
+        _drift(bodies)
+        props = bodies["funds.invest"]["pageProps"]
+        props["fundStatsData"]["data"] = [
+            item for item in props["fundStatsData"]["data"] if item["title"] == VOLATIS
+        ]
+
+    case = Case(tmp_path, mutate)
+    case.convert("account-level", allow_provider_drift=True)
+    target = case.output()
+    derivation = json.loads((target / "conversion-report.json").read_bytes())[
+        "derivation"
+    ]
+    assert derivation["price_series_without_fund_id"] == 1
+    other = _rows(target / "source/csv/ssg_Other___Fund_and_Co_pricehistory.csv")
+    assert {row[1] for row in other[1:]} == {""}
+
+
+def test_missing_data_still_refuses_after_the_drift_tolerance(tmp_path: Path) -> None:
+    def no_key(bodies: dict[str, Any]) -> None:
+        del bodies["users.profile"][0]["id"]
+
+    with pytest.raises(ERROR, match=r"users.profile\[0\] keys differ: missing="):
+        Case(tmp_path / "a", no_key).convert(allow_provider_drift=True)
+
+    def no_volatis_id(bodies: dict[str, Any]) -> None:
+        _drift(bodies)
+        props = bodies["funds.invest"]["pageProps"]
+        props["fundStatsData"]["data"] = [
+            item for item in props["fundStatsData"]["data"] if item["title"] != VOLATIS
+        ]
+
+    with pytest.raises(ERROR, match="lacks the Volatis fund id"):
+        Case(tmp_path / "b", no_volatis_id).convert(
+            "account-level", allow_provider_drift=True
+        )
+
+    def no_stats_id(bodies: dict[str, Any]) -> None:
+        del bodies["funds.invest"]["pageProps"]["fundStatsData"]["data"][0]["id"]
+
+    with pytest.raises(ERROR, match="lacks a fund id or title"):
+        Case(tmp_path / "c", no_stats_id).convert(allow_provider_drift=True)
+
+
+def test_the_volatis_dashboard_series_must_carry_the_cutoff_day(tmp_path: Path) -> None:
+    def stale(bodies: dict[str, Any]) -> None:
+        funds = bodies["portfolio.dashboard"]["data"]["funds_data"]
+        funds[VOLATIS] = {
+            **funds[VOLATIS],
+            "pricehistory": [funds[VOLATIS]["pricehistory"][0]],  # ends 10/02, before D
+        }
+
+    # Total and the other fund still reach the cutoff day; they cannot stand in for Volatis.
+    with pytest.raises(ERROR, match="no observation on the cutoff day 2026-10-07"):
+        Case(tmp_path, stale).convert()
+
+
+def test_drift_tolerance_never_tolerates_a_missing_identity_amount_or_time(
+    tmp_path: Path,
+) -> None:
+    def drop(key: str, index: int = 1):  # type: ignore[no-untyped-def]
+        def mutate(bodies: dict[str, Any]) -> None:
+            _drift(bodies)
+            del bodies["accounts.activity"]["data"][index]["item"][key]
+
+        return mutate
+
+    for number, (key, index, match) in enumerate(
+        [
+            ("id", 1, "lacks required keys"),
+            ("amount", 1, "lacks required keys"),
+            ("time", 1, "lacks required keys"),
+            ("user", 0, "lacks required keys"),
+            ("time", 0, "lacks required keys"),
+        ]
+    ):
+        with pytest.raises(ERROR, match=match):
+            Case(tmp_path / f"m{number}", drop(key, index)).convert(
+                "account-level", allow_provider_drift=True
+            )
+
+
+def test_a_row_without_any_parseable_timestamp_is_refused_not_passed(
+    tmp_path: Path,
+) -> None:
+    def blank(bodies: dict[str, Any]) -> None:
+        item = bodies["accounts.activity"]["data"][1]["item"]
+        for field in converter._TIMESTAMP_FIELDS:
+            if field in item:
+                item[field] = None
+
+    for number, drift in enumerate((False, True)):
+        with pytest.raises(ERROR, match="no parseable timestamp"):
+            Case(tmp_path / f"b{number}", blank).convert(
+                "account-level", allow_provider_drift=drift
+            )
+
+
+def test_an_unknown_activity_type_and_a_missing_stats_column_refuse_under_drift(
+    tmp_path: Path,
+) -> None:
+    def unknown(bodies: dict[str, Any]) -> None:
+        _drift(bodies)
+        bodies["accounts.activity"]["data"][0]["type"] = "brand_new_type"
+
+    with pytest.raises(ERROR, match="no declared required keys"):
+        Case(tmp_path / "u", unknown).convert(
+            "account-level", allow_provider_drift=True
+        )
+
+    def stats(bodies: dict[str, Any]) -> None:
+        _drift(bodies)
+        required = sorted(
+            set(converter.HEADERS["fund_stats"])
+            - converter._STATS_OPTIONAL
+            - {"id", "title"}
+        )
+        del bodies["funds.invest"]["pageProps"]["fundStatsData"]["data"][0][required[0]]
+
+    with pytest.raises(ERROR, match="lacks required columns"):
+        Case(tmp_path / "s", stats).convert("account-level", allow_provider_drift=True)
+    # the 21 explicit optional columns and extra keys are still tolerated
+    Case(tmp_path / "ok", _drift).convert("account-level", allow_provider_drift=True)
+    assert len(converter._STATS_OPTIONAL) == 21

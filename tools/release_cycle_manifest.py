@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
 import os
@@ -30,6 +30,7 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA = (
@@ -39,6 +40,20 @@ RESOLVED_SCHEMA = (
     REPO_ROOT / "schemas" / "portfolio" / "release-resolved-cycle.schema.json"
 )
 RESOLVED_VERSION = "qe-release-resolved-cycle/1"
+
+# Cutoff policy: the delivery cutoff is the end of the last COMPLETE NYSE trading day (New York),
+# resolved when the refresh STARTS (``refresh_started_at_utc``) and fixed for the cycle. A cutoff
+# that differs needs an explicit owner instruction (``cutoff_owner_instruction``) recorded here.
+NEW_YORK = ZoneInfo("America/New_York")
+# Regular close; early closes are not modelled, so a half day counts as complete a little late.
+SESSION_CLOSE = time(16, 0)
+CUTOFF_OVERRIDE_FIELD = "cutoff_owner_instruction"
+CUTOFF_OK = "MATCHES_LAST_COMPLETE_NYSE_DAY"
+CUTOFF_OVERRIDDEN = "OWNER_INSTRUCTION"
+CUTOFF_LEGACY = "NOT_CHECKED_LEGACY"
+# R1, R2, R2.1 and R2.2 were declared before the rule existed: a manifest whose cutoff is not after
+# this date may omit refresh_started_at_utc; any later cutoff must carry it (or an owner instruction).
+LEGACY_LAST_CUTOFF = date(2026, 9, 17)
 
 GENERATION_MANIFEST = "GENERATION_MANIFEST"
 SELECTED_SOURCE_ARTIFACT = "SELECTED_SOURCE_ARTIFACT"
@@ -151,6 +166,67 @@ def normalize_capture_timestamp(value: str, what: str) -> str:
     return text + ("Z" if zone == "Z" else "+00:00")
 
 
+def expected_cutoff(refresh_started_at_utc: str) -> date:
+    """The last complete NYSE trading day as of the declared refresh start (New York clock)."""
+
+    from quant_engine.core import is_nyse_trading_day, last_nyse_trading_day
+
+    stamp = normalize_capture_timestamp(
+        refresh_started_at_utc, "refresh_started_at_utc"
+    )
+    local = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(NEW_YORK)
+    today = local.date()
+    if is_nyse_trading_day(today) and local.time() >= SESSION_CLOSE:
+        return today
+    return last_nyse_trading_day(today - timedelta(days=1))
+
+
+def check_declared_cutoff(manifest: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The cutoff consistency check; ``None`` for a legacy manifest with no refresh start.
+
+    Never blocks a recorded owner instruction; refuses a mismatch that carries none.
+    """
+
+    override = manifest.get(CUTOFF_OVERRIDE_FIELD)
+    started = manifest.get("refresh_started_at_utc")
+    if started is None:
+        if override is not None:
+            raise CycleManifestError(
+                "CUTOFF_CHECK_NEEDS_REFRESH_START",
+                f"{CUTOFF_OVERRIDE_FIELD} is only meaningful with refresh_started_at_utc",
+            )
+        if _day(manifest["cutoff"], "cutoff") > LEGACY_LAST_CUTOFF:
+            raise CycleManifestError(
+                "CUTOFF_CHECK_REQUIRED",
+                f"cutoff {manifest['cutoff']} is after {LEGACY_LAST_CUTOFF} (the last cycle declared "
+                "before the rule): declare refresh_started_at_utc so it can be checked against the "
+                "last complete NYSE trading day",
+            )
+        return None
+    expected = expected_cutoff(started).isoformat()
+    record: dict[str, Any] = {
+        "refresh_started_at_utc": normalize_capture_timestamp(
+            started, "refresh_started_at_utc"
+        ),
+        "expected_cutoff": expected,
+        "declared_cutoff": manifest["cutoff"],
+    }
+    if manifest["cutoff"] == expected:
+        record["status"] = CUTOFF_OK
+    elif override is not None:
+        record["status"] = CUTOFF_OVERRIDDEN
+        record["owner_instruction"] = override
+    else:
+        raise CycleManifestError(
+            "CUTOFF_MISMATCH",
+            f"declared cutoff {manifest['cutoff']} is not the last complete NYSE trading day "
+            f"{expected} as of refresh start {record['refresh_started_at_utc']}; "
+            f'if the owner instructed this cutoff, add "{CUTOFF_OVERRIDE_FIELD}": '
+            '"<the owner instruction, quoted or referenced>" to the cycle manifest',
+        )
+    return record
+
+
 def validate_static(manifest: Mapping[str, Any]) -> None:
     """Rules that need no filesystem: schema, dates, path syntax, finality evidence presence."""
 
@@ -162,6 +238,7 @@ def validate_static(manifest: Mapping[str, Any]) -> None:
         "evaluated_on": _day(manifest["evaluated_on"], "evaluated_on"),
     }
     normalize_capture_timestamp(manifest["captured_at_utc"], "captured_at_utc")
+    check_declared_cutoff(manifest)
     for provider_id, provider in manifest["providers"].items():
         if "finalized_through" in provider:
             _day(provider["finalized_through"], f"{provider_id}.finalized_through")
@@ -443,6 +520,11 @@ def resolve(
         },
         "public_bundles": {},
     }
+    cutoff_check = check_declared_cutoff(manifest)
+    if (
+        cutoff_check is not None
+    ):  # legacy manifests add no key: their output stays byte-identical
+        out["cutoff_check"] = cutoff_check
     if "epoch_admission_policy" in manifest:
         out["epoch_admission_policy"] = _pin(
             manifest["epoch_admission_policy"], roots, "epoch admission policy"
@@ -508,11 +590,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "HASH_MISMATCH", "cycle manifest differs from its pin"
                 )
             validate_static(json.loads(data))
+            _note_legacy(json.loads(data))
             print(
                 "release-cycle-manifest: static checks OK (no roots given; files not checked)"
             )
             return 0
         resolved = resolve(data, roots, args.manifest_sha256)
+        _note_legacy(resolved)
         schema_problem = _resolved_errors(resolved)
         if schema_problem:
             raise CycleManifestError("RESOLVED_SHAPE", schema_problem)
@@ -541,6 +625,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"release-cycle-manifest: FAIL: INPUT: {exc}", file=sys.stderr)
         return 1
+
+
+def _note_legacy(document: Mapping[str, Any]) -> None:
+    if "cutoff_check" not in document and "refresh_started_at_utc" not in document:
+        print(
+            f"release-cycle-manifest: NOTE: cutoff check {CUTOFF_LEGACY} "
+            "(no refresh_started_at_utc declared)",
+            file=sys.stderr,
+        )
 
 
 def _resolved_errors(resolved: Mapping[str, Any]) -> str:

@@ -1532,3 +1532,46 @@ def test_several_query_shapes_of_one_new_route_coalesce_into_one_declaration() -
     (route,) = rec.build_contract_draft([manifest])["extension"]["routes"]
     assert route["query_keys"] == []
     assert route["optional_query_keys"] == ["limit", "page", "sort"]
+
+
+# --- dry-run rehearsal ---------------------------------------------------------
+
+
+def test_dry_run_command_exists_and_refuses_a_governed_looking_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = rec.main(
+        [
+            "dry-run",
+            "--cdp-url",
+            "http://127.0.0.1:9",
+            "--output-root",
+            str(tmp_path / "capture-1"),
+        ]
+    )
+    assert code == 2 and "REFUSED DRY_ROOT_NAME_NOT_DRY" in capsys.readouterr().out
+
+
+def test_a_governed_capture_never_writes_into_a_dry_root_and_no_contract_from_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = rec.main(
+        [
+            "capture",
+            "--cdp-url",
+            "http://127.0.0.1:9",
+            "--output-root",
+            str(tmp_path / "DRY-1"),
+        ]
+    )
+    assert code == 2 and "REFUSED DRY_ROOT_IN_GOVERNED_RUN" in capsys.readouterr().out
+    code = rec.main(
+        [
+            "propose-contract",
+            "--run-root",
+            str(tmp_path / "DRY-1"),
+            "--out",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert code == 2 and "REFUSED DRY_RUN_NOT_ADMITTED" in capsys.readouterr().out

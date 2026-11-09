@@ -124,23 +124,61 @@ def test_quantbase_profile_selects_only_authenticated_and_account_artifacts(
     csv = source / "csv"
     csv.mkdir()
     (csv / "history.csv").write_bytes(b"keep normalized data")
+    # a recorder run: the HAR and the journal both carry the jwt header values; the
+    # manifest is value-free (hashes and counts) and stays
+    run = source / "capture-1"
+    (run / "har").mkdir(parents=True)
+    (run / "har" / "quantbase-session.har").write_bytes(b"jwt header values")
+    (run / "journal.jsonl").write_bytes(
+        b'{"t": "header", "mode": "capture"}\n{"entry": "jwt header values"}\n'
+    )
+    (run / "manifest.json").write_bytes(b'{"har_sha256": "x"}')
 
     result = quarantine.plan_quantbase(source, tmp_path / "quarantine")
-    assert result["artifact_count"] == 5
+    assert result["artifact_count"] == 7
     plan_path = Path(str(result["plan_path"]))
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     assert plan["provider_id"] == "quantbase"
     assert {row["relative_path"] for row in plan["entries"]} == {
         "account_activity_api_response.json",
         "account_activity_screenshot.png",
+        "capture-1/har/quantbase-session.har",
+        "capture-1/journal.jsonl",
         "capture.har",
         "quantbase_api_summary_20260731.json",
         "quantbase_cookies.json",
     }
+    categories = {row["relative_path"]: row["category"] for row in plan["entries"]}
+    assert categories["capture-1/journal.jsonl"] == "AUTHENTICATED_HAR_JOURNAL"
     quarantine.apply_plan(plan_path)
     quarantine.verify_plan(plan_path)
+    assert not (run / "journal.jsonl").exists()
+    assert (run / "manifest.json").is_file()
     assert (source / "RUNBOOK_QUANTBASE.md").is_file()
     assert (csv / "history.csv").is_file()
+
+
+def test_quantbase_discover_journal_stays_and_unreadable_header_is_selected(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "quantbase"
+    discover = source / "discover-1"
+    discover.mkdir(parents=True)
+    (discover / "journal.jsonl").write_bytes(
+        b'{"t": "header", "mode": "discover", "har_name": null}\n{"t": "route"}\n'
+    )
+    (discover / "manifest.json").write_bytes(b'{"mode": "discover"}')
+    broken = source / "broken-1"
+    broken.mkdir()
+    (broken / "journal.jsonl").write_bytes(b"not json\n")
+    (source / "quantbase_cookies.json").write_bytes(b"browser state")
+
+    result = quarantine.plan_quantbase(source, tmp_path / "quarantine")
+    plan = json.loads(Path(str(result["plan_path"])).read_text(encoding="utf-8"))
+    assert {row["relative_path"] for row in plan["entries"]} == {
+        "broken-1/journal.jsonl",
+        "quantbase_cookies.json",
+    }
 
 
 def test_alpaca_profile_quarantines_plaintext_reports_only(tmp_path: Path) -> None:

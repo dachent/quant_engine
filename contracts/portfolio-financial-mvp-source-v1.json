@@ -5203,7 +5203,7 @@
   },
   {
    "source_id": "portfolio-fx-rates",
-   "source_version": "portfolio-fx-rates:fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+   "source_version": "portfolio-fx-rates:ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c",
    "strategy_version": {
     "status": "NOT_APPLICABLE",
     "binding": "REFERENCE_DATA_NOT_STRATEGY_VERSIONED",
@@ -5225,7 +5225,7 @@
     "FX_RATE"
    ],
    "authority": "OWNER_APPROVED_EVENT_DATE_AND_VALUATION_DATE_FX_SOURCE",
-   "endpoint_or_artifact_selector": "Yahoo USDC-USD and USDT-USD daily Close on each original UTC event or NAV date; generation fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa, catalog 39f8af2df453b33560d2440df90966864cfd1cd73566cea4145d5acbd215ee30, rates 5aabe89502c713220d92d807474116269d526da41b8c00431b5933e976e160c1",
+   "endpoint_or_artifact_selector": "Yahoo USDC-USD and USDT-USD daily Close on each original UTC event or NAV date; generation ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c, catalog 75edf2f8226f20c3d951a688c7f834a3d486741d2a317ac71512c34250b315a2, rates eadf7a5a77c1de870a25d1342f39d398befff3049b7bda732ad2128765484d42",
    "acquisition": {
     "adapter": "agent-market-data-terminal-approved-route",
     "mode": "ALREADY_LOCAL_APPROVED_SOURCE_FREEZE",
@@ -5234,7 +5234,7 @@
    "evidence_layer": "MARKET_OBSERVATION",
    "interval": {
     "observed_start": "2025-01-01",
-    "observed_end": "2026-09-17",
+    "observed_end": "2026-11-06",
     "effective_start": null,
     "effective_end": null,
     "splice_policy": "EVENT_DATE_FOR_FLOWS_AND_DECLARED_VALUATION_DATE_FOR_NAV; ORIGINAL_UTC_DATE; NO_PARITY_INTERPOLATION_OR_FILL"
@@ -5273,9 +5273,9 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
-    "sha256": "964bf36b632aa7059455b5f3869f259aaabe323d31fdb6d6bce03915e84820f6",
-    "as_of": "2026-09-17"
+    "generation_id": "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c",
+    "sha256": "9e820c1ae4538601d17fa0e45e3075d51620f0ebe0c50a078981089c2756c13e",
+    "as_of": "2026-11-06"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
@@ -5290,7 +5290,7 @@
     "PANEL",
     "RELEASE_RECEIPT"
    ],
-   "owner_policy_decision": "Owner approval #374 selects Yahoo USDC-USD and USDT-USD daily Close, quoted as USD per native unit, on each original UTC deposit, withdrawal, or NAV date. Preserve original amounts, currencies, and timestamps. No parity assumption, interpolation, or fill. Owner selection 2026-10-01 (#374 comment 5924282578) admits generation fd6096d8 for UTC dates 2025-01-01 through 2026-09-17."
+   "owner_policy_decision": "Owner approval #374 selects Yahoo USDC-USD and USDT-USD daily Close, quoted as USD per native unit, on each original UTC deposit, withdrawal, or NAV date. Preserve original amounts, currencies, and timestamps. No parity assumption, interpolation, or fill. Owner selection 2026-10-01 (#374 comment 5924282578) admitted generation fd6096d8 for UTC dates 2025-01-01 through 2026-09-17; the R3 owner selection for cutoff 2026-11-06 (#374, extending that comment) admits generation ff77af45 for UTC dates 2025-01-01 through 2026-11-06."
   },
   {
    "source_id": "portfolio-calendars",

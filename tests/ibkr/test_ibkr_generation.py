@@ -3049,3 +3049,139 @@ def test_every_account_reaching_the_latest_weekday_is_complete(tmp_path: Path) -
     )
     assert coverage["known_gaps"] == []
     assert coverage["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+
+
+# --- Flex-only (spec schema 4): the TWS snapshot is expunged ------------------------
+
+
+def _flex_only_variant(spec_path: Path, tmp_path: Path, name: str) -> Path:
+    """The same Flex inputs with the TWS source dropped, as spec schema 4."""
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["sources"] = [
+        item for item in spec["sources"] if item["role"] != "TWS_CURRENT_SNAPSHOT"
+    ]
+    spec["schema_version"] = 4
+    spec.setdefault("declared_zero_activity_accounts", [])
+    out = tmp_path / name
+    out.write_bytes(canonical_json_bytes(spec))
+    return out
+
+
+_TWS_CHECK_AND_COVERAGE = {"tws-current-overlap", "TWS_CURRENT_STATE"}
+_TWS_CATALOG_KEYS = {"tws_account_values", "tws_current_positions", "tws_current_state"}
+
+
+def _non_tws(catalog: dict[str, Any]) -> dict[str, Any]:
+    """Everything in a with-TWS catalog that is not a TWS record, check or coverage."""
+    out = {k: v for k, v in catalog.items() if k not in _TWS_CATALOG_KEYS}
+    out["fact_coverage"] = [
+        item
+        for item in catalog["fact_coverage"]
+        if item["fact_type"] not in _TWS_CHECK_AND_COVERAGE
+    ]
+    out["reconciliation_checks"] = [
+        item
+        for item in catalog["reconciliation_checks"]
+        if item["check_id"] not in _TWS_CHECK_AND_COVERAGE
+    ]
+    return out
+
+
+@pytest.mark.parametrize("variant", ["refreshed", "declared"])
+def test_flex_only_build_leaves_every_published_fact_byte_identical(
+    tmp_path: Path, variant: str
+) -> None:
+    with_tws_spec = (
+        _refreshed_spec(tmp_path)
+        if variant == "refreshed"
+        else _declared_account_spec(tmp_path)
+    )
+    flex_only_spec = _flex_only_variant(with_tws_spec, tmp_path, "flex-only.json")
+    with_tws, with_manifest, _ = build_generation(with_tws_spec)
+    flex_only, flex_manifest, flex_bytes = build_generation(flex_only_spec)
+
+    # Every fact the provider ledger ingests, plus every other non-TWS catalog section.
+    ingested = ledger._ACCOUNT_FACTS["ibkr"]
+    assert {"nav_observations", "positions", "transactions"} <= set(ingested)
+    for fact in (*ingested, "accounts", "securities", "fx_observations"):
+        if fact in with_tws or fact in flex_only:
+            assert canonical_json_bytes(flex_only[fact]) == canonical_json_bytes(
+                with_tws[fact]
+            ), fact
+    expected = _non_tws(with_tws)
+    # The only non-TWS field a TWS snapshot can move is the newer observation date.
+    expected["as_of_date"] = flex_only["as_of_date"]
+    expected["catalog_schema_version"] = 9
+    assert canonical_json_bytes(flex_only) == canonical_json_bytes(expected)
+
+    # Nothing TWS-shaped is left anywhere in the catalog or the manifest.
+    assert not _TWS_CATALOG_KEYS & set(flex_only)
+    assert b"tws" not in flex_bytes.lower()
+    assert "tws_current_state" not in flex_manifest.coverage.fact_types
+    assert "tws_current_state" in with_manifest.coverage.fact_types
+    assert flex_manifest.coverage.status is with_manifest.coverage.status or (
+        # the with-TWS build is PARTIAL only for TWS-origin gap text
+        with_manifest.coverage.status is CoverageStatus.PARTIAL
+        and all(
+            "tws" in gap.lower()
+            or gap.startswith("account_topology:snapshot_only:")
+            or gap.startswith("Zero API order rows")
+            for gap in with_manifest.coverage.known_gaps
+        )
+    )
+    assert not any("tws" in gap.lower() for gap in flex_manifest.coverage.known_gaps)
+
+
+def test_flex_only_status_ignores_tws_gap_text_but_keeps_flex_gaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    topology = _topology_diff_spec(tmp_path)
+    _, tws_manifest, _ = build_generation(topology)
+    assert tws_manifest.coverage.status is CoverageStatus.PARTIAL
+    flex_only_spec = _flex_only_variant(topology, tmp_path, "flex-only-topology.json")
+    _, flex_manifest, _ = build_generation(flex_only_spec)
+    assert (
+        flex_manifest.coverage.status
+        is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+    )
+    assert flex_manifest.coverage.known_gaps == ()
+
+    # A Flex gap still decides PARTIAL, in the same shape as before.
+    real = ibkr_generation._flex_history_coverage
+    atom = "missing weekday statement for account-zzzz: 2026-01-06 to 2026-01-07"
+
+    def with_flex_gap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {**real(*args, **kwargs), "known_gaps": [atom], "status": "PARTIAL"}
+
+    monkeypatch.setattr(ibkr_generation, "_flex_history_coverage", with_flex_gap)
+    catalog, partial, _ = build_generation(flex_only_spec)
+    assert partial.coverage.status is CoverageStatus.PARTIAL
+    assert partial.coverage.known_gaps == (atom,)
+    assert "tws_current_state" not in catalog
+
+
+def test_flex_only_spec_refuses_a_tws_snapshot_and_requires_a_refresh(
+    tmp_path: Path,
+) -> None:
+    spec_path = _refreshed_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["schema_version"] = 4
+    spec["declared_zero_activity_accounts"] = []
+    with_snapshot = tmp_path / "flex-only-with-snapshot.json"
+    with_snapshot.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="no TWS snapshot"):
+        build_generation(with_snapshot)
+    spec["sources"] = [
+        item for item in spec["sources"] if item["role"] == "PRIMARY_FLEX_ACTIVITY"
+    ]
+    no_refresh = tmp_path / "flex-only-no-refresh.json"
+    no_refresh.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError):
+        build_generation(no_refresh)
+
+
+def test_flex_only_stage_summary_has_no_tws_echo(tmp_path: Path) -> None:
+    spec = _flex_only_variant(_declared_account_spec(tmp_path), tmp_path, "fo.json")
+    summary = stage_generation_candidate(spec, tmp_path / "out")
+    assert summary["coverage_status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert not [key for key in summary if key.startswith("tws")]

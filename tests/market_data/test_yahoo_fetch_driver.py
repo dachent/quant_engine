@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 import importlib
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -1936,3 +1937,594 @@ def test_make_evidence_names_the_effective_config_and_is_accepted_by_the_authori
             stage_root=tmp_path / "stage2",
             now=datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc),
         )
+
+
+def _closes_file(directory: Path, symbol: str, rows: dict[str, float]) -> None:
+    directory.mkdir(exist_ok=True)
+    lines = ["date,open,high,low,close,adjclose,volume,dividend"]
+    lines += [f"{day},0,0,0,{close},{close},1,0" for day, close in rows.items()]
+    (directory / f"{symbol}_yahoo_daily.csv").write_text("\n".join(lines) + "\n")
+
+
+def test_rescale_check_catches_a_split_after_the_retained_pull(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    previous = tmp_path / "previous"
+    new = tmp_path / "new"
+    days = {"2026-09-16": 100.0, "2026-09-17": 101.0}
+    _closes_file(previous, "SAME", days)
+    _closes_file(previous, "SPLIT", days)
+    _closes_file(previous, "GONE", {"2026-08-03": 5.0})
+    _closes_file(
+        new, "SAME", {**days, "2026-11-06": 120.0}
+    )  # dividends and moves after the retained pull change nothing
+    _closes_file(
+        new, "SPLIT", {"2026-09-16": 50.0, "2026-09-17": 50.5, "2026-11-06": 55.0}
+    )
+    _closes_file(new, "GONE", {"2026-11-06": 6.0})
+    _closes_file(new, "NEWCO", {"2026-11-06": 9.0})
+    argv = ["rescale-check", "--closes-dir", str(new), "--previous-dir", str(previous)]
+    assert driver.main(argv) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["rescaled"] == ["SPLIT"]
+    assert report["no_overlap"] == ["GONE"]
+    assert report["not_in_previous"] == ["NEWCO"]
+    by_symbol = {row["symbol"]: row for row in report["symbols"]}
+    assert by_symbol["SAME"]["status"] == "ok"
+    assert by_symbol["SPLIT"]["ratio_new_over_previous"] == 0.5
+    assert "SPLIT" in captured.err and "GONE" in captured.err
+    # the clean case exits 0; a symbol no retained pull holds is warned about, and refused
+    # only when the operator requires every symbol to have a previous pull
+    (new / "SPLIT_yahoo_daily.csv").unlink()
+    (new / "GONE_yahoo_daily.csv").unlink()
+    assert driver.main(argv) == 0
+    assert "NEWCO" in capsys.readouterr().err
+    assert driver.main([*argv, "--require-previous"]) == 1
+    capsys.readouterr()
+
+
+def test_rescale_check_refuses_malformed_input(tmp_path: Path) -> None:
+    new = tmp_path / "new"
+    new.mkdir()
+    previous = tmp_path / "previous"
+    previous.mkdir()
+    with pytest.raises(driver.DriverError, match="holds no official-closes file"):
+        driver.rescale_check(new, [previous])
+    (new / "BAD_yahoo_daily.csv").write_text("nope\n")
+    with pytest.raises(driver.DriverError, match="not an official-closes file"):
+        driver.rescale_check(new, [previous])
+    with pytest.raises(driver.DriverError, match="tolerance"):
+        driver.rescale_check(new, [previous], 0.0)
+    with pytest.raises(driver.DriverError, match="not a directory"):
+        driver.rescale_check(new, [tmp_path / "missing"])
+
+
+def test_rescale_check_uses_the_last_day_of_a_retained_adjusted_history(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "adjusted.json"
+    rows = [
+        # dividend-adjusted earlier days differ from the raw close; the last day equals it
+        {"Ticker": "SPXL", "Date": "2026-09-16T00:00:00", "Close": 99.0},
+        {"Ticker": "SPXL", "Date": "2026-09-17T00:00:00", "Close": 101.0},
+        {"Ticker": "OTHER", "Date": "2026-09-17T00:00:00", "Close": 10.0},
+    ]
+    artifact.write_text(json.dumps({"rows": rows}))
+    new = tmp_path / "new"
+    _closes_file(new, "SPXL", {"2026-09-16": 100.0, "2026-09-17": 101.0})
+    _closes_file(new, "OTHER", {"2026-09-17": 5.0})
+    previous = tmp_path / "previous"
+    previous.mkdir()
+    report = driver.rescale_check(new, [previous], adjusted_json=[artifact])
+    by_symbol = {row["symbol"]: row for row in report["symbols"]}
+    assert by_symbol["SPXL"]["status"] == "ok"
+    assert by_symbol["SPXL"]["basis"] == "adjusted_last_day"
+    assert by_symbol["SPXL"]["days_compared"] == 1
+    assert report["rescaled"] == ["OTHER"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    with pytest.raises(driver.DriverError, match="not a history artifact"):
+        driver.rescale_check(new, [previous], adjusted_json=[bad])
+
+
+def test_rescale_check_compares_every_retained_vintage_not_the_last_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    oldest, middle, latest = (
+        tmp_path / "oldest",
+        tmp_path / "middle",
+        tmp_path / "latest",
+    )
+    new = tmp_path / "new"
+    days = {"2026-09-16": 100.0, "2026-09-17": 101.0}
+    half = {day: close / 2 for day, close in days.items()}
+    # a split after the oldest pull: the later pulls already hold split-adjusted closes, so
+    # the new pull (also split-adjusted) matches them and only the oldest pull shows it
+    _closes_file(oldest, "SPLIT", days)
+    _closes_file(middle, "SPLIT", half)
+    _closes_file(latest, "SPLIT", half)
+    _closes_file(new, "SPLIT", half)
+    _closes_file(oldest, "CLEAN", days)
+    _closes_file(middle, "CLEAN", days)
+    _closes_file(latest, "CLEAN", days)
+    _closes_file(new, "CLEAN", days)
+    argv = ["rescale-check", "--closes-dir", str(new)]
+    for directory in (oldest, middle, latest):
+        argv += ["--previous-dir", str(directory)]
+    assert driver.main(argv) == 1
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["rescaled"] == ["SPLIT"]
+    assert report["retained_vintages_disagree"] == ["SPLIT"]
+    assert len(report["vintages_compared"]) == 6
+    by_symbol = {row["symbol"]: row for row in report["symbols"]}
+    split = by_symbol["SPLIT"]
+    assert split["status"] == "RESCALED"
+    assert split["rescaled_sources"] == [str(oldest / "SPLIT_yahoo_daily.csv")]
+    assert [item["status"] for item in split["vintages"]] == ["RESCALED", "ok", "ok"]
+    assert by_symbol["CLEAN"]["status"] == "ok"
+    assert "RETAINED_VINTAGES_DISAGREE" in captured.err
+    # argument order does not matter
+    argv_reversed = ["rescale-check", "--closes-dir", str(new)]
+    for directory in (latest, middle, oldest):
+        argv_reversed += ["--previous-dir", str(directory)]
+    assert driver.main(argv_reversed) == 1
+    capsys.readouterr()
+
+
+def test_rescale_check_flags_disagreeing_retained_vintages_even_if_new_matches_one(
+    tmp_path: Path,
+) -> None:
+    older, newer, new = tmp_path / "older", tmp_path / "newer", tmp_path / "new"
+    _closes_file(older, "AB", {"2026-09-17": 10.0})
+    _closes_file(newer, "AB", {"2026-09-17": 10.0, "2026-10-01": 11.0})
+    _closes_file(new, "AB", {"2026-09-17": 10.0, "2026-10-01": 11.0})
+    adjusted = tmp_path / "adjusted.json"
+    adjusted.write_text(
+        json.dumps(
+            {"rows": [{"Ticker": "AB", "Date": "2026-09-17T00:00:00", "Close": 5.0}]}
+        )
+    )
+    report = driver.rescale_check(new, [older, newer], adjusted_json=[adjusted])
+    row = report["symbols"][0]
+    assert report["retained_vintages_disagree"] == ["AB"]
+    assert report["rescaled"] == ["AB"]
+    assert row["status"] == "RESCALED"
+    assert len(row["retained_vintages_disagree"]) == 2
+    # without the disagreeing artifact the same pulls are clean
+    clean = driver.rescale_check(new, [older, newer])
+    assert clean["rescaled"] == [] and clean["retained_vintages_disagree"] == []
+    # two retained pulls that disagree with each other, new matching neither, both reported
+    _closes_file(new, "AB", {"2026-09-17": 20.0})
+    both = driver.rescale_check(new, [older, newer])
+    assert both["rescaled"] == ["AB"]
+    assert both["symbols"][0]["rescaled_sources"] == [
+        str(older / "AB_yahoo_daily.csv"),
+        str(newer / "AB_yahoo_daily.csv"),
+    ]
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-3"])
+def test_rescale_check_refuses_non_finite_and_non_positive_closes(
+    tmp_path: Path, bad: str
+) -> None:
+    new, previous = tmp_path / "new", tmp_path / "previous"
+    _closes_file(new, "AB", {"2026-09-17": 10.0})
+    _closes_file(previous, "AB", {"2026-09-17": 10.0})
+    new_file = new / "AB_yahoo_daily.csv"
+    retained_file = previous / "AB_yahoo_daily.csv"
+    good_new, good_retained = new_file.read_bytes(), retained_file.read_bytes()
+    new_file.write_bytes(good_new.replace(b",10.0,10.0,", f",{bad},{bad},".encode()))
+    with pytest.raises(
+        driver.DriverError, match=r"AB_yahoo_daily\.csv 2026-09-17: close"
+    ):
+        driver.rescale_check(new, [previous])
+    new_file.write_bytes(good_new)
+    retained_file.write_bytes(
+        good_retained.replace(b",10.0,10.0,", f",{bad},{bad},".encode())
+    )
+    with pytest.raises(
+        driver.DriverError, match=r"AB_yahoo_daily\.csv 2026-09-17: close"
+    ):
+        driver.rescale_check(new, [previous])
+    retained_file.write_bytes(good_retained)
+    artifact = tmp_path / "adjusted.json"
+    literal = {"nan": "NaN", "inf": "Infinity", "-inf": "-Infinity"}.get(bad, bad)
+    artifact.write_bytes(
+        b'{"rows": [{"Ticker": "AB", "Date": "2026-09-17T00:00:00", "Close": '
+        + literal.encode()
+        + b"}]}"
+    )
+    with pytest.raises(driver.DriverError, match=r"adjusted\.json 2026-09-17: close"):
+        driver.rescale_check(new, [previous], adjusted_json=[artifact])
+
+
+# ------------------------------------------------ native driver behaviour (R3 live sitting)
+
+
+class HolidayYF(FakeYF):
+    """FakeYF that, like Yahoo, has no bar on the given market closures."""
+
+    def __init__(self, closed: set[date], **kw: Any) -> None:
+        super().__init__(**kw)
+        self.closed = closed
+
+    def download(self, **kwargs: Any) -> pd.DataFrame:
+        frame = super().download(**kwargs)
+        if frame.empty:
+            return frame
+        return frame[[stamp.date() not in self.closed for stamp in frame.index]]
+
+
+# CUTOFF 2026-10-09; START 2026-09-01; Labor Day is Monday 2026-09-07.
+LABOR_DAY = date(2026, 9, 7)
+
+
+def _nyse_group(**overrides: Any) -> dict[str, Any]:
+    return _group("vol", calendar="nyse", max_missing_weekdays=0, **overrides)
+
+
+def test_nyse_calendar_accepts_exactly_the_market_closures(tmp_path: Path) -> None:
+    run = _fetch(
+        tmp_path,
+        _config([_nyse_group()]),
+        yf=HolidayYF({LABOR_DAY}),
+    )
+    entry = json.loads((run / "coverage.json").read_text())["groups"][0]["symbols"][0]
+    assert entry["status"] == "PASS" and entry["missing_weekday_count"] == 0
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+
+
+def test_the_weekday_calendar_needs_a_fixed_allowance_for_the_same_data(
+    tmp_path: Path,
+) -> None:
+    config = _config([_group("vol", max_missing_weekdays=0)])
+    with pytest.raises(driver.DriverError, match="fetch rejected"):
+        _fetch(tmp_path, config, yf=HolidayYF({LABOR_DAY}))
+
+
+def test_a_missing_day_that_is_not_a_closure_is_rejected_under_nyse(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(driver.DriverError, match="fetch rejected"):
+        _fetch(
+            tmp_path,
+            _config([_nyse_group()]),
+            yf=HolidayYF({LABOR_DAY, date(2026, 9, 16)}),
+        )
+    reject = json.loads((tmp_path / "stage" / "run-1.REJECTED.json").read_text())
+    assert any("missing sessions exceed the allowed 0" in m for m in reject["failures"])
+
+
+def test_an_ad_hoc_closure_is_declared_per_group(tmp_path: Path) -> None:
+    closed = {LABOR_DAY, date(2026, 9, 16)}
+    run = _fetch(
+        tmp_path,
+        _config([_nyse_group(closed_days=["2026-09-16"])]),
+        yf=HolidayYF(closed),
+    )
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"calendar": "weekday", "closed_days": ["2026-09-16"]},  # only with nyse
+        {"closed_days": ["2026-09-19"]},  # a Saturday
+        {"closed_days": ["2026-09-16", "2026-09-16"]},  # duplicate
+        {"closed_days": ["2026-08-31"]},  # outside the window
+    ],
+)
+def test_closed_days_are_validated(overrides: dict[str, Any]) -> None:
+    group = _nyse_group()
+    group.update(overrides)
+    with pytest.raises(driver.DriverError, match="closed_days"):
+        driver.parse_config(_config([group]))
+
+
+def _fx_chart(
+    stamps_local: list[tuple[datetime, float]], symbol: str = "EURUSD=X"
+) -> bytes:
+    zone = ZoneInfo("Europe/London")
+    body = {
+        "chart": {
+            "result": [
+                {
+                    "meta": {
+                        "currency": "USD",
+                        "symbol": symbol,
+                        "instrumentType": "CURRENCY",
+                        "dataGranularity": "1d",
+                        "exchangeTimezoneName": "Europe/London",
+                    },
+                    "timestamp": [
+                        int(d.replace(tzinfo=zone).timestamp()) for d, _ in stamps_local
+                    ],
+                    "indicators": {"quote": [{"close": [c for _, c in stamps_local]}]},
+                }
+            ]
+        }
+    }
+    return json.dumps(body).encode()
+
+
+def test_parse_chart_ignores_only_a_live_bar_after_the_cutoff() -> None:
+    cutoff = date(2026, 10, 9)
+    midnight = [
+        (datetime(2026, 10, 8), 1.1),
+        (datetime(2026, 10, 9), 1.2),
+        (datetime(2026, 10, 12), 1.3),  # a midnight bar after the cutoff is kept here
+    ]
+    live = (datetime(2026, 10, 12, 15, 30), 1.4)
+    raw = _fx_chart([*midnight, live])
+    bars, info = driver.parse_chart(raw, "EURUSD=X", ignore_live_after=cutoff)
+    assert [d for d, _ in bars] == [
+        date(2026, 10, 8),
+        date(2026, 10, 9),
+        date(2026, 10, 12),
+    ]
+    assert info["live_bars_ignored"] == 1
+    # without the cutoff, or for a live bar on/before it, the bar still refuses
+    with pytest.raises(driver.DriverError, match="not at local midnight"):
+        driver.parse_chart(raw, "EURUSD=X")
+    early = _fx_chart([midnight[0], (datetime(2026, 10, 9, 15, 30), 1.4)])
+    with pytest.raises(driver.DriverError, match="not at local midnight"):
+        driver.parse_chart(early, "EURUSD=X", ignore_live_after=cutoff)
+
+    # Only the single TERMINAL appended bar is ignored: two off-midnight bars after the
+    # cutoff, or an off-midnight bar followed by the real last bar, fail closed.
+    two = _fx_chart([*midnight, live, (datetime(2026, 10, 12, 16, 30), 1.5)])
+    with pytest.raises(driver.DriverError, match="not at local midnight"):
+        driver.parse_chart(two, "EURUSD=X", ignore_live_after=cutoff)
+    mid_then_bar = _fx_chart([midnight[0], live, (datetime(2026, 10, 13), 1.5)])
+    with pytest.raises(driver.DriverError, match="not at local midnight"):
+        driver.parse_chart(mid_then_bar, "EURUSD=X", ignore_live_after=cutoff)
+
+
+class LiveBarChart(FakeChart):
+    """FakeChart that, like Yahoo while FX is open, appends a bar stamped with the clock."""
+
+    def __init__(self, live_day: date, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.live_day = live_day
+
+    def chart(self, symbol: str, period1: int, period2: int) -> bytes:
+        raw = super().chart(symbol, period1, period2)
+        document = json.loads(raw)
+        body = document["chart"]["result"][0]
+        zone = ZoneInfo("Europe/London")
+        live = datetime(
+            self.live_day.year,
+            self.live_day.month,
+            self.live_day.day,
+            15,
+            30,
+            tzinfo=zone,
+        )
+        body["timestamp"].append(int(live.timestamp()))
+        body["indicators"]["quote"][0]["close"].append(1.5)
+        return json.dumps(document).encode()
+
+
+def _chart_config() -> bytes:
+    return _config(
+        [_group("fx", kind="chart", symbols=["EURUSD=X"], max_missing_weekdays=3)]
+    )
+
+
+def test_a_live_fx_bar_after_the_cutoff_is_staged_raw_and_dropped_from_the_derived_file(
+    tmp_path: Path,
+) -> None:
+    chart = LiveBarChart(date(2026, 10, 12))
+    run = _fetch(tmp_path, _chart_config(), chart=chart)
+    raw = json.loads((run / "raw/fx/EURUSD_X.chart.json").read_text())
+    derived = json.loads((run / "derived/fx/EURUSD_X.chart.json").read_text())
+    raw_stamps = raw["chart"]["result"][0]["timestamp"]
+    derived_stamps = derived["chart"]["result"][0]["timestamp"]
+    assert (
+        len(raw_stamps) == len(derived_stamps) + 1
+    )  # the live bar, raw bytes unmodified
+    assert raw["chart"]["result"][0]["indicators"]["quote"][0]["close"][-1] == 1.5
+    entry = json.loads((run / "coverage.json").read_text())["groups"][0]["symbols"][0]
+    assert entry["status"] == "PASS"
+    assert entry["raw_bars_after_through_dropped"] == 1
+    assert driver.verify_run(run, now=NOW)["status"] == "VERIFIED"
+
+
+def test_a_live_fx_bar_on_or_before_the_cutoff_still_rejects(tmp_path: Path) -> None:
+    with pytest.raises(driver.DriverError, match="fetch rejected"):
+        _fetch(tmp_path, _chart_config(), chart=LiveBarChart(date(2026, 10, 9)))
+
+
+_SINGLETON: dict[str, Any] = {}
+
+
+class SingletonYF(FakeYF):
+    """FakeYF whose cache behaves like yfinance's: one sqlite file, opened at the first
+    location it is given and kept for the whole process. A later group fails with
+    ``unable to open database file`` when that directory no longer exists."""
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.locations: list[str] = []
+        outer = self
+
+        class Cache:
+            def set_cache_location(self, value: str) -> None:
+                outer.locations.append(value)
+                if "db" not in _SINGLETON:
+                    path = Path(value) / "tz.db"
+                    _SINGLETON["db"] = sqlite3.connect(str(path))
+                    _SINGLETON["path"] = path
+
+        self.cache = Cache()  # type: ignore[assignment]
+
+    def download(self, **kwargs: Any) -> pd.DataFrame:
+        if not Path(_SINGLETON["path"]).exists():
+            raise ValueError("unable to open database file")
+        _SINGLETON["db"].execute("select 1")
+        return super().download(**kwargs)
+
+
+def test_every_group_of_a_run_opens_the_same_persistent_cache(tmp_path: Path) -> None:
+    groups = [
+        _group("one", symbols=["AAA"]),
+        _group("two", symbols=["BBB"]),
+        _group("three", symbols=["CCC"]),
+    ]
+    yf = SingletonYF()
+    try:
+        outcome = driver.dry_run(
+            driver.parse_config(_config(groups)),
+            yf=yf,
+            chart=FakeChart(),
+            now=NOW,
+            stage_root=tmp_path / "scratch",
+        )
+        assert outcome["status"] == "VERIFIED", outcome
+        assert len(yf.locations) >= 3
+        assert len(set(yf.locations)) == 1  # one directory, not one per group
+        assert Path(yf.locations[0]).is_dir()  # still there for the next group or run
+        # a second run in the same process reuses it and still reads fresh data
+        again = driver.dry_run(
+            driver.parse_config(_config(groups)),
+            yf=yf,
+            chart=FakeChart(),
+            now=NOW,
+            stage_root=tmp_path / "scratch",
+            run_id="DRY-second",
+        )
+        assert again["status"] == "VERIFIED", again
+        assert len(set(yf.locations)) == 1
+    finally:
+        if "db" in _SINGLETON:
+            _SINGLETON.pop("db").close()
+            _SINGLETON.clear()
+
+
+def test_a_group_never_reads_another_groups_cached_result(tmp_path: Path) -> None:
+    yf = FakeYF()
+    _fetch(tmp_path, _config([_group("one")]), yf=yf, run_id="run-a")
+    _fetch(tmp_path, _config([_group("one")]), yf=yf, run_id="run-b")
+    assert len(yf.calls) == 2  # the second run fetched again, no result-cache hit
+
+
+def test_dry_run_rehearses_without_governance_and_verifies(tmp_path: Path) -> None:
+    config = driver.parse_config(
+        _config([_group("one"), _group("two", symbols=["CCC"])])
+    )
+    scratch = tmp_path / "scratch"
+    outcome = driver.dry_run(
+        config, yf=FakeYF(), chart=FakeChart(), now=NOW, stage_root=scratch
+    )
+    assert outcome["status"] == "VERIFIED"
+    assert outcome["mode"] == "dry-run" and outcome["evidence_consumed"] is False
+    assert outcome["run_id"].startswith("DRY-")
+    assert not (scratch / ".governance-consumed").exists()
+    assert {entry.name for entry in scratch.iterdir()} == {outcome["run_id"]}
+
+
+def test_dry_run_reports_a_rejection_with_its_failures(tmp_path: Path) -> None:
+    config = driver.parse_config(_config([_group("one")]))
+    outcome = driver.dry_run(
+        config,
+        yf=FakeYF(empty={"AAA"}),
+        chart=FakeChart(),
+        now=NOW,
+        stage_root=tmp_path / "scratch",
+    )
+    assert outcome["status"] == "REJECTED" and outcome["failures"]
+
+
+def test_a_dry_run_never_uses_a_release_root_or_a_governed_id(tmp_path: Path) -> None:
+    config = driver.parse_config(_config())
+    for name in ("R3-YAHOO", ".governance-consumed", "MANIFEST.json"):
+        governed = tmp_path / f"root-{name.strip('.')}"
+        governed.mkdir()
+        (governed / name).write_bytes(b"{}")
+        with pytest.raises(driver.DriverError, match="scratch directory"):
+            driver.dry_run(
+                config, yf=FakeYF(), chart=FakeChart(), now=NOW, stage_root=governed
+            )
+    with pytest.raises(driver.DriverError, match="must start with DRY-"):
+        driver.dry_run(
+            config,
+            yf=FakeYF(),
+            chart=FakeChart(),
+            now=NOW,
+            stage_root=tmp_path / "ok",
+            run_id="R3-YAHOO",
+        )
+    # and a governed command refuses a rehearsal id: no evidence can name or spend it
+    with pytest.raises(driver.DriverError, match="DRY-"):
+        driver.make_evidence(
+            config,
+            run_id="DRY-x1",
+            review="https://github.com/dachent/quant_engine/issues/1#issuecomment-2",
+            valid_from_utc=NOW,
+            valid_until_utc=NOW + timedelta(hours=1),
+            max_requests=10,
+        )
+    with pytest.raises(driver.GovernanceError, match="rehearsal"):
+        driver.authorize_live(
+            b"{}", config=config, run_id="DRY-x1", stage_root=tmp_path / "g", now=NOW
+        )
+
+
+def test_dry_run_command_needs_an_explicit_cutoff(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_bytes(_config())
+    assert driver.main(["dry-run", "--config", str(config)]) == 1
+    assert "dry-run needs --cutoff" in capsys.readouterr().err
+    args = driver._parser().parse_args(
+        ["dry-run", "--config", str(config), "--cutoff", CUTOFF]
+    )
+    assert (
+        args.command == "dry-run"
+        and args.stage_root is None
+        and args.max_requests == 2000
+    )
+
+
+def test_the_shipped_volatility_groups_use_the_nyse_calendar() -> None:
+    groups = {
+        item["group_id"]: item
+        for item in json.loads(SHIPPED_CONFIG.read_bytes())["groups"]
+    }
+    for name in ("vol-shv-uvxy-sh", "vol-qqq-gld-tqqq"):
+        parsed = driver._parse_group(groups[name], date(2026, 11, 6), 0)
+        assert parsed.calendar == "nyse" and parsed.max_missing_weekdays == 0
+    # the 2025-01-09 national day of mourning is not in the regular calendar: declared
+    shv = driver._parse_group(groups["vol-shv-uvxy-sh"], date(2026, 11, 6), 0)
+    assert shv.closed_days == (date(2025, 1, 9),)
+    sessions = driver.expected_dates(
+        shv.start, date(2026, 11, 6), shv.calendar, shv.closed_days
+    )
+    assert date(2025, 1, 9) not in sessions and date(2026, 7, 3) not in sessions
+    assert date(2026, 11, 6) in sessions
+
+
+def test_a_dry_run_says_so_in_its_manifest_and_sidecar_and_verify_checks_it(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    scratch = tmp_path / "scratch"
+    outcome = driver.dry_run(
+        config, yf=FakeYF(), chart=FakeChart(), now=NOW, stage_root=scratch
+    )
+    run = Path(outcome["run_dir"])
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    assert manifest["mode"] == "dry-run" and manifest["run_id"].startswith("DRY-")
+    sidecar = json.loads(
+        (run / "official-closes/official-closes-manifest.json").read_text()
+    )
+    assert sidecar["mode"] == "dry-run"
+    manifest["mode"] = "governed"
+    (run / "MANIFEST.json").write_bytes(driver.pretty(manifest))
+    with pytest.raises(driver.DriverError, match="run mode differs"):
+        driver.verify_run(run)
+    assert driver.run_mode("R3-YAHOO-1") == "governed"

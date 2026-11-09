@@ -204,6 +204,8 @@ _PATH_STAGES = {
     "tools/release_provenance_spec.py": [],
     "tools/release_post_commit.py": [],
     "tools/release_acceptance_inputs.py": [],
+    # assembles expected-baseline.json from the two derivations alone; an operator step, no delivery artifact
+    "tools/release_baseline_assemble.py": [],
     # Layered history, dependence and attribution feed the attribution stage and every
     # stage after it.
     "tools/release_pre_chain.py": list(_STAGE_ORDER[2:]),
@@ -228,16 +230,25 @@ _PATH_STAGES = {
     "tools/portfolio_diligence_rubric.py": [],
     "tools/portfolio_driver_map.py": [],
     "tools/portfolio_replication.py": [],
-    # Passive CDP listener for one attended Portfolio123 sitting; writes a
+    # CDP listener (optionally driving the signed-in tab) for one Portfolio123 sitting; writes a
     # create-only run directory and a draft catalog diff, no stage reads it.
     "tools/p123_cdp_recorder.py": [],
+    # The ONE guard (trading-token refusal, no typing) shared by live capture tools.
+    "tools/capture_action_guard.py": [],
+    # Rehearsal (DRY-) root rules shared by the live capture recorders.
+    "tools/capture_dry_run.py": [],
     # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
     # hash-pinned allowlist of read-only exports into a create-only directory; the
     # staging CLI and the generation read only the files and manifest they are handed.
     "tools/p123_cdp_fetcher.py": [],
+    # Turns retained recorder/fetcher bodies into HAR CSVs in a NEW root (offline, checked id
+    # binding, admission manifest); the plan hashes the root it is handed, never this tool.
+    "tools/p123_har_admit.py": [],
     # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
     # create-only run directory; no stage reads it, only a pinned run it is handed.
     "tools/grizzlybulls_capture.py": [],
+    # Operator capture step for the TuringTrader public objects; no stage impact.
+    "tools/tt_public_capture.py": [],
     # Offline signal-vs-fill comparison report; informational, never a stage input.
     "tools/grizzlybulls_schwab_crosscheck.py": [],
     # Stages an unpublished FX candidate from retained bytes; the pipeline reads only
@@ -317,6 +328,7 @@ _PATH_STAGES = {
     # derives the cutoff-day Schwab NAV from the verified holdings and official closes; an operator
     # step before the ingest, it writes no delivery artifact itself
     "tools/schwab_nav_derive.py": [],
+    "tools/schwab_page_actions.py": [],
     "tools/schwab_rollback.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": ["report", "panel"],
@@ -327,6 +339,9 @@ _PATH_STAGES = {
     "tools/quantbase_har_to_csv.py": [],
     "tools/quantbase_cdp_har_recorder.py": [],
     "tools/quantbase_cdp_navigator.py": [],
+    # moves provider legacy files carrying session material into a quarantine root; an
+    # operator step that reads no admitted source and writes no delivery artifact
+    "tools/provider_security_quarantine.py": [],
     "schemas/portfolio/quantbase-fund-facts.schema.json": [],
     # Recovery-rehearsal harness: exercises commit/rollback/recovery mechanics
     # against synthetic, fabricated releases (never real production data or a
@@ -358,6 +373,9 @@ _PATH_STAGES = {
     # producer, so a change to it affects no execution stage.
     "tools/validate_generation.py": [],
     "tools/alpaca_generation.py": [],
+    # Operator CLI that builds, stages or publishes one IBKR generation candidate; consumers
+    # read only the generation they are handed, never this tool.
+    "tools/ibkr_generation.py": [],
     # Plans and stages the Portfolio123 generation (HAR roots and transaction captures);
     # consumers read only the generation they are handed, never this tool.
     "tools/portfolio123_generation.py": [],

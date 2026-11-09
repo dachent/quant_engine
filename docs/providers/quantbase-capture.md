@@ -395,7 +395,14 @@ whose HAR already exists (create-only) and a corrupt journal, drops a half-writt
 last line (warning `JOURNAL_LAST_LINE_TRUNCATED`), and writes the HAR and the manifest
 with `recovered: true` and the warning `RECOVERED_FROM_JOURNAL`. `verify` then
 checks the recovered run like any other. A finished run keeps its journal, hash-bound
-in the manifest, and `verify` requires the HAR to equal it.
+in the manifest, and `verify` requires the HAR to equal it. A legacy-workspace quarantine
+(`provider_security_quarantine.py plan-quantbase`) selects the HAR and `journal.jsonl`
+(category `AUTHENTICATED_HAR_JOURNAL`) together for a capture-mode run, because both hold the
+`jwt` header values. The journal is classified by its first line (the recorder header): a
+`discover` header keeps the value-free journal in place, and a header that cannot be read as
+`discover` selects it (fail closed). The value-free `manifest.json` stays and keeps the provenance (HAR hash, journal hash, per-entry
+body and request hashes). The recorder `verify` of that run is no longer possible once the HAR
+is quarantined, as before; restore from the quarantine to re-verify.
 
 `propose-contract --run-root <run> [--run-root <run> ...] --out <new dir>` verifies the
 runs, then lists the observed unreviewed same-origin GET route templates and query key
@@ -417,8 +424,8 @@ and which extra routes the real pages call beyond the reviewed table.
 ## CDP navigator (`tools/quantbase_cdp_navigator.py`)
 
 An unattended capture needs the pages loaded without anyone clicking. The navigator
-drives the owner's already-signed-in Quantbase tab through a FIXED list of read-only
-pages while the passive recorder above (a separate process, started first) records
+drives the owner's already-signed-in Quantbase tab through a fixed list of pages (it
+may also click and scroll on them, under the one guard below) while the passive recorder above (a separate process, started first) records
 the traffic. The navigator records nothing and keeps no header, cookie or body.
 
 ```powershell
@@ -440,9 +447,11 @@ python tools/quantbase_cdp_navigator.py --cdp-url http://127.0.0.1:9333 --allowl
   `ALLOWLIST_ACCOUNT_ACTIVITY_REPEATED`: the role-driven flow proof needs exactly
   one successful `accounts.activity` GET across the declared HARs. The navigator
   also refuses to run a hand-built list that repeats a page.
-- CDP messages by default: only `Target.getTargets`, `Target.attachToTarget`,
-  `Page.enable` and `Page.navigate` (with exactly one allow-listed `url` and nothing
-  else). No `Input.*`, `Runtime.*`, `Fetch.*`, `Network.*` or `Page.reload`;
+- CDP messages: `Target.getTargets`, `Target.attachToTarget`, `Page.enable`,
+  `Page.navigate` (exactly one allow-listed `url` and nothing else), `Runtime.evaluate`
+  (only the fixed element probe from `tools/capture_action_guard.py`, which reads one
+  control's facts and changes nothing) and `Input.dispatchMouseEvent` (move, wheel, left
+  click). No key or text input of any kind, no `Fetch.*`, `Network.*` or `Page.reload`;
   anything else is refused in the transport guard. The CDP URL must be loopback.
 - Flow: attach to the one page whose URL starts with `https://app.getquantbase.com/`
   (none: STOP; more than one: refused), navigate to each URL in order, wait for
@@ -466,32 +475,43 @@ python tools/quantbase_cdp_navigator.py --cdp-url http://127.0.0.1:9333 --allowl
   funds.statistics 1, funds.rebalance-history 1, partners.status 1 when each page
   loads once).
 
-### `--scroll` fallback (off by default)
+### Actions on a page, and the ONE guard
 
-Default: the navigator sends NO input of any kind. `--scroll` is a
-coordinator-enabled fallback, to be used only if `funds.invest` (the
-`/_next/data/<build>/invest.json` prefetch, a REQUIRED capability) does not fire on
-dwell alone. In the retained HARs it fired only at the end of a long dwell, which
-fits footer links entering the viewport, so a bounded wheel scroll can trigger it.
-With `--scroll` the tool may additionally send ONLY `Input.dispatchMouseEvent` with
-`type: mouseWheel`, after a page has loaded: 6 steps of +400 then 6 of -400
-(`deltaY`, integer, |deltaY| <= 600, `deltaX` 0, x/y 300/300 and never outside 0 to
-2000), no `button`, `buttons`, `modifiers` or `clickCount`. The budget is at most 12
-events and 5000 total |deltaY| per page. Click (`mousePressed`, `mouseReleased`),
-`mouseMoved`, key, touch, drag, any other `Input.*`, `Runtime.*`, `Fetch.*`,
-`Network.*` and `Page.reload` stay refused before sending, with or without
-`--scroll`.
+Navigate, click and scroll are allowed in the owner's signed-in window for any
+non-trading read. A page entry may carry `actions`, a list of `{"click": "<exact control
+name>"}` or `{"scroll": <deltaY, 1 to 5000 in magnitude>}`, run in order after the page
+loads and before the dwell (`--scroll` still wheels every page down and back up). The
+actions are part of the hash-bound allow-list. Reading the tab URL back after each page
+still stops the run on a login page or an off-origin tab.
+
+The one guard (`tools/capture_action_guard.py`, shared by the live capture tools) never
+lets the navigator:
+
+- click or open a control whose accessible name, text, `aria-label`, `value`, `title` or
+  `href` matches trade, transfer, withdraw, deposit, order, buy, sell, submit, confirm
+  payment, or an account-changing control (delete, remove, cancel, unsubscribe, close account, save or apply changes, change or reset password, update profile, email or settings, link, unlink, connect or disconnect broker) (a token match after splitting camelCase and punctuation, so `Border` is not
+  `order`). An allow-list click name that matches is refused at parse time
+  (`ALLOWLIST_ACTION_TRADING_REFUSED`); a control found on the page is refused with
+  `ACTION_REFUSED`. The guard runs on the named control and again on the element that
+  would actually receive the click.
+- touch a submit control (a typeless `<button>` inside a form counts as submit), an image
+  submit or a password control, or follow a link that leaves `https://app.getquantbase.com/`.
+- type: there is no key or text message in the accepted set, so credentials and 2FA are
+  never entered.
+
+Each action is logged value-free (verb, role, first 8 hex characters of the SHA-256 of
+the label, never the label).
 
 ### First-minute dry-run procedure
 
 1. Start the recorder (`capture`), then the navigator on the derived allow-list
-   (without `--scroll`). Page order is `/profile` first (never a cold `/dashboard`
+   (no actions needed). Page order is `/profile` first (never a cold `/dashboard`
    first, which once injected unreviewed page-data routes), then `/dashboard`,
    `/account-activity` (exactly once), then the fund page; 30 s per page.
 2. When the navigator prints its summary, stop the recorder and record its
    per-capability counts (`capabilities.<name>.responses`) in the run notes.
 3. If `funds.invest` is missing after the dwell, rerun ONLY the page that should
-   have triggered it with `--scroll` (a one-page allow-list), against a recorder
+   have triggered it with `--scroll` or a `scroll`/`click` action (a one-page allow-list), against a recorder
    run of its own. Never repeat `/account-activity`.
 4. Check the counts against the expected set above before treating the run as
    complete; any of `funds.catalog`, `funds.index`, `funds.projections` in the
@@ -510,7 +530,7 @@ HAR content is copied):
 `/sign-in` appears in the HARs and is deliberately excluded. UNVERIFIED items: that
 a direct load of `/invest`, `/funds` or `/projections` works and fires the same API
 calls; the fund names beyond Volatis Strategy; whether `funds.invest` fires on dwell
-alone (see `--scroll`); behaviour of a live browser (the tests use a fake CDP
+alone (see Actions); behaviour of a live browser (the tests use a fake CDP
 transport only).
 
 ## Declared contract extension (`build_quantbase_contract`)
@@ -555,3 +575,16 @@ reviewed query validator (`users.profile`, `funds.statistics`,
 contract; the default is unchanged. No real route is declared in this change, and the
 intake driver does not load an extension yet: wiring `--contract-extension` into
 `capture_quantbase_har.py` is the step after the sitting's draft is reviewed.
+
+## Dry run before any governed run (rule for every live driver)
+
+Before a governed live run spends single-use evidence, an allowlist pin or an owner session:
+
+1. rehearse the identical command line and config against scratch output, with no governance
+   evidence, consuming nothing, and never into a release root or the intake being built;
+2. verify what the rehearsal staged with the same verifier the governed run uses;
+3. run the governed command only after a rehearsal of the same config and cutoff verified.
+
+A rehearsal's run ids start with `DRY-`, its outputs are never admitted, and a governed command
+refuses such an id. The Yahoo fetch driver has this natively (`dry-run`,
+`docs/providers/yahoo-fetch.md`, "Dry run first"). The HAR recorder and the navigator have it natively. `python tools/quantbase_cdp_har_recorder.py dry-run --cdp-url <url>` is the `capture` code path written to a scratch run root named `DRY-<utc>` (a new temporary directory, or `--output-root <dir>\DRY-<name>` in a directory that holds only `DRY-` entries, so it can never be a release root or the intake being built); it uses no governance evidence, consumes nothing, runs `verify` on the rehearsal before printing, and prints `dry_run: true`, the `DRY-` run id and `verified: true`. Run the navigator with `--dry-run` alongside it (same allow-list, same pin; its output is labelled with a `DRY-` run id). A governed `discover` or `capture` refuses a `DRY-` output root, and `propose-contract` refuses a `DRY-` run (`DRY_RUN_NOT_ADMITTED`). Check the rehearsal's capability counts against the expected set before the governed run starts, as in the "First-minute dry-run procedure" above.

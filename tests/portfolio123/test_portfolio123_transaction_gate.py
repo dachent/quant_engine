@@ -1059,3 +1059,56 @@ def test_a_managed_performance_that_cannot_be_cut_is_refused(tmp_path: Path) -> 
             _generate(
                 legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
             )
+
+
+def test_a_weekend_start_with_no_weekday_before_as_of_is_refused(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    # Saturday 2026-09-12 start, as_of the same Saturday: the first weekday is after as_of.
+    _managed_performance(har, "2026-09-12", "2026-09-18", 5)
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    with pytest.raises(
+        Portfolio123GenerationError, match="no weekday observation on or before as_of"
+    ):
+        _generate(legacy, har, data, date(2026, 9, 12), transaction_captures=[capture])
+
+
+def test_an_interval_that_is_entirely_a_weekend_is_refused_not_indexed(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    # Saturday..Sunday with no observation: the weekday calendar is empty and data=[].
+    _managed_performance(har, "2026-09-12", "2026-09-13", 0)
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    with pytest.raises(
+        Portfolio123GenerationError,
+        match=r"no weekday observation on or before as_of.*the interval is a weekend",
+    ):
+        _generate(legacy, har, data, date(2026, 9, 12), transaction_captures=[capture])
+
+
+def test_observations_without_an_interval_or_with_an_unreadable_one_are_refused(
+    tmp_path: Path,
+) -> None:
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    for name, drop, edit, match in (
+        ("nolast", "dateLast", None, "no date/dateLast interval"),
+        ("nofirst", "date", None, "no date/dateLast interval"),
+        ("badlast", None, ("dateLast", "n/a"), "unreadable interval"),
+    ):
+        legacy, har, data = _inputs(tmp_path / name)
+        _managed_performance(har, "2026-09-07", "2026-09-14", 6)
+        path = har / "csv" / "account_555_app_investment_perfdata.csv"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept = [line for line in lines if not (drop and line.split(",", 1)[0] == drop)]
+        if edit:
+            kept = [
+                f"{edit[0]},{edit[1]}" if line.startswith(edit[0] + ",") else line
+                for line in kept
+            ]
+        path.write_text(chr(10).join(kept) + chr(10), encoding="utf-8")
+        with pytest.raises(Portfolio123GenerationError, match=match):
+            _generate(
+                legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+            )

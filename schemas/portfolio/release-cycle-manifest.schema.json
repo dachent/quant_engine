@@ -22,6 +22,8 @@
     "cutoff": { "$ref": "#/$defs/date" },
     "evaluated_on": { "$ref": "#/$defs/date" },
     "captured_at_utc": { "$ref": "#/$defs/utc" },
+    "refresh_started_at_utc": { "$ref": "#/$defs/utc" },
+    "cutoff_owner_instruction": { "type": "string", "minLength": 1, "pattern": "\\S" },
     "predecessor": {
       "type": "object",
       "additionalProperties": false,

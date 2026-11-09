@@ -143,6 +143,11 @@ def _parser() -> argparse.ArgumentParser:
     bind.add_argument("--base-spec", type=Path, required=True)
     bind.add_argument("--root-id", required=True)
     bind.add_argument("--as-of", required=True)
+    bind.add_argument(
+        "--flex-only",
+        action="store_true",
+        help="migrate the base to spec schema 4: drop the TWS snapshot source",
+    )
     bind.add_argument("--run-dir", type=Path, action="append", required=True)
     bind.add_argument(
         "--exclusion",
@@ -231,6 +236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     out=args.out,
                     exclusions=exclusions,
                     preflight=args.preflight,
+                    flex_only=args.flex_only,
                 )
             )
         elif args.command == "normalize":

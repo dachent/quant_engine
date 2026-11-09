@@ -697,37 +697,61 @@ def test_api_snapshot_nav_anchor_rejects_stale_snapshot(tmp_path: Path) -> None:
         build_generation(spec)
 
 
-def test_web_contract_snapshot_still_requires_manual_nav(tmp_path: Path) -> None:
-    spec = _spec_with_current(tmp_path)
+def test_web_contract_snapshot_without_manual_nav_uses_the_wch_nav_only(
+    tmp_path: Path,
+) -> None:
+    spec = _web_snapshot_spec(tmp_path)
     document = json.loads(spec.read_text(encoding="utf-8"))
     document["sources"] = [
         item
         for item in document["sources"]
         if item["role"] not in {"MANUAL_NAV_CSV", "MANUAL_NAV_CSV_ALL"}
     ]
-    snapshot_path = (
-        Path(document["roots"]["source"])
-        / document["current_snapshot"]["relative_path"]
-    )
-    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    snapshot["schema_version"] = 2
-    snapshot["transport"] = "WEB_CONTRACT"
-    for position in snapshot["positions"]:
-        position["evidence_class"] = "WCH_CURRENT"
-    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
-    payload = snapshot_path.read_bytes()
-    document["current_snapshot"]["expected_sha256"] = hashlib.sha256(
-        payload
-    ).hexdigest()
-    document["current_snapshot"]["expected_size_bytes"] = len(payload)
-    document["current_snapshot"]["schema_version"] = "2"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    catalog, _, _ = build_generation(spec)
+    assert {item["evidence_class"] for item in catalog["nav_observations"]} == {
+        "WCH_HISTORICAL"
+    }
+    assert catalog["nav_observations"]
+
+
+def _without_manual_nav(spec: Path) -> None:
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["sources"] = [
+        item
+        for item in document["sources"]
+        if item["role"] not in {"MANUAL_NAV_CSV", "MANUAL_NAV_CSV_ALL"}
+    ]
     spec.write_text(json.dumps(document), encoding="utf-8")
 
-    with pytest.raises(
-        SchwabGenerationError,
-        match="a manual NAV role \\(per-account or aggregate\\) is required",
-    ):
+
+def test_web_contract_nav_anchor_refuses_a_cutoff_earlier_than_the_nav_end(
+    tmp_path: Path,
+) -> None:
+    # observed 2026-07-31 but valued 2026-07-29; WCH NAV ends 2026-07-30
+    spec = _web_snapshot_spec(tmp_path, valuation_cutoff="2026-07-29")
+    _without_manual_nav(spec)
+    with pytest.raises(SchwabGenerationError, match="stale current snapshot"):
         build_generation(spec)
+
+
+def test_web_contract_nav_anchor_allows_a_cutoff_equal_to_the_nav_end(
+    tmp_path: Path,
+) -> None:
+    # the R3 shape: snapshot valued at D, NAV through D
+    spec = _web_snapshot_spec(tmp_path, valuation_cutoff="2026-07-30")
+    _without_manual_nav(spec)
+    catalog, _, _ = build_generation(spec)
+    (nav,) = [i for i in catalog["reconciliation"] if i.get("fact_type") == "NAV"]
+    assert nav["snapshot_valuation_cutoff"] == "2026-07-30"
+
+
+def test_web_contract_nav_anchor_records_the_valuation_cutoff(tmp_path: Path) -> None:
+    spec = _web_snapshot_spec(tmp_path, valuation_cutoff="2026-07-31")
+    _without_manual_nav(spec)
+    catalog, _, _ = build_generation(spec)
+    (nav,) = [i for i in catalog["reconciliation"] if i.get("fact_type") == "NAV"]
+    assert nav["snapshot_valuation_cutoff"] == "2026-07-31"
 
 
 def test_current_snapshot_cannot_claim_wch_nav_schema(tmp_path: Path) -> None:

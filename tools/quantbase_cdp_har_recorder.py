@@ -55,6 +55,7 @@ from typing import Any, BinaryIO, Protocol
 from urllib.parse import parse_qsl, unquote, urlsplit
 import urllib.request
 
+import capture_dry_run
 from quant_engine.web_contracts import QUANTBASE_CONTRACT, WebContractError
 
 
@@ -1332,6 +1333,11 @@ def propose_contract(
 
     if not run_roots:
         raise RecorderError("NO_RUNS")
+    try:
+        for run in run_roots:
+            capture_dry_run.refuse_dry_input(run)
+    except capture_dry_run.DryRunRefused as exc:
+        raise RecorderError(exc.code) from None
     manifests = []
     for run in run_roots:
         verify_run(run)
@@ -1785,7 +1791,7 @@ class Listener:
 def _live(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover
     recorder = Recorder(
         args.output_root,
-        mode=args.command,
+        mode="capture" if args.command == "dry-run" else args.command,
         har_name=getattr(args, "har_name", DEFAULT_HAR_NAME),
     )
     transport = WebSocketTransport(args.cdp_url)
@@ -1846,10 +1852,21 @@ def jwt_lines(manifest: Mapping[str, Any]) -> list[str]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("discover", "capture"):
-        item = sub.add_parser(name)
+    for name in ("discover", "capture", "dry-run"):
+        item = sub.add_parser(
+            name,
+            help="rehearse a capture into a scratch DRY- run root (never admitted)"
+            if name == "dry-run"
+            else None,
+        )
         item.add_argument("--cdp-url", required=True)
-        item.add_argument("--output-root", required=True, type=Path)
+        item.add_argument(
+            "--output-root",
+            required=name != "dry-run",
+            default=None,
+            type=Path,
+            help="dry-run only: optional DRY- root in a directory holding only DRY- entries",
+        )
         item.add_argument("--max-seconds", type=float, default=0.0)
         item.add_argument(
             "--warn-after-seconds",
@@ -1858,7 +1875,7 @@ def _parser() -> argparse.ArgumentParser:
             help="warn once if nothing was recorded after this many seconds "
             "(default 30; 0 disables)",
         )
-        if name == "capture":
+        if name in ("capture", "dry-run"):
             item.add_argument("--har-name", default=DEFAULT_HAR_NAME)
     check = sub.add_parser("verify")
     check.add_argument("--run-root", required=True, type=Path)
@@ -1889,7 +1906,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "artifacts": [a["path"] for a in written["artifacts"]],
             }
             lead = []
+        elif args.command == "dry-run":
+            try:
+                args.output_root = capture_dry_run.dry_run_root(args.output_root)
+            except capture_dry_run.DryRunRefused as exc:
+                raise RecorderError(exc.code) from None
+            manifest = _live(args)
+            verify_run(
+                args.output_root
+            )  # the rehearsal is verified before anything prints
+            result = {
+                **_summary(manifest),
+                "dry_run": True,
+                "run_id": args.output_root.name,
+                "verified": True,
+            }
+            lead = jwt_lines(manifest)
         else:
+            if args.command in ("discover", "capture"):
+                try:
+                    capture_dry_run.refuse_dry_as_governed(args.output_root)
+                except capture_dry_run.DryRunRefused as exc:
+                    raise RecorderError(exc.code) from None
             manifest = (
                 recover_run(args.run_root) if args.command == "recover" else _live(args)
             )
