@@ -768,3 +768,14 @@ def test_every_saved_name_carries_the_id() -> None:
     for route in fetcher.ROUTES:
         if route.shape != "visit":
             assert "{id}" in route.saved
+
+
+def test_designer_fetch_carries_the_page_request_headers() -> None:
+    designer = fetcher.fetch_expression(
+        "https://www.portfolio123.com/spr/strategy/model/1?dm=true"
+    )
+    other = fetcher.fetch_expression(
+        "https://www.portfolio123.com/app/investment/resource/1"
+    )
+    assert "angular_req:'1'" in designer
+    assert "angular_req" not in other
