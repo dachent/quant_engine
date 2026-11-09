@@ -1,16 +1,23 @@
-"""Drive the owner's signed-in Quantbase tab through a FIXED list of read-only pages.
+"""Drive the owner's signed-in Quantbase tab through a fixed list of pages.
 
 Pairs with the passive recorder (``tools/quantbase_cdp_har_recorder.py``, a separate
 process) so an unattended capture can load the pages the owner would otherwise open
 by hand while the recorder records the traffic. This tool records nothing itself.
 
+Allowed in the signed-in window for any non-trading read: navigate, click, scroll. The ONE
+guard is ``tools/capture_action_guard.py``: it refuses to click a control whose name, text,
+label, value, title or link matches the trading pattern (trade, transfer, withdraw, deposit,
+order, buy, sell, submit, confirm payment), a submit or password control, or a link that leaves
+the app origin; there is no typing message at all, so credentials and 2FA are never entered.
+Every action is logged value-free (verb, role, label hash).
+
 Hard limits, enforced before a message leaves the process:
 
 * The only CDP messages it can send are ``Target.getTargets`` (discovery),
-  ``Target.attachToTarget``, ``Page.enable`` and ``Page.navigate``. There is no
-  ``Runtime.*``, ``Fetch.*``, ``Network.*`` or ``Page.reload``, and no ``Input.*``
-  unless ``--scroll`` is given, which adds bounded mouseWheel events and nothing else. A
-  ``Page.navigate`` is sent only with exactly ``{"url": <allow-listed url>}``.
+  ``Target.attachToTarget``, ``Page.enable``, ``Page.navigate``, the fixed element probe
+  ``Runtime.evaluate`` and ``Input.dispatchMouseEvent`` (move, wheel, left click). There is no
+  key or text input, no ``Fetch.*``, ``Network.*`` or ``Page.reload``. A ``Page.navigate`` is
+  sent only with exactly ``{"url": <allow-listed url>}``.
 * The CDP URL must be a loopback ``http://host:port`` endpoint.
 * Navigation targets come ONLY from a hash-bound allow-list file (data, not code).
   Every entry is validated before any connection is made: https, the exact host
@@ -40,6 +47,15 @@ import time
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from capture_action_guard import (
+    ActionLog,
+    ActionRefused,
+    ControlNotFound,
+    check_driving_message,
+    click_by_name,
+    matches_trading,
+    wheel_params,
+)
 from quantbase_cdp_har_recorder import (
     APP_ORIGIN,
     MUTATION_WORDS,
@@ -58,16 +74,13 @@ DEFAULT_LOAD_TIMEOUT_SECONDS = 30.0
 MAX_PAGES = 50
 ACCOUNT_ACTIVITY_PATH = "/account-activity"
 
-#: ``--scroll`` fallback (OFF by default): mouse WHEEL events only, bounded.
+#: ``--scroll``: bounded mouse wheel events after each page load (also available per page as a
+#: ``{"scroll": <deltaY>}`` action).
 WHEEL_X = 300
 WHEEL_Y = 300
 WHEEL_STEP = 400
 WHEEL_DOWN_STEPS = 6
-WHEEL_MAX_EVENTS = 12  # per page
-WHEEL_MAX_ABS_DELTA = 600  # per event
-WHEEL_MAX_TOTAL_DELTA = 5000  # sum of |deltaY| per page
 WHEEL_PAUSE_SECONDS = 1.0
-WHEEL_COORD_MAX = 2000
 
 #: The navigator holds no recorder access and may not send Network.*, so it cannot
 #: count responses. The operator reads the recorder's per-capability counts.
@@ -85,11 +98,14 @@ ALLOWED_CDP_METHODS = frozenset(
         "Target.attachToTarget",
         "Page.enable",
         "Page.navigate",
+        "Runtime.evaluate",
+        "Input.dispatchMouseEvent",
     }
 )
-
-#: Sent only when ``--scroll`` is set, and then only as a bounded wheel event.
-SCROLL_ONLY_METHODS = frozenset({"Input.dispatchMouseEvent"})
+APP_PREFIX = APP_ORIGIN + "/"
+MAX_ACTIONS = 20
+MAX_CLICK_NAME = 200
+MAX_SCROLL = 5000
 
 _MUTATION_RE = re.compile("|".join(re.escape(word) for word in MUTATION_WORDS))
 #: A path with one of these segments-in-text is a sign-in flow, never a read-only page.
@@ -200,10 +216,54 @@ def page_key(url: str) -> str:
 
 
 @dataclass(frozen=True)
+class Action:
+    """One in-page action: ``click`` a control by its exact name, or ``scroll`` by deltaY."""
+
+    verb: str
+    name: str = ""
+    delta_y: int = 0
+
+
+@dataclass(frozen=True)
 class Page:
     label: str
     url: str
     dwell_seconds: float
+    actions: tuple[Action, ...] = ()
+
+
+def _parse_actions(raw: object, where: str) -> tuple[Action, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or len(raw) > MAX_ACTIONS:
+        raise NavigatorError("ALLOWLIST_ACTIONS_INVALID", where)
+    actions: list[Action] = []
+    for item in raw:
+        if not isinstance(item, dict) or len(item) != 1:
+            raise NavigatorError("ALLOWLIST_ACTIONS_INVALID", where)
+        ((verb, value),) = item.items()
+        if verb == "click":
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > MAX_CLICK_NAME
+            ):
+                raise NavigatorError("ALLOWLIST_ACTIONS_INVALID", where)
+            if matches_trading(value):
+                raise NavigatorError("ALLOWLIST_ACTION_TRADING_REFUSED", where)
+            actions.append(Action("click", name=value))
+        elif verb == "scroll":
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value == 0
+                or abs(value) > MAX_SCROLL
+            ):
+                raise NavigatorError("ALLOWLIST_ACTIONS_INVALID", where)
+            actions.append(Action("scroll", delta_y=value))
+        else:
+            raise NavigatorError("ALLOWLIST_ACTIONS_INVALID", where)
+    return tuple(actions)
 
 
 @dataclass(frozen=True)
@@ -246,7 +306,12 @@ def parse_allowlist(raw: bytes, *, pin_sha256: str | None = None) -> Allowlist:
     keys: set[str] = set()
     for index, item in enumerate(items):
         where = str(index)
-        if not isinstance(item, dict) or set(item) - {"label", "url", "dwell_seconds"}:
+        if not isinstance(item, dict) or set(item) - {
+            "label",
+            "url",
+            "dwell_seconds",
+            "actions",
+        }:
             raise NavigatorError("ALLOWLIST_ENTRY_SHAPE", where)
         label = item.get("label")
         if not isinstance(label, str) or not _LABEL_RE.fullmatch(label):
@@ -275,7 +340,9 @@ def parse_allowlist(raw: bytes, *, pin_sha256: str | None = None) -> Allowlist:
             if "dwell_seconds" in item
             else default_dwell
         )
-        pages.append(Page(label, url, dwell))
+        pages.append(
+            Page(label, url, dwell, _parse_actions(item.get("actions"), where))
+        )
     return Allowlist(digest, tuple(pages))
 
 
@@ -284,70 +351,17 @@ def parse_allowlist(raw: bytes, *, pin_sha256: str | None = None) -> Allowlist:
 
 
 class GuardedTransport:
-    """Wrap a transport so only the four allowed messages can ever be sent, and
-    ``Page.navigate`` only ever carries exactly one allow-listed URL."""
+    """Wrap a transport so only the allowed messages can ever be sent: ``Page.navigate`` only
+    ever carries exactly one allow-listed URL, and probes and input are checked by the one
+    guard (``tools/capture_action_guard.py``)."""
 
-    def __init__(
-        self,
-        inner: CdpTransport,
-        allowed_urls: frozenset[str],
-        *,
-        scroll: bool = False,
-    ) -> None:
+    def __init__(self, inner: CdpTransport, allowed_urls: frozenset[str]) -> None:
         self._inner = inner
         self._urls = allowed_urls
-        self._scroll = scroll
-        self._wheel_events = 0
-        self._wheel_total = 0
-
-    def new_page(self) -> None:
-        """The wheel budget is per page."""
-
-        self._wheel_events = 0
-        self._wheel_total = 0
-
-    def _check_wheel(self, params: object) -> None:
-        if not isinstance(params, dict) or not set(params) <= {
-            "type",
-            "x",
-            "y",
-            "deltaX",
-            "deltaY",
-        }:
-            raise NavigatorError("CDP_INPUT_REFUSED", "params")
-        if params.get("type") != "mouseWheel":
-            raise NavigatorError("CDP_INPUT_REFUSED", "type")
-        for name in ("x", "y"):
-            value = params.get(name)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not 0 <= value <= WHEEL_COORD_MAX
-            ):
-                raise NavigatorError("CDP_INPUT_REFUSED", name)
-        dx, dy = params.get("deltaX", 0), params.get("deltaY")
-        if dx != 0 or isinstance(dx, bool):
-            raise NavigatorError("CDP_INPUT_REFUSED", "deltaX")
-        if (
-            isinstance(dy, bool)
-            or not isinstance(dy, int)
-            or dy == 0
-            or abs(dy) > WHEEL_MAX_ABS_DELTA
-        ):
-            raise NavigatorError("CDP_INPUT_REFUSED", "deltaY")
-        if (
-            self._wheel_events + 1 > WHEEL_MAX_EVENTS
-            or self._wheel_total + abs(dy) > WHEEL_MAX_TOTAL_DELTA
-        ):
-            raise NavigatorError("CDP_INPUT_BUDGET_EXCEEDED")
-        self._wheel_events += 1
-        self._wheel_total += abs(dy)
 
     def send(self, message: dict[str, Any]) -> None:
         method = message.get("method")
-        if method in SCROLL_ONLY_METHODS and self._scroll:
-            self._check_wheel(message.get("params"))
-        elif method not in ALLOWED_CDP_METHODS:
+        if method not in ALLOWED_CDP_METHODS:
             raise NavigatorError("CDP_METHOD_REFUSED", str(method))
         if method == "Page.navigate":
             params = message.get("params")
@@ -357,6 +371,11 @@ class GuardedTransport:
                 or params["url"] not in self._urls
             ):
                 raise NavigatorError("CDP_NAVIGATE_URL_REFUSED")
+        else:
+            try:
+                check_driving_message(message, navigate_ok=lambda url: None)
+            except ActionRefused as exc:
+                raise NavigatorError("CDP_INPUT_REFUSED", str(exc)) from None
         self._inner.send(message)
 
     def receive(self, timeout: float) -> dict[str, Any] | None:
@@ -386,7 +405,8 @@ class Navigator:
         if len(set(keys)) != len(keys):
             raise NavigatorError("ALLOWLIST_PAGE_REVISITED")
         self._scroll = scroll
-        self._transport = GuardedTransport(transport, allowlist.urls, scroll=scroll)
+        self._transport = GuardedTransport(transport, allowlist.urls)
+        self.log = ActionLog()
         self._allowlist = allowlist
         self._emit = emit
         self._clock = clock
@@ -570,12 +590,20 @@ class Navigator:
 
     def _visit(self, page: Page) -> dict[str, Any]:
         self._events.clear()
-        self._transport.new_page()
         reply = self._call("Page.navigate", {"url": page.url}, self._sid)
         if reply.get("errorText"):
             raise StopReauth("NAVIGATE_ERROR")
         loaded = self._wait_for_load()
         wheel = self._wheel() if loaded and self._scroll else 0
+        clicks = 0
+        if loaded:
+            for action in page.actions:
+                if action.verb == "click":
+                    self._click(action.name)
+                    clicks += 1
+                else:
+                    self._wheel_event(action.delta_y)
+                    wheel += 1
         self._drain(page.dwell_seconds)
         final = urlsplit(self._tab_url())
         if not on_app_origin(final.geturl()):
@@ -589,27 +617,50 @@ class Navigator:
             "redirected_in_app": not same,
             "dwell_seconds": page.dwell_seconds,
             "wheel_events": wheel,
+            "clicks": clicks,
             "capability_counts": COUNTS_NOT_AVAILABLE,
         }
 
+    def _wheel_event(self, delta: int) -> None:
+        self.log.record("scroll", "page", str(delta))
+        self._call(
+            "Input.dispatchMouseEvent",
+            wheel_params(delta, WHEEL_X, WHEEL_Y),
+            self._sid,
+        )
+        self._drain(WHEEL_PAUSE_SECONDS)
+
     def _wheel(self) -> int:
-        """Bounded wheel scroll down then back up, to bring footer links into view."""
+        """Wheel scroll down then back up, to bring footer links into view."""
 
         steps = [WHEEL_STEP] * WHEEL_DOWN_STEPS + [-WHEEL_STEP] * WHEEL_DOWN_STEPS
         for delta in steps:
-            self._call(
-                "Input.dispatchMouseEvent",
-                {
-                    "type": "mouseWheel",
-                    "x": WHEEL_X,
-                    "y": WHEEL_Y,
-                    "deltaX": 0,
-                    "deltaY": delta,
-                },
-                self._sid,
-            )
-            self._drain(WHEEL_PAUSE_SECONDS)
+            self._wheel_event(delta)
         return len(steps)
+
+    def _facts(self, params: dict[str, Any]) -> dict[str, Any] | None:
+        result = self._call("Runtime.evaluate", params, self._sid)
+        inner = result.get("result")
+        value = inner.get("value") if isinstance(inner, dict) else None
+        return value if isinstance(value, dict) else None
+
+    def _click(self, name: str) -> None:
+        """Click the control with this exact name unless the one guard refuses it."""
+
+        try:
+            click_by_name(
+                name,
+                evaluate=lambda params: self._facts(params),
+                dispatch=lambda params: self._call(
+                    "Input.dispatchMouseEvent", params, self._sid
+                ),
+                origin_prefix=APP_PREFIX,
+                log=self.log,
+            )
+        except ControlNotFound:
+            raise NavigatorError("ACTION_CONTROL_NOT_FOUND") from None
+        except ActionRefused as exc:
+            raise NavigatorError("ACTION_REFUSED", str(exc)) from None
 
 
 # ---------------------------------------------------------------------------
@@ -631,8 +682,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scroll",
         action="store_true",
-        help="FALLBACK, off by default: after each page load send bounded "
-        "mouseWheel events only (no click, key or touch)",
+        help="after each page load wheel the page down and back up (clicks and scrolls "
+        "can also be declared per page as allow-list actions)",
     )
     parser.add_argument(
         "--load-timeout-seconds", type=float, default=DEFAULT_LOAD_TIMEOUT_SECONDS
