@@ -972,7 +972,7 @@
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
-   "readiness_reason": "The current Matrixport generation, exact strategy version, 2025-12-06 owner-live boundary, and #287-declared source omissions on 2026-01-27 and 2026-07-03 are evidenced. Daily metrics retain only exact adjacent-day returns, leaving each missing date and its first post-gap endpoint unavailable; epoch cumulative TWR additionally admits the two hash-bound, no-flow holding-period spans with exact NAV and share endpoints. Owner-approved exact-date USD conversion extends owner calculation through 2026-09-17; funded census, HWM, invested capital, crypto applicability, and dependence remain required.",
+   "readiness_reason": "The current Matrixport generation, exact strategy version, 2025-12-06 owner-live boundary, and #287-declared source omissions on 2026-01-27, 2026-07-03 and 2026-10-16 are evidenced. Daily metrics retain only exact adjacent-day returns, leaving each missing date and its first post-gap endpoint unavailable; epoch cumulative TWR additionally admits the three hash-bound, no-flow holding-period spans with exact NAV and share endpoints. Owner-approved exact-date USD conversion extends owner calculation through 2026-09-17; funded census, HWM, invested capital, crypto applicability, and dependence remain required.",
    "blockers": [
     303,
     324,
@@ -4481,7 +4481,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
      "product_data_class_count": 2,
-     "product_data_class_set_sha256": "6d516d502accb2120a79612f80a1c9739cddd40b28c2923b3cbea9c7fcd59532",
+     "product_data_class_set_sha256": "5e472d76e49e668e98f82eaed56eb38edb1facff4c64db7fd7b45ca6c216429e",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c",
      "allowed_exclusion_reasons": [
@@ -4497,26 +4497,30 @@
     }
    },
    "declared_gap_policy": {
-    "policy_id": "MATRIXPORT_OWNER_DECLARED_NAV_GAPS_287_V2",
+    "policy_id": "MATRIXPORT_OWNER_DECLARED_NAV_GAPS_287_V3",
     "authority_issue": 287,
-    "provenance": "owner-accepted 2026-08-14, issue #287",
+    "provenance": "owner-accepted 2026-08-14, issue #287 (2026-01-27, 2026-07-03); owner-accepted 2026-11-06, issue #287 comment 6697113743 (2026-10-16)",
     "reason": "provider NAV endpoint returned no data for this date",
     "calendar": "ALWAYS_ON",
     "frequency": "DAILY",
     "coverage_status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
     "declared_missing_source_dates": [
      "2026-01-27",
-     "2026-07-03"
+     "2026-07-03",
+     "2026-10-16"
     ],
     "omitted_return_dates": [
      "2026-01-28",
-     "2026-07-04"
+     "2026-07-04",
+     "2026-10-17"
     ],
     "unavailable_return_dates": [
      "2026-01-27",
      "2026-01-28",
      "2026-07-03",
-     "2026-07-04"
+     "2026-07-04",
+     "2026-10-16",
+     "2026-10-17"
     ],
     "return_rule": "DAILY_RETURNS_REQUIRE_ADJACENT_CALENDAR_DAY; DECLARED_MISSING_SOURCE_DATES_REMAIN_UNAVAILABLE_FOR_DAILY_METRICS; ADMIT_ONLY_HASH_BOUND_TWO_DAY_OWNER_HOLDING_PERIOD_SPANS_WITH_EXACT_NAV_ENDPOINTS_UNCHANGED_SHARES_AND_NO_IN_SPAN_SUBSCRIPTION_OR_FUNDING; NO_FILL_OR_CALENDAR_CLOSURE_INFERENCE",
     "cumulative_return_across_declared_gaps": "ADMIT_EXACT_HASH_BOUND_OWNER_HOLDING_PERIOD_SPANS_ONLY",
@@ -4549,6 +4553,16 @@
       "span_end_date": "2026-07-04",
       "span_start_date": "2026-07-02",
       "start_endpoint_sha256": "d3c4e152375d1ee77ded278b0123b29580f23c45dbbfe857b79cbad0f850b015",
+      "subscription_events_in_span": 0
+     },
+     {
+      "end_endpoint_sha256": "a0ca192d82b01c0c4c32c1d0ecbdda138a540076bb50ff0ee67f1b456e84f3cc",
+      "missing_source_date": "2026-10-16",
+      "return": "-0.0204398304819813105429510786",
+      "span_days": 2,
+      "span_end_date": "2026-10-17",
+      "span_start_date": "2026-10-15",
+      "start_endpoint_sha256": "fae9f34630fbec0a3a97823c0d576af78ca1f1f5fcb10fc09770ae73c3689d88",
       "subscription_events_in_span": 0
      }
     ]
@@ -4583,7 +4597,7 @@
     "PANEL",
     "RELEASE_RECEIPT"
    ],
-   "owner_policy_decision": "The exact Matrixport generation is captured. Provider NAV before confirmed funding remains PROVIDER_LIVE; ACCOUNT_LIVE returns begin after the 2025-12-06 held observation. Owner-accepted #287 omissions are 2026-01-27 and 2026-07-03 with exact NAV, FX, and reconciliation exclusion triples; no fill or calendar-closure inference is allowed. The first observed endpoint after each omission, 2026-01-28 and 2026-07-04, has no daily return, while its exact hash-bound two-day no-flow holding-period return is admitted only to epoch cumulative TWR. Owner-approved exact event-date and NAV-date FX admits USD history through 2026-09-17; native omission and endpoint rules remain unchanged."
+   "owner_policy_decision": "The exact Matrixport generation is captured. Provider NAV before confirmed funding remains PROVIDER_LIVE; ACCOUNT_LIVE returns begin after the 2025-12-06 held observation. Owner-accepted #287 omissions are 2026-01-27, 2026-07-03 and 2026-10-16 with exact NAV, FX, and reconciliation exclusion triples; no fill or calendar-closure inference is allowed. The first observed endpoint after each omission, 2026-01-28, 2026-07-04 and 2026-10-17, has no daily return, while its exact hash-bound two-day no-flow holding-period return is admitted only to epoch cumulative TWR. Owner-approved exact event-date and NAV-date FX admits USD history through 2026-09-17; native omission and endpoint rules remain unchanged."
   },
   {
    "source_id": "quantbase-account-generation",

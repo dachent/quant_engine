@@ -2679,11 +2679,28 @@ def _refresh_materialized_segment_identities(fixture: dict[str, Any]) -> None:
     _write_json(contract_path, contract)
 
 
+def _contract_gap_provenance() -> str:
+    """The one provenance the product contract declares for every Matrixport gap."""
+
+    contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    return str(source["declared_gap_policy"]["provenance"])
+
+
 def _matrixport_exclusions(*dates: str) -> list[dict[str, str]]:
+    provenance = _contract_gap_provenance()
     return [
         {
             "item": f"{kind}:{observed}",
-            "provenance": "owner-accepted 2026-08-14, issue #287",
+            "provenance": provenance,
             "reason": "provider NAV endpoint returned no data for this date",
         }
         for kind in (

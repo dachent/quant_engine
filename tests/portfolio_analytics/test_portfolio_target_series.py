@@ -2319,3 +2319,152 @@ def test_a_disposition_for_an_admitted_series_is_refused(tmp_path):
 
     with pytest.raises(TargetSeriesError, match="disposition is invalid"):
         target_series._strategy_history_returns(manifest, returns)
+
+
+def _contract_matrixport_policy() -> dict[str, object]:
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    return dict(
+        next(
+            row
+            for row in contract["source_segments"]
+            if row["source_id"] == "matrixport-account-generation"
+        )["declared_gap_policy"]
+    )
+
+
+def test_matrixport_gap_policy_is_restricted_to_the_gaps_inside_the_cutoff() -> None:
+    policy = _contract_matrixport_policy()
+    full = target_series._matrixport_policy_for_cutoff(policy, None)
+    assert full == policy
+    assert len(policy["span_return_receipts"]) == 3  # type: ignore[arg-type]
+
+    # the delivery cutoff of the earlier releases: the old two-gap policy, receipts included
+    early = target_series._matrixport_policy_for_cutoff(policy, date(2026, 9, 17))
+    assert early["declared_missing_source_dates"] == ["2026-01-27", "2026-07-03"]
+    assert early["omitted_return_dates"] == ["2026-01-28", "2026-07-04"]
+    assert early["unavailable_return_dates"] == [
+        "2026-01-27",
+        "2026-01-28",
+        "2026-07-03",
+        "2026-07-04",
+    ]
+    assert [row["missing_source_date"] for row in early["span_return_receipts"]] == [  # type: ignore[attr-defined]
+        "2026-01-27",
+        "2026-07-03",
+    ]
+    assert early["span_return_receipts"] == policy["span_return_receipts"][:2]  # type: ignore[index]
+
+    # the R3 cutoff keeps the whole policy, third receipt included
+    assert (
+        target_series._matrixport_policy_for_cutoff(policy, date(2026, 11, 6)) == policy
+    )
+    # the span end must be inside the cutoff: the gap day as the cutoff day does not bind
+    assert target_series._matrixport_policy_for_cutoff(policy, date(2026, 10, 16))[
+        "declared_missing_source_dates"
+    ] == ["2026-01-27", "2026-07-03"]
+    assert target_series._matrixport_policy_for_cutoff(policy, date(2026, 10, 17))[
+        "declared_missing_source_dates"
+    ] == ["2026-01-27", "2026-07-03", "2026-10-16"]
+
+
+def test_matrixport_declared_dates_at_the_cutoff_keep_the_refusal_of_undeclared_gaps() -> (
+    None
+):
+    policy = _contract_matrixport_policy()
+    provenance = str(policy["provenance"])
+    reason = str(policy["reason"])
+
+    def manifest(*dates: str, authority: str = provenance) -> dict[str, object]:
+        return {
+            "coverage": {
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                "known_gaps": [],
+                "declared_exclusions": [
+                    {
+                        "item": f"{kind}:{day}",
+                        "provenance": authority,
+                        "reason": reason,
+                    }
+                    for kind in (
+                        "fx_missing_date",
+                        "nav_missing_date",
+                        "reconciliation_incomplete_date",
+                    )
+                    for day in dates
+                ],
+            }
+        }
+
+    three = ("2026-01-27", "2026-07-03", "2026-10-16")
+    parse = target_series._matrixport_declared_missing_dates
+    # R3 cutoff: all three are required and returned
+    assert parse(manifest(*three), policy, date(2026, 11, 6)) == frozenset(
+        date.fromisoformat(day) for day in three
+    )
+    # a manifest that omits an applicable declared gap is refused (declared != contract)
+    with pytest.raises(TargetSeriesError, match="differ from product authority"):
+        parse(manifest(*three[:2]), policy, date(2026, 11, 6))
+    # delivery cutoff 2026-09-17: a generation that declares only the two earlier gaps
+    # (and the 2026-08-14 provenance they were accepted under) is accepted ...
+    two = three[:2]
+    legacy = "owner-accepted 2026-08-14, issue #287"
+    assert parse(manifest(*two, authority=legacy), policy, date(2026, 9, 17)) == (
+        frozenset(date.fromisoformat(day) for day in two)
+    )
+    # ... as is one that already lists the later gap, which no longer applies
+    assert parse(manifest(*three), policy, date(2026, 9, 17)) == frozenset(
+        date.fromisoformat(day) for day in two
+    )
+    # the legacy provenance does not cover the 2026-10-16 declaration
+    with pytest.raises(TargetSeriesError, match="differ from product authority"):
+        parse(manifest(*three, authority=legacy), policy, date(2026, 11, 6))
+    # an applicable gap the manifest does not declare is still refused at the early cutoff
+    with pytest.raises(TargetSeriesError, match="differ from product authority"):
+        parse(manifest("2026-01-27", authority=legacy), policy, date(2026, 9, 17))
+
+
+def test_matrixport_target_ignores_a_declared_gap_whose_endpoint_is_after_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    """A later declared gap needs no endpoints when the cutoff discards them."""
+
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    _write(
+        nav,
+        "product_id,timestamp_utc,nav\n"
+        "P1,2026-01-01T00:00:00Z,1\n"
+        "P1,2026-01-02T00:00:00Z,1.1\n"
+        "P1,2026-01-04T00:00:00Z,1.2\n"
+        "P1,2026-01-05T00:00:00Z,1.3\n"
+        "P1,2026-01-07T00:00:00Z,1.4\n",
+    )
+    declared = ("2026-01-03", "2026-01-06")
+    _rebind_matrixport_nav(manifest, nav, declared_dates=declared)
+    daily_holdings = _rebind_matrixport_daily_holdings(
+        manifest, nav, declared_dates=declared
+    )
+
+    def receipts(cutoff: date | None) -> list[str]:
+        _target, proof = build_matrixport_targets(
+            base,
+            manifest,
+            nav,
+            holdings,
+            subscriptions,
+            "P1",
+            "Robuxio",
+            admission_cutoff=cutoff,
+            daily_holdings_path=daily_holdings,
+        )
+        coverage = json.loads(proof)["coverage"]
+        return [row["missing_source_date"] for row in coverage["span_return_receipts"]]
+
+    assert receipts(None) == ["2026-01-03", "2026-01-06"]
+    assert receipts(date(2026, 1, 7)) == ["2026-01-03", "2026-01-06"]
+    # the 2026-01-07 endpoint is after the cutoff: the later gap does not bind
+    assert receipts(date(2026, 1, 6)) == ["2026-01-03"]
+    assert receipts(date(2026, 1, 5)) == ["2026-01-03"]

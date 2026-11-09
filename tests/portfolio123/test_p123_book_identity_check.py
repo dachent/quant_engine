@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date
 from pathlib import Path
 
 from tools import p123_book_identity_check as ic
@@ -194,6 +195,63 @@ def test_us_format_inception_is_checked_and_unparseable_needs_review(
     assert report["books"]["101"]["decision"] != "PASS"
 
 
+def test_positions_at_the_cutoff_roll_back_the_rows_after_it(tmp_path: Path) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")  # B: +50 on 2026-01-05, -20 on 2026-02-02; held A 100, B 30 at T
+    _manifest(capture)
+    assert "I5D" not in {
+        c["check"] for c in ic.check_capture(capture)["books"]["101"]["checks"]
+    }
+    report = ic.check_capture(capture, as_of=date(2026, 1, 31))
+    item = report["books"]["101"]
+    assert _status(report, "101", "I5D") == "PASS"
+    assert item["positions_as_of"]["rolled_back_rows"] == {"SELL": 1}
+    assert item["positions_as_of"]["open_symbols"] == 2
+    full = ic.check_capture(capture, as_of=date(2026, 9, 11))["books"]["101"]
+    assert (
+        full["positions_as_of"]["positions_sha256"]
+        != item["positions_as_of"]["positions_sha256"]
+    )
+
+
+def test_rolling_back_refuses_only_missing_data_or_a_failed_closure(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(
+        raw,
+        "101",
+        trades=[
+            ("2025-05-12", "A101", "BUY", "100"),
+            ("2026-03-01", "A101", "WEIRD", "5"),
+        ],
+        held={"A101": "105.0"},
+    )
+    split = [
+        ("2025-05-12", "A202", "BUY", "100"),
+        ("2026-03-01", "A202", "SPLIT", "100"),
+    ]
+    _book(
+        raw, "202", trades=split, held={"A202": "200.0"}
+    )  # split after D, closes at T
+    _book(raw, "303", trades=split, held={"A202": "100.0"})  # does not close at T
+    _book(raw, "404", trades=split, held={"A202": "200.0"})
+    (raw / "strategy_404_holdings.csv").unlink()  # no holdings export at T
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 2, 1))
+    assert _status(report, "101", "I5D") == "FAIL"  # unknown row type after D
+    assert _status(report, "202", "I5D") == "PASS"
+    assert report["books"]["202"]["positions_as_of"]["splits_after_as_of"] == [
+        {"date": "2026-03-01", "shares": "100", "symbol": "A202"}
+    ]
+    assert _status(report, "303", "I5D") == "FAIL"
+    assert _status(report, "404", "I5D") == "FAIL"
+    detail = next(
+        c["detail"] for c in report["books"]["303"]["checks"] if c["check"] == "I5D"
+    )
+    assert "cannot close" in detail and "SPLIT" in detail
+
+
 def test_manifest_mismatch_and_missing_perf_fail(tmp_path: Path) -> None:
     capture, raw = _capture(tmp_path)
     _book(raw, "101")
@@ -256,6 +314,38 @@ def test_reference_pull_must_be_contained_and_share_the_cash_start(
     foreign = _tx("2008-09-26", "20,000.00", [("2010-01-04", "OTHER", "BUY", "10")])
     report = ic.check_capture(capture, reference_index=_reference(other, foreign))
     assert _status(report, "101", "I9") == "FAIL"
+
+
+def test_reference_rows_are_compared_with_multiplicity_and_zero_missing(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")  # one BUY of A101 on 2025-05-12
+    _manifest(capture)
+    twice = [("2025-05-12", "A101", "BUY", "100")] * 2
+    reference = _reference(tmp_path, _tx("2025-05-09", "1,000,000.00", twice))
+    report = ic.check_capture(capture, reference_index=reference)
+    assert (
+        _status(report, "101", "I9") == "FAIL"
+    )  # held once, the reference holds it twice
+    detail = next(
+        c["detail"] for c in report["books"]["101"]["checks"] if c["check"] == "I9"
+    )
+    assert "1 of 2 reference trade rows absent" in detail
+    renamed = _tx(
+        "2025-05-09", "1,000,000.00", [("2025-05-12", "OLDSYM", "BUY", "100")]
+    )
+    moved = ic.check_capture(
+        capture, reference_index=_reference(tmp_path / "r2", renamed)
+    )
+    assert _status(moved, "101", "I9") == "PASS"  # same row under another symbol
+    assert "1 rows carry another symbol" in next(
+        c["detail"] for c in moved["books"]["101"]["checks"] if c["check"] == "I9"
+    )
+    lenient = ic.check_capture(
+        capture, reference_index=reference, reference_tolerance=0.5
+    )
+    assert _status(lenient, "101", "I9") == "PASS"
 
 
 def test_cli_writes_one_decisions_file_per_capture_bytes_and_exits_by_decision(
@@ -326,7 +416,8 @@ def test_required_reference_and_recorded_tolerance(tmp_path: Path) -> None:
     report = ic.check_capture(capture, require_reference=True)
     assert _status(report, "101", "I9") == "FAIL"
     assert report["settings"] == {
-        "reference_tolerance": 0.01,
+        "as_of": None,
+        "reference_tolerance": 0.0,
         "require_reference": True,
     }
     strict = ic.check_capture(
@@ -345,3 +436,71 @@ def test_required_reference_and_recorded_tolerance(tmp_path: Path) -> None:
         reference_tolerance=0.0,
     )
     assert _status(strict, "101", "I9") == "FAIL"
+
+
+def _perf_to(raw: Path, book: str, rows: list[tuple[str, str]]) -> None:
+    body = "".join(f'{day},0,"{equity}",0\n' for day, equity in rows)
+    (raw / f"strategy_{book}_perf.csv").write_text(PERF_HEADER + body, encoding="utf-8")
+
+
+def test_a_cash_only_book_is_flat_through_the_cutoff_by_closure(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")  # reaches 2026-09-11
+    _book(raw, "505", trades=[], held={})  # one CASH row, no holdings
+    _perf_to(
+        raw, "505", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "1,000,000.00")]
+    )
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 9, 11))
+    assert _status(report, "505", "I5D") == "PASS"
+    facts = report["books"]["505"]["positions_as_of"]
+    assert facts["cash_only_flat_through_as_of"] is True
+    assert facts["equity_at_as_of"] == 1000000.0
+    assert facts["cash_only"]["last_perf_date"] == "2026-08-20"
+    assert facts["cash_only"]["capture_reach"] == "2026-09-11"
+
+
+def test_a_moving_cash_only_book_is_review_and_a_trades_book_ending_early_fails(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")
+    _book(raw, "505", trades=[], held={})
+    _perf_to(raw, "505", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "999,000.00")])
+    _book(raw, "606")  # a book with trades whose curve ends before the cutoff
+    _perf_to(
+        raw, "606", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "1,000,000.00")]
+    )
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 9, 11))
+    assert _status(report, "505", "I5D") == "WARN"  # a moving curve, no instruments
+    detail = next(
+        c["detail"] for c in report["books"]["505"]["checks"] if c["check"] == "I5D"
+    )
+    assert "positions at as-of not determinable" in detail and "999000" in detail
+    assert report["books"]["505"]["positions_as_of"]["positions_not_determinable"]
+    assert report["books"]["505"]["decision"] == "REVIEW"
+    assert _status(report, "606", "I5D") == "FAIL"
+    assert (
+        report["books"]["606"]["positions_as_of"].get("cash_only_flat_through_as_of")
+        is None
+    )
+
+
+def test_a_cash_only_book_alone_in_a_capture_that_ends_early_fails(
+    tmp_path: Path,
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "505", trades=[], held={})
+    _perf_to(
+        raw, "505", [("2025-05-09", "1,000,000.00"), ("2026-08-20", "1,000,000.00")]
+    )
+    _manifest(capture)
+    report = ic.check_capture(capture, as_of=date(2026, 9, 11))
+    assert _status(report, "505", "I5D") == "FAIL"
+    detail = next(
+        c["detail"] for c in report["books"]["505"]["checks"] if c["check"] == "I5D"
+    )
+    assert "no book of this capture reaches as-of" in detail

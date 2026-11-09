@@ -319,6 +319,7 @@ _PATH_STAGES = {
     # derives the cutoff-day Schwab NAV from the verified holdings and official closes; an operator
     # step before the ingest, it writes no delivery artifact itself
     "tools/schwab_nav_derive.py": [],
+    "tools/schwab_rollback.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
     "schemas/portfolio/sleeve-account-facts.schema.json": ["report", "panel"],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted

@@ -74,11 +74,15 @@ def _holdings(
     brk: bool = False,
     mmf: bool = False,
     sweep_price: float = 1.0,
+    price_date: str = "06/13/2031",
+    bought_after: bool = False,
 ) -> dict[str, Any]:
     accounts = []
     for index, external in enumerate(_crosswalk(), start=1):
         symbol = "BRK/B" if brk and index == 1 else f"SYN{index}"
-        rows = [_row(symbol, 4, 24.875, "06/13/2031")]
+        rows = [_row(symbol, 4, 24.875, price_date)]
+        if bought_after:
+            rows.append(_row("SYNNEW", 1, 10.0, price_date))
         if mmf and index == 3:
             rows.append(_row("SYNMMF", 10, 1.0, "06/13/2031"))
         if zero_row and index == 1:
@@ -121,8 +125,14 @@ def _balances(extra_day: str | None = None) -> dict[str, Any]:
 
 class FakeTransport:
     def __init__(
-        self, *, holdings: Any = None, balances: Any = None, to_date: str = "06/14/2031"
+        self,
+        *,
+        holdings: Any = None,
+        balances: Any = None,
+        to_date: str = "06/14/2031",
+        rows: Any = None,
     ) -> None:
+        self._rows = rows  # provider account id -> transaction rows
         self._to_date = to_date
         self._holdings = holdings if holdings is not None else _holdings()
         self._balances = balances if balances is not None else _balances()
@@ -143,8 +153,9 @@ class FakeTransport:
             "description": "SYNTHETIC",
             "transactionDate": "2031-06-10",
         }
+        rows = self._rows(provider_account_id) if self._rows else []
         return 200, {
-            "brokerageTransactions": [row],
+            "brokerageTransactions": [row, *rows],
             "bookmark": None,
             "fromDate": "06/13/2026",
             "toDate": self._to_date,
@@ -572,54 +583,165 @@ def _assert_frozen_accepts(tmp_path: Path, as_of: date) -> Any:
     return coverage
 
 
-def test_labelled_modes_outside_the_proven_patterns_are_not_bound(
-    tmp_path: Path,
-) -> None:
-    """The driver stages them with the label; the adapter refuses to bind them."""
+def _sells_after_the_cutoff(provider_account_id: str) -> list[dict[str, Any]]:
+    index = int(provider_account_id.rsplit("-", 1)[1])
+    return [
+        {
+            "action": "Sell",
+            "symbol": f"SYN{index}",
+            "shareQuantity": "1",
+            "executionPrice": "$25.00",
+            "amount": "$10.00",
+            "description": "SYNTHETIC",
+            "transactionDate": "06/16/2031",
+            "effectiveDate": "06/16/2031",
+        }
+    ]
 
-    cases = {
-        "sunday": (
-            datetime(2031, 6, 15, 12, 0, tzinfo=timezone.utc),
-            "2031-06-15",
-            "06/15/2031",
-        ),
-        "saturday-night": (SATURDAY_NIGHT, "2031-06-15", "06/14/2031"),
-        "monday": (MONDAY_EARLY, "2031-06-16", "06/16/2031"),
+
+MONDAY_NOON = datetime(2031, 6, 16, 16, 0, tzinfo=timezone.utc)  # after the open
+
+
+def _monday(tmp_path: Path, **kwargs: Any) -> Path:
+    """A capture on the Monday after the cutoff Friday: the balance history already holds
+    the cutoff row and the days after it."""
+
+    _TX["at"] = "2031-06-16T16:00:30+00:00"
+    day = kwargs.pop("cutoff_value", 112.5)  # 4 x 25.00 official close + 12.50 cash
+    series = {
+        "histories": {
+            "6/11/2031": {"AccountValue": 100},
+            "6/12/2031": {"AccountValue": 110},
+            "6/13/2031": {"AccountValue": day},
+            "6/16/2031": {"AccountValue": day + 1},
+        }
     }
-    for name, (start, tx_at, to_date) in cases.items():
-        folder = tmp_path / name
-        folder.mkdir()
-        _TX["at"] = f"{tx_at}T12:00:30+00:00"
-        run_dir = _run(
-            folder,
-            FakeTransport(to_date=to_date),
-            start=start,
-            label="OWNER_APPROVED_EXCEPTION",
-        )
-        with pytest.raises(ingest.IngestError, match="cannot be bound"):
-            _ingest(folder, run_dir)
+    holdings = kwargs.pop("holdings", _holdings(price_date="06/16/2031"))
+    label = kwargs.pop("label", None)
+    return _run(
+        tmp_path,
+        FakeTransport(
+            holdings=holdings, balances=series, to_date="06/16/2031", **kwargs
+        ),
+        start=MONDAY_NOON,
+        label=label,
+    )
 
 
-def test_monday_pre_open_is_refused_without_the_label(tmp_path: Path) -> None:
-    with pytest.raises(driver.DriverError, match="outside the first-next-date"):
-        _run(tmp_path, FakeTransport(to_date="06/16/2031"), start=MONDAY_EARLY)
-
-
-def test_sunday_and_saturday_evening_are_refused_without_the_label(
+def test_a_monday_capture_needs_no_label_and_is_rolled_back_to_the_cutoff(
     tmp_path: Path,
 ) -> None:
-    starts = (SATURDAY_NIGHT, datetime(2031, 6, 15, 12, 0, tzinfo=timezone.utc))
-    for number, start in enumerate(starts):
-        folder = tmp_path / f"case-{number}"
-        folder.mkdir()
-        with pytest.raises(driver.DriverError, match="outside the first-next-date"):
-            _run(folder, start=start)
+    # captured: 4 of each symbol and 12.50 cash after a Sell of 1 for 10.00 posted on Monday;
+    # at the close of the cutoff each account held 5 and 2.50 of cash
+    run_dir = _monday(tmp_path, rows=_sells_after_the_cutoff, cutoff_value=127.5)
+    binding = _ingest(tmp_path, run_dir)
+    capture = binding["capture"]
+    assert isinstance(capture, dict)
+    assert capture["capture_mode"] == driver.MODE_LATE
+    assert binding["exception_label"] is None
+    assert binding["valuation_cutoff"] == "2031-06-13"
+    assert binding["as_of_date"] == "2031-06-16"
+    roll_back = binding["roll_back"]
+    assert isinstance(roll_back, dict) and roll_back["to"] == "2031-06-13"
+    assert {
+        tuple(v["rows_rolled_back"].items()) for v in roll_back["accounts"].values()
+    } == {(("Sell", 1),)}
+    snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
+    assert {row["quantity"] for row in snapshot["positions"]} == {"5"}
+    nav = binding["nav"]
+    assert isinstance(nav, dict)
+    assert {v["rows_after_cutoff_dropped"] for v in nav.values()} == {1}
+    assert {v["cutoff_row_present"] for v in nav.values()} == {True}
+    assert {v["late_closure"]["official"] for v in nav.values()} == {"127.50"}
+    # the quote dates (06/16) are informational: set to the cutoff for the frozen reader, counted
+    assert binding["late_capture"] == {
+        "price_guard": "NAV_CLOSURE_AGAINST_NATIVE_CUTOFF_BALANCE",
+        "quote_dates_set_to_cutoff": 8,
+    }
+    _assert_frozen_accepts(tmp_path, date(2031, 6, 16))
 
 
-def test_monday_after_the_open_is_refused_by_the_driver(tmp_path: Path) -> None:
-    with pytest.raises(driver.DriverError, match="outside the first-next-date"):
-        _run(tmp_path, start=datetime(2031, 6, 16, 14, 0, tzinfo=timezone.utc))
-    assert not (tmp_path / "staging/synthetic-ingest-run/manifest.json").exists()
+def test_a_monday_capture_with_no_activity_is_bound_unchanged_and_unrolled(
+    tmp_path: Path,
+) -> None:
+    binding = _ingest(tmp_path, _monday(tmp_path))
+    assert "roll_back" not in binding
+    snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
+    assert {row["quantity"] for row in snapshot["positions"]} == {"4"}
+
+
+def test_a_late_capture_whose_rolled_back_holdings_do_not_close_to_the_native_nav_stops(
+    tmp_path: Path,
+) -> None:
+    run_dir = _monday(tmp_path, rows=_sells_after_the_cutoff, cutoff_value=999.0)
+    with pytest.raises(ingest.IngestError, match=r"worth 127\.5.*native balance.*999"):
+        _ingest(tmp_path, run_dir)
+
+
+def test_a_security_bought_after_the_cutoff_needs_no_close_and_is_not_bound(
+    tmp_path: Path,
+) -> None:
+    def buy(provider_account_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "action": "Buy",
+                "symbol": "SYNNEW",
+                "shareQuantity": "1",
+                "executionPrice": "$10.00",
+                "amount": "-$10.00",
+                "description": "SYNTHETIC",
+                "transactionDate": "06/16/2031",
+                "effectiveDate": "06/16/2031",
+            }
+        ]
+
+    # captured: SYNNEW held (1) and cash 12.50 after a 10.00 Buy; at the cutoff close the account
+    # held neither the share nor that 10.00: 4 x 25.00 + 22.50 = 122.50
+    run_dir = _monday(
+        tmp_path,
+        rows=buy,
+        holdings=_holdings(price_date="06/16/2031", bought_after=True),
+        cutoff_value=122.5,
+    )
+    binding = _ingest(tmp_path, run_dir)
+    snapshot = _json(tmp_path / "ingest/current/current-snapshot.json")
+    assert "SYNNEW" not in {row["symbol"] for row in snapshot["positions"]}
+    assert binding["counts"]["positions"] == 8  # type: ignore[index]
+    assert binding["roll_back"]["accounts"]["account-0000000000000001"][  # type: ignore[index]
+        "rows_rolled_back"
+    ] == {"Buy": 1}
+
+
+def test_a_monday_capture_across_a_split_is_refused_by_name(tmp_path: Path) -> None:
+    def split(provider_account_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                **_sells_after_the_cutoff(provider_account_id)[0],
+                "action": "Stock Split",
+            }
+        ]
+
+    run_dir = _monday(tmp_path, rows=split)
+    with pytest.raises(ingest.IngestError, match="a Stock Split row dated 2031-06-16"):
+        _ingest(tmp_path, run_dir)
+
+
+def test_a_position_sold_in_full_after_the_cutoff_cannot_be_bound(
+    tmp_path: Path,
+) -> None:
+    def buy(provider_account_id: str) -> list[dict[str, Any]]:
+        row = _sells_after_the_cutoff(provider_account_id)[0]
+        return [{**row, "action": "Sell", "symbol": "SYNGONE", "shareQuantity": "-1"}]
+
+    run_dir = _monday(tmp_path, rows=buy)
+    with pytest.raises(ingest.IngestError):
+        _ingest(tmp_path, run_dir)
+
+
+def test_a_labelled_late_capture_binds_too(tmp_path: Path) -> None:
+    run_dir = _monday(tmp_path, label="OWNER_APPROVED_EXCEPTION")
+    binding = _ingest(tmp_path, run_dir)
+    assert binding["exception_label"] == "OWNER_APPROVED_EXCEPTION"
 
 
 def test_labelled_same_day_fallback_is_bound_with_a_cutoff_minus_one_nav(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 import csv
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import json
 import os
@@ -51,6 +51,12 @@ _ISO_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _CAPTURE_MANIFEST = "capture-manifest.json"
 _TRANSACTIONS_TABLE = "tables/har_transactions.parquet"
 _MAX_CSV_FIELD_BYTES = 64 * 1024 * 1024
+# HAR-derived families whose rows are dated history, with the column that dates them.
+_HAR_DATED_FAMILIES = {
+    "equity_curve": "Date",
+    "period_performance": "Period Start Date",
+    "transactions": "Date",
+}
 _LEGACY_TABLES = {
     "book_assets.parquet",
     "entities.parquet",
@@ -366,6 +372,7 @@ def _gate_inputs(
     identity_review_accepted: Mapping[str, str],
     har_download_ids: Sequence[str],
     book_inventory: Mapping[str, Mapping[str, str]],
+    as_of: date,
 ) -> dict[str, Any]:
     captured: dict[str, str] = {}
     captured_perf: dict[str, str] = {}
@@ -477,7 +484,7 @@ def _gate_inputs(
         untrusted_har_ids, captured, captured_perf, har_download_ids
     )
     decisions = _identity_decisions(
-        sources, captured, identity_decisions, identity_review_accepted
+        sources, captured, identity_decisions, identity_review_accepted, as_of
     )
     if book_inventory:
         # The frozen inventory names every book the cycle knows: each captured id and
@@ -595,8 +602,10 @@ def _identity_decisions(
     captured: Mapping[str, str],
     decision_files: Sequence[Mapping[str, Any]],
     review_accepted: Mapping[str, str],
+    as_of: date,
 ) -> dict[str, dict[str, Any]]:
-    """Every captured book needs a PASS identity decision for these capture bytes."""
+    """Every captured book needs a PASS identity decision for these capture bytes, made
+    with ``--as-of`` equal to the plan's as-of date (so the roll-back check I5D ran)."""
 
     if not captured:
         if decision_files or review_accepted:
@@ -618,6 +627,13 @@ def _identity_decisions(
         if decided.get("schema") != "p123-book-identity-decisions/1" or owner is None:
             raise Portfolio123GenerationError(
                 "identity decisions are not for a capture of this plan"
+            )
+        made_for = (decided.get("settings") or {}).get("as_of")
+        if made_for != as_of.isoformat():
+            raise Portfolio123GenerationError(
+                f"identity decisions were made with as_of {made_for}, the plan is "
+                f"{as_of.isoformat()}: rerun the identity check with --as-of "
+                f"{as_of.isoformat()}"
             )
         by_label[owner] = decided
     result: dict[str, dict[str, Any]] = {}
@@ -767,6 +783,7 @@ def create_cutover_plan(
             }
         ),
         inventory,
+        as_of_date,
     )
     payload: dict[str, object] = {
         "as_of_date": as_of_date.isoformat(),
@@ -1101,6 +1118,74 @@ def _capture_day(row: Mapping[str, str]) -> date:
         ) from None
 
 
+def _har_day(row: Mapping[str, str], family: str, column: str) -> date:
+    day = row.get(column, "")
+    try:
+        if _ISO_DATE.fullmatch(day) is None:
+            raise ValueError(day)
+        return date.fromisoformat(day)
+    except ValueError:
+        raise Portfolio123GenerationError(
+            f"HAR {family} {column} is not ISO for entity {row.get('_entity_id', '')}"
+        ) from None
+
+
+def _cut_managed_performance(
+    rows: Sequence[dict[str, str]], as_of: date
+) -> Counter[str]:
+    """Cut each managed-performance series at ``as_of``; return the observations removed.
+
+    The series is one capture of field/value rows per entity: ``date`` (first day),
+    ``dateLast`` (last day) and ``data`` (one observation per weekday from ``date`` through
+    ``dateLast``), with ``panels`` naming the graphs.  Every reader expands that weekday
+    calendar with no cutoff of its own, so a series ending after ``as_of`` is truncated to
+    its last weekday on or before ``as_of`` (``data`` and ``dateLast`` rewritten).  A series
+    that ends on or before ``as_of`` is left byte for byte as captured.  A series that
+    starts after ``as_of`` or whose observation count is not its weekday calendar cannot be
+    truncated and refuses."""
+    groups: dict[tuple[str, str], dict[str, dict[str, str]]] = defaultdict(dict)
+    for row in rows:
+        key = (row.get("_entity_id", ""), row.get("_source_artifact", ""))
+        groups[key].setdefault(row.get("field", ""), row)
+    removed: Counter[str] = Counter()
+    for (entity, _artifact), fields in sorted(groups.items()):
+        if not {"data", "date", "dateLast"} <= set(fields):
+            continue
+        try:
+            first = date.fromisoformat(fields["date"]["value"])
+            last = date.fromisoformat(fields["dateLast"]["value"])
+        except ValueError:
+            continue  # the readers refuse an unreadable interval themselves
+        if last <= as_of:
+            continue
+        if first > as_of:
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} starts {first}, after as_of {as_of}"
+            )
+        try:
+            data = json.loads(fields["data"]["value"])
+        except ValueError:
+            data = None
+        calendar = [
+            first + timedelta(days=offset)
+            for offset in range((last - first).days + 1)
+            if (first + timedelta(days=offset)).weekday() < 5
+        ]
+        if not isinstance(data, list) or len(data) != len(calendar):
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} cannot be cut at as_of {as_of}: "
+                "the observations are not its weekday calendar"
+            )
+        keep = sum(1 for day in calendar if day <= as_of)
+        for row in fields.values():
+            if row["field"] == "data":
+                row["value"] = json.dumps(data[:keep], separators=(",", ":"))
+            elif row["field"] == "dateLast":
+                row["value"] = calendar[keep - 1].isoformat()
+        removed[entity] += len(data) - keep
+    return removed
+
+
 def _enforce_transaction_gate(
     gate: Mapping[str, Any],
     rows: Iterable[Mapping[str, str]],
@@ -1263,6 +1348,7 @@ def _build_outputs(
     )
     excluded: Counter[str] = Counter()
     excluded_perf: Counter[str] = Counter()
+    har_excluded: dict[str, Counter[str]] = defaultdict(Counter)
     dropped_downloads: dict[str, list[str]] = defaultdict(list)
     for item in _objects(har.get("files"), "files"):
         if item.get("disposition") != "HAR_DERIVED_CSV":
@@ -1277,6 +1363,17 @@ def _build_outputs(
             dropped_downloads[entity.group(2)].append(relative)
             continue
         parsed = _csv_rows(_object_path(authority, item), relative, family)
+        column = _HAR_DATED_FAMILIES.get(family)
+        if gate is not None and column is not None:
+            # A late pull must not leak rows dated after as_of through a book that is not
+            # captured: the dated history families are cut at as_of and counted.
+            kept_har = []
+            for row in parsed:
+                if _har_day(row, family, column) > as_of:
+                    har_excluded[family][row["_entity_id"]] += 1
+                else:
+                    kept_har.append(row)
+            parsed = kept_har
         rows_by_family[family].extend(parsed)
         dataset_rows[family] += len(parsed)
     for source in _sources(plan):
@@ -1310,6 +1407,11 @@ def _build_outputs(
                     kept.append(row)
             rows_by_family[family].extend(kept)
             dataset_rows[family] += len(kept)
+    if gate is not None:
+        for perf_entity, cut in _cut_managed_performance(
+            rows_by_family.get("managed_performance", []), as_of
+        ).items():
+            har_excluded["managed_performance"][perf_entity] += cut
     gate_report = (
         _enforce_transaction_gate(
             gate,
@@ -1326,6 +1428,10 @@ def _build_outputs(
         else None
     )
     if gate_report is not None:
+        gate_report["har_excluded_after_as_of"] = {
+            family: dict(sorted(counts.items()))
+            for family, counts in sorted(har_excluded.items())
+        }
         gate_report["dropped_har_downloads"] = {
             book: sorted(paths) for book, paths in sorted(dropped_downloads.items())
         }

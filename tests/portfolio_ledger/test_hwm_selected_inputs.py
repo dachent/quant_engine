@@ -1892,6 +1892,16 @@ def test_mvp2_matrixport_coverage_declares_nav_gap_in_producer_shape() -> None:
     }
 
     fixture_module._declare_matrixport_nav_gap_coverage(ledger, ["2026-04-25"])
+    contract = json.loads(
+        (REPO / "contracts/portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    provenance = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )["declared_gap_policy"]["provenance"]
 
     assert ledger["provider_coverage"] == [
         {
@@ -1901,17 +1911,17 @@ def test_mvp2_matrixport_coverage_declares_nav_gap_in_producer_shape() -> None:
                 "declared_exclusions": [
                     {
                         "item": "fx_missing_date:2026-04-25",
-                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "provenance": provenance,
                         "reason": "provider NAV endpoint returned no data for this date",
                     },
                     {
                         "item": "nav_missing_date:2026-04-25",
-                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "provenance": provenance,
                         "reason": "provider NAV endpoint returned no data for this date",
                     },
                     {
                         "item": "reconciliation_incomplete_date:2026-04-25",
-                        "provenance": "owner-accepted 2026-08-14, issue #287",
+                        "provenance": provenance,
                         "reason": "provider NAV endpoint returned no data for this date",
                     },
                 ],

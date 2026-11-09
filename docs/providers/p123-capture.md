@@ -399,7 +399,7 @@ commit.
 python -m tools.p123_cdp_fetcher make-allowlist --out <allowlist.json> --book <id> [--book <id> ...] `
   [--designer-model <id> ...] [--drive-file-id <id>] [--page-record] [--kind perf_csv ...]
 python -m tools.p123_cdp_fetcher run --cdp-url http://127.0.0.1:9333 --allowlist <allowlist.json> `
-  --allowlist-sha256 <printed hash> --download-dir <new dir> `
+  --allowlist-sha256 <printed hash> --download-dir <new dir> --as-of <D> `
   --reference-index <legacy-20260731-...>\artifacts\source-index.json `
   [--prior-dir <older or HAR download set> ...] [--cross-capture-dir <other capture dir> ...] `
   [--skip-designer-models] [--no-reference]
@@ -409,7 +409,15 @@ python -m tools.p123_cdp_fetcher drive --cdp-url http://127.0.0.1:9333 --allowli
 
 `run` refuses (`REFERENCE_REQUIRED`) without `--reference-index` (the `source-index.json` of
 the 2026-07-31 run) unless `--no-reference` is given; the choice and the index sha256 are
-recorded in the manifest. `--prior-dir` (warn) and `--cross-capture-dir` (fail) feed the
+recorded in the manifest. `--as-of D` (required, `REFUSED AS_OF_REQUIRED` without it) is the
+financial cutoff: the identity check rolls each book's holdings back to D (I5D) and
+`book-identity-decisions.json` records it as `settings.as_of`; the generation plan refuses
+decisions whose as-of is not its own `--as-of-date`, and a capture whose perf curve ends
+before D fails I5D. The binding decisions file is the as-of one: the fetcher run with
+`--as-of D` (D = the plan's as-of date) and `--no-reference`; a standalone
+`tools/p123_book_identity_check.py --as-of D --reference-index ...` run (no
+`--require-reference`) adds the reference tie, and a book absent from the reference pull is
+REVIEW, accepted per book at plan time. `--prior-dir` (warn) and `--cross-capture-dir` (fail) feed the
 identity check's permutation comparison: the same trade rows under another id.
 
 `--download-dir` must not exist (absolute, outside Git, not in synced scratch). The

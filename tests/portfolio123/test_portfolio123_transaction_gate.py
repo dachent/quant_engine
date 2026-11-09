@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 from datetime import date
 import hashlib
 import json
@@ -113,7 +114,9 @@ def _stage_downloads(har: Path, books: dict[str, str]) -> None:
         )
 
 
-def _auto(har: Path, options: dict[str, object]) -> dict[str, object]:
+def _auto(
+    har: Path, options: dict[str, object], day: date = date(2026, 9, 11)
+) -> dict[str, object]:
     """Supply a PASS identity decision per captured book and exclude the other HAR ids."""
 
     captures = [Path(str(item)) for item in options.get("transaction_captures", [])]  # type: ignore[attr-defined]
@@ -134,6 +137,7 @@ def _auto(har: Path, options: dict[str, object]) -> dict[str, object]:
             {
                 "schema": "p123-book-identity-decisions/1",
                 "capture_manifest_sha256": sha,
+                "settings": {"as_of": day.isoformat()},
                 "books": {book: {"decision": "PASS"} for book in books},
             }
         )
@@ -161,7 +165,7 @@ def _generate(
     **options: object,
 ) -> str:
     planned = create_cutover_plan(
-        legacy, har, data, as_of_date=day, **_auto(har, options)
+        legacy, har, data, as_of_date=day, **_auto(har, options, day)
     )  # type: ignore[arg-type]
     plan = Path(str(planned["plan_path"]))
     generation_id = str(stage_candidate(plan)["generation_id"])
@@ -171,7 +175,7 @@ def _generate(
 
 def _refused(legacy: Path, har: Path, data: Path, day: date, **options: object) -> str:
     planned = create_cutover_plan(
-        legacy, har, data, as_of_date=day, **_auto(har, options)
+        legacy, har, data, as_of_date=day, **_auto(har, options, day)
     )  # type: ignore[arg-type]
     with pytest.raises(Portfolio123GenerationError) as refused:
         stage_candidate(Path(str(planned["plan_path"])))
@@ -342,6 +346,34 @@ def test_capture_rows_after_the_cutoff_are_excluded_and_counted(tmp_path: Path) 
     assert gate["books"]["101"]["last_date"] == "2026-09-11"  # type: ignore[index]
 
 
+def test_har_rows_of_a_non_captured_book_after_the_cutoff_are_excluded_and_counted(
+    tmp_path: Path,
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    (har / "csv").mkdir()
+    (har / "csv" / "strategy_303_transactions.csv").write_text(
+        _full(6, "2026-09-11") + "2026-09-12,LATE,BUY,1,1,1,,,\n", encoding="utf-8"
+    )
+    (har / "csv" / "strategy_303_perf.csv").write_text(
+        PERF + "2026-09-14,3.00,3.00\n", encoding="utf-8"
+    )
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    generation_id = _generate(
+        legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+    )
+    root = data / "generations" / generation_id / "tables"
+    tx = pq.read_table(root / "har_transactions.parquet").to_pylist()
+    curve = pq.read_table(root / "har_equity_curve.parquet").to_pylist()
+    assert max(row["Date"] for row in tx) == "2026-09-11"
+    assert max(row["Date"] for row in curve) == "2026-09-11"
+    assert sum(row["_entity_id"] == "303" for row in tx) == 6
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    assert gate["har_excluded_after_as_of"] == {  # type: ignore[index]
+        "equity_curve": {"303": 1},
+        "transactions": {"303": 1},
+    }
+
+
 def test_publish_refuses_when_current_moved_after_planning(tmp_path: Path) -> None:
     legacy, har, data = _inputs(tmp_path)
     _generate(
@@ -356,7 +388,9 @@ def test_publish_refuses_when_current_moved_after_planning(tmp_path: Path) -> No
         data,
         as_of_date=date(2026, 9, 12),
         **_auto(
-            har, {"transaction_captures": [_capture(tmp_path, "b", {"101": _full(6)})]}
+            har,
+            {"transaction_captures": [_capture(tmp_path, "b", {"101": _full(6)})]},
+            date(2026, 9, 12),
         ),  # type: ignore[arg-type]
     )
     moved = _generate(
@@ -714,11 +748,28 @@ def _decisions(capture: Path, **decisions: str) -> dict[str, object]:
         books[book] = {"decision": decision}
     return {
         "schema": "p123-book-identity-decisions/1",
+        "settings": {"as_of": "2026-09-11"},
         "capture_manifest_sha256": hashlib.sha256(
             (capture / "capture-manifest.json").read_bytes()
         ).hexdigest(),
         "books": books,
     }
+
+
+def test_identity_decisions_must_be_made_with_the_plans_as_of(tmp_path: Path) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    options = _auto(har, {"transaction_captures": [capture]})
+    for settings in ({}, {"as_of": None}, {"as_of": "2026-09-10"}):
+        decision = {**_decisions(capture), "settings": settings}
+        with pytest.raises(Portfolio123GenerationError, match="--as-of 2026-09-11"):
+            create_cutover_plan(
+                legacy,
+                har,
+                data,
+                as_of_date=date(2026, 9, 11),
+                **{**options, "identity_decisions": [decision]},  # type: ignore[arg-type]
+            )
 
 
 SEED_ROLE = "excluded: no capture this cycle; seed role: carried HAR rows are dropped"
@@ -871,7 +922,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             expected_books=["101", "202"],
             book_inventory=INVENTORY,
             **base,  # type: ignore[arg-type]
@@ -882,7 +933,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             book_inventory=unlisted,
             **base,  # type: ignore[arg-type]
         )
@@ -891,7 +942,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             book_inventory={**INVENTORY, "101": {"role": "x", "route": "skip"}},
             **base,  # type: ignore[arg-type]
         )
@@ -900,7 +951,7 @@ def test_book_inventory_is_the_only_source_of_expected_exempt_and_untrusted(
             legacy,
             har,
             data,
-            as_of_date=date(2026, 9, 12),
+            as_of_date=date(2026, 9, 11),
             book_inventory={**INVENTORY, "909": {"role": "x", "route": "exempt"}},
             **base,  # type: ignore[arg-type]
         )
@@ -935,3 +986,76 @@ def test_schema_one_plans_still_rebuild_under_the_legacy_adapter(
     )
     assert plan_artifact["schema"]["version"] == "1"
     assert verify_published(old_path, generation_id)["state"] == "VERIFIED_PUBLISHED"
+
+
+def _managed_performance(har: Path, first: str, last: str, count: int) -> None:
+    """A managed-performance capture: one [marker, Strategy, Total Value] row per weekday."""
+    data = json.dumps([[0, 100 + index, 1000 + index] for index in range(count)])
+    panels = json.dumps(
+        [{"graphs": [{"idx": 0, "s": "Strategy"}, {"idx": 1, "s": "Total Value"}]}]
+    )
+    (har / "csv").mkdir(exist_ok=True)
+    path = har / "csv" / "account_555_app_investment_perfdata.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["field", "value"])
+        for field, value in (
+            ("date", first),
+            ("dateLast", last),
+            ("data", data),
+            ("panels", panels),
+        ):
+            writer.writerow([field, value])
+
+
+def _performance_fields(data: Path, generation_id: str) -> dict[str, str]:
+    table = (
+        data / "generations" / generation_id / "tables/har_managed_performance.parquet"
+    )
+    return {row["field"]: row["value"] for row in pq.read_table(table).to_pylist()}
+
+
+@pytest.mark.parametrize(
+    ("last", "count", "kept", "removed"),
+    [
+        ("2026-09-14", 6, 5, 1),  # ends after as_of: cut to the last weekday <= as_of
+        ("2026-09-18", 10, 5, 5),
+        ("2026-09-11", 5, 5, 0),  # ends exactly on as_of: left as captured
+        ("2026-09-10", 4, 4, 0),  # ends before as_of: left as captured
+    ],
+)
+def test_managed_performance_is_cut_at_the_cutoff(
+    tmp_path: Path, last: str, count: int, kept: int, removed: int
+) -> None:
+    legacy, har, data = _inputs(tmp_path)
+    _managed_performance(har, "2026-09-07", last, count)
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    generation_id = _generate(
+        legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+    )
+    fields = _performance_fields(data, generation_id)
+    series = json.loads(fields["data"])
+    assert len(series) == kept
+    assert series == [[0, 100 + index, 1000 + index] for index in range(kept)]
+    assert fields["dateLast"] == min(last, "2026-09-11")
+    gate = _catalog(data, generation_id)["transaction_gate"]
+    expected = {"managed_performance": {"555": removed}} if removed else {}
+    assert {  # type: ignore[index]
+        family: counts
+        for family, counts in gate["har_excluded_after_as_of"].items()
+        if family == "managed_performance"
+    } == expected
+
+
+def test_a_managed_performance_that_cannot_be_cut_is_refused(tmp_path: Path) -> None:
+    capture = _capture(tmp_path, "cap", {"101": _full(10)})
+    for first, last, count, match in (
+        ("2026-09-14", "2026-09-18", 5, "starts 2026-09-14, after as_of"),
+        ("2026-09-07", "2026-09-14", 5, "not its weekday calendar"),
+    ):
+        legacy, har, data = _inputs(tmp_path / f"w{count}{first}")
+        _managed_performance(har, first, last, count)
+        with pytest.raises(Portfolio123GenerationError, match=match):
+            _generate(
+                legacy, har, data, date(2026, 9, 11), transaction_captures=[capture]
+            )

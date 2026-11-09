@@ -121,6 +121,154 @@ so one call returns every account; `balances.historical` is a `GET` with an empt
 `query`, scoped per account by `Schwab-Client-Ids`; `transactions.history` is the
 reviewed POST. `body` is `null` for the two requests the driver builds itself.
 
+## Late pull: the capture is rolled back to the cutoff close
+
+A capture is the account at capture time T. Any capture taken after the cutoff close D
+(Saturday, Sunday, Monday, any later day, at any hour) is bound without an exception
+label: `tools/schwab_rollback.py` takes the captured quantities and cash back to the close of
+D by undoing the rows of the run's own transaction history that are posted after D, and the
+closure checks decide whether the result is right. `derive` prices the rolled-back
+holdings; `ingest` binds them (the snapshot carries the rolled-back quantities and cash) and
+records `roll_back` (rows undone and rows after D that carry no quantity or amount, per
+account) in the binding; `declare` pins the transaction files and the ledger replays the
+same function (`replay.transactions`). A capture with no row after D is bound exactly as
+before.
+
+The rule was fitted to retained bytes, not assumed (the 2026-01-19, 04-12, 07-17 and 09-04
+position exports against the 3,299 retained transaction rows, all eight accounts, tolerances
+1e-6 shares and 0.005 cash; `tests/schwab/test_schwab_rollback_retained.py`, skipped when the
+sources are not mounted). Five rolled-back pairs reproduce the earlier snapshot exactly
+(quantities and cash, 876 to 2,080 rows each):
+
+| Row type | Share effect forward | Cash effect forward |
+|---|---|---|
+| Buy, Reinvest Shares | `+abs(shareQuantity)` | `amount` (signed, fees netted) |
+| Sell | `-abs(shareQuantity)` | `amount` |
+| Journal, Journaled Shares, Security Transfer | `shareQuantity` as signed | `amount` when present |
+| dividends of every kind, reinvest legs, interest, fees, MoneyLink, bank transfer, wire, funds received, cash in lieu | none | `amount` |
+
+* **Which rows:** posted after D (first date of `transactionDate`) and effective after D
+  (`effectiveDate`). The retained bytes cannot tell the two dates apart (none of the 68 rows
+  whose posting and effective dates differ straddles a snapshot date), so a row posted after D
+  with an effective date on or before D, or the reverse, is refused by name rather than
+  guessed. A month-end D pulled late can hit this: Bank Interest rows are posted the next
+  business day "as of" month end.
+* **Trade date, not settle date:** the snapshot cash is trade-date cash (a Buy on 2026-04-10
+  that settles 04-13 is already inside the 04-12 cash row; settle-date accounting fails).
+* **Symbols** join with `.` and `/` removed (`BRK.B` in the snapshot, `BRKB` in the rows).
+
+Refused, each naming account, action and date: Stock Split and Spin-off (a quantity added
+after D, while Yahoo `Close` is split-adjusted), any action outside the table, a row whose
+quantity or amount does not fit its action, a negative rolled-back quantity, a position held
+at D that the capture never listed (sold in full after D), and a cash change when the account
+has not exactly one cash summary row. The closure checks of `derive` stay: the rolled-back
+value against the native balance of D and of D-1, tolerance 0.05; the waiver option is unchanged and is not needed for a
+roll-back.
+
+**Refusals removed, and why each protected nothing.** The driver's `assess_timing` and the
+ingest no longer refuse a capture for its weekday, its hour (the 20:00 New York window), the
+next session's open, the first-New-York-date rule, a missing label, or mode
+(`OUTSIDE_STANDARD_WINDOW` is now `LATER_DAY_ROLLED_BACK`, bound as is). The holdings rows'
+quoted price date may differ from D without a label (it is informational; the value comes
+from the official closes). Each of these guarded the assumption that the capture equals the
+account at D; the roll-back removes the assumption and the closures test the numbers. Kept:
+a capture before the cutoff close (the closing data does not exist), a same-day capture
+(the balance history ends the day before the capture, so the cutoff-day balance row does not
+exist; a label still admits the D-1 row), a cutoff that is not a trading day, a missing D
+balance row or official close, an account-set mismatch, any closure failure.
+
+**Unverified.** Stock Split, Spin-off, Cash In Lieu, Journaled Shares and Security Transfer
+signs sit before every retained snapshot, and Journal-with-symbol nets to zero in every
+window; settle-date cash for trades that straddle a snapshot; which of posting and effective
+date the broker's own accounting follows; an account whose sweep fund is reported as a
+position at T but as cash at D (or the reverse); a Monday native D balance row (it is
+checked against the rolled-back value, not assumed).
+
+## Live capture tooling: evidence, crosswalk, attach check
+
+### Generating and checking the evidence
+
+`make-evidence` writes the evidence for you (create-only; the driver fills the
+`catalog` and `terms` hashes and the three fixed request entries) and then runs
+the same checks `capture` runs, deleting the file if any fails:
+
+```powershell
+python tools/schwab_capture_driver.py make-evidence --output <evidence.json> `
+  --cutoff 2026-11-06 --account-count <N> --holdings-body <body.json> `
+  --review-identity <name> --review-reference <issue-comment-url> `
+  --issued-at <RFC3339> --expires-at <RFC3339> --max-requests <M>
+```
+
+`check-evidence <evidence.json> [--receipt-root <dir>]` re-runs every
+authorization check against the real clock without writing a receipt, so it never
+consumes the evidence; with `--receipt-root` it also reports `already_consumed`.
+Run it just before `capture`. `issued_at` must be in the past and `expires_at` in
+the future when `capture` runs. `capture` itself is unchanged and still the only
+thing that consumes evidence.
+
+### Crosswalk and the first-minute live check
+
+`build-crosswalk --selected-source-root <dir> --out <crosswalk.json>` writes the
+restricted `{"crosswalk": [...]}` file from the retained terminal targets
+(create-only; prints only the account count and the file hash, never an id). It
+is exactly what `capture` compares to the targets, so the two cannot disagree.
+The approved evidence `--account-count` must equal that count (the retained
+`refresh-20260902` root, manifest sha256 `1b57aa1d...ba858fd0`, yields 8).
+
+`attach-check --cdp-url http://127.0.0.1:9223` is the live check to run before
+the single-use capture: it attaches, requires exactly one `client.schwab.com`
+page, reloads it and reads one of the SPA's own API requests (the same step
+`capture` starts with), and prints `ok`, `governed_requests: 0` and the observed
+header names (never values). It needs no evidence and consumes nothing.
+
+#### The holdings body, read from the page itself
+
+No retained capture holds a Holdings-V2 request body (the 2026-07-31 HARs contain
+the SPA bundle, which has only key names). `attach-check --cdp-url <url>
+--capture-body-out <body.json> [--wait-seconds 20]` records the body of the
+page's OWN HoldingV2 POST while it reloads the page (a passive
+`request.post_data` read; no request of ours, no header, cookie or token is
+stored or printed). The body is reduced to the keys the gate allows and written
+create-only; the output lists the key names and the file hash. Feed the file to
+`make-evidence --holdings-body`.
+
+If no HoldingV2 request is seen within the wait window the command refuses and
+writes nothing. The operator then opens the Schwab positions/holdings page by
+read-only navigation in the same browser and runs `attach-check` again, or STOPs
+and uses the retained UI method below.
+
+#### Account-set compare
+
+With `--crosswalk <crosswalk.json>`, `attach-check` also reads the response of that
+same HoldingV2 request (only the `accounts[].accountId` list is kept; no balance
+or position leaves the function) and compares the set to the crosswalk. It
+reports `accounts_on_page`, `accounts_in_crosswalk` and `account_set_matches`;
+on a difference it refuses, naming crosswalk accounts missing on the page by
+internal id and extra page accounts only by an 8-character hash, never a
+provider id. Run it before issuing evidence; `--account-count` must equal the
+matched count.
+
+#### Fallback: the retained UI method (R2.1)
+
+If the driver's first live use fails, the documented fallback is the method that
+produced `source-runs/r21-schwab-0917-official`: the "All Brokerage Accounts"
+page's own HoldingV2 call (HTTP 200) saved as `all-brokerage-positions.json`, with
+`capture-receipt.json` (selected UI perimeter, source path, file hashes), the
+selected-account transactions, `official-nav-derivation.json` and the
+`finality/` and `normalized/` directories. Ledger finality for a fresh capture
+then comes from the same chain as the driver's output: derive, ingest and
+declare (above), with the declared evidence wired into the cycle manifest. The
+fallback needs its own review and the owner's say-so; it is not interchangeable
+with a driver run without that.
+
+#### Re-issuing evidence in the capture window
+
+Evidence is single use and a failed run is not resumed, so a second evidence is a
+new file with a new review comment. The cycle is `make-evidence` (writes and
+validates) then `check-evidence`, each well under a second; the time is the review
+comment and the `--issued-at`/`--expires-at` values, not the tools. Use a fresh
+`--output` path each time.
+
 ## Credentials
 
 None. Capture attaches over CDP to the owner's already-authenticated browser and
@@ -346,7 +494,7 @@ directory outside the world.
    --prior-day 2026-11-05 --out <ev>/schwab-nav-derivation.json --report <ev>/schwab-nav-report.json`
    (add `--waive-prior-closure ACCOUNT=REASON` only for an account the run shows transactions on D for; see below).
 4. `python tools/schwab_capture_ingest.py ingest <run> --crosswalk <xw> --cutoff 2026-11-06 --official-closes-dir
-   <yahoo run> --config <ingest config> --output-root <ingest root> --base-spec <base spec> --spec-out
+   <closes> --config <ingest config> --output-root <ingest root> --base-spec <base spec> --spec-out
    <ev>/schwab-composed-spec.json --derivation-record <ev>/schwab-nav-derivation.json`.
 5. `python tools/schwab_generation.py stage <ev>/schwab-composed-spec.json <dataSchwab root>` (then `publish` with the
    accepted generation id), giving the generation id and `generation.json` sha256.
