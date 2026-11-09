@@ -635,6 +635,11 @@
     ],
     [
       "quantbase_cdp_navigator",
+      "capture_action_guard",
+      1
+    ],
+    [
+      "quantbase_cdp_navigator",
       "quantbase_cdp_har_recorder",
       1
     ],
@@ -751,6 +756,11 @@
     [
       "schwab_nav_derive",
       "schwab_rollback",
+      1
+    ],
+    [
+      "schwab_page_actions",
+      "capture_action_guard",
       1
     ],
     [

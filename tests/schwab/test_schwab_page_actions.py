@@ -202,3 +202,36 @@ def test_a_link_leaving_the_schwab_origin_is_refused() -> None:
     )
     ok.click("link", "Accounts")
     assert c2.clicked == 1
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Delete account",
+        "Save changes",
+        "Update profile",
+        "Link broker",
+        "Cancel subscription",
+        "Change password",
+        "Close account",
+        "Disconnect broker",
+    ],
+)
+def test_account_changing_controls_are_refused_by_the_same_guard(name: str) -> None:
+    page, control = _page(text="ok", type="button")
+    with pytest.raises(actions.ActionRefused, match="trading guard"):
+        page.click("button", name)
+    assert control.clicked == 0 and page.log == []
+    page, control = _page(text=name, type="button")
+    with pytest.raises(actions.ActionRefused):
+        page.click("button", "Open")
+    assert control.clicked == 0
+
+
+@pytest.mark.parametrize(
+    "name", ["Performance", "Holdings", "Transactions", "Export", "Download"]
+)
+def test_tabs_and_export_controls_stay_allowed(name: str) -> None:
+    page, control = _page(text=name, type="button")
+    page.click("tab", name)
+    assert control.clicked == 1
