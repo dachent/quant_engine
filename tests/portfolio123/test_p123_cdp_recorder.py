@@ -1422,3 +1422,56 @@ def test_a_refused_drive_plan_is_rejected_before_any_directory_or_connection(
     )
     assert code == 2 and "REFUSED DRIVE_PLAN_REFUSED" in capsys.readouterr().out
     assert not root.exists()
+
+
+# --- dry-run rehearsal ---------------------------------------------------------
+
+
+def test_dry_run_is_verified_before_it_prints_and_is_never_admitted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(rec, "WebSocketTransport", lambda url: FakeTransport({}))
+    root = tmp_path / "DRY-rehearsal"
+    code = rec.main(
+        ["dry-run", "--cdp-url", "http://127.0.0.1:9", "--output-root", str(root)]
+    )
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert code == 0 and out["dry_run"] is True and out["verified"] is True
+    assert out["run_id"] == "DRY-rehearsal"
+    assert verify_run(root)
+    # a draft is never built from a rehearsal, and a governed capture never writes into one
+    assert (
+        rec.main(
+            ["propose-catalog", "--discover", str(root), "--out", str(tmp_path / "o")]
+        )
+        == 2
+    )
+    assert "REFUSED DRY_RUN_NOT_ADMITTED" in capsys.readouterr().out
+    assert (
+        rec.main(
+            [
+                "capture",
+                "--cdp-url",
+                "http://127.0.0.1:9",
+                "--output-root",
+                str(tmp_path / "DRY-other"),
+            ]
+        )
+        == 2
+    )
+    assert "REFUSED DRY_ROOT_IN_GOVERNED_RUN" in capsys.readouterr().out
+
+
+def test_dry_run_refuses_a_root_that_is_not_dry(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = rec.main(
+        [
+            "dry-run",
+            "--cdp-url",
+            "http://127.0.0.1:9",
+            "--output-root",
+            str(tmp_path / "capture-1"),
+        ]
+    )
+    assert code == 2 and "REFUSED DRY_ROOT_NAME_NOT_DRY" in capsys.readouterr().out

@@ -64,8 +64,10 @@ from quant_engine.portfolio123 import catalog_rows
 # module runs as a script (tools/ on sys.path) or is imported as tools.p123_cdp_recorder.
 try:
     guard = importlib.import_module("capture_action_guard")
+    dry = importlib.import_module("capture_dry_run")
 except ImportError:
     guard = importlib.import_module("tools.capture_action_guard")
+    dry = importlib.import_module("tools.capture_dry_run")
 
 
 ORIGIN = "https://www.portfolio123.com"
@@ -1788,6 +1790,12 @@ def propose_catalog(
 ) -> dict[str, Any]:
     """Verify the input runs, then write the DRAFT files into a new directory."""
 
+    try:
+        dry.refuse_dry_input(discover_dir)
+        if raw_run is not None:
+            dry.refuse_dry_input(raw_run)
+    except dry.DryRunRefused as exc:
+        raise RecorderError(exc.code) from None
     verify_run(discover_dir)
     _, discover_entries = _load_run(discover_dir)
     raw_entries: list[dict[str, Any]] = []
@@ -1833,7 +1841,9 @@ def _live(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover
             raise RecorderError("DRIVE_PLAN_INVALID") from None
         plan = parse_drive_plan(raw_plan)
     recorder = Recorder(
-        args.output_root, mode=args.command, include_identity=args.include_identity
+        args.output_root,
+        mode="capture" if args.command == "dry-run" else args.command,
+        include_identity=args.include_identity,
     )
     transport = WebSocketTransport(args.cdp_url)
     try:
@@ -1883,10 +1893,21 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("discover", "capture"):
-        item = sub.add_parser(name)
+    for name in ("discover", "capture", "dry-run"):
+        item = sub.add_parser(
+            name,
+            help="rehearse a capture into a scratch DRY- run root (never admitted)"
+            if name == "dry-run"
+            else None,
+        )
         item.add_argument("--cdp-url", required=True)
-        item.add_argument("--output-root", required=True, type=Path)
+        item.add_argument(
+            "--output-root",
+            required=name != "dry-run",
+            default=None,
+            type=Path,
+            help="dry-run only: optional DRY- root in a directory holding only DRY- entries",
+        )
         item.add_argument("--max-seconds", type=float, default=0.0)
         item.add_argument(
             "--warn-after-seconds",
@@ -1933,7 +1954,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "applied": False,
                 "artifacts": [a["path"] for a in written["artifacts"]],
             }
+        elif args.command == "dry-run":
+            try:
+                args.output_root = dry.dry_run_root(args.output_root)
+            except dry.DryRunRefused as exc:
+                raise RecorderError(exc.code) from None
+            manifest = _live(args)
+            verify_run(
+                args.output_root
+            )  # the rehearsal is verified before anything prints
+            result = {
+                **_summary(manifest),
+                "dry_run": True,
+                "run_id": args.output_root.name,
+                "verified": True,
+            }
         else:
+            try:
+                dry.refuse_dry_as_governed(args.output_root)
+            except dry.DryRunRefused as exc:
+                raise RecorderError(exc.code) from None
             result = _summary(_live(args))
     except RecorderError as exc:
         print(f"REFUSED {exc.code}")
