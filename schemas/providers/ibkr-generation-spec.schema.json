@@ -13,7 +13,7 @@
     "sources"
   ],
   "properties": {
-    "schema_version": {"enum": [1, 2, 3]},
+    "schema_version": {"enum": [1, 2, 3, 4]},
     "as_of_date": {"type": "string", "format": "date"},
     "minimum_crosswalk_overlap": {"type": "integer", "minimum": 2},
     "roots": {
@@ -123,6 +123,20 @@
       "then": {
         "required": ["declared_zero_activity_accounts"],
         "properties": {"sources": {"minItems": 28}}
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 4}}},
+      "then": {
+        "required": ["declared_zero_activity_accounts"],
+        "properties": {
+          "sources": {
+            "minItems": 27,
+            "items": {
+              "properties": {"role": {"not": {"const": "TWS_CURRENT_SNAPSHOT"}}}
+            }
+          }
+        }
       }
     }
   ]

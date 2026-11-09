@@ -27,7 +27,7 @@ from .staging import write_new_file
 from .verify import verify_run
 
 # the refresh-capable generation spec schemas (2 added the Flex refresh and TWS roles)
-SPEC_SCHEMA_VERSIONS = (2, 3)
+SPEC_SCHEMA_VERSIONS = (2, 3, 4)
 _REFRESH_ROLE = "REFRESH_FLEX_ACTIVITY"
 _ACTIVITY_SCHEMA = ("activity-flex", "3")
 
@@ -173,7 +173,7 @@ def bind_spec(
         not isinstance(spec, dict)
         or spec.get("schema_version") not in SPEC_SCHEMA_VERSIONS
     ):
-        raise BindError("the base spec must be schema version 2 or 3")
+        raise BindError("the base spec must be schema version 2, 3 or 4")
     roots = spec.get("roots")
     if not isinstance(roots, dict) or root_id not in roots:
         raise BindError("the root id is not in the base spec")

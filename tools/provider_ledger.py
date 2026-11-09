@@ -103,7 +103,7 @@ for _descriptor in (
     ProviderDescriptor(
         provider_id="ibkr",
         catalog_filename="ibkr-catalog.json",
-        catalog_schema_versions=frozenset({3, 4, 5, 6, 7, 8}),
+        catalog_schema_versions=frozenset({3, 4, 5, 6, 7, 8, 9}),
         account_facts=(
             "capital_anchors",
             "corporate_actions",

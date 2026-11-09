@@ -18,13 +18,27 @@
     "provider_id",
     "reconciliation_checks",
     "securities",
-    "transactions",
-    "tws_account_values",
-    "tws_current_positions",
-    "tws_current_state"
+    "transactions"
   ],
+  "if": {"properties": {"catalog_schema_version": {"const": 9}}},
+  "then": {
+    "not": {
+      "anyOf": [
+        {"required": ["tws_account_values"]},
+        {"required": ["tws_current_positions"]},
+        {"required": ["tws_current_state"]}
+      ]
+    }
+  },
+  "else": {
+    "required": [
+      "tws_account_values",
+      "tws_current_positions",
+      "tws_current_state"
+    ]
+  },
   "properties": {
-    "catalog_schema_version": {"enum": [4, 5, 6, 7, 8]},
+    "catalog_schema_version": {"enum": [4, 5, 6, 7, 8, 9]},
     "provider_id": {"const": "ibkr"},
     "as_of_date": {"type": "string", "format": "date"},
     "accounts": {"type": "array", "items": {"type": "object"}},
