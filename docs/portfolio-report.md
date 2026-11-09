@@ -294,4 +294,5 @@ then publishes the bridge with `status` `UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT` a
 must be null, every other category a finite exact return link, and the gap must still equal the account return minus the model return;
 only the closure of the categories to the gap is not asserted, because three effects are not stated. A value on an unavailable
 effect, a null on an exact one, or a missing unavailable category stops the build. The panel prints an unavailable effect as
-`unavailable`, never as 0 pp.
+`unavailable`, never as 0 pp, and states that the closure is not computable for the unavailable part: the producer
+publishes no number for it, so no residual is inferred.

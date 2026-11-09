@@ -2020,7 +2020,9 @@
         const effect = item.effect_pp == null ? null : Number(item.effect_pp);
         const effectText = effect == null ? "unavailable" : `${effect > 0 ? "+" : ""}${decimal(effect, 3)} pp`;
         return `<span class="cell-secondary"><strong>${safe(humanStatus(item.category))}</strong> ${safe(effectText)} · ${safe(humanStatus(item.status))}${item.method ? ` · ${safe(item.method)}` : ""}</span>`;
-      }).join("");
+      }).join("") + (causalBridge?.status === "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
+        ? `<span class="cell-secondary"><strong>Closure not computable for the unavailable effects:</strong> the categories above are not closed to the gap; the producer states no number for the unavailable part.</span>`
+        : "");
       const causalMixMarkup = causalBridge?.effective_account_model_mix_return == null
         ? ""
         : `<span class="cell-secondary"><strong>Correct connected-model comparator:</strong> effective model mix ${pct(causalBridge.effective_account_model_mix_return)} · account-vs-mix gap ${decimal(causalBridge.effective_account_model_mix_gap_pp, 3)} pp. The primary AI model alone is not the whole-account benchmark.</span>`;

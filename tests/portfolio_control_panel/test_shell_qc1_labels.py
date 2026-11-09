@@ -1316,3 +1316,4 @@ def test_an_unavailable_causal_effect_is_printed_unavailable_never_as_zero(
     assert "Primary only benchmark to effective account model mix unavailable ·" in cell
     assert "Unexplained actual activity -0.500 pp" in cell
     assert " 0.000 pp" not in cell
+    assert "Closure not computable for the unavailable effects" in cell
