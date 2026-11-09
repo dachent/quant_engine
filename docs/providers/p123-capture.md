@@ -591,12 +591,15 @@ bytes and pin.
 | Kind | Host page | In-page GET | Saved as |
 |---|---|---|---|
 | `designer_model` | `/app/r2g/summary?id=<id>` | `/spr/strategy/model/<id>?dm=true` | `raw/r2g_<id>_dm_true.json` |
-| `designer_perf` | same | `/spr/strategy/model/<id>/perf?dm=true&init=true&years=15` | `raw/r2g_<id>_perf-full.json` |
+| `designer_perf_full` | same | `/spr/strategy/model/<id>/perf?dm=true&init=true&years=15` | `raw/r2g_<id>_perf-full.json` |
 | `designer_holdings` | same | `/spr/strategy/model/<id>/holdings?dm=true` | `raw/r2g_<id>_holdings.json` |
 | `investment_perfdata` | `/app/investment/details?id=<id>` | `/app/investment/perf-data/<id>?init=1` | `raw/strategy_<id>_app_investment_perfdata_init.json` |
 | `investment_resource` | same | `/app/investment/resource/<id>` | `raw/strategy_<id>_app_investment_resource.json` |
-| `investment_performance` | same | `/app/investment/performance` (HTML fragment) | `raw/strategy_<id>_app_investment_performance.html` |
-| `investment_holdings_csv` | same | `/app/investment/holdings.csv?id=<id>&v=basic` | `raw/strategy_<id>_app_investment_holdings.csv` |
+| `investment_perfdata_blank` | same | `/app/investment/perf-data/<id>?init=` (catalog spelling; the operator-recorded request is `init=1`) | `raw/strategy_<id>_app_investment_perfdata_init_blank.json` |
+| `investment_holdings` | same | `/app/investment/holdings/<id>` | `raw/strategy_<id>_app_investment_holdings.json` |
+| `investment_performance` | same | `/spr/strategy/portmodel/<id>/perf` | `raw/strategy_<id>_strategy_portmodel_perf.json` |
+| `investment_performance_page` | same | `/app/investment/performance` (HTML fragment) | `raw/strategy_<id>_app_investment_performance.html` |
+| `investment_holdings_csv` | same | `/app/investment/holdings.csv?id=<id>&v=basic` | `raw/strategy_<id>_app_investment_holdings_basic.csv` |
 | `investment_trans_csv` | same | `/app/investment/trans.csv?id=<id>&type=&tickers=&fromDt=&toDt=` | `raw/strategy_<id>_investment_transactions.csv` |
 | `account_resource` | `/app/account/details?id=<id>` | `/app/account/resource/<id>` | `raw/account_<id>_app_account_resource.json` |
 | `account_positions` | same | `/app/account/positions/<id>` | `raw/account_<id>_app_account_positions.json` |
@@ -615,6 +618,7 @@ Rules, pinned by `tests/portfolio123/test_p123_cdp_routes.py`:
   container type, missing marker field, designer model id differs, wrong CSV header, empty
   body). Nothing is saved for a refused body; files already saved are kept and the rest are
   listed in `routes_not_fetched`.
+- `page_gets` is accepted as the earlier name of the allowlist's `routes` list (and `--page-get` of `--route`). `run --dry-run` screens any allowlist and prints the plan with no browser and nothing written; `run` with a route-only allowlist reads the routes (no identity check, no `--as-of`), and refuses routes mixed with books.
 - Page visits may navigate within the signed-in tab only to allowlisted pages; nothing is
   clicked, typed or submitted.
 - **`--dry-run`**: the same code path and the same messages. It differs only in where it

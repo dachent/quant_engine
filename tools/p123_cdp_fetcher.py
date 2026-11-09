@@ -227,8 +227,10 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
         "drive_files",
         "page_record",
     }
-    if not isinstance(data, dict) or set(data) - {"routes"} != keys:
+    if not isinstance(data, dict) or set(data) - {"routes", "page_gets"} != keys:
         raise FetchRefused("ALLOWLIST_INVALID", "keys")
+    if "routes" in data and "page_gets" in data:
+        raise FetchRefused("ALLOWLIST_INVALID", "routes and page_gets")
     if data["schema_version"] != ALLOWLIST_SCHEMA_VERSION:
         raise FetchRefused("ALLOWLIST_SCHEMA_UNSUPPORTED")
     if data["origin"] != ORIGIN:
@@ -275,7 +277,8 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
         tuple(drive),
         data["page_record"],
         digest,
-        _parse_routes(data.get("routes", [])),
+        # ``page_gets`` is the same list under its earlier name (PR 865's allowlists).
+        _parse_routes(data.get("routes", data.get("page_gets", []))),
     )
 
 
@@ -510,7 +513,7 @@ class Route:
     host_page: str
     target: str
     saved: str
-    shape: str  # json_object | json_list | csv | html | visit
+    shape: str  # json_object | json_list | json_any | csv | html | visit
     check: str = ""
 
 
@@ -524,7 +527,7 @@ ROUTES: tuple[Route, ...] = (
         "portUid",
     ),
     Route(
-        "designer_perf",
+        "designer_perf_full",
         "/app/r2g/summary?id={id}",
         "/spr/strategy/model/{id}/perf?dm=true&init=true&years=15",
         "r2g_{id}_perf-full.json",
@@ -548,6 +551,27 @@ ROUTES: tuple[Route, ...] = (
         "data",
     ),
     Route(
+        "investment_perfdata_blank",
+        "/app/investment/details?id={id}",
+        "/app/investment/perf-data/{id}?init=",
+        "strategy_{id}_app_investment_perfdata_init_blank.json",
+        "json_any",
+    ),
+    Route(
+        "investment_holdings",
+        "/app/investment/details?id={id}",
+        "/app/investment/holdings/{id}",
+        "strategy_{id}_app_investment_holdings.json",
+        "json_any",
+    ),
+    Route(
+        "investment_performance",
+        "/app/investment/details?id={id}",
+        "/spr/strategy/portmodel/{id}/perf",
+        "strategy_{id}_strategy_portmodel_perf.json",
+        "json_any",
+    ),
+    Route(
         "investment_resource",
         "/app/investment/details?id={id}",
         "/app/investment/resource/{id}",
@@ -556,7 +580,7 @@ ROUTES: tuple[Route, ...] = (
         "assetUid",
     ),
     Route(
-        "investment_performance",
+        "investment_performance_page",
         "/app/investment/details?id={id}",
         "/app/investment/performance",
         "strategy_{id}_app_investment_performance.html",
@@ -567,7 +591,7 @@ ROUTES: tuple[Route, ...] = (
         "investment_holdings_csv",
         "/app/investment/details?id={id}",
         "/app/investment/holdings.csv?id={id}&v=basic",
-        "strategy_{id}_app_investment_holdings.csv",
+        "strategy_{id}_app_investment_holdings_basic.csv",
         "csv",
         "Ticker,",
     ),
@@ -680,19 +704,23 @@ def validate_route_body(
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise FetchStop("STOP_SHAPE_UNEXPECTED", "body is not UTF-8") from exc
-    if route.shape in {"json_object", "json_list"}:
+    if route.shape in {"json_object", "json_list", "json_any"}:
         if "json" not in content_type:
             raise FetchStop("STOP_SHAPE_UNEXPECTED", "response is not JSON")
         try:
             document = json.loads(text)
         except ValueError as exc:
             raise FetchStop("STOP_SHAPE_UNEXPECTED", "body is not JSON") from exc
-        want = dict if route.shape == "json_object" else list
+        want: tuple[type, ...] = {
+            "json_object": (dict,),
+            "json_list": (list,),
+            "json_any": (dict, list),
+        }[route.shape]
         if not isinstance(document, want):
-            raise FetchStop(
-                "STOP_SHAPE_UNEXPECTED", f"body is not a JSON {want.__name__}"
-            )
-        if route.check and route.check not in document:
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "body has an unexpected JSON type")
+        if route.check and (
+            not isinstance(document, dict) or route.check not in document
+        ):
             raise FetchStop("STOP_SHAPE_UNEXPECTED", "expected field missing")
         if (
             route.name == "designer_model"
@@ -1843,6 +1871,13 @@ def _parser() -> argparse.ArgumentParser:
         "(kinds: " + ", ".join(r.name for r in ROUTES) + ")",
     )
     make.add_argument(
+        "--page-get",
+        action="append",
+        default=[],
+        metavar="KIND:ID",
+        help="alias of --route",
+    )
+    make.add_argument(
         "--kind",
         action="append",
         default=[],
@@ -1904,6 +1939,12 @@ def _parser() -> argparse.ArgumentParser:
                 "back to; required, and equal to the generation plan's as-of date",
             )
             item.add_argument("--skip-designer-models", action="store_true")
+            item.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="screen the whole allowlist and print the plan; no browser and "
+                "nothing written (use `routes --dry-run` to rehearse a route read)",
+            )
         else:
             item.add_argument("--file-id", required=True)
     return parser
@@ -1929,6 +1970,28 @@ def _summary(manifest: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def dry_run_plan(allowlist: Allowlist) -> dict[str, Any]:
+    """Screen every URL of the allowlist exactly as a run would; send nothing."""
+
+    exports = allowed_p123_urls(allowlist)
+    for url in exports:
+        screen_p123_url(url, exports)
+    designers = {designer_url(m): m for m in allowlist.designer_models}
+    for url in designers:
+        screen_designer_url(url, designers)
+    pages, fetches = route_urls(allowlist)
+    for url in pages | fetches:
+        screen_route_url(url, pages | fetches)
+    return {
+        "dry_run": True,
+        "allowlist_sha256": allowlist.sha256,
+        "exports": len(exports),
+        "designer_models": len(designers),
+        "routes": [f"{k}:{i}" for k, i in allowlist.routes],
+        "page_record": allowlist.page_record,
+    }
+
+
 def _route_arg(item: str) -> tuple[str, int]:
     kind, _, ident = item.partition(":")
     if kind not in ROUTE_BY_NAME or not ident.isdigit():
@@ -1940,7 +2003,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "make-allowlist":
-            routes = [_route_arg(item) for item in args.route]
+            routes = [_route_arg(item) for item in (*args.route, *args.page_get)]
             if (
                 not args.book
                 and not args.designer_model
@@ -1963,6 +2026,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         allowlist = load_allowlist(args.allowlist, args.allowlist_sha256)
         timeout = args.download_timeout
         extra: dict[str, Any] = {"download_timeout": timeout} if timeout else {}
+        if args.command == "run" and args.dry_run:
+            print(json.dumps(dry_run_plan(allowlist), sort_keys=True))
+            return 0
+        if args.command == "run" and allowlist.routes:
+            if allowlist.books or allowlist.designer_models or allowlist.page_record:
+                raise FetchRefused("ROUTES_MIXED_WITH_BOOKS", "use separate allowlists")
+            args.command = "routes"  # route-only allowlist: no identity check, no as-of
+            args.dry_run = False
         if args.command == "routes":
             refusal = check_entry_interpreter(
                 "the P123 CDP fetcher (in-page routes)", "p123-cdp-fetcher"

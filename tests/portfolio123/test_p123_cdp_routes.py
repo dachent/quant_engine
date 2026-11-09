@@ -39,7 +39,7 @@ def _bodies() -> dict[str, tuple[str, bytes]]:
     model = dict(SHAPES["designer_model"], portUid=MODEL)
     out: dict[str, tuple[str, bytes]] = {
         "designer_model": ("application/json", json.dumps(model).encode()),
-        "designer_perf": (
+        "designer_perf_full": (
             "application/json",
             json.dumps(SHAPES["designer_perf"]).encode(),
         ),
@@ -55,9 +55,15 @@ def _bodies() -> dict[str, tuple[str, bytes]]:
             "application/json",
             json.dumps(SHAPES["investment_resource"]).encode(),
         ),
-        "investment_performance": (
+        "investment_performance_page": (
             "text/html;charset=utf-8",
             b'<div ng-controller="InvestmentPerformanceCtrl">Loading...</div>\n',
+        ),
+        "investment_performance": ("application/json", b'{"nav": []}'),
+        "investment_holdings": ("application/json", b"[]"),
+        "investment_perfdata_blank": (
+            "application/json",
+            json.dumps(SHAPES["investment_perfdata"]).encode(),
         ),
         "account_resource": ("application/json", b'{"accountUid": 0}'),
         "account_positions": ("application/json", b"[]"),
@@ -160,11 +166,14 @@ def _allowlist(routes: list[tuple[str, int]]) -> fetcher.Allowlist:
 
 ALL_ROUTES = [
     ("designer_model", MODEL),
-    ("designer_perf", MODEL),
+    ("designer_perf_full", MODEL),
     ("designer_holdings", MODEL),
     ("investment_perfdata", INVEST),
     ("investment_resource", INVEST),
+    ("investment_performance_page", INVEST),
     ("investment_performance", INVEST),
+    ("investment_holdings", INVEST),
+    ("investment_perfdata_blank", INVEST),
     ("investment_holdings_csv", INVEST),
     ("investment_trans_csv", INVEST),
     ("account_resource", ACCOUNT),
@@ -345,13 +354,18 @@ def test_bad_status_or_content_type_fails_closed(
         ("designer_model", MODEL, b"[]", "application/json"),
         ("designer_model", MODEL, b'{"portUid": 9}', "application/json"),
         ("designer_model", MODEL, b"not json", "application/json"),
-        ("designer_perf", MODEL, b'{"other": 1}', "application/json"),
+        ("designer_perf_full", MODEL, b'{"other": 1}', "application/json"),
         ("designer_holdings", MODEL, b"", "application/json"),
         ("investment_perfdata", INVEST, b"{}", "application/json"),
         ("investment_holdings_csv", INVEST, b"Wrong,Header\n1,2\n", "text/csv"),
         ("investment_trans_csv", INVEST, b"Date,Type,\n", "text/html"),
-        ("investment_performance", INVEST, b"<p>nope</p>", "text/html"),
-        ("investment_performance", INVEST, b"InvestmentPerformanceCtrl", "text/json"),
+        ("investment_performance_page", INVEST, b"<p>nope</p>", "text/html"),
+        (
+            "investment_performance_page",
+            INVEST,
+            b"InvestmentPerformanceCtrl",
+            "text/json",
+        ),
         ("account_positions", ACCOUNT, b"{}", "application/json"),
     ],
 )
@@ -398,7 +412,7 @@ def test_a_page_that_never_finishes_loading_stops(tmp_path: Path) -> None:
 
 
 def test_a_failed_route_keeps_earlier_files_and_names_the_rest(tmp_path: Path) -> None:
-    url = fetcher.route_target_url(fetcher.ROUTE_BY_NAME["designer_perf"], MODEL)
+    url = fetcher.route_target_url(fetcher.ROUTE_BY_NAME["designer_perf_full"], MODEL)
 
     def mutate(browser: RoutesBrowser) -> None:
         browser.replies[url] = (400, "application/json", b"{}")
@@ -407,14 +421,14 @@ def test_a_failed_route_keeps_earlier_files_and_names_the_rest(tmp_path: Path) -
         tmp_path,
         [
             ("designer_model", MODEL),
-            ("designer_perf", MODEL),
+            ("designer_perf_full", MODEL),
             ("designer_holdings", MODEL),
         ],
         mutate=mutate,
     )
     assert [r["kind"] for r in manifest["routes"]] == ["designer_model"]
     assert manifest["routes_not_fetched"] == [
-        f"designer_perf:{MODEL}",
+        f"designer_perf_full:{MODEL}",
         f"designer_holdings:{MODEL}",
     ]
     assert (root / "capture" / "raw" / f"r2g_{MODEL}_dm_true.json").is_file()
@@ -583,3 +597,73 @@ def test_cli_make_allowlist_accepts_routes(tmp_path: Path) -> None:
         fetcher.main(["make-allowlist", "--out", str(tmp_path / "b"), "--route", "x:1"])
         == 2
     )
+
+
+def test_perfdata_variants_are_both_exact_and_distinct() -> None:
+    init1 = fetcher.route_target_url(fetcher.ROUTE_BY_NAME["investment_perfdata"], 7)
+    blank = fetcher.route_target_url(
+        fetcher.ROUTE_BY_NAME["investment_perfdata_blank"], 7
+    )
+    assert init1 == f"{BASE}/app/investment/perf-data/7?init=1"
+    assert blank == f"{BASE}/app/investment/perf-data/7?init="
+
+
+def test_page_gets_is_the_same_allowlist_list_under_its_earlier_name() -> None:
+    data = json.loads(fetcher.build_allowlist_bytes([], routes=[("designer_model", 5)]))
+    data["page_gets"] = data.pop("routes")
+    payload = fetcher.canonical_bytes(data)
+    parsed = fetcher.parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
+    assert parsed.routes == (("designer_model", 5),)
+    data["routes"] = data["page_gets"]
+    both = fetcher.canonical_bytes(data)
+    with pytest.raises(FetchRefused):
+        fetcher.parse_allowlist(both, hashlib.sha256(both).hexdigest())
+
+
+def test_run_dry_run_screens_and_prints_the_plan_without_a_browser(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = fetcher.build_allowlist_bytes([], routes=ALL_ROUTES)
+    allow = tmp_path / "a.json"
+    allow.write_bytes(payload)
+    code = fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:1",
+            "--allowlist",
+            str(allow),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "never"),
+            "--dry-run",
+        ]
+    )
+    plan = json.loads(capsys.readouterr().out)
+    assert code == 0 and plan["dry_run"] is True
+    assert len(plan["routes"]) == len(ALL_ROUTES)
+    assert not (tmp_path / "never").exists()
+
+
+def test_run_refuses_routes_mixed_with_books(tmp_path: Path) -> None:
+    payload = fetcher.build_allowlist_bytes([5], routes=[("designer_model", 5)])
+    allow = tmp_path / "a.json"
+    allow.write_bytes(payload)
+    code = fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:1",
+            "--allowlist",
+            str(allow),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "never"),
+            "--no-reference",
+            "--as-of",
+            "2000-01-03",
+        ]
+    )
+    assert code == fetcher.EXIT_REFUSED
