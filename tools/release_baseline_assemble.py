@@ -61,6 +61,7 @@ SUPPORTED_MANIFEST_SCHEMAS = frozenset(
 )
 CONTRACT_PATH = "contracts/portfolio-financial-mvp-source-v1.json"
 CONTRACT_FAMILY = "financial_source_contract"
+DECLARED_CUTOFF_FAMILY = "declared_cutoff_date"
 
 # The header text of the R2.2 baseline (the only header text the retained assemblers carried over).
 DEFAULT_HEADER: dict[str, str] = {
@@ -147,6 +148,7 @@ def values_agree(left: object, right: object, unit: str) -> bool:
     if unit == "list":
         a_list = left if isinstance(left, list) else [left]
         b_list = right if isinstance(right, list) else [right]
+        # multiset: order is free, multiplicity is not (['a', 'a'] != ['a'])
         return sorted(map(str, a_list)) == sorted(map(str, b_list))
     return str(left) == str(right)
 
@@ -221,10 +223,10 @@ def _check_header(
             "CUTOFF_MISMATCH",
             f"derive a cutoff {a.get('cutoff')!r} differs from --cutoff {cutoff}",
         )
-    if "cutoff" in b and b["cutoff"] != cutoff:
+    if b.get("cutoff") != cutoff:
         raise AssemblyError(
             "CUTOFF_MISMATCH",
-            f"derive b cutoff {b['cutoff']!r} differs from --cutoff {cutoff}",
+            f"derive b cutoff {b.get('cutoff')!r} differs from --cutoff {cutoff}",
         )
     if not _COMMIT.fullmatch(head):
         raise AssemblyError("USAGE", "--head must be a 40-hex commit sha")
@@ -237,14 +239,27 @@ def _check_header(
             )
     for side, doc in (("a", a), ("b", b)):
         named = doc.get("inputs_manifest")
-        if side == "a" and not isinstance(named, dict):
+        if not isinstance(named, dict):
             raise AssemblyError(
-                "MANIFEST_MISMATCH", "derive a does not record the manifest it read"
+                "MANIFEST_MISMATCH",
+                f"derive {side} does not record the manifest it read",
             )
-        if isinstance(named, dict) and named.get("sha256") != manifest_sha256:
+        if named.get("sha256") != manifest_sha256:
             raise AssemblyError(
                 "MANIFEST_MISMATCH",
                 f"derive {side} read manifest {named.get('sha256')!r}, not {manifest_sha256}",
+            )
+    if manifest.get("schema") == "qe-cp-acceptance-inputs/3":
+        declared = [
+            e
+            for e in manifest.get("inputs", [])
+            if isinstance(e, dict) and e.get("family") == DECLARED_CUTOFF_FAMILY
+        ]
+        if len(declared) != 1 or not _SHA256.fullmatch(str(declared[0].get("sha256"))):
+            raise AssemblyError(
+                "CUTOFF_ARTIFACT",
+                f"manifest names {len(declared)} pinned {DECLARED_CUTOFF_FAMILY} "
+                "entries, not one",
             )
     if _basis(a) != _basis(b):
         raise AssemblyError(
