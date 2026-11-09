@@ -2838,7 +2838,7 @@ def v3_authority_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, 
     coverage = generation.get("coverage", {})
     if (
         generation.get("generation_id")
-        != "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa"
+        != "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c"
         or generation.get("as_of_date") != CUTOFF.isoformat()
         or coverage.get("observed_end") != CUTOFF.isoformat()
         or coverage.get("status") != "COMPLETE_WITHIN_DECLARED_BOUNDARY"

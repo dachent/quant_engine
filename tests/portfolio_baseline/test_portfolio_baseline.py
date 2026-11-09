@@ -5210,7 +5210,7 @@ def test_n56_catalog_version_two_only_when_custody_cash_is_present() -> None:
 # repository's real contract bytes; only the custody admission gate, which needs a
 # published admission receipt, is replaced by a gate that returns the real contract.
 
-_FX_GENERATION = "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa"
+_FX_GENERATION = "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c"
 
 
 def _e3_real_contract() -> dict[str, Any]:
@@ -5314,7 +5314,7 @@ def test_e3_an_admitted_fx_generation_with_unconverted_rows_is_partial_not_faile
     assert disposition["fx_affected_record_count"] == 3
     assert disposition["generation_id"] == _FX_GENERATION
     assert disposition["admitted_start"] == "2025-01-01"
-    assert disposition["admitted_end"] == "2026-09-17"
+    assert disposition["admitted_end"] == "2026-11-06"
     assert disposition["currencies"] == ["EUR"]
 
 

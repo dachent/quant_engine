@@ -1663,7 +1663,7 @@ def custody_v3_fixture(
         ),
         "generation.json": json.dumps(
             {
-                "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+                "generation_id": "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c",
                 "as_of_date": "2026-09-17",
                 "coverage": {
                     "observed_end": "2026-09-17",
@@ -2738,7 +2738,7 @@ def test_oracle_v3_b_conflicted_included_crosswalk_fails_closed(
         "receipt-b-response.json": authority_files["receipt-b-response.json"],
         "generation.json": json.dumps(
             {
-                "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+                "generation_id": "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c",
                 "as_of_date": "2026-09-17",
                 "coverage": {
                     "observed_end": "2026-09-17",
@@ -3335,7 +3335,7 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
         "receipt-b-response.json": authority_files["receipt-b-response.json"],
         "generation.json": json.dumps(
             {
-                "generation_id": "fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa",
+                "generation_id": "ff77af45a7ab5d29bb5a619e810dd52a5ef15ce24d6901333b7432ebe7d6667c",
                 "as_of_date": "2026-09-17",
                 "coverage": {
                     "observed_end": "2026-09-17",

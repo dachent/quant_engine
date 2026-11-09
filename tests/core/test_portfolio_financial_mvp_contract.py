@@ -1075,7 +1075,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "390a16130de4e93176632852af80f0ac45df74384b85736b839e6584907273ef"
+        "91c6d4a8da1f8fb1ef76d0a908347a03a1214e59ae3ea2218a16b33595baf3f8"
     )
 
 
@@ -4356,11 +4356,12 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # historical generation, inventory or admitted-item pins. The held-workbook
     # correction removes only that consumer from the historical source rows.
     # Moved again by the 2026-10-16 Matrixport NAV gap declaration (#287 V3).
+    # Moved again by the R3 FX re-selection (generation ff77af45, through 2026-11-06).
     # The affected product-data-class pins are then rederived from those changed
     # source identities, including the four verified source-class bindings;
     # financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "578820e2ea410553f39b9bdbe69b55e57df613915b83075f62949fa1234924d9"
+        "0e52172b1ce1829e3773530a0d26611582259d4dae62fb314cf30b23a96154c0"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4397,7 +4398,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "578820e2ea410553f39b9bdbe69b55e57df613915b83075f62949fa1234924d9"
+        "0e52172b1ce1829e3773530a0d26611582259d4dae62fb314cf30b23a96154c0"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
