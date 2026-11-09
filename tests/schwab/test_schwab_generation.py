@@ -725,14 +725,25 @@ def _without_manual_nav(spec: Path) -> None:
     spec.write_text(json.dumps(document), encoding="utf-8")
 
 
-def test_web_contract_nav_anchor_uses_the_valuation_cutoff_not_capture_time(
+def test_web_contract_nav_anchor_refuses_a_cutoff_earlier_than_the_nav_end(
     tmp_path: Path,
 ) -> None:
-    # observed 2026-07-31, WCH NAV ends 2026-07-30: a cutoff of 07-30 is not later
-    spec = _web_snapshot_spec(tmp_path, valuation_cutoff="2026-07-30")
+    # observed 2026-07-31 but valued 2026-07-29; WCH NAV ends 2026-07-30
+    spec = _web_snapshot_spec(tmp_path, valuation_cutoff="2026-07-29")
     _without_manual_nav(spec)
     with pytest.raises(SchwabGenerationError, match="stale current snapshot"):
         build_generation(spec)
+
+
+def test_web_contract_nav_anchor_allows_a_cutoff_equal_to_the_nav_end(
+    tmp_path: Path,
+) -> None:
+    # the R3 shape: snapshot valued at D, NAV through D
+    spec = _web_snapshot_spec(tmp_path, valuation_cutoff="2026-07-30")
+    _without_manual_nav(spec)
+    catalog, _, _ = build_generation(spec)
+    (nav,) = [i for i in catalog["reconciliation"] if i.get("fact_type") == "NAV"]
+    assert nav["snapshot_valuation_cutoff"] == "2026-07-30"
 
 
 def test_web_contract_nav_anchor_records_the_valuation_cutoff(tmp_path: Path) -> None:

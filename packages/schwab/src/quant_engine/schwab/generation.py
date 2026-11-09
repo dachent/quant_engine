@@ -1673,14 +1673,19 @@ def _nav_api(
     )
     if series_max is None:
         raise SchwabGenerationError("WCH NAV series is empty")
-    snapshot_date = (
-        snapshot_valuation_cutoff
-        if snapshot_valuation_cutoff is not None
-        else snapshot_observed_at.date()
-    )
-    if snapshot_date <= series_max:
+    if snapshot_valuation_cutoff is not None:
+        # valued at D with NAV through D is the normal case: only an earlier
+        # cutoff means the snapshot predates the NAV being anchored
+        if snapshot_valuation_cutoff < series_max:
+            raise SchwabGenerationError(
+                f"stale current snapshot: valuation_cutoff "
+                f"{snapshot_valuation_cutoff.isoformat()} is earlier than the WCH "
+                f"NAV series end {series_max.isoformat()}"
+            )
+    elif snapshot_observed_at.date() <= series_max:
         raise SchwabGenerationError(
-            f"stale current snapshot: valuation date {snapshot_date.isoformat()} is "
+            f"stale current snapshot: observed date "
+            f"{snapshot_observed_at.date().isoformat()} is "
             f"not later than the WCH NAV series end {series_max.isoformat()}"
         )
 
