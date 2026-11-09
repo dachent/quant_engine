@@ -15,8 +15,10 @@ from collections.abc import Sequence
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import sys
+import uuid
 from typing import Any
 
 import capture_action_guard as guard
@@ -25,8 +27,6 @@ ALLOWED_PREFIX = "https://client.schwab.com/"
 MAX_SCROLL = 5000
 _BLOCKED_TYPES = frozenset({"submit", "image", "password"})
 
-
-_FACTS_SCRIPT = "e => ({type: e.type || null, href: e.href || null})"
 
 # ONE guard shared with the other live capture tools (trading words plus account-changing
 # words such as delete, save changes, update profile, link broker).
@@ -45,33 +45,28 @@ class SchwabPage:
     def _record(self, verb: str, role: str, label: str) -> None:
         self.log.append({"action": verb, "role": role, "label_sha8": label_hash(label)})
 
+    def _require_origin(self) -> None:
+        """Before every action: the page must still be on the Schwab origin."""
+
+        url = getattr(self._page, "url", None)
+        if isinstance(url, str) and not url.startswith(ALLOWED_PREFIX):
+            raise ActionRefused(f"refused: the page left {ALLOWED_PREFIX}")
+
     def _control(self, role: str, name: str) -> Any:
+        self._require_origin()
         refuse_if_trading(name)
         # exact: a substring match could resolve a control whose full name holds a blocked term
         control = self._page.get_by_role(role, name=name, exact=True).first
-        # the EFFECTIVE type and the resolved href (a typeless <button> in a form submits)
-        facts = control.evaluate(_FACTS_SCRIPT)
-        kind = facts.get("type") if isinstance(facts, dict) else None
-        href = facts.get("href") if isinstance(facts, dict) else None
-        if isinstance(kind, str) and kind.casefold() in _BLOCKED_TYPES:
-            raise ActionRefused(
-                f"refused: a {kind} control (label {label_hash(name)}) is never touched"
-            )
-        if isinstance(href, str) and href and not href.startswith(ALLOWED_PREFIX):
-            raise ActionRefused(
-                f"refused: a link leaving {ALLOWED_PREFIX} (label {label_hash(name)})"
-            )
-        refuse_if_trading(
-            control.inner_text(),
-            href,
-            control.get_attribute("aria-label"),
-            control.get_attribute("value"),
-            control.get_attribute("href"),
-            control.get_attribute("title"),
-        )
+        # the full shared facts (accessible name sources, HTML name, labels, alt, onclick text,
+        # effective type, resolved href, document origin), checked by the one guard
+        facts = control.evaluate(guard.FACTS_SCRIPT)
+        if not isinstance(facts, dict):
+            raise ActionRefused("refused: the control could not be inspected")
+        guard.check_control(facts, origin_prefix=ALLOWED_PREFIX)
         return control
 
     def navigate(self, url: str) -> None:
+        self._require_origin()
         if not url.startswith(ALLOWED_PREFIX):
             raise ActionRefused(f"refused: only {ALLOWED_PREFIX} pages are opened")
         refuse_if_trading(url[len(ALLOWED_PREFIX) :])
@@ -84,6 +79,7 @@ class SchwabPage:
         control.click()
 
     def scroll(self, delta_y: int) -> None:
+        self._require_origin()
         if not isinstance(delta_y, int) or abs(delta_y) > MAX_SCROLL:
             raise ActionRefused(f"refused: a scroll is at most {MAX_SCROLL} pixels")
         self._record("scroll", "page", str(delta_y))
@@ -102,10 +98,22 @@ class SchwabPage:
         if destination.exists():
             raise ActionRefused("refused: the download destination already exists")
         self._record("download", role, name)
-        with self._page.expect_download() as info:
-            control.click()
-        info.value.save_as(str(destination))
-        return hashlib.sha256(destination.read_bytes()).hexdigest()
+        # save to an owned temp sibling, then publish with a no-replace link: a destination
+        # created during the download is never overwritten
+        temp = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
+        try:
+            with self._page.expect_download() as info:
+                control.click()
+            info.value.save_as(str(temp))
+            try:
+                os.link(temp, destination)
+            except FileExistsError:
+                raise ActionRefused(
+                    "refused: the download destination already exists"
+                ) from None
+            return hashlib.sha256(destination.read_bytes()).hexdigest()
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -19,10 +19,24 @@ class Control:
     def get_attribute(self, name: str) -> str | None:
         return self.attributes.get(name)
 
-    def evaluate(self, script: str) -> dict[str, str | None]:
+    def evaluate(self, script: str) -> dict[str, Any]:
+        a = self.attributes
         return {
-            "type": self.attributes.get("effective_type", self.attributes.get("type")),
-            "href": self.attributes.get("resolved_href", self.attributes.get("href")),
+            "tag": a.get("tag", "a"),
+            "type": a.get("effective_type", a.get("type")),
+            "in_form": False,
+            "text": a.get("text") or "",
+            "aria_label": a.get("aria-label") or "",
+            "name": a.get("name") or "",
+            "value": a.get("value") or "",
+            "title": a.get("title") or "",
+            "labelled_by": a.get("labelled_by") or "",
+            "labels": "",
+            "alt": a.get("alt") or "",
+            "onclick": a.get("onclick") or "",
+            "page_url": a.get("page_url", "https://client.schwab.com/app/x"),
+            "href": a.get("resolved_href", a.get("href")) or "",
+            "href_attr": a.get("href") or "",
         }
 
     def inner_text(self) -> str:
@@ -235,3 +249,56 @@ def test_tabs_and_export_controls_stay_allowed(name: str) -> None:
     page, control = _page(text=name, type="button")
     page.click("tab", name)
     assert control.clicked == 1
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"name": "placeOrder", "onclick": "placeOrder()", "text": "Continue"},
+        {"aria-label": "Place order", "text": ""},
+        {"onclick": "submitTrade()", "text": "Continue", "type": "button"},
+        {"labelled_by": "Buy now", "text": "Open"},
+        {"alt": "Sell", "text": ""},
+        {"page_url": "https://elsewhere.example/", "text": "Continue"},
+        {"text": "Close the account", "type": "button"},
+        {"text": "Change your password", "type": "button"},
+    ],
+)
+def test_a_control_whose_name_is_innocent_but_whose_facts_are_not_is_refused(
+    attributes: dict[str, str],
+) -> None:
+    page, control = _page(**attributes)
+    with pytest.raises(actions.ActionRefused):
+        page.click("button", "Continue")
+    assert control.clicked == 0 and page.log == []
+
+
+def test_a_page_that_left_the_origin_stops_every_action() -> None:
+    page, control = _page(text="Holdings")
+    page._page.url = "https://elsewhere.example/"
+    for call in (
+        lambda: page.click("tab", "Holdings"),
+        lambda: page.scroll(100),
+        lambda: page.navigate("https://client.schwab.com/app/x"),
+    ):
+        with pytest.raises(actions.ActionRefused, match="left"):
+            call()
+    assert control.clicked == 0 and page.log == []
+
+
+def test_a_destination_created_during_the_download_is_never_overwritten(
+    tmp_path: Path,
+) -> None:
+    page, control = _page(text="Export")
+    target = tmp_path / "export.csv"
+    real_click = control.click
+
+    def click_and_race() -> None:
+        real_click()
+        target.write_bytes(b"someone else")
+
+    control.click = click_and_race  # type: ignore[method-assign]
+    with pytest.raises(actions.ActionRefused, match="already exists"):
+        page.download("button", "Export", target)
+    assert target.read_bytes() == b"someone else"
+    assert [p.name for p in tmp_path.iterdir()] == ["export.csv"]  # no temp left behind
