@@ -66,6 +66,14 @@ MODEL = "/spr/strategy/model/{id}"
 MODEL_PERF = "/spr/strategy/model/{id}/perf"
 MODEL_HOLDINGS = "/spr/strategy/model/{id}/holdings"
 _TEMP_PARTS = {"tmp", "temp", "scratch"}
+# Routes whose bodies this tool needs.  A run may end CAPTURE_WITH_UNRECORDED_BODIES (an
+# unreadable /app/state poll, say) and still be admitted, but a 200 GET of any needed route
+# that has no body file is a refusal: the evidence for it is missing, not merely absent.
+ADMIT_ROUTES = frozenset(
+    {LIST_TEMPLATE, ITEM_RESOURCE, ITEM_PERF, ITEM_HOLDINGS, ACCOUNT_RESOURCE}
+)
+DESIGNER_ROUTES = frozenset({MODEL, MODEL_PERF, MODEL_HOLDINGS})
+NEEDED_ROUTES = ADMIT_ROUTES | DESIGNER_ROUTES
 _ITEM_KINDS = ("resource", "perf", "holdings")
 _FETCHER_NAMES = {
     "perf": re.compile(r"^strategy_(\d+)_app_investment_perfdata_init\.json$"),
@@ -166,9 +174,18 @@ def load_recorder(run: Path) -> tuple[list[tuple[int, Body]], dict[str, Any]]:
     if not isinstance(entries, list):
         raise AdmissionRefused("recorder entries are not a list")
     bodies: list[tuple[int, Body]] = []
+    unrecorded: list[dict[str, Any]] = []
     for entry in entries:
         entry = _object(entry, "recorder entry")
         relative = f"raw/{int(entry['ordinal']):05d}.body"
+        if entry.get("method") == "GET" and entry.get("status") == 200:
+            if relative not in listed and entry.get("path_template") in NEEDED_ROUTES:
+                unrecorded.append(
+                    {
+                        "ordinal": int(entry["ordinal"]),
+                        "template": str(entry["path_template"]),
+                    }
+                )
         if (
             entry.get("method") != "GET"
             or entry.get("status") != 200
@@ -193,7 +210,20 @@ def load_recorder(run: Path) -> tuple[list[tuple[int, Body]], dict[str, Any]]:
         "manifest_sha256": _sha(manifest_bytes),
         "entries_sha256": listed["entries.json"],
         "bodies": len(bodies),
+        "unrecorded_needed_routes": unrecorded,
+        "status": manifest.get("status"),
     }
+
+
+def _refuse_unrecorded(
+    summary: dict[str, Any], run: Path, routes: frozenset[str]
+) -> None:
+    hit = [u for u in summary["unrecorded_needed_routes"] if u["template"] in routes]
+    if hit:
+        raise AdmissionRefused(
+            f"{run.name}: the recorder saw a needed route but holds no body for it "
+            f"(ordinal {hit[0]['ordinal']}, {hit[0]['template']}); status {summary['status']}"
+        )
 
 
 def load_fetcher(capture: Path) -> tuple[dict[str, Body], dict[str, Any]]:
@@ -285,12 +315,26 @@ def _check_accounts(seen: set[Any], stated: Sequence[int]) -> list[int]:
     return sorted(set(stated))
 
 
+def _corroboration_error(
+    kind: str, doc: dict[str, Any], row: dict[str, Any]
+) -> str | None:
+    if kind == "perf":
+        if doc.get("date") != row.get("inceptionDt"):
+            return f"starts {doc.get('date')}, not the inception {row.get('inceptionDt')} of the item it follows"
+        return None
+    positions = doc.get("positions")
+    if not isinstance(positions, list) or len(positions) != row.get("posCnt"):
+        count = len(positions) if isinstance(positions, list) else "?"
+        return f"has {count} positions, the item has {row.get('posCnt')}"
+    return None
+
+
 def bind_recorder(
     bodies: Sequence[tuple[int, Body]],
 ) -> tuple[dict[int, Item], Body]:
     rows, list_body = _list_rows(bodies)
     items: dict[int, Item] = {}
-    current: tuple[int, int] | None = None  # (item uid, ordinal of its resource body)
+    seen: list[tuple[int, int]] = []  # (ordinal, item uid) of every resource body
     for ordinal, body in bodies:
         if body.template == ITEM_RESOURCE:
             doc = _object(body.json(), f"item resource body {ordinal}")
@@ -310,7 +354,7 @@ def bind_recorder(
                 raise AdmissionRefused(
                     f"resource body {ordinal} names another item than its list row"
                 )
-            current = (uid, ordinal)
+            seen.append((ordinal, uid))
             _put(
                 items,
                 uid,
@@ -321,33 +365,39 @@ def bind_recorder(
             )
         elif body.template in (ITEM_PERF, ITEM_HOLDINGS):
             kind = "perf" if body.template == ITEM_PERF else "holdings"
-            if current is None or ordinal - current[1] > WINDOW:
+            doc = _object(body.json(), f"{kind} body {ordinal}")
+            # Recorder ordinals follow response COMPLETION, so overlapping requests can
+            # interleave: every item whose resource body is within the window is a candidate,
+            # the body must corroborate exactly one of them, and two candidates that both
+            # corroborate it are an ambiguous interleaving (refused, never guessed).
+            near = [(o, u) for o, u in seen if 0 < ordinal - o <= WINDOW]
+            if not near:
                 raise AdmissionRefused(
                     f"{kind} body {ordinal} has no item resource body within {WINDOW} ordinals before it"
                 )
-            row = items[current[0]].row
-            if kind == "perf":
-                doc = _object(body.json(), f"perf body {ordinal}")
-                if doc.get("date") != row.get("inceptionDt"):
-                    raise AdmissionRefused(
-                        f"perf body {ordinal} starts {doc.get('date')}, not the inception {row.get('inceptionDt')} of the item it follows"
-                    )
-            else:
-                doc = _object(body.json(), f"holdings body {ordinal}")
-                positions = doc.get("positions")
-                if not isinstance(positions, list) or len(positions) != row.get(
-                    "posCnt"
-                ):
-                    raise AdmissionRefused(
-                        f"holdings body {ordinal} has {len(positions) if isinstance(positions, list) else '?'} positions, the item has {row.get('posCnt')}"
-                    )
+            candidates = sorted({u for _, u in near})
+            fits = [
+                u
+                for u in candidates
+                if _corroboration_error(kind, doc, items[u].row) is None
+            ]
+            if len(fits) > 1:
+                raise AdmissionRefused(
+                    f"{kind} body {ordinal} fits items {fits}: ambiguous interleaving of responses, not bound"
+                )
+            if not fits:
+                nearest = near[-1][1]
+                raise AdmissionRefused(
+                    f"{kind} body {ordinal} {_corroboration_error(kind, doc, items[nearest].row)}"
+                )
+            uid = fits[0]
             _put(
                 items,
-                current[0],
-                row,
+                uid,
+                items[uid].row,
                 kind,
                 body,
-                f"nearest preceding resource body {current[1]}, corroborated (ordinal {ordinal})",
+                f"the only resource body within {WINDOW} ordinals it corroborates ({kind} ordinal {ordinal})",
             )
     return items, list_body
 
@@ -413,12 +463,17 @@ def _merge_run(
 
 def bind_fetcher(
     files: dict[str, Body], items: dict[int, Item], rows: dict[int, dict[str, Any]]
-) -> None:
+) -> tuple[list[str], list[str]]:
+    """Bind the fetcher bodies this tool admits; return (admitted, ignored) file names.
+
+    A capture that supplies no admissible body is refused rather than reported as admitted."""
+    admitted: list[str] = []
     for name, body in sorted(files.items()):
         for kind, rx in _FETCHER_NAMES.items():
             match = rx.match(name)
             if match is None:
                 continue
+            admitted.append(name)
             uid = int(match.group(1))
             if uid not in rows:
                 raise AdmissionRefused(
@@ -447,6 +502,13 @@ def bind_fetcher(
                     f"fetcher body {name} differs from the recorder body of the same item"
                 )
             _put(items, uid, row, kind, body, f"file name carries the id ({name})")
+    if not admitted:
+        raise AdmissionRefused(
+            "the fetcher capture supplies no admissible body (expected names like "
+            "strategy_<id>_app_investment_perfdata_init.json); it holds: "
+            + ", ".join(sorted(files)[:8])
+        )
+    return admitted, sorted(set(files) - set(admitted))
 
 
 # ---------------------------------------------------------------- outputs
@@ -598,6 +660,13 @@ def _inventory(root: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _refuse_overlap(base: Path, out: Path) -> None:
+    """Neither root may sit inside the other: the base is read-only input."""
+    left, right = base.resolve(), out.resolve()
+    if left == right or left in right.parents or right in left.parents:
+        raise AdmissionRefused("the output root and the base root must not overlap")
+
+
 def check_output_root(out: Path, dry_run: bool) -> None:
     if not out.is_absolute():
         raise AdmissionRefused("the output root must be absolute")
@@ -638,6 +707,7 @@ def admit(
     check_output_root(out, dry_run)
     if base.is_symlink() or not base.is_dir():
         raise AdmissionRefused("the base HAR root is missing or linked")
+    _refuse_overlap(base, out)
     items: dict[int, Item] = {}
     recorder_summaries = []
     list_body: Body | None = None
@@ -647,6 +717,7 @@ def admit(
     superseded: list[dict[str, str]] = []
     for run in recorders:
         bodies, run_summary = load_recorder(run)
+        _refuse_unrecorded(run_summary, run, ADMIT_ROUTES)
         seen_accounts |= _stated_accounts(bodies)
         run_items, run_list = bind_recorder(bodies)
         if list_body is None:
@@ -668,9 +739,14 @@ def admit(
     fetcher_summaries = []
     for capture in fetchers:
         files, summary = load_fetcher(capture)
-        bind_fetcher(files, items, list_rows)
+        admitted_names, ignored_names = bind_fetcher(files, items, list_rows)
         fetcher_summaries.append(
-            {"path_name": capture.parent.name + "/" + capture.name, **summary}
+            {
+                "path_name": capture.parent.name + "/" + capture.name,
+                "admitted_files": admitted_names,
+                "ignored_files": ignored_names,
+                **summary,
+            }
         )
     outputs, summary = build_outputs(items, list_rows_raw, accounts, as_of)
     base_inventory = _inventory(base)
@@ -789,6 +865,7 @@ def stage_designer(
         raise AdmissionRefused("give exactly one of --recorder and --fetcher")
     check_output_root(out, dry_run)
     picked: dict[str, Body] = {}
+    perfs: dict[str, Body] = {}  # every curve body of the model, by sha256
     source: dict[str, Any]
     if fetcher is not None:
         files, source = load_fetcher(fetcher)
@@ -796,10 +873,14 @@ def stage_designer(
             for name, body in files.items():
                 match = rx.match(name)
                 if match and int(match.group(1)) == uid:
-                    picked[kind] = body
+                    if kind == "perf":
+                        perfs.setdefault(body.sha256, body)
+                    else:
+                        picked[kind] = body
     else:
         assert recorder is not None
         bodies, source = load_recorder(recorder)
+        _refuse_unrecorded(source, recorder, DESIGNER_ROUTES)
         current: int | None = None
         for ordinal, body in bodies:
             if body.template == MODEL:
@@ -814,13 +895,15 @@ def stage_designer(
                 and current is not None
                 and ordinal - current <= WINDOW
             ):
-                kind = "perf" if body.template == MODEL_PERF else "holdings"
-                if kind in picked and picked[kind].sha256 != body.sha256:
+                if body.template == MODEL_PERF:
+                    perfs.setdefault(body.sha256, body)
+                    continue
+                if "holdings" in picked and picked["holdings"].sha256 != body.sha256:
                     raise AdmissionRefused(
-                        f"two different {kind} bodies for designer {uid}"
+                        f"two different holdings bodies for designer {uid}"
                     )
-                picked[kind] = body
-    if "model" not in picked or "perf" not in picked:
+                picked["holdings"] = body
+    if "model" not in picked or not perfs:
         raise AdmissionRefused(
             f"designer {uid}: the model body or the curve is missing"
         )
@@ -829,7 +912,29 @@ def stage_designer(
         raise AdmissionRefused(
             f"designer model body names {model.get('portUid')}, not {uid}"
         )
-    curve = _designer_curve(model, _object(picked["perf"].json(), "designer perf"), uid)
+    # A model page also requests shorter chart windows (15 years, 20 years).  The curve is
+    # the one body that starts on the model's inception; windowed bodies are recorded, not
+    # staged, and two different full-history bodies refuse.
+    full: dict[str, tuple[Body, dict[str, str]]] = {}
+    windowed: list[str] = []
+    first_error: AdmissionRefused | None = None
+    for sha, body in perfs.items():
+        try:
+            full[sha] = (
+                body,
+                _designer_curve(model, _object(body.json(), "designer perf"), uid),
+            )
+        except AdmissionRefused as exc:
+            windowed.append(sha)
+            first_error = first_error or exc
+    if not full:
+        assert first_error is not None
+        raise first_error
+    if len(full) > 1:
+        raise AdmissionRefused(
+            f"designer {uid} has {len(full)} different full-history curve bodies"
+        )
+    picked["perf"], curve = next(iter(full.values()))
     names = {
         "model": f"r2g_{uid}_dm_true.json",
         "perf": f"r2g_{uid}_perf-full.json",
@@ -851,6 +956,7 @@ def stage_designer(
         "evidence_eligible": not dry_run,
         "designer_model_id": uid,
         "curve": curve,
+        "windowed_curve_bodies_not_staged": sorted(windowed),
         "source": source,
     }
     _write_new(

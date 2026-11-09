@@ -587,7 +587,7 @@ managed metadata, `..._holdings_<id>.csv` managed holdings, `strategy_<id>_perf.
 curve). The 2026-09-02 HAR workspace holds the account's investment list but no per-investment
 performance, resource or holdings, so a plan on it alone has no managed performance. The
 recorder saves raw bodies under id-less path templates (`raw/NNNNN.body`); the fetcher's
-`routes` command names its bodies with the id. `p123_har_admit.py` is the one offline tool that
+`routes` command (PR 868; the fetcher on main saves book exports and `designer_model_<id>.json`, which this tool does not admit) names its bodies with the id. `p123_har_admit.py` is the one offline tool that
 turns either into HAR CSVs. It never writes to its inputs.
 
 ```powershell
@@ -613,13 +613,15 @@ Id binding (recorder bodies), each step checked, a body that cannot be bound is 
    list of the first `--recorder` is the one saved, the others are recorded);
 2. an item's resource body is matched to exactly one list row on `name`, `inceptionDt` and
    `posCnt` (zero or several refuse; a `portfolioUid` in the body must agree);
-3. a `perf-data` or `holdings` body binds to the nearest resource body before it (within 40
-   ordinals), and the body corroborates it: perf `date` equals the item's `inceptionDt`, the
-   position count equals `posCnt`;
+3. a `perf-data` or `holdings` body binds to the one item, among those whose resource body is
+   within 40 ordinals before it, that it corroborates (perf `date` equals `inceptionDt`, the
+   position count equals `posCnt`); recorder ordinals follow response completion, so two items
+   that both fit are an ambiguous interleaving and refuse;
 4. a fetcher body carries the id in its name and must be byte-identical to the recorder body of
    the same item; two different bodies for one item refuse.
 
-Also refused: a performance series whose rows differ from the weekday calendar of
+Also refused: a fetcher capture with no admissible body, an output root that overlaps the base
+root, a performance series whose rows differ from the weekday calendar of
 `date..dateLast`, one that ends before `--as-of`, an `--account-id` no run states, and an
 admitted file that would replace a base data file (only the account's list csv is replaced).
 
@@ -629,6 +631,17 @@ admitted file that would replace a base data file (only the account's list csv i
 model's `inceptionDt`, ends on its `endDt` and has its launch line on `launchDt`: the chart's
 default 15-year window starts years after inception and is refused (`years=25` is the full
 history).
+
+A run may end `CAPTURE_WITH_UNRECORDED_BODIES` (for example an unreadable `/app/state` poll) and
+still be admitted, under one explicit rule: a 200 GET entry of a NEEDED route with no body file
+is a refusal. Needed routes are the account list, item resource, item perf-data, item holdings
+and account resource for `admit`, and the model, model perf and model holdings for
+`stage-designer`; any other unrecorded body is recorded in the manifest and ignored.
+
+`stage-designer` also meets several chart windows of one model (15 and 20 years beside the full
+history). It stages the one body that starts on `inceptionDt`, ends on `endDt` and has its
+launch line on `launchDt`, lists the windowed bodies (sha256) in the staged manifest and does not
+stage them, and refuses two different full-history bodies.
 
 `--dry-run` is the scratch mode: the output must sit under a `scratch` folder, the manifest says
 `evidence_eligible: false`, and every check and message is the same. A real run refuses a

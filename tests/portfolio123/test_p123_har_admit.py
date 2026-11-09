@@ -583,3 +583,158 @@ def test_a_later_sitting_supersedes_live_snapshots_and_a_longer_series(
     run3 = _recorder(tmp_path, "clash", visits=[(ROWS[0], clash, None)])
     with pytest.raises(admit.AdmissionRefused, match="disagree on their shared days"):
         _run(tmp_path, first, recorders=[first, run3], out=_out(tmp_path, "o2"))
+
+
+def test_the_output_root_may_not_overlap_the_base_root(tmp_path: Path) -> None:
+    run = _recorder(tmp_path)
+    base = _base(tmp_path)
+    with pytest.raises(admit.AdmissionRefused, match="must not overlap"):
+        _run(tmp_path, run, out=base / "scratch" / "inside")
+    assert not (base / "scratch").exists()
+
+
+def test_interleaved_responses_that_fit_two_items_are_not_bound(tmp_path: Path) -> None:
+    # Two items share an inception date; both resource bodies completed before the perf body,
+    # which fits both: the recorder cannot say which page it came from.
+    a = _row(9001, "Alpha", "2026-01-05", 2)
+    b = _row(9002, "Beta", "2026-01-05", 2)
+    run = _recorder(
+        tmp_path,
+        rows=[a, b],
+        visits=[(a, None, None), (b, _perf(), None)],
+    )
+    with pytest.raises(admit.AdmissionRefused, match="ambiguous interleaving"):
+        _run(tmp_path, run)
+    # distinguishable by the body itself: a later inception makes the perf unique
+    c = _row(9003, "Gamma", "2026-01-06", 2)
+    run2 = _recorder(
+        tmp_path, "r2", rows=[a, c], visits=[(c, None, None), (a, _perf(), None)]
+    )
+    manifest = _run(tmp_path, run2, out=_out(tmp_path, "o2"))
+    assert manifest["bodies"]["9001/perf"]["label"] == "4"
+
+
+def test_a_fetcher_capture_with_no_admissible_body_is_refused(tmp_path: Path) -> None:
+    capture = _fetcher(
+        tmp_path,
+        {"p123_investment_resource.json": {"x": 1}, "strategy_1_perf.csv": "a"},
+    )
+    with pytest.raises(admit.AdmissionRefused, match="supplies no admissible body"):
+        _run(tmp_path, _recorder(tmp_path), fetchers=[capture])
+    mixed = _fetcher(
+        tmp_path,
+        {
+            "strategy_9001_app_investment_perfdata_init.json": _perf(),
+            "p123_investment_resource.json": {"x": 1},
+        },
+        "mixed",
+    )
+    manifest = _run(
+        tmp_path, _recorder(tmp_path, "ok"), fetchers=[mixed], out=_out(tmp_path, "o2")
+    )
+    entry = manifest["sources"]["fetchers"][0]
+    assert entry["admitted_files"] == [
+        "strategy_9001_app_investment_perfdata_init.json"
+    ]
+    assert entry["ignored_files"] == ["p123_investment_resource.json"]
+
+
+def _drop_body(run: Path, ordinal: int) -> None:
+    """Make a recorded entry a 200 GET with no body: remove the file and its manifest line."""
+    (run / "raw" / f"{ordinal:05d}.body").unlink()
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"] = [
+        a for a in manifest["artifacts"] if a["path"] != f"raw/{ordinal:05d}.body"
+    ]
+    manifest["status"] = "CAPTURE_WITH_UNRECORDED_BODIES"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_unrecorded_bodies_are_tolerated_only_off_the_needed_routes(
+    tmp_path: Path,
+) -> None:
+    # an unreadable /app/state poll: the run still ends CAPTURE_WITH_UNRECORDED_BODIES
+    run = _recorder(tmp_path, extra=[("/app/state", {"x": 1})])
+    _drop_body(run, len(json.loads((run / "entries.json").read_text())) - 1)
+    manifest = _run(tmp_path, run)
+    assert manifest["sources"]["recorders"][0]["unrecorded_needed_routes"] == []
+    # a needed route without its body (the item's perf-data) is a refusal
+    run2 = _recorder(tmp_path, "r2")
+    perf_ordinal = next(
+        e["ordinal"]
+        for e in json.loads((run2 / "entries.json").read_text())
+        if e["path_template"] == "/app/investment/perf-data/{id}"
+    )
+    _drop_body(run2, perf_ordinal)
+    with pytest.raises(admit.AdmissionRefused, match="holds no body for it"):
+        _run(tmp_path, run2, out=_out(tmp_path, "o2"))
+
+
+def test_designer_staging_picks_the_full_history_among_windowed_bodies(
+    tmp_path: Path,
+) -> None:
+    model, full = _designer()
+    _, windowed = _designer(start="2026-01-06")
+    odd = deepcopy(windowed)
+    odd["perfData"]["data"] = odd["perfData"]["data"][:3]
+    run = _recorder(
+        tmp_path,
+        "multi",
+        visits=[],
+        extra=[
+            ("/spr/strategy/model/{id}", model),
+            ("/spr/strategy/model/{id}/perf", windowed),
+            ("/spr/strategy/model/{id}/perf", odd),
+            ("/spr/strategy/model/{id}/perf", full),
+            ("/spr/strategy/model/{id}/holdings", {"holdings": []}),
+        ],
+    )
+    out = _out(tmp_path, "d1")
+    manifest = admit.stage_designer(
+        out=out, uid=8001, recorder=run, fetcher=None, dry_run=True
+    )
+    assert manifest["curve"]["start"] == "2026-01-05"
+    assert len(manifest["windowed_curve_bodies_not_staged"]) == 2
+    staged = json.loads((out / "raw" / "r2g_8001_perf-full.json").read_text())
+    assert staged["perfData"]["date"] == "2026-01-05"
+    # two different full-history bodies would be a guess: refused
+    other = deepcopy(full)
+    other["perfData"]["data"][2][1] = 555.0
+    run2 = _recorder(
+        tmp_path,
+        "two",
+        visits=[],
+        extra=[
+            ("/spr/strategy/model/{id}", model),
+            ("/spr/strategy/model/{id}/perf", full),
+            ("/spr/strategy/model/{id}/perf", other),
+        ],
+    )
+    with pytest.raises(admit.AdmissionRefused, match="2 different full-history"):
+        admit.stage_designer(
+            out=_out(tmp_path, "d2"),
+            uid=8001,
+            recorder=run2,
+            fetcher=None,
+            dry_run=True,
+        )
+    # an unrecorded designer body refuses
+    run3 = _recorder(
+        tmp_path,
+        "three",
+        visits=[],
+        extra=[
+            ("/spr/strategy/model/{id}", model),
+            ("/spr/strategy/model/{id}/perf", full),
+        ],
+    )
+    _drop_body(run3, len(json.loads((run3 / "entries.json").read_text())) - 1)
+    with pytest.raises(admit.AdmissionRefused, match="holds no body for it"):
+        admit.stage_designer(
+            out=_out(tmp_path, "d3"),
+            uid=8001,
+            recorder=run3,
+            fetcher=None,
+            dry_run=True,
+        )
