@@ -293,6 +293,12 @@ and `tests/core/test_capture_action_guard.py`:
   control found refused on the page stops the plan (`DRIVE_ACTION_REFUSED`). The action
   log (stderr) is value-free: verb, role, first 8 hex characters of the label's SHA-256.
   Runs recorded by the earlier, listen-only recorder still verify.
+- Which tab is driven is never decided by event order. `--target-id <CDP target id>` names
+  the one tab; without it the plan runs only when exactly one P123 page is open, and with
+  several the run is refused (`DRIVE_TARGET_AMBIGUOUS`) and the candidate target ids (opaque
+  ids, no URLs or titles) are listed on stderr. A control is found by its exact name, the
+  first match in document order; the guard checks that control and the element that would
+  receive the click.
 - Origin-limited to `https://www.portfolio123.com` (exact host list `ALLOWED_HOSTS`,
   no port, no userinfo). Only page targets already on that origin are attached.
   Other-origin responses are counted, never listed.
