@@ -441,3 +441,57 @@ def test_a_non_object_har_body_is_a_controlled_refusal(
     root, catalog, manifest = _fixture(tmp_path, har_entries={HAR_NAME: [_entry(body)]})
     with pytest.raises(ERROR, match="response shape differs"):
         _coverage(root, catalog, manifest)
+
+
+_NULL_DRIFT = (
+    "failure_notice_claimed_at",
+    "failure_notified_at",
+    "first_failed_at",
+    "pending_sell_wait_alerted_at",
+)
+
+
+def _drifted_response(
+    value: object = None, name: str = _NULL_DRIFT[0]
+) -> dict[str, Any]:
+    """The captured response where the provider added a field the converter's schema lacks."""
+
+    response = _response()
+    for row in response["data"]:
+        row["item"][name] = value
+    return response
+
+
+def test_provider_added_null_fields_the_csv_drops_are_tolerated(tmp_path: Path) -> None:
+    drifted = _drifted_response()
+    for name in _NULL_DRIFT[1:]:
+        for row in drifted["data"]:
+            row["item"][name] = None
+    root, catalog, manifest = _fixture(
+        tmp_path,
+        har_entries={HAR_NAME: [_entry(drifted)]},
+        csv_response=_response(),
+    )
+    assert _coverage(root, catalog, manifest)[ACCOUNT]["record_count"] == 2
+
+
+def test_a_dropped_field_holding_a_value_is_still_refused(tmp_path: Path) -> None:
+    root, catalog, manifest = _fixture(
+        tmp_path,
+        har_entries={HAR_NAME: [_entry(_drifted_response("2026-10-26T00:00:00Z"))]},
+        csv_response=_response(),
+    )
+    with pytest.raises(ERROR, match="CSV differs from captured response"):
+        _coverage(root, catalog, manifest)
+
+
+def test_an_unknown_dropped_field_is_still_refused_even_when_null(
+    tmp_path: Path,
+) -> None:
+    root, catalog, manifest = _fixture(
+        tmp_path,
+        har_entries={HAR_NAME: [_entry(_drifted_response(None, "some_new_field"))]},
+        csv_response=_response(),
+    )
+    with pytest.raises(ERROR, match="CSV differs from captured response"):
+        _coverage(root, catalog, manifest)
