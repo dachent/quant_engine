@@ -13790,6 +13790,7 @@ def _check_implementation_layers(
         "causal_attribution_closure_not_computable_strategy_ids": sorted(
             closure_not_computable_strategy_ids
         ),
+        "causal_closure_computable": not closure_not_computable_strategy_ids,
         "policy_unavailable_strategy_ids": sorted(policy_unavailable_strategy_ids),
         "stale_attribution_strategy_ids": sorted(stale_attribution_strategy_ids),
         "stale_reconciliation_strategy_ids": sorted(stale_reconciliation_strategy_ids),
@@ -14614,6 +14615,9 @@ def verify_candidate(
                     implementation_findings[
                         "causal_attribution_closure_not_computable_strategy_ids"
                     ]
+                ),
+                "causal_closure_computable": (
+                    implementation_findings["causal_closure_computable"]
                 ),
                 "policy_unavailable_strategy_ids": (
                     implementation_findings["policy_unavailable_strategy_ids"]

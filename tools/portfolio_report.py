@@ -6764,8 +6764,24 @@ def require_unavailable_attribution_bridge(
     exact_cash = contributions.get(
         "CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED", 0.0
     ) + contributions.get("OPENING_OR_POSITION_RECONCILIATION", 0.0)
+    # The primary sleeve effect is the primary candidate's actual contribution minus its
+    # inferred target contribution; it is null exactly when the target is absent.
+    raw_roles = mix.get("role_contributions")
+    roles = _object(raw_roles, "model mix role contributions") if raw_roles else {}
+    raw_target = roles.get("PRIMARY_AI_FACTOR")
+    primary_effect = effects[_ATTRIBUTION_PRIMARY_CATEGORY]
+    if raw_target is None:
+        primary_consistent = primary_effect is None
+    else:
+        primary_consistent = primary_effect is not None and math.isclose(
+            primary_effect,
+            contributions.get("PRIMARY_ONLY", 0.0)
+            - _finite_number(raw_target, "primary target contribution") * 100.0,
+            abs_tol=1e-8,
+        )
     if (
-        not contributions
+        not primary_consistent
+        or not contributions
         or not math.isclose(sum(contributions.values()), account_pp, abs_tol=1e-8)
         or not math.isclose(
             effects[_ATTRIBUTION_UNEXPLAINED_CATEGORY] or 0.0,

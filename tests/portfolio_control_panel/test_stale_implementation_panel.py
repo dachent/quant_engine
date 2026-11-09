@@ -510,7 +510,7 @@ def _make_ai_attribution_unavailable(rows: list[dict[str, Any]]) -> dict[str, An
                 },
                 {
                     "category": "PRIMARY_AI_SLEEVE_IMPLEMENTATION",
-                    "effect_pp": 2.0,
+                    "effect_pp": 5.0,
                     "status": "PRIMARY_ONLY_CANDIDATE_ACTUAL_PNL_MINUS_INFERRED_PRIMARY_TARGET_PNL",
                 },
                 {
@@ -533,6 +533,7 @@ def _make_ai_attribution_unavailable(rows: list[dict[str, Any]]) -> dict[str, An
     )
     attribution["effective_account_model_mix"] = {
         "model_mix_return": None,
+        "role_contributions": {"PRIMARY_AI_FACTOR": -0.01},
         "status": _UNAVAILABLE_BRIDGE_STATUS,
     }
     attribution["actual_return_contribution_by_trade_provenance"] = {
@@ -558,6 +559,7 @@ def test_the_verifier_accepts_the_producers_unavailable_bridge() -> None:
     assert AI in findings["causal_attribution_strategy_ids"]
     # accepted as a valid declared shape, never counted as a verified closure
     assert findings["causal_attribution_closure_not_computable_strategy_ids"] == [AI]
+    assert findings["causal_closure_computable"] is False
 
 
 def test_a_closed_bridge_is_not_listed_as_closure_not_computable() -> None:
@@ -566,6 +568,7 @@ def test_a_closed_bridge_is_not_listed_as_closure_not_computable() -> None:
     findings = panel._check_implementation_layers(rows)
 
     assert findings["causal_attribution_closure_not_computable_strategy_ids"] == []
+    assert findings["causal_closure_computable"] is True
 
 
 def test_the_verifier_refuses_a_value_on_an_unavailable_effect() -> None:

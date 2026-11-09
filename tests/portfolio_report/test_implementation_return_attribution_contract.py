@@ -148,7 +148,7 @@ def _unavailable_ai_row(row: dict[str, Any]) -> dict[str, Any]:
             {"category": _BENCHMARK, "effect_pp": None, "status": _UNAVAILABLE},
             {
                 "category": _PRIMARY,
-                "effect_pp": 2.0,
+                "effect_pp": 5.0,
                 "status": "PRIMARY_ONLY_CANDIDATE_ACTUAL_PNL_MINUS_INFERRED_PRIMARY_TARGET_PNL",
             },
             {"category": _OTHER, "effect_pp": None, "status": _UNAVAILABLE},
@@ -172,6 +172,7 @@ def _unavailable_ai_row(row: dict[str, Any]) -> dict[str, Any]:
     }
     row["effective_account_model_mix"] = {
         "model_mix_return": None,
+        "role_contributions": {"PRIMARY_AI_FACTOR": -0.01},
         "status": _UNAVAILABLE,
         "unavailable_roles": ["TEMP_LONG_SHORT"],
     }
@@ -224,17 +225,17 @@ def test_the_producers_unavailable_bridge_is_accepted(tmp_path: Path) -> None:
     assert bridge["status"] == _UNAVAILABLE
     effects = {c["category"]: c["effect_pp"] for c in bridge["categories"]}
     assert effects[_BENCHMARK] is None and effects[_OTHER] is None
-    assert effects[_PRIMARY] == 2.0
+    assert effects[_PRIMARY] == 5.0
 
 
 def test_the_primary_effect_may_itself_be_unavailable(tmp_path: Path) -> None:
     path = tmp_path / "return-attribution.json"
-    _write(
-        path,
-        lambda row: _category(row, _PRIMARY).update(
-            {"effect_pp": None, "status": _UNAVAILABLE}
-        ),
-    )
+
+    def drop_target(row: dict[str, Any]) -> None:
+        _category(row, _PRIMARY).update({"effect_pp": None, "status": _UNAVAILABLE})
+        row["effective_account_model_mix"]["role_contributions"] = {}
+
+    _write(path, drop_target)
 
     _build(path)
 
@@ -463,3 +464,30 @@ def test_the_unavailable_bridge_is_a_partial_status_never_the_verified_closure()
         reporter._implementation_status("HISTORY", {"x": 1}, verified)
         == "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
     )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda row: _category(row, _PRIMARY).update({"effect_pp": 4.0}),
+        lambda row: _category(row, _PRIMARY).update(
+            {"effect_pp": None, "status": _UNAVAILABLE}
+        ),
+        lambda row: row["effective_account_model_mix"].update(
+            {"role_contributions": {}}
+        ),
+    ),
+    ids=(
+        "primary-effect-differs",
+        "primary-null-with-target",
+        "primary-finite-no-target",
+    ),
+)
+def test_the_primary_effect_must_equal_actual_minus_target(
+    tmp_path: Path, mutation: Callable[[dict[str, Any]], object]
+) -> None:
+    path = tmp_path / "return-attribution.json"
+    _write(path, mutation)
+
+    with pytest.raises(reporter.ReportValidationError, match="exact return links"):
+        _build(path)

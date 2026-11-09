@@ -300,6 +300,8 @@ the gap is not asserted: the producer publishes no number for the unavailable pa
 says so ("Closure not computable for the unavailable effects"). A value on an unavailable effect, an omitted effect key, a forged
 status, or the same state on another strategy stops the build. The strategy's implementation status is then `PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE`, never
 `VERIFIED_CAUSAL_RETURN_ATTRIBUTION`, and the panel verifier lists the strategy under
-`causal_attribution_closure_not_computable_strategy_ids` instead of counting it as a closed bridge. Exactly the producer's five
+`causal_attribution_closure_not_computable_strategy_ids` (and `causal_closure_computable` is false) instead of counting it as a
+closed bridge; the finite primary effect must equal the primary candidate's actual contribution minus its inferred target contribution, and be
+null exactly when that target is absent. Exactly the producer's five
 categories (each once, each with its producer status) and the producer's bridge fields are accepted; an added field or category is refused.
 The panel prints an unavailable effect as `unavailable`, never as 0 pp.
