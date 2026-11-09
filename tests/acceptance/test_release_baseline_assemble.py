@@ -22,6 +22,8 @@ CONTRACT_SHA = "c" * 64
 DECISION = b"R3 admission: derive_a and derive_b agree on every row"
 LEDGER = "dataPortfolio/provider-ledger/generations/g1/provider-ledger.json"
 LEDGER_SHA = "1" * 64
+DECLARED_SHA = "d" * 64
+DECLARED = "evidence/declared-cutoff.json"
 
 
 def _dump(value: object) -> bytes:
@@ -42,6 +44,11 @@ def _manifest(cutoff: str = CUTOFF) -> dict[str, Any]:
                 "family": tool.CONTRACT_FAMILY,
                 "path": tool.CONTRACT_PATH,
                 "sha256": CONTRACT_SHA,
+            },
+            {
+                "family": tool.DECLARED_CUTOFF_FAMILY,
+                "path": DECLARED,
+                "sha256": DECLARED_SHA,
             },
         ],
     }
@@ -81,8 +88,7 @@ def _derivation(
         "not_derivable": nd,
         "strategy_basis": None,
     }
-    if side == "a":
-        doc["inputs_manifest"] = {"sha256": manifest_sha}
+    doc["inputs_manifest"] = {"sha256": manifest_sha}
     return doc
 
 
@@ -157,6 +163,17 @@ def _refusal(files: dict[str, bytes], **over: Any) -> tool.AssemblyError:
     return caught.value
 
 
+def _rebound(files: dict[str, bytes], raw: bytes) -> dict[str, bytes]:
+    """``files`` with ``raw`` as the manifest, both derivations naming its digest."""
+
+    out = {**files, "manifest": raw}
+    for side in ("derive_a", "derive_b"):
+        doc = json.loads(files[side])
+        doc["inputs_manifest"] = {"sha256": hashlib.sha256(raw).hexdigest()}
+        out[side] = _dump(doc)
+    return out
+
+
 def _doc(files: dict[str, bytes] | None = None, **over: Any) -> dict[str, Any]:
     value: dict[str, Any] = json.loads(_run(files or _build(), **over))
     return value
@@ -187,7 +204,7 @@ def test_agreeing_rows_are_admitted_with_a_value_and_the_unit_tolerance() -> Non
             == HEAD
         )
         assert row["critical"] is True
-        assert row["authority_pointer"][-1] != {} and len(row["authority_pointer"]) == 2
+        assert row["authority_pointer"][-1] != {} and len(row["authority_pointer"]) == 3
 
 
 def test_header_fields_match_the_committed_schema_and_hashes() -> None:
@@ -280,6 +297,9 @@ def test_exact_units_compare_as_text_and_lists_as_sets() -> None:
     assert not tool.values_agree("7", "8", "count")
     assert not tool.values_agree("2026-11-06", "2026-11-05", "date")
     assert tool.values_agree(["a", "b"], ["b", "a"], "list")
+    assert tool.values_agree(["a", "a", "b"], ["a", "b", "a"], "list")
+    assert not tool.values_agree(["a", "a"], ["a"], "list")  # multiplicity counts
+    assert not tool.values_agree(["a", "a", "b"], ["a", "b", "b"], "list")
     assert not tool.values_agree(["a"], ["a", "b"], "list")
     assert tool.values_agree("1.00", "1.01", "USD") and not tool.values_agree(
         "1.00", "1.011", "USD"
@@ -352,12 +372,7 @@ def test_cutoff_mismatches_are_refused() -> None:
     assert _refusal(files, cutoff="2026-09-17").code == "CUTOFF_MISMATCH"
     manifest = _manifest("2026-09-17")
     raw = _dump(manifest)
-    a = json.loads(files["derive_a"])
-    a["inputs_manifest"]["sha256"] = hashlib.sha256(raw).hexdigest()
-    assert (
-        _refusal({**files, "manifest": raw, "derive_a": _dump(a)}).code
-        == "CUTOFF_MISMATCH"
-    )
+    assert _refusal(_rebound(files, raw)).code == "CUTOFF_MISMATCH"
     a = json.loads(files["derive_a"])
     a["cutoff"] = "2026-09-17"
     assert "derive a cutoff" in _refusal({**files, "derive_a": _dump(a)}).detail
@@ -366,6 +381,24 @@ def test_cutoff_mismatches_are_refused() -> None:
     assert "derive b cutoff" in _refusal({**files, "derive_b": _dump(b)}).detail
     b["cutoff"] = CUTOFF
     assert _doc({**files, "derive_b": _dump(b)})["cutoff"] == CUTOFF
+    del b["cutoff"]  # B must declare its cutoff, not merely not contradict it
+    assert _refusal({**files, "derive_b": _dump(b)}).code == "CUTOFF_MISMATCH"
+
+
+def test_b_must_record_the_manifest_it_read_and_the_manifest_the_cutoff_artifact() -> (
+    None
+):
+    files = _build()
+    b = json.loads(files["derive_b"])
+    del b["inputs_manifest"]
+    refusal = _refusal({**files, "derive_b": _dump(b)})
+    assert refusal.code == "MANIFEST_MISMATCH" and "derive b" in refusal.detail
+    manifest = _manifest()
+    manifest["inputs"] = [
+        e for e in manifest["inputs"] if e.get("family") != tool.DECLARED_CUTOFF_FAMILY
+    ]
+    raw = _dump(manifest)
+    assert _refusal(_rebound(files, raw)).code == "CUTOFF_ARTIFACT"
 
 
 def test_commit_and_manifest_identity_are_refused_on_mismatch() -> None:
@@ -417,12 +450,10 @@ def test_schema_side_basis_and_pin_mismatches_are_refused() -> None:
 
 def test_manifest_without_exactly_one_contract_is_refused() -> None:
     manifest = _manifest()
-    manifest["inputs"].pop()
+    manifest["inputs"].pop(1)  # the contract entry
     raw = _dump(manifest)
     files = _build()
-    a = json.loads(files["derive_a"])
-    a["inputs_manifest"]["sha256"] = hashlib.sha256(raw).hexdigest()
-    assert _refusal({**files, "manifest": raw, "derive_a": _dump(a)}).code == "CONTRACT"
+    assert _refusal(_rebound(files, raw)).code == "CONTRACT"
 
 
 def _real_world(
@@ -435,6 +466,7 @@ def _real_world(
         LEDGER: b"ledger bytes",
         tool.CONTRACT_PATH: b"contract bytes",
         "evidence/fx/rates.csv": b"rates bytes",
+        DECLARED: b"declared cutoff bytes",
     }
     for rel, data in contents.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -442,6 +474,7 @@ def _real_world(
     sha = {rel: hashlib.sha256(data).hexdigest() for rel, data in contents.items()}
     monkeypatch.setattr(sys.modules[__name__], "LEDGER_SHA", sha[LEDGER])
     monkeypatch.setattr(sys.modules[__name__], "CONTRACT_SHA", sha[tool.CONTRACT_PATH])
+    monkeypatch.setattr(sys.modules[__name__], "DECLARED_SHA", sha[DECLARED])
     files = _build()
     for side in ("derive_a", "derive_b"):
         doc = json.loads(files[side])
@@ -458,6 +491,7 @@ def _real_world(
                 },
                 {"path": tool.CONTRACT_PATH, "sha256": sha[tool.CONTRACT_PATH]},
                 {"path": LEDGER, "sha256": sha[LEDGER]},
+                {"path": DECLARED, "sha256": sha[DECLARED]},
             ]
         }
     )
@@ -478,6 +512,7 @@ def test_pointer_outside_the_data_root_needs_a_template_and_a_data_root(
         "evidence/fx/rates.csv",
         tool.CONTRACT_PATH,
         LEDGER,
+        DECLARED,
     ]
 
 
@@ -566,9 +601,7 @@ def test_only_the_supported_manifest_schemas_are_accepted() -> None:
         manifest = _manifest()
         manifest["schema"] = f"qe-cp-acceptance-inputs/{version}"
         raw = _dump(manifest)
-        a = json.loads(files["derive_a"])
-        a["inputs_manifest"]["sha256"] = hashlib.sha256(raw).hexdigest()
-        swapped = {**files, "manifest": raw, "derive_a": _dump(a)}
+        swapped = _rebound(files, raw)
         if accepted:
             assert _doc(swapped)
         else:
@@ -736,6 +769,15 @@ def test_reproduces_the_r22_release_baseline_byte_for_byte(tmp_path: Path) -> No
         "manifest": (_RESTATED / "acceptance-inputs-manifest.json").read_bytes(),
     }
     old = json.loads(target)
+    # The retained R2.2 derive_b predates the cutoff and manifest attribution the assembler now
+    # requires of B; the test records them as the run's own values, nothing else is touched.
+    legacy_b = json.loads(files["derive_b"])
+    assert "cutoff" not in legacy_b and "inputs_manifest" not in legacy_b
+    legacy_b["cutoff"] = old["cutoff"]
+    legacy_b["inputs_manifest"] = {
+        "sha256": hashlib.sha256(files["manifest"]).hexdigest()
+    }
+    files["derive_b"] = _dump(legacy_b)
     common: dict[str, Any] = {
         "head": R22_HEAD,
         "cutoff": old["cutoff"],
@@ -775,7 +817,12 @@ def test_reproduces_the_r22_release_baseline_byte_for_byte(tmp_path: Path) -> No
     contract.write_bytes(lf.replace(b"\n", b"\r\n"))
     roots = [_EVIDENCE.parent, contract_root]
     built = tool.assemble(**files, **common, template=template, data_roots=roots)
-    assert built == target
+    # Identical to the committed baseline except the one digest of the patched derive_b bytes.
+    expected = json.loads(target)
+    expected["derivations"]["b"]["raw_output_sha256"] = hashlib.sha256(
+        files["derive_b"]
+    ).hexdigest()
+    assert json.loads(built) == expected
     assert (
         tool.assemble(**files, **common, template=template, data_roots=roots) == built
     )
