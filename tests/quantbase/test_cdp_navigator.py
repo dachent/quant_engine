@@ -1233,3 +1233,17 @@ def test_dry_run_flag_labels_the_run_with_a_dry_id_and_changes_nothing_else(
     assert browser.navigated == [p["url"] for p in PAGES]
     _, plain, _, _ = cli(tmp_path)
     assert "dry_run" not in plain[0] and "dry_run" not in plain[-1]
+
+
+@pytest.mark.parametrize(
+    "name", ["Delete portfolio", "Save changes", "Cancel subscription", "Link broker"]
+)
+def test_the_guard_refuses_account_changing_clicks_in_the_allowlist(name: str) -> None:
+    with pytest.raises(NavigatorError, match="ALLOWLIST_ACTION_TRADING_REFUSED"):
+        parse_allowlist(allowlist_bytes(click_pages(name)))
+
+
+@pytest.mark.parametrize("name", ["Performance", "Holdings", "Transactions", "Export"])
+def test_tabs_and_exports_stay_allowed(name: str) -> None:
+    allowlist = parse_allowlist(allowlist_bytes(click_pages(name)))
+    assert allowlist.pages[0].actions[0].name == name

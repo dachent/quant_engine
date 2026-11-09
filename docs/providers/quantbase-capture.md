@@ -481,8 +481,8 @@ The one guard (`tools/capture_action_guard.py`, shared by the live capture tools
 lets the navigator:
 
 - click or open a control whose accessible name, text, `aria-label`, `value`, `title` or
-  `href` matches trade, transfer, withdraw, deposit, order, buy, sell, submit or confirm
-  payment (a token match after splitting camelCase and punctuation, so `Border` is not
+  `href` matches trade, transfer, withdraw, deposit, order, buy, sell, submit, confirm
+  payment, or an account-changing control (delete, remove, cancel, unsubscribe, close account, save or apply changes, change or reset password, update profile, email or settings, link, unlink, connect or disconnect broker) (a token match after splitting camelCase and punctuation, so `Border` is not
   `order`). An allow-list click name that matches is refused at parse time
   (`ALLOWLIST_ACTION_TRADING_REFUSED`); a control found on the page is refused with
   `ACTION_REFUSED`. The guard runs on the named control and again on the element that

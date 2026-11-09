@@ -283,8 +283,8 @@ and `tests/core/test_capture_action_guard.py`:
   events only.
 - The ONE guard (`tools/capture_action_guard.py`, shared by the live capture tools):
   never click or open a control whose accessible name, text, `aria-label`, `value`,
-  `title` or `href` matches trade, transfer, withdraw, deposit, order, buy, sell, submit
-  or confirm payment (token match after splitting camelCase and punctuation); never touch
+  `title` or `href` matches trade, transfer, withdraw, deposit, order, buy, sell, submit,
+  confirm payment, or an account-changing control (delete, remove, cancel, unsubscribe, close account, save or apply changes, change or reset password, update profile, email or settings, link, unlink, connect or disconnect broker) (token match after splitting camelCase and punctuation); never touch
   a submit control (a typeless `<button>` inside a form counts), an image submit or a
   password control; never follow a link off the origin; no typing message exists, so
   credentials and 2FA are never entered. A drive plan is a JSON list of
