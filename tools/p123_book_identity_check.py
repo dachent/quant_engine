@@ -569,8 +569,8 @@ def _start_gap_ok(
     must not precede the curve) and the two start amounts are identical."""
     if perf_day is None or cash_day is None or first_row is None:
         return False
-    if first_row < perf_day:
-        return False
+    if first_row < perf_day or first_row != cash_day:
+        return False  # the CASH row must itself be the earliest row of any type
     if perf_equity is None or cash_amount is None:
         return False
     return (
@@ -790,6 +790,8 @@ def check_capture(
                 smaller = min(len(keys[book]), len(other_keys))
                 shared = len(keys[book] & other_keys)
                 overlap = _overlap_status(shared, smaller, status)
+                if status == "FAIL" and overlap == "WARN":
+                    overlap = "FAIL"  # same pull: any share above the threshold fails
                 if other != book and overlap is not None:
                     by_book[book]["checks"].append(
                         _check(
