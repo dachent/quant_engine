@@ -593,15 +593,15 @@ ROUTES: tuple[Route, ...] = (
         "/app/investment/holdings.csv?id={id}&v=basic",
         "strategy_{id}_app_investment_holdings_basic.csv",
         "csv",
-        "Ticker,",
+        "Ticker,Name,Prev Close,1D (%),1D,Value,Weight,Shares,Return%,Avg Price,Return,#Days",
     ),
     Route(
         "investment_trans_csv",
         "/app/investment/details?id={id}",
         "/app/investment/trans.csv?id={id}&type=&tickers=&fromDt=&toDt=",
-        "strategy_{id}_investment_transactions.csv",
+        "strategy_{id}_app_investment_trans.csv",
         "csv",
-        "Date,Type,",
+        "Date,Type,Ticker,Name,Shares,Price,Commiss,Amount,Note",
     ),
     Route(
         "account_resource",
@@ -730,7 +730,7 @@ def validate_route_body(
             raise FetchStop("STOP_SHAPE_UNEXPECTED", "model id differs")
         return None
     if route.shape == "csv":
-        if html or not text.startswith(route.check):
+        if html or text.splitlines()[0] != route.check:
             raise FetchStop("STOP_SHAPE_UNEXPECTED", "unexpected CSV header")
         return count_rows(data)
     if route.shape == "html":

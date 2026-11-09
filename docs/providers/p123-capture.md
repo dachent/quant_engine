@@ -600,7 +600,7 @@ bytes and pin.
 | `investment_performance` | same | `/spr/strategy/portmodel/<id>/perf` | `raw/strategy_<id>_strategy_portmodel_perf.json` |
 | `investment_performance_page` | same | `/app/investment/performance` (HTML fragment) | `raw/strategy_<id>_app_investment_performance.html` |
 | `investment_holdings_csv` | same | `/app/investment/holdings.csv?id=<id>&v=basic` | `raw/strategy_<id>_app_investment_holdings_basic.csv` |
-| `investment_trans_csv` | same | `/app/investment/trans.csv?id=<id>&type=&tickers=&fromDt=&toDt=` | `raw/strategy_<id>_investment_transactions.csv` |
+| `investment_trans_csv` | same | `/app/investment/trans.csv?id=<id>&type=&tickers=&fromDt=&toDt=` | `raw/strategy_<id>_app_investment_trans.csv` |
 | `account_resource` | `/app/account/details?id=<id>` | `/app/account/resource/<id>` | `raw/account_<id>_app_account_resource.json` |
 | `account_positions` | same | `/app/account/positions/<id>` | `raw/account_<id>_app_account_positions.json` |
 | `account_pages` | the details page and each `&t=<tab>` | none (visit only) | nothing |

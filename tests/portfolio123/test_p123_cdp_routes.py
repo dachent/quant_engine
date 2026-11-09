@@ -224,7 +224,7 @@ def test_every_route_is_saved_unmodified_with_a_sha256_manifest(tmp_path: Path) 
     assert f"raw/r2g_{MODEL}_dm_true.json" in names
     assert f"raw/r2g_{MODEL}_perf-full.json" in names
     assert f"raw/strategy_{INVEST}_app_investment_perfdata_init.json" in names
-    assert f"raw/strategy_{INVEST}_investment_transactions.csv" in names
+    assert f"raw/strategy_{INVEST}_app_investment_trans.csv" in names
     on_disk = json.loads((root / "capture" / "capture-manifest.json").read_text())
     assert len(on_disk["artifacts"]) == len(manifest["routes"])
     written = (root / "p123-fetch-manifest.json").read_bytes()
@@ -358,6 +358,8 @@ def test_bad_status_or_content_type_fails_closed(
         ("designer_holdings", MODEL, b"", "application/json"),
         ("investment_perfdata", INVEST, b"{}", "application/json"),
         ("investment_holdings_csv", INVEST, b"Wrong,Header\n1,2\n", "text/csv"),
+        ("investment_trans_csv", INVEST, b"Date,Type,Unexpected\n1,2,3\n", "text/csv"),
+        ("investment_holdings_csv", INVEST, b"Ticker,Name\nA,B\n", "text/csv"),
         ("investment_trans_csv", INVEST, b"Date,Type,\n", "text/html"),
         ("investment_performance_page", INVEST, b"<p>nope</p>", "text/html"),
         (
@@ -667,3 +669,8 @@ def test_run_refuses_routes_mixed_with_books(tmp_path: Path) -> None:
         ]
     )
     assert code == fetcher.EXIT_REFUSED
+
+
+def test_transactions_csv_name_cannot_enter_the_transaction_capture_path() -> None:
+    saved = fetcher.ROUTE_BY_NAME["investment_trans_csv"].saved.format(id=7)
+    assert "transaction" not in saved.lower()
