@@ -321,11 +321,15 @@ def _corroboration_error(
     kind: str, doc: dict[str, Any], row: dict[str, Any]
 ) -> str | None:
     if kind == "perf":
-        if doc.get("date") != row.get("inceptionDt"):
+        if doc.get("date") in (None, "") or doc.get("date") != row.get("inceptionDt"):
             return f"starts {doc.get('date')}, not the inception {row.get('inceptionDt')} of the item it follows"
         return None
     positions = doc.get("positions")
-    if not isinstance(positions, list) or len(positions) != row.get("posCnt"):
+    if (
+        not isinstance(positions, list)
+        or row.get("posCnt") is None
+        or len(positions) != row.get("posCnt")
+    ):
         count = len(positions) if isinstance(positions, list) else "?"
         return f"has {count} positions, the item has {row.get('posCnt')}"
     return None
@@ -340,12 +344,15 @@ def bind_recorder(
     for ordinal, body in bodies:
         if body.template == ITEM_RESOURCE:
             doc = _object(body.json(), f"item resource body {ordinal}")
+            identity = (doc.get("name"), doc.get("inceptionDt"), doc.get("posCnt"))
+            if any(part in (None, "") for part in identity):
+                raise AdmissionRefused(
+                    f"resource body {ordinal} lacks its name, inception or position count"
+                )
             hits = [
                 r
                 for r in rows
-                if r.get("name") == doc.get("name")
-                and r.get("inceptionDt") == doc.get("inceptionDt")
-                and r.get("posCnt") == doc.get("posCnt")
+                if (r.get("name"), r.get("inceptionDt"), r.get("posCnt")) == identity
             ]
             if len(hits) != 1:
                 raise AdmissionRefused(
@@ -483,9 +490,18 @@ def bind_fetcher(
                 )
             row = rows[uid]
             doc = _object(body.json(), f"fetcher body {name}")
-            if kind == "perf" and doc.get("date") != row.get("inceptionDt"):
+            if kind == "perf" and (
+                doc.get("date") in (None, "")
+                or doc.get("date") != row.get("inceptionDt")
+            ):
                 raise AdmissionRefused(
                     f"fetcher body {name} starts {doc.get('date')}, not the inception {row.get('inceptionDt')}"
+                )
+            if kind == "resource" and (
+                doc.get("name") in (None, "") or doc.get("inceptionDt") in (None, "")
+            ):
+                raise AdmissionRefused(
+                    f"fetcher body {name} lacks its name or inception"
                 )
             if kind == "resource" and (doc.get("name"), doc.get("inceptionDt")) != (
                 row.get("name"),
@@ -535,6 +551,20 @@ def _check_perf(uid: int, doc: dict[str, Any], as_of: date) -> date:
         raise AdmissionRefused(
             f"item {uid} perf rows differ from the weekday calendar {start}..{last}"
         )
+    for number, row in enumerate(data):
+        if (
+            not isinstance(row, list)
+            or len(row) != 3
+            or isinstance(row[0], bool)
+            or not isinstance(row[0], int)
+            or any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) for v in row[1:]
+            )
+            or row[1] <= 0
+        ):
+            raise AdmissionRefused(
+                f"item {uid} perf row {number} is not [marker, positive level, total value]"
+            )
     graphs = [
         g
         for p in doc.get("panels") or []

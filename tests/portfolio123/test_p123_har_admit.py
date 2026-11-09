@@ -802,3 +802,61 @@ def test_designer_staging_failure_leaves_no_output(
     monkeypatch.setattr(admit, "_write_new", real)
     admit.stage_designer(out=out, uid=8001, recorder=run, fetcher=None, dry_run=True)
     assert (out / "capture-manifest.json").is_file()
+
+
+def test_an_absent_identity_field_never_matches_another_absent_one(
+    tmp_path: Path,
+) -> None:
+    # None == None must not bind: a list row and a body that both lack the identity fields
+    bare = {
+        "portfolioUid": 9005,
+        "assetUid": 1,
+        "assetType": "X",
+        "accountUid": ACCOUNT,
+    }
+    body_less = {"startingCapital": 0.0}
+    run = _recorder(tmp_path, rows=[bare])
+    resource = next(
+        p for p in (run / "raw").glob("*.body") if b"startingCapital" in p.read_bytes()
+    )
+    resource.write_text(json.dumps(body_less), encoding="utf-8")
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data = resource.read_bytes()
+    for item in manifest["artifacts"]:
+        if item["path"] == f"raw/{resource.name}":
+            item["sha256"], item["size_bytes"] = (
+                hashlib.sha256(data).hexdigest(),
+                len(data),
+            )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(
+        admit.AdmissionRefused, match="lacks its name, inception or position"
+    ):
+        _run(tmp_path, run)
+    # a perf body without a start date does not corroborate an item without an inception
+    dateless = _perf()
+    del dateless["date"]
+    row = _row(9006, "Delta", "2026-01-05", 0)
+    del row["inceptionDt"]
+    assert admit._corroboration_error("perf", dateless, row) is not None
+    assert (
+        admit._corroboration_error("holdings", {"positions": []}, {"portfolioUid": 1})
+        is not None
+    )
+
+
+def test_a_perf_row_that_is_not_marker_level_total_is_refused(tmp_path: Path) -> None:
+    for number, bad in enumerate(
+        ([1, None, 5.0], [1, 100.0], [1, 0, 5.0], [1, 100.0, "x"], [True, 100.0, 1.0])
+    ):
+        broken = _perf()
+        broken["data"][2] = bad
+        run = _recorder(
+            tmp_path / f"r{number}", visits=[(ROWS[0], broken, _holdings(2))]
+        )
+        with pytest.raises(
+            admit.AdmissionRefused,
+            match=r"is not \[marker, positive level, total value\]",
+        ):
+            _run(tmp_path / f"r{number}", run, out=_out(tmp_path / f"r{number}"))
