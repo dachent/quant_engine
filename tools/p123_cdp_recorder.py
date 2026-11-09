@@ -5,7 +5,8 @@ port. This tool LISTENS to the browser's Network events, and with ``--drive-plan
 can also drive the signed-in tab: navigate on https://www.portfolio123.com, click,
 scroll. The ONE guard (``tools/capture_action_guard.py``) refuses to click a control
 whose name, text, label, value, title or link matches trade, transfer, withdraw,
-deposit, order, buy, sell, submit or confirm payment, a submit or password control,
+deposit, order, buy, sell, submit, confirm payment or an account-changing word (delete,
+remove, cancel, save changes, change password, ...), a submit or password control,
 or a link that leaves the origin; there is no typing message at all. Every message it
 can send to the browser is on a closed allow-list (target discovery, attach, enable
 Network, read one finished response body, and the guarded driving messages) and

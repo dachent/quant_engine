@@ -7,7 +7,7 @@ by hand while the recorder records the traffic. This tool records nothing itself
 Allowed in the signed-in window for any non-trading read: navigate, click, scroll. The ONE
 guard is ``tools/capture_action_guard.py``: it refuses to click a control whose name, text,
 label, value, title or link matches the trading pattern (trade, transfer, withdraw, deposit,
-order, buy, sell, submit, confirm payment), a submit or password control, or a link that leaves
+order, buy, sell, submit, confirm payment, delete, remove, cancel, save changes, ...), a submit or password control, or a link that leaves
 the app origin; there is no typing message at all, so credentials and 2FA are never entered.
 Every action is logged value-free (verb, role, label hash).
 
