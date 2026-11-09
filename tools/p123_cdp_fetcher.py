@@ -606,6 +606,14 @@ ROUTES: tuple[Route, ...] = (
         "InvestmentPerformanceCtrl",
     ),
     Route(
+        "book_port_summary",
+        "/port_summary.jsp?portid={id}",
+        "/port_summary.jsp?portid={id}",
+        "book_{id}_port_summary.html",
+        "html",
+        "<title>Summary - ",
+    ),
+    Route(
         "investment_holdings_csv",
         "/app/investment/details?id={id}",
         "/app/investment/holdings.csv?id={id}&v=basic",
@@ -650,10 +658,19 @@ PROBE_EXPRESSION = (
 def fetch_expression(url: str) -> str:
     """The one pinned in-page GET: same origin, cookies, no redirect, bytes as base64."""
 
+    # The designer JSON endpoints answer HTTP 400 unless the request carries the page's own
+    # angular_req marker and a JSON accept header (a bare fetch is refused by the server).
+    headers = (
+        ",headers:{accept:'application/json, text/plain, */*',angular_req:'1'}"
+        if "/spr/strategy/model/" in url
+        else ""
+    )
     return (
         "(async()=>{const r=await fetch("
         + json.dumps(url)
-        + ",{method:'GET',credentials:'include',redirect:'error'});"
+        + ",{method:'GET',credentials:'include',redirect:'error'"
+        + headers
+        + "});"
         "const b=new Uint8Array(await r.arrayBuffer());let s='';"
         "for(let i=0;i<b.length;i+=8192){s+=String.fromCharCode.apply("
         "null,b.subarray(i,i+8192))}"
