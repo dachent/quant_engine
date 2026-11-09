@@ -6605,45 +6605,123 @@ def _validate_policy_unavailable_comparison(
 
 _IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS: Final = (1, 2)
 _ATTRIBUTION_UNAVAILABLE_STATUS: Final = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
-# The effects the producer cannot state without the effective-dated model mix.
-_ATTRIBUTION_MODEL_DEPENDENT_CATEGORIES: Final = frozenset(
+# The producer declares this state only on the Portfolio123 AI Factor path, whose shared
+# account follows connected models it may be unable to scale.
+_ATTRIBUTION_UNAVAILABLE_STRATEGY: Final = "p123-ai-factor"
+# The effects the producer cannot state without the effective-dated model mix.  The primary
+# sleeve effect is stated whenever the primary model has a scale, so it is finite or null.
+_ATTRIBUTION_NULL_CATEGORIES: Final = frozenset(
     {
         "PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX",
-        "PRIMARY_AI_SLEEVE_IMPLEMENTATION",
         "OTHER_CONNECTED_SLEEVES_IMPLEMENTATION",
     }
 )
+_ATTRIBUTION_PRIMARY_CATEGORY: Final = "PRIMARY_AI_SLEEVE_IMPLEMENTATION"
+_ATTRIBUTION_UNEXPLAINED_CATEGORY: Final = "UNEXPLAINED_ACTUAL_ACTIVITY"
+_ATTRIBUTION_CASH_CATEGORY: Final = "CASH_FINANCING_FEES_AND_POSITION_RECONCILIATION"
+_ATTRIBUTION_CATEGORIES: Final = _ATTRIBUTION_NULL_CATEGORIES | {
+    _ATTRIBUTION_PRIMARY_CATEGORY,
+    _ATTRIBUTION_UNEXPLAINED_CATEGORY,
+    _ATTRIBUTION_CASH_CATEGORY,
+}
 
 
-def _require_unavailable_attribution_categories(
-    categories: Sequence[Mapping[str, Any]], strategy_id: str
+def require_unavailable_attribution_bridge(
+    strategy_id: str,
+    row: Mapping[str, Any],
+    bridge: Mapping[str, Any],
+    categories: Sequence[Mapping[str, Any]],
 ) -> None:
-    """An unavailable bridge states exactly the model-dependent effects as null.
+    """The producer's declared unavailable bridge, and nothing looser.
 
-    Every other category is an exact return link and stays a finite number; a value on an
-    unavailable effect, or a null on an exact one, is refused rather than read as zero.
+    The effective account model mix is unavailable, so the benchmark-definition and
+    other-connected-sleeves effects are explicit nulls (the key is present, never omitted,
+    and never zero), the primary sleeve effect is finite or null, and the two exact return
+    links are finite numbers equal to the trade-provenance contributions they are made of.
+    The producer states no number for the unavailable part, so no closure of the categories
+    to the gap is asserted and no residual is inferred.
     """
 
-    names = [category.get("category") for category in categories]
-    if len(set(names)) != len(
-        names
-    ) or not _ATTRIBUTION_MODEL_DEPENDENT_CATEGORIES <= set(names):
+    if strategy_id != _ATTRIBUTION_UNAVAILABLE_STRATEGY:
         raise ReportValidationError(
-            "implementation return attribution unavailable bridge lacks the "
-            f"model-dependent categories {strategy_id}"
+            "implementation return attribution unavailable bridge is not declared "
+            f"for {strategy_id}"
         )
+    names = [category.get("category") for category in categories]
+    if len(set(names)) != len(names) or set(names) != _ATTRIBUTION_CATEGORIES:
+        raise ReportValidationError(
+            "implementation return attribution unavailable bridge categories differ "
+            f"{strategy_id}"
+        )
+    effects: dict[str, float | None] = {}
     for category in categories:
-        if category.get("category") in _ATTRIBUTION_MODEL_DEPENDENT_CATEGORIES:
-            if category.get("effect_pp") is not None:
+        name = str(category.get("category"))
+        if "effect_pp" not in category:
+            raise ReportValidationError(
+                "implementation return attribution unavailable bridge omits an "
+                f"effect {strategy_id}"
+            )
+        value = category["effect_pp"]
+        if name in _ATTRIBUTION_NULL_CATEGORIES:
+            if value is not None:
                 raise ReportValidationError(
                     "implementation return attribution unavailable effect carries "
                     f"a value {strategy_id}"
                 )
+            effects[name] = None
+        elif name == _ATTRIBUTION_PRIMARY_CATEGORY and value is None:
+            effects[name] = None
         else:
-            _finite_number(
-                category.get("effect_pp"),
-                f"implementation return attribution effect {strategy_id}",
+            effects[name] = _finite_number(
+                value, f"implementation return attribution effect {strategy_id}"
             )
+    mix = _object(
+        row.get("effective_account_model_mix"),
+        f"implementation return attribution model mix {strategy_id}",
+    )
+    if (
+        mix.get("status") != _ATTRIBUTION_UNAVAILABLE_STATUS
+        or mix.get("model_mix_return") is not None
+        or bridge.get("effective_account_model_mix_return") is not None
+        or bridge.get("effective_account_model_mix_gap_pp") is not None
+    ):
+        raise ReportValidationError(
+            "implementation return attribution unavailable bridge lacks an "
+            f"unavailable model mix {strategy_id}"
+        )
+    actual = _object(
+        row.get("actual_return_contribution_by_trade_provenance"),
+        f"implementation return attribution actual contributions {strategy_id}",
+    )
+    contributions = {
+        str(key): _finite_number(value, "actual return contribution")
+        for key, value in _object(
+            actual.get("contributions_pp"), "actual return contributions"
+        ).items()
+    }
+    account_pp = (
+        _finite_number(bridge.get("account_return"), "actual account return") * 100.0
+    )
+    exact_unexplained = contributions.get("UNEXPLAINED_ACTUAL_ACTIVITY", 0.0)
+    exact_cash = contributions.get(
+        "CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED", 0.0
+    ) + contributions.get("OPENING_OR_POSITION_RECONCILIATION", 0.0)
+    if (
+        not contributions
+        or not math.isclose(sum(contributions.values()), account_pp, abs_tol=1e-8)
+        or not math.isclose(
+            effects[_ATTRIBUTION_UNEXPLAINED_CATEGORY] or 0.0,
+            exact_unexplained,
+            abs_tol=1e-8,
+        )
+        or not math.isclose(
+            effects[_ATTRIBUTION_CASH_CATEGORY] or 0.0, exact_cash, abs_tol=1e-8
+        )
+    ):
+        raise ReportValidationError(
+            "implementation return attribution unavailable bridge does not match "
+            f"its exact return links {strategy_id}"
+        )
 
 
 _ACCOUNT_LEG_BASIS: Final = "BASELINE_ACCOUNT_LIVE"
@@ -7210,9 +7288,9 @@ def _implementation_return_attribution_contract(
         category_total: float | None
         if bridge.get("status") == _ATTRIBUTION_UNAVAILABLE_STATUS:
             # The producer's own declared state: a connected model without an effective-dated
-            # scale makes the model mix, and the three effects that depend on it, unavailable.
+            # scale makes the model mix, and the effects that depend on it, unavailable.
             # They are published as null, never as zero, so there is no total to close to.
-            _require_unavailable_attribution_categories(categories, strategy_id)
+            require_unavailable_attribution_bridge(strategy_id, row, bridge, categories)
             category_total = None
         else:
             category_total = sum(

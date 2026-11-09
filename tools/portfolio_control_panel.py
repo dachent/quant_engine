@@ -13754,13 +13754,13 @@ def _check_implementation_layers(
         )
         category_total: float | None
         if bridge.get("status") == "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT":
-            # the producer's declared unavailable state: the model-dependent effects are null
-            # (never zero), so there is no total to close to; the report validated the shape
+            # the producer's declared unavailable state: the unavailable effects are null (never
+            # zero), so there is no total to close to; the same checks the report applies
             import portfolio_report as reporter
 
             try:
-                reporter._require_unavailable_attribution_categories(
-                    categories, strategy_id
+                reporter.require_unavailable_attribution_bridge(
+                    strategy_id, attribution, bridge, categories
                 )
             except reporter.ReportValidationError as exc:
                 raise ControlPanelValidationError(str(exc)) from exc
