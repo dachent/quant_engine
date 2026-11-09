@@ -121,6 +121,16 @@ so one call returns every account; `balances.historical` is a `GET` with an empt
 `query`, scoped per account by `Schwab-Client-Ids`; `transactions.history` is the
 reviewed POST. `body` is `null` for the two requests the driver builds itself.
 
+### What the receipt counts
+
+The receipt's `governed_requests` counts only the requests the driver sends through
+`LiveReadGovernance.reserve`. In the primary mode the holdings page is reloaded so the
+Schwab SPA sends its own Holdings-V2 request; that reload runs the SPA, whose other
+read-only page requests are not metered and are not in the count. The one request the
+driver reads from the page is still checked against the approved body before it is used.
+This was accepted by the owner and control as a documented boundary, with no driver
+change. For scale: R3 run `r3-schwab-1108-e` made 32 governed requests (maximum 60).
+
 ## Late pull: the capture is rolled back to the cutoff close
 
 A capture is the account at capture time T. Any capture taken after the cutoff close D
