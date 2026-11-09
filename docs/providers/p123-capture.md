@@ -407,6 +407,20 @@ python -m tools.p123_cdp_fetcher drive --cdp-url http://127.0.0.1:9333 --allowli
   --allowlist-sha256 <printed hash> --download-dir <new dir> --file-id <id>
 ```
 
+**First-class page GETs.** `make-allowlist --page-get KIND:ID` (repeatable) adds in-page GET
+routes that answer 400 to a direct navigation and only work as the signed-in page's own
+`fetch`: `designer_perf_full` (`/spr/strategy/model/<id>/perf?dm=true&init=true&years=15`),
+`investment_resource`, `investment_holdings`, `investment_performance`,
+`investment_perfdata` (`/app/investment/perf-data/<id>?init=`), `account_resource`,
+`account_positions`. The URL is built from a reviewed table and compared for equality; each
+is fetched by one `Runtime.evaluate` of a fixed `fetch(...)` template, the only expression
+the guard passes. A non-200 or non-JSON reply is recorded in the manifest (`page_gets`) and
+saved nowhere; 401/403 stops with `STOP_REAUTH`. Files land unmodified at
+`capture/raw/<kind>_<id>.json`. A run with only page GETs needs no `--as-of`. The designer
+"View Holdings" route is not in any preserved capture and is not a kind yet: add its row to
+`PAGE_GETS` after one attended sitting names it. `run --dry-run` screens the whole
+allowlist and prints the plan without connecting to a browser or writing anything.
+
 `run` refuses (`REFERENCE_REQUIRED`) without `--reference-index` (the `source-index.json` of
 the 2026-07-31 run) unless `--no-reference` is given; the choice and the index sha256 are
 recorded in the manifest. `--as-of D` (required, `REFUSED AS_OF_REQUIRED` without it) is the

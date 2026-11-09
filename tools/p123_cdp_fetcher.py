@@ -20,6 +20,13 @@ Stops (exit 3) rather than continuing: the tab leaves https://www.portfolio123.c
 lands on a login page, no download starts, a download is not exactly the expected file,
 or the per-book identity check (``tools/p123_book_identity_check.py``) fails.
 
+First-class page GETs (``page_gets`` in the allowlist): fixed read-only JSON routes that
+answer 400 to a direct navigation and only work as the page's own ``fetch`` (designer model
+performance and the investment and account resources). Each is fetched by ONE
+``Runtime.evaluate`` whose expression is the exact template below with one allowlisted URL
+spliced in; the guard refuses any other expression. ``run --dry-run`` screens the whole
+allowlist and prints the plan without connecting to a browser.
+
 A second mode downloads one Google Drive file by direct-download URL under an exact
 host allowlist, into a new directory, with a sha256 manifest.
 """
@@ -71,6 +78,7 @@ ALLOWED_CDP_METHODS = frozenset(
         "Browser.setDownloadBehavior",
         "Network.enable",
         "Network.getResponseBody",
+        "Runtime.evaluate",
     }
 )
 #: Allowed only in a run that fetches designer models, and ``getResponseBody`` only for
@@ -138,6 +146,65 @@ KIND_BY_NAME = {item.name: item for item in KINDS}
 _DESIGNER_PATH = re.compile(r"/spr/strategy/model/[1-9][0-9]*")
 
 
+@dataclass(frozen=True)
+class PageGet:
+    """One reviewed read-only JSON route fetched by the signed-in page itself."""
+
+    name: str
+    path: str  # ``{id}`` is the allowlisted integer
+    query: str
+    saved: str  # relative to the capture directory
+
+
+#: Routes confirmed by preserved captures or by the owner's attended sitting. Every URL is
+#: built from this table and compared for equality, so no other route can be requested.
+PAGE_GETS: tuple[PageGet, ...] = (
+    PageGet(
+        "designer_perf_full",
+        "/spr/strategy/model/{id}/perf",
+        "dm=true&init=true&years=15",
+        "raw/designer_perf_full_{id}.json",
+    ),
+    PageGet(
+        "investment_resource",
+        "/app/investment/resource/{id}",
+        "",
+        "raw/investment_resource_{id}.json",
+    ),
+    PageGet(
+        "investment_holdings",
+        "/app/investment/holdings/{id}",
+        "",
+        "raw/investment_holdings_{id}.json",
+    ),
+    PageGet(
+        "investment_performance",
+        "/spr/strategy/portmodel/{id}/perf",
+        "",
+        "raw/investment_performance_{id}.json",
+    ),
+    PageGet(
+        "investment_perfdata",
+        "/app/investment/perf-data/{id}",
+        "init=",
+        "raw/investment_perfdata_{id}.json",
+    ),
+    PageGet(
+        "account_resource",
+        "/app/account/resource/{id}",
+        "",
+        "raw/account_resource_{id}.json",
+    ),
+    PageGet(
+        "account_positions",
+        "/app/account/positions/{id}",
+        "",
+        "raw/account_positions_{id}.json",
+    ),
+)
+PAGE_GET_BY_NAME = {item.name: item for item in PAGE_GETS}
+
+
 class FetchRefused(ValueError):
     """Refused before anything was sent to the browser (exit 2)."""
 
@@ -172,6 +239,7 @@ class Allowlist:
     drive_files: tuple[str, ...]
     page_record: bool
     sha256: str
+    page_gets: tuple[tuple[str, int], ...] = ()
 
 
 def canonical_bytes(value: object) -> bytes:
@@ -206,7 +274,7 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
         "drive_files",
         "page_record",
     }
-    if not isinstance(data, dict) or set(data) != keys:
+    if not isinstance(data, dict) or set(data) not in (keys, keys | {"page_gets"}):
         raise FetchRefused("ALLOWLIST_INVALID", "keys")
     if data["schema_version"] != ALLOWLIST_SCHEMA_VERSION:
         raise FetchRefused("ALLOWLIST_SCHEMA_UNSUPPORTED")
@@ -248,8 +316,24 @@ def parse_allowlist(payload: bytes, expected_sha256: str) -> Allowlist:
         raise FetchRefused("ALLOWLIST_INVALID", "duplicate drive id")
     if not isinstance(data["page_record"], bool):
         raise FetchRefused("ALLOWLIST_INVALID", "page_record")
+    gets: list[tuple[str, int]] = []
+    for item in data.get("page_gets", []):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"kind", "id"}
+            or item["kind"] not in PAGE_GET_BY_NAME
+        ):
+            raise FetchRefused("ALLOWLIST_INVALID", "page_gets entry")
+        gets.append((str(item["kind"]), _positive(item["id"], "page get id")))
+    if len(set(gets)) != len(gets):
+        raise FetchRefused("ALLOWLIST_INVALID", "duplicate page get")
     return Allowlist(
-        tuple(books), tuple(models), tuple(drive), data["page_record"], digest
+        tuple(books),
+        tuple(models),
+        tuple(drive),
+        data["page_record"],
+        digest,
+        tuple(gets),
     )
 
 
@@ -267,18 +351,20 @@ def build_allowlist_bytes(
     drive_ids: Sequence[str] = (),
     kinds: Sequence[str] | None = None,
     page_record: bool = False,
+    page_gets: Sequence[tuple[str, int]] = (),
 ) -> bytes:
     chosen = list(kinds) if kinds else [k.name for k in KINDS]
-    return canonical_bytes(
-        {
-            "schema_version": ALLOWLIST_SCHEMA_VERSION,
-            "origin": ORIGIN,
-            "books": [{"id": b, "kinds": chosen} for b in book_ids],
-            "designer_models": list(designer_ids),
-            "drive_files": list(drive_ids),
-            "page_record": page_record,
-        }
-    )
+    document: dict[str, Any] = {
+        "schema_version": ALLOWLIST_SCHEMA_VERSION,
+        "origin": ORIGIN,
+        "books": [{"id": b, "kinds": chosen} for b in book_ids],
+        "designer_models": list(designer_ids),
+        "drive_files": list(drive_ids),
+        "page_record": page_record,
+    }
+    if page_gets:  # absent when empty: older allowlists keep their bytes and pins
+        document["page_gets"] = [{"kind": k, "id": i} for k, i in page_gets]
+    return canonical_bytes(document)
 
 
 def book_url(kind: Kind, book_id: int) -> str:
@@ -287,6 +373,43 @@ def book_url(kind: Kind, book_id: int) -> str:
 
 def designer_url(model_id: int) -> str:
     return f"{ORIGIN}/spr/strategy/model/{model_id}?dm=true"
+
+
+def page_get_url(kind: str, ident: int) -> str:
+    item = PAGE_GET_BY_NAME[kind]
+    query = f"?{item.query}" if item.query else ""
+    return f"{ORIGIN}{item.path.format(id=ident)}{query}"
+
+
+def screen_page_get_url(url: str, kind: str, ident: int) -> None:
+    """Raise FetchRefused unless ``url`` is exactly the reviewed route of ``kind``/``ident``."""
+
+    if not url.startswith("https://") or not _origin_ok(url, frozenset({P123_HOST})):
+        raise FetchRefused("URL_OFF_ORIGIN")
+    parts = urlsplit(url)
+    text = (unquote_plus(parts.path) + "?" + unquote_plus(parts.query)).lower()
+    if _MUTATION_RE.search(text):
+        raise FetchRefused("URL_MUTATION_WORD")
+    if (
+        kind not in PAGE_GET_BY_NAME
+        or url != page_get_url(kind, ident)
+        or parts.fragment
+    ):
+        raise FetchRefused("URL_NOT_ALLOWLISTED")
+
+
+#: The one expression the guard lets through ``Runtime.evaluate``: the page's own GET with
+#: its signed-in cookies. The URL is spliced in as a JSON string literal.
+_PAGE_GET_TEMPLATE = (
+    "fetch({url}, {{method: 'GET', credentials: 'include', "
+    "headers: {{'Accept': 'application/json'}}}})"
+    ".then(r => r.text().then(t => ({{status: r.status, "
+    "type: r.headers.get('content-type') || '', text: t}})))"
+)
+
+
+def page_get_expression(url: str) -> str:
+    return _PAGE_GET_TEMPLATE.format(url=json.dumps(url))
 
 
 def page_record_url(stamp_ms: int) -> str:
@@ -477,8 +600,10 @@ class GuardedTransport:
         allowed_urls: frozenset[str],
         download_path: str,
         network_read: bool = False,
+        page_get_expressions: frozenset[str] = frozenset(),
     ) -> None:
         self._inner = inner
+        self._expressions = page_get_expressions
         self._urls = allowed_urls
         self._download_path = download_path
         self._network_read = network_read
@@ -489,7 +614,15 @@ class GuardedTransport:
         params = message.get("params") or {}
         if method not in ALLOWED_CDP_METHODS:
             raise FetchRefused("CDP_METHOD_REFUSED", str(method))
-        if method in NETWORK_CDP_METHODS:
+        if method == "Runtime.evaluate":
+            if (
+                set(params) != {"expression", "awaitPromise", "returnByValue"}
+                or params["awaitPromise"] is not True
+                or params["returnByValue"] is not True
+                or params["expression"] not in self._expressions
+            ):
+                raise FetchRefused("CDP_EVALUATE_NOT_ALLOWLISTED")
+        elif method in NETWORK_CDP_METHODS:
             if not self._network_read:
                 raise FetchRefused("CDP_METHOD_REFUSED", str(method))
             if method == "Network.enable" and params:
@@ -574,12 +707,14 @@ class Session:
         download_timeout: float = 180.0,
         attach_wait: float = 5.0,
         network_read: bool = False,
+        page_get_expressions: frozenset[str] = frozenset(),
     ) -> None:
         self._transport = GuardedTransport(
             transport,
             allowed_urls=allowed_urls,
             download_path=str(incoming),
             network_read=network_read,
+            page_get_expressions=page_get_expressions,
         )
         self._incoming = incoming
         self._tab_ok = tab_ok
@@ -774,6 +909,33 @@ class Session:
     # -- one allowlisted JSON page (designer model) ------------------------
     def enable_network(self) -> None:
         self._call("Network.enable", {}, self._sid)
+
+    def page_get(self, url: str) -> tuple[int, str, bytes]:
+        """The page's own GET of one allowlisted URL: (status, content type, body bytes)."""
+
+        self._check_tab()
+        result = self._call(
+            "Runtime.evaluate",
+            {
+                "expression": page_get_expression(url),
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
+            self._sid,
+        )
+        value = result.get("result", {}).get("value")
+        if (
+            not isinstance(value, dict)
+            or not isinstance(value.get("status"), int)
+            or not isinstance(value.get("text"), str)
+            or result.get("exceptionDetails")
+        ):
+            raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "page fetch failed")
+        return (
+            int(value["status"]),
+            str(value.get("type", "")).lower(),
+            value["text"].encode("utf-8"),
+        )
 
     def read_json(self, url: str, saved: Path, shape: type = dict) -> tuple[str, int]:
         """Navigate to the exact ``url`` and save its response body unmodified.
@@ -1039,8 +1201,16 @@ def run_p123(
     fetch_designers = bool(allowlist.designer_models) and not skip_designer_models
     fetch_page = allowlist.page_record
     network_read = fetch_designers or fetch_page
-    if not allowlist.books and not fetch_designers and not fetch_page:
+    if (
+        not allowlist.books
+        and not fetch_designers
+        and not fetch_page
+        and not allowlist.page_gets
+    ):
         raise FetchRefused("ALLOWLIST_EMPTY")
+    get_urls = {page_get_url(k, i): (k, i) for k, i in allowlist.page_gets}
+    for get_url, (get_kind, get_id) in get_urls.items():
+        screen_page_get_url(get_url, get_kind, get_id)
     urls = allowed_p123_urls(allowlist)
     for url in urls:  # screen the whole allowlist before anything is sent
         screen_p123_url(url, urls)
@@ -1060,6 +1230,7 @@ def run_p123(
         transport,
         allowed_urls=frozenset(navigable),
         network_read=network_read,
+        page_get_expressions=frozenset(page_get_expression(u) for u in get_urls),
         incoming=incoming,
         tab_ok=p123_tab_ok,
         tab_known=recorder.origin_allowed,
@@ -1070,6 +1241,7 @@ def run_p123(
     landed: list[Landed] = []
     books: dict[str, dict[str, Any]] = {}
     designers: dict[str, dict[str, Any]] = {}
+    gets: dict[str, dict[str, Any]] = {}
     page_info: dict[str, Any] | None = None
     stop: FetchStop | None = None
     report: Mapping[str, Any] = {}
@@ -1169,6 +1341,46 @@ def run_p123(
                     "stage_file_capability": "designer-model.json",
                 }
                 _replace(capture / "capture-manifest.json", _capture_manifest(landed))
+        for pg_url, (pg_kind, pg_id) in get_urls.items():
+            screen_page_get_url(pg_url, pg_kind, pg_id)
+            pg_status, mime, data = session.page_get(pg_url)
+            pg_entry: dict[str, Any] = {
+                "kind": pg_kind,
+                "id": pg_id,
+                "status": pg_status,
+            }
+            gets[f"{pg_kind}:{pg_id}"] = pg_entry
+            if pg_status in {401, 403}:
+                raise FetchStop("STOP_REAUTH", f"HTTP {pg_status}")
+            if pg_status != 200 or "json" not in mime:
+                pg_entry["saved"] = (
+                    False  # recorded, never fatal: a wrong id is a finding
+                )
+                continue
+            try:
+                json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                pg_entry["saved"] = False
+                continue
+            pg_rel = PAGE_GET_BY_NAME[pg_kind].saved.format(id=pg_id)
+            pg_digest = _write_new(capture / pg_rel, data)
+            pg_entry.update(
+                saved=True,
+                relative_path=pg_rel,
+                sha256=pg_digest,
+                size_bytes=len(data),
+            )
+            landed.append(
+                Landed(
+                    "page_get_json",
+                    f"{pg_kind}:{pg_id}",
+                    pg_rel,
+                    pg_digest,
+                    len(data),
+                    None,
+                )
+            )
+            _replace(capture / "capture-manifest.json", _capture_manifest(landed))
     except FetchStop as exc:
         stop = exc
     except FetchRefused as exc:
@@ -1228,6 +1440,10 @@ def run_p123(
         },
         "final_identity_error": final_error,
         "designer_models": designers,
+        "page_gets": gets,
+        "page_gets_not_fetched": [
+            f"{k}:{i}" for k, i in allowlist.page_gets if f"{k}:{i}" not in gets
+        ],
         "designer_models_not_fetched": [
             str(m) for m in allowlist.designer_models if str(m) not in designers
         ],
@@ -1329,6 +1545,28 @@ def run_drive(
 # CLI
 
 
+def dry_run_plan(allowlist: Allowlist) -> dict[str, Any]:
+    """Screen every URL of the allowlist exactly as a run would; send nothing."""
+
+    exports = allowed_p123_urls(allowlist)
+    for url in exports:
+        screen_p123_url(url, exports)
+    designers = {designer_url(m): m for m in allowlist.designer_models}
+    for url in designers:
+        screen_designer_url(url, designers)
+    gets = {page_get_url(k, i): (k, i) for k, i in allowlist.page_gets}
+    for url, (kind, ident) in gets.items():
+        screen_page_get_url(url, kind, ident)
+    return {
+        "dry_run": True,
+        "allowlist_sha256": allowlist.sha256,
+        "exports": len(exports),
+        "designer_models": len(designers),
+        "page_gets": [f"{k}:{i}" for k, i in gets.values()],
+        "page_record": allowlist.page_record,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1348,6 +1586,13 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         choices=[k.name for k in KINDS],
         help="export kinds per book (default: all three)",
+    )
+    make.add_argument(
+        "--page-get",
+        action="append",
+        default=[],
+        metavar="KIND:ID",
+        help="in-page GET route, one of: " + ", ".join(PAGE_GET_BY_NAME),
     )
     for name in ("run", "drive"):
         item = sub.add_parser(name)
@@ -1390,6 +1635,11 @@ def _parser() -> argparse.ArgumentParser:
                 "back to; required, and equal to the generation plan's as-of date",
             )
             item.add_argument("--skip-designer-models", action="store_true")
+            item.add_argument(
+                "--dry-run",
+                action="store_true",
+                help="screen the allowlist and print the plan; no browser, nothing written",
+            )
         else:
             item.add_argument("--file-id", required=True)
     return parser
@@ -1415,7 +1665,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "make-allowlist":
-            if not args.book and not args.designer_model and not args.drive_file_id:
+            page_gets: list[tuple[str, int]] = []
+            for text in args.page_get:
+                kind, _, ident = text.partition(":")
+                if kind not in PAGE_GET_BY_NAME or not ident.isdigit():
+                    raise FetchRefused("ALLOWLIST_INVALID", "page get")
+                page_gets.append((kind, int(ident)))
+            if (
+                not args.book
+                and not args.designer_model
+                and not args.drive_file_id
+                and not page_gets
+            ):
                 raise FetchRefused("ALLOWLIST_EMPTY")
             payload = build_allowlist_bytes(
                 args.book,
@@ -1423,6 +1684,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.drive_file_id,
                 args.kind,
                 args.page_record,
+                page_gets,
             )
             parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
             digest = _write_new(args.out, payload)
@@ -1430,6 +1692,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         allowlist = load_allowlist(args.allowlist, args.allowlist_sha256)
         timeout = args.download_timeout
+        if args.command == "run" and args.dry_run:
+            print(json.dumps(dry_run_plan(allowlist), sort_keys=True))
+            return 0
         if args.command == "run":
             refusal = check_entry_interpreter(
                 "the P123 CDP fetcher (it runs the book identity check)",
@@ -1439,7 +1704,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return refusal
             if args.reference_index is None and not args.no_reference:
                 raise FetchRefused("REFERENCE_REQUIRED")
-            if args.as_of is None:
+            if args.as_of is None and allowlist.books:
                 raise FetchRefused("AS_OF_REQUIRED", "pass --as-of D")
             check = load_identity_check(
                 prior_dirs=args.prior_dir,

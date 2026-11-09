@@ -360,6 +360,7 @@ def test_transport_guard_refuses_everything_else(message: dict[str, Any]) -> Non
         "Browser.setDownloadBehavior",
         "Network.enable",
         "Network.getResponseBody",
+        "Runtime.evaluate",  # only the exact page-GET expression (tested below)
     }
 
 
@@ -1277,7 +1278,6 @@ def test_body_read_is_allowed_only_for_a_registered_request_id() -> None:
         "Network.setExtraHTTPHeaders",
         "Network.getRequestPostData",
         "Network.disable",
-        "Runtime.evaluate",
         "Fetch.enable",
         "Fetch.fulfillRequest",
         "Input.dispatchKeyEvent",
@@ -1783,3 +1783,217 @@ def test_cli_refuses_a_run_without_reference_choice(
     )
     assert code == 2
     assert capsys.readouterr().out.strip() == "REFUSED REFERENCE_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# first-class in-page GET routes (page_gets) and the dry run
+
+INV = 1897754
+GET_JSON = '{"rows": [1, 2, 3], "note": "café"}'
+
+
+class PageBrowser(FakeBrowser):
+    """Answers the guarded ``Runtime.evaluate`` of an allowlisted page GET."""
+
+    def __init__(self, *args: Any, replies: dict[str, tuple[int, str, str]], **kw: Any):
+        super().__init__(*args, **kw)
+        self.replies = replies
+        self.evaluated: list[str] = []
+
+    def send(self, message: dict[str, Any]) -> None:
+        if message["method"] != "Runtime.evaluate":
+            return super().send(message)
+        self.sent.append(message)
+        expression = message["params"]["expression"]
+        self.evaluated.append(expression)
+        url = json.loads(expression[len("fetch(") : expression.index(", {method")])
+        status, mime, text = self.replies[url]
+        self.queue.append(
+            {
+                "id": message["id"],
+                "result": {
+                    "result": {"value": {"status": status, "type": mime, "text": text}}
+                },
+            }
+        )
+        return None
+
+
+def _gets_allowlist(*gets: tuple[str, int]) -> fetcher.Allowlist:
+    payload = fetcher.build_allowlist_bytes((), (), (), None, False, gets)
+    return parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
+
+
+def _get_run(
+    tmp_path: Path,
+    gets: tuple[tuple[str, int], ...],
+    replies: dict[str, tuple[int, str, str]],
+) -> tuple[dict[str, Any], PageBrowser, Path]:
+    clock = FakeClock()
+    browser = PageBrowser(
+        clock, {TAB: f"{BASE}/app/home"}, good_navigate, replies=replies
+    )
+    root = tmp_path / "run"
+    manifest = run_p123(
+        browser,
+        _gets_allowlist(*gets),
+        root,
+        identity_check=_pass_check,
+        no_reference=True,
+        clock=clock,
+        download_timeout=10.0,
+    )
+    return manifest, browser, root
+
+
+def test_every_page_get_route_is_exact_and_screened() -> None:
+    for item in fetcher.PAGE_GETS:
+        url = fetcher.page_get_url(item.name, INV)
+        fetcher.screen_page_get_url(url, item.name, INV)
+    full = fetcher.page_get_url("designer_perf_full", 12)
+    assert full == f"{BASE}/spr/strategy/model/12/perf?dm=true&init=true&years=15"
+    for url, code in (
+        (f"{BASE}/spr/strategy/model/12/perf?dm=true&init=true&years=16", "NOT_ALLOW"),
+        (full + "#x", "NOT_ALLOW"),
+        (full.replace("https://www.", "https://evil."), "OFF_ORIGIN"),
+        (full + "&delete=1", "MUTATION"),
+        (f"{BASE}/spr/strategy/model/13/perf?dm=true&init=true&years=15", "NOT_ALLOW"),
+    ):
+        with pytest.raises(FetchRefused, match=code):
+            fetcher.screen_page_get_url(url, "designer_perf_full", 12)
+
+
+def test_page_gets_are_fetched_in_page_and_saved_unmodified(tmp_path: Path) -> None:
+    gets = (("designer_perf_full", 12), ("investment_holdings", INV))
+    replies = {
+        fetcher.page_get_url(k, i): (200, "application/json;charset=utf-8", GET_JSON)
+        for k, i in gets
+    }
+    manifest, browser, root = _get_run(tmp_path, gets, replies)
+    assert manifest["status"] == "COMPLETE"
+    assert browser.evaluated == [
+        fetcher.page_get_expression(fetcher.page_get_url(k, i)) for k, i in gets
+    ]
+    saved = root / "capture" / "raw" / "designer_perf_full_12.json"
+    assert saved.read_bytes() == GET_JSON.encode()
+    entry = manifest["page_gets"][f"investment_holdings:{INV}"]
+    assert entry["sha256"] == hashlib.sha256(GET_JSON.encode()).hexdigest()
+    # the whole run sent only guarded methods: no navigation, no download
+    assert {m["method"] for m in browser.sent} <= ALLOWED_CDP_METHODS
+    assert "Page.navigate" not in {m["method"] for m in browser.sent}
+    assert CONTENT_SENTINEL not in json.dumps(manifest)
+
+
+def test_a_non_200_page_get_is_recorded_and_401_stops(tmp_path: Path) -> None:
+    gets = (("account_resource", 5), ("account_positions", 5))
+    url_a, url_b = (fetcher.page_get_url(k, i) for k, i in gets)
+    manifest, _, root = _get_run(
+        tmp_path,
+        gets,
+        {
+            url_a: (404, "application/json", "{}"),
+            url_b: (200, "application/json", "[]"),
+        },
+    )
+    assert manifest["page_gets"]["account_resource:5"] == {
+        "kind": "account_resource",
+        "id": 5,
+        "status": 404,
+        "saved": False,
+    }
+    assert not (root / "capture" / "raw" / "account_resource_5.json").exists()
+    assert (root / "capture" / "raw" / "account_positions_5.json").is_file()
+    stopped, _, _ = _get_run(
+        tmp_path / "again", gets[:1], {url_a: (401, "application/json", "{}")}
+    )
+    assert _stop_code(stopped) == "STOP_REAUTH"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"expression": "document.cookie", "awaitPromise": True, "returnByValue": True},
+        {"expression": "1+1"},
+        {
+            "expression": fetcher.page_get_expression(
+                f"{BASE}/app/investment/resource/1"
+            ),
+            "awaitPromise": True,
+            "returnByValue": True,
+            "extra": 1,
+        },
+        {
+            "expression": fetcher.page_get_expression(
+                f"{BASE}/app/investment/resource/2"
+            ),
+            "awaitPromise": True,
+            "returnByValue": True,
+        },
+    ],
+)
+def test_the_guard_lets_through_only_the_allowlisted_expression(
+    params: dict[str, Any],
+) -> None:
+    allowed = fetcher.page_get_expression(f"{BASE}/app/investment/resource/1")
+    guard = GuardedTransport(
+        FakeBrowser(FakeClock(), {}, good_navigate),
+        allowed_urls=frozenset(),
+        download_path="/x",
+        page_get_expressions=frozenset({allowed}),
+    )
+    with pytest.raises(FetchRefused, match="CDP_EVALUATE_NOT_ALLOWLISTED"):
+        guard.send({"id": 1, "method": "Runtime.evaluate", "params": params})
+    guard.send(
+        {
+            "id": 2,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": allowed,
+                "awaitPromise": True,
+                "returnByValue": True,
+            },
+        }
+    )
+
+
+def test_page_gets_allowlist_roundtrip_and_old_bytes_are_unchanged() -> None:
+    plain = fetcher.build_allowlist_bytes((1,), (), (), None, False)
+    assert b"page_gets" not in plain
+    parsed = _gets_allowlist(("account_resource", 7))
+    assert parsed.page_gets == (("account_resource", 7),)
+    for bad in ([{"kind": "nope", "id": 1}], [{"kind": "account_resource", "id": 0}]):
+        document = json.loads(plain)
+        document["page_gets"] = bad
+        payload = fetcher.canonical_bytes(document)
+        with pytest.raises(FetchRefused, match="ALLOWLIST_INVALID"):
+            parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
+
+
+def test_dry_run_screens_and_prints_the_plan_without_a_browser(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = fetcher.build_allowlist_bytes(
+        (BOOKS[0],), (12,), (), None, True, (("investment_perfdata", INV),)
+    )
+    path = tmp_path / "allow.json"
+    path.write_bytes(payload)
+    code = fetcher.main(
+        [
+            "run",
+            "--cdp-url",
+            "http://127.0.0.1:1",  # never contacted
+            "--allowlist",
+            str(path),
+            "--allowlist-sha256",
+            hashlib.sha256(payload).hexdigest(),
+            "--download-dir",
+            str(tmp_path / "never"),
+            "--no-reference",
+            "--dry-run",
+        ]
+    )
+    plan = json.loads(capsys.readouterr().out)
+    assert code == 0 and plan["dry_run"] is True
+    assert plan["page_gets"] == [f"investment_perfdata:{INV}"]
+    assert plan["exports"] == 3 and plan["designer_models"] == 1
+    assert not (tmp_path / "never").exists()
