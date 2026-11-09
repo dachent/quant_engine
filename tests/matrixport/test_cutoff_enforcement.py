@@ -341,6 +341,74 @@ def test_verify_refuses_late_captures_without_a_label(
         cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
 
 
+def test_verify_records_a_capture_within_the_bound_as_a_fact_without_a_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a Monday-noon capture of a Friday cutoff: 36 h after the cutoff day's end, no label
+    clock = CUTOFF_END_MS + 1 + 36 * 3_600_000
+    run_dir = _extract(tmp_path, monkeypatch, clock=clock)
+    fact = cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF)
+    assert fact is not None
+    assert fact["gap_hours"] == 36.0
+    assert fact["cutoff_end_ms"] == CUTOFF_END_MS
+    assert fact["latest_captured_at_ms"] == clock
+    assert fact["late_paths"] == sorted(SNAPSHOTS)
+    assert "capture-time shares" in fact["valuation_share_count"]
+    metadata = json.loads(_run(run_dir)["metadata_json"])
+    assert metadata["late_capture"] == fact
+    assert metadata["captured_after_cutoff_label"] is None
+
+
+def test_verify_refuses_a_capture_past_the_bound_without_a_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound_ms = pipeline.MAX_UNLABELLED_GAP_HOURS * 3_600_000
+    (tmp_path / "in").mkdir()
+    (tmp_path / "out").mkdir()
+    inside = _extract(tmp_path / "in", monkeypatch, clock=CUTOFF_END_MS + bound_ms)
+    assert cli._require_recorded_cutoff(inside, inside.name, CUTOFF) is not None
+    outside = _extract(
+        tmp_path / "out", monkeypatch, clock=CUTOFF_END_MS + bound_ms + 3_600_000
+    )
+    with pytest.raises(cli.CredentialError, match="more than 72 h"):
+        cli._require_recorded_cutoff(outside, outside.name, CUTOFF)
+
+
+def test_a_capture_one_millisecond_past_the_bound_is_refused_without_a_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1 ms past 72 h rounds to gap_hours == 72.0 but must still be refused
+    bound_ms = pipeline.MAX_UNLABELLED_GAP_HOURS * 3_600_000
+    (tmp_path / "exact").mkdir()
+    (tmp_path / "over").mkdir()
+    exact = _extract(tmp_path / "exact", monkeypatch, clock=CUTOFF_END_MS + bound_ms)
+    fact = cli._require_recorded_cutoff(exact, exact.name, CUTOFF)
+    assert fact is not None and fact["gap_hours"] == 72.0
+    over = _extract(tmp_path / "over", monkeypatch, clock=CUTOFF_END_MS + bound_ms + 1)
+    stored = pipeline.recorded_captures(_run(over))
+    assert round((max(stored.values()) - CUTOFF_END_MS) / 3_600_000, 4) == 72.0
+    with pytest.raises(cli.CredentialError, match="more than 72 h"):
+        cli._require_recorded_cutoff(over, over.name, CUTOFF)
+
+
+def test_bound_check_uses_raw_milliseconds_not_the_rounded_gap() -> None:
+    bound_ms = pipeline.MAX_UNLABELLED_GAP_HOURS * 3_600_000
+    assert not pipeline.late_capture_exceeds_bound(
+        CUTOFF_END_MS + bound_ms, CUTOFF_END_MS
+    )
+    assert pipeline.late_capture_exceeds_bound(
+        CUTOFF_END_MS + bound_ms + 1, CUTOFF_END_MS
+    )
+
+
+def test_a_capture_inside_the_cutoff_day_records_no_late_fact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _extract(tmp_path, monkeypatch, clock=NOON_MS)
+    assert cli._require_recorded_cutoff(run_dir, run_dir.name, CUTOFF) is None
+    assert "late_capture" not in json.loads(_run(run_dir)["metadata_json"])
+
+
 def test_verify_accepts_late_captures_with_an_explicit_label_and_records_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -534,6 +602,7 @@ def _seeded_pair(
     base_label: str | None,
     new_label: str | None,
     strip_base_captures: bool = False,
+    new_clock: int | None = None,
 ) -> Path:
     """A completed base run (cutoff 09-17) and an incremental run (cutoff 09-18)."""
     monkeypatch.setattr(pipeline, "FULL_START_MS", 1722384000000)
@@ -569,7 +638,7 @@ def _seeded_pair(
         transport=ChangedHoldings(),
         cutoff="2026-09-18",
         captured_after_cutoff_label=new_label,
-        clock_ms=lambda: new_noon,
+        clock_ms=lambda: new_noon if new_clock is None else new_clock,
     )
     try:
         assert new.previous_run_dir == base.run_dir
@@ -638,3 +707,112 @@ def test_verify_refuses_inherited_rows_whose_base_recorded_no_capture_time(
     )
     with pytest.raises(cli.CredentialError, match="Inherited current-state rows"):
         cli._require_recorded_cutoff(run_dir, run_dir.name, "2026-09-18")
+
+
+def test_direct_and_inherited_late_captures_form_one_fact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_clock = int(datetime(2026, 9, 19, 6, tzinfo=timezone.utc).timestamp() * 1000)
+    new_clock = int(datetime(2026, 9, 19, 12, tzinfo=timezone.utc).timestamp() * 1000)
+    run_dir = _seeded_pair(
+        tmp_path,
+        monkeypatch,
+        base_clock=base_clock,
+        base_label=None,
+        new_label=None,
+        new_clock=new_clock,
+    )
+    fact = cli._require_recorded_cutoff(run_dir, run_dir.name, "2026-09-18")
+    assert fact is not None
+    new_end = (
+        int(datetime(2026, 9, 18, 23, 59, 59, tzinfo=timezone.utc).timestamp()) * 1000
+        + 999
+    )
+    assert fact["latest_captured_at_ms"] == new_clock
+    assert fact["earliest_captured_at_ms"] == base_clock
+    assert fact["gap_hours"] == round((new_clock - new_end) / 3_600_000, 4)
+    inherited = fact["inherited_late_paths"]
+    assert "holdings:20260901T000000.000Z" in inherited
+    # the direct late paths and the inherited exposure are both listed
+    assert set(SNAPSHOTS) & set(fact["late_paths"])
+    assert set(inherited) <= set(fact["late_paths"])
+
+
+def test_inherited_only_late_capture_is_reported_with_its_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_clock = int(datetime(2026, 9, 19, 6, tzinfo=timezone.utc).timestamp() * 1000)
+    run_dir = _seeded_pair(
+        tmp_path, monkeypatch, base_clock=base_clock, base_label=None, new_label=None
+    )
+    fact = cli._require_recorded_cutoff(run_dir, run_dir.name, "2026-09-18")
+    assert fact is not None
+    assert fact["late_paths"] == fact["inherited_late_paths"]
+    assert (
+        fact["latest_captured_at_ms"] == fact["earliest_captured_at_ms"] == base_clock
+    )
+
+
+class _Credentials:
+    key_identifier = "synthetic-key-id"
+    signing_material = "synthetic-signing-material"
+
+
+def _run_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: int, label=None
+) -> int:
+    """Drive ``main(["run", ...])`` against the fixture transport and a fake clock."""
+
+    monkeypatch.setattr(pipeline, "FULL_START_MS", 1722384000000)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "load_credentials", lambda _path=None: _Credentials())
+    monkeypatch.setattr(cli, "_require_recorded_credentials", lambda *_a, **_k: None)
+    monkeypatch.setattr(cli, "export_run", lambda *_a, **_k: {"csv": [], "xlsx": {}})
+    monkeypatch.setattr(
+        cli, "verify_run", lambda *_a, **_k: {"ok": True, "status": "PARTIAL"}
+    )
+
+    def factory(workspace, **kwargs):  # type: ignore[no-untyped-def]
+        return MatrixportExtractor(
+            workspace,
+            mode="full",
+            run_id="20260901T000000.000Z",
+            transport=FixtureTransport(),
+            cutoff=kwargs["cutoff"],
+            captured_after_cutoff_label=label,
+            clock_ms=lambda: clock,
+        )
+
+    monkeypatch.setattr(cli, "MatrixportExtractor", factory)
+    return cli.main(
+        ["run", "--full", "--governance-evidence", "x.json", "--cutoff", CUTOFF]
+    )
+
+
+def test_run_command_records_a_late_capture_within_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = CUTOFF_END_MS + 1 + 36 * 3_600_000
+    assert _run_command(tmp_path, monkeypatch, clock) == 0
+    release = json.loads(
+        (
+            tmp_path
+            / "output"
+            / "20260901T000000.000Z"
+            / "reports"
+            / "release_status.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert release["late_capture"]["gap_hours"] == 36.0
+    assert release["extraction_status"] == "COMPLETED"
+    assert release["export_status"] == "COMPLETED"
+    assert release["verification_ok"] is True
+
+
+def test_run_command_refuses_a_capture_past_the_bound_without_a_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _run_command(tmp_path, monkeypatch, LATER_MS) == 3
+    assert "captured_after_cutoff_label" in capsys.readouterr().err

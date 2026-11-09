@@ -131,10 +131,38 @@ holding snapshot allows only `is_cleared`, `is_holding` and `product_id` (172-17
 1153-1160, wallet 1661-1668) and `transport.py:207` rejects any parameter not in
 the allowlist. They therefore reflect the moment of the call. Each call's UTC
 capture time is recorded in the run metadata (`captures`). `verify` refuses a
-cutoff-bound run whose capture time is after the cutoff day's end (UTC), or that
-did not record capture times, unless the evidence provenance carries an explicit
+cutoff-bound run that did not record capture times. A capture after the cutoff
+day's end (UTC) is recorded automatically as the `late_capture` fact (latest and
+earliest `captured_at`, `cutoff_end_ms`, `gap_hours` from the latest capture, the
+union of late paths, and `inherited_late_paths` for snapshot rows an incremental run
+inherited from base runs) in the run metadata, in the `verify` output and in
+`release_status.json`; direct and inherited captures form one fact. The combined
+`run` command goes through the same gate as `verify`, so it records the fact and
+applies the same refusal. No approval is needed up to `MAX_UNLABELLED_GAP_HOURS`
+(72 h: a Friday cutoff and a pull through the following Monday UTC); the bound is
+compared on the raw millisecond difference, so a capture 1 ms past 72 h is refused
+without a label (`gap_hours` is rounded to four decimals for display only). Past that, or for inherited rows with no recorded capture
+time, `verify` refuses unless the evidence provenance carries an explicit
 `captured_after_cutoff_label` (`governance-evidence --captured-after-cutoff-label
-TEXT`), which is then recorded in the run metadata.
+TEXT`), which is recorded in the run metadata (and must not change on `--resume`).
+The fact is not a closure: the daily valuation anchors its opening share gap on the
+current holding (`valuation.py` 576), so the D share count is the share count at
+capture and a share event between the cutoff and the capture is not visible
+(history windows end at the cutoff). A reviewer reads `gap_hours` for that exposure.
+
+The 72 h unlabelled cap protects only that unclosed caveat (the D share count equals the T share
+count; `valuation.py` 576 anchors D shares on the current holding, so a share event between D and
+the capture is invisible, and windows end at the cutoff). It is not a numeric check of its own, it
+disappears when a share-event netting lane exists, and it is kept until then and not widened.
+Share count at D = T share count is an unclosed caveat for any LATE Matrixport pull; R3's Friday
+extract captures current state at D so it does not touch R3.
+The wallet coverage `updated_at_utc` is the real clock at the moment the endpoint's coverage
+row is written (`storage.py` 431; the pipeline passes no time), so a late pull makes it a later date
+than the cutoff day. `provider_ledger.py` `_matrixport_flow_coverage` and the acceptance replica
+`derive_a` require that date to be the observed boundary day up to three days after it (a Friday
+cutoff pulled through Monday); a date before the boundary, or more than three days after it, is
+refused with `Matrixport wallet coverage boundary differs`. The history endpoints end at the
+run window (the cutoff day), so a later capture observed every row up to the boundary.
 
 Receipt transitions are durable before a live request is permitted. On POSIX,
 the adapter fsyncs the receipt's containing directory after exclusive creation

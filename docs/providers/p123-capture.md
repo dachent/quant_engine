@@ -260,20 +260,39 @@ produce a `REVIEWED_SHAPES` run that admission accepts. That review is a small,
 mechanical code change (two catalog rows and their tests), not data, and it must
 land before the run that admission binds is staged.
 
-## Passive CDP recorder for the pre-R3 sitting (`tools/p123_cdp_recorder.py`)
+## CDP recorder for the pre-R3 sitting (`tools/p123_cdp_recorder.py`)
 
 One attended sitting (Block 0) can learn the real routes and response shapes of the
 UNVERIFIED capabilities (`aifactor.predictor`, `aifactor.model`, `screen.definition`,
 `simulation.result`, `transactions.account`) so that R3 stays data-only. The recorder
 attaches to a dedicated Edge or Chrome profile with a loopback debug port that the
-owner signed in to and drove by hand. Nothing here logs in, types, or clicks.
+owner signed in to. It records the traffic, and with `--drive-plan <file>` it can also
+drive the signed-in tab itself: navigate on `https://www.portfolio123.com`, click and
+scroll. Nothing here logs in or types.
 
-Safety rules, enforced in code and pinned by `tests/portfolio123/test_p123_cdp_recorder.py`:
+Safety rules, enforced in code and pinned by `tests/portfolio123/test_p123_cdp_recorder.py`
+and `tests/core/test_capture_action_guard.py`:
 
-- Passive. The only messages sent to the browser are `Target.setDiscoverTargets`,
-  `Target.attachToTarget`, `Network.enable`, and `Network.getResponseBody`; a guard
-  refuses everything else (navigate, evaluate, input, fetch interception, cookies)
-  before it leaves the process. It listens to four Network events only.
+- Allowed in the signed-in window for any non-trading read: navigate, click, scroll. The
+  messages sent to the browser are `Target.setDiscoverTargets`, `Target.attachToTarget`,
+  `Network.enable`, `Network.getResponseBody`, and the driving messages `Page.navigate`
+  (one URL on the P123 origin), `Runtime.evaluate` (only the fixed element probe of
+  `tools/capture_action_guard.py`) and `Input.dispatchMouseEvent` (move, wheel, left
+  click). A guard refuses everything else (reload, any other evaluate, key or text input,
+  fetch interception, cookies) before it leaves the process. It listens to four Network
+  events only.
+- The ONE guard (`tools/capture_action_guard.py`, shared by the live capture tools):
+  never click or open a control whose accessible name, text, `aria-label`, `value`,
+  `title` or `href` matches trade, transfer, withdraw, deposit, order, buy, sell, submit,
+  confirm payment, or an account-changing control (delete, remove, cancel, unsubscribe, close account, save or apply changes, change or reset password, update profile, email or settings, link, unlink, connect or disconnect broker) (token match after splitting camelCase and punctuation); never touch
+  a submit control (a typeless `<button>` inside a form counts), an image submit or a
+  password control; never follow a link off the origin; no typing message exists, so
+  credentials and 2FA are never entered. A drive plan is a JSON list of
+  `{"navigate": url}`, `{"click": "<exact control name>"}` and `{"scroll": deltaY}`; a
+  step the guard would refuse is rejected before connecting (`DRIVE_PLAN_REFUSED`), a
+  control found refused on the page stops the plan (`DRIVE_ACTION_REFUSED`). The action
+  log (stderr) is value-free: verb, role, first 8 hex characters of the label's SHA-256.
+  Runs recorded by the earlier, listen-only recorder still verify.
 - Origin-limited to `https://www.portfolio123.com` (exact host list `ALLOWED_HOSTS`,
   no port, no userinfo). Only page targets already on that origin are attached.
   Other-origin responses are counted, never listed.
@@ -579,6 +598,128 @@ UNVERIFIED, never exercised live (the proof is a fake CDP transport):
 - Transaction and perf row counts versus the page, which only the identity check
   (`I3`, `I4`) and the generation transaction gate judge.
 
+### In-page routes (`routes` command)
+
+Some reads only answer a `fetch()` issued FROM the signed-in page: the same URLs return
+HTTP 400 when requested by direct navigation. `routes` navigates the tab to the host page
+that normally issues each request, then runs one pinned `fetch` for the exact allowlisted
+URL and saves the body unmodified (create-only) with a sha256 manifest entry. Allowlist
+entries are `--route KIND:ID` (`make-allowlist`); an allowlist without `routes` keeps its
+bytes and pin.
+
+| Kind | Host page | In-page GET | Saved as |
+|---|---|---|---|
+| `designer_model` | `/app/r2g/summary?id=<id>` | `/spr/strategy/model/<id>?dm=true` | `raw/r2g_<id>_dm_true.json` |
+| `designer_perf_full` | same | `/spr/strategy/model/<id>/perf?dm=true&init=true&years=25` (the FULL curve; its first date must equal the model's `inceptionDt`, else `STOP_SHAPE_UNEXPECTED` and nothing is saved; needs `designer_model` for the same id in the allowlist, read first) | `raw/r2g_<id>_perf-full.json` |
+| `designer_holdings` | same | `/spr/strategy/model/<id>/holdings?dm=true` | `raw/r2g_<id>_holdings.json` |
+| `investment_perfdata` | `/app/investment/details?id=<id>` | `/app/investment/perf-data/<id>?init=1` | `raw/strategy_<id>_app_investment_perfdata_init.json` |
+| `investment_resource` | same | `/app/investment/resource/<id>` | `raw/strategy_<id>_app_investment_resource.json` |
+| `investment_perfdata_blank` | same | `/app/investment/perf-data/<id>?init=` (catalog spelling; the operator-recorded request is `init=1`) | `raw/strategy_<id>_app_investment_perfdata_init_blank.json` |
+| `investment_perfdata_true` | same | `/app/investment/perf-data/<id>?init=true` | `raw/strategy_<id>_app_investment_perfdata_init_true.json` |
+| `investment_trans_resource` | same | `/app/investment/transResource/<id>` | `raw/strategy_<id>_app_investment_transresource.json` |
+| `investment_holdings` | same | `/app/investment/holdings/<id>` | `raw/strategy_<id>_app_investment_holdings.json` |
+| `investment_performance` | same | `/spr/strategy/portmodel/<id>/perf` | `raw/strategy_<id>_strategy_portmodel_perf.json` |
+| `investment_performance_page` | same | `/app/investment/performance` (HTML fragment) | `raw/strategy_<id>_app_investment_performance.html` |
+| `investment_holdings_csv` | same | `/app/investment/holdings.csv?id=<id>&v=basic` | `raw/strategy_<id>_app_investment_holdings_basic.csv` |
+| `investment_trans_csv` | same | `/app/investment/trans.csv?id=<id>&type=&tickers=&fromDt=&toDt=` | `raw/strategy_<id>_app_investment_trans.csv` |
+| `account_resource` | `/app/account/details?id=<id>` | `/app/account/resource/<id>` | `raw/account_<id>_app_account_resource.json` |
+| `account_positions` | same | `/app/account/positions/<id>` | `raw/account_<id>_app_account_positions.json` |
+| `account_pages` | the details page and each `&t=<tab>` | none (visit only) | nothing |
+
+Rules, pinned by `tests/portfolio123/test_p123_cdp_routes.py`:
+
+- The one widening of the transport: `Runtime.evaluate`, accepted only when the run supplied
+  pinned expressions and the message is exactly `{expression, awaitPromise: true,
+  returnByValue: true}` with an expression that is byte-for-byte the page probe or the
+  `fetch` template for an allowlisted URL (`GET`, same origin, cookies, `redirect:'error'`).
+  Every other run, method, expression and extra parameter is refused. No input events.
+- Stops, value-free (the code and the check, never a value from a body): non-200
+  (`STOP_DOWNLOAD_NOT_EXACT`), 401/403, a redirect, HTML where JSON or CSV is expected, or a
+  login page (`STOP_REAUTH`), and an unexpected shape (`STOP_SHAPE_UNEXPECTED`: wrong
+  container type, missing marker field, designer model id differs, wrong CSV header, empty
+  body). Nothing is saved for a refused body; files already saved are kept and the rest are
+  listed in `routes_not_fetched`.
+- `page_gets` is accepted as the earlier name of the allowlist's `routes` list (and `--page-get` of `--route`). `run --dry-run` screens any allowlist and prints the plan with no browser and nothing written; `run` with a route-only allowlist reads the routes (no identity check, no `--as-of`), and refuses routes mixed with books.
+- Page visits may navigate within the signed-in tab only to allowlisted pages; nothing is
+  clicked, typed or submitted.
+- **`--dry-run`**: the same code path and the same messages. It differs only in where it
+  writes: the root must be under a `scratch` folder and not under `releases` or `evidence`,
+  files land in `dry-run-capture/` (never `capture/`, the name staging reads), the manifest
+  is `p123-dry-run-manifest.json` with `dry_run: true` and `evidence_eligible: false`. Run it
+  before any evidence is spent; then run the same allowlist without the flag.
+
+## Admitting recorder and fetcher bodies into the HAR root (`tools/p123_har_admit.py`)
+
+The generation reads only the `csv/` and `downloads/` files of the plan's HAR root, by file name
+(`strategy_<id>_app_investment_perfdata_<id>.csv` is managed performance, `..._resource_<id>.csv`
+managed metadata, `..._holdings_<id>.csv` managed holdings, `strategy_<id>_perf.csv` the equity
+curve). The 2026-09-02 HAR workspace holds the account's investment list but no per-investment
+performance, resource or holdings, so a plan on it alone has no managed performance. The
+recorder saves raw bodies under id-less path templates (`raw/NNNNN.body`); the fetcher's
+`routes` command (PR 868; the fetcher on main saves book exports and `designer_model_<id>.json`, which this tool does not admit) names its bodies with the id. `p123_har_admit.py` is the one offline tool that
+turns either into HAR CSVs. It never writes to its inputs.
+
+```powershell
+python tools/p123_har_admit.py admit --base <HAR root> --out <new governed dir> `
+    --recorder <recorder run> [--recorder <another sitting>] [--fetcher <fetcher capture dir>] `
+    --as-of 2026-11-06 --account-id <id> [--account-id <id>] [--dry-run]
+python tools/p123_har_admit.py stage-designer --out <new dir> --model-id <id> `
+    (--recorder <recorder run> | --fetcher <fetcher capture dir>) [--dry-run]
+```
+
+`admit` copies the base root into `<out>/har-root/`, adds the admitted CSVs, and writes
+`<out>/p123-har-admission-manifest.json` beside it (outside the root, so the plan does not hash
+it). The plan's `HAR_ROOT` is `<out>/har-root`. The manifest records the sha256 of the recorder
+manifest and entries, of every source body and of every output CSV, the binding evidence per
+item, the last date of every performance series, the base files an admitted file replaced, the
+stale lists left in the root, and the final root layout (every file with its sha256 and whether
+it is `base` or `admitted`).
+
+Id binding (recorder bodies), each step checked, a body that cannot be bound is a refusal:
+
+1. the account's investment list (`/app/investment/resource`) names every item by
+   `portfolioUid`; across sittings its items must be identical (live columns may move, the
+   list of the first `--recorder` is the one saved, the others are recorded);
+2. an item's resource body is matched to exactly one list row on `name`, `inceptionDt` and
+   `posCnt` (zero or several refuse; a `portfolioUid` in the body must agree);
+3. a `perf-data` or `holdings` body binds to the one item, among those whose resource body is
+   within 40 ordinals before it, that it corroborates (perf `date` equals `inceptionDt`, the
+   position count equals `posCnt`); recorder ordinals follow response completion, so two items
+   that both fit are an ambiguous interleaving and refuse;
+4. a fetcher body carries the id in its name and must be byte-identical to the recorder body of
+   the same item; two different bodies for one item refuse.
+
+Also refused: a fetcher capture with no admissible body, an output root that overlaps the base
+root, a performance series whose rows differ from the weekday calendar of
+`date..dateLast`, one that ends before `--as-of`, an `--account-id` no run states, and an
+admitted file that would replace a base data file (only the account's list csv is replaced).
+
+`stage-designer` writes `capture-manifest.json` and `raw/r2g_<id>_dm_true.json`,
+`r2g_<id>_perf-full.json` (and `_holdings.json` when present) for
+`tools/portfolio_designer_model_curve.py`. A curve is admitted only when it starts on the
+model's `inceptionDt`, ends on its `endDt` and has its launch line on `launchDt`: the chart's
+default 15-year window starts years after inception and is refused (`years=25` is the full
+history).
+
+A run may end `CAPTURE_WITH_UNRECORDED_BODIES` (for example an unreadable `/app/state` poll) and
+still be admitted, under one explicit rule: a 200 GET entry of a NEEDED route with no body file
+is a refusal. Needed routes are the account list, item resource, item perf-data, item holdings
+and account resource for `admit`, and the model, model perf and model holdings for
+`stage-designer`; any other unrecorded body is recorded in the manifest and ignored.
+
+`stage-designer` also meets several chart windows of one model (15 and 20 years beside the full
+history). It stages the one body that starts on `inceptionDt`, ends on `endDt` and has its
+launch line on `launchDt`, lists the windowed bodies (sha256) in the staged manifest and does not
+stage them, and refuses two different full-history bodies.
+
+Both commands build their output in an owned temp sibling directory (`.<name>.partial-<pid>`) and
+rename it into place; a failure removes the sibling and leaves no output, so a retry is never
+blocked, and a final path that exists (also one that appears while the output is built) is refused.
+
+`--dry-run` is the scratch mode: the output must sit under a `scratch` folder, the manifest says
+`evidence_eligible: false`, and every check and message is the same. A real run refuses a
+scratch, tmp or temp root and any root inside a Git worktree.
+
 ## HTML transactions list (`transactions.account`)
 
 `GET /transact_list.jsp?portid=<id>&offset=<n>` (the first page may omit `offset`) is
@@ -635,3 +776,16 @@ The HTML header differs from the CSV download header (`Ticker`, `Tot Fees`, `Not
 must map them explicitly. Conformance check against the preserved bytes (counts only): the
 eight real pages stage with `allow_partial` as 8 records, 400 rows, 1 strategy, 56 pages
 expected, PARTIAL, `UNVERIFIED_SYNTHETIC_SHAPES`, and strict `verify` refuses with `COVERAGE_PARTIAL`.
+
+## Dry run before any governed run (rule for every live driver)
+
+Before a governed live run spends single-use evidence, an allowlist pin or an owner session:
+
+1. rehearse the identical command line and config against scratch output, with no governance
+   evidence, consuming nothing, and never into a release root or the intake being built;
+2. verify what the rehearsal staged with the same verifier the governed run uses;
+3. run the governed command only after a rehearsal of the same config and cutoff verified.
+
+A rehearsal's run ids start with `DRY-`, its outputs are never admitted, and a governed command
+refuses such an id. The Yahoo fetch driver has this natively (`dry-run`,
+`docs/providers/yahoo-fetch.md`, "Dry run first"). The recorder (`tools/p123_cdp_recorder.py`) has it natively: `python tools/p123_cdp_recorder.py dry-run --cdp-url <url> [--drive-plan <file>]` is the `capture` code path written to a scratch run root named `DRY-<utc>` (a new temporary directory, or `--output-root <dir>\DRY-<name>` in a directory that holds only `DRY-` entries), with no governance evidence, nothing consumed, `verify` run on the rehearsal before it prints (`dry_run: true`, the `DRY-` run id, `verified: true`). A governed `discover` or `capture` refuses a `DRY-` output root and `propose-catalog` refuses a `DRY-` run (`DRY_RUN_NOT_ADMITTED`). The fetcher's dry run is owned by its own work. Until it has one, the rehearsal is a ONE-book scratch run: `make-allowlist --book <one id> --kind perf_csv`, then `run --download-dir <new scratch dir> --no-reference --as-of D` against that allowlist (read-only reads of one book, a new directory outside synced storage), then the identity check on what it landed, and only then the governed allowlist; the recorder is rehearsed with `capture` and `verify --run-root` on a throwaway run root before the governed capture.

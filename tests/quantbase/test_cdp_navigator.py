@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+import capture_action_guard as nav_guard
 import quantbase_cdp_har_recorder as rec
 import quantbase_cdp_navigator as nav
 from quantbase_cdp_navigator import (
@@ -75,6 +76,28 @@ class FakeBrowser:
         self.fail: str | None = None
         self.navigate_error: str | None = None
         self.closed = False
+        self.controls: dict[str, dict[str, Any]] = {}
+        self.under: dict[tuple[int, int], dict[str, Any]] = {}
+
+    def _evaluate(self, expression: str) -> dict[str, Any]:
+        by_name = nav_guard._BY_NAME_PREFIX
+        value: dict[str, Any] | None
+        if expression.startswith(by_name):
+            value = self.controls.get(json.loads(expression[len(by_name) : -1]))
+        else:
+            x, y = (
+                int(n)
+                for n in expression[len(nav_guard._AT_POINT_PREFIX) : -1].split(", ")
+            )
+            value = self.under.get((x, y))
+            if value is None:
+                value = next(
+                    (c for c in self.controls.values() if (c["x"], c["y"]) == (x, y)),
+                    None,
+                )
+            if value is None:
+                value = {"page_url": self.tabs[0]["url"], "tag": None}
+        return {"result": {"type": "object", "value": value}}
 
     def send(self, message: dict[str, Any]) -> None:
         self.sent.append(message)
@@ -87,6 +110,8 @@ class FakeBrowser:
             result = {"targetInfos": [dict(t) for t in self.tabs]}
         elif method == "Target.attachToTarget":
             result = {SID_KEY: SID}
+        elif method == "Runtime.evaluate":
+            result = self._evaluate(message["params"]["expression"])
         elif method == "Page.navigate":
             url = message["params"]["url"]
             self.tabs[0]["url"] = self.final.get(url, url)
@@ -617,11 +642,10 @@ def test_guard_refuses_every_message_that_could_act_on_the_page() -> None:
     inner = Sink()
     guard = GuardedTransport(inner, frozenset({PAGES[0]["url"]}))
     for method in (
-        "Input.dispatchMouseEvent",
         "Input.dispatchKeyEvent",
         "Input.insertText",
         "Input.synthesizeTapGesture",
-        "Runtime.evaluate",
+        "Input.dispatchTouchEvent",
         "Runtime.callFunctionOn",
         "Page.reload",
         "Page.addScriptToEvaluateOnNewDocument",
@@ -649,18 +673,30 @@ def test_guard_refuses_every_message_that_could_act_on_the_page() -> None:
     assert inner.sent == []
 
 
-def test_guard_passes_the_four_allowed_methods_and_only_those() -> None:
+def test_guard_passes_the_allowed_methods_and_only_those() -> None:
     assert ALLOWED_CDP_METHODS == {
         "Target.getTargets",
         "Target.attachToTarget",
         "Page.enable",
         "Page.navigate",
+        "Runtime.evaluate",
+        "Input.dispatchMouseEvent",
     }
     inner = Sink()
     guard = GuardedTransport(inner, frozenset({PAGES[0]["url"]}))
-    for method in sorted(ALLOWED_CDP_METHODS - {"Page.navigate"}):
+    plain = {"Target.getTargets", "Target.attachToTarget", "Page.enable"}
+    for method in sorted(plain):
         guard.send({"id": 1, "method": method, "params": {}})
     guard.send({"id": 2, "method": "Page.navigate", "params": {"url": PAGES[0]["url"]}})
+    guard.send(
+        {
+            "id": 3,
+            "method": "Runtime.evaluate",
+            "params": nav_guard.probe_at_point(5, 6),
+        }
+    )
+    wheel = {"type": "mouseWheel", "x": 5, "y": 5, "deltaX": 0, "deltaY": 100}
+    guard.send({"id": 4, "method": "Input.dispatchMouseEvent", "params": wheel})
     assert len(inner.sent) == len(ALLOWED_CDP_METHODS)
 
 
@@ -698,33 +734,28 @@ def test_navigator_cannot_be_made_to_send_an_acting_message() -> None:
     navigator = Navigator(
         browser, parse_allowlist(allowlist_bytes()), emit=lambda r: None, clock=clock
     )
-    for method in ("Input.dispatchMouseEvent", "Runtime.evaluate"):
+    for method in ("Input.dispatchKeyEvent", "Input.insertText"):
         with pytest.raises(NavigatorError, match="CDP_METHOD_REFUSED"):
             navigator._call(method, {}, None)
     assert browser.sent == []
 
 
-def test_tool_source_never_names_an_acting_cdp_method() -> None:
+def test_tool_source_names_no_typing_or_interception_method() -> None:
     source = (REPOSITORY_ROOT / "tools/quantbase_cdp_navigator.py").read_text(
         encoding="utf-8"
     )
     named = set(re.findall(r'"((?:[A-Z][A-Za-z]+)\.[a-z][A-Za-z]+)"', source))
-    assert named == (
-        ALLOWED_CDP_METHODS | nav.SCROLL_ONLY_METHODS | {"Page.loadEventFired"}
-    )
-    assert nav.SCROLL_ONLY_METHODS == {"Input.dispatchMouseEvent"}
-    for banned in ("Runtime.", "Fetch.", "Network.", "Page.reload"):
-        assert f'"{banned}' not in source
-    # the only input event type the source ever names is the wheel
-    for acting in (
-        "mousePressed",
-        "mouseReleased",
-        "mouseMoved",
-        "keyDown",
-        "touchStart",
+    assert named == ALLOWED_CDP_METHODS | {"Page.loadEventFired"}
+    for banned in (
+        "Fetch.",
+        "Network.",
+        "Page.reload",
+        "Input.dispatchKey",
+        "insertText",
     ):
+        assert f'"{banned}' not in source
+    for acting in ("keyDown", "keyUp", "touchStart"):
         assert acting not in source
-    assert source.count('"mouseWheel"') == 2  # the guard and the sender
 
 
 # --- committed allow-list data ----------------------------------------------
@@ -865,7 +896,7 @@ def test_step_lines_carry_label_dwell_and_no_counts() -> None:
     assert {s["capability_counts"] for s in steps} == {"READ_RECORDER_MANIFEST"}
 
 
-# --- --scroll fallback -------------------------------------------------------
+# --- scroll and click under the one guard ----------------------------------
 
 
 def input_sent(browser: FakeBrowser) -> list[dict[str, Any]]:
@@ -879,41 +910,24 @@ def run_scroll(browser: FakeBrowser, clock: Clock, scroll: bool) -> int:
     ).run()
 
 
-def test_without_scroll_no_input_message_is_ever_sent() -> None:
+def test_without_scroll_no_input_message_is_sent_unless_an_action_asks() -> None:
     clock, browser = setup()
     assert run_scroll(browser, clock, scroll=False) == 0
     assert input_sent(browser) == []
 
 
-def test_scroll_default_is_off_in_the_cli(tmp_path: Path) -> None:
-    code, _, _, browser = cli(tmp_path)
-    assert code == 0 and input_sent(browser) == []
-
-
-def test_with_scroll_only_bounded_mouse_wheel_events_are_sent() -> None:
+def test_with_scroll_wheel_events_go_down_and_back_up_on_every_page() -> None:
     clock, browser = setup()
     assert run_scroll(browser, clock, scroll=True) == 0
     events = input_sent(browser)
     per_page = nav.WHEEL_DOWN_STEPS * 2
     assert len(events) == 3 * per_page
     for message in events:
-        assert message["method"] == "Input.dispatchMouseEvent"
-        params = message["params"]
-        assert set(params) <= {"type", "x", "y", "deltaX", "deltaY"}
-        assert params["type"] == "mouseWheel"
-        assert params["deltaX"] == 0 and 0 < abs(params["deltaY"]) <= 600
-        assert 0 <= params["x"] <= 2000 and 0 <= params["y"] <= 2000
-        assert "button" not in params and "modifiers" not in params
+        assert message["params"]["type"] == "mouseWheel"
         assert message[SID_KEY] == SID
     for start in range(0, len(events), per_page):
         chunk = [m["params"]["deltaY"] for m in events[start : start + per_page]]
-        assert sum(chunk) == 0 and sum(abs(d) for d in chunk) <= 5000
-    order = [
-        m["method"]
-        for m in browser.sent
-        if m["method"].startswith(("Page.nav", "Input"))
-    ]
-    assert order[0] == "Page.navigate" and order[1] == "Input.dispatchMouseEvent"
+        assert sum(chunk) == 0
 
 
 def test_cli_scroll_flag_enables_the_wheel(tmp_path: Path) -> None:
@@ -931,105 +945,214 @@ def test_no_wheel_when_the_page_did_not_load() -> None:
     assert input_sent(browser) == []
 
 
+def control(name: str, x: int = 40, y: int = 50, **extra: Any) -> dict[str, Any]:
+    facts: dict[str, Any] = {
+        "tag": "a",
+        "type": None,
+        "in_form": False,
+        "text": name,
+        "aria_label": "",
+        "name": "",
+        "value": "",
+        "title": "",
+        "href": f"{APP}/fund/details/Volatis%20Strategy",
+        "href_attr": "/fund/details/Volatis%20Strategy",
+        "x": x,
+        "y": y,
+        "w": 80,
+        "h": 20,
+    }
+    facts.update(extra)
+    return facts
+
+
+def click_pages(*names: str) -> list[dict[str, Any]]:
+    actions = [{"click": n} for n in names]
+    return [{"label": "dashboard", "url": f"{APP}/dashboard", "actions": actions}]
+
+
+def test_a_declared_click_is_probed_then_sent_as_a_left_click() -> None:
+    clock, browser = setup()
+    browser.controls["Fund details"] = control("Fund details")
+    code, lines = run(browser, clock, click_pages("Fund details"))
+    assert code == 0
+    step = next(x for x in lines if x["event"] == "step")
+    assert step["clicks"] == 1
+    kinds = [m["params"]["type"] for m in input_sent(browser)]
+    assert kinds == ["mouseMoved", "mousePressed", "mouseReleased"]
+    methods = [m["method"] for m in browser.sent]
+    assert methods.index("Runtime.evaluate") < methods.index("Input.dispatchMouseEvent")
+    for message in input_sent(browser):
+        assert message["params"]["x"] == 40 and message["params"]["y"] == 50
+        assert message["params"]["button"] == "left"
+
+
+def test_a_scroll_action_sends_one_wheel_event() -> None:
+    clock, browser = setup()
+    pages = [
+        {"label": "dashboard", "url": f"{APP}/dashboard", "actions": [{"scroll": 800}]}
+    ]
+    code, lines = run(browser, clock, pages)
+    assert code == 0
+    (event,) = input_sent(browser)
+    assert event["params"]["type"] == "mouseWheel" and event["params"]["deltaY"] == 800
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Buy shares",
+        "Sell",
+        "Place order",
+        "Transfer funds",
+        "Withdraw",
+        "Deposit now",
+        "Submit",
+        "Confirm payment",
+        "Trade",
+        "Trading hub",
+        "placeOrder",
+    ],
+)
+def test_the_one_guard_refuses_trading_controls_in_the_allowlist(name: str) -> None:
+    raw = allowlist_bytes(click_pages(name))
+    with pytest.raises(NavigatorError, match="ALLOWLIST_ACTION_TRADING_REFUSED"):
+        parse_allowlist(raw)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"aria_label": "Buy"},
+        {"value": "Place order"},
+        {"title": "Transfer money"},
+        {"href": f"{APP}/transfer/start"},
+        {"href_attr": "/withdraw"},
+        {"tag": "button", "type": "submit", "href": ""},
+        {"tag": "button", "type": None, "in_form": True, "href": ""},
+        {"tag": "input", "type": "password", "href": ""},
+        {"tag": "input", "type": "image", "href": ""},
+        {"href": "https://example.test/out"},
+    ],
+)
+def test_the_one_guard_refuses_a_control_that_reads_clean_by_name(
+    overrides: dict[str, Any],
+) -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open", **overrides)
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, click_pages("Open"))
+    assert input_sent(browser) == []
+
+
+def test_the_guard_checks_the_element_that_would_really_get_the_click() -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open")
+    browser.under[(40, 50)] = control("Buy now", tag="button", href="")
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, click_pages("Open"))
+    assert input_sent(browser) == []
+
+
+def test_a_typeless_button_outside_a_form_is_a_plain_control() -> None:
+    clock, browser = setup()
+    browser.controls["Expand"] = control(
+        "Expand", tag="button", type=None, in_form=False, href=""
+    )
+    code, _ = run(browser, clock, click_pages("Expand"))
+    assert code == 0 and len(input_sent(browser)) == 3
+
+
+def test_border_is_not_a_trading_word_but_camel_case_order_is() -> None:
+    assert not nav_guard.matches_trading("Border settings")
+    assert not nav_guard.matches_trading("Account holdings")
+    assert nav_guard.matches_trading("SubmitOrder")
+    assert nav_guard.matches_trading("confirm-payment")
+
+
+def test_a_missing_control_is_refused_and_nothing_is_clicked() -> None:
+    clock, browser = setup()
+    with pytest.raises(NavigatorError, match="ACTION_CONTROL_NOT_FOUND"):
+        run(browser, clock, click_pages("Nowhere"))
+    assert input_sent(browser) == []
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [
+        [{"click": ""}],
+        [{"click": 5}],
+        [{"scroll": 0}],
+        [{"scroll": 5001}],
+        [{"scroll": True}],
+        [{"type": "hello"}],
+        [{"key": "Enter"}],
+        [{"click": "a", "scroll": 5}],
+        "click",
+    ],
+)
+def test_malformed_actions_are_refused(actions: Any) -> None:
+    pages = [{"label": "dashboard", "url": f"{APP}/dashboard", "actions": actions}]
+    with pytest.raises(NavigatorError, match="ALLOWLIST_ACTIONS_INVALID"):
+        parse_allowlist(allowlist_bytes(pages))
+
+
 @pytest.mark.parametrize(
     "params",
     [
-        {"type": "mousePressed", "x": 5, "y": 5, "button": "left", "clickCount": 1},
-        {"type": "mouseReleased", "x": 5, "y": 5, "button": "left"},
-        {"type": "mouseMoved", "x": 5, "y": 5},
-        {"type": "mouseMoved", "x": 5, "y": 5, "buttons": 1},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 100, "button": "left"},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 100, "buttons": 1},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 100, "modifiers": 2},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 100, "clickCount": 1},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaX": 50, "deltaY": 100},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 601},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": -601},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 0},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 1.5},
-        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": True},
-        {"type": "mouseWheel", "x": 5, "y": 5},
-        {"type": "mouseWheel", "x": -1, "y": 5, "deltaY": 100},
-        {"type": "mouseWheel", "x": 5, "y": 5000, "deltaY": 100},
-        {"type": "mouseWheel", "x": "5", "y": 5, "deltaY": 100},
-        {"type": "mouseWheel", "y": 5, "deltaY": 100},
-        {"x": 5, "y": 5, "deltaY": 100},
+        {"type": "keyDown", "x": 5, "y": 5},
+        {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 5001},
+        {"type": "mousePressed", "x": 5, "y": 5, "button": "right"},
+        {"type": "mousePressed", "x": 5, "y": 5, "button": "left", "text": "a"},
+        {"type": "mousePressed", "x": -1, "y": 5},
+        {"type": "mousePressed", "x": "5", "y": 5},
+        {"x": 5, "y": 5},
         {},
     ],
 )
-def test_scroll_still_refuses_any_input_that_is_not_a_plain_wheel(
+def test_guard_refuses_input_that_is_not_a_plain_mouse_event(
     params: dict[str, Any],
 ) -> None:
     inner = Sink()
-    guard = GuardedTransport(inner, frozenset(), scroll=True)
+    guard = GuardedTransport(inner, frozenset())
     with pytest.raises(NavigatorError, match="CDP_INPUT_REFUSED"):
         guard.send({"id": 1, "method": "Input.dispatchMouseEvent", "params": params})
     assert inner.sent == []
 
 
-def test_scroll_refuses_input_without_params() -> None:
-    guard = GuardedTransport(Sink(), frozenset(), scroll=True)
-    with pytest.raises(NavigatorError, match="CDP_INPUT_REFUSED"):
-        guard.send({"id": 1, "method": "Input.dispatchMouseEvent"})
-
-
 @pytest.mark.parametrize(
-    "method",
+    "params",
     [
-        "Input.dispatchKeyEvent",
-        "Input.insertText",
-        "Input.dispatchTouchEvent",
-        "Input.synthesizeScrollGesture",
-        "Input.synthesizeTapGesture",
-        "Input.emulateTouchFromMouseEvent",
-        "Input.dispatchDragEvent",
-        "Runtime.evaluate",
-        "Fetch.enable",
-        "Network.enable",
-        "Page.reload",
+        {"expression": "document.cookie", "returnByValue": True},
+        {"expression": "fetch('/x')", "returnByValue": True},
+        {"expression": nav_guard.probe_at_point(1, 2)["expression"]},
+        {**nav_guard.probe_at_point(1, 2), "awaitPromise": True},
+        {
+            "expression": nav_guard._AT_POINT_PREFIX + "1, 2); fetch('/x'",
+            "returnByValue": True,
+        },
+        {},
     ],
 )
-def test_scroll_does_not_widen_anything_else(method: str) -> None:
-    inner = Sink()
-    guard = GuardedTransport(inner, frozenset(), scroll=True)
-    with pytest.raises(NavigatorError, match="CDP_METHOD_REFUSED"):
-        guard.send({"id": 1, "method": method, "params": {}})
-    assert inner.sent == []
-
-
-def test_wheel_without_scroll_flag_is_refused_as_a_method() -> None:
+def test_guard_refuses_any_evaluate_that_is_not_the_fixed_probe(
+    params: dict[str, Any],
+) -> None:
     inner = Sink()
     guard = GuardedTransport(inner, frozenset())
-    wheel = {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 100}
-    with pytest.raises(NavigatorError, match="CDP_METHOD_REFUSED"):
-        guard.send({"id": 1, "method": "Input.dispatchMouseEvent", "params": wheel})
+    with pytest.raises(NavigatorError, match="CDP_INPUT_REFUSED"):
+        guard.send({"id": 1, "method": "Runtime.evaluate", "params": params})
     assert inner.sent == []
 
 
-def test_wheel_budget_is_bounded_per_page_and_resets_on_a_new_page() -> None:
-    inner = Sink()
-    guard = GuardedTransport(inner, frozenset(), scroll=True)
-    wheel = {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 400}
-    for _ in range(12):
-        guard.send({"id": 1, "method": "Input.dispatchMouseEvent", "params": wheel})
-    with pytest.raises(NavigatorError, match="CDP_INPUT_BUDGET_EXCEEDED"):
-        guard.send({"id": 1, "method": "Input.dispatchMouseEvent", "params": wheel})
-    assert len(inner.sent) == 12
-    guard.new_page()
-    guard.send({"id": 1, "method": "Input.dispatchMouseEvent", "params": wheel})
-    assert len(inner.sent) == 13
-
-
-def test_wheel_total_delta_is_bounded() -> None:
-    inner = Sink()
-    guard = GuardedTransport(inner, frozenset(), scroll=True)
-    big = {"type": "mouseWheel", "x": 5, "y": 5, "deltaY": 600}
-    sent = 0
-    with pytest.raises(NavigatorError, match="CDP_INPUT_BUDGET_EXCEEDED"):
-        for _ in range(12):
-            guard.send({"id": 1, "method": "Input.dispatchMouseEvent", "params": big})
-            sent += 1
-    assert sent * 600 <= 5000 and sent == 8
+def test_action_log_never_holds_the_label() -> None:
+    clock, browser = setup()
+    browser.controls["Account 12345 details"] = control("Account 12345 details")
+    allowlist = parse_allowlist(allowlist_bytes(click_pages("Account 12345 details")))
+    navigator = Navigator(browser, allowlist, emit=lambda r: None, clock=clock)
+    assert navigator.run() == 0
+    (entry,) = navigator.log.entries
+    assert entry["action"] == "click" and len(entry["label_sha8"]) == 8
+    assert "12345" not in json.dumps(navigator.log.entries)
 
 
 # --- review findings: pin is required, attempts counted at navigation start --
@@ -1059,3 +1182,68 @@ def test_attempted_counts_a_navigation_that_errored() -> None:
     browser.fail = "Page.navigate"
     _, lines = run(browser, clock)
     assert lines[-1]["attempted"] == 1 and lines[-1]["ok"] == 0
+
+
+def test_a_page_that_left_the_origin_stops_the_click_and_the_scroll() -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open", page_url="https://elsewhere.example/")
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, click_pages("Open"))
+    assert input_sent(browser) == []
+    clock, browser = setup()
+    browser.under[(nav.WHEEL_X, nav.WHEEL_Y)] = {
+        "page_url": "https://elsewhere.example/",
+        "tag": None,
+    }
+    pages = [
+        {"label": "dashboard", "url": f"{APP}/dashboard", "actions": [{"scroll": 5}]}
+    ]
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, pages)
+    assert input_sent(browser) == []
+
+
+@pytest.mark.parametrize("field", ["labelled_by", "labels", "alt"])
+def test_the_computed_accessible_name_sources_are_guarded(field: str) -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open", **{field: "Buy now"})
+    with pytest.raises(NavigatorError, match="ACTION_REFUSED"):
+        run(browser, clock, click_pages("Open"))
+    assert input_sent(browser) == []
+
+
+def test_the_action_log_is_emitted_in_the_summary_and_on_refusal(
+    tmp_path: Path,
+) -> None:
+    clock, browser = setup()
+    browser.controls["Open"] = control("Open")
+    _, lines = run(browser, clock, click_pages("Open"))
+    (entry,) = lines[-1]["actions"]
+    assert entry["action"] == "click" and len(entry["label_sha8"]) == 8
+    assert "Open" not in json.dumps(lines[-1]["actions"])
+
+
+def test_dry_run_flag_labels_the_run_with_a_dry_id_and_changes_nothing_else(
+    tmp_path: Path,
+) -> None:
+    code, lines, _, browser = cli(tmp_path, "--dry-run")
+    assert code == 0
+    assert lines[0]["dry_run"] is True and lines[0]["run_id"].startswith("DRY-")
+    assert lines[-1]["dry_run"] is True
+    assert browser.navigated == [p["url"] for p in PAGES]
+    _, plain, _, _ = cli(tmp_path)
+    assert "dry_run" not in plain[0] and "dry_run" not in plain[-1]
+
+
+@pytest.mark.parametrize(
+    "name", ["Delete portfolio", "Save changes", "Cancel subscription", "Link broker"]
+)
+def test_the_guard_refuses_account_changing_clicks_in_the_allowlist(name: str) -> None:
+    with pytest.raises(NavigatorError, match="ALLOWLIST_ACTION_TRADING_REFUSED"):
+        parse_allowlist(allowlist_bytes(click_pages(name)))
+
+
+@pytest.mark.parametrize("name", ["Performance", "Holdings", "Transactions", "Export"])
+def test_tabs_and_exports_stay_allowed(name: str) -> None:
+    allowlist = parse_allowlist(allowlist_bytes(click_pages(name)))
+    assert allowlist.pages[0].actions[0].name == name

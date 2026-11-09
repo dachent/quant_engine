@@ -48,7 +48,14 @@ from quant_engine.portfolio_ledger import (
 
 
 SPEC_SCHEMA_VERSION = 3
+# Spec schema 4 is Flex-only: Flex is the sole data authority and a TWS snapshot is
+# refused. Its catalog (schema 9) carries no tws_* records, check, or coverage.
+FLEX_ONLY_SPEC_SCHEMA_VERSION = 4
+_DECLARING_SPEC_VERSIONS = frozenset(
+    {SPEC_SCHEMA_VERSION, FLEX_ONLY_SPEC_SCHEMA_VERSION}
+)
 CATALOG_SCHEMA_VERSION = 8
+FLEX_ONLY_CATALOG_SCHEMA_VERSION = 9
 ADAPTER_VERSION = "0.5.0"
 _CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -239,7 +246,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
         raise IbkrGenerationError("IBKR spec is not valid UTF-8 JSON") from exc
     spec = _object(value, "spec")
     schema_version = _integer(spec["schema_version"], "schema_version")
-    if schema_version not in {1, 2, SPEC_SCHEMA_VERSION}:
+    if schema_version not in {1, 2, *_DECLARING_SPEC_VERSIONS}:
         raise IbkrGenerationError("IBKR spec schema version is unsupported")
     expected_keys = {
         "as_of_date",
@@ -249,7 +256,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
         "schema_version",
         "sources",
     }
-    if schema_version == SPEC_SCHEMA_VERSION:
+    if schema_version in _DECLARING_SPEC_VERSIONS:
         expected_keys.add("declared_zero_activity_accounts")
         if "declared_general_exclusions" in spec:
             expected_keys.add("declared_general_exclusions")
@@ -257,7 +264,7 @@ def _load_spec(path: Path) -> dict[str, Any]:
     minimum = _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap")
     if minimum < 2:
         raise IbkrGenerationError("minimum_crosswalk_overlap must be at least 2")
-    if schema_version == SPEC_SCHEMA_VERSION:
+    if schema_version in _DECLARING_SPEC_VERSIONS:
         _parse_zero_activity(spec.get("declared_zero_activity_accounts"))
         _parse_general_exclusions(spec.get("declared_general_exclusions"))
     return spec
@@ -296,6 +303,10 @@ def _sources(
     if spec_schema_version == SPEC_SCHEMA_VERSION and len(values) < 28:
         raise IbkrGenerationError(
             "the refreshed inventory requires legacy, Flex refresh, and TWS evidence"
+        )
+    if spec_schema_version == FLEX_ONLY_SPEC_SCHEMA_VERSION and len(values) < 27:
+        raise IbkrGenerationError(
+            "the Flex-only inventory requires legacy and Flex refresh evidence"
         )
     resolved: list[tuple[str, str, Path]] = []
     artifacts: list[SourceArtifact] = []
@@ -365,6 +376,15 @@ def _sources(
         if refresh or snapshots:
             raise IbkrGenerationError(
                 "legacy spec cannot include current provider evidence"
+            )
+    elif spec_schema_version == FLEX_ONLY_SPEC_SCHEMA_VERSION:
+        if (
+            not refresh
+            or any(item[2].suffix.lower() != ".xml" for item in refresh)
+            or snapshots
+        ):
+            raise IbkrGenerationError(
+                "Flex-only spec requires at least one Flex refresh and no TWS snapshot"
             )
     elif (
         not refresh
@@ -827,6 +847,7 @@ def _normalize(
     flex_overlap_count: int,
     tws_source: tuple[TwsSnapshot, str] | None,
     *,
+    flex_only: bool = False,
     declared_zero_activity_raw_ids: frozenset[str] = frozenset(),
     flex_history_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1493,7 +1514,14 @@ def _normalize(
     tws_coverage: dict[str, Any]
     tws_identity_partial = False
     topology_gaps: list[str] = []
-    if tws_source is None:
+    tws_gaps: list[str] = []
+    if flex_only:
+        # No TWS evidence exists in this generation. tws_coverage only accumulates the
+        # Flex-side declared-zero-activity atoms and is never emitted as TWS coverage.
+        tws_state = {}
+        tws_check = {}
+        tws_coverage = {"known_gaps": []}
+    elif tws_source is None:
         tws_state = {
             "account_summary_value_count": 0,
             "execution_count": 0,
@@ -1636,7 +1664,6 @@ def _normalize(
                 "PASS" if reconciliation.account_identity_status == "PASS" else "REVIEW"
             ),
         }
-        tws_gaps: list[str] = []
         if tws_identity_partial:
             snapshot_ids = frozenset(snapshot.raw_account_ids)
             # flex_only = normal under Flex authority — no atom emitted
@@ -1672,8 +1699,7 @@ def _normalize(
         }
 
     # Declared zero-activity accounts must have no activity in Flex or TWS.
-    if declared_zero_activity_raw_ids and tws_source is not None:
-        abuse_snapshot = tws_source[0]
+    if declared_zero_activity_raw_ids and (tws_source is not None or flex_only):
         for statement in statements:
             if statement.raw_account_id in declared_zero_activity_raw_ids:
                 if (
@@ -1689,42 +1715,60 @@ def _normalize(
                     )
                     tws_gaps.append(atom)
                     tws_coverage["known_gaps"].append(atom)
-        for tws_pos in abuse_snapshot.positions:
-            if tws_pos.raw_account_id in declared_zero_activity_raw_ids:
-                atom = (
-                    "declared_zero_activity_abuse:tws_position:"
-                    f"{hashlib.sha256(tws_pos.raw_account_id.encode()).hexdigest()[:16]}"
-                )
-                tws_gaps.append(atom)
-                tws_coverage["known_gaps"].append(atom)
-        # A genuinely empty account may still carry ZERO-valued summary rows;
-        # only nonzero values or real executions disprove the declaration.
-        for tws_value in abuse_snapshot.account_values:
-            if (
-                tws_value.raw_account_id in declared_zero_activity_raw_ids
-                and tws_value.value != 0
-            ):
-                atom = (
-                    "declared_zero_activity_abuse:tws_value:"
-                    f"{hashlib.sha256(tws_value.raw_account_id.encode()).hexdigest()[:16]}"
-                )
-                tws_gaps.append(atom)
-                tws_coverage["known_gaps"].append(atom)
-        for tws_exec in abuse_snapshot.executions:
-            if tws_exec.raw_account_id in declared_zero_activity_raw_ids:
-                atom = (
-                    "declared_zero_activity_abuse:tws_execution:"
-                    f"{hashlib.sha256(tws_exec.raw_account_id.encode()).hexdigest()[:16]}"
-                )
-                tws_gaps.append(atom)
-                tws_coverage["known_gaps"].append(atom)
-        tws_coverage["status"] = (
-            "PARTIAL"
-            if tws_coverage["known_gaps"]
-            else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
-        )
+        if tws_source is not None:
+            abuse_snapshot = tws_source[0]
+            for tws_pos in abuse_snapshot.positions:
+                if tws_pos.raw_account_id in declared_zero_activity_raw_ids:
+                    atom = (
+                        "declared_zero_activity_abuse:tws_position:"
+                        f"{hashlib.sha256(tws_pos.raw_account_id.encode()).hexdigest()[:16]}"
+                    )
+                    tws_gaps.append(atom)
+                    tws_coverage["known_gaps"].append(atom)
+            # A genuinely empty account may still carry ZERO-valued summary rows;
+            # only nonzero values or real executions disprove the declaration.
+            for tws_value in abuse_snapshot.account_values:
+                if (
+                    tws_value.raw_account_id in declared_zero_activity_raw_ids
+                    and tws_value.value != 0
+                ):
+                    atom = (
+                        "declared_zero_activity_abuse:tws_value:"
+                        f"{hashlib.sha256(tws_value.raw_account_id.encode()).hexdigest()[:16]}"
+                    )
+                    tws_gaps.append(atom)
+                    tws_coverage["known_gaps"].append(atom)
+            for tws_exec in abuse_snapshot.executions:
+                if tws_exec.raw_account_id in declared_zero_activity_raw_ids:
+                    atom = (
+                        "declared_zero_activity_abuse:tws_execution:"
+                        f"{hashlib.sha256(tws_exec.raw_account_id.encode()).hexdigest()[:16]}"
+                    )
+                    tws_gaps.append(atom)
+                    tws_coverage["known_gaps"].append(atom)
+        if not flex_only:
+            tws_coverage["status"] = (
+                "PARTIAL"
+                if tws_coverage["known_gaps"]
+                else "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+            )
 
-    return {
+    flex_coverage: dict[str, Any] = (
+        dict(flex_history_coverage)
+        if flex_history_coverage is not None
+        else {
+            "fact_type": "FLEX_FINALIZED_HISTORY",
+            "known_gaps": [],
+            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        }
+    )
+    if flex_only and tws_coverage["known_gaps"]:
+        flex_coverage = {
+            **flex_coverage,
+            "known_gaps": [*flex_coverage["known_gaps"], *tws_coverage["known_gaps"]],
+            "status": "PARTIAL",
+        }
+    catalog: dict[str, Any] = {
         "accounts": [
             {
                 "account_id": account_id,
@@ -1738,7 +1782,9 @@ def _normalize(
             flex_as_of,
             tws_source[0].observed_at.date() if tws_source is not None else flex_as_of,
         ).isoformat(),
-        "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+        "catalog_schema_version": (
+            FLEX_ONLY_CATALOG_SCHEMA_VERSION if flex_only else CATALOG_SCHEMA_VERSION
+        ),
         "corporate_actions": _dedupe(corporate_actions, "corporate action"),
         "crosswalk_proof": list(proof),
         "change_in_nav_observations": sorted(
@@ -1746,14 +1792,8 @@ def _normalize(
             key=lambda item: (item["account_id"], item["accounting_date"]),
         ),
         "fact_coverage": [
-            dict(flex_history_coverage)
-            if flex_history_coverage is not None
-            else {
-                "fact_type": "FLEX_FINALIZED_HISTORY",
-                "known_gaps": [],
-                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
-            },
-            tws_coverage,
+            flex_coverage,
+            *([] if flex_only else [tws_coverage]),
             {
                 "fact_type": "CORPORATE_ACTION_PROJECTION",
                 "known_gaps": [],
@@ -1814,14 +1854,16 @@ def _normalize(
                 "exception_count": account_scope_mismatches,
                 "status": "REVIEW" if account_scope_mismatches else "PASS",
             },
-            tws_check,
+            *([] if flex_only else [tws_check]),
         ],
         "securities": [securities[key] for key in sorted(securities)],
         "transactions": _dedupe(transactions, "transaction"),
-        "tws_account_values": _dedupe(tws_account_values, "TWS account value"),
-        "tws_current_positions": _dedupe(tws_positions, "TWS position"),
-        "tws_current_state": tws_state,
     }
+    if not flex_only:
+        catalog["tws_account_values"] = _dedupe(tws_account_values, "TWS account value")
+        catalog["tws_current_positions"] = _dedupe(tws_positions, "TWS position")
+        catalog["tws_current_state"] = tws_state
+    return catalog
 
 
 def declared_exclusion(gap: str, scope_count: int) -> str | None:
@@ -1887,6 +1929,7 @@ def build_generation(
         refresh_accounts,
         flex_overlap_count,
         tws_source,
+        flex_only=spec_schema_version == FLEX_ONLY_SPEC_SCHEMA_VERSION,
         declared_zero_activity_raw_ids=declared_zero_activity_raw_ids,
         flex_history_coverage=flex_history_coverage,
     )
@@ -1897,7 +1940,7 @@ def build_generation(
         size_bytes=len(catalog_bytes),
         as_of_date=_date(catalog["as_of_date"], "catalog.as_of_date"),
         schema_name="ibkr-read-catalog",
-        schema_version=str(CATALOG_SCHEMA_VERSION),
+        schema_version=str(catalog["catalog_schema_version"]),
     )
     spec_hash, spec_size = hash_file(spec_path)
     spec_artifact = SourceArtifact(
@@ -1914,15 +1957,27 @@ def build_generation(
         for item in catalog["reconciliation_checks"]
         if item["check_id"] == "activity-account-scope"
     )
-    tws_coverage = next(
-        item
-        for item in catalog["fact_coverage"]
-        if item["fact_type"] == "TWS_CURRENT_STATE"
-    )
-    raw_gaps: list[str] = [
-        *flex_history_coverage["known_gaps"],
-        *tws_coverage["known_gaps"],
-    ]
+    flex_only = spec_schema_version == FLEX_ONLY_SPEC_SCHEMA_VERSION
+    raw_gaps: list[str]
+    if flex_only:
+        # Flex is the sole authority: the decision reads the Flex coverage alone.
+        raw_gaps = [
+            *next(
+                item
+                for item in catalog["fact_coverage"]
+                if item["fact_type"] == "FLEX_FINALIZED_HISTORY"
+            )["known_gaps"]
+        ]
+    else:
+        tws_coverage = next(
+            item
+            for item in catalog["fact_coverage"]
+            if item["fact_type"] == "TWS_CURRENT_STATE"
+        )
+        raw_gaps = [
+            *flex_history_coverage["known_gaps"],
+            *tws_coverage["known_gaps"],
+        ]
     if account_scope_exceptions:
         raw_gaps.append(
             "Some activity rows have an ambiguous provider-reported account scope"
@@ -1988,7 +2043,7 @@ def build_generation(
                 "nav",
                 "positions",
                 "transactions",
-                "tws_current_state",
+                *(() if flex_only else ("tws_current_state",)),
             ),
             observed_start=min(observed),
             observed_end=_date(catalog["as_of_date"], "catalog.as_of_date"),
@@ -2003,6 +2058,18 @@ def build_generation(
         verification=VerificationStatus.VERIFIED,
     )
     return catalog, manifest, catalog_bytes
+
+
+def _tws_counts(catalog: Mapping[str, Any]) -> dict[str, Any]:
+    """TWS count echoes; a Flex-only catalog has none and echoes nothing."""
+
+    if "tws_current_state" not in catalog:
+        return {}
+    return {
+        "tws_account_value_count": len(catalog["tws_account_values"]),
+        "tws_position_count": len(catalog["tws_current_positions"]),
+        "tws_status": catalog["tws_current_state"]["status"],
+    }
 
 
 def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, Any]:
@@ -2036,9 +2103,7 @@ def stage_generation_candidate(spec_path: Path, output_root: Path) -> dict[str, 
         "nav_count": len(catalog["nav_observations"]),
         "position_count": len(catalog["positions"]),
         "transaction_count": len(catalog["transactions"]),
-        "tws_account_value_count": len(catalog["tws_account_values"]),
-        "tws_position_count": len(catalog["tws_current_positions"]),
-        "tws_status": catalog["tws_current_state"]["status"],
+        **_tws_counts(catalog),
     }
 
 

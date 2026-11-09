@@ -167,6 +167,7 @@ def _panel() -> dict[str, Any]:
             "series": series,
             "current_week": {"is_partial": True, "data_through_date": "2026-03-05"},
         },
+        "meta": {"source_clock": {"selected_financial_cutoff": "2026-03-05"}},
         "account_manifest": {"calculation_cutoff_date": "2026-03-05", "rows": rows},
         "capital": {"systematic": "174.50"},
         "hwm_governed_proof": {
@@ -339,11 +340,102 @@ def test_spy_and_spxl_are_explicit_unavailable_entries_with_the_pull() -> None:
         assert benchmark["substitute"] is None
         pull = benchmark["required_pull"]
         assert pull["source_id"] == "yahoo-adjusted-etf-daily"
-        assert pull["to_date"] == "2026-09-17"
-        assert pull["minimum_window"] == ["2024-10-01", "2026-09-17"]
+        assert pull["to_date"] == "2026-03-05"
+        assert pull["minimum_window"] == ["2024-10-01", "2026-03-05"]
     assert block["benchmarks"][0]["required_pull"]["from_date"] == "2007-01-03"
     assert block["benchmarks"][1]["required_pull"]["from_date"] == "2008-11-05"
     assert "ITOT" not in json.dumps(block)
+
+
+_OLD_R22_PULL = {
+    "source_id": "yahoo-adjusted-etf-daily",
+    "series": (
+        "daily adjusted close with dividends and distributions reinvested, or "
+        "daily price plus the distribution history"
+    ),
+    "existing_files": (
+        "price-only daily CSVs exist on disk (SPY to 2026-01-22, SPXL to 2025-12-19): "
+        "not admitted, no adjusted close or distributions, and they stop before the "
+        "cutoff, so they are not a total-return series and are not used"
+    ),
+    "to_date": "2026-09-17",
+    "minimum_window": ["2024-10-01", "2026-09-17"],
+    "admission": "hash-bound input plus a place in CORE_BENCHMARKS and the plan manifest",
+    "approval": "the owner's direct approval of the pull",
+}
+
+
+def _panel_at(cutoff: str, weekly_as_of: str | None = None) -> dict[str, Any]:
+    """A panel whose selected financial cutoff is ``cutoff``.
+
+    The weekly source date may differ (later source coverage).
+    """
+
+    panel = _panel()
+    panel["weekly_returns"]["as_of_date"] = weekly_as_of or cutoff
+    panel["account_manifest"] = None
+    panel["meta"] = {"source_clock": {"selected_financial_cutoff": cutoff}}
+    return panel
+
+
+def test_pull_for_the_r22_cutoff_is_byte_identical_to_the_old_constant() -> None:
+    block = tab.build_performance_tab(_panel_at("2026-09-17"))
+    for benchmark, since in zip(
+        block["benchmarks"], ("2007-01-03", "2008-11-05"), strict=True
+    ):
+        pull = benchmark["required_pull"]
+        assert pull == {**_OLD_R22_PULL, "from_date": since, "note": pull["note"]}
+        assert json.dumps(pull) == json.dumps(
+            {**_OLD_R22_PULL, "from_date": since, "note": pull["note"]}
+        )
+    tab.verify_performance_tab(block, _panel_at("2026-09-17"))
+
+
+def test_pull_ends_at_the_build_cutoff_and_the_verifier_rejects_a_stale_end() -> None:
+    panel = _panel_at("2026-11-06")
+    block = tab.build_performance_tab(panel)
+    for benchmark in block["benchmarks"]:
+        pull = benchmark["required_pull"]
+        assert pull["to_date"] == "2026-11-06"
+        assert pull["minimum_window"] == ["2024-10-01", "2026-11-06"]
+    tab.verify_performance_tab(block, panel)
+    stale = copy.deepcopy(block)
+    stale["benchmarks"][0]["required_pull"]["to_date"] = "2026-09-17"
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(stale, panel)
+    stale = copy.deepcopy(block)
+    stale["benchmarks"][1]["required_pull"]["minimum_window"][1] = "2026-09-17"
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(stale, panel)
+
+
+def test_later_weekly_coverage_does_not_move_the_pull() -> None:
+    panel = _panel_at("2026-09-17", weekly_as_of="2026-10-29")
+    block = tab.build_performance_tab(panel)
+    assert block["as_of"] == "2026-10-29"
+    for benchmark in block["benchmarks"]:
+        assert benchmark["required_pull"]["to_date"] == "2026-09-17"
+        assert benchmark["required_pull"]["minimum_window"][1] == "2026-09-17"
+    tab.verify_performance_tab(block, panel)
+    moved = copy.deepcopy(block)
+    moved["benchmarks"][0]["required_pull"]["to_date"] = "2026-10-29"
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(moved, panel)
+
+
+def test_pull_uses_the_weekly_date_only_when_no_governed_cutoff_is_declared() -> None:
+    panel = _panel_at("2026-09-17", weekly_as_of="2026-10-29")
+    del panel[
+        "meta"
+    ]  # no source clock, no account manifest: no later-coverage claim exists
+    block = tab.build_performance_tab(panel)
+    assert block["benchmarks"][0]["required_pull"]["to_date"] == "2026-10-29"
+    tab.verify_performance_tab(block, panel)
+    panel["weekly_returns"]["as_of_date"] = "not-a-date"
+    absent = tab.build_performance_tab(panel)
+    assert absent["benchmarks"][0]["required_pull"]["to_date"] is None
+    with pytest.raises(tab.PerformanceTabError):
+        tab.verify_performance_tab(absent, panel)
 
 
 # ------------------------------------------------------------ slices

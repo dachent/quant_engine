@@ -1,0 +1,440 @@
+{
+ "designer_holdings": {
+  "holdings": [
+   {
+    "country": "x",
+    "currency": "x",
+    "days": 0,
+    "lastValue": 0.0,
+    "marketCap": 0.0,
+    "mktUid": 0,
+    "mktVal": 0.0,
+    "name": "x",
+    "priceClose": 0.0,
+    "shares": 0.0,
+    "shortPos": false,
+    "symbol": "x"
+   },
+   {
+    "country": "x",
+    "currency": "x",
+    "days": 0,
+    "lastValue": 0.0,
+    "marketCap": 0.0,
+    "mktUid": 0,
+    "mktVal": 0.0,
+    "name": "x",
+    "priceClose": 0.0,
+    "shares": 0.0,
+    "shortPos": false,
+    "symbol": "x"
+   }
+  ],
+  "lastRebalance": "x",
+  "rebalTrans": []
+ },
+ "designer_model": {
+  "backtestDisabled": false,
+  "benchmark": "x",
+  "benchmarkUid": 0,
+  "comments": [
+   {
+    "commentUid": 0,
+    "dt": "x",
+    "replies": [
+     {
+      "commentUid": 0,
+      "dt": "x",
+      "replies": [],
+      "txt": "x",
+      "userSName": "x"
+     },
+     {
+      "commentUid": 0,
+      "dt": "x",
+      "replies": [],
+      "txt": "x",
+      "userSName": "x"
+     }
+    ],
+    "txt": "x",
+    "userSName": "x"
+   },
+   {
+    "commentUid": 0,
+    "dt": "x",
+    "replies": [
+     {
+      "commentUid": 0,
+      "dt": "x",
+      "replies": [],
+      "txt": "x",
+      "userSName": "x"
+     }
+    ],
+    "txt": "x",
+    "userSName": "x"
+   }
+  ],
+  "context": null,
+  "currency": "x",
+  "desc": "x",
+  "designerModel": {
+   "attachment": "x",
+   "backtestAgreement": true,
+   "cost": 0.0,
+   "designerInfo": {
+    "avatarUrl": "x",
+    "fullName": "x",
+    "lastLoginDt": "x",
+    "name": "x",
+    "noModels": 0,
+    "profileUrl": "x",
+    "signupDt": "x",
+    "userUid": 0
+   },
+   "img": "x",
+   "isLiveBookAsset": false,
+   "isStrategyAsset": true,
+   "maxSubs": 0,
+   "okmsg": null,
+   "pUid": 0,
+   "revisions": [
+    {
+     "insert_dt": "x",
+     "reason": "x",
+     "revision_uid": 0,
+     "update_dt": "x"
+    }
+   ],
+   "status": "x",
+   "subs": 0,
+   "subscription": {
+    "cancelled": false,
+    "nextBillDt": "x",
+    "portfolioUid": 0,
+    "startDt": "x",
+    "type": "x"
+   }
+  },
+  "editable": false,
+  "endDt": "x",
+  "hasRebalTran": 0,
+  "hedgeEnabled": false,
+  "holdingsAvg": 0.0,
+  "inceptionDt": "x",
+  "lastRebal": "x",
+  "lastRebalanceToday": false,
+  "launchDt": "x",
+  "liquidationValue": 0.0,
+  "maxdd90": 0.0,
+  "mkttypeUid": 0,
+  "name": "x",
+  "pctHedgeAvg": 0.0,
+  "portUid": 0,
+  "rebalFreq": "x",
+  "refLiquidity": 0.0,
+  "riskScore": 0,
+  "stats3y": {
+   "annRet": 0.0,
+   "annRetBench": 0.0,
+   "bench": {
+    "downDev": 0.0,
+    "maxDd": 0.0,
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "stdDev": 0.0
+   },
+   "beta": 0.0,
+   "model": {
+    "downDev": 0.0,
+    "maxDd": 0.0,
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "stdDev": 0.0
+   }
+  },
+  "statsInception": {
+   "annRet": 0.0,
+   "annRetBench": 0.0,
+   "bench": {
+    "downDev": 0.0,
+    "maxDd": 0.0,
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "stdDev": 0.0
+   },
+   "beta": 0.0,
+   "model": {
+    "downDev": 0.0,
+    "maxDd": 0.0,
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "stdDev": 0.0
+   }
+  },
+  "statsLaunch": {
+   "annRet": 0.0,
+   "annRetBench": 0.0,
+   "bench": {
+    "downDev": 0.0,
+    "maxDd": 0.0,
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "stdDev": 0.0
+   },
+   "beta": 0.0,
+   "model": {
+    "downDev": 0.0,
+    "maxDd": 0.0,
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "stdDev": 0.0
+   }
+  },
+  "topData": [
+   {
+    "label": "x",
+    "tooltip": null,
+    "value": "x"
+   },
+   {
+    "label": "x",
+    "tooltip": null,
+    "value": "x"
+   }
+  ],
+  "tradesTtm": 0,
+  "tradingAll": {
+   "biggest": null,
+   "daysAvg": 0.0,
+   "retAvg": 0.0,
+   "trades": 0
+  },
+  "tradingCommitment": 0,
+  "tradingLose": {
+   "biggest": 0.0,
+   "daysAvg": 0.0,
+   "retAvg": 0.0,
+   "trades": 0
+  },
+  "tradingWin": {
+   "biggest": 0.0,
+   "daysAvg": 0.0,
+   "retAvg": 0.0,
+   "trades": 0
+  },
+  "trailingReturns": [
+   {
+    "name": "x",
+    "values": [
+     0.0,
+     0.0
+    ]
+   },
+   {
+    "name": "x",
+    "values": [
+     0.0,
+     0.0
+    ]
+   }
+  ],
+  "volatility90": 0.0
+ },
+ "designer_perf": {
+  "allocMktCap": [
+   {
+    "name": "x",
+    "value": 0.0
+   },
+   {
+    "name": "x",
+    "value": 0.0
+   }
+  ],
+  "allocSector": [
+   {
+    "name": "x",
+    "value": 0.0
+   },
+   {
+    "name": "x",
+    "value": 0.0
+   }
+  ],
+  "colorBench": "x",
+  "colorModel": "x",
+  "perfData": {
+   "data": [
+    [
+     0,
+     0.0
+    ],
+    [
+     0,
+     0.0
+    ]
+   ],
+   "date": "x",
+   "dateLast": "x",
+   "panels": [
+    {
+     "graphs": [
+      {
+       "id": "x",
+       "idx": 0,
+       "lineColor": "x"
+      },
+      {
+       "id": "x",
+       "idx": 0,
+       "lineColor": "x"
+      }
+     ],
+     "id": "x",
+     "percentHeight": 0.0,
+     "recalculateToPercentsDisabled": true
+    }
+   ],
+   "plotLines": [
+    {
+     "color": "x",
+     "dt": "x",
+     "width": 0
+    }
+   ]
+  },
+  "quarterPerf": [
+   [
+    0.0,
+    0.0
+   ],
+   [
+    0.0,
+    0.0
+   ]
+  ],
+  "yearPerf": [
+   {
+    "perf": [
+     0.0,
+     0.0
+    ],
+    "year": 0
+   },
+   {
+    "perf": [
+     0.0,
+     0.0
+    ],
+    "year": 0
+   }
+  ]
+ },
+ "investment_holdings_csv_header": "Ticker,Name,Prev Close,1D (%),1D,Value,Weight,Shares,Return%,Avg Price,Return,#Days",
+ "investment_perfdata": {
+  "data": [
+   [
+    0,
+    0.0
+   ],
+   [
+    0,
+    0.0
+   ]
+  ],
+  "date": "x",
+  "dateLast": "x",
+  "panels": [
+   {
+    "graphs": [
+     {
+      "id": "x",
+      "idx": 0,
+      "s": "x"
+     }
+    ],
+    "hideCategoryAxis": true,
+    "percentHeight": 0.0
+   },
+   {
+    "graphs": [
+     {
+      "fillAlphas": 0.0,
+      "id": "x",
+      "idx": 0,
+      "lineColor": "x",
+      "s": "x"
+     }
+    ],
+    "name": "x",
+    "percentHeight": 0.0,
+    "recalculateToPercentsDisabled": true,
+    "rollOverItemDisabled": true
+   }
+  ]
+ },
+ "investment_resource": {
+  "accountUid": 0,
+  "assetName": "x",
+  "assetType": "x",
+  "assetUid": 0,
+  "cost": 0.0,
+  "currency": "x",
+  "designer": "x",
+  "hasTrans": true,
+  "inceptionDt": "x",
+  "lastRebalDt": "x",
+  "maxDrift": 0.0,
+  "name": "x",
+  "needsRebal": true,
+  "nextRebalDt": "x",
+  "portfolioUid": 0,
+  "posCnt": 0,
+  "rebalanceMethod": "x",
+  "startingCapital": 0.0,
+  "stats": {
+   "annTurnover": 0.0,
+   "bench": {
+    "m3": 0.0,
+    "maxDd": 0.0,
+    "total": 0.0
+   },
+   "chg1d": 0.0,
+   "correlation": 0.0,
+   "earnings": 0.0,
+   "mktVal": 0.0,
+   "mktValLong": 0.0,
+   "mktValShort": 0.0,
+   "ret": {
+    "ann": 0.0,
+    "beta": 0.0,
+    "m3": 0.0,
+    "m6": 0.0,
+    "maxDd": 0.0,
+    "sharpe": 0.0,
+    "stdDev": 0.0,
+    "total": 0.0,
+    "w1": 0.0
+   },
+   "samples": 0,
+   "sharpe": 0.0,
+   "stocks": {
+    "l": 0.0
+   },
+   "total": {
+    "l": 0.0
+   },
+   "tradAll": 0,
+   "tradWin": 0,
+   "unreal": 0.0,
+   "yield": 0.0
+  },
+  "tickers": "x",
+  "ts": "x",
+  "type": "x",
+  "yield": 0.0
+ },
+ "investment_trans_csv_header": "Date,Type,Ticker,Name,Shares,Price,Commiss,Amount,Note"
+}

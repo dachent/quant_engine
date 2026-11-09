@@ -32,6 +32,7 @@ Live use is out of scope for the repository tests; the live transports are
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -43,12 +44,15 @@ import math
 from pathlib import Path
 import re
 import runpy
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
 from typing import Any, Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from quant_engine.core import is_nyse_trading_day
 
 SCHEMA_VERSION = 1
 PROBE_LABEL = "CANDIDATE_NOT_ADMITTED"
@@ -83,7 +87,7 @@ _MAX_LISTED_DATES = 60
 _RULES = frozenset(
     {"min_rows", "first_bar", "last_bar", "missing_weekdays", "null_closes"}
 )
-_CALENDARS = frozenset({"weekday", "every_day"})
+_CALENDARS = frozenset({"weekday", "every_day", "nyse"})
 _DATASETS = ("history", "history_adjusted")
 _PROFILES = frozenset({"tape", "capture-v0"})
 _HISTORY_COLUMNS = (
@@ -189,19 +193,33 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", value)
 
 
-def expected_dates(first: date, last: date, calendar: str) -> list[date]:
+def _is_session(day: date, calendar: str, closed: Sequence[date]) -> bool:
+    if calendar == "every_day":
+        return True
+    if calendar == "nyse":
+        # The repo's NYSE calendar (weekends and regular full-day closures); an ad hoc
+        # closure it does not model is declared per group in ``closed_days``.
+        return is_nyse_trading_day(day) and day not in closed
+    return day.weekday() < 5
+
+
+def expected_dates(
+    first: date, last: date, calendar: str, closed: Sequence[date] = ()
+) -> list[date]:
     out: list[date] = []
     cursor = first
     while cursor <= last:
-        if calendar == "every_day" or cursor.weekday() < 5:
+        if _is_session(cursor, calendar, closed):
             out.append(cursor)
         cursor += timedelta(days=1)
     return out
 
 
-def last_expected_session(through: date, calendar: str) -> date:
+def last_expected_session(
+    through: date, calendar: str, closed: Sequence[date] = ()
+) -> date:
     cursor = through
-    while calendar == "weekday" and cursor.weekday() >= 5:
+    while calendar != "every_day" and not _is_session(cursor, calendar, closed):
         cursor -= timedelta(days=1)
     return cursor
 
@@ -234,6 +252,7 @@ class Group:
     allowed_last_bar_lag_days: int
     exceptions: tuple[ExceptionLabel, ...]
     official_names: Mapping[str, str] | None = None
+    closed_days: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -336,6 +355,7 @@ _GROUP_OPTIONAL = {
     "allowed_last_bar_lag_days",
     "exceptions",
     "official_closes",
+    "closed_days",
 } | _DERIVED_OPTIONAL
 
 
@@ -370,6 +390,16 @@ def _parse_group(raw: object, cutoff: date, index: int) -> Group:
     calendar = value.get("calendar", "weekday")
     if calendar not in _CALENDARS:
         raise DriverError(f"{group_id}: calendar is unsupported")
+    closed_raw = value.get("closed_days", [])
+    if not isinstance(closed_raw, list) or (closed_raw and calendar != "nyse"):
+        raise DriverError(f"{group_id}: closed_days needs the nyse calendar")
+    closed_days = tuple(_day(item, f"{group_id}.closed_days") for item in closed_raw)
+    if len(set(closed_days)) != len(closed_days) or any(
+        item.weekday() >= 5 or not start <= item <= through for item in closed_days
+    ):
+        raise DriverError(
+            f"{group_id}: closed_days must be distinct weekdays in the window"
+        )
     datasets_raw = value.get("datasets", list(_DATASETS))
     if (
         kind == "chart"
@@ -452,6 +482,7 @@ def _parse_group(raw: object, cutoff: date, index: int) -> Group:
         ),
         exceptions=tuple(exceptions),
         official_names=official_names,
+        closed_days=closed_days,
     )
 
 
@@ -690,8 +721,8 @@ def make_evidence(
     config the live command will read, so it cannot be mistyped or taken from the file's bytes.
     """
 
-    if not _RUN_ID.fullmatch(run_id):
-        raise DriverError("run id is invalid")
+    if not _RUN_ID.fullmatch(run_id) or run_id.startswith(DRY_RUN_PREFIX):
+        raise DriverError("run id is invalid (the DRY- prefix is for rehearsals)")
     if not _REVIEW.fullmatch(review):
         raise DriverError("the review must be a quant_engine issue-comment URL")
     if valid_from_utc.tzinfo is None or valid_until_utc.tzinfo is None:
@@ -789,6 +820,197 @@ def held_check(
             names & {str(item).replace("/", ".") for item in cash}
         )
     return report
+
+
+RESCALE_TOLERANCE = 1e-4
+
+
+def rescale_check(
+    closes_dir: Path,
+    previous_dirs: Sequence[Path],
+    tolerance: float = RESCALE_TOLERANCE,
+    adjusted_json: Sequence[Path] = (),
+) -> dict[str, Any]:
+    """New official closes against the closes a retained earlier pull holds for the same days.
+
+    ``Close`` is split-adjusted by Yahoo at fetch time and not dividend-adjusted, so a split after
+    an earlier pull rescales every earlier day of the new pull and a dividend moves nothing.  A
+    late fetch (a pull after the cutoff) cannot see events after the cutoff (the request ends at
+    the cutoff), so the retained pull is the witness: any overlapping day whose close differs by
+    more than ``tolerance`` (relative) is a rescale, reported with the largest ratio.  A symbol the
+    retained pulls never held is listed as ``not_in_previous`` and is not checked.
+
+    ``adjusted_json`` are retained ``history_adjusted`` artifacts (OHLC rescaled by the dividend
+    factor, so only their last day equals the raw close): for a symbol with no raw pull the last
+    day of such an artifact is compared (``basis`` ``adjusted_last_day``); a split after that pull
+    still shows, a dividend does not.
+    """
+
+    if not tolerance > 0:
+        raise DriverError("the rescale tolerance must be positive")
+
+    def positive_close(value: Any, path: Path, day: str) -> float:
+        # float() accepts nan, inf and 0: a nan comparison is always false (the check would
+        # fall through to ok) and a zero retained close divides by zero
+        number = float(value)
+        if not math.isfinite(number) or number <= 0:
+            raise DriverError(
+                f"{path.name} {day}: close {value!r} is not a finite positive number"
+            )
+        return number
+
+    def closes(path: Path) -> dict[str, float]:
+        try:
+            reader = csv.DictReader(io.StringIO(path.read_bytes().decode("utf-8")))
+            if not {"date", "close"} <= set(reader.fieldnames or ()):
+                raise KeyError("date,close")
+            return {
+                row["date"]: positive_close(row["close"], path, row["date"])
+                for row in reader
+                if row["close"]
+            }
+        except DriverError:
+            raise
+        except (OSError, UnicodeDecodeError, KeyError, ValueError) as exc:
+            raise DriverError(f"{path.name} is not an official-closes file") from exc
+
+    if not closes_dir.is_dir() or any(not item.is_dir() for item in previous_dirs):
+        raise DriverError("a closes directory is not a directory")
+    # every retained pull is its own vintage: a later pull must not hide a split that an
+    # earlier one still shows, so nothing is merged by argument order
+    vintages: dict[str, list[tuple[str, str, dict[str, float]]]] = {}
+    for directory in previous_dirs:
+        for item in sorted(directory.glob(f"*{_OFFICIAL_SUFFIX}")):
+            vintages.setdefault(item.name[: -len(_OFFICIAL_SUFFIX)], []).append(
+                (str(item), "raw", closes(item))
+            )
+    adjusted: dict[str, list[tuple[str, dict[str, float]]]] = {}
+    for path in adjusted_json:
+        per_symbol: dict[str, dict[str, float]] = {}
+        try:
+            artifact = json.loads(path.read_bytes().decode("utf-8"))
+            for row in artifact["rows"]:
+                if row.get("Close") is not None:
+                    day = str(row["Date"])[:10]
+                    per_symbol.setdefault(str(row["Ticker"]), {})[day] = positive_close(
+                        row["Close"], path, day
+                    )
+        except DriverError:
+            raise
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            raise DriverError(f"{path.name} is not a history artifact") from None
+        for symbol, series in per_symbol.items():
+            adjusted.setdefault(symbol, []).append((str(path), series))
+    names = sorted(
+        item.name[: -len(_OFFICIAL_SUFFIX)]
+        for item in closes_dir.glob(f"*{_OFFICIAL_SUFFIX}")
+    )
+    if not names:
+        raise DriverError("the closes directory holds no official-closes file")
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        new = closes(closes_dir / f"{name}{_OFFICIAL_SUFFIX}")
+        held: list[tuple[str, str, dict[str, float]]] = list(vintages.get(name, ()))
+        for source, series in adjusted.get(name, ()):
+            last = max(series)
+            held.append((source, "adjusted_last_day", {last: series[last]}))
+        if not held:
+            rows.append({"symbol": name, "status": "not_in_previous"})
+            continue
+        per_vintage: list[dict[str, Any]] = []
+        for source, basis, old in held:
+            shared = sorted(set(new) & set(old))
+            if not shared:
+                per_vintage.append(
+                    {"source": source, "basis": basis, "status": "no_overlap"}
+                )
+                continue
+            worst = max(
+                shared, key=lambda day: abs(new[day] - old[day]) / abs(old[day])
+            )
+            change = abs(new[worst] - old[worst]) / abs(old[worst])
+            per_vintage.append(
+                {
+                    "source": source,
+                    "basis": basis,
+                    "status": "RESCALED" if change > tolerance else "ok",
+                    "days_compared": len(shared),
+                    "worst_day": worst,
+                    "worst_relative_change": round(change, 8),
+                    "ratio_new_over_previous": round(new[worst] / old[worst], 8),
+                }
+            )
+        # two retained pulls that disagree on a shared day straddle a split (or a bad pull)
+        disagreements: list[dict[str, Any]] = []
+        for i, (source_a, _, old_a) in enumerate(held):
+            for source_b, _, old_b in held[i + 1 :]:
+                shared_ab = sorted(set(old_a) & set(old_b))
+                if not shared_ab:
+                    continue
+                day = max(
+                    shared_ab, key=lambda d: abs(old_a[d] - old_b[d]) / abs(old_a[d])
+                )
+                if abs(old_a[day] - old_b[day]) / abs(old_a[day]) > tolerance:
+                    disagreements.append(
+                        {
+                            "sources": [source_a, source_b],
+                            "day": day,
+                            "ratio_second_over_first": round(
+                                old_b[day] / old_a[day], 8
+                            ),
+                        }
+                    )
+        compared = [item for item in per_vintage if item["status"] != "no_overlap"]
+        entry: dict[str, Any] = {"symbol": name, "vintages": per_vintage}
+        if not compared:
+            entry["status"] = "no_overlap"
+        else:
+            top = max(compared, key=lambda item: item["worst_relative_change"])
+            rescaled = any(item["status"] == "RESCALED" for item in compared)
+            entry.update(
+                {
+                    "status": "RESCALED" if rescaled else "ok",
+                    "basis": top["basis"],
+                    "source": top["source"],
+                    "days_compared": top["days_compared"],
+                    "worst_day": top["worst_day"],
+                    "worst_relative_change": top["worst_relative_change"],
+                    "ratio_new_over_previous": top["ratio_new_over_previous"],
+                    "rescaled_sources": [
+                        item["source"]
+                        for item in compared
+                        if item["status"] == "RESCALED"
+                    ],
+                }
+            )
+        if disagreements:
+            entry["retained_vintages_disagree"] = disagreements
+            if entry["status"] == "ok":
+                entry["status"] = "RETAINED_VINTAGES_DISAGREE"
+        rows.append(entry)
+    return {
+        "tolerance": tolerance,
+        "vintages_compared": sorted(
+            {s for held_ in vintages.values() for s, _, _ in held_}
+            | {s for series in adjusted.values() for s, _ in series}
+        ),
+        "symbols": rows,
+        "rescaled": [row["symbol"] for row in rows if row["status"] == "RESCALED"],
+        "retained_vintages_disagree": [
+            row["symbol"] for row in rows if row.get("retained_vintages_disagree")
+        ],
+        "no_overlap": [row["symbol"] for row in rows if row["status"] == "no_overlap"],
+        "not_in_previous": [
+            row["symbol"] for row in rows if row["status"] == "not_in_previous"
+        ],
+    }
 
 
 def _materialize(
@@ -1109,6 +1331,34 @@ class RecordedChart:
 _ADAPTER: SimpleNamespace | None = None
 
 
+DRY_RUN_PREFIX = "DRY-"
+_YF_CACHE_DIR: str | None = None
+
+
+def yf_cache_dir() -> str:
+    """One persistent yfinance cache directory for the whole process.
+
+    yfinance keeps its cookie and timezone sqlite cache in a process-wide singleton bound to
+    the first location it is given. A directory made and deleted per group (or per run)
+    leaves that singleton pointing at a path that no longer exists, so every later group
+    failed with ``unable to open database file`` (Windows). The directory is created once
+    and removed when the process exits."""
+    global _YF_CACHE_DIR
+    if _YF_CACHE_DIR is None or not Path(_YF_CACHE_DIR).is_dir():
+        _YF_CACHE_DIR = tempfile.mkdtemp(prefix="yahoo-fetch-cache-")
+        atexit.register(shutil.rmtree, _YF_CACHE_DIR, ignore_errors=True)
+    return _YF_CACHE_DIR
+
+
+def _clear_result_cache(directory: str) -> None:
+    """Delete the adapter's cached RESULTS (history, snapshot, search files), never the
+    sqlite cookie/timezone cache beside them: every group must be a fresh network read,
+    whatever an earlier group or run in this process fetched."""
+    for pattern in ("history_*.csv", "current_snapshot_*.json", "ticker_search_*.json"):
+        for path in Path(directory).glob(pattern):
+            path.unlink()
+
+
 def load_adapter() -> Any:
     """Load the maintained yfinance adapter by path (it lives outside the packages)."""
     global _ADAPTER
@@ -1154,7 +1404,9 @@ def evaluate_series(
     unique_stamps = set(stamps)
     unique = sorted({date.fromisoformat(item[:10]) for item in unique_stamps})
     duplicates = len(stamps) - len(unique_stamps)
-    expected_last = last_expected_session(group.through, group.calendar)
+    expected_last = last_expected_session(
+        group.through, group.calendar, group.closed_days
+    )
     entry: dict[str, Any] = {
         "id": symbol_id,
         "ticker": ticker,
@@ -1203,7 +1455,9 @@ def evaluate_series(
             )
         seen_days = set(unique)
         missing = [
-            d for d in expected_dates(first, last, group.calendar) if d not in seen_days
+            d
+            for d in expected_dates(first, last, group.calendar, group.closed_days)
+            if d not in seen_days
         ]
         entry["missing_weekday_count"] = len(missing)
         entry["missing_weekdays"] = [d.isoformat() for d in missing[:_MAX_LISTED_DATES]]
@@ -1315,8 +1569,35 @@ def analyze_raw_csv(
 
 
 def parse_chart(
-    raw: bytes, symbol: str, *, require_midnight: bool = True
+    raw: bytes,
+    symbol: str,
+    *,
+    require_midnight: bool = True,
+    ignore_live_after: date | None = None,
 ) -> tuple[list[tuple[date, float | None]], dict[str, Any]]:
+    """Parse one daily chart response.
+
+    ``ignore_live_after`` (the cutoff): Yahoo appends a live bar stamped with the current
+    time to an FX chart while the market is open, even for a window that ended in the past.
+    The single LAST bar, when it is both not at local midnight and dated after that day, is ignored (counted in
+    ``info['live_bars_ignored']``); any other bar off midnight, including one on or before
+    it, still refuses. The raw bytes are never altered."""
+    out, info, _kept = _parse_chart_indexed(
+        raw,
+        symbol,
+        require_midnight=require_midnight,
+        ignore_live_after=ignore_live_after,
+    )
+    return out, info
+
+
+def _parse_chart_indexed(
+    raw: bytes,
+    symbol: str,
+    *,
+    require_midnight: bool = True,
+    ignore_live_after: date | None = None,
+) -> tuple[list[tuple[date, float | None]], dict[str, Any], list[int]]:
     try:
         document = json.loads(raw.decode("utf-8"))
         result = document["chart"]["result"]
@@ -1344,11 +1625,20 @@ def parse_chart(
     if not isinstance(stamps, list) or len(stamps) != len(closes) or not stamps:
         raise DriverError("chart response arrays differ")
     out: list[tuple[date, float | None]] = []
-    for stamp, close in zip(stamps, closes, strict=True):
+    kept: list[int] = []
+    for index, (stamp, close) in enumerate(zip(stamps, closes, strict=True)):
         if isinstance(stamp, bool) or not isinstance(stamp, int):
             raise DriverError("chart timestamp is invalid")
         local = datetime.fromtimestamp(stamp, zone)
-        if require_midnight and (local.hour, local.minute, local.second) != (0, 0, 0):
+        off_midnight = (local.hour, local.minute, local.second) != (0, 0, 0)
+        if (
+            ignore_live_after is not None
+            and off_midnight
+            and local.date() > ignore_live_after
+            and index == len(stamps) - 1  # only the single terminal appended live bar
+        ):
+            continue
+        if require_midnight and off_midnight:
             raise DriverError("chart bar is not at local midnight")
         if close is not None and (
             isinstance(close, bool)
@@ -1358,7 +1648,10 @@ def parse_chart(
         ):
             raise DriverError("chart close is not a positive finite number")
         out.append((local.date(), None if close is None else float(close)))
+        kept.append(index)
     days = [d for d, _ in out]
+    if not out:
+        raise DriverError("chart response arrays differ")
     if days != sorted(set(days)):
         raise DriverError("chart session dates are not strictly increasing")
     info = {
@@ -1370,13 +1663,15 @@ def parse_chart(
         "long_name": meta.get("longName"),
         "short_name": meta.get("shortName"),
     }
-    return out, info
+    if ignore_live_after is not None and len(kept) != len(stamps):
+        info["live_bars_ignored"] = len(stamps) - len(kept)
+    return out, info, kept
 
 
 def analyze_chart(
     group: Group, raw: bytes, symbol_id: str, ticker: str
 ) -> dict[str, Any]:
-    observed, info = parse_chart(raw, ticker)
+    observed, info = parse_chart(raw, ticker, ignore_live_after=group.through)
     inside = [(d, v) for d, v in observed if group.start <= d <= group.through]
     after = [d for d, _ in observed if d > group.through]
     nulls = sum(1 for _, v in inside if v is None)
@@ -1405,10 +1700,11 @@ def trim_chart(raw: bytes, through: date, symbol: str) -> tuple[bytes, int]:
     Returns the derived bytes and the number of bars dropped. The raw response is
     never altered; the derived file keeps the response shape the FX tool reads.
     """
-    observed, _ = parse_chart(raw, symbol)
-    keep = [i for i, (d, _) in enumerate(observed) if d <= through]
+    observed, _, indices = _parse_chart_indexed(raw, symbol, ignore_live_after=through)
+    keep = [indices[i] for i, (d, _) in enumerate(observed) if d <= through]
     document = json.loads(raw.decode("utf-8"))
     body = document["chart"]["result"][0]
+    total = len(body["timestamp"])
 
     def cut(values: Any) -> Any:
         return [values[i] for i in keep] if isinstance(values, list) else values
@@ -1419,7 +1715,7 @@ def trim_chart(raw: bytes, through: date, symbol: str) -> tuple[bytes, int]:
             for key in list(series):
                 series[key] = cut(series[key])
     derived = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
-    return derived.encode("utf-8"), len(observed) - len(keep)
+    return derived.encode("utf-8"), total - len(keep)
 
 
 def chart_entry(
@@ -1460,6 +1756,7 @@ def _commit_run(
     manifest = {
         **header,
         "schema_version": SCHEMA_VERSION,
+        "mode": run_mode(run_id),
         "run_id": run_id,
         "files": {name: _file_record(files[name]) for name in sorted(files)},
     }
@@ -1569,6 +1866,14 @@ def utc_text(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def run_mode(run_id: str) -> str:
+    """``dry-run`` for a rehearsal (its id starts with ``DRY-``), ``governed`` otherwise.
+
+    Written into every run manifest and official-closes sidecar so an admission consumer
+    can refuse a rehearsal by what the bytes say, not only by what the directory is called."""
+    return "dry-run" if run_id.startswith("DRY-") else "governed"
+
+
 def official_manifest(
     merged: Mapping[str, Mapping[str, list[str]]],
     *,
@@ -1612,6 +1917,7 @@ def official_manifest(
         {
             "schema_version": SCHEMA_VERSION,
             "kind": "yahoo-official-closes-manifest",
+            "mode": run_mode(run_id),
             "run_id": run_id,
             "cutoff": cutoff.isoformat(),
             "fetch_started_utc": started,
@@ -1836,19 +2142,20 @@ def run_fetch(
                 if "history_adjusted" in group.datasets
                 else "history"
             )
-            with tempfile.TemporaryDirectory(prefix="yahoo-fetch-cache-") as cache_dir:
-                ns = _namespace(group, config, fetch_dataset, tickers, cache_dir)
-                try:
-                    frame = adapter.fetch_history_frame(
-                        tickers, ns, Path(cache_dir), yf=MeteredYFinance(yf, meter)
-                    )
-                except GovernanceError:
-                    raise
-                except (ValueError, RuntimeError) as exc:
-                    if meter.exceeded:  # the adapter's retry loop swallows the refusal
-                        raise GovernanceError("request budget exhausted") from exc
-                    failures.append(f"{group.group_id}: {exc}")
-                    continue
+            cache_dir = yf_cache_dir()
+            _clear_result_cache(cache_dir)
+            ns = _namespace(group, config, fetch_dataset, tickers, cache_dir)
+            try:
+                frame = adapter.fetch_history_frame(
+                    tickers, ns, Path(cache_dir), yf=MeteredYFinance(yf, meter)
+                )
+            except GovernanceError:
+                raise
+            except (ValueError, RuntimeError) as exc:
+                if meter.exceeded:  # the adapter's retry loop swallows the refusal
+                    raise GovernanceError("request budget exhausted") from exc
+                failures.append(f"{group.group_id}: {exc}")
+                continue
             raw_csv = frame.to_csv(None, index=False, lineterminator="\n").encode(
                 "utf-8"
             )
@@ -2219,6 +2526,8 @@ def authorize_live(
     now: datetime,
 ) -> int:
     """Single-use evidence naming this run, this config and this cutoff; returns the budget."""
+    if run_id.startswith(DRY_RUN_PREFIX):
+        raise GovernanceError("a rehearsal run id (DRY-) cannot spend evidence")
     try:
         document = json.loads(evidence_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2431,6 +2740,9 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
     recorded = manifest.get("files")
     if not isinstance(recorded, dict):
         raise DriverError("run manifest has no file table")
+    if "mode" in manifest or run_dir.name.startswith("DRY-"):
+        if manifest.get("mode") != run_mode(run_dir.name):
+            problems.append("run mode differs from what its run id says")
     present = {
         p.relative_to(run_dir).as_posix()
         for p in run_dir.rglob("*")
@@ -2752,6 +3064,83 @@ def _retained_group(
     )
 
 
+# --------------------------------------------------------------------- dry run
+
+
+def dry_run(
+    config: Config,
+    *,
+    yf: YFinanceLike | None,
+    chart: ChartLike | None,
+    now: datetime,
+    stage_root: Path | None = None,
+    run_id: str | None = None,
+    allow_unresolved: bool = False,
+    max_requests: int = 2000,
+    config_source_sha256: str | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> dict[str, Any]:
+    """Rehearse a governed fetch: same config, same rules, same staging, same verify.
+
+    No governance evidence is read or consumed, the reads are the public ones, and the run
+    is staged in a scratch directory (a fresh temporary one unless ``stage_root`` is given;
+    a given directory may hold only ``DRY-`` entries, so it can never be a release root or a
+    governed stage). The run id always starts with ``DRY-``, which a governed fetch refuses,
+    so a rehearsal cannot be mistaken for, or substituted into, a governed run. The staged run
+    is verified before this returns. Spend evidence only after a dry run of the same config
+    and cutoff verified."""
+    if stage_root is None:
+        root = Path(tempfile.mkdtemp(prefix="yahoo-dry-stage-"))
+    else:
+        root = stage_root
+        if root.exists() and any(
+            not entry.name.startswith(DRY_RUN_PREFIX) for entry in root.iterdir()
+        ):
+            raise DriverError(
+                "a dry run stages only in a scratch directory that holds DRY- entries "
+                "alone (never a release root or a governed stage)"
+            )
+    name = run_id or DRY_RUN_PREFIX + utc_text(now).replace(":", "").replace("-", "")
+    if not name.startswith(DRY_RUN_PREFIX):
+        raise DriverError("a dry run id must start with DRY-")
+    outcome: dict[str, Any] = {
+        "mode": "dry-run",
+        "evidence_consumed": False,
+        "stage_root": str(root),
+        "run_id": name,
+        "cutoff": config.cutoff.isoformat(),
+        "config_sha256": config.sha256,
+    }
+    try:
+        path = run_fetch(
+            config,
+            stage_root=root,
+            run_id=name,
+            yf=yf,
+            chart=chart,
+            now=now,
+            allow_unresolved=allow_unresolved,
+            max_requests=max_requests,
+            config_source_sha256=config_source_sha256,
+            clock=clock,
+        )
+    except GovernanceError:
+        raise
+    except DriverError as exc:
+        report = root / f"{name}.REJECTED.json"
+        failures: list[str] = []
+        if report.is_file():
+            failures = list(_load_json(report).get("failures", []))
+        outcome.update(
+            status="REJECTED", error=str(exc), failures=failures, report=str(report)
+        )
+        return outcome
+    outcome["run_dir"] = str(path)
+    outcome["verify"] = verify_run(path, now=now)
+    outcome["status"] = outcome["verify"]["status"]
+    return outcome
+
+
 # ------------------------------------------------------------------------ CLI
 
 
@@ -2782,6 +3171,19 @@ def _parser() -> argparse.ArgumentParser:
             cmd.add_argument("--allow-unresolved", action="store_true")
         else:
             cmd.add_argument("--recorded-dir", type=Path, default=None)
+    dry = sub.add_parser(
+        "dry-run",
+        help="rehearse a governed fetch: public reads, no governance, scratch stage, "
+        "verified, never consumes evidence",
+    )
+    dry.add_argument("--config", type=Path, required=True)
+    dry.add_argument("--cutoff", default=None, help="the cutoff to rehearse (required)")
+    dry.add_argument("--tt-source-manifest", type=Path, default=None)
+    dry.add_argument("--schwab-positions", type=Path, default=None)
+    dry.add_argument("--allow-unresolved", action="store_true")
+    dry.add_argument("--stage-root", type=Path, default=None)
+    dry.add_argument("--run-id", default=None)
+    dry.add_argument("--max-requests", type=int, default=2000)
     check = sub.add_parser(
         "config-check", help="validate a config and print its resolution table"
     )
@@ -2825,6 +3227,21 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Schwab ingest config: also list held symbols it aliases or values as cash",
+    )
+    rescale = sub.add_parser(
+        "rescale-check",
+        help="offline: new official closes against a retained pull's closes for the same days",
+    )
+    rescale.add_argument("--closes-dir", type=Path, required=True)
+    rescale.add_argument("--previous-dir", type=Path, action="append", required=True)
+    rescale.add_argument("--tolerance", type=float, default=RESCALE_TOLERANCE)
+    rescale.add_argument(
+        "--previous-adjusted-json", type=Path, action="append", default=[]
+    )
+    rescale.add_argument(
+        "--require-previous",
+        action="store_true",
+        help="also exit 1 for a symbol no retained pull holds (it is always reported)",
     )
     verify = sub.add_parser(
         "verify", help="independently re-verify a staged run from its bytes"
@@ -2892,7 +3309,7 @@ def _require_explicit_cutoff(args: argparse.Namespace) -> None:
     evidence on an old delivery's date."""
 
     command = args.command
-    if command in ("fetch", "apply-admissions") or (
+    if command in ("fetch", "apply-admissions", "dry-run") or (
         command == "probe" and getattr(args, "recorded_dir", None) is None
     ):
         if args.cutoff is None:
@@ -2987,6 +3404,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 1
             return 0
+        if args.command == "rescale-check":
+            outcome = rescale_check(
+                args.closes_dir,
+                args.previous_dir,
+                args.tolerance,
+                args.previous_adjusted_json,
+            )
+            print(json.dumps(outcome, indent=2, sort_keys=True))
+            if outcome["not_in_previous"]:
+                print(
+                    "Warning: no retained pull holds these symbols, so they are NOT checked "
+                    "for a rescale: " + ", ".join(outcome["not_in_previous"]),
+                    file=sys.stderr,
+                )
+            if (
+                outcome["rescaled"]
+                or outcome["no_overlap"]
+                or outcome["retained_vintages_disagree"]
+            ):
+                print(
+                    "Error: closes rescaled against a retained pull (a split after it), "
+                    "sharing no day with it, or retained pulls disagreeing with each other "
+                    "(RETAINED_VINTAGES_DISAGREE: a split between the two pulls): "
+                    + ", ".join(
+                        outcome["rescaled"]
+                        + outcome["no_overlap"]
+                        + [
+                            f"{s} (disagree)"
+                            for s in outcome["retained_vintages_disagree"]
+                        ]
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            return 1 if args.require_previous and outcome["not_in_previous"] else 0
         if args.command == "verify":
             print(
                 json.dumps(
@@ -3025,10 +3477,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 summary["derived_size_bytes"] = result["derived_size_bytes"]
             print(json.dumps(summary, indent=2))
             return 1 if result["problems"] else 0
+        if args.command == "dry-run":
+            return _dry_run_live(args)
         return _live(args)
     except (DriverError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _dry_run_live(args: argparse.Namespace) -> int:  # pragma: no cover - live only
+    raw = _config_bytes(args.config)
+    config = _load_config(args)
+    adapter = (
+        load_adapter() if any(g.kind == "yfinance" for g in config.groups) else None
+    )
+    outcome = dry_run(
+        config,
+        yf=adapter.import_yfinance() if adapter is not None else None,
+        chart=LiveChart(config.limits.timeout_seconds),
+        now=datetime.now(timezone.utc),
+        stage_root=args.stage_root,
+        run_id=args.run_id,
+        allow_unresolved=args.allow_unresolved,
+        max_requests=args.max_requests,
+        config_source_sha256=sha256_hex(raw),
+        clock=lambda: datetime.now(timezone.utc),
+    )
+    print(json.dumps(outcome, indent=2, sort_keys=True))
+    return 0 if outcome["status"] == "VERIFIED" else 1
 
 
 def _live(args: argparse.Namespace) -> int:  # pragma: no cover - live only

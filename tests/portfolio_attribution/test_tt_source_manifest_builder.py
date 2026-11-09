@@ -287,6 +287,43 @@ def test_refuses_stale_capture_and_token_url(tmp_path: Path) -> None:
     assert builder.main(argv) == 2
 
 
+def test_cutoff_bounds_the_capture_by_the_next_open(tmp_path: Path) -> None:
+    jroot, troot = _capture(tmp_path)
+    argv = _args(tmp_path, jroot, troot)
+    # captures are 2026-09-03T02:39Z: a Tuesday cutoff ends at Wednesday 13:30Z
+    assert builder.main([*argv, "--cutoff", "2026-09-01"]) == 2
+    assert not (tmp_path / "out").exists()
+    assert builder.main([*argv, "--cutoff", "2026-09-02"]) == 0
+    prov = json.loads((tmp_path / "out" / builder.MANIFEST_NAME).read_text())[
+        builder.PROVENANCE_KEY
+    ]
+    assert prov["cutoff"] == "2026-09-02"
+    assert prov["capture_bound_utc"] == "2026-09-03T13:30:00+00:00"
+    assert builder.main(["verify", "--out-dir", str(tmp_path / "out")]) == 0
+
+
+def test_cutoff_absent_keeps_the_manifest_unchanged(tmp_path: Path) -> None:
+    assert _build(tmp_path) == 0
+    prov = json.loads((tmp_path / "out" / builder.MANIFEST_NAME).read_text())[
+        builder.PROVENANCE_KEY
+    ]
+    assert "cutoff" not in prov and "capture_bound_utc" not in prov
+
+
+def test_capture_bound_is_the_next_weekday_open() -> None:
+    from datetime import date
+
+    assert builder.capture_bound_utc(date(2026, 11, 6)).isoformat() == (
+        "2026-11-09T13:30:00+00:00"
+    )
+    assert builder.capture_bound_utc(date(2026, 11, 3)).isoformat() == (
+        "2026-11-04T13:30:00+00:00"
+    )
+    assert builder.capture_bound_utc(date(2026, 11, 7)).isoformat() == (
+        "2026-11-09T13:30:00+00:00"
+    )
+
+
 def test_market_vane_missing_needs_explicit_file(tmp_path: Path) -> None:
     jroot, troot = _capture(tmp_path)
     vane = jroot / "tt-market-vane__status.json"

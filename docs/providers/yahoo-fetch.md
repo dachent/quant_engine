@@ -16,10 +16,19 @@ fiat mode already reads.
 `docs/providers/yahoo-fetch/r3-batch-a.config.json` is the R3 Batch A config. Keys:
 `cutoff` (ISO date; `--cutoff` overrides), `groups[]` (`group_id`, `kind`
 `yfinance|chart`, `symbols`, `interval`, `start`, `through` = `cutoff` or an inclusive
-ISO date, `calendar` `weekday|every_day`, `min_rows`, `max_missing_weekdays`, optional
-`datasets`, `artifact_profile` `tape|capture-v0`, `max_null_closes`,
+ISO date, `calendar` `weekday|every_day|nyse`, `min_rows`, `max_missing_weekdays`, optional
+`closed_days[]` (nyse only), `datasets`, `artifact_profile` `tape|capture-v0`, `max_null_closes`,
 `first_bar_tolerance_days`, `allowed_last_bar_lag_days`, `exceptions[]`), `limits`,
-`symbol_resolution[]`. The request end is always `through + 1 day` (exclusive). Unknown
+`symbol_resolution[]`.
+
+**Calendars.** `weekday` expects every Monday to Friday, so a group whose window holds market
+closures needed a guessed `max_missing_weekdays`. `nyse` expects exactly the NYSE sessions of
+`quant_engine.core.market_calendar` (weekends and the regular full-day closures): a session
+with no bar is missing, the closures are not, so the check is exact and
+`max_missing_weekdays` stays only as an upper bound (set it to 0). An ad hoc closure the calendar
+does not model (for example 2025-01-09) is declared per group in `closed_days` (distinct
+weekdays inside the window, `nyse` only); an undeclared one refuses the group. The shipped
+volatility groups use `nyse`. The request end is always `through + 1 day` (exclusive). Unknown
 keys are refused. `capture-v0` emits exactly the ten-key capture the FX tool reads
 (`provider, transport, dataset, tickers, columns, rows, start, end, interval, prepost`).
 
@@ -77,6 +86,24 @@ last operation: it copies every manifest path of the root it is given, so the ad
 through, and the pin handed to the release driver is the rebound root's, not this command's. Running
 `add` again from the same root with the same bytes gives the same pin; a rebound root is never the
 input of a later `add`.
+
+## Dry run first
+
+`dry-run --config CONFIG --cutoff D [--tt-source-manifest TT] [--schwab-positions POSITIONS]
+[--allow-unresolved] [--stage-root SCRATCH] [--run-id DRY-...] [--max-requests N]` rehearses the
+governed `fetch` of the same config and cutoff: the same groups, rules, staging and `verify`, with
+the public reads, and none of the governance. It reads and consumes no evidence, stages in a scratch
+directory (a fresh temporary one unless `--stage-root` is given; a given directory may hold only
+`DRY-` entries, so a release root or a governed stage is refused), uses a run id that starts with
+`DRY-` (a governed `make-evidence` or `fetch` refuses such an id, so a rehearsal can never be
+substituted for a governed run), and verifies what it staged before it prints the outcome
+(`status` `VERIFIED` or `REJECTED` with the failures, `evidence_consumed` false). It does not
+replace the approval: spend single-use evidence only after a dry run of the same config and cutoff
+verified. Every live driver follows this rule: rehearse first, with no evidence, in a scratch stage.
+Every run manifest and every `official-closes-manifest.json` also carries `mode` (`dry-run` for a
+`DRY-` id, `governed` otherwise); `verify` fails a run whose mode disagrees with its id, and
+`schwab_capture_ingest` refuses an official-closes run or sidecar that is marked `dry-run`, has a
+`DRY-` run id or sits in a `DRY-` directory, so a rehearsal cannot return a verified Yahoo binding.
 
 ## Run order and the clock (R3)
 
@@ -192,6 +219,36 @@ SPXL, SPY, TQQQ, UDOW, UPRO, XLE; the "38 positions" of that pull list are rows 
 16 symbols with `SWVXX`). A symbol that appears in the R3 capture and is not in those directories
 is "never served" and needs a read-only Yahoo chart request by hand before the evidence is minted.
 
+### Close vintage of a late fetch, and `rescale-check`
+
+R3 uses the raw daily `Close` (split-adjusted by Yahoo, not dividend-adjusted) for every
+official close; `Adj Close` is fetched beside it for history only and feeds no D close. A
+dividend after D cannot move `Close`; a split after D rescales every earlier close, D included.
+The request ends at D, so a pull after D cannot see a later split (the `split_event_count` in
+the adjustment record covers days up to D only). The retained earlier pull is the witness:
+`rescale-check --closes-dir NEW/official-closes --previous-dir DIR [--previous-dir DIR ...]
+[--tolerance 1e-4]` compares each new `<SYMBOL>_yahoo_daily.csv` with the same symbol's retained
+file on the days both hold, and exits 1 if any symbol's close differs by more than the tolerance
+(`RESCALED`, with the worst day and the ratio) or shares no day with the retained pull
+(`no_overlap`: the check proved nothing). A symbol the retained pulls never held is listed as
+`not_in_previous`, warned about on stderr and not checked (`--require-previous` makes it exit 1
+too, for a run where every symbol must have a retained pull).
+
+Every retained pull is its own vintage and is compared with the new closes separately (nothing is
+merged by argument order, so a later pull that already holds split-adjusted closes cannot hide a
+split that the oldest pull still shows). The report lists `vintages_compared` and, per symbol, a
+`vintages` entry for each retained file (and for the last day of each `--previous-adjusted-json`,
+`basis` `adjusted_last_day`) with its own status, worst day and ratio; `rescaled_sources` names
+the files that show the rescale, and the check exits 1 if any vintage does. Two retained
+vintages that disagree with each other on a shared day beyond the tolerance are reported as
+`RETAINED_VINTAGES_DISAGREE` (a split between the two pulls, or a bad pull) with the sources, day
+and ratio, and also exit 1. A close that is `nan`, infinite, zero or negative in a new file, a
+retained file or an adjusted json row is refused with a `DriverError` naming the file and date.
+The `held-closes` window starts 60 days before the cutoff so
+that it overlaps a retained pull that ended at the previous cutoff (R2.1 ended 2026-09-17); run
+the check after the fetch and before the Schwab ingest. Run it on the Saturday pull too: it is a
+no-op when nothing happened and the only gate if a symbol split between the previous pull and D.
+
 ## Symbol resolution and admission
 
 An id in `symbol_resolution` is fetched only through `resolved_ticker`, which requires
@@ -228,6 +285,12 @@ than `max_null_closes`, or a `through` that is not a closed UTC day. Only an exp
 written into the coverage report. Empty data and duplicates cannot be waived, and a bar
 after `through` is refused (chart responses are trimmed into the derived file instead).
 
+One live bar is ignored, and only that one: Yahoo appends a bar stamped with the current time
+to an FX chart while the market is open, even for a window that ended in the past. A chart bar
+that is both off local midnight AND dated after the cutoff is skipped (counted as
+`live_bars_ignored`; the raw response is staged unmodified and the derived file drops it); an
+off-midnight bar on or before the cutoff still refuses.
+
 ## Staging
 
 Run layout under `<stage-root>/<run-id>/`: `raw/<group>/history.csv` (the validated raw
@@ -255,12 +318,13 @@ python tools/yahoo_fetch_driver.py config-check --config <config> [--cutoff D] [
 python tools/yahoo_fetch_driver.py probe  --config <config> --stage-root <root> --run-id <id> (--governance <evidence.json> | --recorded-dir <dir>) [--cutoff D] [--tt-source-manifest M]
 python tools/yahoo_fetch_driver.py apply-admissions --config <config> --probe-run <root>/<id> --out <new-config> [--cutoff D] [--tt-source-manifest M]
 python tools/yahoo_fetch_driver.py fetch  --config <config> --stage-root <root> --run-id <id> --governance <evidence.json> [--cutoff D] [--tt-source-manifest M] [--schwab-positions P] [--allow-unresolved]
+python tools/yahoo_fetch_driver.py dry-run --config <config> --cutoff D [--tt-source-manifest M] [--schwab-positions P] [--allow-unresolved] [--stage-root <scratch>] [--run-id DRY-id] [--max-requests N]
 python tools/yahoo_fetch_driver.py verify <root>/<id>
 python tools/yahoo_fetch_driver.py verify-retained --artifact A [--manifest M] --cutoff D --min-rows N --max-missing-weekdays N [--calendar every_day] [--kind chart --symbol S --start D --max-null-closes N [--derive-out path]] [--report path]
 ```
 
-`fetch` and `probe` are the only commands that touch the network, and only with
-governance evidence: single-use JSON naming `run_id`, `config_sha256` (printed by
+`fetch` and `probe` touch the network only with governance evidence, and `dry-run` is the
+evidence-free rehearsal of `fetch` (above): single-use JSON naming `run_id`, `config_sha256` (printed by
 `config-check`), `cutoff`, a quant_engine issue-comment URL as `review`, a UTC window of
 at most 24 h, and `max_requests` (1..5000, enforced on every transport call). `verify`
 re-derives hashes, config binding, coverage, rows against the raw bytes, and every
@@ -272,6 +336,13 @@ and never fetches.
 
 Never run live. The live transports (`LiveChart`, the yfinance module) are not exercised
 by the repository tests. Chart `period1/period2` padding assumes London-stamped
-`CCYUSD=X` pairs. Exchange holidays are not modelled: a holiday or a cross-exchange
-cutoff needs a label or a higher `max_missing_weekdays`. Hourly groups are checked by
-bar date only, not by bar time.
+`CCYUSD=X` pairs. Only the NYSE calendar is modelled (`calendar: nyse`); another exchange's
+holiday or a cross-exchange cutoff needs a label or a higher `max_missing_weekdays` under
+`weekday`. Hourly groups are checked by bar date only, not by bar time.
+
+The yfinance cache (its cookie and timezone sqlite files) is ONE directory for the whole process
+(`yf_cache_dir`, removed at exit), never one per group: yfinance binds its cache singleton to the
+first location it is given, and a directory deleted after the first group made every later group
+fail with `unable to open database file` (Windows). The adapter's cached results in it
+(`history_*.csv`, `current_snapshot_*.json`, `ticker_search_*.json`) are deleted before each group,
+so every group is a fresh read.

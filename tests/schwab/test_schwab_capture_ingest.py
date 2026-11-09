@@ -1859,3 +1859,32 @@ def test_the_saturday_scenario_derive_ingest_declare_and_ledger_finality(
     with pytest.raises(ledger.ProviderLedgerError, match="repeats its prior day"):
         finality(bare, carried)
     assert Decimal("112.50") != Decimal("108.5")
+
+
+def test_a_yahoo_dry_run_is_refused_by_mode_id_and_directory(tmp_path: Path) -> None:
+    """The driver's rehearsal writes an ordinary-looking run; the ingest must not admit it."""
+
+    run_dir = _run(tmp_path)
+    # the sidecar's own mode marker
+    marked = _closes(tmp_path, sidecar_edit=lambda doc: doc.update(mode="dry-run"))
+    with pytest.raises(ingest.IngestError, match="Yahoo dry-run rehearsal"):
+        _ingest(tmp_path, run_dir, closes_dir=marked)
+    # the sidecar's run id
+    named = _closes(tmp_path, sidecar_edit=lambda doc: doc.update(run_id="DRY-x1"))
+    with pytest.raises(ingest.IngestError, match="Yahoo dry-run rehearsal"):
+        _ingest(tmp_path, run_dir, closes_dir=named)
+    # the run manifest's mode marker
+    closes = _closes(tmp_path)
+    manifest_path = closes.parent / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["mode"] = "dry-run"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ingest.IngestError, match="Yahoo dry-run rehearsal"):
+        _ingest(tmp_path, run_dir, closes_dir=closes)
+    # the directory a rehearsal is staged under
+    fresh = _closes(tmp_path)
+    renamed = (
+        fresh.parent.rename(fresh.parent.parent / "DRY-yahoo-run") / "official-closes"
+    )
+    with pytest.raises(ingest.IngestError, match="Yahoo dry-run rehearsal"):
+        _ingest(tmp_path, run_dir, closes_dir=renamed)

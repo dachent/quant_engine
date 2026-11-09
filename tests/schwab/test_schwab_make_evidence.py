@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 
@@ -334,3 +334,94 @@ def test_check_evidence_refuses_an_unworkable_budget(
     path.write_text(json.dumps(document), encoding="utf-8")
     assert driver.main(["check-evidence", str(path)]) == 2
     assert "cannot complete a capture" in capsys.readouterr().out
+
+
+def test_replay_headers_drop_only_the_transport_managed_ones() -> None:
+    observed = {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",
+        "Cookie": "c",
+        "content-length": "9",
+        "Host": "h",
+        ":authority": "x",
+        "Schwab-Env": "e",
+    }
+    assert driver.replay_headers(observed) == {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",  # an empty scoping header is kept as the page sends it
+        "Schwab-Env": "e",
+    }
+
+
+def test_the_page_body_is_replayed_only_when_it_equals_the_approved_body() -> None:
+    raw = '{"isNWE":false}'
+    assert driver.check_observed_body(raw, {"isNWE": False}) == raw
+    with pytest.raises(driver.DriverError) as extra:
+        driver.check_observed_body(
+            '{"isNWE":false,"accountsFilter":["SECRET"]}', {"isNWE": False}
+        )
+    assert "accountsFilter" in str(extra.value) and "SECRET" not in str(extra.value)
+    with pytest.raises(driver.DriverError, match="only in the evidence: \\['isNWE'\\]"):
+        driver.check_observed_body("{}", {"isNWE": False})
+    with pytest.raises(driver.DriverError, match=r"values differ for: \['isNWE'\]"):
+        driver.check_observed_body('{"isNWE":true}', {"isNWE": False})
+    for bad in (None, "", "not json", "[]"):
+        with pytest.raises(driver.DriverError):
+            driver.check_observed_body(bad, {"isNWE": False})
+
+
+def test_attach_check_names_the_body_keys_the_evidence_filter_drops(
+    tmp_path: Path,
+) -> None:
+    body = json.dumps({**BODY, "someOtherKey": 1})
+    result = driver.attach_check(
+        cdp_url="x",
+        connect=lambda url: _Browser([SCHWAB]),
+        observe=lambda page: ({"Authorization": "t"}, body, None),
+        capture_body_out=tmp_path / "b.json",
+    )
+    assert result["holdings_body_dropped_keys"] == ["someOtherKey"]
+    assert driver.dropped_body_keys("not json") == []
+
+
+def test_page_fetch_headers_drop_only_what_a_page_script_cannot_set() -> None:
+    replay = {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",
+        "Sec-Fetch-Mode": "cors",
+        "sec-ch-ua": "x",
+        "Origin": "o",
+        "Referer": "r",
+        "Content-Type": "application/json",
+    }
+    assert driver.page_fetch_headers(replay) == {
+        "Authorization": "t",
+        "Schwab-Client-Ids": "",
+        "Content-Type": "application/json",
+    }
+
+
+def test_exception_text_is_value_free_and_bounded() -> None:
+    text = driver.value_free_error(
+        ValueError("Failed for account 123456789 at 2026-11-08\n" + "x" * 400)
+    )
+    assert text.startswith("ValueError: Failed for account #")
+    assert "123456789" not in text and "\n" not in text and len(text) <= 160
+
+
+def test_transaction_date_reads_the_as_of_shape_and_errors_value_free() -> None:
+    assert driver._txn_date("08/31/2026") == date(2026, 8, 31)
+    assert driver._txn_date("11/05/2026 as of 11/04/2026") == date(2026, 11, 5)
+    assert driver._txn_date("2026-11-05") == date(2026, 11, 5)
+    with pytest.raises(driver.DriverError) as bad:
+        driver._txn_date("Pending 11/05/2026 123456")
+    assert "123456" not in str(bad.value) and "shape" in str(bad.value)
+
+
+def test_body_equality_is_type_aware_and_error_hint_is_keys_only() -> None:
+    with pytest.raises(driver.DriverError, match="values differ for"):
+        driver.check_observed_body('{"isNWE":1}', {"isNWE": True})
+    hint = driver._error_hint(
+        {"message": "Hi John AAPL $12.34", "ErrorCode": "x", "a b": 1}
+    )
+    assert "John" not in hint and "12.34" not in hint and "ErrorCode" in hint

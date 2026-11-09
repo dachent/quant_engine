@@ -1028,3 +1028,244 @@ def test_a_failure_while_writing_the_output_leaves_no_partial_file(
     assert not world["out"].exists()
     assert not list(world["tmp"].rglob(".*.tmp"))
     assert tool.main(argv) == 0
+
+
+# ----------------------------------------------------------------------------- cutoff-aware defaults
+
+OTHER_DAY = "2031-02-01"
+DEFAULT_RELATIVE = {
+    "crosswalk": "ops/mvp2-release/inputs/current-epoch-crosswalk.json",
+    "quantbase_declared_inputs": "ops/mvp2-release/inputs/sleeves/quantbase/declared-inputs.json",
+    "ibkr_declared_inputs": "ops/mvp2-release/inputs/sleeves/sleeve-declared-inputs.json",
+}
+
+
+def _stale_default(world: dict[str, Any], role: str) -> None:
+    """Date one governed default for another cutoff, as the previous cycle's root would be."""
+
+    path = world["repo"] / DEFAULT_RELATIVE[role]
+    if role == "ibkr_declared_inputs":
+        document: dict[str, Any] = {"window": {"last_day": OTHER_DAY}}
+    elif role == "quantbase_declared_inputs":
+        document = {"data_cutoff": OTHER_DAY}
+    else:
+        document = {"calculation_cutoff_date": OTHER_DAY}
+    path.write_bytes(json.dumps(document).encode())
+
+
+def _stderr(world: dict[str, Any], argv: list[str], capsys: Any) -> str:
+    before = snapshot(world)
+    assert tool.main(argv) == 1
+    err: str = capsys.readouterr().err
+    assert snapshot(world) == before, "a refusal writes nothing"
+    return err
+
+
+def test_a_stale_crosswalk_default_names_the_exact_file_flag(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stale_default(world, "crosswalk")
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "FAIL: CUTOFF_MISMATCH:" in err
+    assert f"crosswalk: calculation_cutoff_date is '{OTHER_DAY}'" in err
+    assert f"the cycle cutoff is {CUTOFF}" in err
+    assert f"(default {DEFAULT_RELATIVE['crosswalk']})" in err
+    assert "--file crosswalk=KEY:REL" in err
+    assert "inputs are refused" not in err  # one problem is reported as itself
+    # the flag it names is accepted and clears the refusal
+    _put(
+        world["scratch"] / "fresh" / "current-epoch-crosswalk.json",
+        json.dumps({"calculation_cutoff_date": CUTOFF}).encode(),
+    )
+    argv = sleeve_args(
+        world, "--file", "crosswalk=scratch:fresh/current-epoch-crosswalk.json"
+    )
+    assert tool.main(argv) == 0
+
+
+@pytest.mark.parametrize("role", ["ibkr_declared_inputs", "quantbase_declared_inputs"])
+def test_a_stale_declared_inputs_default_names_the_exact_file_flag(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str], role: str
+) -> None:
+    _stale_default(world, role)
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "FAIL: CUTOFF_MISMATCH:" in err
+    assert f"{role}:" in err and OTHER_DAY in err
+    assert f"(default {DEFAULT_RELATIVE[role]})" in err
+    assert f"--file {role}=KEY:REL" in err
+    assert "--file crosswalk=" not in err  # a consistent default is not listed
+
+
+def test_every_stale_default_is_listed_together(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    for role in DEFAULT_RELATIVE:
+        _stale_default(world, role)
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "FAIL: CUTOFF_MISMATCH: 3 inputs are refused" in err
+    for role in DEFAULT_RELATIVE:
+        assert f"--file {role}=KEY:REL" in err
+    assert "tag_map" not in err  # it carries no date and is not stale
+    # replacing two of the three leaves exactly the third in the refusal
+    _json(
+        world["scratch"] / "a" / "crosswalk.json",
+        {"calculation_cutoff_date": CUTOFF},
+    )
+    _json(world["scratch"] / "a" / "qb.json", {"data_cutoff": CUTOFF})
+    err = _stderr(
+        world,
+        sleeve_args(
+            world,
+            "--file",
+            "crosswalk=scratch:a/crosswalk.json",
+            "--file",
+            "quantbase_declared_inputs=scratch:a/qb.json",
+        ),
+        capsys,
+    )
+    assert "ibkr_declared_inputs" in err and "inputs are refused" not in err
+    assert "--file crosswalk=" not in err
+
+
+def test_a_stale_file_given_with_file_is_refused_not_trusted(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _json(world["scratch"] / "old" / "cw.json", {"calculation_cutoff_date": OTHER_DAY})
+    err = _stderr(
+        world, sleeve_args(world, "--file", "crosswalk=scratch:old/cw.json"), capsys
+    )
+    assert "(given with --file)" in err and "--file crosswalk=KEY:REL" in err
+
+
+def test_a_release_inputs_root_for_another_cutoff_lists_every_default(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    from quant_engine.core import build_release_inputs_manifest
+
+    root = world["tmp"] / "old-root"
+    paths = sorted(tool.SLEEVE_FILE_DEFAULTS.values())
+    for relative in paths:
+        _put(root / relative, (world["repo"] / relative).read_bytes())
+    _, pin = build_release_inputs_manifest(root, paths, cutoff=OTHER_DAY)
+    argv = sleeve_args(
+        world,
+        "--release-inputs-root",
+        str(root),
+        "--release-inputs-manifest-sha256",
+        pin,
+    )
+    err = _stderr(world, argv, capsys)
+    assert "FAIL: RELEASE_INPUTS: 4 inputs are refused" in err
+    assert f"release inputs are for {OTHER_DAY}, this run is for {CUTOFF}" in err
+    for role in tool.SLEEVE_FILE_DEFAULTS:
+        assert f"--file {role}=KEY:REL" in err
+
+
+def test_an_ambiguous_family_prints_the_candidates_and_the_flag(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = world["qe"] / "data-quantbase" / "source-runs"
+    for name in QB_FILES:
+        leaf = name.rpartition("/")[2]
+        _put(
+            root / "run-two" / "artifacts" / "csv" / leaf,
+            (root / "run-one" / "artifacts" / "csv" / leaf).read_bytes(),
+        )
+    for argv in (acceptance_args(world), sleeve_args(world)):
+        err = _stderr(world, argv, capsys)
+        assert "FAIL: AMBIGUOUS_FILE:" in err
+        assert "accounts.csv" in err and "run-one" in err and "run-two" in err
+        assert "--artifact-dir quantbase=qe:data-quantbase/source-runs/run-one" in err
+        assert "--artifact-dir quantbase=qe:data-quantbase/source-runs/run-two" in err
+        # the captures of one provider share one fix, which is printed once
+        assert err.count("narrow the search with one of") == 1
+    assert "quantbase_dashboard_total" in err
+    narrowed = "quantbase=qe:data-quantbase/source-runs/run-one"
+    assert tool.main(sleeve_args(world, "--artifact-dir", narrowed)) == 0
+
+
+def test_an_ambiguous_family_and_a_stale_default_are_refused_in_one_error(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = world["qe"] / "data-quantbase" / "source-runs"
+    source = root / "run-one" / "artifacts" / "csv" / "accounts.csv"
+    _put(root / "run-two" / "artifacts" / "csv" / "accounts.csv", source.read_bytes())
+    _stale_default(world, "crosswalk")
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "2 inputs are refused" in err
+    assert "[CUTOFF_MISMATCH]" in err and "[AMBIGUOUS_FILE]" in err
+    assert "--file crosswalk=KEY:REL" in err
+    assert "--artifact-dir quantbase=qe:data-quantbase/source-runs/run-one" in err
+
+
+def test_stale_run_outputs_are_listed_together_for_the_acceptance_inputs(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    for target, keys in (
+        (
+            "scratch/run/stages/panel/account-strategy-manifest.json",
+            ("calculation_cutoff_date",),
+        ),
+        (
+            "scratch/run/stages/report/current-epoch-crosswalk.json",
+            ("calculation_cutoff_date", "as_of_date"),
+        ),
+    ):
+        path = world["tmp"] / target
+        document = json.loads(path.read_bytes())
+        for key in keys:
+            document[key] = OTHER_DAY
+        path.write_bytes(json.dumps(document).encode())
+    err = _stderr(world, acceptance_args(world), capsys)
+    assert "FAIL: CUTOFF_MISMATCH: 2 inputs are refused" in err
+    assert "--file declared_cutoff_date=KEY:REL" in err
+    assert "--file account_strategy_map_and_active_universe=KEY:REL" in err
+    assert "calculation_cutoff_date is" in err and "as_of_date is" in err
+
+
+def test_consistent_defaults_pin_the_governed_bytes_unchanged(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert tool.main(sleeve_args(world)) == 0
+    assert capsys.readouterr().err == ""
+    inputs = result(world)["inputs"]
+    for role, relative in tool.SLEEVE_FILE_DEFAULTS.items():
+        assert inputs[role] == {
+            "path": relative,
+            "root": "repo",
+            "sha256": _sha((world["repo"] / relative).read_bytes()),
+        }
+
+
+def test_only_directories_holding_the_whole_family_are_advertised(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = world["qe"] / "data-quantbase" / "source-runs"
+    source = root / "run-one" / "artifacts" / "csv" / "accounts.csv"
+    _put(root / "run-two" / "artifacts" / "csv" / "accounts.csv", source.read_bytes())
+    for argv in (acceptance_args(world), sleeve_args(world)):
+        err = _stderr(world, argv, capsys)
+        assert "FAIL: AMBIGUOUS_FILE:" in err
+        assert "--artifact-dir quantbase=qe:data-quantbase/source-runs/run-one" in err
+        assert "run-two" not in err.partition("narrow the search")[2]
+    # when no candidate holds the family, no flag is suggested
+    (
+        root / "run-one" / "artifacts" / "csv" / "dashboard_Total_pricehistory.csv"
+    ).unlink()
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "no candidate directory holds the whole quantbase family" in err
+    assert "narrow the search" not in err
+
+
+def test_a_stale_provider_does_not_hide_a_later_ambiguous_provider(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = make_world(tmp_path, as_of={"ibkr": "2031-03-01"})
+    root = world["qe"] / "data-quantbase" / "source-runs"
+    source = root / "run-one" / "artifacts" / "csv" / "accounts.csv"
+    _put(root / "run-two" / "artifacts" / "csv" / "accounts.csv", source.read_bytes())
+    err = _stderr(world, sleeve_args(world), capsys)
+    assert "2 inputs are refused" in err
+    assert "[STALE_GENERATION] ibkr" in err
+    assert "[AMBIGUOUS_FILE] quantbase_accounts" in err
+    assert "--artifact-dir quantbase=qe:data-quantbase/source-runs/run-one" in err

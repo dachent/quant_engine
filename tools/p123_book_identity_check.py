@@ -28,7 +28,8 @@ I7 against the page record: series start is not after the page inception; the se
    is not after, and within 7 days of, the strategy start string; the holdings count is
    within 5 of ``posCnt`` (warning).  A live book whose transactions precede its inception
    is correct and passes.
-I8 no two books share trade rows (CASH rows excluded): more than 5% of the smaller set fails.
+I8 no two books share trade rows (CASH rows excluded): at least 50% of the smaller set fails
+   (a duplicate or permutation), more than 5% is a warning with the counts recorded.
 I9 against a reference pull (``--reference-index``): every older row of the same id is in
    the new file with its multiplicity (a row held twice in the reference must be held twice;
    rows are compared on every field except the symbol, which the export retags, and the
@@ -71,9 +72,11 @@ _START_STRING = re.compile(r"Start\s+(\d{1,2})/(\d{1,2})/(\d{4})")
 _NON_SHARE_TYPES = {"CASH", "DIV", "INT", "FEE"}
 _SHARES_TOLERANCE = 0.5
 _OVERLAP_FAIL = 0.05
+_OVERLAP_DUPLICATE = 0.5
 _REFERENCE_MISSING = 0.0
 _PAGE_POSITIONS_TOLERANCE = 5
 _START_WINDOW_DAYS = 7
+_START_GAP_DAYS = 7
 
 
 def _number(value: str | None) -> float | None:
@@ -242,9 +245,15 @@ def check_book(
     perf_day = _day(perf[0]["Date"]) if perf else None
     perf_equity = _number(perf[0].get("Total Equity")) if perf else None
     # I3
+    i3_gap: int | None = None
+    first_row = min((d for d in (_day(r.get("Date")) for r in tx) if d), default=None)
     if cash is None or not perf:
         checks.append(_check("I3", "FAIL", "no CASH start row or no perf rows"))
-    elif (perf_day != cash_day and any(r.get("Type") != "CASH" for r in tx)) or (
+    elif (
+        perf_day != cash_day
+        and any(r.get("Type") != "CASH" for r in tx)
+        and not _start_gap_ok(perf_day, cash_day, first_row, perf_equity, cash_amount)
+    ) or (
         cash_amount is not None
         and perf_equity is not None
         and abs(perf_equity - cash_amount) > 0.01
@@ -254,7 +263,21 @@ def check_book(
                 "I3",
                 "FAIL",
                 f"perf starts {perf_day} with equity {perf_equity}; "
-                f"transactions start {cash_day} with cash {cash_amount}",
+                f"transactions start {cash_day} with cash {cash_amount}; "
+                f"earliest transaction row {first_row}",
+            )
+        )
+    elif perf_day != cash_day and any(r.get("Type") != "CASH" for r in tx):
+        # The perf curve starts on the last trading day before the first transaction row
+        # (a year-end boundary: Thu 1998-12-31 curve start, first row Sat 1999-01-02), with
+        # the identical start amount.
+        i3_gap = (cash_day - perf_day).days  # type: ignore[operator]
+        checks.append(
+            _check(
+                "I3",
+                "PASS",
+                f"perf starts {perf_day}, transactions start {cash_day} ({i3_gap} days "
+                f"later, within {_START_GAP_DAYS}); equal start amount {cash_amount}",
             )
         )
     elif perf_day != cash_day:
@@ -435,6 +458,7 @@ def check_book(
             "cash_amount": cash_amount,
             "date": cash_day.isoformat() if cash_day else None,
         },
+        "i3_start_gap_days": i3_gap,
     }
 
 
@@ -533,6 +557,28 @@ def _positions_as_of(
     )
 
 
+def _start_gap_ok(
+    perf_day: date | None,
+    cash_day: date | None,
+    first_row: date | None,
+    perf_equity: float | None,
+    cash_amount: float | None,
+) -> bool:
+    """The perf curve starts up to ``_START_GAP_DAYS`` calendar days before the first
+    transaction row (never after it: the earliest row of ANY type, not only the CASH row,
+    must not precede the curve) and the two start amounts are identical."""
+    if perf_day is None or cash_day is None or first_row is None:
+        return False
+    if first_row < perf_day or first_row != cash_day:
+        return False  # the CASH row must itself be the earliest row of any type
+    if perf_equity is None or cash_amount is None:
+        return False
+    return (
+        0 < (cash_day - perf_day).days <= _START_GAP_DAYS
+        and abs(perf_equity - cash_amount) <= 0.01
+    )
+
+
 def _cash_only(
     tx: Sequence[dict[str, str]], perf: Sequence[dict[str, str]], holdings_rows: int
 ) -> dict[str, Any] | None:
@@ -618,6 +664,21 @@ def _cash_only_positions(
     )
 
 
+def _overlap_status(shared: int, smaller: int, duplicate_status: str) -> str | None:
+    """Graded I8: a book that shares at least half of the smaller book's trade rows is a
+    duplicate or permutation (the 2026-09-02 set shared all 188 rows of two books);
+    a small overlap is review (two EU strategy books of the same family shared 9 of 188,
+    an AI book and its derivative 51 of 787); at most 5% passes."""
+    if not smaller or shared == 0:
+        return None
+    share = shared / smaller
+    if share >= _OVERLAP_DUPLICATE:
+        return duplicate_status
+    if share > _OVERLAP_FAIL:
+        return "WARN"
+    return None
+
+
 def _decision(checks: Sequence[dict[str, str]]) -> str:
     statuses = {c["status"] for c in checks}
     return (
@@ -697,16 +758,21 @@ def check_capture(
         for right in selected[index + 1 :]:
             smaller = min(len(keys[left]), len(keys[right]))
             shared = len(keys[left] & keys[right])
-            if smaller and shared / smaller > _OVERLAP_FAIL:
+            status = _overlap_status(shared, smaller, "FAIL")
+            if status is not None:
                 for book, other in ((left, right), (right, left)):
                     by_book[book]["checks"].append(
                         _check(
                             "I8",
-                            "FAIL",
-                            f"{shared} trade rows shared with book {other}",
+                            status,
+                            f"{shared} of {smaller} trade rows ({shared / smaller:.1%} of "
+                            f"the smaller book) shared with book {other}",
                         )
                     )
-                    by_book[book]["decision"] = "FAIL"
+                    by_book[book].setdefault("i8_shared_rows", {})[other] = {
+                        "shared": shared,
+                        "smaller_book_rows": smaller,
+                    }
     for result in results:
         if not any(c["check"] == "I8" for c in result["checks"]):
             result["checks"].append(
@@ -723,12 +789,17 @@ def check_capture(
             for other, other_keys in sorted(others.items()):
                 smaller = min(len(keys[book]), len(other_keys))
                 shared = len(keys[book] & other_keys)
-                if other != book and smaller and shared / smaller > _OVERLAP_FAIL:
+                overlap = _overlap_status(shared, smaller, status)
+                if status == "FAIL" and overlap == "WARN":
+                    overlap = "FAIL"  # same pull: any share above the threshold fails
+                if other != book and overlap is not None:
                     by_book[book]["checks"].append(
                         _check(
                             "I8x",
-                            status,
-                            f"{shared} trade rows shared with book {other} in {directory.name}",
+                            overlap,
+                            f"{shared} of {smaller} trade rows ({shared / smaller:.1%} of "
+                            f"the smaller book) shared with book {other} in "
+                            f"{directory.name}",
                         )
                     )
     for result in results:
