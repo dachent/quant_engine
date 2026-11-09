@@ -22,10 +22,12 @@ never a skip:
 2. An item's own resource body (``/app/investment/resource/{id}``) is matched to exactly one
    list row on ``name``, ``inceptionDt`` and ``posCnt``; zero or several rows refuse, and a
    ``portfolioUid`` in the body must agree.
-3. A ``perf-data`` or ``holdings`` body binds to the item whose resource body is the nearest
-   one before it (within ``WINDOW`` ordinals, no other item in between), and is corroborated by
-   the body itself: perf-data ``date`` equals the item's ``inceptionDt``, the holdings position
-   count equals ``posCnt``.  An uncorroborated body refuses.
+3. A ``perf-data`` or ``holdings`` body binds to the list row its CONTENT matches, never by the
+   order the recorder saw responses in (ordinals follow completion, so overlapping requests
+   interleave): perf-data starts on the row's ``inceptionDt`` and its total return (last level
+   over the first, in percent) equals the row's ``retTotal``; holdings has ``posCnt`` positions
+   whose value sums to ``mktVal``.  No fitting row, or two fitting rows (identical EMPTY holdings
+   of zero-position books are the one exception), refuses.
 4. Fetcher bodies carry the id in the file name; where the same (id, kind) is also in a
    recorder run the two must be byte-identical.
 
@@ -58,7 +60,6 @@ from typing import Any, Sequence
 from quant_engine.core import InterpreterRefusal, require_current_interpreter
 
 SCHEMA = "p123-har-admission/1"
-WINDOW = 40  # ordinals between an item's resource body and the bodies bound to it
 LIST_TEMPLATE = "/app/investment/resource"
 ITEM_RESOURCE = "/app/investment/resource/{id}"
 ITEM_PERF = "/app/investment/perf-data/{id}"
@@ -145,11 +146,26 @@ def _us_day(value: object, what: str) -> date:
 # ---------------------------------------------------------------- sources
 
 
+def _refuse_rehearsal(path: Path, document: dict[str, Any], what: str) -> None:
+    """A rehearsal (dry-run) capture or root is never admitted as evidence."""
+    parts = {part.casefold() for part in path.parts}
+    if (
+        document.get("evidence_eligible") is False
+        or str(document.get("run_id") or "").startswith("DRY-")
+        or any(part.startswith("dry-") for part in parts)
+    ):
+        raise AdmissionRefused(
+            f"{what} {path.name} is a dry-run/rehearsal, not evidence (evidence_eligible false, "
+            "a DRY- run id or a dry-run directory)"
+        )
+
+
 def load_recorder(run: Path) -> tuple[list[tuple[int, Body]], dict[str, Any]]:
     """Verify a recorder run against its manifest and return its recorded GET 200 bodies."""
 
     manifest_bytes = _regular(run / "manifest.json", "recorder manifest")
     manifest = _object(json.loads(manifest_bytes), "recorder manifest")
+    _refuse_rehearsal(run, manifest, "recorder run")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise AdmissionRefused("recorder manifest lists no artifacts")
@@ -235,6 +251,7 @@ def load_fetcher(capture: Path) -> tuple[dict[str, Body], dict[str, Any]]:
         capture / "capture-manifest.json", "fetcher capture manifest"
     )
     manifest = _object(json.loads(manifest_bytes), "fetcher capture manifest")
+    _refuse_rehearsal(capture, manifest, "fetcher capture")
     out: dict[str, Body] = {}
     for item in manifest.get("artifacts") or []:
         item = _object(item, "fetcher artifact")
@@ -320,9 +337,34 @@ def _check_accounts(seen: set[Any], stated: Sequence[int]) -> list[int]:
 def _corroboration_error(
     kind: str, doc: dict[str, Any], row: dict[str, Any]
 ) -> str | None:
+    """Why ``doc`` is not the ``kind`` body of the list row ``row`` (None: it is).
+
+    The link is the CONTENT of the body against the account list, never the order the
+    recorder saw responses in (ordinals follow completion): a perf body starts on the item's
+    inception and its total return (last level over the first, in percent) is the list's
+    ``retTotal``; a holdings body has the item's position count and its market value is the
+    list's ``mktVal``."""
     if kind == "perf":
+        data = doc.get("data")
         if doc.get("date") in (None, "") or doc.get("date") != row.get("inceptionDt"):
-            return f"starts {doc.get('date')}, not the inception {row.get('inceptionDt')} of the item it follows"
+            return (
+                f"starts {doc.get('date')}, not the inception {row.get('inceptionDt')}"
+            )
+        total = row.get("retTotal")
+        if (
+            not isinstance(data, list)
+            or not data
+            or total is None
+            or isinstance(total, bool)
+        ):
+            return "cannot be compared with the list's total return"
+        try:
+            first, last = float(data[0][1]), float(data[-1][1])
+            expected = float(total)
+        except (TypeError, ValueError, IndexError):
+            return "cannot be compared with the list's total return"
+        if first <= 0 or abs((last / first - 1.0) * 100.0 - expected) > 0.011:
+            return "total return differs from the list's retTotal"
         return None
     positions = doc.get("positions")
     if (
@@ -332,6 +374,13 @@ def _corroboration_error(
     ):
         count = len(positions) if isinstance(positions, list) else "?"
         return f"has {count} positions, the item has {row.get('posCnt')}"
+    try:
+        value = sum(float(p["value"]) for p in positions)
+        market = float(row["mktVal"])
+    except (TypeError, ValueError, KeyError):
+        return "cannot be compared with the list's market value"
+    if abs(value - market) > 0.011:
+        return "market value differs from the list's mktVal"
     return None
 
 
@@ -340,7 +389,6 @@ def bind_recorder(
 ) -> tuple[dict[int, Item], Body]:
     rows, list_body = _list_rows(bodies)
     items: dict[int, Item] = {}
-    seen: list[tuple[int, int]] = []  # (ordinal, item uid) of every resource body
     for ordinal, body in bodies:
         if body.template == ITEM_RESOURCE:
             doc = _object(body.json(), f"item resource body {ordinal}")
@@ -363,7 +411,6 @@ def bind_recorder(
                 raise AdmissionRefused(
                     f"resource body {ordinal} names another item than its list row"
                 )
-            seen.append((ordinal, uid))
             _put(
                 items,
                 uid,
@@ -375,39 +422,32 @@ def bind_recorder(
         elif body.template in (ITEM_PERF, ITEM_HOLDINGS):
             kind = "perf" if body.template == ITEM_PERF else "holdings"
             doc = _object(body.json(), f"{kind} body {ordinal}")
-            # Recorder ordinals follow response COMPLETION, so overlapping requests can
-            # interleave: every item whose resource body is within the window is a candidate,
-            # the body must corroborate exactly one of them, and two candidates that both
-            # corroborate it are an ambiguous interleaving (refused, never guessed).
-            near = [(o, u) for o, u in seen if 0 < ordinal - o <= WINDOW]
-            if not near:
-                raise AdmissionRefused(
-                    f"{kind} body {ordinal} has no item resource body within {WINDOW} ordinals before it"
-                )
-            candidates = sorted({u for _, u in near})
-            fits = [
-                u
-                for u in candidates
-                if _corroboration_error(kind, doc, items[u].row) is None
-            ]
-            if len(fits) > 1:
-                raise AdmissionRefused(
-                    f"{kind} body {ordinal} fits items {fits}: ambiguous interleaving of responses, not bound"
-                )
+            fits = [r for r in rows if _corroboration_error(kind, doc, r) is None]
             if not fits:
-                nearest = near[-1][1]
-                raise AdmissionRefused(
-                    f"{kind} body {ordinal} {_corroboration_error(kind, doc, items[nearest].row)}"
+                reasons = sorted(
+                    {str(_corroboration_error(kind, doc, r)) for r in rows}
                 )
-            uid = fits[0]
-            _put(
-                items,
-                uid,
-                items[uid].row,
-                kind,
-                body,
-                f"the only resource body within {WINDOW} ordinals it corroborates ({kind} ordinal {ordinal})",
-            )
+                raise AdmissionRefused(
+                    f"{kind} body {ordinal} belongs to no item of the list: {'; '.join(reasons)}"
+                )
+            if len(fits) > 1:
+                # Only identical empty books can share a holdings body: every fitting row
+                # states zero positions and zero value, so the same bytes are true of each.
+                empty = kind == "holdings" and not doc.get("positions")
+                if not empty:
+                    raise AdmissionRefused(
+                        f"{kind} body {ordinal} fits items "
+                        f"{sorted(int(r['portfolioUid']) for r in fits)}: not bound"
+                    )
+            for row in fits:
+                _put(
+                    items,
+                    int(row["portfolioUid"]),
+                    row,
+                    kind,
+                    body,
+                    f"content matches the list row (inception/retTotal or posCnt/mktVal) ({kind} ordinal {ordinal})",
+                )
     return items, list_body
 
 
@@ -762,6 +802,12 @@ def admit(
     if base.is_symlink() or not base.is_dir():
         raise AdmissionRefused("the base HAR root is missing or linked")
     _refuse_overlap(base, out)
+    previous = base.parent / "p123-har-admission-manifest.json"
+    _refuse_rehearsal(
+        base,
+        json.loads(previous.read_text(encoding="utf-8")) if previous.is_file() else {},
+        "base HAR root",
+    )
     items: dict[int, Item] = {}
     recorder_summaries = []
     list_body: Body | None = None
@@ -944,28 +990,15 @@ def stage_designer(
         assert recorder is not None
         bodies, source = load_recorder(recorder)
         _refuse_unrecorded(source, recorder, DESIGNER_ROUTES)
-        current: int | None = None
-        for ordinal, body in bodies:
+        for _ordinal, body in bodies:
             if body.template == MODEL:
-                doc = _object(body.json(), f"model body {ordinal}")
-                current = ordinal if doc.get("portUid") == uid else None
-                if current is not None:
+                doc = _object(body.json(), f"model body {_ordinal}")
+                if doc.get("portUid") == uid:
                     if "model" in picked and picked["model"].sha256 != body.sha256:
                         raise AdmissionRefused(f"two different model bodies for {uid}")
                     picked["model"] = body
-            elif (
-                body.template in (MODEL_PERF, MODEL_HOLDINGS)
-                and current is not None
-                and ordinal - current <= WINDOW
-            ):
-                if body.template == MODEL_PERF:
-                    perfs.setdefault(body.sha256, body)
-                    continue
-                if "holdings" in picked and picked["holdings"].sha256 != body.sha256:
-                    raise AdmissionRefused(
-                        f"two different holdings bodies for designer {uid}"
-                    )
-                picked["holdings"] = body
+            elif body.template == MODEL_PERF:
+                perfs.setdefault(body.sha256, body)
     if "model" not in picked or not perfs:
         raise AdmissionRefused(
             f"designer {uid}: the model body or the curve is missing"

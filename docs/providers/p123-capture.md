@@ -613,19 +613,21 @@ Id binding (recorder bodies), each step checked, a body that cannot be bound is 
    list of the first `--recorder` is the one saved, the others are recorded);
 2. an item's resource body is matched to exactly one list row on `name`, `inceptionDt` and
    `posCnt` (zero or several refuse; a `portfolioUid` in the body must agree);
-3. a `perf-data` or `holdings` body binds to the one item, among those whose resource body is
-   within 40 ordinals before it, that it corroborates (perf `date` equals `inceptionDt`, the
-   position count equals `posCnt`); recorder ordinals follow response completion, so two items
-   that both fit are an ambiguous interleaving and refuse;
+3. a `perf-data` or `holdings` body binds to the list row its CONTENT matches, never by the order
+   the recorder saw responses in (ordinals follow response completion, so overlapping requests
+   interleave): perf-data starts on the row's `inceptionDt` and its total return (last level over
+   the first, in percent) equals the row's `retTotal`; holdings has `posCnt` positions whose value
+   sums to `mktVal`. No fitting row, or two fitting rows, refuses; the one exception is identical
+   EMPTY holdings, which fit every zero-position row and are true of each;
 4. a fetcher body carries the id in its name and must be byte-identical to the recorder body of
    the same item; two different bodies for one item refuse.
 
-Also refused: a fetcher capture with no admissible body, an output root that overlaps the base
+Also refused: any dry-run or non-evidence input (a manifest with `evidence_eligible` false or a `DRY-` run id, a dry-run directory, or a base root produced by a dry-run admission), a fetcher capture with no admissible body, an output root that overlaps the base
 root, a performance series whose rows differ from the weekday calendar of
 `date..dateLast`, one that ends before `--as-of`, an `--account-id` no run states, and an
 admitted file that would replace a base data file (only the account's list csv is replaced).
 
-`stage-designer` writes `capture-manifest.json` and `raw/r2g_<id>_dm_true.json`,
+`stage-designer` binds the model body by its own `portUid` and judges every curve body of the run against that model (no ordinal adjacency); from a recorder run it stages the model and the curve only (holdings are staged from an id-named fetcher capture). It writes `capture-manifest.json` and `raw/r2g_<id>_dm_true.json`,
 `r2g_<id>_perf-full.json` (and `_holdings.json` when present) for
 `tools/portfolio_designer_model_curve.py`. A curve is admitted only when it starts on the
 model's `inceptionDt`, ends on its `endDt` and has its launch line on `launchDt`: the chart's

@@ -20,7 +20,9 @@ ACCOUNT = 7001
 LIST_TEMPLATE = "/app/investment/resource"
 
 
-def _row(uid: int, name: str, inception: str, pos: int) -> dict[str, Any]:
+def _row(
+    uid: int, name: str, inception: str, pos: int, ret: float = 4.0
+) -> dict[str, Any]:
     return {
         "portfolioUid": uid,
         "assetUid": uid + 100,
@@ -31,11 +33,12 @@ def _row(uid: int, name: str, inception: str, pos: int) -> dict[str, Any]:
         "inceptionDt": inception,
         "posCnt": pos,
         "isAccountLive": True,
-        "mktVal": 1.5,
+        "mktVal": pos * 2.0,
+        "retTotal": ret,
     }
 
 
-ROWS = [_row(9001, "Alpha", "2026-01-05", 2), _row(9002, "Beta", "2026-01-05", 0)]
+ROWS = [_row(9001, "Alpha", "2026-01-05", 2), _row(9002, "Beta", "2026-01-05", 0, 0.0)]
 
 
 def _perf() -> dict[str, Any]:
@@ -215,11 +218,11 @@ def test_a_resource_body_matching_two_list_rows_or_none_is_refused(
         _run(tmp_path, run, out=_out(tmp_path, "o2"))
 
 
-def test_a_body_that_the_item_does_not_corroborate_is_refused(tmp_path: Path) -> None:
+def test_a_body_that_no_list_row_corroborates_is_refused(tmp_path: Path) -> None:
     wrong_start = _perf()
     wrong_start["date"] = "2026-01-06"
     wrong_start["data"] = wrong_start["data"][:4]
-    with pytest.raises(admit.AdmissionRefused, match="not the inception"):
+    with pytest.raises(admit.AdmissionRefused, match="belongs to no item of the list"):
         _run(
             tmp_path, _recorder(tmp_path, visits=[(ROWS[0], wrong_start, _holdings(2))])
         )
@@ -229,23 +232,82 @@ def test_a_body_that_the_item_does_not_corroborate_is_refused(tmp_path: Path) ->
             _recorder(tmp_path, "r2", visits=[(ROWS[0], _perf(), _holdings(1))]),
             out=_out(tmp_path, "o2"),
         )
+    # a total return the list does not state for any item
+    off = _perf()
+    off["data"][-1][1] = 150.0
+    with pytest.raises(admit.AdmissionRefused, match="total return differs"):
+        _run(
+            tmp_path,
+            _recorder(tmp_path, "r3", visits=[(ROWS[0], off, None)]),
+            out=_out(tmp_path, "o3"),
+        )
+    # holdings whose value is not the list's market value
+    heavy = {
+        "positions": [{"shares": 1.0, "value": 9.0}, {"shares": 1.0, "value": 2.0}]
+    }
+    with pytest.raises(admit.AdmissionRefused, match="market value differs"):
+        _run(
+            tmp_path,
+            _recorder(tmp_path, "r4", visits=[(ROWS[0], None, heavy)]),
+            out=_out(tmp_path, "o4"),
+        )
 
 
-def test_a_perf_body_with_no_item_before_it_is_refused(tmp_path: Path) -> None:
-    run = _recorder(
-        tmp_path, visits=[], extra=[("/app/investment/perf-data/{id}", _perf())]
-    )
-    with pytest.raises(admit.AdmissionRefused, match="no item resource body"):
-        _run(tmp_path, run)
-    far = [("/app/account/resource/{id}", {"id": ACCOUNT})] * (admit.WINDOW + 1)
+def test_binding_does_not_depend_on_the_order_responses_completed_in(
+    tmp_path: Path,
+) -> None:
+    """Astra R5-01: a perf body completes BEFORE its own resource body, and another item's
+    resource body sits between: the content still binds it to the right item."""
+    a = _row(9001, "Alpha", "2026-01-05", 2, 4.0)
+    b = _row(9002, "Beta", "2026-01-05", 2, 8.0)
+    perf_b = _perf()
+    perf_b["data"][-1][1] = 108.0  # Beta's own total return (8.0)
     run = _recorder(
         tmp_path,
-        "far",
-        visits=[(ROWS[0], None, None)],
-        extra=[*far, ("/app/investment/perf-data/{id}", _perf())],
+        rows=[a, b],
+        visits=[],
+        extra=[
+            ("/app/investment/resource/{id}", _resource(a)),
+            (
+                "/app/investment/perf-data/{id}",
+                perf_b,
+            ),  # Beta's curve, right after Alpha
+            ("/app/investment/resource/{id}", _resource(b)),
+        ],
     )
-    with pytest.raises(admit.AdmissionRefused, match="no item resource body"):
-        _run(tmp_path, run, out=_out(tmp_path, "o2"))
+    manifest = _run(tmp_path, run)
+    assert manifest["items"]["9002"]["last_date"] == "2026-01-09"
+    assert "perf" not in {
+        k.split("/")[1] for k in manifest["bodies"] if k.startswith("9001/")
+    }
+    assert manifest["bodies"]["9002/perf"]["label"] == "3"
+    # two items whose total return and inception are identical cannot be told apart: refused
+    twin = _row(9003, "Gamma", "2026-01-05", 2, 4.0)
+    run2 = _recorder(
+        tmp_path,
+        "twins",
+        rows=[a, twin],
+        visits=[(a, _perf(), None), (twin, None, None)],
+    )
+    with pytest.raises(admit.AdmissionRefused, match="not bound"):
+        _run(tmp_path, run2, out=_out(tmp_path, "o2"))
+
+
+def test_a_perf_body_matching_no_item_is_refused_wherever_it_sits(
+    tmp_path: Path,
+) -> None:
+    run = _recorder(
+        tmp_path,
+        visits=[],
+        extra=[
+            (
+                "/app/investment/perf-data/{id}",
+                {"date": "2020-01-01", "data": [[0, 100.0, 0.0]]},
+            )
+        ],
+    )
+    with pytest.raises(admit.AdmissionRefused, match="belongs to no item of the list"):
+        _run(tmp_path, run)
 
 
 def test_two_different_bodies_for_one_item_are_refused(tmp_path: Path) -> None:
@@ -268,7 +330,12 @@ def test_a_series_that_stops_before_the_as_of_or_breaks_the_calendar_is_refused(
     ):
         _run(
             tmp_path,
-            _recorder(tmp_path, "r2", visits=[(ROWS[0], short, None)]),
+            _recorder(
+                tmp_path,
+                "r2",
+                rows=[_row(9001, "Alpha", "2026-01-05", 2, 3.0)],
+                visits=[(_row(9001, "Alpha", "2026-01-05", 2, 3.0), short, None)],
+            ),
             out=_out(tmp_path, "o2"),
         )
 
@@ -454,7 +521,6 @@ def test_designer_staging_refuses_a_windowed_curve_and_stages_the_full_one(
     names = sorted(p.name for p in (out / "raw").iterdir())
     assert names == [
         "r2g_8001_dm_true.json",
-        "r2g_8001_holdings.json",
         "r2g_8001_perf-full.json",
     ]
     staged = json.loads((out / "capture-manifest.json").read_text(encoding="utf-8"))
@@ -555,6 +621,7 @@ def test_a_later_sitting_supersedes_live_snapshots_and_a_longer_series(
     longer["data"].append([1, 105.0, 10.0])
     moved = deepcopy(ROWS)
     row = moved[0]
+    row["retTotal"] = 5.0  # the later sitting reaches 105
     run2 = _recorder(
         tmp_path, "later", rows=moved, visits=[(row, longer, _holdings(2))]
     )
@@ -591,27 +658,6 @@ def test_the_output_root_may_not_overlap_the_base_root(tmp_path: Path) -> None:
     with pytest.raises(admit.AdmissionRefused, match="must not overlap"):
         _run(tmp_path, run, out=base / "scratch" / "inside")
     assert not (base / "scratch").exists()
-
-
-def test_interleaved_responses_that_fit_two_items_are_not_bound(tmp_path: Path) -> None:
-    # Two items share an inception date; both resource bodies completed before the perf body,
-    # which fits both: the recorder cannot say which page it came from.
-    a = _row(9001, "Alpha", "2026-01-05", 2)
-    b = _row(9002, "Beta", "2026-01-05", 2)
-    run = _recorder(
-        tmp_path,
-        rows=[a, b],
-        visits=[(a, None, None), (b, _perf(), None)],
-    )
-    with pytest.raises(admit.AdmissionRefused, match="ambiguous interleaving"):
-        _run(tmp_path, run)
-    # distinguishable by the body itself: a later inception makes the perf unique
-    c = _row(9003, "Gamma", "2026-01-06", 2)
-    run2 = _recorder(
-        tmp_path, "r2", rows=[a, c], visits=[(c, None, None), (a, _perf(), None)]
-    )
-    manifest = _run(tmp_path, run2, out=_out(tmp_path, "o2"))
-    assert manifest["bodies"]["9001/perf"]["label"] == "4"
 
 
 def test_a_fetcher_capture_with_no_admissible_body_is_refused(tmp_path: Path) -> None:
@@ -860,3 +906,58 @@ def test_a_perf_row_that_is_not_marker_level_total_is_refused(tmp_path: Path) ->
             match=r"is not \[marker, positive level, total value\]",
         ):
             _run(tmp_path / f"r{number}", run, out=_out(tmp_path / f"r{number}"))
+
+
+def _mark(run: Path, **fields: Any) -> None:
+    path = run / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.update(fields)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_a_dry_run_or_non_evidence_input_is_refused(tmp_path: Path) -> None:
+    """Astra R5-03: DRY- ids, dry-run directories and evidence_eligible false never admit."""
+    for number, fields in enumerate(
+        ({"run_id": "DRY-1"}, {"evidence_eligible": False})
+    ):
+        run = _recorder(tmp_path / f"d{number}")
+        _mark(run, **fields)
+        with pytest.raises(admit.AdmissionRefused, match="dry-run/rehearsal"):
+            _run(tmp_path / f"d{number}", run, out=_out(tmp_path / f"d{number}"))
+    # a recorder run under a dry-run directory
+    nested = tmp_path / "dry-run-capture"
+    run = _recorder(nested)
+    with pytest.raises(admit.AdmissionRefused, match="dry-run/rehearsal"):
+        _run(nested, run, out=_out(nested))
+    # a fetcher capture marked as not evidence
+    capture = _fetcher(
+        tmp_path, {"strategy_9001_app_investment_perfdata_init.json": _perf()}
+    )
+    manifest_path = capture / "capture-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["evidence_eligible"] = False
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(admit.AdmissionRefused, match="dry-run/rehearsal"):
+        _run(tmp_path, _recorder(tmp_path), fetchers=[capture], out=_out(tmp_path, "f"))
+    # a HAR root produced by a dry-run admission cannot be the base of the next one
+    produced = _out(tmp_path, "first")
+    _run(tmp_path, _recorder(tmp_path, "ok"), out=produced)
+    with pytest.raises(admit.AdmissionRefused, match="dry-run/rehearsal"):
+        _run(
+            tmp_path,
+            _recorder(tmp_path, "ok2"),
+            base=produced / "har-root",
+            out=_out(tmp_path, "chained"),
+        )
+    # stage-designer refuses the same inputs
+    model, full = _designer()
+    drun = _designer_run(tmp_path, model, full, "dd")
+    _mark(drun, evidence_eligible=False)
+    with pytest.raises(admit.AdmissionRefused, match="dry-run/rehearsal"):
+        admit.stage_designer(
+            out=_out(tmp_path, "sd"),
+            uid=8001,
+            recorder=drun,
+            fetcher=None,
+            dry_run=True,
+        )
