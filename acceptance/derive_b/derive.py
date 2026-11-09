@@ -7730,6 +7730,15 @@ def main() -> None:
         parser.exit(2, f"input error: {error}\n")
     except ManifestError as error:
         parser.exit(1, f"error: {error}\n")
+    # Attribution an assembler can check: the cutoff this run installed and the exact
+    # inputs manifest it read (the same shape derive_a records).
+    result["cutoff"] = CUTOFF.isoformat()
+    if args.inputs is not None:
+        result["inputs_manifest"] = {
+            "path": str(args.inputs),
+            "sha256": file_sha256(args.inputs),
+            "bytes": args.inputs.stat().st_size,
+        }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(result, indent=2, ensure_ascii=False) + "\n",

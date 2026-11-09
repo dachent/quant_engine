@@ -322,6 +322,13 @@ def test_non_legacy_cutoff_end_to_end_is_not_fail_closed(
     assert capital["value"] == "123.00"
     assert capital["as_of"] == R3_CUTOFF
     assert output["code_commit"] == "control-constant"
+    # attribution the baseline assembler checks: B's own cutoff and the exact manifest read
+    assert output["cutoff"] == R3_CUTOFF
+    assert (
+        output["inputs_manifest"]["sha256"]
+        == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    )
+    assert output["inputs_manifest"]["bytes"] == manifest.stat().st_size
     assert all(
         row["as_of"] == R3_CUTOFF
         for row in output["metrics"]
