@@ -209,6 +209,10 @@ def test_a_model_unavailable_on_both_lanes_is_not_a_move_but_is_listed(
     assert table["rows"] == [] and table["findings"] == []
     assert len(table["summary"]["unavailable_on_both_lanes"]) == 2
     assert "No synthetic-strategy lens model changes" in table["sentence"]
+    assert (
+        "2 lens models are unavailable on both lanes: nothing is lost"
+        in table["sentence"]
+    )
     _schema().validate(table)
 
 
@@ -237,7 +241,15 @@ def test_a_model_unavailable_on_both_lanes_for_different_reasons_is_not_a_findin
     assert {item["status"] for item in both} == {
         "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY"
     }
+    assert {item["account_status"] for item in both} == {
+        "UNAVAILABLE_INSUFFICIENT_TIME_ORDERED_CV"
+    }
     assert "No synthetic-strategy lens model changes" in table["sentence"]
+    assert (
+        "2 lens models are unavailable on both lanes (2 for different reasons on the "
+        "two lanes; see the table): nothing is lost on the sleeve basis."
+    ) in table["sentence"]
+    assert "no account-lane figure" not in table["sentence"]
     _schema().validate(table)
 
 
