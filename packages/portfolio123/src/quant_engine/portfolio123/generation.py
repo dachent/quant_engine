@@ -1149,13 +1149,21 @@ def _cut_managed_performance(
         groups[key].setdefault(row.get("field", ""), row)
     removed: Counter[str] = Counter()
     for (entity, _artifact), fields in sorted(groups.items()):
-        if not {"data", "date", "dateLast"} <= set(fields):
+        if "data" not in fields:
             continue
+        if not {"date", "dateLast"} <= set(fields):
+            # observations with no interval cannot be placed against the cutoff: never passed
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} has observations but no "
+                "date/dateLast interval"
+            )
         try:
             first = date.fromisoformat(fields["date"]["value"])
             last = date.fromisoformat(fields["dateLast"]["value"])
         except ValueError:
-            continue  # the readers refuse an unreadable interval themselves
+            raise Portfolio123GenerationError(
+                f"managed performance of entity {entity} has an unreadable interval"
+            ) from None
         if last <= as_of:
             continue
         if first > as_of:
