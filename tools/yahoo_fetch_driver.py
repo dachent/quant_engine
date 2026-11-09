@@ -32,6 +32,7 @@ Live use is out of scope for the repository tests; the live transports are
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -43,12 +44,15 @@ import math
 from pathlib import Path
 import re
 import runpy
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
 from typing import Any, Protocol
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from quant_engine.core import is_nyse_trading_day
 
 SCHEMA_VERSION = 1
 PROBE_LABEL = "CANDIDATE_NOT_ADMITTED"
@@ -83,7 +87,7 @@ _MAX_LISTED_DATES = 60
 _RULES = frozenset(
     {"min_rows", "first_bar", "last_bar", "missing_weekdays", "null_closes"}
 )
-_CALENDARS = frozenset({"weekday", "every_day"})
+_CALENDARS = frozenset({"weekday", "every_day", "nyse"})
 _DATASETS = ("history", "history_adjusted")
 _PROFILES = frozenset({"tape", "capture-v0"})
 _HISTORY_COLUMNS = (
@@ -189,19 +193,33 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", value)
 
 
-def expected_dates(first: date, last: date, calendar: str) -> list[date]:
+def _is_session(day: date, calendar: str, closed: Sequence[date]) -> bool:
+    if calendar == "every_day":
+        return True
+    if calendar == "nyse":
+        # The repo's NYSE calendar (weekends and regular full-day closures); an ad hoc
+        # closure it does not model is declared per group in ``closed_days``.
+        return is_nyse_trading_day(day) and day not in closed
+    return day.weekday() < 5
+
+
+def expected_dates(
+    first: date, last: date, calendar: str, closed: Sequence[date] = ()
+) -> list[date]:
     out: list[date] = []
     cursor = first
     while cursor <= last:
-        if calendar == "every_day" or cursor.weekday() < 5:
+        if _is_session(cursor, calendar, closed):
             out.append(cursor)
         cursor += timedelta(days=1)
     return out
 
 
-def last_expected_session(through: date, calendar: str) -> date:
+def last_expected_session(
+    through: date, calendar: str, closed: Sequence[date] = ()
+) -> date:
     cursor = through
-    while calendar == "weekday" and cursor.weekday() >= 5:
+    while calendar != "every_day" and not _is_session(cursor, calendar, closed):
         cursor -= timedelta(days=1)
     return cursor
 
@@ -234,6 +252,7 @@ class Group:
     allowed_last_bar_lag_days: int
     exceptions: tuple[ExceptionLabel, ...]
     official_names: Mapping[str, str] | None = None
+    closed_days: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -336,6 +355,7 @@ _GROUP_OPTIONAL = {
     "allowed_last_bar_lag_days",
     "exceptions",
     "official_closes",
+    "closed_days",
 } | _DERIVED_OPTIONAL
 
 
@@ -370,6 +390,16 @@ def _parse_group(raw: object, cutoff: date, index: int) -> Group:
     calendar = value.get("calendar", "weekday")
     if calendar not in _CALENDARS:
         raise DriverError(f"{group_id}: calendar is unsupported")
+    closed_raw = value.get("closed_days", [])
+    if not isinstance(closed_raw, list) or (closed_raw and calendar != "nyse"):
+        raise DriverError(f"{group_id}: closed_days needs the nyse calendar")
+    closed_days = tuple(_day(item, f"{group_id}.closed_days") for item in closed_raw)
+    if len(set(closed_days)) != len(closed_days) or any(
+        item.weekday() >= 5 or not start <= item <= through for item in closed_days
+    ):
+        raise DriverError(
+            f"{group_id}: closed_days must be distinct weekdays in the window"
+        )
     datasets_raw = value.get("datasets", list(_DATASETS))
     if (
         kind == "chart"
@@ -452,6 +482,7 @@ def _parse_group(raw: object, cutoff: date, index: int) -> Group:
         ),
         exceptions=tuple(exceptions),
         official_names=official_names,
+        closed_days=closed_days,
     )
 
 
@@ -690,8 +721,8 @@ def make_evidence(
     config the live command will read, so it cannot be mistyped or taken from the file's bytes.
     """
 
-    if not _RUN_ID.fullmatch(run_id):
-        raise DriverError("run id is invalid")
+    if not _RUN_ID.fullmatch(run_id) or run_id.startswith(DRY_RUN_PREFIX):
+        raise DriverError("run id is invalid (the DRY- prefix is for rehearsals)")
     if not _REVIEW.fullmatch(review):
         raise DriverError("the review must be a quant_engine issue-comment URL")
     if valid_from_utc.tzinfo is None or valid_until_utc.tzinfo is None:
@@ -1109,6 +1140,34 @@ class RecordedChart:
 _ADAPTER: SimpleNamespace | None = None
 
 
+DRY_RUN_PREFIX = "DRY-"
+_YF_CACHE_DIR: str | None = None
+
+
+def yf_cache_dir() -> str:
+    """One persistent yfinance cache directory for the whole process.
+
+    yfinance keeps its cookie and timezone sqlite cache in a process-wide singleton bound to
+    the first location it is given. A directory made and deleted per group (or per run)
+    leaves that singleton pointing at a path that no longer exists, so every later group
+    failed with ``unable to open database file`` (Windows). The directory is created once
+    and removed when the process exits."""
+    global _YF_CACHE_DIR
+    if _YF_CACHE_DIR is None or not Path(_YF_CACHE_DIR).is_dir():
+        _YF_CACHE_DIR = tempfile.mkdtemp(prefix="yahoo-fetch-cache-")
+        atexit.register(shutil.rmtree, _YF_CACHE_DIR, ignore_errors=True)
+    return _YF_CACHE_DIR
+
+
+def _clear_result_cache(directory: str) -> None:
+    """Delete the adapter's cached RESULTS (history, snapshot, search files), never the
+    sqlite cookie/timezone cache beside them: every group must be a fresh network read,
+    whatever an earlier group or run in this process fetched."""
+    for pattern in ("history_*.csv", "current_snapshot_*.json", "ticker_search_*.json"):
+        for path in Path(directory).glob(pattern):
+            path.unlink()
+
+
 def load_adapter() -> Any:
     """Load the maintained yfinance adapter by path (it lives outside the packages)."""
     global _ADAPTER
@@ -1154,7 +1213,9 @@ def evaluate_series(
     unique_stamps = set(stamps)
     unique = sorted({date.fromisoformat(item[:10]) for item in unique_stamps})
     duplicates = len(stamps) - len(unique_stamps)
-    expected_last = last_expected_session(group.through, group.calendar)
+    expected_last = last_expected_session(
+        group.through, group.calendar, group.closed_days
+    )
     entry: dict[str, Any] = {
         "id": symbol_id,
         "ticker": ticker,
@@ -1203,7 +1264,9 @@ def evaluate_series(
             )
         seen_days = set(unique)
         missing = [
-            d for d in expected_dates(first, last, group.calendar) if d not in seen_days
+            d
+            for d in expected_dates(first, last, group.calendar, group.closed_days)
+            if d not in seen_days
         ]
         entry["missing_weekday_count"] = len(missing)
         entry["missing_weekdays"] = [d.isoformat() for d in missing[:_MAX_LISTED_DATES]]
@@ -1315,8 +1378,35 @@ def analyze_raw_csv(
 
 
 def parse_chart(
-    raw: bytes, symbol: str, *, require_midnight: bool = True
+    raw: bytes,
+    symbol: str,
+    *,
+    require_midnight: bool = True,
+    ignore_live_after: date | None = None,
 ) -> tuple[list[tuple[date, float | None]], dict[str, Any]]:
+    """Parse one daily chart response.
+
+    ``ignore_live_after`` (the cutoff): Yahoo appends a live bar stamped with the current
+    time to an FX chart while the market is open, even for a window that ended in the past.
+    A bar that is BOTH not at local midnight AND dated after that day is ignored (counted in
+    ``info['live_bars_ignored']``); any other bar off midnight, including one on or before
+    it, still refuses. The raw bytes are never altered."""
+    out, info, _kept = _parse_chart_indexed(
+        raw,
+        symbol,
+        require_midnight=require_midnight,
+        ignore_live_after=ignore_live_after,
+    )
+    return out, info
+
+
+def _parse_chart_indexed(
+    raw: bytes,
+    symbol: str,
+    *,
+    require_midnight: bool = True,
+    ignore_live_after: date | None = None,
+) -> tuple[list[tuple[date, float | None]], dict[str, Any], list[int]]:
     try:
         document = json.loads(raw.decode("utf-8"))
         result = document["chart"]["result"]
@@ -1344,11 +1434,19 @@ def parse_chart(
     if not isinstance(stamps, list) or len(stamps) != len(closes) or not stamps:
         raise DriverError("chart response arrays differ")
     out: list[tuple[date, float | None]] = []
-    for stamp, close in zip(stamps, closes, strict=True):
+    kept: list[int] = []
+    for index, (stamp, close) in enumerate(zip(stamps, closes, strict=True)):
         if isinstance(stamp, bool) or not isinstance(stamp, int):
             raise DriverError("chart timestamp is invalid")
         local = datetime.fromtimestamp(stamp, zone)
-        if require_midnight and (local.hour, local.minute, local.second) != (0, 0, 0):
+        off_midnight = (local.hour, local.minute, local.second) != (0, 0, 0)
+        if (
+            ignore_live_after is not None
+            and off_midnight
+            and local.date() > ignore_live_after
+        ):
+            continue
+        if require_midnight and off_midnight:
             raise DriverError("chart bar is not at local midnight")
         if close is not None and (
             isinstance(close, bool)
@@ -1358,7 +1456,10 @@ def parse_chart(
         ):
             raise DriverError("chart close is not a positive finite number")
         out.append((local.date(), None if close is None else float(close)))
+        kept.append(index)
     days = [d for d, _ in out]
+    if not out:
+        raise DriverError("chart response arrays differ")
     if days != sorted(set(days)):
         raise DriverError("chart session dates are not strictly increasing")
     info = {
@@ -1370,13 +1471,15 @@ def parse_chart(
         "long_name": meta.get("longName"),
         "short_name": meta.get("shortName"),
     }
-    return out, info
+    if ignore_live_after is not None and len(kept) != len(stamps):
+        info["live_bars_ignored"] = len(stamps) - len(kept)
+    return out, info, kept
 
 
 def analyze_chart(
     group: Group, raw: bytes, symbol_id: str, ticker: str
 ) -> dict[str, Any]:
-    observed, info = parse_chart(raw, ticker)
+    observed, info = parse_chart(raw, ticker, ignore_live_after=group.through)
     inside = [(d, v) for d, v in observed if group.start <= d <= group.through]
     after = [d for d, _ in observed if d > group.through]
     nulls = sum(1 for _, v in inside if v is None)
@@ -1405,10 +1508,11 @@ def trim_chart(raw: bytes, through: date, symbol: str) -> tuple[bytes, int]:
     Returns the derived bytes and the number of bars dropped. The raw response is
     never altered; the derived file keeps the response shape the FX tool reads.
     """
-    observed, _ = parse_chart(raw, symbol)
-    keep = [i for i, (d, _) in enumerate(observed) if d <= through]
+    observed, _, indices = _parse_chart_indexed(raw, symbol, ignore_live_after=through)
+    keep = [indices[i] for i, (d, _) in enumerate(observed) if d <= through]
     document = json.loads(raw.decode("utf-8"))
     body = document["chart"]["result"][0]
+    total = len(body["timestamp"])
 
     def cut(values: Any) -> Any:
         return [values[i] for i in keep] if isinstance(values, list) else values
@@ -1419,7 +1523,7 @@ def trim_chart(raw: bytes, through: date, symbol: str) -> tuple[bytes, int]:
             for key in list(series):
                 series[key] = cut(series[key])
     derived = json.dumps(document, separators=(",", ":"), ensure_ascii=False)
-    return derived.encode("utf-8"), len(observed) - len(keep)
+    return derived.encode("utf-8"), total - len(keep)
 
 
 def chart_entry(
@@ -1836,19 +1940,20 @@ def run_fetch(
                 if "history_adjusted" in group.datasets
                 else "history"
             )
-            with tempfile.TemporaryDirectory(prefix="yahoo-fetch-cache-") as cache_dir:
-                ns = _namespace(group, config, fetch_dataset, tickers, cache_dir)
-                try:
-                    frame = adapter.fetch_history_frame(
-                        tickers, ns, Path(cache_dir), yf=MeteredYFinance(yf, meter)
-                    )
-                except GovernanceError:
-                    raise
-                except (ValueError, RuntimeError) as exc:
-                    if meter.exceeded:  # the adapter's retry loop swallows the refusal
-                        raise GovernanceError("request budget exhausted") from exc
-                    failures.append(f"{group.group_id}: {exc}")
-                    continue
+            cache_dir = yf_cache_dir()
+            _clear_result_cache(cache_dir)
+            ns = _namespace(group, config, fetch_dataset, tickers, cache_dir)
+            try:
+                frame = adapter.fetch_history_frame(
+                    tickers, ns, Path(cache_dir), yf=MeteredYFinance(yf, meter)
+                )
+            except GovernanceError:
+                raise
+            except (ValueError, RuntimeError) as exc:
+                if meter.exceeded:  # the adapter's retry loop swallows the refusal
+                    raise GovernanceError("request budget exhausted") from exc
+                failures.append(f"{group.group_id}: {exc}")
+                continue
             raw_csv = frame.to_csv(None, index=False, lineterminator="\n").encode(
                 "utf-8"
             )
@@ -2219,6 +2324,8 @@ def authorize_live(
     now: datetime,
 ) -> int:
     """Single-use evidence naming this run, this config and this cutoff; returns the budget."""
+    if run_id.startswith(DRY_RUN_PREFIX):
+        raise GovernanceError("a rehearsal run id (DRY-) cannot spend evidence")
     try:
         document = json.loads(evidence_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2752,6 +2859,83 @@ def _retained_group(
     )
 
 
+# --------------------------------------------------------------------- dry run
+
+
+def dry_run(
+    config: Config,
+    *,
+    yf: YFinanceLike | None,
+    chart: ChartLike | None,
+    now: datetime,
+    stage_root: Path | None = None,
+    run_id: str | None = None,
+    allow_unresolved: bool = False,
+    max_requests: int = 2000,
+    config_source_sha256: str | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> dict[str, Any]:
+    """Rehearse a governed fetch: same config, same rules, same staging, same verify.
+
+    No governance evidence is read or consumed, the reads are the public ones, and the run
+    is staged in a scratch directory (a fresh temporary one unless ``stage_root`` is given;
+    a given directory may hold only ``DRY-`` entries, so it can never be a release root or a
+    governed stage). The run id always starts with ``DRY-``, which a governed fetch refuses,
+    so a rehearsal cannot be mistaken for, or substituted into, a governed run. The staged run
+    is verified before this returns. Spend evidence only after a dry run of the same config
+    and cutoff verified."""
+    if stage_root is None:
+        root = Path(tempfile.mkdtemp(prefix="yahoo-dry-stage-"))
+    else:
+        root = stage_root
+        if root.exists() and any(
+            not entry.name.startswith(DRY_RUN_PREFIX) for entry in root.iterdir()
+        ):
+            raise DriverError(
+                "a dry run stages only in a scratch directory that holds DRY- entries "
+                "alone (never a release root or a governed stage)"
+            )
+    name = run_id or DRY_RUN_PREFIX + utc_text(now).replace(":", "").replace("-", "")
+    if not name.startswith(DRY_RUN_PREFIX):
+        raise DriverError("a dry run id must start with DRY-")
+    outcome: dict[str, Any] = {
+        "mode": "dry-run",
+        "evidence_consumed": False,
+        "stage_root": str(root),
+        "run_id": name,
+        "cutoff": config.cutoff.isoformat(),
+        "config_sha256": config.sha256,
+    }
+    try:
+        path = run_fetch(
+            config,
+            stage_root=root,
+            run_id=name,
+            yf=yf,
+            chart=chart,
+            now=now,
+            allow_unresolved=allow_unresolved,
+            max_requests=max_requests,
+            config_source_sha256=config_source_sha256,
+            clock=clock,
+        )
+    except GovernanceError:
+        raise
+    except DriverError as exc:
+        report = root / f"{name}.REJECTED.json"
+        failures: list[str] = []
+        if report.is_file():
+            failures = list(_load_json(report).get("failures", []))
+        outcome.update(
+            status="REJECTED", error=str(exc), failures=failures, report=str(report)
+        )
+        return outcome
+    outcome["run_dir"] = str(path)
+    outcome["verify"] = verify_run(path, now=now)
+    outcome["status"] = outcome["verify"]["status"]
+    return outcome
+
+
 # ------------------------------------------------------------------------ CLI
 
 
@@ -2782,6 +2966,19 @@ def _parser() -> argparse.ArgumentParser:
             cmd.add_argument("--allow-unresolved", action="store_true")
         else:
             cmd.add_argument("--recorded-dir", type=Path, default=None)
+    dry = sub.add_parser(
+        "dry-run",
+        help="rehearse a governed fetch: public reads, no governance, scratch stage, "
+        "verified, never consumes evidence",
+    )
+    dry.add_argument("--config", type=Path, required=True)
+    dry.add_argument("--cutoff", default=None, help="the cutoff to rehearse (required)")
+    dry.add_argument("--tt-source-manifest", type=Path, default=None)
+    dry.add_argument("--schwab-positions", type=Path, default=None)
+    dry.add_argument("--allow-unresolved", action="store_true")
+    dry.add_argument("--stage-root", type=Path, default=None)
+    dry.add_argument("--run-id", default=None)
+    dry.add_argument("--max-requests", type=int, default=2000)
     check = sub.add_parser(
         "config-check", help="validate a config and print its resolution table"
     )
@@ -2892,7 +3089,7 @@ def _require_explicit_cutoff(args: argparse.Namespace) -> None:
     evidence on an old delivery's date."""
 
     command = args.command
-    if command in ("fetch", "apply-admissions") or (
+    if command in ("fetch", "apply-admissions", "dry-run") or (
         command == "probe" and getattr(args, "recorded_dir", None) is None
     ):
         if args.cutoff is None:
@@ -3025,10 +3222,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 summary["derived_size_bytes"] = result["derived_size_bytes"]
             print(json.dumps(summary, indent=2))
             return 1 if result["problems"] else 0
+        if args.command == "dry-run":
+            return _dry_run_live(args)
         return _live(args)
     except (DriverError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _dry_run_live(args: argparse.Namespace) -> int:  # pragma: no cover - live only
+    raw = _config_bytes(args.config)
+    config = _load_config(args)
+    adapter = (
+        load_adapter() if any(g.kind == "yfinance" for g in config.groups) else None
+    )
+    outcome = dry_run(
+        config,
+        yf=adapter.import_yfinance() if adapter is not None else None,
+        chart=LiveChart(config.limits.timeout_seconds),
+        now=datetime.now(timezone.utc),
+        stage_root=args.stage_root,
+        run_id=args.run_id,
+        allow_unresolved=args.allow_unresolved,
+        max_requests=args.max_requests,
+        config_source_sha256=sha256_hex(raw),
+        clock=lambda: datetime.now(timezone.utc),
+    )
+    print(json.dumps(outcome, indent=2, sort_keys=True))
+    return 0 if outcome["status"] == "VERIFIED" else 1
 
 
 def _live(args: argparse.Namespace) -> int:  # pragma: no cover - live only

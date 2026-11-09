@@ -635,3 +635,16 @@ The HTML header differs from the CSV download header (`Ticker`, `Tot Fees`, `Not
 must map them explicitly. Conformance check against the preserved bytes (counts only): the
 eight real pages stage with `allow_partial` as 8 records, 400 rows, 1 strategy, 56 pages
 expected, PARTIAL, `UNVERIFIED_SYNTHETIC_SHAPES`, and strict `verify` refuses with `COVERAGE_PARTIAL`.
+
+## Dry run before any governed run (rule for every live driver)
+
+Before a governed live run spends single-use evidence, an allowlist pin or an owner session:
+
+1. rehearse the identical command line and config against scratch output, with no governance
+   evidence, consuming nothing, and never into a release root or the intake being built;
+2. verify what the rehearsal staged with the same verifier the governed run uses;
+3. run the governed command only after a rehearsal of the same config and cutoff verified.
+
+A rehearsal's run ids start with `DRY-`, its outputs are never admitted, and a governed command
+refuses such an id. The Yahoo fetch driver has this natively (`dry-run`,
+`docs/providers/yahoo-fetch.md`, "Dry run first"). These drivers have no native `dry-run` command yet (open work; no flag exists). Until they do, the rehearsal is a ONE-book scratch run: `make-allowlist --book <one id> --kind perf_csv`, then `run --download-dir <new scratch dir> --no-reference --as-of D` against that allowlist (read-only reads of one book, a new directory outside synced storage), then the identity check on what it landed, and only then the governed allowlist; the recorder is rehearsed with `capture` and `verify --run-root` on a throwaway run root before the governed capture.
