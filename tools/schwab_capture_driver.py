@@ -110,6 +110,8 @@ _HOLDINGS_BODY_KEYS = frozenset(
     {
         "entitlement",
         "featureFlags",
+        "ff",
+        "fs",
         "fetchSettings",
         "groupByCallPut",
         "groupBySecurityType",
@@ -563,7 +565,8 @@ def _provider_date(value: object, name: str) -> date:
             return datetime.strptime(text, pattern).date()
         except ValueError:
             continue
-    raise DriverError(f"{name} has an unsupported date format")
+    shape = re.sub(r"[0-9]", "9", re.sub(r"[A-Za-z]{4,}", "word", text))[:40]
+    raise DriverError(f"{name} has an unsupported date format (shape {shape!r})")
 
 
 def _as_of_fields(
@@ -1244,8 +1247,18 @@ _POSITIONS_PAGE = "https://client.schwab.com/app/accounts/positions/"
 class CdpTransport:  # pragma: no cover - live only, never run by the repository tests
     """Replays the owner's authenticated SPA headers for read-only requests."""
 
-    def __init__(self, context: Any, observed_headers: Mapping[str, str]) -> None:
+    def __init__(
+        self,
+        context: Any,
+        observed_headers: Mapping[str, str],
+        holdings_replay: tuple[Mapping[str, str], str] | None = None,
+        page: Any = None,
+        holdings_from_page: bool = False,
+    ) -> None:
+        self._holdings_from_page = holdings_from_page
+        self._page = page
         self._context = context
+        self._holdings_replay = holdings_replay  # in memory only, never stored
         self._headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -1279,12 +1292,228 @@ class CdpTransport:  # pragma: no cover - live only, never run by the repository
     def post(
         self, path: str, body: Mapping[str, object], provider_account_id: str
     ) -> tuple[int, object]:
+        if path == HOLDINGS_V2_PATH and self._holdings_from_page and self._page:
+            return _read_page_holdings_response(self._page, body)
+        if path == HOLDINGS_V2_PATH and self._holdings_replay is not None:
+            # exactly the page's own request: its headers (the scoping header as the SPA sends
+            # it) and its body text, which equals the approved body (``check_observed_body``)
+            headers, text = self._holdings_replay
+            if self._page is not None:
+                # from inside the page, as its own script would send it (an empty scoping header
+                # stays an empty header); the transport has zero retries, a failure raises
+                try:
+                    reply = self._page.evaluate(
+                        _PAGE_POST_SCRIPT,
+                        {
+                            "url": _ORIGIN + path,
+                            "headers": page_fetch_headers(headers),
+                            "body": text,
+                        },
+                    )
+                    status = int(reply["status"])
+                    try:
+                        return status, json.loads(reply["text"])
+                    except ValueError as exc:
+                        raise DriverError("Schwab response is not JSON") from exc
+                except DriverError:
+                    raise
+                except Exception as exc:  # zero retry: no second request
+                    raise DriverError(
+                        f"the in-page holdings request failed ({value_free_error(exc)})"
+                    ) from exc
+            response = self._context.request.post(
+                _ORIGIN + path, headers=dict(headers), data=text
+            )
+            return self._decode(response)
         response = self._context.request.post(
             _ORIGIN + path,
             headers=self._scoped(provider_account_id),
             data=json.dumps(body, separators=(",", ":")),
         )
         return self._decode(response)
+
+
+_REPLAY_SKIPPED = frozenset(
+    {
+        "host",
+        "content-length",
+        "cookie",  # the browser context attaches its own cookies to a context request
+        "connection",
+        "accept-encoding",
+        "user-agent",
+    }
+)
+
+
+_PAGE_POST_SCRIPT = (
+    "async ({url, headers, body}) => {"
+    " const r = await fetch(url, {method: 'POST', headers, body, credentials: 'include'});"
+    " return {status: r.status, text: await r.text()}; }"
+)
+# header names a page script cannot set (the browser sets or refuses them itself)
+_FETCH_FORBIDDEN = frozenset(
+    {"origin", "referer", "upgrade-insecure-requests", "dnt", "te", "trailer", "via"}
+)
+
+
+def page_fetch_headers(replay: Mapping[str, str]) -> dict[str, str]:
+    """``replay`` minus the headers ``fetch`` cannot set from a page (sec-*, origin, referer...)."""
+
+    return {
+        name: value
+        for name, value in replay.items()
+        if name.casefold() not in _FETCH_FORBIDDEN
+        and not name.casefold().startswith(("sec-", "proxy-"))
+    }
+
+
+def replay_headers(observed: Mapping[str, str]) -> dict[str, str]:
+    """The page's own request headers minus the transport-managed ones (values untouched)."""
+
+    return {
+        name: value
+        for name, value in observed.items()
+        if name.casefold() not in _REPLAY_SKIPPED and not name.startswith(":")
+    }
+
+
+def _canon_json(value: object) -> str:
+    """Type-aware equality: ``True`` and ``1`` are different JSON values."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def check_observed_body(post_data: object, approved: Mapping[str, object]) -> str:
+    """The page's raw Holdings-V2 body text, accepted only when it equals the approved body.
+
+    Refuses with the key NAMES that differ (never a value)."""
+
+    if not isinstance(post_data, str) or not post_data.strip():
+        raise DriverError("the observed HoldingV2 request carried no body")
+    try:
+        parsed = _object(
+            strict_json_loads(post_data.encode("utf-8"), label="holdings body"),
+            "holdings body",
+        )
+    except DriverError:
+        raise
+    except Exception as exc:
+        raise DriverError("the observed HoldingV2 body is not strict JSON") from exc
+    if _canon_json(parsed) != _canon_json(dict(approved)):
+        only_page = sorted(set(parsed) - set(approved))
+        only_evidence = sorted(set(approved) - set(parsed))
+        values = sorted(
+            k
+            for k in set(parsed) & set(approved)
+            if _canon_json(parsed[k]) != _canon_json(approved[k])
+        )
+        raise DriverError(
+            "the page's own HoldingV2 body differs from the approved evidence body "
+            f"(keys only on the page: {only_page}; only in the evidence: {only_evidence}; "
+            f"values differ for: {values}): issue new evidence from `attach-check`"
+        )
+    return post_data
+
+
+def dropped_body_keys(post_data: object) -> list[str]:
+    """Key names of the page's Holdings-V2 body that the evidence filter drops (names only)."""
+
+    try:
+        parsed = strict_json_loads(
+            str(post_data).encode("utf-8"), label="holdings body"
+        )
+    except Exception:
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    return sorted(k for k in parsed if k not in _HOLDINGS_BODY_KEYS)
+
+
+def _observe_holdings_request(
+    page: Any, seconds: float = 12
+) -> tuple[dict[str, str], str] | None:  # pragma: no cover - live only
+    """The page's OWN Holdings-V2 POST (headers and body text), read during a read-only reload."""
+
+    seen: list[tuple[dict[str, str], str]] = []
+
+    def on_request(request: Any) -> None:
+        if request.method != "POST" or not request.url.endswith(HOLDINGS_V2_PATH):
+            return
+        try:
+            headers = dict(request.all_headers())
+        except Exception:
+            headers = dict(request.headers)
+        seen.append((headers, request.post_data or ""))
+
+    page.on("request", on_request)
+    try:
+        page.reload(wait_until="domcontentloaded")
+        waited = 0.0
+        while not seen and waited < seconds:
+            page.wait_for_timeout(500)
+            waited += 0.5
+    finally:
+        page.remove_listener("request", on_request)
+    return seen[0] if seen else None
+
+
+def value_free_error(exc: BaseException) -> str:
+    """Exception class and message, digit runs of 4+ masked, first 160 characters."""
+
+    text = re.sub(r"\d{4,}", "#", str(exc)).replace("\n", " ")
+    return f"{type(exc).__name__}: {text}"[:160]
+
+
+_ORIGIN_PAGES = "https://client.schwab.com/"
+
+
+def _read_page_holdings_response(
+    page: Any, approved: Mapping[str, object]
+) -> tuple[int, object]:  # pragma: no cover
+    """Let the SPA send its OWN Holdings-V2 request (a reload of the page) and read the response:
+    nothing of ours is replayed. One request (the governed reservation already counted it)."""
+
+    try:  # settle first: a page still navigating destroys the execution context
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    if not str(page.url).startswith(_ORIGIN_PAGES):
+        raise DriverError("the page left client.schwab.com before the holdings read")
+    seen: list[Any] = []
+
+    def on_response(response: Any) -> None:
+        request = response.request
+        if request.method == "POST" and request.url.endswith(HOLDINGS_V2_PATH):
+            seen.append(response)
+
+    page.on("response", on_response)
+    try:
+        page.reload(wait_until="domcontentloaded")
+        waited = 0.0
+        while not seen and waited < 30:
+            page.wait_for_timeout(500)
+            waited += 0.5
+    except Exception as exc:
+        raise DriverError(f"holdings read failed ({value_free_error(exc)})") from exc
+    finally:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
+    if not seen:
+        raise DriverError(
+            "the page did not send its own HoldingV2 request in 30 seconds"
+        )
+    response = seen[0]
+    # the body of the request the page actually sent must equal the approved body, else the
+    # response is discarded unread (the reservation is already made: fail closed)
+    check_observed_body(response.request.post_data, approved)
+    try:
+        return int(response.status), response.json()
+    except Exception as exc:
+        raise DriverError(
+            f"the page's own HoldingV2 response is not JSON ({value_free_error(exc)})"
+        ) from exc
 
 
 def _observe_headers(page: Any) -> dict[str, str]:  # pragma: no cover - live only
@@ -1344,9 +1573,23 @@ def _write_new(
     }
 
 
-def _single_ok(status: int, name: str) -> None:
+def _error_hint(raw: object) -> str:
+    """Key names of a failed response only (identifier-shaped, bounded): the provider's message
+    text can carry names, symbols and amounts and is never emitted."""
+
+    if not isinstance(raw, dict):
+        return ""
+    keys = sorted(
+        k for k in raw if isinstance(k, str) and re.fullmatch(r"[A-Za-z_]{1,32}", k)
+    )
+    return f" (response keys {keys[:8]})"
+
+
+def _single_ok(status: int, name: str, raw: object = None) -> None:
     if status != 200:
-        raise DriverError(f"{name} request failed with status {status}")
+        raise DriverError(
+            f"{name} request failed with status {status}{_error_hint(raw)}"
+        )
 
 
 def run_capture(
@@ -1393,7 +1636,7 @@ def run_capture(
         holdings_req.path, dict(holdings_req.body or {}), ""
     )
     holdings_at = now()
-    _single_ok(status, "holdings")
+    _single_ok(status, "holdings", holdings_raw)
     artifacts.append(
         _write_new(run_dir, "raw/holdings.v2.json", _canonical(holdings_raw), "RAW")
     )
@@ -1488,7 +1731,11 @@ def run_capture(
 
 
 def _txn_date(value: object) -> date:
-    return _provider_date(value, "transaction date")
+    # Schwab posts as-of rows as "MM/DD/YYYY as of MM/DD/YYYY": the posting date is the first
+    # date (the rule of tools/schwab_rollback.py); the raw text, with its as-of date, stays in
+    # the retained row.
+    first = _text(value, "transaction date").split(" as of ", 1)[0]
+    return _provider_date(first, "transaction date")
 
 
 def _bind_transactions(
@@ -1825,13 +2072,17 @@ def capture_live(
 ) -> dict[str, object]:  # pragma: no cover - live only
     """Refuses without governance evidence; never called by the repository tests."""
 
-    governance = authorize_live_read(evidence, receipt_root=receipt_root)
+    checked = validate_evidence(evidence)
+    approved = next(
+        (r.body for r in checked.requests if r.capability == "holdings.v2"), None
+    )
     crosswalk = parse_crosswalk(_load(crosswalk_path, "crosswalk"))
     targets = _TRANSACTION_CAPTURE.load_retained_targets(selected_source_root)
     try:
         sync_playwright = importlib.import_module("playwright.sync_api").sync_playwright
     except ImportError as exc:
         raise DriverError("Playwright is required for live Schwab capture") from exc
+    replay_mode = os.environ.get("QE_SCHWAB_HOLDINGS_REPLAY") == "1"
     with sync_playwright() as playwright:
         browser = playwright.chromium.connect_over_cdp(cdp_url)
         if not browser.contexts:
@@ -1842,7 +2093,26 @@ def capture_live(
         ]
         if not pages:
             raise DriverError("open an authenticated Schwab page before capture")
-        transport = CdpTransport(context, _observe_headers(pages[0]))
+        # reserve (consume the evidence, count the requests) BEFORE any page reload: every read
+        # the SPA makes on a reload happens under a durable reservation
+        governance = authorize_live_read(evidence, receipt_root=receipt_root)
+        observed_headers = _observe_headers(pages[0])
+        replay = None
+        if replay_mode:
+            page_request = _observe_holdings_request(pages[0])
+            if page_request is None:
+                raise DriverError("the page's own HoldingV2 request was not observed")
+            text = check_observed_body(page_request[1], approved or {})
+            replay = (replay_headers(page_request[0]), text)
+        transport = CdpTransport(
+            context,
+            observed_headers,
+            replay,
+            pages[0],
+            # primary: the SPA sends its own request, its body is checked against the approved
+            # body and the response is read; the in-page replay is an explicit alternative
+            holdings_from_page=not replay_mode,
+        )
         return run_capture(
             transport=transport,
             governance=governance,
@@ -2070,6 +2340,8 @@ def attach_check(
             raise DriverError("output already exists") from exc
         result["holdings_body_sha256"] = _sha256(payload)
         result["holdings_body_keys"] = sorted(json.loads(payload))
+        # a page body with keys outside the allowed set cannot be replayed by capture
+        result["holdings_body_dropped_keys"] = dropped_body_keys(post_data)
     if crosswalk is not None:
         result.update(_compare_accounts(page_accounts, crosswalk))
     return result

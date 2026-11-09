@@ -1149,3 +1149,46 @@ def test_a_run_without_an_observed_cutoff_balance_row_is_refused(
 
     with pytest.raises(driver.DriverError, match="differs from the declared cutoff"):
         _run(tmp_path, Short())
+
+
+def test_a_400_on_the_holdings_request_stops_the_run_and_the_evidence_stays_consumed(
+    tmp_path: Path,
+) -> None:
+    class Rejecting(FakeTransport):
+        def post(
+            self, path: str, body: Any, provider_account_id: str
+        ) -> tuple[int, object]:
+            if path == HOLDINGS_PATH:
+                self.calls.append(("POST", path))
+                return 400, {}
+            return super().post(path, body, provider_account_id)
+
+    governance = _authorize(tmp_path, _evidence())
+    fake = Rejecting()
+    with pytest.raises(
+        driver.DriverError, match="holdings request failed with status 400"
+    ):
+        driver.run_capture(
+            transport=fake,
+            governance=governance,
+            crosswalk=_crosswalk(),
+            targets=_targets(),
+            cutoff=CUTOFF,
+            staging_root=tmp_path / "staging",
+            run_id="synthetic-run-400",
+            clock=_clock(),
+        )
+    assert fake.calls == [("POST", HOLDINGS_PATH)] and governance.used_requests == 1
+    with pytest.raises(driver.GovernanceError, match="already consumed"):
+        _authorize(tmp_path, _evidence())
+
+
+def test_a_failed_response_hint_is_value_free() -> None:
+    hint = driver._error_hint(
+        {"message": "Account 123456789 not entitled for 2026-11-06", "code": "E1"}
+    )
+    assert "123456789" not in hint and "not entitled" not in hint
+    assert "['code', 'message']" in hint
+    assert driver._error_hint([1, 2]) == "" and driver._error_hint(None) == ""
+    with pytest.raises(driver.DriverError, match=r"status 400 \(response keys \['x'\]"):
+        driver._single_ok(400, "holdings", {"x": 1})
