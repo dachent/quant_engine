@@ -2071,6 +2071,15 @@ def test_parse_chart_ignores_only_a_live_bar_after_the_cutoff() -> None:
     with pytest.raises(driver.DriverError, match="not at local midnight"):
         driver.parse_chart(early, "EURUSD=X", ignore_live_after=cutoff)
 
+    # Only the single TERMINAL appended bar is ignored: two off-midnight bars after the
+    # cutoff, or an off-midnight bar followed by the real last bar, fail closed.
+    two = _fx_chart([*midnight, live, (datetime(2026, 10, 12, 16, 30), 1.5)])
+    with pytest.raises(driver.DriverError, match="not at local midnight"):
+        driver.parse_chart(two, "EURUSD=X", ignore_live_after=cutoff)
+    mid_then_bar = _fx_chart([midnight[0], live, (datetime(2026, 10, 13), 1.5)])
+    with pytest.raises(driver.DriverError, match="not at local midnight"):
+        driver.parse_chart(mid_then_bar, "EURUSD=X", ignore_live_after=cutoff)
+
 
 class LiveBarChart(FakeChart):
     """FakeChart that, like Yahoo while FX is open, appends a bar stamped with the clock."""

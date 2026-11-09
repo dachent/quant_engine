@@ -1388,7 +1388,7 @@ def parse_chart(
 
     ``ignore_live_after`` (the cutoff): Yahoo appends a live bar stamped with the current
     time to an FX chart while the market is open, even for a window that ended in the past.
-    A bar that is BOTH not at local midnight AND dated after that day is ignored (counted in
+    The single LAST bar, when it is both not at local midnight and dated after that day, is ignored (counted in
     ``info['live_bars_ignored']``); any other bar off midnight, including one on or before
     it, still refuses. The raw bytes are never altered."""
     out, info, _kept = _parse_chart_indexed(
@@ -1444,6 +1444,7 @@ def _parse_chart_indexed(
             ignore_live_after is not None
             and off_midnight
             and local.date() > ignore_live_after
+            and index == len(stamps) - 1  # only the single terminal appended live bar
         ):
             continue
         if require_midnight and off_midnight:
