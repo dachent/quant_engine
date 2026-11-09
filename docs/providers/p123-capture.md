@@ -579,6 +579,61 @@ UNVERIFIED, never exercised live (the proof is a fake CDP transport):
 - Transaction and perf row counts versus the page, which only the identity check
   (`I3`, `I4`) and the generation transaction gate judge.
 
+## Admitting recorder and fetcher bodies into the HAR root (`tools/p123_har_admit.py`)
+
+The generation reads only the `csv/` and `downloads/` files of the plan's HAR root, by file name
+(`strategy_<id>_app_investment_perfdata_<id>.csv` is managed performance, `..._resource_<id>.csv`
+managed metadata, `..._holdings_<id>.csv` managed holdings, `strategy_<id>_perf.csv` the equity
+curve). The 2026-09-02 HAR workspace holds the account's investment list but no per-investment
+performance, resource or holdings, so a plan on it alone has no managed performance. The
+recorder saves raw bodies under id-less path templates (`raw/NNNNN.body`); the fetcher's
+`routes` command names its bodies with the id. `p123_har_admit.py` is the one offline tool that
+turns either into HAR CSVs. It never writes to its inputs.
+
+```powershell
+python tools/p123_har_admit.py admit --base <HAR root> --out <new governed dir> `
+    --recorder <recorder run> [--recorder <another sitting>] [--fetcher <fetcher capture dir>] `
+    --as-of 2026-11-06 --account-id <id> [--account-id <id>] [--dry-run]
+python tools/p123_har_admit.py stage-designer --out <new dir> --model-id <id> `
+    (--recorder <recorder run> | --fetcher <fetcher capture dir>) [--dry-run]
+```
+
+`admit` copies the base root into `<out>/har-root/`, adds the admitted CSVs, and writes
+`<out>/p123-har-admission-manifest.json` beside it (outside the root, so the plan does not hash
+it). The plan's `HAR_ROOT` is `<out>/har-root`. The manifest records the sha256 of the recorder
+manifest and entries, of every source body and of every output CSV, the binding evidence per
+item, the last date of every performance series, the base files an admitted file replaced, the
+stale lists left in the root, and the final root layout (every file with its sha256 and whether
+it is `base` or `admitted`).
+
+Id binding (recorder bodies), each step checked, a body that cannot be bound is a refusal:
+
+1. the account's investment list (`/app/investment/resource`) names every item by
+   `portfolioUid`; across sittings its items must be identical (live columns may move, the
+   list of the first `--recorder` is the one saved, the others are recorded);
+2. an item's resource body is matched to exactly one list row on `name`, `inceptionDt` and
+   `posCnt` (zero or several refuse; a `portfolioUid` in the body must agree);
+3. a `perf-data` or `holdings` body binds to the nearest resource body before it (within 40
+   ordinals), and the body corroborates it: perf `date` equals the item's `inceptionDt`, the
+   position count equals `posCnt`;
+4. a fetcher body carries the id in its name and must be byte-identical to the recorder body of
+   the same item; two different bodies for one item refuse.
+
+Also refused: a performance series whose rows differ from the weekday calendar of
+`date..dateLast`, one that ends before `--as-of`, an `--account-id` no run states, and an
+admitted file that would replace a base data file (only the account's list csv is replaced).
+
+`stage-designer` writes `capture-manifest.json` and `raw/r2g_<id>_dm_true.json`,
+`r2g_<id>_perf-full.json` (and `_holdings.json` when present) for
+`tools/portfolio_designer_model_curve.py`. A curve is admitted only when it starts on the
+model's `inceptionDt`, ends on its `endDt` and has its launch line on `launchDt`: the chart's
+default 15-year window starts years after inception and is refused (`years=25` is the full
+history).
+
+`--dry-run` is the scratch mode: the output must sit under a `scratch` folder, the manifest says
+`evidence_eligible: false`, and every check and message is the same. A real run refuses a
+scratch, tmp or temp root and any root inside a Git worktree.
+
 ## HTML transactions list (`transactions.account`)
 
 `GET /transact_list.jsp?portid=<id>&offset=<n>` (the first page may omit `offset`) is

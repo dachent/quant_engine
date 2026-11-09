@@ -235,6 +235,9 @@ _PATH_STAGES = {
     # hash-pinned allowlist of read-only exports into a create-only directory; the
     # staging CLI and the generation read only the files and manifest they are handed.
     "tools/p123_cdp_fetcher.py": [],
+    # Turns retained recorder/fetcher bodies into HAR CSVs in a NEW root (offline, checked id
+    # binding, admission manifest); the plan hashes the root it is handed, never this tool.
+    "tools/p123_har_admit.py": [],
     # Records raw GrizzlyBulls responses from an owner-authenticated browser into a
     # create-only run directory; no stage reads it, only a pinned run it is handed.
     "tools/grizzlybulls_capture.py": [],
