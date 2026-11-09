@@ -1,11 +1,16 @@
-"""Passive, read-only recorder of Portfolio123 responses for one attended sitting.
+"""Recorder of Portfolio123 responses for one sitting in the owner's signed-in window.
 
 The owner signs in to a dedicated Edge or Chrome profile that has a loopback debug
-port and browses by hand. This tool only LISTENS to the browser's Network events.
-It never navigates, clicks, types, submits, or injects script: every message it can
-send to the browser is on a closed allow-list (target discovery, attach, enable
-Network, read one finished response body) and anything else is refused before it
-leaves the process. It never reads or stores request headers, cookies, or the
+port. This tool LISTENS to the browser's Network events, and with ``--drive-plan`` it
+can also drive the signed-in tab: navigate on https://www.portfolio123.com, click,
+scroll. The ONE guard (``tools/capture_action_guard.py``) refuses to click a control
+whose name, text, label, value, title or link matches trade, transfer, withdraw,
+deposit, order, buy, sell, submit, confirm payment or an account-changing word (delete,
+remove, cancel, save changes, change password, ...), a submit or password control,
+or a link that leaves the origin; there is no typing message at all. Every message it
+can send to the browser is on a closed allow-list (target discovery, attach, enable
+Network, read one finished response body, and the guarded driving messages) and
+anything else is refused before it leaves the process. It never reads or stores request headers, cookies, or the
 Authorization value, it records only same-origin GET responses on
 https://www.portfolio123.com (exact host allow-list below), and it refuses to record
 any non-GET request and any GET whose path or query looks like a mutation; those are
@@ -39,6 +44,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 import hashlib
 import html
+import importlib
 import io
 import json
 import os
@@ -53,6 +59,13 @@ from urllib.parse import parse_qsl, unquote, unquote_plus, urlsplit
 import urllib.request
 
 from quant_engine.portfolio123 import catalog_rows
+
+# Loaded by name so the same file is never seen under two module names (mypy), whether this
+# module runs as a script (tools/ on sys.path) or is imported as tools.p123_cdp_recorder.
+try:
+    guard = importlib.import_module("capture_action_guard")
+except ImportError:
+    guard = importlib.import_module("tools.capture_action_guard")
 
 
 ORIGIN = "https://www.portfolio123.com"
@@ -97,15 +110,23 @@ IDENTITY_WORDS: tuple[str, ...] = (
 #: Integer values of these query keys are pagination positions, kept as counts.
 PAGINATION_KEYS = frozenset({"offset", "page", "limit", "start", "size", "count"})
 
-#: The only messages this process may send to the browser. Passive by construction.
+#: The only messages this process may send to the browser. The last three are the driving
+#: messages and are further checked by the one guard (capture_action_guard).
 ALLOWED_CDP_METHODS = frozenset(
     {
         "Target.setDiscoverTargets",
         "Target.attachToTarget",
         "Network.enable",
         "Network.getResponseBody",
+        "Page.navigate",
+        "Runtime.evaluate",
+        "Input.dispatchMouseEvent",
     }
 )
+DRIVE_ORIGIN_PREFIX = ORIGIN + "/"
+DEFAULT_DRIVE_DWELL_SECONDS = 5.0
+DEFAULT_DRIVE_SETTLE_SECONDS = 2.0
+MAX_DRIVE_STEPS = 200
 
 #: What the run directory says about itself; verify requires it unchanged.
 NO_ENTRIES_TEXT = (
@@ -115,6 +136,15 @@ NO_ENTRIES_TEXT = (
 )
 DEFAULT_WARN_AFTER_SECONDS = 30.0
 SAFETY = {
+    "drive_guard": "trading-token-guard",
+    "types": False,
+    "reads_request_headers": False,
+    "reads_cookies": False,
+    "persists_query_values": False,
+    "records_non_get": False,
+}
+#: Runs recorded before the driving mode existed carry this block; they still verify.
+LEGACY_SAFETY = {
     "passive": True,
     "navigates": False,
     "injects_script": False,
@@ -748,7 +778,7 @@ def _load_run(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         raise RecorderError("MANIFEST_UNREADABLE") from None
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise RecorderError("MANIFEST_SCHEMA")
-    if manifest.get("safety") != SAFETY:
+    if manifest.get("safety") not in (SAFETY, LEGACY_SAFETY):
         raise RecorderError("MANIFEST_SAFETY_BLOCK_DIFFERS")
     name = "discovery.json" if manifest.get("mode") == "discover" else "entries.json"
     try:
@@ -810,6 +840,44 @@ def verify_run(root: Path) -> dict[str, object]:
 
 
 # ---------------------------------------------------------------------------
+# Driving plan (optional): navigate, click, scroll in the signed-in tab
+
+
+def parse_drive_plan(raw: object) -> tuple[tuple[str, Any], ...]:
+    """Validate a plan: a list of ``{"navigate": url}``, ``{"click": name}``, ``{"scroll": n}``.
+
+    A step the one guard would refuse is refused here, before any connection is made.
+    """
+
+    if not isinstance(raw, list) or not raw or len(raw) > MAX_DRIVE_STEPS:
+        raise RecorderError("DRIVE_PLAN_INVALID")
+    steps: list[tuple[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or len(item) != 1:
+            raise RecorderError("DRIVE_PLAN_INVALID")
+        ((verb, value),) = item.items()
+        if verb == "navigate" and isinstance(value, str):
+            try:
+                guard.check_url(value, origin_prefix=DRIVE_ORIGIN_PREFIX)
+            except guard.ActionRefused:
+                raise RecorderError("DRIVE_PLAN_REFUSED") from None
+        elif verb == "click" and isinstance(value, str) and value.strip():
+            if guard.matches_trading(value):
+                raise RecorderError("DRIVE_PLAN_REFUSED")
+        elif (
+            verb == "scroll"
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and 0 < abs(value) <= guard.WHEEL_MAX_ABS_DELTA
+        ):
+            pass
+        else:
+            raise RecorderError("DRIVE_PLAN_INVALID")
+        steps.append((verb, value))
+    return tuple(steps)
+
+
+# ---------------------------------------------------------------------------
 # CDP transport: stdlib WebSocket client + the allow-list guard
 
 
@@ -822,14 +890,23 @@ class CdpTransport(Protocol):
 
 
 class GuardedTransport:
-    """Wrap a transport so only :data:`ALLOWED_CDP_METHODS` can ever be sent."""
+    """Wrap a transport so only :data:`ALLOWED_CDP_METHODS` can ever be sent, and the driving
+    messages only as the one guard accepts them."""
 
     def __init__(self, inner: CdpTransport) -> None:
         self._inner = inner
 
+    @staticmethod
+    def _navigate_ok(url: str) -> None:
+        guard.check_url(url, origin_prefix=DRIVE_ORIGIN_PREFIX)
+
     def send(self, message: dict[str, Any]) -> None:
         if message.get("method") not in ALLOWED_CDP_METHODS:
             raise RecorderError("CDP_METHOD_REFUSED", str(message.get("method")))
+        try:
+            guard.check_driving_message(message, navigate_ok=self._navigate_ok)
+        except guard.ActionRefused as exc:
+            raise RecorderError("CDP_DRIVE_REFUSED", str(exc)) from None
         self._inner.send(message)
 
     def receive(self, timeout: float) -> dict[str, Any] | None:
@@ -1020,8 +1097,17 @@ class Listener:
         warn_after: float = DEFAULT_WARN_AFTER_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         call_timeout: float = 20.0,
+        drive_plan: Sequence[tuple[str, Any]] = (),
+        drive_dwell: float = DEFAULT_DRIVE_DWELL_SECONDS,
+        drive_target_id: str | None = None,
+        drive_settle: float = DEFAULT_DRIVE_SETTLE_SECONDS,
     ) -> None:
         self._transport = GuardedTransport(transport)
+        self._drive_plan = tuple(drive_plan)
+        self._drive_dwell = drive_dwell
+        self._drive_target_id = drive_target_id
+        self._drive_settle = drive_settle
+        self.drive_log = guard.ActionLog()
         self._recorder = recorder
         self._max_seconds = max_seconds
         self._warn_after = warn_after
@@ -1087,10 +1173,87 @@ class Listener:
                 )
                 if message is not None:
                     self._dispatch(message)
+                if self._drive_plan and self._attached:
+                    sid = self._drive_session()
+                    if sid is not None:
+                        plan, self._drive_plan = self._drive_plan, ()
+                        self._drive(plan, sid)
         except RecorderError as exc:
             if exc.code != "CDP_CLOSED":
                 raise
             self._recorder.browser_closed = True
+
+    def _drive_session(self) -> str | None:
+        """The session of the tab to drive; never chosen by event order.
+
+        With an explicit ``--target-id`` that tab is driven once it is attached (None until
+        then). Without one, after a settle period the plan runs only if exactly one same-origin
+        page is attached; with several the run is refused and the candidates are listed (opaque
+        target ids only).
+        """
+
+        if self._drive_target_id is not None:
+            return self._attached.get(self._drive_target_id)
+        self._drain(self._drive_settle)
+        if len(self._attached) != 1:
+            print(
+                json.dumps({"drive_candidates": sorted(self._attached)}),
+                file=sys.stderr,
+            )
+            raise RecorderError("DRIVE_TARGET_AMBIGUOUS")
+        return next(iter(self._attached.values()))
+
+    def _drain(self, seconds: float) -> None:
+        """Keep recording for ``seconds`` while the page settles."""
+        deadline = self._clock() + seconds
+        while self._clock() < deadline:
+            message = (
+                self._pending.popleft()
+                if self._pending
+                else self._transport.receive(0.5)
+            )
+            if message is not None:
+                self._dispatch(message)
+
+    def _facts(self, params: dict[str, Any], sid: str) -> dict[str, Any] | None:
+        result = self._call("Runtime.evaluate", params, sid)
+        inner = result.get("result")
+        value = inner.get("value") if isinstance(inner, dict) else None
+        return value if isinstance(value, dict) else None
+
+    def _drive(self, plan: Sequence[tuple[str, Any]], sid: str) -> None:
+        """Run the plan on the attached tab. The guard refuses a trading control; a refusal
+        stops the plan (RecorderError) and nothing further is sent."""
+
+        for verb, value in plan:
+            try:
+                if verb == "navigate":
+                    self.drive_log.record("navigate", "url", value)
+                    self._call("Page.navigate", {"url": value}, sid)
+                elif verb == "scroll":
+                    guard.require_origin(
+                        self._facts(guard.probe_at_point(300, 300), sid),
+                        origin_prefix=DRIVE_ORIGIN_PREFIX,
+                    )
+                    self.drive_log.record("scroll", "page", str(value))
+                    self._call(
+                        "Input.dispatchMouseEvent",
+                        guard.wheel_params(value),
+                        sid,
+                    )
+                else:
+                    guard.click_by_name(
+                        value,
+                        evaluate=lambda params: self._facts(params, sid),
+                        dispatch=lambda params: self._call(
+                            "Input.dispatchMouseEvent", params, sid
+                        ),
+                        origin_prefix=DRIVE_ORIGIN_PREFIX,
+                        log=self.drive_log,
+                    )
+            except guard.ActionRefused as exc:
+                raise RecorderError("DRIVE_ACTION_REFUSED", str(exc)) from None
+            self._drain(self._drive_dwell)
 
     def _dispatch(self, message: dict[str, Any]) -> None:
         method = message.get("method")
@@ -1688,17 +1851,34 @@ def propose_catalog(
 
 
 def _live(args: argparse.Namespace) -> dict[str, Any]:  # pragma: no cover
+    plan: tuple[tuple[str, Any], ...] = ()
+    if args.drive_plan is not None:  # validated before any directory or connection
+        try:
+            raw_plan = json.loads(args.drive_plan.read_text("utf-8"))
+        except (OSError, ValueError):
+            raise RecorderError("DRIVE_PLAN_INVALID") from None
+        plan = parse_drive_plan(raw_plan)
     recorder = Recorder(
         args.output_root, mode=args.command, include_identity=args.include_identity
     )
     transport = WebSocketTransport(args.cdp_url)
     try:
-        Listener(
+        listener = Listener(
             transport,
             recorder,
             max_seconds=args.max_seconds,
             warn_after=args.warn_after_seconds,
-        ).run()
+            drive_plan=plan,
+            drive_target_id=args.target_id,
+        )
+        try:
+            listener.run()
+        finally:
+            if plan:
+                print(
+                    json.dumps({"drive_log": listener.drive_log.entries}),
+                    file=sys.stderr,
+                )
     except KeyboardInterrupt:
         pass
     finally:
@@ -1741,6 +1921,18 @@ def _parser() -> argparse.ArgumentParser:
             default=DEFAULT_WARN_AFTER_SECONDS,
             help="warn once if nothing was recorded after this many seconds "
             "(default 30; 0 disables)",
+        )
+        item.add_argument(
+            "--target-id",
+            default=None,
+            help="drive-plan only: the CDP target id of the one tab to drive. Without it the "
+            "plan runs only when exactly one P123 page is open (else the candidates are listed)",
+        )
+        item.add_argument(
+            "--drive-plan",
+            type=Path,
+            help="JSON list of {navigate: url} / {click: control name} / {scroll: deltaY} "
+            "steps to run on the signed-in tab while recording (trading controls refused)",
         )
         item.add_argument(
             "--include-identity",
