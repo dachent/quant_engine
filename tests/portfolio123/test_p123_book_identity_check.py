@@ -7,6 +7,8 @@ import json
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from tools import p123_book_identity_check as ic
 
 TX_HEADER = "Date,Symbol,Type,Shares,Price,Amount,TotFees,Rank,Notes\n"
@@ -631,3 +633,68 @@ def test_i8x_any_overlap_above_the_threshold_in_the_same_pull_fails(
         _status(ic.check_capture(capture, prior_checks=[(other, "raw")]), "101", "I8x")
         == "WARN"
     )
+
+
+def _drop_column(path: Path, name: str) -> None:
+    import csv
+    import io
+
+    rows = list(csv.reader(io.StringIO(path.read_text(encoding="utf-8"))))
+    index = rows[0].index(name)
+    out = io.StringIO(newline="")
+    csv.writer(out, lineterminator="\n").writerows(
+        [c for i, c in enumerate(row) if i != index] for row in rows
+    )
+    path.write_text(out.getvalue(), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("file", "column"),
+    [
+        ("transactions", "Amount"),
+        ("transactions", "Date"),
+        ("transactions", "Type"),
+        ("transactions", "Shares"),
+        ("perf", "Total Equity"),
+        ("perf", "Date"),
+    ],
+)
+def test_an_export_without_a_required_column_fails_i2(
+    tmp_path: Path, file: str, column: str
+) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")
+    _drop_column(raw / f"strategy_101_{file}.csv", column)
+    _manifest(capture)
+    report = ic.check_capture(capture)
+    assert report["books"]["101"]["decision"] == "FAIL"
+    assert _status(report, "101", "I2") == "FAIL"
+    detail = next(
+        c["detail"] for c in report["books"]["101"]["checks"] if c["check"] == "I2"
+    )
+    assert column in detail
+
+
+def test_an_undated_row_or_a_non_numeric_cash_amount_fails_i2(tmp_path: Path) -> None:
+    capture, raw = _capture(tmp_path)
+    _book(raw, "101")
+    path = raw / "strategy_101_transactions.csv"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("2025-05-12", "not-a-date", 1), encoding="utf-8")
+    _manifest(capture)
+    report = ic.check_capture(capture)
+    assert _status(report, "101", "I2") == "FAIL"
+    capture2, raw2 = _capture(tmp_path / "two")
+    _book(raw2, "101")
+    path2 = raw2 / "strategy_101_transactions.csv"
+    path2.write_text(
+        path2.read_text(encoding="utf-8").replace("1,000,000.00", "n/a"),
+        encoding="utf-8",
+    )
+    _manifest(capture2)
+    detail = next(
+        c["detail"]
+        for c in ic.check_capture(capture2)["books"]["101"]["checks"]
+        if c["check"] == "I2"
+    )
+    assert "CASH" in detail or "numeric" in detail
