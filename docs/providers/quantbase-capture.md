@@ -293,6 +293,7 @@ later evidence, the generation does not carry post-cutoff observations. The capt
 may be later than the cutoff but never earlier (`capture date >= as_of_date`; the
 legacy proof keeps `==`), and the proof's `effective_end` is the cutoff, not the
 capture date; `record_count` counts the kept rows.
+A captured item may carry the provider bookkeeping fields `failure_notice_claimed_at`, `failure_notified_at`, `first_failed_at` and `pending_sell_wait_alerted_at` that the converter's fixed schema drops (`--allow-provider-drift` ignores extras): the proof tolerates exactly these four absent from the CSV, and only while every captured value is null. Any other dropped field, and any dropped non-null value, still refuses.
 
 Refused: a role HAR with no or more than one activity request, with no
 `account_activity.csv` artifact, with a CSV that is not the HAR response, with a

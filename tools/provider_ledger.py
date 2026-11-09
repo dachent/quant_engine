@@ -2158,6 +2158,16 @@ def _quantbase_flows(
 # (a sell is sized in whole fund units, so it differs from the journal by a
 # rounding): the window and the relative tolerance are the declared matching rule.
 _QUANTBASE_FEE_MATCH_DAYS: Final = 31
+# Provider bookkeeping fields (alert and failure timestamps) the activity API began returning,
+# null on every item of the 2026-11-09 capture; the converter's fixed schema drops them.
+_QUANTBASE_NULL_DRIFT_FIELDS: Final = frozenset(
+    {
+        "failure_notice_claimed_at",
+        "failure_notified_at",
+        "first_failed_at",
+        "pending_sell_wait_alerted_at",
+    }
+)
 _QUANTBASE_FEE_MATCH_TOLERANCE: Final = Decimal("0.025")
 _QUANTBASE_COST_JOURNAL_TYPES: Final = frozenset({"PARTNER_SUB_FEE", "AUM_FEE"})
 
@@ -8555,11 +8565,22 @@ def _quantbase_flow_coverage(
         csv_rows = list(csv.reader(io.StringIO(csv_text, newline=""), strict=True))
     except csv.Error as exc:
         raise ProviderLedgerError("Quantbase account activity CSV is invalid") from exc
+    # A native HAR may carry provider fields the converter's schema drops (allow-provider-drift
+    # ignores extras). Exactly the named bookkeeping fields, and only while every captured
+    # value is null, may be absent from the CSV; any other dropped field, or a dropped value,
+    # still refuses.
+    tolerated = {
+        name
+        for name in fields - set(csv_rows[0] if csv_rows else ())
+        if role_har_ids
+        and name in _QUANTBASE_NULL_DRIFT_FIELDS
+        and all(item.get(name) is None for _, item in normalized)
+    }
     if (
         not csv_rows
         or len(csv_rows[0]) != len(set(csv_rows[0]))
         or (
-            not fields <= set(csv_rows[0])
+            not fields - tolerated <= set(csv_rows[0])
             if role_har_ids
             else set(csv_rows[0]) != fields
         )
