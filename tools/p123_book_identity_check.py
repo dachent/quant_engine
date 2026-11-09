@@ -17,7 +17,11 @@ Field definitions (one set per book):
 Checks (``I1`` .. ``I9``); a book is PASS (all pass), REVIEW (a warning) or FAIL:
 
 I1 every export is listed in ``capture-manifest.json`` with the same sha256 and length.
-I2 transactions and perf exist; holdings exist (a missing holdings file is a warning).
+I2 transactions and perf exist; holdings exist (a missing holdings file is a warning). Every
+   column the checks read must be present (transactions Date/Symbol/Type/Shares/Price/Amount,
+   perf Date/Total Equity, holdings Ticker/Shares), every transaction and perf row carries an
+   ISO Date, the CASH Amount and the first perf Total Equity are numeric: a missing column
+   fails, never passes by absence.
 I3 perf start date equals series start date, and perf start equity equals the cash amount.
 I4 the last transaction date is not after the last perf date.
 I5 the net shares per symbol over all transaction rows (BUY/SELL/SHORT/COVER/SPLIT, signed
@@ -94,6 +98,42 @@ def _rows(path: Path) -> list[dict[str, str]]:
     if not text.strip() or text.strip() == "no rows":
         return []
     return [row for row in csv.DictReader(text.splitlines()) if any(row.values())]
+
+
+_REQUIRED_COLUMNS = {
+    "transactions": ("Date", "Symbol", "Type", "Shares", "Price", "Amount"),
+    "perf": ("Date", "Total Equity"),
+    "holdings": ("Ticker", "Shares"),
+}
+
+
+def _shape_problems(names: dict[str, Path]) -> str:
+    """An export that omits a column the checks read must fail, never pass by absence: every
+    required column present, every transaction and perf row dated, the CASH amount and the
+    first perf equity numeric."""
+    for kind, columns in _REQUIRED_COLUMNS.items():
+        path = names[kind]
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8-sig")
+        if not text.strip() or text.strip() == "no rows":
+            continue
+        header = next(csv.reader(text.splitlines()[:1]), [])
+        lacking = [c for c in columns if c not in header]
+        if lacking:
+            return f"{path.name} lacks required columns: {', '.join(lacking)}"
+    transactions = _rows(names["transactions"])
+    perf = _rows(names["perf"])
+    for label, rows in (("transactions", transactions), ("perf", perf)):
+        undated = sum(1 for r in rows if _day(r.get("Date")) is None)
+        if undated:
+            return f"{undated} {label} rows have no ISO Date"
+    cash = next((r for r in transactions if r.get("Type") == "CASH"), None)
+    if cash is not None and _number(cash.get("Amount")) is None:
+        return "the CASH row has no numeric Amount"
+    if perf and _number(perf[0].get("Total Equity")) is None:
+        return "the first perf row has no numeric Total Equity"
+    return ""
 
 
 def _day(value: str | None) -> date | None:
@@ -221,6 +261,10 @@ def check_book(
     missing = [kind for kind in ("transactions", "perf") if not names[kind].is_file()]
     if missing:
         checks.append(_check("I2", "FAIL", "missing: " + ", ".join(missing)))
+        return {"book": book, "checks": checks, "decision": "FAIL"}
+    shape = _shape_problems(names)
+    if shape:
+        checks.append(_check("I2", "FAIL", shape))
         return {"book": book, "checks": checks, "decision": "FAIL"}
     checks.append(
         _check(
