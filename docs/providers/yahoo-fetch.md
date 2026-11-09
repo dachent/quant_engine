@@ -100,6 +100,10 @@ substituted for a governed run), and verifies what it staged before it prints th
 (`status` `VERIFIED` or `REJECTED` with the failures, `evidence_consumed` false). It does not
 replace the approval: spend single-use evidence only after a dry run of the same config and cutoff
 verified. Every live driver follows this rule: rehearse first, with no evidence, in a scratch stage.
+Every run manifest and every `official-closes-manifest.json` also carries `mode` (`dry-run` for a
+`DRY-` id, `governed` otherwise); `verify` fails a run whose mode disagrees with its id, and
+`schwab_capture_ingest` refuses an official-closes run or sidecar that is marked `dry-run`, has a
+`DRY-` run id or sits in a `DRY-` directory, so a rehearsal cannot return a verified Yahoo binding.
 
 ## Run order and the clock (R3)
 

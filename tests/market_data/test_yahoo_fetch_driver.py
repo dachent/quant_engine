@@ -2505,3 +2505,26 @@ def test_the_shipped_volatility_groups_use_the_nyse_calendar() -> None:
     )
     assert date(2025, 1, 9) not in sessions and date(2026, 7, 3) not in sessions
     assert date(2026, 11, 6) in sessions
+
+
+def test_a_dry_run_says_so_in_its_manifest_and_sidecar_and_verify_checks_it(
+    tmp_path: Path,
+) -> None:
+    positions = _positions(tmp_path, ["SPY"])
+    config = driver.parse_config(_held_config(), schwab_positions=positions)
+    scratch = tmp_path / "scratch"
+    outcome = driver.dry_run(
+        config, yf=FakeYF(), chart=FakeChart(), now=NOW, stage_root=scratch
+    )
+    run = Path(outcome["run_dir"])
+    manifest = json.loads((run / "MANIFEST.json").read_text())
+    assert manifest["mode"] == "dry-run" and manifest["run_id"].startswith("DRY-")
+    sidecar = json.loads(
+        (run / "official-closes/official-closes-manifest.json").read_text()
+    )
+    assert sidecar["mode"] == "dry-run"
+    manifest["mode"] = "governed"
+    (run / "MANIFEST.json").write_bytes(driver.pretty(manifest))
+    with pytest.raises(driver.DriverError, match="run mode differs"):
+        driver.verify_run(run)
+    assert driver.run_mode("R3-YAHOO-1") == "governed"
