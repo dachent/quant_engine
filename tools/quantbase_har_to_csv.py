@@ -542,11 +542,35 @@ def _key_value(pairs: Sequence[tuple[str, object]]) -> bytes:
     return _csv_bytes(HEADERS["key_value"], [list(pair) for pair in pairs])
 
 
-def _user_profile(body: object) -> bytes:
+def _without_extra(
+    value: object,
+    keys: frozenset[str],
+    name: str,
+    ignored: dict[str, set[str]] | None,
+) -> dict[str, Any]:
+    """The record limited to ``keys``. Strict (``ignored`` is None): any key difference
+    refuses. Tolerant (``--allow-provider-drift``): a MISSING key still refuses (data is
+    absent), an extra key the retained schema does not carry is dropped and recorded by
+    name (never its value)."""
+    if ignored is None:
+        return _exact(value, keys, name)
+    record = _object(value, name)
+    missing = sorted(keys - set(record))
+    if missing:
+        raise QuantbaseCsvError(f"{name} keys differ: missing={missing}")
+    extra = set(record) - keys
+    if extra:
+        ignored.setdefault(name, set()).update(extra)
+    return {key: record[key] for key in keys}
+
+
+def _user_profile(body: object, ignored: dict[str, set[str]] | None = None) -> bytes:
     users = _array(body, "users.profile")
     if len(users) != 1:
         raise QuantbaseCsvError("users.profile must hold exactly one user")
-    user = dict(_exact(users[0], _PROFILE_KEYS | {"ob_status"}, "users.profile[0]"))
+    user = _without_extra(
+        users[0], _PROFILE_KEYS | {"ob_status"}, "users.profile[0]", ignored
+    )
     onboarding = _exact(
         user.pop("ob_status"), _ONBOARDING_KEYS, "users.profile.ob_status"
     )
@@ -566,7 +590,9 @@ def _accounts(body: object) -> bytes:
     return _csv_bytes(HEADERS["accounts"], rows)
 
 
-def _account_activity(body: object, cutoff: _Cutoff) -> bytes:
+def _account_activity(
+    body: object, cutoff: _Cutoff, ignored: dict[str, set[str]] | None = None
+) -> bytes:
     header = HEADERS["account_activity"]
     allowed = frozenset(header) - {"activity_type"}
     document = _exact(body, frozenset({"data"}), "accounts.activity")
@@ -574,10 +600,16 @@ def _account_activity(body: object, cutoff: _Cutoff) -> bytes:
     for entry in _array(document["data"], "accounts.activity.data"):
         record = _exact(entry, frozenset({"item", "type"}), "accounts.activity.data[]")
         item = _object(record["item"], "accounts.activity.item")
-        if not isinstance(record["type"], str) or not set(item) <= allowed:
-            raise QuantbaseCsvError(
-                "accounts.activity item keys differ: "
-                f"extra={sorted(set(item) - allowed)}"
+        if not isinstance(record["type"], str):
+            raise QuantbaseCsvError("accounts.activity type must be text")
+        if set(item) - allowed:
+            if ignored is None:
+                raise QuantbaseCsvError(
+                    "accounts.activity item keys differ: "
+                    f"extra={sorted(set(item) - allowed)}"
+                )
+            ignored.setdefault("accounts.activity.item", set()).update(
+                set(item) - allowed
             )
         days = [
             _observation_day(item[field], f"accounts.activity.{field}")
@@ -609,7 +641,9 @@ def _price_rows(body: object, name: str, cutoff: _Cutoff) -> list[list[object]]:
     return rows
 
 
-def _dashboard(body: object, cutoff: _Cutoff) -> tuple[dict[str, bytes], str | None]:
+def _dashboard(
+    body: object, cutoff: _Cutoff, tolerant: bool = False
+) -> tuple[dict[str, bytes], str | None]:
     document = _exact(body, frozenset({"data"}), "portfolio.dashboard")
     data = _exact(
         document["data"], frozenset({"funds_data", "top_wins"}), "dashboard.data"
@@ -623,10 +657,21 @@ def _dashboard(body: object, cutoff: _Cutoff) -> tuple[dict[str, bytes], str | N
         name = f"dashboard_{stem}_pricehistory.csv"
         if name in files:
             raise QuantbaseCsvError("dashboard fund titles collide on file names")
-        files[name] = _csv_bytes(
-            HEADERS["dashboard_pricehistory"],
-            _price_rows(fund["pricehistory"], "dashboard.pricehistory", cutoff),
-        )
+        price_rows = _price_rows(fund["pricehistory"], "dashboard.pricehistory", cutoff)
+        if title == VOLATIS_TITLE:
+            # The Volatis value series is the live NAV window: it must carry the cutoff day
+            # itself, whatever other funds' series reach (an unrelated or Total series
+            # cannot stand in for it).
+            days = [
+                _observation_day(row[0], "dashboard.pricehistory") for row in price_rows
+            ]
+            if cutoff.day not in days:
+                raise QuantbaseCsvError(
+                    "the Volatis dashboard series has no observation on the cutoff day "
+                    f"{cutoff.day.isoformat()} (last on or before it: "
+                    f"{max(days).isoformat() if days else 'none'})"
+                )
+        files[name] = _csv_bytes(HEADERS["dashboard_pricehistory"], price_rows)
         holdings = _array(fund["holdings"], "dashboard.holdings")
         if holdings:
             files[f"dashboard_{stem}_holdings.csv"] = _csv_bytes(
@@ -670,6 +715,12 @@ def _dashboard(body: object, cutoff: _Cutoff) -> tuple[dict[str, bytes], str | N
         data["top_wins"], frozenset({"biggest", "longest"}), "dashboard.top_wins"
     )
     for key in ("biggest", "longest"):
+        if tolerant and top[key] is None:
+            # No win recorded yet (the provider returns null): empty cells, as for the
+            # fund-level totals above; an object of the wrong shape still refuses.
+            for column in ("percentage", "days_ago", "fund_id"):
+                metrics[f"{key}_{column}"] = ""
+            continue
         mark = _exact(top[key], _WIN_MARK_KEYS, f"dashboard.top_wins.{key}")
         metrics[f"{key}_percentage"] = mark["percentage"]
         metrics[f"{key}_days_ago"] = mark["days_ago"]
@@ -722,9 +773,26 @@ def _partner_status(body: object) -> bytes:
     )
 
 
+def _stats_ids(stats: object) -> dict[str, object]:
+    """Fund title to fund id from ``fundStatsData`` (a repeated title must keep its id)."""
+    data = _array(_object(stats, "fundStatsData").get("data"), "fundStatsData.data")
+    ids: dict[str, object] = {}
+    for item in data:
+        entry = _object(item, "fundStatsData.data[]")
+        title, fund_id = entry.get("title"), entry.get("id")
+        if isinstance(title, str) and fund_id is not None:
+            if ids.setdefault(title, fund_id) != fund_id:
+                raise QuantbaseCsvError("a fund title maps to more than one fund id")
+    return ids
+
+
 def _invest(
-    body: object, mode: str, dashboard: object, cutoff: _Cutoff
-) -> tuple[dict[str, bytes], dict[str, int]]:
+    body: object,
+    mode: str,
+    dashboard: object,
+    cutoff: _Cutoff,
+    ignored: dict[str, set[str]] | None = None,
+) -> tuple[dict[str, bytes], dict[str, object]]:
     document = _exact(body, frozenset({"pageProps", "__N_SSG"}), "funds.invest")
     props = _exact(
         document["pageProps"],
@@ -735,8 +803,24 @@ def _invest(
     series: dict[str, list[list[object]]] = {}
     identifiers: dict[str, object] = {}
     seen: set[tuple[str, object]] = set()
+    stats_ids = _stats_ids(props["fundStatsData"]) if ignored is not None else {}
+    no_id: set[str] = set()
+    reduced_keys = price_keys - {"fund_id"}
     for item in _array(props["fundPriceData"], "fundPriceData"):
-        row = _exact(item, price_keys, "fundPriceData[]")
+        if ignored is not None and isinstance(item, dict) and "fund_id" not in item:
+            # The provider's price rows may omit the fund id; the same response's
+            # fundStatsData names its funds by title and id, so it is read from there.
+            # A fund the stats do not list keeps an empty id (counted in the facts);
+            # the Volatis fund must have one for the account-level series.
+            row = dict(_exact(item, reduced_keys, "fundPriceData[]"))
+            title = row["fund_title"]
+            if not isinstance(title, str):
+                raise QuantbaseCsvError("fundPriceData fund_title must be text")
+            row["fund_id"] = stats_ids.get(title, "")
+            if title not in stats_ids:
+                no_id.add(title)
+        else:
+            row = _exact(item, price_keys, "fundPriceData[]")
         title = row["fund_title"]
         if not isinstance(title, str) or not title:
             raise QuantbaseCsvError("fundPriceData fund_title must be text")
@@ -751,7 +835,7 @@ def _invest(
         ):
             rows.append([title, row["fund_id"], row["value"], row["time"]])
     if mode == "account-level":
-        if VOLATIS_TITLE not in series:
+        if VOLATIS_TITLE not in series or not identifiers.get(VOLATIS_TITLE):
             raise QuantbaseCsvError("public series lacks the Volatis fund id")
         funds = _object(
             _exact(dashboard, frozenset({"data"}), "portfolio.dashboard")["data"],
@@ -778,20 +862,40 @@ def _invest(
     if set(stats) != {"data"}:
         raise QuantbaseCsvError("fundStatsData keys differ")
     stat_keys = frozenset(HEADERS["fund_stats"])
-    rows = [
-        [
-            _exact(item, stat_keys, "fundStatsData.data[]")[column]
-            for column in HEADERS["fund_stats"]
-        ]
-        for item in _array(stats["data"], "fundStatsData.data")
-    ]
+    absent: set[str] = set()
+    rows = []
+    for item in _array(stats["data"], "fundStatsData.data"):
+        if ignored is None:
+            record = _exact(item, stat_keys, "fundStatsData.data[]")
+        else:
+            record = _object(item, "fundStatsData.data[]")
+        if not {"id", "title"} <= set(record):
+            raise QuantbaseCsvError("fundStatsData.data[] lacks a fund id or title")
+        # The provider's stats list may carry fewer descriptor columns than the retained
+        # table and a few new ones: an absent column is written empty and its name
+        # recorded, an extra one is dropped and its name recorded; the fund id and title
+        # are required.
+        absent |= stat_keys - set(record)
+        if ignored is not None and set(record) - stat_keys:
+            ignored.setdefault("fundStatsData.data[]", set()).update(
+                set(record) - stat_keys
+            )
+        rows.append([record.get(column, "") for column in HEADERS["fund_stats"]])
     if not rows:
         raise QuantbaseCsvError("fundStatsData holds no funds")
     # The retained converter wrote one fund-metadata table under both names.
     table = _csv_bytes(HEADERS["fund_stats"], rows)
     files["ssg_all_funds_stats.csv"] = table
     files["projections_all_live_funds.csv"] = table
-    return files, {"price_series": len(series), "fund_stats_rows": len(rows)}
+    facts: dict[str, object] = {
+        "price_series": len(series),
+        "fund_stats_rows": len(rows),
+    }
+    if no_id:
+        facts["price_series_without_fund_id"] = len(no_id)
+    if absent:
+        facts["fund_stats_columns_absent"] = sorted(absent)
+    return files, facts
 
 
 _SUPPORTED: Final = frozenset(
@@ -813,6 +917,7 @@ def derive_csv_files(
     volatis_pricehistory: str,
     cutoff_day: date,
     snapshot_exception: str | None = None,
+    allow_provider_drift: bool = False,
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Return ``{file name: bytes}`` and value-free derivation facts.
 
@@ -841,11 +946,17 @@ def derive_csv_files(
             raise QuantbaseCsvError(f"capture lacks a required response: {capability}")
         return body
 
-    add("user_profile.csv", _user_profile(need("users.profile")))
+    ignored: dict[str, set[str]] | None = {} if allow_provider_drift else None
+    add("user_profile.csv", _user_profile(need("users.profile"), ignored))
     add("accounts.csv", _accounts(need("accounts.linked")))
-    add("account_activity.csv", _account_activity(need("accounts.activity"), cutoff))
+    add(
+        "account_activity.csv",
+        _account_activity(need("accounts.activity"), cutoff, ignored),
+    )
     dashboard_body = need("portfolio.dashboard")
-    dashboard_files, wins_source = _dashboard(dashboard_body, cutoff)
+    dashboard_files, wins_source = _dashboard(
+        dashboard_body, cutoff, ignored is not None
+    )
     for name, content in dashboard_files.items():
         add(name, content)
     partner = _single(responses, "partners.status")
@@ -877,7 +988,7 @@ def derive_csv_files(
                 _csv_bytes(HEADERS["fund_rebalance"], rows),
             )
     invest_files, invest_facts = _invest(
-        need("funds.invest"), volatis_pricehistory, dashboard_body, cutoff
+        need("funds.invest"), volatis_pricehistory, dashboard_body, cutoff, ignored
     )
     for name, content in invest_files.items():
         add(name, content)
@@ -929,6 +1040,12 @@ def derive_csv_files(
         "volatis_pricehistory": volatis_pricehistory,
         **invest_facts,
     }
+    if ignored is not None:
+        facts["allow_provider_drift"] = True
+    if ignored:
+        facts["ignored_extra_fields"] = {
+            name: sorted(fields) for name, fields in sorted(ignored.items())
+        }
     return files, facts
 
 
@@ -1015,13 +1132,18 @@ def _derive(
     intake_dir: Path,
     volatis_pricehistory: str,
     snapshot_exception: str | None = None,
+    allow_provider_drift: bool = False,
 ) -> tuple[Path, dict[str, bytes], dict[str, Any]]:
     """Every output file name (relative to the output directory) to its bytes."""
 
     root, manifest, record, report = _load_intake(intake_dir)
     responses = _bound_responses(root, manifest, record)
     csv_files, facts = derive_csv_files(
-        responses, volatis_pricehistory, manifest.cutoff, snapshot_exception
+        responses,
+        volatis_pricehistory,
+        manifest.cutoff,
+        snapshot_exception,
+        allow_provider_drift,
     )
     snapshots = facts.pop("snapshots")
     intake_id = str(record["intake_id"])
@@ -1120,11 +1242,12 @@ def convert(
     out_root: Path,
     volatis_pricehistory: str,
     snapshot_exception: str | None = None,
+    allow_provider_drift: bool = False,
 ) -> dict[str, object]:
     """Derive the CSV source root and the native manifest; create-only."""
 
     root, outputs, conversion = _derive(
-        intake_dir, volatis_pricehistory, snapshot_exception
+        intake_dir, volatis_pricehistory, snapshot_exception, allow_provider_drift
     )
     target = _output_dir(root, out_root, str(conversion["intake_id"]))
     if target.exists():
@@ -1166,11 +1289,12 @@ def verify_conversion(
     out_root: Path,
     volatis_pricehistory: str,
     snapshot_exception: str | None = None,
+    allow_provider_drift: bool = False,
 ) -> dict[str, object]:
     """Re-derive every output from the verified intake and compare byte for byte."""
 
     root, outputs, conversion = _derive(
-        intake_dir, volatis_pricehistory, snapshot_exception
+        intake_dir, volatis_pricehistory, snapshot_exception, allow_provider_drift
     )
     target = _output_dir(root, out_root, str(conversion["intake_id"]))
     if target.is_symlink() or not target.is_dir():
@@ -1213,6 +1337,14 @@ def _parser() -> argparse.ArgumentParser:
             help="label that accepts capture-time snapshots taken after the "
             "cutoff day end (recorded in the report and the native manifest)",
         )
+        child.add_argument(
+            "--allow-provider-drift",
+            action="store_true",
+            help="accept provider fields the retained schema lacks (dropped, names "
+            "recorded), absent descriptor columns (written empty, names recorded), "
+            "null top wins and price rows without a fund id (read from the stats "
+            "list); a missing identifying field still refuses",
+        )
     return parser
 
 
@@ -1225,6 +1357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.out_root,
             args.volatis_pricehistory,
             args.snapshot_exception,
+            args.allow_provider_drift,
         )
     except (OSError, QuantbaseCsvError, ValueError) as exc:
         print(f"quantbase-har-to-csv: FAIL: {exc}")

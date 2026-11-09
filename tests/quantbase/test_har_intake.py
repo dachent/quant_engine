@@ -191,7 +191,104 @@ def test_off_grid_cutoff_is_flagged(tmp_path: Path) -> None:
 
 def test_cutoff_after_newest_nav_fails_closed(tmp_path: Path) -> None:
     case = Case(tmp_path, cutoff="2026-10-12")
-    with pytest.raises(intake.QuantbaseHarIntakeError, match="after the newest"):
+    with pytest.raises(
+        intake.QuantbaseHarIntakeError,
+        match=r"cutoff 2026-10-12 is after the newest captured NAV date 2026-10-07",
+    ):
+        intake.parse_intake(case.stage())
+
+
+def test_us_formatted_dates_are_dated_values() -> None:
+    assert intake._parsed_date("11/06/2026") == date(2026, 11, 6)
+    assert intake._parsed_date("1/5/2026") == date(2026, 1, 5)
+    assert (
+        intake._parsed_date("1/5/2026 00:00:00") is None
+    )  # the converter reads m/d/Y only
+    assert intake._parsed_date("13/45/2026") is None  # not a date: counted as unparsed
+    assert intake._parsed_date("11/06/1999") is None  # outside 2000..2100
+
+
+def _dashboard(days: list[str]) -> dict[str, Any]:
+    return _entry(
+        f"{API}/api/users/123/dashboard_data/",
+        {
+            "data": {
+                "funds_data": {
+                    "SYNTH": {
+                        "pricehistory": [
+                            {"time": day, "value": 100.0 + index, "cost_basis": 90.0}
+                            for index, day in enumerate(days)
+                        ]
+                    }
+                },
+                "top_wins": [],
+            }
+        },
+    )
+
+
+def _dashboard_case(root: Path, days: list[str], **overrides: Any) -> Case:
+    document = _manifest(**overrides)
+    document["nav_grid"] = {
+        **document["nav_grid"],
+        "capabilities": ["portfolio.dashboard"],
+    }
+    document["capabilities"]["portfolio.dashboard"] = {
+        "expected_responses": 1,
+        "expected_records": 1,
+        "records_key": None,
+    }
+    case = Case(root, **overrides)
+    case.set_manifest(document)
+    _write_har(case.capture / "owner_b.har", _activity(), _dashboard(days))
+    return case
+
+
+def test_the_dashboard_series_is_a_nav_date_source_and_covers_the_cutoff(
+    tmp_path: Path,
+) -> None:
+    # The public statistics series ends 2026-10-07 (the grid date); the dashboard series
+    # (m/d/Y strings) reaches 2026-10-09 and carries the cutoff day: the parse passes.
+    case = _dashboard_case(
+        tmp_path, ["10/06/2026", "10/07/2026", "10/09/2026"], cutoff="2026-10-07"
+    )
+    result = intake.parse_intake(case.stage())
+    report = json.loads(Path(result["report"]).read_bytes())
+    assert report["capabilities"]["portfolio.dashboard"]["observed_end"] == "2026-10-09"
+    assert report["nav_grid"]["newest_nav_date"] == "2026-10-09"
+    assert report["nav_grid"]["cutoff_observation"] == {
+        "first_on_or_after_cutoff": "2026-10-07",
+        "last_on_or_before_cutoff": "2026-10-07",
+        "observed_on_cutoff": True,
+    }
+    assert "CUTOFF_DATE_NOT_OBSERVED" not in result["flags"]
+    assert report["unparsed_date_values"] == 0
+
+
+def test_a_cutoff_day_missing_from_the_nav_series_is_reported_exactly(
+    tmp_path: Path,
+) -> None:
+    case = _dashboard_case(
+        tmp_path, ["10/06/2026", "10/07/2026", "10/09/2026"], cutoff="2026-10-08"
+    )
+    result = intake.parse_intake(case.stage())
+    report = json.loads(Path(result["report"]).read_bytes())
+    assert "CUTOFF_DATE_NOT_OBSERVED" in result["flags"]
+    assert report["nav_grid"]["cutoff_observation"] == {
+        "first_on_or_after_cutoff": "2026-10-09",
+        "last_on_or_before_cutoff": "2026-10-07",
+        "observed_on_cutoff": False,
+    }
+
+
+def test_a_dashboard_series_ending_before_the_cutoff_still_refuses(
+    tmp_path: Path,
+) -> None:
+    case = _dashboard_case(tmp_path, ["10/05/2026", "10/06/2026"], cutoff="2026-10-07")
+    with pytest.raises(
+        intake.QuantbaseHarIntakeError,
+        match=r"after the newest captured NAV date 2026-10-06",
+    ):
         intake.parse_intake(case.stage())
 
 
@@ -577,3 +674,41 @@ def test_interrupted_parse_resumes_over_identical_partial_output(
     (other / "normalized" / "records.json").write_bytes(b"{}")
     with pytest.raises(intake.QuantbaseHarIntakeError, match="partial parse output"):
         intake.parse_intake(other)
+
+
+def test_dashboard_coverage_is_reported_for_each_fund_series(tmp_path: Path) -> None:
+    # An unrelated series reaches the cutoff while the strategy series ends before it: the
+    # capability-wide observation is met, the per-series report and the flag show the gap.
+    def entry(days: dict[str, list[str]]) -> dict[str, Any]:
+        return _entry(
+            f"{API}/api/users/123/dashboard_data/",
+            {
+                "data": {
+                    "funds_data": {
+                        title: {
+                            "pricehistory": [
+                                {"time": day, "value": 1.0, "cost_basis": 1.0}
+                                for day in rows
+                            ]
+                        }
+                        for title, rows in days.items()
+                    },
+                    "top_wins": [],
+                }
+            },
+        )
+
+    case = _dashboard_case(tmp_path, ["10/07/2026"], cutoff="2026-10-07")
+    _write_har(
+        case.capture / "owner_b.har",
+        _activity(),
+        entry({"Strategy": ["10/05/2026", "10/06/2026"], "Total": ["10/07/2026"]}),
+    )
+    result = intake.parse_intake(case.stage())
+    report = json.loads(Path(result["report"]).read_bytes())
+    assert report["nav_grid"]["cutoff_observation"]["observed_on_cutoff"] is True
+    assert report["nav_grid"]["cutoff_observation_by_series"] == {
+        "Strategy": {"observed_end": "2026-10-06", "observed_on_cutoff": False},
+        "Total": {"observed_end": "2026-10-07", "observed_on_cutoff": True},
+    }
+    assert "NAV_SERIES_ENDS_BEFORE_CUTOFF" in result["flags"]
