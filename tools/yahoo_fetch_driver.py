@@ -1565,6 +1565,7 @@ def _commit_run(
     manifest = {
         **header,
         "schema_version": SCHEMA_VERSION,
+        "mode": run_mode(run_id),
         "run_id": run_id,
         "files": {name: _file_record(files[name]) for name in sorted(files)},
     }
@@ -1674,6 +1675,14 @@ def utc_text(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def run_mode(run_id: str) -> str:
+    """``dry-run`` for a rehearsal (its id starts with ``DRY-``), ``governed`` otherwise.
+
+    Written into every run manifest and official-closes sidecar so an admission consumer
+    can refuse a rehearsal by what the bytes say, not only by what the directory is called."""
+    return "dry-run" if run_id.startswith("DRY-") else "governed"
+
+
 def official_manifest(
     merged: Mapping[str, Mapping[str, list[str]]],
     *,
@@ -1717,6 +1726,7 @@ def official_manifest(
         {
             "schema_version": SCHEMA_VERSION,
             "kind": "yahoo-official-closes-manifest",
+            "mode": run_mode(run_id),
             "run_id": run_id,
             "cutoff": cutoff.isoformat(),
             "fetch_started_utc": started,
@@ -2539,6 +2549,9 @@ def verify_run(run_dir: Path, *, now: datetime | None = None) -> dict[str, Any]:
     recorded = manifest.get("files")
     if not isinstance(recorded, dict):
         raise DriverError("run manifest has no file table")
+    if "mode" in manifest or run_dir.name.startswith("DRY-"):
+        if manifest.get("mode") != run_mode(run_dir.name):
+            problems.append("run mode differs from what its run id says")
     present = {
         p.relative_to(run_dir).as_posix()
         for p in run_dir.rglob("*")
