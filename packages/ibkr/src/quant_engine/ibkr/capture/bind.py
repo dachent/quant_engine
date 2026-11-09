@@ -162,8 +162,13 @@ def bind_spec(
     exclusions: Mapping[str, str] | None = None,
     verify: bool = True,
     preflight: bool = False,
+    flex_only: bool = False,
 ) -> dict[str, Any]:
-    """Write ``out``: the base spec plus the runs as refresh sources, each with its real hash."""
+    """Write ``out``: the base spec plus the runs as refresh sources, each with its real hash.
+
+    ``flex_only`` migrates the base to spec schema 4: the TWS snapshot source is dropped and
+    the version set to 4 (Flex is the sole data authority).
+    """
 
     try:
         spec = json.loads(base_spec.read_text(encoding="utf-8"))
@@ -179,6 +184,10 @@ def bind_spec(
         raise BindError("the root id is not in the base spec")
     root = Path(str(roots[root_id])).resolve()
     sources = list(spec["sources"])
+    if flex_only:
+        sources = [item for item in sources if item["role"] != "TWS_CURRENT_SNAPSHOT"]
+        spec["schema_version"] = 4
+        spec.setdefault("declared_zero_activity_accounts", [])
     known = {item["artifact_id"] for item in sources}
     added: list[dict[str, Any]] = []
     days: set[date] = set()
