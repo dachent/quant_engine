@@ -226,8 +226,8 @@ header names (never values). It needs no evidence and consumes nothing.
 No retained capture holds a Holdings-V2 request body (the 2026-07-31 HARs contain
 the SPA bundle, which has only key names). `attach-check --cdp-url <url>
 --capture-body-out <body.json> [--wait-seconds 20]` records the body of the
-page's OWN HoldingV2 POST while it reloads the page (a passive
-`request.post_data` read; no request of ours, no header, cookie or token is
+page's OWN HoldingV2 POST while it reloads the page (the body is read from
+`request.post_data`; no request of ours, no header, cookie or token is
 stored or printed). The body is reduced to the keys the gate allows and written
 create-only; the output lists the key names and the file hash. Feed the file to
 `make-evidence --holdings-body`.
