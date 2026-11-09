@@ -23,6 +23,8 @@ from tools.p123_cdp_fetcher import FetchRefused, GuardedTransport, run_routes
 BASE = "https://www.portfolio123.com"
 MODEL, INVEST, ACCOUNT = 1111111, 2222222, 3333333
 TAB = "TAB-1"
+INCEPTION = "01/01/2008"  # provider format, as the model payload states it
+START = "2008-01-01"
 SID_KEY = "session" + "Id"
 SHAPES = json.loads(
     (Path(__file__).with_name("p123_route_shapes.json")).read_text(encoding="utf-8")
@@ -36,12 +38,14 @@ CSV_ROW = {
 def _bodies() -> dict[str, tuple[str, bytes]]:
     """route kind -> (content type, body) a healthy page would return."""
 
-    model = dict(SHAPES["designer_model"], portUid=MODEL)
+    model = dict(SHAPES["designer_model"], portUid=MODEL, inceptionDt=INCEPTION)
+    perf = json.loads(json.dumps(SHAPES["designer_perf"]))
+    perf["perfData"]["date"] = START
     out: dict[str, tuple[str, bytes]] = {
         "designer_model": ("application/json", json.dumps(model).encode()),
         "designer_perf_full": (
             "application/json",
-            json.dumps(SHAPES["designer_perf"]).encode(),
+            json.dumps(perf).encode(),
         ),
         "designer_holdings": (
             "application/json",
@@ -61,6 +65,11 @@ def _bodies() -> dict[str, tuple[str, bytes]]:
         ),
         "investment_performance": ("application/json", b'{"nav": []}'),
         "investment_holdings": ("application/json", b"[]"),
+        "investment_trans_resource": ("application/json", b"{}"),
+        "investment_perfdata_true": (
+            "application/json",
+            json.dumps(SHAPES["investment_perfdata"]).encode(),
+        ),
         "investment_perfdata_blank": (
             "application/json",
             json.dumps(SHAPES["investment_perfdata"]).encode(),
@@ -173,6 +182,8 @@ ALL_ROUTES = [
     ("investment_performance_page", INVEST),
     ("investment_performance", INVEST),
     ("investment_holdings", INVEST),
+    ("investment_perfdata_true", INVEST),
+    ("investment_trans_resource", INVEST),
     ("investment_perfdata_blank", INVEST),
     ("investment_holdings_csv", INVEST),
     ("investment_trans_csv", INVEST),
@@ -354,7 +365,6 @@ def test_bad_status_or_content_type_fails_closed(
         ("designer_model", MODEL, b"[]", "application/json"),
         ("designer_model", MODEL, b'{"portUid": 9}', "application/json"),
         ("designer_model", MODEL, b"not json", "application/json"),
-        ("designer_perf_full", MODEL, b'{"other": 1}', "application/json"),
         ("designer_holdings", MODEL, b"", "application/json"),
         ("investment_perfdata", INVEST, b"{}", "application/json"),
         ("investment_holdings_csv", INVEST, b"Wrong,Header\n1,2\n", "text/csv"),
@@ -674,3 +684,87 @@ def test_run_refuses_routes_mixed_with_books(tmp_path: Path) -> None:
 def test_transactions_csv_name_cannot_enter_the_transaction_capture_path() -> None:
     saved = fetcher.ROUTE_BY_NAME["investment_trans_csv"].saved.format(id=7)
     assert "transaction" not in saved.lower()
+
+
+def _curve_run(tmp_path: Path, start: str | None) -> dict[str, Any]:
+    perf = json.loads(json.dumps(SHAPES["designer_perf"]))
+    perf["perfData"]["date"] = start
+    url = fetcher.route_target_url(fetcher.ROUTE_BY_NAME["designer_perf_full"], MODEL)
+
+    def mutate(browser: RoutesBrowser) -> None:
+        browser.replies[url] = (200, "application/json", json.dumps(perf).encode())
+
+    routes = [("designer_model", MODEL), ("designer_perf_full", MODEL)]
+    manifest, _, root = _run(tmp_path, routes, mutate=mutate)
+    perf_file = root / "capture" / "raw" / f"r2g_{MODEL}_perf-full.json"
+    assert perf_file.exists() is (manifest["status"] == "COMPLETE")
+    return manifest
+
+
+def test_the_designer_curve_is_the_full_25_year_route() -> None:
+    url = fetcher.route_target_url(fetcher.ROUTE_BY_NAME["designer_perf_full"], 7)
+    assert url == f"{BASE}/spr/strategy/model/7/perf?dm=true&init=true&years=25"
+
+
+def test_a_curve_starting_on_the_model_inception_is_saved(tmp_path: Path) -> None:
+    assert _curve_run(tmp_path, START)["status"] == "COMPLETE"
+
+
+@pytest.mark.parametrize("start", ["2011-01-03", "not a date", None])
+def test_a_truncated_or_unreadable_curve_start_fails_closed(
+    tmp_path: Path, start: str | None
+) -> None:
+    manifest = _curve_run(tmp_path, start)
+    assert manifest["status"] == "STOPPED"
+    assert manifest["stop"]["code"] == "STOP_SHAPE_UNEXPECTED"
+    assert "2011" not in json.dumps(manifest, default=str)
+
+
+def test_a_model_without_a_readable_inception_stops(tmp_path: Path) -> None:
+    url = fetcher.route_target_url(fetcher.ROUTE_BY_NAME["designer_model"], MODEL)
+    model = dict(SHAPES["designer_model"], portUid=MODEL, inceptionDt="x")
+
+    def mutate(browser: RoutesBrowser) -> None:
+        browser.replies[url] = (200, "application/json", json.dumps(model).encode())
+
+    manifest, _, _ = _run(tmp_path, [("designer_model", MODEL)], mutate=mutate)
+    assert manifest["stop"]["code"] == "STOP_SHAPE_UNEXPECTED"
+
+
+def test_a_curve_route_needs_its_model_route_in_the_allowlist() -> None:
+    payload = fetcher.build_allowlist_bytes([], routes=[("designer_perf_full", MODEL)])
+    with pytest.raises(FetchRefused) as info:
+        fetcher.parse_allowlist(payload, hashlib.sha256(payload).hexdigest())
+    assert info.value.code == "ALLOWLIST_INVALID"
+
+
+def test_the_model_is_read_before_its_curve_whatever_the_allowlist_order(
+    tmp_path: Path,
+) -> None:
+    routes = [("designer_perf_full", MODEL), ("designer_model", MODEL)]
+    manifest, _, _ = _run(tmp_path, routes)
+    assert manifest["status"] == "COMPLETE"
+    assert [r["kind"] for r in manifest["routes"]] == [
+        "designer_model",
+        "designer_perf_full",
+    ]
+
+
+def test_account_investment_routes_cover_the_five_account_reads() -> None:
+    expected = {
+        "investment_perfdata_true": f"{BASE}/app/investment/perf-data/9?init=true",
+        "investment_performance_page": f"{BASE}/app/investment/performance",
+        "investment_resource": f"{BASE}/app/investment/resource/9",
+        "investment_holdings": f"{BASE}/app/investment/holdings/9",
+        "investment_trans_resource": f"{BASE}/app/investment/transResource/9",
+    }
+    for kind, url in expected.items():
+        route = fetcher.ROUTE_BY_NAME[kind]
+        assert fetcher.route_target_url(route, 9) == url
+        assert "{id}" in route.saved  # the staged name carries the investment id
+
+
+def test_every_saved_name_carries_the_id() -> None:
+    for route in fetcher.ROUTES:
+        if route.shape != "visit":
+            assert "{id}" in route.saved

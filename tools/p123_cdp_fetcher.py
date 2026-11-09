@@ -206,6 +206,9 @@ def _parse_routes(value: object) -> tuple[tuple[str, int], ...]:
         pairs.append((kind, _positive(item["id"], "route id")))
     if len(set(pairs)) != len(pairs):
         raise FetchRefused("ALLOWLIST_INVALID", "duplicate route")
+    for kind, ident in pairs:
+        if kind == "designer_perf_full" and ("designer_model", ident) not in pairs:
+            raise FetchRefused("ALLOWLIST_INVALID", "curve needs its model route")
     return tuple(pairs)
 
 
@@ -529,7 +532,7 @@ ROUTES: tuple[Route, ...] = (
     Route(
         "designer_perf_full",
         "/app/r2g/summary?id={id}",
-        "/spr/strategy/model/{id}/perf?dm=true&init=true&years=15",
+        "/spr/strategy/model/{id}/perf?dm=true&init=true&years=25",
         "r2g_{id}_perf-full.json",
         "json_object",
         "perfData",
@@ -555,6 +558,21 @@ ROUTES: tuple[Route, ...] = (
         "/app/investment/details?id={id}",
         "/app/investment/perf-data/{id}?init=",
         "strategy_{id}_app_investment_perfdata_init_blank.json",
+        "json_any",
+    ),
+    Route(
+        "investment_perfdata_true",
+        "/app/investment/details?id={id}",
+        "/app/investment/perf-data/{id}?init=true",
+        "strategy_{id}_app_investment_perfdata_init_true.json",
+        "json_object",
+        "data",
+    ),
+    Route(
+        "investment_trans_resource",
+        "/app/investment/details?id={id}",
+        "/app/investment/transResource/{id}",
+        "strategy_{id}_app_investment_transresource.json",
         "json_any",
     ),
     Route(
@@ -687,8 +705,57 @@ def screen_route_url(url: str, allowed: frozenset[str]) -> None:
         raise FetchRefused("URL_NOT_ALLOWLISTED")
 
 
+def _provider_day(value: object) -> date | None:
+    """The model payload states dates as MM/DD/YYYY."""
+
+    parts = str(value).split("/")
+    try:
+        month, day, year = (int(item) for item in parts)
+        return date(year, month, day) if len(parts) == 3 else None
+    except ValueError:
+        return None
+
+
+def _check_designer_curve(
+    route: Route, ident: int, document: object, context: dict[int, date] | None
+) -> None:
+    """The perf curve must be the FULL curve: it starts on the model's inceptionDt.
+
+    The model is read first and its inceptionDt is kept in ``context``; a curve that starts
+    later (a truncated ``years`` window) is refused, never saved.
+    """
+
+    if route.name not in {"designer_model", "designer_perf_full"}:
+        return
+    if not isinstance(document, dict) or context is None:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "no model context")
+    if route.name == "designer_model":
+        inception = _provider_day(document.get("inceptionDt"))
+        if inception is None:
+            raise FetchStop("STOP_SHAPE_UNEXPECTED", "model inceptionDt unreadable")
+        context[ident] = inception
+        return
+    block = document.get("perfData")
+    start = block.get("date") if isinstance(block, dict) else None
+    try:
+        first = date.fromisoformat(str(start))
+    except ValueError as exc:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "curve start unreadable") from exc
+    expected = context.get(ident)
+    if expected is None:
+        raise FetchStop("STOP_SHAPE_UNEXPECTED", "model not read before its curve")
+    if first != expected:
+        raise FetchStop(
+            "STOP_SHAPE_UNEXPECTED", "curve start differs from model inceptionDt"
+        )
+
+
 def validate_route_body(
-    route: Route, ident: int, content_type: str, data: bytes
+    route: Route,
+    ident: int,
+    content_type: str,
+    data: bytes,
+    context: dict[int, date] | None = None,
 ) -> int | None:
     """Fail closed unless ``data`` has exactly the reviewed shape; return CSV rows.
 
@@ -728,6 +795,7 @@ def validate_route_body(
             and document.get("portUid") != ident
         ):
             raise FetchStop("STOP_SHAPE_UNEXPECTED", "model id differs")
+        _check_designer_curve(route, ident, document, context)
         return None
     if route.shape == "csv":
         if html or text.splitlines()[0] != route.check:
@@ -1213,7 +1281,12 @@ class Session:
         self._event(settle)
 
     def fetch_in_page(
-        self, url: str, saved: Path, route: Route, ident: int
+        self,
+        url: str,
+        saved: Path,
+        route: Route,
+        ident: int,
+        context: dict[int, date] | None = None,
     ) -> tuple[str, int, int | None]:
         """GET ``url`` from inside the page and save the body unmodified."""
 
@@ -1232,7 +1305,7 @@ class Session:
             raise FetchStop("STOP_REAUTH", f"HTTP {status}")
         if status != 200:
             raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", f"HTTP {status}")
-        rows = validate_route_body(route, ident, content_type, data)
+        rows = validate_route_body(route, ident, content_type, data, context)
         if saved.exists():
             raise FetchStop("STOP_DOWNLOAD_NOT_EXACT", "destination exists")
         saved.parent.mkdir(parents=True, exist_ok=True)
@@ -1694,7 +1767,9 @@ def run_routes(
     visited: list[str] = []
     stop: FetchStop | None = None
     groups: dict[str, list[tuple[Route, int]]] = {}
-    for name, ident in allowlist.routes:
+    inceptions: dict[int, date] = {}
+    # the model is read before its curve (stable sort keeps the rest of the order)
+    for name, ident in sorted(allowlist.routes, key=lambda e: e[0] != "designer_model"):
         route = ROUTE_BY_NAME[name]
         groups.setdefault(route_host_url(route, ident), []).append((route, ident))
     try:
@@ -1714,7 +1789,7 @@ def run_routes(
                 screen_route_url(url, fetches)
                 relative = f"raw/{route.saved.format(id=ident)}"
                 digest, size, rows = session.fetch_in_page(
-                    url, capture / relative, route, ident
+                    url, capture / relative, route, ident, inceptions
                 )
                 landed.append(
                     Landed(route.name, str(ident), relative, digest, size, rows)

@@ -591,11 +591,13 @@ bytes and pin.
 | Kind | Host page | In-page GET | Saved as |
 |---|---|---|---|
 | `designer_model` | `/app/r2g/summary?id=<id>` | `/spr/strategy/model/<id>?dm=true` | `raw/r2g_<id>_dm_true.json` |
-| `designer_perf_full` | same | `/spr/strategy/model/<id>/perf?dm=true&init=true&years=15` | `raw/r2g_<id>_perf-full.json` |
+| `designer_perf_full` | same | `/spr/strategy/model/<id>/perf?dm=true&init=true&years=25` (the FULL curve; its first date must equal the model's `inceptionDt`, else `STOP_SHAPE_UNEXPECTED` and nothing is saved; needs `designer_model` for the same id in the allowlist, read first) | `raw/r2g_<id>_perf-full.json` |
 | `designer_holdings` | same | `/spr/strategy/model/<id>/holdings?dm=true` | `raw/r2g_<id>_holdings.json` |
 | `investment_perfdata` | `/app/investment/details?id=<id>` | `/app/investment/perf-data/<id>?init=1` | `raw/strategy_<id>_app_investment_perfdata_init.json` |
 | `investment_resource` | same | `/app/investment/resource/<id>` | `raw/strategy_<id>_app_investment_resource.json` |
 | `investment_perfdata_blank` | same | `/app/investment/perf-data/<id>?init=` (catalog spelling; the operator-recorded request is `init=1`) | `raw/strategy_<id>_app_investment_perfdata_init_blank.json` |
+| `investment_perfdata_true` | same | `/app/investment/perf-data/<id>?init=true` | `raw/strategy_<id>_app_investment_perfdata_init_true.json` |
+| `investment_trans_resource` | same | `/app/investment/transResource/<id>` | `raw/strategy_<id>_app_investment_transresource.json` |
 | `investment_holdings` | same | `/app/investment/holdings/<id>` | `raw/strategy_<id>_app_investment_holdings.json` |
 | `investment_performance` | same | `/spr/strategy/portmodel/<id>/perf` | `raw/strategy_<id>_strategy_portmodel_perf.json` |
 | `investment_performance_page` | same | `/app/investment/performance` (HTML fragment) | `raw/strategy_<id>_app_investment_performance.html` |
