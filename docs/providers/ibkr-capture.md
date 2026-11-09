@@ -290,6 +290,9 @@ therefore drops the TWS source. It requires the primaries and at least one Flex 
 PARTIAL/COMPLETE decision reads the Flex coverage only; the declared-zero-activity Flex check is
 kept. Specs of schema versions 1 to 3 still build their catalog schema 8 byte-identically.
 
+`bind-spec --flex-only` is the producer path: it migrates a schema 2 or 3 base to schema 4 (drops
+the TWS source) while it adds the bound runs. Without the flag the base keeps its version.
+
 ## R3 generation spec (skeleton from the R2.1 spec)
 
 The model is the R2.1 spec (`dataIBKR/config/ibkr-generation-spec-refresh-20260903.json`, schema
