@@ -376,7 +376,11 @@ def _sources(
         raise SchwabGenerationError(
             "cannot use both per-account and aggregate manual NAV roles"
         )
-    if not has_nav_per and not has_nav_all and snapshot_schema_version != "1":
+    if (
+        not has_nav_per
+        and not has_nav_all
+        and snapshot_schema_version not in {"1", "2"}
+    ):
         raise SchwabGenerationError(
             "a manual NAV role (per-account or aggregate) is required"
         )
@@ -1644,9 +1648,14 @@ def _nav_api(
     *,
     snapshot_account_ids: set[str],
     snapshot_observed_at: datetime,
+    snapshot_valuation_cutoff: date | None = None,
     source_artifact_ids: Mapping[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Anchor historical WCH NAV to a later developer-API account snapshot."""
+    """Anchor historical WCH NAV to a later account snapshot.
+
+    The snapshot's financial date is its valuation_cutoff when it declares one
+    (a rolled-back WEB_CONTRACT snapshot); capture time is only provenance.
+    """
 
     wch_by_account: dict[str, dict[date, Decimal]] = {}
     for account_id, path in wch:
@@ -1664,10 +1673,19 @@ def _nav_api(
     )
     if series_max is None:
         raise SchwabGenerationError("WCH NAV series is empty")
-    snapshot_date = snapshot_observed_at.date()
-    if snapshot_date <= series_max:
+    if snapshot_valuation_cutoff is not None:
+        # valued at D with NAV through D is the normal case: only an earlier
+        # cutoff means the snapshot predates the NAV being anchored
+        if snapshot_valuation_cutoff < series_max:
+            raise SchwabGenerationError(
+                f"stale current snapshot: valuation_cutoff "
+                f"{snapshot_valuation_cutoff.isoformat()} is earlier than the WCH "
+                f"NAV series end {series_max.isoformat()}"
+            )
+    elif snapshot_observed_at.date() <= series_max:
         raise SchwabGenerationError(
-            f"stale current snapshot: observed date {snapshot_date.isoformat()} is "
+            f"stale current snapshot: observed date "
+            f"{snapshot_observed_at.date().isoformat()} is "
             f"not later than the WCH NAV series end {series_max.isoformat()}"
         )
 
@@ -1701,6 +1719,10 @@ def _nav_api(
             "wch_nav_max_date": series_max.isoformat(),
         }
     ]
+    if snapshot_valuation_cutoff is not None:
+        reconciliation[0]["snapshot_valuation_cutoff"] = (
+            snapshot_valuation_cutoff.isoformat()
+        )
     normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
     return normalized, reconciliation
 
@@ -1961,7 +1983,7 @@ def build_generation(
         if (
             current_accounts is None
             or current_observed_at is None
-            or current_transport != "DEVELOPER_API"
+            or current_transport not in {"DEVELOPER_API", "WEB_CONTRACT"}
         ):
             raise SchwabGenerationError(
                 "a developer-API current snapshot is required "
@@ -1971,6 +1993,7 @@ def build_generation(
             sources["WCH_NAV_CSV"],
             snapshot_account_ids={str(item["account_id"]) for item in current_accounts},
             snapshot_observed_at=current_observed_at,
+            snapshot_valuation_cutoff=current_valuation_cutoff,
             source_artifact_ids=nav_source_artifact_ids,
         )
     manual_positions, manual_position_as_of, unavailable_position_quantity = _positions(
