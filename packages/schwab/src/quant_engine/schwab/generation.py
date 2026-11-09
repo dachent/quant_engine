@@ -1648,9 +1648,14 @@ def _nav_api(
     *,
     snapshot_account_ids: set[str],
     snapshot_observed_at: datetime,
+    snapshot_valuation_cutoff: date | None = None,
     source_artifact_ids: Mapping[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Anchor historical WCH NAV to a later developer-API account snapshot."""
+    """Anchor historical WCH NAV to a later account snapshot.
+
+    The snapshot's financial date is its valuation_cutoff when it declares one
+    (a rolled-back WEB_CONTRACT snapshot); capture time is only provenance.
+    """
 
     wch_by_account: dict[str, dict[date, Decimal]] = {}
     for account_id, path in wch:
@@ -1668,10 +1673,14 @@ def _nav_api(
     )
     if series_max is None:
         raise SchwabGenerationError("WCH NAV series is empty")
-    snapshot_date = snapshot_observed_at.date()
+    snapshot_date = (
+        snapshot_valuation_cutoff
+        if snapshot_valuation_cutoff is not None
+        else snapshot_observed_at.date()
+    )
     if snapshot_date <= series_max:
         raise SchwabGenerationError(
-            f"stale current snapshot: observed date {snapshot_date.isoformat()} is "
+            f"stale current snapshot: valuation date {snapshot_date.isoformat()} is "
             f"not later than the WCH NAV series end {series_max.isoformat()}"
         )
 
@@ -1705,6 +1714,10 @@ def _nav_api(
             "wch_nav_max_date": series_max.isoformat(),
         }
     ]
+    if snapshot_valuation_cutoff is not None:
+        reconciliation[0]["snapshot_valuation_cutoff"] = (
+            snapshot_valuation_cutoff.isoformat()
+        )
     normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
     return normalized, reconciliation
 
@@ -1975,6 +1988,7 @@ def build_generation(
             sources["WCH_NAV_CSV"],
             snapshot_account_ids={str(item["account_id"]) for item in current_accounts},
             snapshot_observed_at=current_observed_at,
+            snapshot_valuation_cutoff=current_valuation_cutoff,
             source_artifact_ids=nav_source_artifact_ids,
         )
     manual_positions, manual_position_as_of, unavailable_position_quantity = _positions(
