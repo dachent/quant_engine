@@ -14,6 +14,8 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shutil
+import time
 from typing import Any
 
 import pytest
@@ -1306,13 +1308,20 @@ class DrivableTransport(FakeTransport):
 
 
 def run_drive(
-    transport: FakeTransport, run_root: Path, plan: list[dict[str, Any]]
+    transport: FakeTransport,
+    run_root: Path,
+    plan: list[dict[str, Any]],
+    target_id: str | None = None,
+    settle: float = 0.0,
 ) -> Listener:
     listener = Listener(
         transport,
         Recorder(run_root, mode="discover"),
+        max_seconds=1.0 if settle else 0.0,
         drive_plan=parse_drive_plan(plan),
         drive_dwell=0.0,
+        drive_settle=settle,
+        drive_target_id=target_id,
     )
     listener.run()
     return listener
@@ -1422,3 +1431,52 @@ def test_a_refused_drive_plan_is_rejected_before_any_directory_or_connection(
     )
     assert code == 2 and "REFUSED DRIVE_PLAN_REFUSED" in capsys.readouterr().out
     assert not root.exists()
+
+
+class IdleTransport(DrivableTransport):
+    """Stays open when nothing is queued (a live browser), so the settle period can elapse."""
+
+    def receive(self, timeout: float) -> dict[str, Any] | None:
+        if self.inbound:
+            return self.inbound.popleft()
+        time.sleep(0.01)
+        return None
+
+
+def two_tab_transport() -> DrivableTransport:
+    transport = IdleTransport()
+    transport.targets = [
+        {"targetId": "T1", "type": "page", "url": f"{BASE}/app/x"},
+        {"targetId": "T2", "type": "page", "url": f"{BASE}/app/y"},
+    ]
+    return transport
+
+
+def test_two_candidate_tabs_without_a_target_id_are_refused_and_listed(
+    run_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transport = two_tab_transport()
+    with pytest.raises(RecorderError, match="DRIVE_TARGET_AMBIGUOUS"):
+        run_drive(transport, run_root, [{"scroll": 300}], settle=0.05)
+    assert not [m for m in transport.sent if m["method"].startswith("Input.")]
+    assert json.loads(capsys.readouterr().err.strip())["drive_candidates"] == [
+        "T1",
+        "T2",
+    ]
+
+
+def test_an_explicit_target_id_drives_that_tab_whatever_the_event_order(
+    run_root: Path,
+) -> None:
+    for chosen in ("T1", "T2"):
+        transport = two_tab_transport()
+        shutil.rmtree(run_root, ignore_errors=True)
+        run_drive(transport, run_root, [{"scroll": 300}], target_id=chosen, settle=0.05)
+        wheel = [m for m in transport.sent if m["method"] == "Input.dispatchMouseEvent"]
+        assert [m["sessionId"] for m in wheel] == ["S-" + chosen]
+
+
+def test_a_target_id_that_is_never_attached_drives_nothing(run_root: Path) -> None:
+    transport = two_tab_transport()
+    run_drive(transport, run_root, [{"scroll": 300}], target_id="T9", settle=0.05)
+    assert not [m for m in transport.sent if m["method"].startswith("Input.")]
