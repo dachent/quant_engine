@@ -367,6 +367,50 @@ def _put(
     item.evidence.setdefault(kind, why)
 
 
+def _merge_run(
+    items: dict[int, Item], new: Item, run: str, superseded: list[dict[str, str]]
+) -> None:
+    """Fold one sitting's bodies for an item into the others.
+
+    A resource or holdings body is a live snapshot (a rebalance moves ``lastRebalDt``), so the
+    later ``--recorder`` supersedes the earlier and both hashes are recorded.  A performance
+    series may be replaced only by one that starts on the same day, agrees on every shared
+    day and reaches further; anything else refuses."""
+    for kind, body in new.bodies.items():
+        why = f"{new.evidence[kind]} [run {run}]"
+        held = items.get(new.uid)
+        if held is None or kind not in held.bodies:
+            _put(items, new.uid, new.row, kind, body, why)
+            continue
+        old = held.bodies[kind]
+        if old.sha256 == body.sha256:
+            continue
+        if kind == "perf":
+            a, b = _object(old.json(), "perf"), _object(body.json(), "perf")
+            short, long_ = (a, b) if len(a["data"]) <= len(b["data"]) else (b, a)
+            if (
+                a.get("date") != b.get("date")
+                or long_["data"][: len(short["data"])] != short["data"]
+            ):
+                raise AdmissionRefused(
+                    f"item {new.uid} perf bodies of two sittings disagree on their shared days"
+                )
+            keep = body if long_ is b else old
+        else:
+            keep = body
+        superseded.append(
+            {
+                "item": str(new.uid),
+                "kind": kind,
+                "replaced_sha256": old.sha256 if keep is body else body.sha256,
+                "kept_sha256": keep.sha256,
+                "run": run,
+            }
+        )
+        held.bodies[kind] = keep
+        held.evidence[kind] = why if keep is body else held.evidence[kind]
+
+
 def bind_fetcher(
     files: dict[str, Body], items: dict[int, Item], rows: dict[int, dict[str, Any]]
 ) -> None:
@@ -600,6 +644,7 @@ def admit(
     list_rows_raw: list[dict[str, Any]] = []
     seen_accounts: set[Any] = set()
     list_differs: list[dict[str, str]] = []
+    superseded: list[dict[str, str]] = []
     for run in recorders:
         bodies, run_summary = load_recorder(run)
         seen_accounts |= _stated_accounts(bodies)
@@ -615,15 +660,7 @@ def admit(
                 )
             list_differs.append({"run": run.name, "sha256": run_list.sha256})
         for uid, item in run_items.items():
-            for kind, body in item.bodies.items():
-                _put(
-                    items,
-                    uid,
-                    item.row,
-                    kind,
-                    body,
-                    f"{item.evidence[kind]} [run {run.name}]",
-                )
+            _merge_run(items, item, run.name, superseded)
         recorder_summaries.append({"name": run.name, **run_summary})
     assert list_body is not None
     accounts = _check_accounts(seen_accounts, account_ids)
@@ -682,6 +719,7 @@ def admit(
             "base_root_files": len(base_inventory),
         },
         "items": summary,
+        "superseded_bodies": superseded,
         "bodies": {
             f"{uid}/{kind}": {"source": b.source, "label": b.label, "sha256": b.sha256}
             for uid, item in sorted(items.items())

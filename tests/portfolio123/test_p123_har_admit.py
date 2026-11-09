@@ -544,3 +544,42 @@ def test_the_cli_exits_2_with_the_reason(
     argv[argv.index("--out") + 1] = str(_out(tmp_path, "cli"))
     assert admit.main(argv) == 0
     assert "admitted" in capsys.readouterr().out
+
+
+def test_a_later_sitting_supersedes_live_snapshots_and_a_longer_series(
+    tmp_path: Path,
+) -> None:
+    first = _recorder(tmp_path, visits=[(ROWS[0], _perf(), _holdings(2))])
+    longer = _perf()
+    longer["dateLast"] = "2026-01-12"
+    longer["data"].append([1, 105.0, 10.0])
+    moved = deepcopy(ROWS)
+    row = moved[0]
+    run2 = _recorder(
+        tmp_path, "later", rows=moved, visits=[(row, longer, _holdings(2))]
+    )
+    # the resource body of the later sitting differs (a rebalance moved a live field)
+    resource = tmp_path / "later" / "raw" / "00002.body"
+    doc = json.loads(resource.read_text(encoding="utf-8"))
+    doc["lastRebalDt"] = "01/12/26"
+    data = json.dumps(doc, sort_keys=True).encode()
+    resource.write_bytes(data)
+    manifest_path = tmp_path / "later" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for item in manifest["artifacts"]:
+        if item["path"] == "raw/00002.body":
+            item["sha256"], item["size_bytes"] = (
+                hashlib.sha256(data).hexdigest(),
+                len(data),
+            )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    result = _run(tmp_path, first, recorders=[first, run2], as_of=date(2026, 1, 12))
+    kinds = {(x["item"], x["kind"]) for x in result["superseded_bodies"]}
+    assert ("9001", "resource") in kinds and ("9001", "perf") in kinds
+    assert result["items"]["9001"]["last_date"] == "2026-01-12"
+    # an earlier series that disagrees on a shared day refuses
+    clash = _perf()
+    clash["data"][2][1] = 555.0
+    run3 = _recorder(tmp_path, "clash", visits=[(ROWS[0], clash, None)])
+    with pytest.raises(admit.AdmissionRefused, match="disagree on their shared days"):
+        _run(tmp_path, first, recorders=[first, run3], out=_out(tmp_path, "o2"))
