@@ -283,3 +283,25 @@ With the declaration on, nothing the row used to carry for the parent account di
 Every derivation fails closed: a broken identity, a facts binding the report can check and that
 differs (parent account, tag map digest, provider-ledger generation), flow legs that differ from the
 daily flows, or a bridge residual beyond 1e-9 stops the build.
+
+## Implementation return attribution: an unavailable connected-model mix
+
+The producer infers an effective-dated scale only for the connected models whose trades it can match; a connected model it cannot
+scale (a book with no dated order snapshot, or a retired one) makes the effective account model mix unavailable. On the
+Portfolio123 AI Factor path the producer then publishes the bridge with `status` `UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT`, an
+unavailable `effective_account_model_mix`, and `effect_pp` explicitly null (the key present, never omitted, never zero) on
+`PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX` and `OTHER_CONNECTED_SLEEVES_IMPLEMENTATION`. The primary sleeve effect
+`PRIMARY_AI_SLEEVE_IMPLEMENTATION` stays finite whenever the primary model has a scale. The report and the control panel accept that
+state and nothing looser: only for `p123-ai-factor`; the two null effects, a finite or null primary effect, the unavailable model
+mix on both the bridge and the row, finite exact links for `UNEXPLAINED_ACTUAL_ACTIVITY` and
+`CASH_FINANCING_FEES_AND_POSITION_RECONCILIATION` that equal the trade-provenance contributions they are made of, contributions that
+sum to the account return, and a gap equal to the account return minus the model return. Only the closure of the categories to
+the gap is not asserted: the producer publishes no number for the unavailable part, so no residual is inferred, and the panel
+says so ("Closure not computable for the unavailable effects"). A value on an unavailable effect, an omitted effect key, a forged
+status, or the same state on another strategy stops the build. The strategy's implementation status is then `PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE`, never
+`VERIFIED_CAUSAL_RETURN_ATTRIBUTION`, and the panel verifier lists the strategy under
+`causal_attribution_closure_not_computable_strategy_ids` (and `causal_closure_computable` is false) instead of counting it as a
+closed bridge; the finite primary effect must equal the primary candidate's actual contribution minus its inferred target contribution, and be
+null exactly when that target is absent. Exactly the producer's five
+categories (each once, each with its producer status) and the producer's bridge fields are accepted; an added field or category is refused.
+The panel prints an unavailable effect as `unavailable`, never as 0 pp.

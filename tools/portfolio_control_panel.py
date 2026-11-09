@@ -13627,6 +13627,7 @@ def _check_implementation_layers(
     gap_reconciles = True
     causal_attribution_reconciles = True
     causal_attribution_strategy_ids: set[str] = set()
+    closure_not_computable_strategy_ids: set[str] = set()
     policy_unavailable_strategy_ids: set[str] = set()
     stale_attribution_strategy_ids: set[str] = set()
     stale_reconciliation_strategy_ids: set[str] = set()
@@ -13748,25 +13749,48 @@ def _check_implementation_layers(
             bridge.get("account_return"), "underwriting causal account return"
         )
         gap_pp = _finite_float(bridge.get("gap_pp"), "underwriting causal gap")
-        category_total = sum(
-            _finite_float(
-                category.get("effect_pp"), "underwriting causal category effect"
-            )
-            for category in _objects(
-                bridge.get("categories"), "underwriting causal categories"
-            )
-        )
         strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+        categories = _objects(
+            bridge.get("categories"), "underwriting causal categories"
+        )
+        category_total: float | None
+        if bridge.get("status") == "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT":
+            # the producer's declared unavailable state: the unavailable effects are null (never
+            # zero), so there is no total to close to; the same checks the report applies
+            import portfolio_report as reporter
+
+            try:
+                reporter.require_unavailable_attribution_bridge(
+                    strategy_id, attribution, bridge, categories
+                )
+            except reporter.ReportValidationError as exc:
+                raise ControlPanelValidationError(str(exc)) from exc
+            category_total = None
+            closure_not_computable_strategy_ids.add(strategy_id)
+        else:
+            category_total = sum(
+                _finite_float(
+                    category.get("effect_pp"), "underwriting causal category effect"
+                )
+                for category in categories
+            )
         causal_attribution_strategy_ids.add(strategy_id)
         if not math.isclose(
             gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
-        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
+        ) or (
+            category_total is not None
+            and not math.isclose(gap_pp, category_total, abs_tol=1e-8)
+        ):
             causal_attribution_reconciles = False
             break
     return {
         "gap_reconciles": gap_reconciles,
         "causal_attribution_reconciles": causal_attribution_reconciles,
         "causal_attribution_strategy_ids": sorted(causal_attribution_strategy_ids),
+        "causal_attribution_closure_not_computable_strategy_ids": sorted(
+            closure_not_computable_strategy_ids
+        ),
+        "causal_closure_computable": not closure_not_computable_strategy_ids,
         "policy_unavailable_strategy_ids": sorted(policy_unavailable_strategy_ids),
         "stale_attribution_strategy_ids": sorted(stale_attribution_strategy_ids),
         "stale_reconciliation_strategy_ids": sorted(stale_reconciliation_strategy_ids),
@@ -14586,6 +14610,14 @@ def verify_candidate(
                 ),
                 "causal_attribution_strategy_ids": (
                     implementation_findings["causal_attribution_strategy_ids"]
+                ),
+                "causal_attribution_closure_not_computable_strategy_ids": (
+                    implementation_findings[
+                        "causal_attribution_closure_not_computable_strategy_ids"
+                    ]
+                ),
+                "causal_closure_computable": (
+                    implementation_findings["causal_closure_computable"]
                 ),
                 "policy_unavailable_strategy_ids": (
                     implementation_findings["policy_unavailable_strategy_ids"]

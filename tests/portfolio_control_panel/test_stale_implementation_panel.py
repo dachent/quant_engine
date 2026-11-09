@@ -481,3 +481,120 @@ def test_real_producer_contracts_render_the_dated_pre_policy_exclusion_disclosur
         "contract as of Aug 3, 2026, before the PROVIDER_ADMIT_OR_DECLARE_V1 "
         "exclusion effective Aug 14, 2026"
     ) in cell
+
+
+_UNAVAILABLE_BRIDGE_STATUS = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
+
+
+def _make_ai_attribution_unavailable(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Give the AI row the producer's unavailable attribution shape (synthetic numbers)."""
+
+    layer = next(row for row in rows if row["strategy_id"] == AI)
+    detail = layer["evidence_layers"]["implementation_reconciliation"]["detail"]
+    attribution = detail["return_attribution"]
+    bridge = attribution["bridge"]
+    account_return, model_return = 0.05, 0.07
+    bridge.update(
+        {
+            "account_return": account_return,
+            "model_return": model_return,
+            "gap_pp": (account_return - model_return) * 100.0,
+            "status": _UNAVAILABLE_BRIDGE_STATUS,
+            "effective_account_model_mix_return": None,
+            "effective_account_model_mix_gap_pp": None,
+            "categories": [
+                {
+                    "category": "PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX",
+                    "effect_pp": None,
+                    "status": _UNAVAILABLE_BRIDGE_STATUS,
+                },
+                {
+                    "category": "PRIMARY_AI_SLEEVE_IMPLEMENTATION",
+                    "effect_pp": 5.0,
+                    "status": "PRIMARY_ONLY_CANDIDATE_ACTUAL_PNL_MINUS_INFERRED_PRIMARY_TARGET_PNL",
+                },
+                {
+                    "category": "OTHER_CONNECTED_SLEEVES_IMPLEMENTATION",
+                    "effect_pp": None,
+                    "status": _UNAVAILABLE_BRIDGE_STATUS,
+                },
+                {
+                    "category": "UNEXPLAINED_ACTUAL_ACTIVITY",
+                    "effect_pp": -1.0,
+                    "status": "EXACT_RETURN_LINK_NO_ADMITTED_MODEL_EVENT_CANDIDATE",
+                },
+                {
+                    "category": "CASH_FINANCING_FEES_AND_POSITION_RECONCILIATION",
+                    "effect_pp": 0.0,
+                    "status": "EXACT_RETURN_LINK_NON_SECURITY_AND_OPENING_POSITION_EFFECT",
+                },
+            ],
+        }
+    )
+    attribution["effective_account_model_mix"] = {
+        "model_mix_return": None,
+        "role_contributions": {"PRIMARY_AI_FACTOR": -0.01},
+        "status": _UNAVAILABLE_BRIDGE_STATUS,
+    }
+    attribution["actual_return_contribution_by_trade_provenance"] = {
+        "contributions_pp": {
+            "AMBIGUOUS_PRIMARY_AND_TEMPORARY": 1.5,
+            "CASH_FINANCING_FEES_TAXES_AND_UNCLASSIFIED": 0.25,
+            "NON_AI_TEMPORARY_ONLY": 0.5,
+            "OPENING_OR_POSITION_RECONCILIATION": -0.25,
+            "PRIMARY_ONLY": 4.0,
+            "UNEXPLAINED_ACTUAL_ACTIVITY": -1.0,
+        },
+    }
+    return attribution
+
+
+def test_the_verifier_accepts_the_producers_unavailable_bridge() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+    _make_ai_attribution_unavailable(rows)
+
+    findings = panel._check_implementation_layers(rows)
+
+    assert findings["causal_attribution_reconciles"] is True
+    assert AI in findings["causal_attribution_strategy_ids"]
+    # accepted as a valid declared shape, never counted as a verified closure
+    assert findings["causal_attribution_closure_not_computable_strategy_ids"] == [AI]
+    assert findings["causal_closure_computable"] is False
+
+
+def test_a_closed_bridge_is_not_listed_as_closure_not_computable() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+
+    findings = panel._check_implementation_layers(rows)
+
+    assert findings["causal_attribution_closure_not_computable_strategy_ids"] == []
+    assert findings["causal_closure_computable"] is True
+
+
+def test_the_verifier_refuses_a_value_on_an_unavailable_effect() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+    attribution = _make_ai_attribution_unavailable(rows)
+    attribution["bridge"]["categories"][0]["effect_pp"] = 0.0
+
+    with pytest.raises(panel.ControlPanelValidationError, match="carries a value"):
+        panel._check_implementation_layers(rows)
+
+
+def test_the_verifier_refuses_a_forged_unavailable_status() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+    attribution = _make_ai_attribution_unavailable(rows)
+    attribution["effective_account_model_mix"]["status"] = "EFFECTIVE_MODEL_MIX"
+
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="unavailable model mix"
+    ):
+        panel._check_implementation_layers(rows)
+
+
+def test_the_verifier_refuses_a_null_effect_on_an_available_bridge() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+    attribution = _make_ai_attribution_unavailable(rows)
+    attribution["bridge"]["status"] = "DIAGNOSTIC_CAUSAL_BRIDGE"
+
+    with pytest.raises(panel.ControlPanelValidationError, match="numeric"):
+        panel._check_implementation_layers(rows)

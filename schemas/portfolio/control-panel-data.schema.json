@@ -525,6 +525,7 @@
                     "additionalProperties": false,
                     "required": ["account_train_margin", "evidence_mode", "model_id", "sleeve_train_margin", "status", "surface"],
                     "properties": {
+                      "account_status": { "type": "string" },
                       "account_train_margin": { "type": ["integer", "null"] },
                       "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
                       "model_id": { "type": "string" },

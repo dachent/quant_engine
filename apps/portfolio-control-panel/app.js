@@ -177,6 +177,7 @@
     NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE: "Not ready: stale contract (ledger vintage)",
     PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY: "Partial: causal attribution ready, reconciliation not ready",
     PARTIAL_RECONCILIATION_ATTRIBUTION_NOT_READY: "Partial: reconciliation ready, causal attribution not ready",
+    PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE: "Partial: causal attribution without the connected-model mix",
     UPPER_BOUND_CONTRACT_CAP_PRE_TAX: "Upper bound (contract cap)",
     DOCUMENTED_RATE_NOT_DOLLAR: "Documented percent rate (no dollar cost)",
     documented_rate_percent: "Documented percent rate",
@@ -2016,10 +2017,13 @@
         ? `<span class="cell-primary">${safe(modelBasisText(verifiedMetrics.model_basis))} ${pct(verifiedMetrics.model_cumulative_return, 2)} · ${safe(basisSubject(verifiedMetrics.account_basis))} ${pct(verifiedMetrics.account_cumulative_return, 2)}${verifiedMetrics.account_basis ? ` (${safe(accountBasisText(verifiedMetrics.account_basis))})` : ""} · gap ${ppFromFraction(verifiedMetrics.account_minus_model_cumulative)}</span><span class="cell-secondary">${formatDateHtml(verifiedMetrics.observed_start)}–${formatDateHtml(verifiedMetrics.observed_end)} · ${integer.format(verifiedMetrics.observations)} exact common dates${safe(contractDateText("reconciliation"))} · β ${decimal(verifiedMetrics.beta_to_model)} · correlation ${decimal(verifiedMetrics.daily_return_correlation)} · tracking error ${pct(verifiedMetrics.annualized_tracking_error)}</span><span class="cell-secondary">Information ratio ${decimal(verifiedMetrics.information_ratio)} · up/down capture ${pct(verifiedMetrics.up_capture)}/${pct(verifiedMetrics.down_capture)} · relative drawdown ${pct(verifiedMetrics.relative_drawdown)}</span><span class="cell-secondary">Confirmed causes: ${safe(confirmedCauses.map((item) => humanStatus(item.cause)).join(" · ") || "none")}</span>${trade ? `<span class="cell-secondary">Model events ${integer.format(trade.model_event_count)} · matched ${integer.format((trade.matched_same_date_count || 0) + (trade.matched_delayed_count || 0))} · missed ${integer.format(trade.missed_model_event_count)} · unexplained broker events ${integer.format(trade.actual_unexplained_count)}</span>` : ""}<span class="cell-secondary">${safe(humanStatus(verifiedMetrics.status))}</span>`
         : "";
       const causalCategoryMarkup = (causalBridge?.categories || []).map((item) => {
-        const effect = Number(item.effect_pp);
-        const effectText = `${effect > 0 ? "+" : ""}${decimal(effect, 3)} pp`;
+        // an unavailable effect is published as null and printed as such, never as 0 pp
+        const effect = item.effect_pp == null ? null : Number(item.effect_pp);
+        const effectText = effect == null ? "unavailable" : `${effect > 0 ? "+" : ""}${decimal(effect, 3)} pp`;
         return `<span class="cell-secondary"><strong>${safe(humanStatus(item.category))}</strong> ${safe(effectText)} · ${safe(humanStatus(item.status))}${item.method ? ` · ${safe(item.method)}` : ""}</span>`;
-      }).join("");
+      }).join("") + (causalBridge?.status === "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
+        ? `<span class="cell-secondary"><strong>Closure not computable for the unavailable effects:</strong> the categories above are not closed to the gap; the producer states no number for the unavailable part.</span>`
+        : "");
       const causalMixMarkup = causalBridge?.effective_account_model_mix_return == null
         ? ""
         : `<span class="cell-secondary"><strong>Correct connected-model comparator:</strong> effective model mix ${pct(causalBridge.effective_account_model_mix_return)} · account-vs-mix gap ${decimal(causalBridge.effective_account_model_mix_gap_pp, 3)} pp. The primary AI model alone is not the whole-account benchmark.</span>`;

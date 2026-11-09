@@ -1276,3 +1276,44 @@ def test_a_sleeve_ai_factor_row_prints_one_model_label_and_percentage_points(
     assert f"{label} 17.36% · sleeve 14.24% (sleeve epoch) · gap -3.12 pp" in cell
     assert f"Causal return waterfall · bridge model ({label}) 17.36%" in cell
     assert "gap -3.12%" not in cell
+
+
+def test_an_unavailable_causal_effect_is_printed_unavailable_never_as_zero(
+    tmp_path: Path,
+) -> None:
+    unavailable = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
+    bridge = _bridge(0.07, 0.05, -2.0, "EXACT_WORKBOOK_MODEL_RETURNS")
+    bridge["status"] = unavailable
+    bridge["categories"] = [
+        {
+            "category": "PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX",
+            "effect_pp": None,
+            "status": unavailable,
+        },
+        {
+            "category": "UNEXPLAINED_ACTUAL_ACTIVITY",
+            "effect_pp": -0.5,
+            "status": "EXACT_RETURN_LINK_NO_ADMITTED_MODEL_EVENT_CANDIDATE",
+        },
+    ]
+    detail = {
+        "return_attribution": {
+            "bridge": bridge,
+            "observed_end": "2026-11-06",
+            "observed_start": "2026-01-22",
+            "verification": "PARTIAL_EXACT_ACTUAL_PNL_PARTIAL_COUNTERFACTUAL_GAP",
+        },
+    }
+    row = _underwriting_row(
+        "p123-ai-factor",
+        "AI Factor [P123]",
+        detail,
+        layer_status="PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY",
+    )
+    dom = _run(tmp_path, _underwriting(row), "renderUnderwriting")
+    cell = _flat(dom, "#underwriting-table")
+
+    assert "Primary only benchmark to effective account model mix unavailable ·" in cell
+    assert "Unexplained actual activity -0.500 pp" in cell
+    assert " 0.000 pp" not in cell
+    assert "Closure not computable for the unavailable effects" in cell

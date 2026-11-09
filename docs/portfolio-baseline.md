@@ -120,6 +120,9 @@ and a derived position row's `as_of_basis` is `DERIVED_FROM_OFFICIAL_CLOSES` ins
 `CAPTURED_AFTER_NEW_YORK_CLOSE_OF_AS_OF_DATE` (its `capture_date` and `observed_at` stay).
 Rows of other accounts and dates keep the captured basis and carry no `value_basis`. The
 set comes from the evidence file the run observation pins; it is never hardcoded.
+A `derived_patch` whose `patches` list is empty (no account needed a patch on the cutoff day) declares
+no derived value: the report indexes nothing for it and every row keeps its captured basis; a non-empty
+list that lacks a field of the report's value basis (for example the official closes manifest) refuses.
 
 ## One-command rebuild
 

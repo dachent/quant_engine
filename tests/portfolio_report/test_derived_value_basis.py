@@ -134,6 +134,68 @@ def test_the_derived_set_comes_from_the_pinned_evidence_file(tmp_path: Path) -> 
     assert reporter._derived_value_index(None) == []
 
 
+def _source_evidence(tmp_path: Path, patches: list[dict[str, Any]]) -> dict[str, Any]:
+    """The source-branch declaration (no official closes manifest key), synthetic."""
+
+    document = {
+        "derived_patch": {
+            "schema": "schwab-nav-source-derived-patch/1",
+            "derivation_basis": DERIVED,
+            "derivation_record": {
+                "path": "r.json",
+                "sha256": H_RECORD,
+                "size_bytes": 1,
+            },
+            "native_balances": [],
+            "patched_dates": ["2026-09-17"],
+            "patches": patches,
+            "replay": {"closes": []},
+        }
+    }
+    raw = json.dumps(document).encode("utf-8")
+    path = tmp_path / "source-finality.json"
+    path.write_bytes(raw)
+    return {
+        "source_provenance": {
+            "providers": {
+                "prov": {
+                    "finality_evidence": {
+                        "path": str(path),
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "size_bytes": len(raw),
+                    },
+                    "finality_interpretation": {"provider_finality_guarantee": False},
+                }
+            }
+        }
+    }
+
+
+def test_a_source_declaration_with_no_patched_account_declares_no_derived_value(
+    tmp_path: Path,
+) -> None:
+    phase = _source_evidence(tmp_path, [])
+
+    index = reporter._derived_value_index(phase)
+
+    assert index == []
+    assert reporter._derived_value_basis(index, "acct-derived", "2026-09-17") is None
+    for row in reporter._positions(_catalog(), None, index):
+        assert "value_basis" not in row
+
+
+def test_a_source_declaration_that_patches_an_account_still_needs_its_manifest(
+    tmp_path: Path,
+) -> None:
+    phase = _source_evidence(
+        tmp_path,
+        [{"account_id": "acct-derived", "patched_values": {"2026-09-17": "1"}}],
+    )
+
+    with pytest.raises(reporter.ReportValidationError, match="derived patch differs"):
+        reporter._derived_value_index(phase)
+
+
 def test_a_tampered_evidence_file_is_refused(tmp_path: Path) -> None:
     phase = _evidence(tmp_path, ["acct-derived"], ["2026-09-17"])
     (tmp_path / "finality.json").write_bytes(b'{"derived_patch": {}}')

@@ -125,6 +125,16 @@
    "file": "tools/portfolio_model_vs_actual.py",
    "pattern": "^parent account \\{\\}, not restated onto the sleeve \\(capital base \\{\\}\\)$",
    "justification": "the basis label of a restated strategy's model-versus-actual windows: it names the parent account the audit input measures and the capital base the window itself carries, both inserted from the same row; it states a basis, not a quantity"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^Closure not computable for the unavailable effects:$|^the producer states no number for the unavailable part\\.$",
+   "justification": "the two halves of one static note printed under an unavailable causal bridge: it states why no closure is shown (the producer publishes no number for the unavailable part), not a quantity; the bridge shape it labels is validated by the report and panel verifiers (implementation_return_attribution tests)"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^Partial: causal attribution without the connected-model mix$",
+   "justification": "the status label of PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE: it names which part of the causal attribution is missing, not a quantity; the status is derived and validated by the report and panel verifiers"
   }
  ]
 }

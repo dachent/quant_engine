@@ -250,10 +250,17 @@ def build_table(
     unchanged_unavailable: list[dict[str, Any]] = []
     for sleeve in sorted(sleeve_rows, key=key):
         account = account_by_key.get(key(sleeve))
-        if account is not None and account["status"] == sleeve["status"]:
+        # unchanged: the same status, or unavailable on both lanes (the reason may differ, as
+        # when the account lane lacks time-ordered folds and the shorter sleeve lane lacks
+        # train history): nothing was lost on the sleeve basis, so it is not a diminished row
+        if account is not None and (
+            account["status"] == sleeve["status"]
+            or (_unavailable(account["status"]) and _unavailable(sleeve["status"]))
+        ):
             if _unavailable(sleeve["status"]):
                 unchanged_unavailable.append(
                     {
+                        "account_status": account["status"],
                         "account_train_margin": account["train_margin"],
                         "evidence_mode": sleeve["evidence_mode"],
                         "model_id": sleeve["model_id"],
@@ -363,10 +370,11 @@ def sentence(block: Mapping[str, Any]) -> str:
     series = block["series_id"]
     unavailable = summary["unavailable_on_sleeve_lane"]
     changed = summary["changed_models"]
+    both = _both_lanes_clause(summary)
     if changed == 0:
         return (
             f"No {series} lens model changes status between the sleeve lane and the "
-            "account lane."
+            "account lane." + (f" {both}" if both else "")
         )
     reasons = ", ".join(
         f"{count} {status.removeprefix('UNAVAILABLE_').lower().replace('_', ' ')}"
@@ -401,12 +409,36 @@ def sentence(block: Mapping[str, Any]) -> str:
         else f"{summary['finding_count']} of them have no account-lane figure and are "
         "listed as findings."
     )
+    if both:
+        parts.append(both)
     if hybrid is not None:
         parts.append(
             "The hybrid (live plus backtest) mode is not affected by the minimums: its "
             f"smallest train margin is {hybrid} observations."
         )
     return " ".join(parts)
+
+
+def _both_lanes_clause(summary: Mapping[str, Any]) -> str:
+    """The models unavailable on both lanes, and how many for different reasons."""
+
+    entries = summary["unavailable_on_both_lanes"]
+    if not entries:
+        return ""
+    different = sum(
+        1
+        for item in entries
+        if item.get("account_status", item["status"]) != item["status"]
+    )
+    reasons = (
+        f" ({different} for different reasons on the two lanes; see the table)"
+        if different
+        else ""
+    )
+    return (
+        f"{len(entries)} lens models are unavailable on both lanes{reasons}: nothing "
+        "is lost on the sleeve basis."
+    )
 
 
 def markdown(block: Mapping[str, Any]) -> str:
