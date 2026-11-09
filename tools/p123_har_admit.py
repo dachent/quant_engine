@@ -43,10 +43,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -684,6 +686,28 @@ def check_output_root(out: Path, dry_run: bool) -> None:
             raise AdmissionRefused("the output root must not be inside a Git worktree")
 
 
+def _atomic(out: Path, build: Callable[[Path], dict[str, Any]]) -> dict[str, Any]:
+    """Build the output in an owned temp sibling directory, then rename it into place.
+
+    Create-only is kept (a final path that already exists is refused, also at rename time);
+    a failure part-way removes the temp sibling and leaves no ``out``, so a retry is never
+    blocked by a partial result."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stage = out.parent / f".{out.name}.partial-{os.getpid()}"
+    if stage.exists():
+        raise AdmissionRefused(f"a partial output of this run exists: {stage.name}")
+    stage.mkdir()
+    try:
+        manifest = build(stage)
+        if out.exists():
+            raise AdmissionRefused("the output root must not exist yet")
+        os.rename(stage, out)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return manifest
+
+
 def _write_new(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("xb") as handle:
@@ -767,55 +791,64 @@ def admit(
         if re.fullmatch(r"csv/strategy_[a-z0-9]+_app_investment_resource\.csv", r)
         and r not in outputs
     )
-    root = out / "har-root"
-    root.mkdir(parents=True)
-    for entry in base_inventory:
-        relative = entry["relative_path"]
-        if relative in outputs:
-            continue
-        destination = root / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(base / relative, destination)
-        if _sha(destination.read_bytes()) != entry["sha256"]:
-            raise AdmissionRefused(f"base file changed while copying: {relative}")
-    for relative, data in sorted(outputs.items()):
-        _write_new(root / relative, data)
-    layout = _inventory(root)
-    origin = {relative: "admitted" for relative in outputs}
-    manifest = {
-        "schema": SCHEMA,
-        "evidence_eligible": not dry_run,
-        "as_of": as_of.isoformat(),
-        "list_saved_for_accounts": accounts,
-        "sources": {
-            "recorders": recorder_summaries,
-            "investment_list_sha256": list_body.sha256,
-            "investment_lists_of_other_runs": list_differs,
-            "fetchers": fetcher_summaries,
-            "base_root_files": len(base_inventory),
-        },
-        "items": summary,
-        "superseded_bodies": superseded,
-        "bodies": {
-            f"{uid}/{kind}": {"source": b.source, "label": b.label, "sha256": b.sha256}
-            for uid, item in sorted(items.items())
-            for kind, b in sorted(item.bodies.items())
-        },
-        "outputs": {
-            r: {"sha256": _sha(d), "bytes": len(d)} for r, d in sorted(outputs.items())
-        },
-        "replaced_base_files": replaced,
-        "stale_base_lists_left_in_root": stale_lists,
-        "final_root_layout": [
-            {**e, "origin": origin.get(e["relative_path"], "base")} for e in layout
-        ],
-        "har_root": "har-root",
-    }
-    _write_new(
-        out / "p123-har-admission-manifest.json",
-        json.dumps(manifest, indent=1, sort_keys=True).encode("utf-8") + b"\n",
-    )
-    return manifest
+
+    def _write_admission(out: Path) -> dict[str, Any]:
+        root = out / "har-root"
+        root.mkdir(parents=True)
+        for entry in base_inventory:
+            relative = entry["relative_path"]
+            if relative in outputs:
+                continue
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(base / relative, destination)
+            if _sha(destination.read_bytes()) != entry["sha256"]:
+                raise AdmissionRefused(f"base file changed while copying: {relative}")
+        for relative, data in sorted(outputs.items()):
+            _write_new(root / relative, data)
+        layout = _inventory(root)
+        origin = {relative: "admitted" for relative in outputs}
+        manifest = {
+            "schema": SCHEMA,
+            "evidence_eligible": not dry_run,
+            "as_of": as_of.isoformat(),
+            "list_saved_for_accounts": accounts,
+            "sources": {
+                "recorders": recorder_summaries,
+                "investment_list_sha256": list_body.sha256,
+                "investment_lists_of_other_runs": list_differs,
+                "fetchers": fetcher_summaries,
+                "base_root_files": len(base_inventory),
+            },
+            "items": summary,
+            "superseded_bodies": superseded,
+            "bodies": {
+                f"{uid}/{kind}": {
+                    "source": b.source,
+                    "label": b.label,
+                    "sha256": b.sha256,
+                }
+                for uid, item in sorted(items.items())
+                for kind, b in sorted(item.bodies.items())
+            },
+            "outputs": {
+                r: {"sha256": _sha(d), "bytes": len(d)}
+                for r, d in sorted(outputs.items())
+            },
+            "replaced_base_files": replaced,
+            "stale_base_lists_left_in_root": stale_lists,
+            "final_root_layout": [
+                {**e, "origin": origin.get(e["relative_path"], "base")} for e in layout
+            ],
+            "har_root": "har-root",
+        }
+        _write_new(
+            out / "p123-har-admission-manifest.json",
+            json.dumps(manifest, indent=1, sort_keys=True).encode("utf-8") + b"\n",
+        )
+        return manifest
+
+    return _atomic(out, _write_admission)
 
 
 # ---------------------------------------------------------------- designer staging
@@ -940,30 +973,34 @@ def stage_designer(
         "perf": f"r2g_{uid}_perf-full.json",
         "holdings": f"r2g_{uid}_holdings.json",
     }
-    artifacts = []
-    for kind, body in sorted(picked.items()):
-        _write_new(out / "raw" / names[kind], body.data)
-        artifacts.append(
-            {
-                "relative_path": f"raw/{names[kind]}",
-                "sha256": body.sha256,
-                "observed_length": len(body.data),
-            }
+
+    def _write_stage(out: Path) -> dict[str, Any]:
+        artifacts = []
+        for kind, body in sorted(picked.items()):
+            _write_new(out / "raw" / names[kind], body.data)
+            artifacts.append(
+                {
+                    "relative_path": f"raw/{names[kind]}",
+                    "sha256": body.sha256,
+                    "observed_length": len(body.data),
+                }
+            )
+        manifest = {
+            "artifacts": artifacts,
+            "schema": "p123-designer-capture-staged/1",
+            "evidence_eligible": not dry_run,
+            "designer_model_id": uid,
+            "curve": curve,
+            "windowed_curve_bodies_not_staged": sorted(windowed),
+            "source": source,
+        }
+        _write_new(
+            out / "capture-manifest.json",
+            json.dumps(manifest, indent=1, sort_keys=True).encode("utf-8") + b"\n",
         )
-    manifest = {
-        "artifacts": artifacts,
-        "schema": "p123-designer-capture-staged/1",
-        "evidence_eligible": not dry_run,
-        "designer_model_id": uid,
-        "curve": curve,
-        "windowed_curve_bodies_not_staged": sorted(windowed),
-        "source": source,
-    }
-    _write_new(
-        out / "capture-manifest.json",
-        json.dumps(manifest, indent=1, sort_keys=True).encode("utf-8") + b"\n",
-    )
-    return manifest
+        return manifest
+
+    return _atomic(out, _write_stage)
 
 
 # ---------------------------------------------------------------- CLI

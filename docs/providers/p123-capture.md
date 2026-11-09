@@ -643,6 +643,10 @@ history). It stages the one body that starts on `inceptionDt`, ends on `endDt` a
 launch line on `launchDt`, lists the windowed bodies (sha256) in the staged manifest and does not
 stage them, and refuses two different full-history bodies.
 
+Both commands build their output in an owned temp sibling directory (`.<name>.partial-<pid>`) and
+rename it into place; a failure removes the sibling and leaves no output, so a retry is never
+blocked, and a final path that exists (also one that appears while the output is built) is refused.
+
 `--dry-run` is the scratch mode: the output must sit under a `scratch` folder, the manifest says
 `evidence_eligible: false`, and every check and message is the same. A real run refuses a
 scratch, tmp or temp root and any root inside a Git worktree.

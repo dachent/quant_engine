@@ -738,3 +738,67 @@ def test_designer_staging_picks_the_full_history_among_windowed_bodies(
             fetcher=None,
             dry_run=True,
         )
+
+
+def test_a_failure_part_way_leaves_no_output_and_a_retry_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _recorder(tmp_path)
+    out = _out(tmp_path)
+    real_copy = admit.shutil.copyfile
+    calls = {"n": 0}
+
+    def flaky(src: Any, dst: Any, **kw: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real_copy(src, dst, **kw)
+
+    monkeypatch.setattr(admit.shutil, "copyfile", flaky)
+    with pytest.raises(OSError, match="disk full"):
+        _run(tmp_path, run)
+    assert not out.exists()
+    assert [p.name for p in out.parent.iterdir()] == []  # the temp sibling is gone too
+    monkeypatch.setattr(admit.shutil, "copyfile", real_copy)
+    manifest = _run(tmp_path, run)  # the retry is not blocked by a partial result
+    assert (out / "har-root" / "csv" / "strategy_9001_perf.csv").is_file()
+    assert (out / "p123-har-admission-manifest.json").is_file()
+    assert [p.name for p in out.parent.iterdir()] == [out.name]
+    assert manifest["items"]["9001"]["last_date"] == "2026-01-09"
+    # create-only: a final path that appears while the output is built is refused, not replaced
+    other = _out(tmp_path, "race")
+
+    def appears(src: Any, dst: Any, **kw: Any) -> Any:
+        other.mkdir(parents=True, exist_ok=True)
+        return real_copy(src, dst, **kw)
+
+    monkeypatch.setattr(admit.shutil, "copyfile", appears)
+    with pytest.raises(admit.AdmissionRefused, match="must not exist yet"):
+        _run(tmp_path, run, out=other)
+    assert not any(p.name.startswith(".") for p in other.parent.iterdir())
+
+
+def test_designer_staging_failure_leaves_no_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model, full = _designer()
+    run = _designer_run(tmp_path, model, full)
+    out = _out(tmp_path, "d1")
+    real = admit._write_new
+    calls = {"n": 0}
+
+    def flaky(path: Path, data: bytes) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        real(path, data)
+
+    monkeypatch.setattr(admit, "_write_new", flaky)
+    with pytest.raises(OSError, match="disk full"):
+        admit.stage_designer(
+            out=out, uid=8001, recorder=run, fetcher=None, dry_run=True
+        )
+    assert not out.exists() and list(out.parent.iterdir()) == []
+    monkeypatch.setattr(admit, "_write_new", real)
+    admit.stage_designer(out=out, uid=8001, recorder=run, fetcher=None, dry_run=True)
+    assert (out / "capture-manifest.json").is_file()
