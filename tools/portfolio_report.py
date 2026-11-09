@@ -6604,6 +6604,48 @@ def _validate_policy_unavailable_comparison(
 
 
 _IMPLEMENTATION_CONTRACT_SCHEMA_VERSIONS: Final = (1, 2)
+_ATTRIBUTION_UNAVAILABLE_STATUS: Final = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
+# The effects the producer cannot state without the effective-dated model mix.
+_ATTRIBUTION_MODEL_DEPENDENT_CATEGORIES: Final = frozenset(
+    {
+        "PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX",
+        "PRIMARY_AI_SLEEVE_IMPLEMENTATION",
+        "OTHER_CONNECTED_SLEEVES_IMPLEMENTATION",
+    }
+)
+
+
+def _require_unavailable_attribution_categories(
+    categories: Sequence[Mapping[str, Any]], strategy_id: str
+) -> None:
+    """An unavailable bridge states exactly the model-dependent effects as null.
+
+    Every other category is an exact return link and stays a finite number; a value on an
+    unavailable effect, or a null on an exact one, is refused rather than read as zero.
+    """
+
+    names = [category.get("category") for category in categories]
+    if len(set(names)) != len(
+        names
+    ) or not _ATTRIBUTION_MODEL_DEPENDENT_CATEGORIES <= set(names):
+        raise ReportValidationError(
+            "implementation return attribution unavailable bridge lacks the "
+            f"model-dependent categories {strategy_id}"
+        )
+    for category in categories:
+        if category.get("category") in _ATTRIBUTION_MODEL_DEPENDENT_CATEGORIES:
+            if category.get("effect_pp") is not None:
+                raise ReportValidationError(
+                    "implementation return attribution unavailable effect carries "
+                    f"a value {strategy_id}"
+                )
+        else:
+            _finite_number(
+                category.get("effect_pp"),
+                f"implementation return attribution effect {strategy_id}",
+            )
+
+
 _ACCOUNT_LEG_BASIS: Final = "BASELINE_ACCOUNT_LIVE"
 _ACCOUNT_LEG_SERIES_SCHEMA: Final = "ordered-date-return/1"
 # The figure published beside a leg is the leg itself; the tolerance only absorbs
@@ -7165,16 +7207,27 @@ def _implementation_return_attribution_contract(
             raise ReportValidationError(
                 "implementation return attribution categories are empty"
             )
-        category_total = sum(
-            _finite_number(
-                category.get("effect_pp"),
-                f"implementation return attribution effect {strategy_id}",
+        category_total: float | None
+        if bridge.get("status") == _ATTRIBUTION_UNAVAILABLE_STATUS:
+            # The producer's own declared state: a connected model without an effective-dated
+            # scale makes the model mix, and the three effects that depend on it, unavailable.
+            # They are published as null, never as zero, so there is no total to close to.
+            _require_unavailable_attribution_categories(categories, strategy_id)
+            category_total = None
+        else:
+            category_total = sum(
+                _finite_number(
+                    category.get("effect_pp"),
+                    f"implementation return attribution effect {strategy_id}",
+                )
+                for category in categories
             )
-            for category in categories
-        )
         if not math.isclose(
             gap_pp, (account_return - model_return) * 100.0, abs_tol=1e-10
-        ) or not math.isclose(gap_pp, category_total, abs_tol=1e-8):
+        ) or (
+            category_total is not None
+            and not math.isclose(gap_pp, category_total, abs_tol=1e-8)
+        ):
             raise ReportValidationError(
                 "implementation return attribution bridge does not reconcile"
             )

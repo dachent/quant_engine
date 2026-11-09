@@ -283,3 +283,15 @@ With the declaration on, nothing the row used to carry for the parent account di
 Every derivation fails closed: a broken identity, a facts binding the report can check and that
 differs (parent account, tag map digest, provider-ledger generation), flow legs that differ from the
 daily flows, or a bridge residual beyond 1e-9 stops the build.
+
+## Implementation return attribution: an unavailable connected-model mix
+
+The producer infers an effective-dated scale only for the connected models whose trades it can match; a connected model it cannot
+scale (a book with no dated order snapshot, or a retired one) makes the effective account model mix unavailable. The producer
+then publishes the bridge with `status` `UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT` and `effect_pp` null (never zero) on exactly
+`PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX`, `PRIMARY_AI_SLEEVE_IMPLEMENTATION` and
+`OTHER_CONNECTED_SLEEVES_IMPLEMENTATION`. The report and the control panel accept that state and nothing looser: those three effects
+must be null, every other category a finite exact return link, and the gap must still equal the account return minus the model return;
+only the closure of the categories to the gap is not asserted, because three effects are not stated. A value on an unavailable
+effect, a null on an exact one, or a missing unavailable category stops the build. The panel prints an unavailable effect as
+`unavailable`, never as 0 pp.

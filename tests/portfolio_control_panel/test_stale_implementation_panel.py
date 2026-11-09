@@ -481,3 +481,71 @@ def test_real_producer_contracts_render_the_dated_pre_policy_exclusion_disclosur
         "contract as of Aug 3, 2026, before the PROVIDER_ADMIT_OR_DECLARE_V1 "
         "exclusion effective Aug 14, 2026"
     ) in cell
+
+
+_UNAVAILABLE_BRIDGE_STATUS = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
+
+
+def _make_ai_bridge_unavailable(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Turn the AI row's bridge into the producer's unavailable state; return the bridge."""
+
+    layer = next(row for row in rows if row["strategy_id"] == AI)
+    detail = layer["evidence_layers"]["implementation_reconciliation"]["detail"]
+    bridge = detail["return_attribution"]["bridge"]
+    bridge["status"] = _UNAVAILABLE_BRIDGE_STATUS
+    bridge["categories"] = [
+        {
+            "category": "PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX",
+            "effect_pp": None,
+            "status": _UNAVAILABLE_BRIDGE_STATUS,
+        },
+        {
+            "category": "PRIMARY_AI_SLEEVE_IMPLEMENTATION",
+            "effect_pp": None,
+            "status": _UNAVAILABLE_BRIDGE_STATUS,
+        },
+        {
+            "category": "OTHER_CONNECTED_SLEEVES_IMPLEMENTATION",
+            "effect_pp": None,
+            "status": _UNAVAILABLE_BRIDGE_STATUS,
+        },
+        {
+            "category": "UNEXPLAINED_ACTUAL_ACTIVITY",
+            "effect_pp": bridge["gap_pp"] - 0.25,
+            "status": "EXACT_RETURN_LINK_NO_ADMITTED_MODEL_EVENT_CANDIDATE",
+        },
+        {
+            "category": "CASH_FINANCING_FEES_AND_POSITION_RECONCILIATION",
+            "effect_pp": 0.25,
+            "status": "EXACT_RETURN_LINK_NON_SECURITY_AND_OPENING_POSITION_EFFECT",
+        },
+    ]
+    return bridge
+
+
+def test_the_verifier_accepts_the_producers_unavailable_bridge() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+    _make_ai_bridge_unavailable(rows)
+
+    findings = panel._check_implementation_layers(rows)
+
+    assert findings["causal_attribution_reconciles"] is True
+    assert AI in findings["causal_attribution_strategy_ids"]
+
+
+def test_the_verifier_refuses_a_value_on_an_unavailable_effect() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+    bridge = _make_ai_bridge_unavailable(rows)
+    bridge["categories"][1]["effect_pp"] = 0.0
+
+    with pytest.raises(panel.ControlPanelValidationError, match="carries a value"):
+        panel._check_implementation_layers(rows)
+
+
+def test_the_verifier_refuses_a_null_effect_on_an_available_bridge() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+    bridge = _make_ai_bridge_unavailable(rows)
+    bridge["status"] = "DIAGNOSTIC_CAUSAL_BRIDGE"
+
+    with pytest.raises(panel.ControlPanelValidationError, match="numeric"):
+        panel._check_implementation_layers(rows)
