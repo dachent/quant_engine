@@ -68,6 +68,10 @@ def facts(**extra: Any) -> dict[str, Any]:
         "Link broker",
         "Disconnect your broker",
         "connectBroker",
+        "Close the account",
+        "Change your password",
+        "Update your settings",
+        "placeOrder()",
     ],
 )
 def test_trading_text_is_matched(text: str) -> None:
@@ -110,6 +114,10 @@ def test_plain_reads_are_not_matched(text: object) -> None:
         {"name": "withdraw"},
         {"value": "Place order"},
         {"title": "Transfer"},
+        {"name": "placeOrder"},
+        {"labelled_by": "Buy"},
+        {"onclick": "placeOrder()"},
+        {"page_url": "https://elsewhere.example/"},
         {"href": ORIGIN + "deposit"},
         {"href_attr": "/trade"},
         {"tag": "input", "type": "submit"},
