@@ -260,20 +260,39 @@ produce a `REVIEWED_SHAPES` run that admission accepts. That review is a small,
 mechanical code change (two catalog rows and their tests), not data, and it must
 land before the run that admission binds is staged.
 
-## Passive CDP recorder for the pre-R3 sitting (`tools/p123_cdp_recorder.py`)
+## CDP recorder for the pre-R3 sitting (`tools/p123_cdp_recorder.py`)
 
 One attended sitting (Block 0) can learn the real routes and response shapes of the
 UNVERIFIED capabilities (`aifactor.predictor`, `aifactor.model`, `screen.definition`,
 `simulation.result`, `transactions.account`) so that R3 stays data-only. The recorder
 attaches to a dedicated Edge or Chrome profile with a loopback debug port that the
-owner signed in to and drove by hand. Nothing here logs in, types, or clicks.
+owner signed in to. It records the traffic, and with `--drive-plan <file>` it can also
+drive the signed-in tab itself: navigate on `https://www.portfolio123.com`, click and
+scroll. Nothing here logs in or types.
 
-Safety rules, enforced in code and pinned by `tests/portfolio123/test_p123_cdp_recorder.py`:
+Safety rules, enforced in code and pinned by `tests/portfolio123/test_p123_cdp_recorder.py`
+and `tests/core/test_capture_action_guard.py`:
 
-- Passive. The only messages sent to the browser are `Target.setDiscoverTargets`,
-  `Target.attachToTarget`, `Network.enable`, and `Network.getResponseBody`; a guard
-  refuses everything else (navigate, evaluate, input, fetch interception, cookies)
-  before it leaves the process. It listens to four Network events only.
+- Allowed in the signed-in window for any non-trading read: navigate, click, scroll. The
+  messages sent to the browser are `Target.setDiscoverTargets`, `Target.attachToTarget`,
+  `Network.enable`, `Network.getResponseBody`, and the driving messages `Page.navigate`
+  (one URL on the P123 origin), `Runtime.evaluate` (only the fixed element probe of
+  `tools/capture_action_guard.py`) and `Input.dispatchMouseEvent` (move, wheel, left
+  click). A guard refuses everything else (reload, any other evaluate, key or text input,
+  fetch interception, cookies) before it leaves the process. It listens to four Network
+  events only.
+- The ONE guard (`tools/capture_action_guard.py`, shared by the live capture tools):
+  never click or open a control whose accessible name, text, `aria-label`, `value`,
+  `title` or `href` matches trade, transfer, withdraw, deposit, order, buy, sell, submit,
+  confirm payment, or an account-changing control (delete, remove, cancel, unsubscribe, close account, save or apply changes, change or reset password, update profile, email or settings, link, unlink, connect or disconnect broker) (token match after splitting camelCase and punctuation); never touch
+  a submit control (a typeless `<button>` inside a form counts), an image submit or a
+  password control; never follow a link off the origin; no typing message exists, so
+  credentials and 2FA are never entered. A drive plan is a JSON list of
+  `{"navigate": url}`, `{"click": "<exact control name>"}` and `{"scroll": deltaY}`; a
+  step the guard would refuse is rejected before connecting (`DRIVE_PLAN_REFUSED`), a
+  control found refused on the page stops the plan (`DRIVE_ACTION_REFUSED`). The action
+  log (stderr) is value-free: verb, role, first 8 hex characters of the label's SHA-256.
+  Runs recorded by the earlier, listen-only recorder still verify.
 - Origin-limited to `https://www.portfolio123.com` (exact host list `ALLOWED_HOSTS`,
   no port, no userinfo). Only page targets already on that origin are attached.
   Other-origin responses are counted, never listed.
