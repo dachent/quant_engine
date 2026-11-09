@@ -4774,6 +4774,12 @@ def _derived_value_index(
         patch = document.get("derived_patch") if isinstance(document, Mapping) else None
         if not isinstance(patch, Mapping):
             continue
+        if patch.get("patches") == []:
+            # a declaration that no account needed a patch (the source-branch schema
+            # schwab-nav-source-derived-patch/1 states it as an empty list, with no official
+            # closes manifest): it declares no derived value, so there is no value basis to
+            # index.  A non-empty list that lacks a field still refuses below.
+            continue
         interpretation = row.get("finality_interpretation")
         try:
             found.append(
