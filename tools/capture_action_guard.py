@@ -119,10 +119,13 @@ def matches_trading(text: object) -> bool:
             return True
         if word.startswith(_MUTATION_STEMS):
             return True
-        following = words[index + 1 : index + 2]
-        if (word, *following) in _MUTATION_PHRASES:
+        # a phrase may have filler words inside it ("Close the account", "Change your password")
+        window = words[index + 1 : index + 4]
+        if any(
+            word == first and second in window for first, second in _MUTATION_PHRASES
+        ):
             return True
-        if word in _BROKER_VERBS and "broker" in words[index + 1 : index + 3]:
+        if word in _BROKER_VERBS and "broker" in window:
             return True
     return False
 
@@ -170,6 +173,7 @@ def check_control(facts: Mapping[str, Any], *, origin_prefix: str) -> None:
         facts.get("labelled_by"),
         facts.get("labels"),
         facts.get("alt"),
+        facts.get("onclick"),
         facts.get("href_attr"),
         href,
     )
@@ -223,6 +227,7 @@ FACTS_FIELDS = (
     "labelled_by",
     "labels",
     "alt",
+    "onclick",
     "page_url",
     "href",
     "href_attr",
@@ -251,6 +256,7 @@ _FACTS_JS = r"""(target) => {
     labelled_by: labelled,
     labels: labels,
     alt: el.getAttribute('alt') || '',
+    onclick: (el.getAttribute('onclick') || '').slice(0, 200),
     page_url: location.href,
     href: el.href || '',
     href_attr: el.getAttribute('href') || '',
@@ -260,6 +266,8 @@ _FACTS_JS = r"""(target) => {
     h: Math.round(r.height)
   };
 }"""
+#: The same probe as a Playwright ``locator.evaluate`` function (takes the element).
+FACTS_SCRIPT = _FACTS_JS
 _BY_NAME_JS = (
     "(name) => { const hit = Array.from(document.querySelectorAll("
     "'a,button,input,select,summary,[role=button],[role=link],[role=tab]'))"
