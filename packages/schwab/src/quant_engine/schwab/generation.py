@@ -376,7 +376,11 @@ def _sources(
         raise SchwabGenerationError(
             "cannot use both per-account and aggregate manual NAV roles"
         )
-    if not has_nav_per and not has_nav_all and snapshot_schema_version != "1":
+    if (
+        not has_nav_per
+        and not has_nav_all
+        and snapshot_schema_version not in {"1", "2"}
+    ):
         raise SchwabGenerationError(
             "a manual NAV role (per-account or aggregate) is required"
         )
@@ -1961,7 +1965,7 @@ def build_generation(
         if (
             current_accounts is None
             or current_observed_at is None
-            or current_transport != "DEVELOPER_API"
+            or current_transport not in {"DEVELOPER_API", "WEB_CONTRACT"}
         ):
             raise SchwabGenerationError(
                 "a developer-API current snapshot is required "
