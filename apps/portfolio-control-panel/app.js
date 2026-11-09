@@ -177,6 +177,7 @@
     NOT_READY_STALE_CONTRACT_LEDGER_VINTAGE: "Not ready: stale contract (ledger vintage)",
     PARTIAL_CAUSAL_ATTRIBUTION_RECONCILIATION_NOT_READY: "Partial: causal attribution ready, reconciliation not ready",
     PARTIAL_RECONCILIATION_ATTRIBUTION_NOT_READY: "Partial: reconciliation ready, causal attribution not ready",
+    PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE: "Partial: causal attribution without the connected-model mix",
     UPPER_BOUND_CONTRACT_CAP_PRE_TAX: "Upper bound (contract cap)",
     DOCUMENTED_RATE_NOT_DOLLAR: "Documented percent rate (no dollar cost)",
     documented_rate_percent: "Documented percent rate",

@@ -556,6 +556,16 @@ def test_the_verifier_accepts_the_producers_unavailable_bridge() -> None:
 
     assert findings["causal_attribution_reconciles"] is True
     assert AI in findings["causal_attribution_strategy_ids"]
+    # accepted as a valid declared shape, never counted as a verified closure
+    assert findings["causal_attribution_closure_not_computable_strategy_ids"] == [AI]
+
+
+def test_a_closed_bridge_is_not_listed_as_closure_not_computable() -> None:
+    rows = deepcopy(_underwriting()["rows"])
+
+    findings = panel._check_implementation_layers(rows)
+
+    assert findings["causal_attribution_closure_not_computable_strategy_ids"] == []
 
 
 def test_the_verifier_refuses_a_value_on_an_unavailable_effect() -> None:

@@ -6619,6 +6619,48 @@ _ATTRIBUTION_NULL_CATEGORIES: Final = frozenset(
 _ATTRIBUTION_PRIMARY_CATEGORY: Final = "PRIMARY_AI_SLEEVE_IMPLEMENTATION"
 _ATTRIBUTION_UNEXPLAINED_CATEGORY: Final = "UNEXPLAINED_ACTUAL_ACTIVITY"
 _ATTRIBUTION_CASH_CATEGORY: Final = "CASH_FINANCING_FEES_AND_POSITION_RECONCILIATION"
+# The producer's bridge and category objects carry exactly these fields; an added field
+# (a residual, a plug) is refused rather than ignored.
+_ATTRIBUTION_BRIDGE_KEYS: Final = frozenset(
+    {
+        "account_basis",
+        "account_return",
+        "categories",
+        "effective_account_model_mix_gap_pp",
+        "effective_account_model_mix_return",
+        "gap_pp",
+        "model_basis",
+        "model_return",
+        "status",
+    }
+)
+_ATTRIBUTION_CATEGORY_KEYS: Final = frozenset({"category", "effect_pp", "status"})
+# category -> (status when the effect is a number, status when it is null)
+_ATTRIBUTION_CATEGORY_STATUSES: Final = {
+    "PRIMARY_ONLY_BENCHMARK_TO_EFFECTIVE_ACCOUNT_MODEL_MIX": (
+        "CORRECTS_MULTI_MODEL_SHARED_ACCOUNT_BENCHMARK",
+        "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT",
+    ),
+    "PRIMARY_AI_SLEEVE_IMPLEMENTATION": (
+        "PRIMARY_ONLY_CANDIDATE_ACTUAL_PNL_MINUS_INFERRED_PRIMARY_TARGET_PNL",
+        "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT",
+    ),
+    "OTHER_CONNECTED_SLEEVES_IMPLEMENTATION": (
+        "TEMPORARY_AND_AMBIGUOUS_CANDIDATE_ACTUAL_PNL_MINUS_OTHER_CONNECTED_MODEL_TARGET_PNL",
+        "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT",
+    ),
+    "UNEXPLAINED_ACTUAL_ACTIVITY": (
+        "EXACT_RETURN_LINK_NO_ADMITTED_MODEL_EVENT_CANDIDATE",
+        None,
+    ),
+    "CASH_FINANCING_FEES_AND_POSITION_RECONCILIATION": (
+        "EXACT_RETURN_LINK_NON_SECURITY_AND_OPENING_POSITION_EFFECT",
+        None,
+    ),
+}
+# The strategy's implementation status when the bridge states no model-mix effects: partial,
+# never the verified closure.
+_ATTRIBUTION_PARTIAL_STATUS: Final = "PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE"
 _ATTRIBUTION_CATEGORIES: Final = _ATTRIBUTION_NULL_CATEGORIES | {
     _ATTRIBUTION_PRIMARY_CATEGORY,
     _ATTRIBUTION_UNEXPLAINED_CATEGORY,
@@ -6647,6 +6689,11 @@ def require_unavailable_attribution_bridge(
             "implementation return attribution unavailable bridge is not declared "
             f"for {strategy_id}"
         )
+    if set(bridge) - _ATTRIBUTION_BRIDGE_KEYS:
+        raise ReportValidationError(
+            "implementation return attribution unavailable bridge carries an unknown "
+            f"field {strategy_id}"
+        )
     names = [category.get("category") for category in categories]
     if len(set(names)) != len(names) or set(names) != _ATTRIBUTION_CATEGORIES:
         raise ReportValidationError(
@@ -6662,6 +6709,11 @@ def require_unavailable_attribution_bridge(
                 f"effect {strategy_id}"
             )
         value = category["effect_pp"]
+        if set(category) - _ATTRIBUTION_CATEGORY_KEYS:
+            raise ReportValidationError(
+                "implementation return attribution unavailable bridge carries an "
+                f"unknown category field {strategy_id}"
+            )
         if name in _ATTRIBUTION_NULL_CATEGORIES:
             if value is not None:
                 raise ReportValidationError(
@@ -6674,6 +6726,12 @@ def require_unavailable_attribution_bridge(
         else:
             effects[name] = _finite_number(
                 value, f"implementation return attribution effect {strategy_id}"
+            )
+        stated, unstated = _ATTRIBUTION_CATEGORY_STATUSES[name]
+        if category.get("status") != (stated if value is not None else unstated):
+            raise ReportValidationError(
+                "implementation return attribution unavailable bridge category "
+                f"status differs {strategy_id}"
             )
     mix = _object(
         row.get("effective_account_model_mix"),
@@ -7476,6 +7534,11 @@ def _implementation_status(
         == "UNAVAILABLE_POLICY_NOT_ADMITTED"
     ):
         return "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    if (
+        return_attribution.get("bridge", {}).get("status")
+        == _ATTRIBUTION_UNAVAILABLE_STATUS
+    ):
+        return _ATTRIBUTION_PARTIAL_STATUS
     if return_attribution:
         return "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
     return "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"

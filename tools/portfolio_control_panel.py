@@ -13627,6 +13627,7 @@ def _check_implementation_layers(
     gap_reconciles = True
     causal_attribution_reconciles = True
     causal_attribution_strategy_ids: set[str] = set()
+    closure_not_computable_strategy_ids: set[str] = set()
     policy_unavailable_strategy_ids: set[str] = set()
     stale_attribution_strategy_ids: set[str] = set()
     stale_reconciliation_strategy_ids: set[str] = set()
@@ -13765,6 +13766,7 @@ def _check_implementation_layers(
             except reporter.ReportValidationError as exc:
                 raise ControlPanelValidationError(str(exc)) from exc
             category_total = None
+            closure_not_computable_strategy_ids.add(strategy_id)
         else:
             category_total = sum(
                 _finite_float(
@@ -13785,6 +13787,9 @@ def _check_implementation_layers(
         "gap_reconciles": gap_reconciles,
         "causal_attribution_reconciles": causal_attribution_reconciles,
         "causal_attribution_strategy_ids": sorted(causal_attribution_strategy_ids),
+        "causal_attribution_closure_not_computable_strategy_ids": sorted(
+            closure_not_computable_strategy_ids
+        ),
         "policy_unavailable_strategy_ids": sorted(policy_unavailable_strategy_ids),
         "stale_attribution_strategy_ids": sorted(stale_attribution_strategy_ids),
         "stale_reconciliation_strategy_ids": sorted(stale_reconciliation_strategy_ids),
@@ -14604,6 +14609,11 @@ def verify_candidate(
                 ),
                 "causal_attribution_strategy_ids": (
                     implementation_findings["causal_attribution_strategy_ids"]
+                ),
+                "causal_attribution_closure_not_computable_strategy_ids": (
+                    implementation_findings[
+                        "causal_attribution_closure_not_computable_strategy_ids"
+                    ]
                 ),
                 "policy_unavailable_strategy_ids": (
                     implementation_findings["policy_unavailable_strategy_ids"]

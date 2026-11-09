@@ -229,7 +229,12 @@ def test_the_producers_unavailable_bridge_is_accepted(tmp_path: Path) -> None:
 
 def test_the_primary_effect_may_itself_be_unavailable(tmp_path: Path) -> None:
     path = tmp_path / "return-attribution.json"
-    _write(path, lambda row: _category(row, _PRIMARY).update({"effect_pp": None}))
+    _write(
+        path,
+        lambda row: _category(row, _PRIMARY).update(
+            {"effect_pp": None, "status": _UNAVAILABLE}
+        ),
+    )
 
     _build(path)
 
@@ -315,9 +320,18 @@ def test_the_unavailable_waiver_is_only_for_the_ai_path(tmp_path: Path) -> None:
             {"model_mix_return": 0.01}
         ),
         lambda row: row["bridge"].update({"effective_account_model_mix_return": 0.01}),
+        lambda row: row["bridge"].update({"effective_account_model_mix_gap_pp": 0.01}),
         lambda row: row.pop("effective_account_model_mix"),
+        lambda row: row["bridge"].update({"residual_pp": 0.5}),
     ),
-    ids=("forged-mix-status", "mix-return-present", "bridge-mix-present", "no-mix"),
+    ids=(
+        "forged-mix-status",
+        "mix-return-present",
+        "bridge-mix-present",
+        "bridge-mix-gap-present",
+        "no-mix",
+        "added-residual-field",
+    ),
 )
 def test_a_forged_unavailable_status_cannot_skip_closure_alone(
     tmp_path: Path, mutation: Callable[[dict[str, Any]], object]
@@ -361,3 +375,91 @@ def test_an_available_bridge_still_requires_every_effect_finite(
 
     with pytest.raises(reporter.ReportValidationError, match="finite number"):
         _build(path)
+
+
+def test_an_unavailable_bridge_refuses_an_unknown_field_on_a_category(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "return-attribution.json"
+    _write(path, lambda row: _category(row, _UNEXPLAINED).update({"plug_pp": 0.1}))
+
+    with pytest.raises(reporter.ReportValidationError, match="unknown category field"):
+        _build(path)
+
+
+def test_an_unavailable_bridge_refuses_an_added_category(tmp_path: Path) -> None:
+    path = tmp_path / "return-attribution.json"
+
+    def add(row: dict[str, Any]) -> None:
+        row["bridge"]["categories"].append(
+            {"category": "RESIDUAL", "effect_pp": 0.5, "status": "ANYTHING"}
+        )
+
+    _write(path, add)
+
+    with pytest.raises(reporter.ReportValidationError, match="categories differ"):
+        _build(path)
+
+
+def test_an_unavailable_bridge_refuses_a_duplicated_category(tmp_path: Path) -> None:
+    path = tmp_path / "return-attribution.json"
+
+    def duplicate(row: dict[str, Any]) -> None:
+        row["bridge"]["categories"].append(dict(_category(row, _UNEXPLAINED)))
+
+    _write(path, duplicate)
+
+    with pytest.raises(reporter.ReportValidationError, match="categories differ"):
+        _build(path)
+
+
+@pytest.mark.parametrize("category", (_UNEXPLAINED, _CASH))
+def test_an_unavailable_bridge_refuses_a_deleted_exact_category(
+    tmp_path: Path, category: str
+) -> None:
+    path = tmp_path / "return-attribution.json"
+
+    def delete(row: dict[str, Any]) -> None:
+        row["bridge"]["categories"] = [
+            c for c in row["bridge"]["categories"] if c["category"] != category
+        ]
+
+    _write(path, delete)
+
+    with pytest.raises(reporter.ReportValidationError, match="categories differ"):
+        _build(path)
+
+
+@pytest.mark.parametrize(
+    "category, status",
+    (
+        (_BENCHMARK, "CORRECTS_MULTI_MODEL_SHARED_ACCOUNT_BENCHMARK"),
+        (_PRIMARY, _UNAVAILABLE),
+        (_UNEXPLAINED, _UNAVAILABLE),
+        (_CASH, "SOMETHING_ELSE"),
+    ),
+)
+def test_an_unavailable_bridge_refuses_a_category_status_that_contradicts_its_effect(
+    tmp_path: Path, category: str, status: str
+) -> None:
+    path = tmp_path / "return-attribution.json"
+    _write(path, lambda row: _category(row, category).update({"status": status}))
+
+    with pytest.raises(reporter.ReportValidationError, match="status differs"):
+        _build(path)
+
+
+def test_the_unavailable_bridge_is_a_partial_status_never_the_verified_closure() -> (
+    None
+):
+    attribution = {"bridge": {"status": _UNAVAILABLE}}
+    verified = {"bridge": {"status": "ORDERED_COUNTERFACTUAL_WITH_EXPLICIT_RESIDUAL"}}
+
+    assert (
+        reporter._implementation_status("HISTORY", {"x": 1}, attribution)
+        == "PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE"
+    )
+    assert (
+        reporter._implementation_status("HISTORY", {"x": 1}, verified)
+        == "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
+    )

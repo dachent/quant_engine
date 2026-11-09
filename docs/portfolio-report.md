@@ -298,4 +298,8 @@ mix on both the bridge and the row, finite exact links for `UNEXPLAINED_ACTUAL_A
 sum to the account return, and a gap equal to the account return minus the model return. Only the closure of the categories to
 the gap is not asserted: the producer publishes no number for the unavailable part, so no residual is inferred, and the panel
 says so ("Closure not computable for the unavailable effects"). A value on an unavailable effect, an omitted effect key, a forged
-status, or the same state on another strategy stops the build. The panel prints an unavailable effect as `unavailable`, never as 0 pp.
+status, or the same state on another strategy stops the build. The strategy's implementation status is then `PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE`, never
+`VERIFIED_CAUSAL_RETURN_ATTRIBUTION`, and the panel verifier lists the strategy under
+`causal_attribution_closure_not_computable_strategy_ids` instead of counting it as a closed bridge. Exactly the producer's five
+categories (each once, each with its producer status) and the producer's bridge fields are accepted; an added field or category is refused.
+The panel prints an unavailable effect as `unavailable`, never as 0 pp.
