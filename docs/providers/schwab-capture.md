@@ -280,6 +280,17 @@ validates) then `check-evidence`, each well under a second; the time is the revi
 comment and the `--issued-at`/`--expires-at` values, not the tools. Use a fresh
 `--output` path each time.
 
+### Rehearsal without a governed request
+
+`attach-check` is the only live step that sends no governed request (no evidence is consumed,
+nothing is stored but header names and the body hash). A read of the Holdings-V2 response is
+itself the first governed request, so it has no dry run: the governance reservation is made,
+the page sends its own request, and the body is checked against the approved body before the
+response is read. Everything after the bytes arrive is rehearsed offline instead:
+`tests/schwab/test_schwab_retained_pages_parse.py` runs the driver's date handling over every
+retained raw page of refresh-20260902 (including the `MM/DD/YYYY as of MM/DD/YYYY` shape) and,
+with `QE_SCHWAB_STAGED_RUN=<staging run dir>`, over the normalized rows of a staged run.
+
 ## Credentials
 
 None. Capture attaches over CDP to the owner's already-authenticated browser and
