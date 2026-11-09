@@ -230,9 +230,11 @@ _PATH_STAGES = {
     "tools/portfolio_diligence_rubric.py": [],
     "tools/portfolio_driver_map.py": [],
     "tools/portfolio_replication.py": [],
-    # Passive CDP listener for one attended Portfolio123 sitting; writes a
+    # CDP listener (optionally driving the signed-in tab) for one Portfolio123 sitting; writes a
     # create-only run directory and a draft catalog diff, no stage reads it.
     "tools/p123_cdp_recorder.py": [],
+    # The ONE guard (trading-token refusal, no typing) shared by live capture tools.
+    "tools/capture_action_guard.py": [],
     # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
     # hash-pinned allowlist of read-only exports into a create-only directory; the
     # staging CLI and the generation read only the files and manifest they are handed.
