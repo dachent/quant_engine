@@ -233,6 +233,8 @@ _PATH_STAGES = {
     "tools/p123_cdp_recorder.py": [],
     # The ONE guard (trading-token refusal, no typing) shared by live capture tools.
     "tools/capture_action_guard.py": [],
+    # Rehearsal (DRY-) root rules shared by the live capture recorders.
+    "tools/capture_dry_run.py": [],
     # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
     # hash-pinned allowlist of read-only exports into a create-only directory; the
     # staging CLI and the generation read only the files and manifest they are handed.

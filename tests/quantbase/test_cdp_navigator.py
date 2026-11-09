@@ -1221,3 +1221,15 @@ def test_the_action_log_is_emitted_in_the_summary_and_on_refusal(
     (entry,) = lines[-1]["actions"]
     assert entry["action"] == "click" and len(entry["label_sha8"]) == 8
     assert "Open" not in json.dumps(lines[-1]["actions"])
+
+
+def test_dry_run_flag_labels_the_run_with_a_dry_id_and_changes_nothing_else(
+    tmp_path: Path,
+) -> None:
+    code, lines, _, browser = cli(tmp_path, "--dry-run")
+    assert code == 0
+    assert lines[0]["dry_run"] is True and lines[0]["run_id"].startswith("DRY-")
+    assert lines[-1]["dry_run"] is True
+    assert browser.navigated == [p["url"] for p in PAGES]
+    _, plain, _, _ = cli(tmp_path)
+    assert "dry_run" not in plain[0] and "dry_run" not in plain[-1]

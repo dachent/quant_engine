@@ -58,6 +58,7 @@ from capture_action_guard import (
     require_origin,
     wheel_params,
 )
+from capture_dry_run import new_run_id
 from quantbase_cdp_har_recorder import (
     APP_ORIGIN,
     MUTATION_WORDS,
@@ -402,7 +403,9 @@ class Navigator:
         load_timeout: float = DEFAULT_LOAD_TIMEOUT_SECONDS,
         call_timeout: float = 20.0,
         scroll: bool = False,
+        dry_run: bool = False,
     ) -> None:
+        self._dry_run_id = new_run_id() if dry_run else None
         keys = [page_key(page.url) for page in allowlist.pages]
         if len(set(keys)) != len(keys):
             raise NavigatorError("ALLOWLIST_PAGE_REVISITED")
@@ -534,6 +537,11 @@ class Navigator:
                 "event": "allowlist",
                 "sha256": self._allowlist.sha256,
                 "pages": len(self._allowlist.pages),
+                **(
+                    {"dry_run": True, "run_id": self._dry_run_id}
+                    if self._dry_run_id
+                    else {}
+                ),
             }
         )
         counts = {"ok": 0, "timeout": 0}
@@ -584,6 +592,7 @@ class Navigator:
                 "timeout": counts["timeout"],
                 "stopped": stopped or None,
                 "scroll": self._scroll,
+                **({"dry_run": True} if self._dry_run_id else {}),
                 "actions": self.log.entries,
             }
         )
@@ -695,6 +704,12 @@ def _parser() -> argparse.ArgumentParser:
         "can also be declared per page as allow-list actions)",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="rehearsal: the same code path, labelled with a DRY- run id; pair it with the "
+        "recorder's dry-run command (scratch DRY- run root, never admitted)",
+    )
+    parser.add_argument(
         "--load-timeout-seconds", type=float, default=DEFAULT_LOAD_TIMEOUT_SECONDS
     )
     return parser
@@ -741,6 +756,7 @@ def main(
         clock=clock,
         load_timeout=args.load_timeout_seconds,
         scroll=args.scroll,
+        dry_run=args.dry_run,
     )
     try:
         return navigator.run()
