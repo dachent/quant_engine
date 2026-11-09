@@ -769,6 +769,11 @@
       1
     ],
     [
+      "schwab_page_actions",
+      "capture_action_guard",
+      1
+    ],
+    [
       "sleeve_inputs",
       "nested_strategy_tag_map",
       1

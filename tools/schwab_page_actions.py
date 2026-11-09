@@ -16,38 +16,23 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
-import re
 import sys
 from typing import Any
 
+import capture_action_guard as guard
+
 ALLOWED_PREFIX = "https://client.schwab.com/"
 MAX_SCROLL = 5000
-# trading, transfer, withdraw, deposit, order, buy, sell, submit, confirm payment
-TRADING = re.compile(
-    r"(trad(e|es|ing)|transfer|withdraw|deposit|order|buy|sell|submit|confirm\s+payment)",
-    re.IGNORECASE,
-)
-_BLOCKED_TYPES = frozenset({"submit", "password"})
+_BLOCKED_TYPES = frozenset({"submit", "image", "password"})
 
 
 _FACTS_SCRIPT = "e => ({type: e.type || null, href: e.href || null})"
 
-
-class ActionRefused(ValueError):
-    """The action targets a trading control or leaves the Schwab window."""
-
-
-def label_hash(label: str) -> str:
-    return hashlib.sha256(label.encode("utf-8")).hexdigest()[:8]
-
-
-def refuse_if_trading(*texts: object) -> None:
-    for text in texts:
-        if isinstance(text, str) and TRADING.search(text):
-            raise ActionRefused(
-                "refused: the control matches the trading guard "
-                f"(label {label_hash(text)}); only non-trading reads are allowed"
-            )
+# ONE guard shared with the other live capture tools (trading words plus account-changing
+# words such as delete, save changes, update profile, link broker).
+ActionRefused = guard.ActionRefused
+label_hash = guard.label_hash
+refuse_if_trading = guard.refuse_if_trading
 
 
 class SchwabPage:
