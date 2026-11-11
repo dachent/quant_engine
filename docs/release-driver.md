@@ -529,3 +529,7 @@ previous pass's configuration is never carried (it is dropped and re-derived), a
 The operator records the pin the command prints (`calendar_authority_sha256`) in the pass evidence, where the release owner's
 direct hash confirmation at commit covers it. Without the seed keys there is no pin, and the `calendar-seed` stage refuses (it needs `calendar_authority_sha256`);
 `config --require-calendar` still writes the pin from an existing authority file for the later `calendar-authority` attempts.
+
+## Commit-path canary
+
+`tools/release_canary.py run --root <root>... [--bound-file <file>...] [--baseline <json>] [--out <receipt>]` exercises the real (synced) volume before the commit, which no scratch rehearsal does: bound files are not cloud placeholders (attributes only), a pointer-sized create/write/fsync/atomic-replace/lock/rename/delete cycle runs in a `.canary-<pid>-<rand>` directory beside each root (always removed), timings stay within 10 x the recorded baseline (2 s floor), and an environment fingerprint (Windows build, OneDrive client, cloud-files driver, volume type, interpreter and package hashes, git version) is recorded. `release_canary.py diff A B` shows a fingerprint change between two releases. Exit 0 PASS, 1 FAIL, 3 usage. Handle listing is skipped unless a lister is injected (`SKIPPED_NOT_AVAILABLE`, a failure only with `--require-handles`). It writes nothing inside a root.
