@@ -140,6 +140,12 @@ def _argv(command: str) -> list[str]:
 
 
 def run(steps: Sequence[Step]) -> int:
+    """Run every step; report all failing steps, not just the first (#910).
+
+    The hosted job has the same shape: one broken step must not hide the next.
+    """
+
+    failed: list[tuple[str, int]] = []
     for step in steps:
         print(f"\n== {step.name}\n$ {step.command[:200]}", flush=True)
         # Hosted runners carry no GIT_* overrides and the suppression check
@@ -148,7 +154,12 @@ def run(steps: Sequence[Step]) -> int:
         done = subprocess.run(_argv(step.command), cwd=ROOT, env={**env, **step.env})
         if done.returncode:
             print(f"FAILED ({done.returncode}): {step.name}", file=sys.stderr)
-            return done.returncode
+            failed.append((step.name, done.returncode))
+    if failed:
+        print(f"\n{len(failed)} step(s) failed:", file=sys.stderr)
+        for name, code in failed:
+            print(f"  FAILED ({code}): {name}", file=sys.stderr)
+        return failed[0][1]
     return 0
 
 
