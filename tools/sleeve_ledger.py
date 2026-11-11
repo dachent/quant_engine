@@ -389,6 +389,21 @@ def derive_sleeve_ledger(
                         quantity[sleeve][symbol] *= factor
                 scalings.append((day, symbol, factor))
             elif abs(total) > _EPSILON and actual == 0:
+                # A position a real sleeve holds cannot vanish with no execution
+                # to explain it: that is a corporate action (a reverse split
+                # re-issues the security id) the aliases did not declare, and
+                # closing it silently drops the sleeve's value into nothing.
+                vanished = [
+                    item
+                    for item in real
+                    if abs(quantity[item].get(symbol, _ZERO)) > _RECONCILE_TOLERANCE
+                ]
+                if vanished:
+                    raise SleeveLedgerError(
+                        f"position {symbol} held by sleeve(s) {', '.join(vanished)} "
+                        f"vanished from the account on {day} with no execution "
+                        "(an undeclared corporate action?); declare the alias"
+                    )
                 for sleeve in every:
                     quantity[sleeve].pop(symbol, None)
             else:
