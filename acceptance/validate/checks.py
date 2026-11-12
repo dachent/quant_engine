@@ -9188,6 +9188,12 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                 continue
             if days is not None and days < ONE_YEAR_DAYS:
                 summary = comparison_labels.get(str(row.get("strategy_id")), {})
+                if summary.get("provider_comparison_status") == (
+                    "UNAVAILABLE_POLICY_NOT_ADMITTED"
+                ):
+                    # the summary withholds this comparison's figures by policy;
+                    # the raw comparison row is not a published figure
+                    continue
                 short_window(
                     f"provider.{row.get('strategy_id')}.{key}",
                     days,

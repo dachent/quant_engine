@@ -535,11 +535,13 @@ def _periods_per_year(common: Sequence[date]) -> int:
     span_days = (common[-1] - common[0]).days
     if span_days < 28:
         return 252
+    observed = min(max(round((len(common) - 1) * 365 / span_days), 1), 366)
     weekend = sum(1 for day in common if day.weekday() >= 5)
     if weekend * 5 >= len(common):
-        return 365
-    observed = round((len(common) - 1) * 365 / span_days)
-    return 252 if abs(observed - 252) <= 252 * 0.02 else min(max(observed, 1), 366)
+        # calendar-daily only when the dates are dense enough to be daily at all; a
+        # sparse series (every five days, weekly) keeps its own observed frequency
+        return 365 if len(common) >= 0.8 * 365 * span_days / 365 else observed
+    return 252 if abs(observed - 252) <= 252 * 0.02 else observed
 
 
 def relative_metrics(

@@ -9,6 +9,7 @@ figure is recomputed here from the index path to 6 decimals.
 from __future__ import annotations
 
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 import sys
 
@@ -77,3 +78,24 @@ def test_a_window_under_a_year_has_no_annual_rate_and_no_trailing_year() -> None
     # filled with a shorter window
     assert block["trailing_12_months"] is None
     assert block["value"] is not None
+
+
+def test_a_stale_or_unordered_base_gives_no_trailing_window() -> None:
+    """Review finding: the base was the last observation however old, from an unsorted path."""
+
+    path = [
+        {"as_of": "2025-06-30", "index": "100"},
+        {"as_of": "2026-03-01", "index": "120"},
+        {"as_of": "2026-03-02", "index": "121"},
+    ]
+    # year-to-date anchor is 2025-12-31 but the base would be 184 days old
+    assert totals._index_return_since(path, date(2025, 12, 31), Decimal("121")) is None
+    # an unordered path has no trailing window
+    assert (
+        totals._index_return_since(
+            [path[1], path[0], path[2]], date(2026, 1, 1), Decimal("121")
+        )
+        is None
+    )
+    # 29 February: the anniversary falls back to the 28th
+    assert totals._one_year_before(date(2028, 2, 29)) == date(2027, 2, 28)

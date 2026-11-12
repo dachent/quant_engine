@@ -53,6 +53,7 @@ TOTALS_SCHEMA_VERSION: Final = 1
 DECIMAL_PRECISION: Final = 100
 PERIMETER_TOLERANCE: Final = Decimal("1e-18")
 ANNUALISATION_MINIMUM_DAYS: Final = 365
+TRAILING_ANCHOR_TOLERANCE_DAYS: Final = 7
 TWR_BASIS: Final = "GOVERNED_HWM_INDEX"
 OPEN_RULE: Final = "CURRENT_OF_EPOCHS_OPEN_AT_CUTOFF_MINUS_GAIN_OF_ALL_EPOCHS"
 
@@ -227,6 +228,15 @@ def _summed_epoch_twr(
     }
 
 
+def _one_year_before(day: date) -> date:
+    """The calendar anniversary a year earlier (29 February falls back to 28)."""
+
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:
+        return day.replace(year=day.year - 1, day=28)
+
+
 def _index_return_since(
     path: Sequence[Mapping[str, Any]], anchor: date, end_index: Decimal
 ) -> str | None:
@@ -237,12 +247,19 @@ def _index_return_since(
     """
 
     base: Decimal | None = None
+    base_day: date | None = None
+    previous: date | None = None
     for item in path:
-        if _day(item["as_of"], "index date") <= anchor:
-            base = _decimal(item["index"], "index")
-        else:
-            break
-    if base is None or base <= 0:
+        day = _day(item["as_of"], "index date")
+        if previous is not None and day <= previous:
+            return None  # an unordered path has no trailing window
+        previous = day
+        if day <= anchor:
+            base, base_day = _decimal(item["index"], "index"), day
+    if base is None or base_day is None or base <= 0:
+        return None
+    if (anchor - base_day).days > TRAILING_ANCHOR_TOLERANCE_DAYS:
+        # the base must be the index at the anchor, not a stale observation before it
         return None
     return _text(end_index / base - 1)
 
@@ -284,9 +301,7 @@ def build_portfolio_twr(
             if window_days >= ANNUALISATION_MINIMUM_DAYS
             else None
         )
-        trailing_12m = _index_return_since(
-            path, end - timedelta(days=365), current_index
-        )
+        trailing_12m = _index_return_since(path, _one_year_before(end), current_index)
         year_to_date = _index_return_since(
             path, date(end.year - 1, 12, 31), current_index
         )

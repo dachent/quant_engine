@@ -2328,3 +2328,12 @@ def test_the_reconciliation_tracking_error_scales_with_the_series_own_calendar()
 
     expected = _s.stdev(active) * _m.sqrt(365)
     assert round(metrics["annualized_tracking_error"], 6) == round(expected, 6)
+
+
+def test_sparse_calendar_dates_are_not_scaled_as_calendar_daily() -> None:
+    """Review finding: every-five-days dates were scaled with 365 (2.2x too large)."""
+
+    days = [date(2026, 1, 2) + timedelta(days=5 * n) for n in range(40)]
+    assert reconciliation._periods_per_year(days) == round(39 * 365 / (5 * 39))
+    weekly = [date(2026, 1, 2) + timedelta(days=7 * n) for n in range(30)]
+    assert reconciliation._periods_per_year(weekly) == 52

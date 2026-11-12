@@ -387,3 +387,27 @@ def test_a_published_sleeve_return_per_year_under_365_days_blocks() -> None:
     }
     row["return_levered_annualised"] = None
     assert not _short(list(checks.check_lint_returns(_context(report))))
+
+
+def test_a_policy_withheld_provider_comparison_is_not_linted() -> None:
+    """Review finding: the raw comparison row of a withheld comparison blocked a valid report."""
+
+    summary = {
+        "strategy_id": "alpha",
+        "provider_comparison_status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+        "provider_annualization": None,
+    }
+    comparison = {
+        "strategy_id": "alpha",
+        "metrics": {
+            "observed_start": "2026-01-02",
+            "observed_end": "2026-06-19",
+            "tracking_error_annualized": "0.1",
+        },
+    }
+    report = {
+        "report_schema_version": 5,
+        "strategy_summary": [summary],
+        "strategy_attribution": {"comparisons": [comparison]},
+    }
+    assert not _short(list(checks.check_lint_returns(_context(report))))
