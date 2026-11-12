@@ -500,11 +500,11 @@ def test_a_pinned_git_child_does_not_void_the_recording_but_another_one_does(wor
 
 def test_allowed_read_only_children_are_exactly_these():
     sha = "c" * 40
-    assert vr.allowed_child_command(f"git -C C:\repo show {sha}:docs/x.json")
+    assert vr.allowed_child_command(f"git -C C:/repo show {sha}:docs/x.json")
     assert vr.allowed_child_command(
-        "git -C C:\repo rev-parse --show-toplevel HEAD^{commit}"
+        "git -C C:/repo rev-parse --show-toplevel HEAD^{commit}"
     )
-    assert vr.allowed_child_command('C:\Windows\system32\cmd.exe /c "ver"')
-    assert not vr.allowed_child_command("git -C C:\repo checkout main")
-    assert not vr.allowed_child_command("git -C C:\repo show HEAD:docs/x.json")
+    assert vr.allowed_child_command('C:/Windows/system32/cmd.exe /c "ver"')
+    assert not vr.allowed_child_command("git -C C:/repo checkout main")
+    assert not vr.allowed_child_command("git -C C:/repo show HEAD:docs/x.json")
     assert not vr.allowed_child_command("cmd.exe /c del x")
