@@ -193,7 +193,9 @@ def test_the_unavailable_definition_counts_the_items_that_name_a_pull() -> None:
         "leverage_disclosures"
     ] = []  # no governed interest rows: governed terms are UNAVAILABLE
     raw = json.dumps(audit).encode("utf-8")
-    block = mva.build_model_vs_actual(panel, raw, hashlib.sha256(raw).hexdigest())
+    block = mva.build_model_vs_actual(
+        panel, raw, hashlib.sha256(raw).hexdigest(), max_window_lag_days=None
+    )
     items = _unavailable_items(block)
     named = sum(1 for u in items if u.get("replacing_pull") is not None)
     empty = sum(

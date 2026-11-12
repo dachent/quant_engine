@@ -363,7 +363,11 @@ def _panel() -> dict[str, Any]:
 
 def _build(audit: dict[str, Any] | None = None) -> tuple[dict[str, Any], bytes, str]:
     raw, sha = _raw(audit or _audit())
-    return mva.build_model_vs_actual(_panel(), raw, sha), raw, sha
+    return (
+        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None),
+        raw,
+        sha,
+    )
 
 
 def test_the_block_validates_against_the_real_schema_and_verifier() -> None:
@@ -419,12 +423,12 @@ def test_an_unknown_pull_or_component_is_refused() -> None:
     audit["strategies"][0]["windows"][0]["components"][0]["replacing_pull"] = "NOPE"
     raw, sha = _raw(audit)
     with pytest.raises(mva.ModelVsActualError, match="unknown pull"):
-        mva.build_model_vs_actual(_panel(), raw, sha)
+        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
     audit = _audit()
     audit["strategies"][0]["windows"][0]["components"][0]["component_id"] = "magic"
     raw, sha = _raw(audit)
     with pytest.raises(mva.ModelVsActualError, match="vocabulary"):
-        mva.build_model_vs_actual(_panel(), raw, sha)
+        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
 
 
 def test_governed_interest_is_evidenced_and_never_sums_mixed_currencies() -> None:
@@ -465,21 +469,35 @@ def test_epochs_and_aligned_windows_are_separate_lists() -> None:
 
 
 def test_the_synthetic_audit_input_builds_closes_and_validates() -> None:
-    _assert_staged_shape(synthetic_staged_bytes())
+    # the synthetic input exercises the window arithmetic, not freshness (kill tests below do)
+    _assert_staged_shape(synthetic_staged_bytes(), fresh=False)
 
 
 @pytest.mark.skipif(
     not os.environ.get(REAL_INPUT_ENV), reason="real audit input is not in Git"
 )
 def test_the_governed_audit_input_builds_closes_and_validates() -> None:
-    _assert_staged_shape(Path(os.environ[REAL_INPUT_ENV]).read_bytes())
+    _assert_staged_shape(Path(os.environ[REAL_INPUT_ENV]).read_bytes(), fresh=True)
 
 
-def _assert_staged_shape(raw: bytes) -> None:
+def _assert_staged_shape(raw: bytes, *, fresh: bool) -> None:
+    """`fresh` is True for the governed input: its windows must reach the cutoff."""
+
     sha = hashlib.sha256(raw).hexdigest()
-    block = mva.build_model_vs_actual(_panel_for_staged(), raw, sha)
+    block = mva.build_model_vs_actual(
+        _panel_for_staged(),
+        raw,
+        sha,
+        **({} if fresh else {"max_window_lag_days": None}),
+    )
     assert _errors(block) == []
-    mva.verify_model_vs_actual(block, _panel_for_staged(), raw, sha)
+    mva.verify_model_vs_actual(
+        block,
+        _panel_for_staged(),
+        raw,
+        sha,
+        **({} if fresh else {"max_window_lag_days": None}),
+    )
     ids = {s["strategy_id"] for s in block["strategies"]}
     assert ids == {
         "p123-eu",
@@ -529,14 +547,14 @@ def test_an_unavailable_term_with_an_unknown_pull_is_refused_at_build() -> None:
     audit["strategies"][0]["unavailable"][0]["replacing_pull"] = "TYPO-P9"
     raw, sha = _raw(audit)
     with pytest.raises(mva.ModelVsActualError, match="unknown pull"):
-        mva.build_model_vs_actual(_panel(), raw, sha)
+        mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
 
 
 def test_a_window_ending_after_the_cutoff_is_withheld_not_published() -> None:
     audit = _audit()
     audit["strategies"][0]["windows"][0]["end"] = "2026-03-10"  # cutoff is 2026-03-09
     raw, sha = _raw(audit)
-    block = mva.build_model_vs_actual(_panel(), raw, sha)
+    block = mva.build_model_vs_actual(_panel(), raw, sha, max_window_lag_days=None)
     first = block["strategies"][0]
     assert first["windows"] == [] and first["primary_window_id"] is None
     assert [w["window_id"] for w in first["epochs"]] == ["E1"]
@@ -558,7 +576,7 @@ def test_a_restated_strategys_parent_account_windows_name_their_basis() -> None:
         "basis": "SLEEVE_EPOCH",
         "parent_account_ids": ["acct-969b9e47"],
     }
-    block = mva.build_model_vs_actual(panel, raw, sha)
+    block = mva.build_model_vs_actual(panel, raw, sha, max_window_lag_days=None)
     assert _errors(block) == []
     mva.verify_model_vs_actual(block, panel, raw, sha)
     restated, plain = block["strategies"][0], block["strategies"][1]
@@ -582,3 +600,27 @@ def test_a_restated_strategys_parent_account_windows_name_their_basis() -> None:
     assert included["s1"]["basis_label"].startswith("parent account acct-969b9e47, ")
     assert "basis_label" not in included["s2"]
     assert tagged.get("s2") is None
+
+
+def test_a_block_whose_windows_stop_short_of_the_cutoff_is_refused() -> None:
+    """RULING-E D4: windows ending 2026-09-02 under a 2026-09-17 stamp are stale."""
+
+    raw, sha = _raw(_audit())
+    with pytest.raises(mva.ModelVsActualError, match="stale"):
+        mva.build_model_vs_actual(_panel_for_staged(), raw, sha)
+
+
+def test_an_unavailable_leg_dated_before_the_cutoff_is_refused() -> None:
+    audit = _audit()
+    audit["strategies"][0]["unavailable"] = [
+        {
+            "term": "model_leg",
+            "reason": "NO_MODEL_LEG_AFTER_2026_09_11",
+            "window_end": "2026-09-11",
+            "replacing_pull": None,
+        }
+    ]
+    raw, sha = _raw(audit)
+    panel = _panel_for_staged()
+    with pytest.raises(mva.ModelVsActualError):
+        mva.build_model_vs_actual(panel, raw, sha)
