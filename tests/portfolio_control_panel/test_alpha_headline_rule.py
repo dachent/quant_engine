@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-import sys
 from typing import Any
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +21,6 @@ def _load() -> Any:
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
