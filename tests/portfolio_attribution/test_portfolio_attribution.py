@@ -1167,8 +1167,12 @@ def test_daily_periods_per_year_keeps_exact_date_pairing(
         float(Decimal(account[day]) - Decimal(reference[day.isoformat()]))
         for day in days
     ]
+    # every calendar day is a period: a 252 declaration is replaced by 365 (#904)
     assert float(metrics["active_return_annualized"]) == pytest.approx(
-        statistics.fmean(active) * periods_per_year
+        statistics.fmean(active) * 365
+    )
+    assert metrics.get("periods_per_year_declared") == (
+        periods_per_year if periods_per_year != 365 else None
     )
 
 

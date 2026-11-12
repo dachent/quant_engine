@@ -101,26 +101,83 @@ class AnnualizationFrequencyError(AttributionValidationError):
         observations: int,
         observed_start: str,
         observed_end: str,
-        minimum_observations: int,
+        minimum_observations: int | None = None,
+        maximum_observations: int | None = None,
     ) -> None:
-        super().__init__(
-            f"{observations} observations over {observed_start}..{observed_end} "
-            f"are fewer than the {minimum_observations} that {periods_per_year} "
-            "periods a year implies"
-        )
+        if (minimum_observations is None) == (maximum_observations is None):
+            raise ValueError("exactly one of minimum or maximum observations")
+        if minimum_observations is not None:
+            sentence = (
+                f"{observations} observations over {observed_start}..{observed_end} "
+                f"are fewer than the {minimum_observations} that "
+                f"{periods_per_year} periods a year implies"
+            )
+        else:
+            sentence = (
+                f"{observations} observations over {observed_start}..{observed_end} "
+                f"are more than the {maximum_observations} that "
+                f"{periods_per_year} periods a year implies"
+            )
+        super().__init__(sentence)
+        self.sentence = sentence
         self.detail = {
-            "minimum_observations": minimum_observations,
             "observations": observations,
             "observed_end": observed_end,
             "observed_start": observed_start,
             "periods_per_year": periods_per_year,
+            **(
+                {"minimum_observations": minimum_observations}
+                if minimum_observations is not None
+                else {"maximum_observations": maximum_observations}
+            ),
         }
 
 
+CALENDAR_PERIODS_PER_YEAR: Final = 365
+# A series whose dates include weekends at this share or more is calendar-daily.
+_CALENDAR_WEEKEND_SHARE: Final = Decimal("0.2")
+_TRADING_CALENDAR_TOLERANCE: Final = Decimal("0.02")
+ANNUALIZATION_MAX_FREQUENCY_SHARE: Final = Decimal("1.2")
+PERIODS_BASIS_DECLARED: Final = "DECLARED"
+PERIODS_BASIS_DERIVED: Final = "DERIVED_FROM_DATES"
+
+
+def _effective_periods_per_year(
+    common: Sequence[date], declared: int
+) -> tuple[int, str]:
+    """Periods a year the common dates carry, derived from the dates themselves.
+
+    A declared coarser-than-daily frequency stays as declared (the guard checks it
+    against the dates).  A daily declaration is replaced by the series' own
+    calendar: 365 when the dates include weekends (crypto, Quantbase, Schwab
+    calendar series), otherwise the observed trading dates per year, so a
+    weekday series that keeps market holidays is not scaled with 252.
+    """
+
+    if declared < DAILY_PERIODS_PER_YEAR:
+        return declared, PERIODS_BASIS_DECLARED
+    span_days = (common[-1] - common[0]).days
+    if span_days <= 0:
+        return declared, PERIODS_BASIS_DECLARED
+    weekend = sum(1 for day in common if day.weekday() >= 5)
+    if Decimal(weekend) >= _CALENDAR_WEEKEND_SHARE * len(common):
+        return CALENDAR_PERIODS_PER_YEAR, PERIODS_BASIS_DERIVED
+    observed = round(Decimal(len(common) - 1) * 365 / span_days)
+    if abs(observed - declared) <= declared * _TRADING_CALENDAR_TOLERANCE:
+        # an exchange calendar: the declared 252 stands (holiday placement moves the
+        # observed count by a period or two, which is not a different calendar)
+        return declared, PERIODS_BASIS_DECLARED
+    return min(max(observed, 1), 366), PERIODS_BASIS_DERIVED
+
+
 def _check_annualization_frequency(
-    common: Sequence[date], periods_per_year: int
+    common: Sequence[date], periods_per_year: int, *, upper: bool = True
 ) -> None:
-    """Refuse a declared frequency the common dates do not carry."""
+    """Refuse a declared frequency the common dates do not carry, in either direction.
+
+    ``upper=False`` runs only the too-few-observations side, for a declaration that
+    is about to be replaced by the series' own calendar.
+    """
 
     span_days = (common[-1] - common[0]).days
     # observations < share * periods_per_year * span_days / 365, in exact arithmetic.
@@ -134,6 +191,19 @@ def _check_annualization_frequency(
             minimum_observations=int(
                 required.to_integral_value(rounding="ROUND_CEILING")
             ),
+        )
+    if not upper:
+        return
+    # Too MANY observations for the declared frequency (daily dates declared weekly)
+    # is as wrong as too few.
+    allowed = ANNUALIZATION_MAX_FREQUENCY_SHARE * periods_per_year * span_days / 365
+    if Decimal(len(common)) > allowed + 1:
+        raise AnnualizationFrequencyError(
+            periods_per_year=periods_per_year,
+            observations=len(common),
+            observed_start=common[0].isoformat(),
+            observed_end=common[-1].isoformat(),
+            maximum_observations=int(allowed.to_integral_value(rounding="ROUND_FLOOR")),
         )
 
 
@@ -691,6 +761,14 @@ def _comparison_metrics(
     common = sorted(set(account) & set(reference))
     if len(common) < 2:
         raise AttributionValidationError("comparison lacks two exact common dates")
+    declared_periods = periods_per_year
+    # the declaration must at least be carried by the dates (weekly dates declared
+    # daily are refused); a daily declaration is then replaced by the series' own
+    # calendar, and the result must satisfy both sides of the guard
+    _check_annualization_frequency(common, declared_periods, upper=False)
+    periods_per_year, periods_basis = _effective_periods_per_year(
+        common, declared_periods
+    )
     _check_annualization_frequency(common, periods_per_year)
     reference_dec = [reference[day] for day in common]
     account_values = [float(account[day]) for day in common]
@@ -763,6 +841,16 @@ def _comparison_metrics(
         "relative_drawdown": _decimal_text(relative_drawdown),
         "tracking_error_annualized": _decimal_text(tracking_error),
         "upside_capture": _decimal_text(upside_capture),
+        # present only when the series' own calendar replaced the declaration
+        **(
+            {
+                "periods_per_year": periods_per_year,
+                "periods_per_year_basis": periods_basis,
+                "periods_per_year_declared": declared_periods,
+            }
+            if periods_per_year != declared_periods
+            else {}
+        ),
     }
 
 
@@ -784,10 +872,8 @@ def _frequency_refused_comparison(
         "disposition": (
             "Annualized figures are unavailable: the comparison declares "
             f"{refusal.detail['periods_per_year']} periods a year but its "
-            f"{refusal.detail['observations']} common observations over "
-            f"{refusal.detail['observed_start']}..{refusal.detail['observed_end']} "
-            f"are fewer than the {refusal.detail['minimum_observations']} that "
-            "frequency implies."
+            f"{refusal.sentence.removesuffix(' periods a year implies')} "
+            "that frequency implies."
         ),
         "legacy_baseline_delta": None,
         "legacy_baseline_disposition": "NOT_APPLICABLE",
