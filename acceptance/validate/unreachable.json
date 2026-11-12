@@ -82,11 +82,11 @@
     },
     {
       "check_id": "lint.payload_size",
-      "issue": 895,
-      "owner": "sprint-qc-validator",
-      "class": "RULE_SCOPE_TOO_WIDE",
+      "issue": 893,
+      "owner": "sprint-runtime-build",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-15",
-      "reason": "50 MB literal contradicts the committed payload budget (F2)"
+      "reason": "the 50 MB literal was replaced by the committed budget in #893; entry closes when a builder fixture passes the check"
     },
     {
       "check_id": "lint.internal_tokens_displayed",
