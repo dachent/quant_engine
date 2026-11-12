@@ -785,6 +785,16 @@ def _evidence_mode_returns(
     return modes, compositions
 
 
+def _backtest_observations(composition: Mapping[str, object] | None) -> int | None:
+    """Backtest observations a mode used; 0 without a composition (the rows decide),
+    None (fail closed) when a composition exists but does not state the count."""
+
+    if composition is None:
+        return 0
+    value = composition.get("backtest_observations_used")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _number(value: float | np.floating[Any] | None) -> str | None:
     if value is None:
         return None
@@ -796,13 +806,66 @@ def _number(value: float | np.floating[Any] | None) -> str | None:
     return format(accepted, ".12g")
 
 
-def _performance_summary(rows: Sequence[ReturnRow]) -> dict[str, object]:
-    """Compound one accepted evidence-mode path into reproducible statistics."""
+ANNUALIZATION_BASIS: Final = "ACT_365_FROM_OPENING_CLOSE"
+# layers whose rows are a realised record; anything else (BACKTEST, SHADOW_OOS,
+# PREDECESSOR, CONCEPTUAL_STRESS) is hypothetical or out of sample and never
+# annualised.  The mode-derived labels carry their backtest count in the composition.
+_ANNUALISABLE_LAYERS: Final = frozenset(
+    {
+        "ACCOUNT_LIVE",
+        "PROVIDER_LIVE",
+        "OFFICIAL_VEHICLE",
+        "LIVE_ONLY",
+        "LIVE_PLUS_OPTIONAL_BACKTEST",
+    }
+)
+MINIMUM_ANNUALISATION_DAYS: Final = 365
+
+
+def _annualised_headline_status(
+    window_days: int, backtest_observations: int | None
+) -> str:
+    """The one rule (#904 items 3 and 10) over a series' own composition.
+
+    An annualised figure exists from 365 days and never on a series that contains
+    any hypothetical backtest observation, whatever the strategy is called.  An
+    unknown composition fails closed.
+    """
+
+    if backtest_observations is None:
+        return "SUPPRESSED_COMPOSITION_UNKNOWN"
+    if backtest_observations > 0:
+        return "SUPPRESSED_INCLUDES_BACKTEST"
+    if window_days < MINIMUM_ANNUALISATION_DAYS:
+        return "SUPPRESSED_UNDER_365D"
+    return "AVAILABLE"
+
+
+def _performance_summary(
+    rows: Sequence[ReturnRow], backtest_observations: int | None = 0
+) -> dict[str, object]:
+    """Compound one accepted evidence-mode path into reproducible statistics.
+
+    The window opens at the close before the first return (one median interval
+    earlier), ACT/365, geometric: the same convention as every other CAGR.
+    """
 
     accepted = sorted(rows, key=lambda item: item.day)
+    if backtest_observations is not None:
+        # the rows' own layer counts too: a path that still carries BACKTEST rows
+        # is hypothetical whatever the composition block says
+        backtest_observations = max(
+            backtest_observations,
+            sum(
+                1
+                for item in accepted
+                if item.evidence_layer not in _ANNUALISABLE_LAYERS
+            ),
+        )
     if not accepted:
         return {
-            "annualization_basis": "ACTUAL_DAYS_365_25",
+            "annualization_basis": ANNUALIZATION_BASIS,
+            "annualization_status": "UNAVAILABLE_NO_ACCEPTED_OBSERVATIONS",
             "cagr": None,
             "cumulative_return": None,
             "maximum_drawdown": None,
@@ -820,19 +883,29 @@ def _performance_summary(rows: Sequence[ReturnRow]) -> dict[str, object]:
         wealth *= 1.0 + row.value
         peak = max(peak, wealth)
         maximum_drawdown = min(maximum_drawdown, wealth / peak - 1.0)
-    elapsed_days = (accepted[-1].day - accepted[0].day).days
-    cagr = None if elapsed_days <= 0 else math.pow(wealth, 365.25 / elapsed_days) - 1.0
+    gaps = sorted(
+        (later.day - earlier.day).days for earlier, later in zip(accepted, accepted[1:])
+    )
+    opening_gap = max(gaps[len(gaps) // 2], 1) if gaps else 1
+    elapsed_days = (accepted[-1].day - accepted[0].day).days + opening_gap
+    annualisation = _annualised_headline_status(elapsed_days, backtest_observations)
+    cagr = (
+        math.pow(wealth, 365.0 / elapsed_days) - 1.0
+        if annualisation == "AVAILABLE"
+        else None
+    )
     return {
-        "annualization_basis": "ACTUAL_DAYS_365_25",
+        "annualization_basis": ANNUALIZATION_BASIS,
+        "annualization_status": annualisation,
+        "backtest_observations": backtest_observations,
+        "window_days": elapsed_days,
         "cagr": _number(cagr),
         "cumulative_return": _number(wealth - 1.0),
         "maximum_drawdown": _number(maximum_drawdown),
         "observed_end": accepted[-1].day.isoformat(),
         "observed_start": accepted[0].day.isoformat(),
         "return_observations": len(accepted),
-        "status": (
-            "AVAILABLE" if cagr is not None else "UNAVAILABLE_ZERO_DAY_INTERVAL"
-        ),
+        "status": "AVAILABLE",
     }
 
 
@@ -1413,7 +1486,14 @@ def _dependence_payload(
     posterior = _nearest_correlation(posterior_pre, spec.eigenvalue_floor)
     stress = _nearest_correlation(stress_pre, spec.eigenvalue_floor)
     performance = {
-        series_id: _performance_summary(returns.get(series_id, []))
+        series_id: _performance_summary(
+            returns.get(series_id, []),
+            _backtest_observations(
+                None
+                if series_composition is None
+                else series_composition.get(series_id)
+            ),
+        )
         for series_id in spec.series_ids
     }
     loss = sum(
