@@ -9037,9 +9037,12 @@ def _model_account_gap_underwriting(
             != "PROVEN_COMPATIBLE"
         ):
             unresolved_causes.append("REFERENCE_VERSION_COMPATIBILITY_NOT_PROVEN")
-        if strategy.get("cash_drag_status") != "EVIDENCED":
+        import portfolio_cash_drag
+        import portfolio_report as reporter
+
+        if strategy.get("cash_drag_status") != portfolio_cash_drag.STATUS_EVIDENCED:
             unresolved_causes.append("COMPLETE_DAILY_ACCOUNT_CASH_PATH_UNAVAILABLE")
-        if strategy.get("fees_status") != "EVIDENCED_PRE_TAX":
+        if strategy.get("fees_status") != reporter.FEES_STATUS_EVIDENCED:
             unresolved_causes.append("ACCOUNT_BOUND_FEE_PATH_INCOMPLETE")
         unresolved_causes.extend(
             [

@@ -41,6 +41,7 @@ def derive_cash_drag(
     benchmark_returns: Mapping[str, str],
     cash_returns: Mapping[str, str] | None = None,
     statement_cash: Mapping[str, str] | None = None,
+    opening_day: str | None = None,
 ) -> dict[str, Any]:
     """Cash drag over ``start``..``end`` (the days whose returns are compared).
 
@@ -69,13 +70,22 @@ def derive_cash_drag(
         return _unavailable(
             "the benchmark has fewer than two observations in the window"
         )
+    if not statement_cash:
+        return _unavailable("no statement cash figure to close the path against")
+    # The balance a return is weighted by is the close of the previous observation
+    # day (never an intervening weekend row), and observations must be consecutive
+    # exchange days: a weekly or sparse reference is refused, not weighted by one day.
     nav_days = sorted(date.fromisoformat(k) for k in nav)
-    prior: list[date] = []
-    for d in days:
-        earlier = [n for n in nav_days if n < d]
-        if not earlier:
-            return _unavailable(f"no nav before {d.isoformat()}")
-        prior.append(earlier[-1])
+    # ``opening_day`` is the observation before the window (the reference's own previous
+    # date); without it the nearest earlier balance row stands in.
+    before_first = (
+        [date.fromisoformat(opening_day)]
+        if opening_day is not None
+        else [n for n in nav_days if n < days[0]]
+    )
+    if not before_first:
+        return _unavailable(f"no nav before {days[0].isoformat()}")
+    prior = [before_first[-1], *days[:-1]]
     for label, series, needed in (
         ("nav", nav, [*prior, *days]),
         ("cash", cash, [*prior, *days]),
@@ -86,6 +96,9 @@ def derive_cash_drag(
             return _unavailable(
                 f"no daily {label} path: {len(missing)} day(s) missing, first {missing[0]}"
             )
+    for needed_day in sorted({*prior, *days}):
+        if Decimal(nav[needed_day.isoformat()]) <= 0:
+            return _unavailable(f"nav is not positive on {needed_day.isoformat()}")
     gap = [
         (b.isoformat(), d.isoformat())
         for b, d in zip(prior, days, strict=True)
@@ -110,6 +123,9 @@ def derive_cash_drag(
         )
     return {
         "status": STATUS_EVIDENCED,
-        "reason": f"derived on {len(days)} complete daily observations, closed to the statement",
+        "reason": (
+            f"derived on {len(days)} complete daily observations, closed to "
+            f"{len(statement_cash)} statement cash figure(s), settled-cash basis"
+        ),
         "cash_drag": format(drag, "f"),
     }
