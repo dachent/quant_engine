@@ -88,6 +88,10 @@ _AVAILABLE_PREFIXES = (
     "VERIFIED",
     "GOVERNED",
 )
+# The one non-available after-tax status that satisfies E6: the owner's declared
+# pre-tax reporting scope (record OR-901-AFTER-TAX). The producer constant
+# portfolio_attribution.AFTER_TAX_STATUS_NOT_APPLICABLE must equal it (tested).
+AFTER_TAX_NOT_APPLICABLE = "NOT_APPLICABLE_PRE_TAX_REPORTING_SCOPE"
 _NOT_READY_VALUES = frozenset({"REQUIRED_NOT_READY", "NOT_READY"})
 _UNADMITTED_FLOW_PATHS = frozenset(
     {"NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"}
@@ -8590,7 +8594,12 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
         unavailable = sorted(
             str(row.get("strategy_id"))
             for row in summary
-            if field_name in row and not is_available(row.get(field_name))
+            if field_name in row
+            and not is_available(row.get(field_name))
+            and not (
+                field_name == "after_tax_status"
+                and row.get(field_name) == AFTER_TAX_NOT_APPLICABLE
+            )
         )
         if unavailable:
             yield _finding(
