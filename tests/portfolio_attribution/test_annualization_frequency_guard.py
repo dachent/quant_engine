@@ -179,8 +179,9 @@ _QSI_SHAPE_ROW_SHA256 = (
     [
         # 12 weekly periods over 77 days need 0.8 * 52 * 77 / 365 = 8.8
         (52, 12, False),
-        # monthly declared on weekly dates: 12 periods over 182 days -> need 4.8
-        (12, 27, False),
+        # monthly declared on weekly dates: too MANY observations (27 > 1.2 x 6)
+        # -- the two-sided guard (#904) refuses what the one-sided guard allowed
+        (12, 27, True),
         # weekly dates declared daily: refused at any length
         (252, 12, True),
         (365, 27, True),

@@ -2197,7 +2197,12 @@ def _annualization_label(
     periods = periods_per_year if isinstance(periods_per_year, int) else None
     if frequency is None and periods is not None:
         frequency = _FREQUENCY_BY_PERIODS_PER_YEAR.get(
-            periods, (f"PERIODS_PER_YEAR_{periods}", f"{periods}-per-year")
+            periods,
+            # a trading-day count derived from the dates (e.g. 261 weekdays with
+            # holidays kept) is still a daily series
+            ("DAILY_TRADING", "daily")
+            if 200 <= periods <= 270
+            else (f"PERIODS_PER_YEAR_{periods}", f"{periods}-per-year"),
         )[0]
     word = (
         None
@@ -2245,7 +2250,10 @@ def _comparison_annualization(
         start=metrics.get("observed_start"),
         end=metrics.get("observed_end"),
         observations=metrics.get("observations"),
-        periods_per_year=comparison.get("periods_per_year"),
+        # the periods a year the figures were scaled with: the series' own calendar
+        # when it replaced the declaration (metrics carries it only then)
+        periods_per_year=metrics.get("periods_per_year")
+        or comparison.get("periods_per_year"),
     )
 
 
