@@ -1756,7 +1756,9 @@ def cost_evidence_status_for_fees(fees_status: object) -> str:
     return EVIDENCE_STATUS_UNAVAILABLE
 
 
-def benchmark_evidence_status_for(assignment_status: object, comparison_status: object) -> str:
+def benchmark_evidence_status_for(
+    assignment_status: object, comparison_status: object
+) -> str:
     """Benchmark evidence: an evidenced assignment and an admitted comparison."""
 
     if not str(assignment_status or "").startswith("EVIDENCED"):
@@ -1764,7 +1766,6 @@ def benchmark_evidence_status_for(assignment_status: object, comparison_status: 
     if not str(comparison_status or "").startswith("DESCRIPTIVE"):
         return EVIDENCE_STATUS_COMPARISON_MISSING
     return EVIDENCE_STATUS_EVIDENCED
-
 
 
 def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None:
@@ -7844,14 +7845,6 @@ def _strategies(
         )
         live_boundary = (
             _object(version.get("live_boundary"), "strategy version live boundary")
-            if version
-            else {}
-        )
-        version_costs = (
-            _object(version.get("costs"), "strategy version costs") if version else {}
-        )
-        benchmark = (
-            _object(version.get("benchmark"), "strategy version benchmark")
             if version
             else {}
         )
