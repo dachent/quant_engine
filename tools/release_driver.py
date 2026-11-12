@@ -74,6 +74,26 @@ TREE_SCHEME = "git-tree-v2"
 FULL_CEREMONY = "full"
 REPLICA_ONLY = "replica-only"
 ATTESTATION_FILENAME = "merge-attestation.json"
+# Configuration that decides what code runs on which inputs, whatever a stage's templates say.
+_ALWAYS_BOUND_CONFIG = frozenset(
+    {
+        "repo_root",
+        "python",
+        "cycle",
+        "run",
+        "code_commit",
+        "mode",
+        "identity_scheme",
+        "node",
+        "coordination_root",
+        "candidate_commit",
+        "base_ref",
+        "release_inputs_root",
+        "release_inputs_manifest_sha256",
+        "requested_as_of",
+        "expected_baseline_sha256",
+    }
+)
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -392,14 +412,15 @@ class Run:
         names: set[str] = set(_PLACEHOLDER.findall(json.dumps(definitions)))
         shared: dict[str, Any] = {"paths": {}, "derive": {}}
         pending = sorted(names)
+        referenced: set[str] = set(names)
         while pending:
             name = pending.pop()
             for table in ("paths", "derive"):
                 if name in self.graph.get(table, {}) and name not in shared[table]:
                     shared[table][name] = self.graph[table][name]
-                    pending.extend(
-                        _PLACEHOLDER.findall(json.dumps(self.graph[table][name]))
-                    )
+                    more = _PLACEHOLDER.findall(json.dumps(self.graph[table][name]))
+                    referenced.update(more)
+                    pending.extend(more)
         for key in (
             "provider_roots",
             "provider_run_sources",
@@ -407,10 +428,22 @@ class Run:
             "required_python",
         ):
             shared[key] = self.graph.get(key)
+        # Only the configuration this stage's closure can read binds it (#890): a scalar
+        # key no definition references (a payload budget, a note) cannot change what the
+        # stage does, so changing it no longer invalidates the stage. Structured keys
+        # (real_roots, ...) and the identity keys below always bind.
+        for definition in definitions:
+            referenced.update(definition.get("needs_config", []))
+            referenced.update(definition.get("config_inputs", {}))
+        bound_config = {
+            key: value
+            for key, value in self._bound_config.items()
+            if key in referenced
+            or key in _ALWAYS_BOUND_CONFIG
+            or not isinstance(value, (str, int))
+        }
         digest = hashlib.sha256(
-            json.dumps(
-                [self._bound_config, definitions, shared], sort_keys=True
-            ).encode()
+            json.dumps([bound_config, definitions, shared], sort_keys=True).encode()
         ).hexdigest()
         self._stage_bindings[stage_id] = digest
         return digest
