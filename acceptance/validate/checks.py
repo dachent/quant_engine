@@ -7893,6 +7893,25 @@ def _dated_sections(
             ("C2",),
             ("c2_descriptive", row),
         )
+    # M5 (#895 F2): the provider reference comparisons carry their own observed end,
+    # published beside the benchmark ones. A provider series that ended before the
+    # cutoff is a stale input; it is labelled NOT_READY with its true end date, never a
+    # commit refusal (a missing or non-date value is skipped here: the schema owns it).
+    provider_rows = node(ctx.report, "strategy_attribution", "comparisons")
+    for position, row in enumerate(
+        provider_rows if isinstance(provider_rows, list) else []
+    ):
+        if not isinstance(row, dict) or row.get("observed_end") is None:
+            continue
+        yield (
+            f"provider-comparison:{row.get('strategy_id')}",
+            REPORT,
+            f"$.strategy_attribution.comparisons[{position}].observed_end",
+            row.get("observed_end"),
+            row.get("status"),
+            ("M5",),
+            ("m5_provider_series", row),
+        )
     # The alias is only one published view. Check every mode, retaining a
     # divergent alias but avoiding duplicate findings for the same date claim.
     lens_views: list[tuple[str, str, list[Any]]] = []
@@ -8008,6 +8027,15 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
             and end is not None
             and start <= end
             and value == row.get("observed_end")
+        )
+    if kind == "m5_provider_series":
+        return (
+            isinstance(detail.get("strategy_id"), str)
+            and bool(detail["strategy_id"].strip())
+            and isinstance(detail.get("reference_series_id"), str)
+            and bool(detail["reference_series_id"].strip())
+            and _canonical_iso_day(value) is not None
+            and value == detail.get("observed_end")
         )
     if kind == "c4_historical":
         key, metadata = detail

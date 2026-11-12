@@ -4603,6 +4603,27 @@ def _number_text(value: float) -> str:
     return format(value, ".12g")
 
 
+_MACHINE_PARAMETERISED = re.compile(r"\b([a-z]+(?:_[a-z]+)+):([A-Za-z0-9_:.-]+)")
+_MACHINE_UPPER = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+
+
+def _operator_readable(note: Any) -> Any:
+    """#895 F3: a gate note is shown to the operator, so internal tokens become words.
+
+    ``name_part:argument`` reads as ``name part (argument)`` and ``UPPER_CASE`` as
+    ``upper case``; the facts that carry the tokens are not changed, only the display.
+    """
+
+    if not isinstance(note, str):
+        return note
+    note = _MACHINE_PARAMETERISED.sub(
+        lambda match: f"{match.group(1).replace('_', ' ')} ({match.group(2)})", note
+    )
+    return _MACHINE_UPPER.sub(
+        lambda match: match.group(0).replace("_", " ").lower(), note
+    )
+
+
 def _hwm_policy(
     evaluation_date: date, policy_snapshot: bytes | None = None
 ) -> tuple[dict[str, Any], str]:
@@ -11331,7 +11352,7 @@ def _panel_data(
             {
                 "item": item,
                 "label": label,
-                "note": fact.get("known_gap")
+                "note": _operator_readable(fact.get("known_gap"))
                 or "Accepted within the declared boundary",
                 "status": fact.get("status"),
             }
@@ -11389,6 +11410,12 @@ def _panel_data(
         }
     )
     provenance = _objects(report.get("provenance"), "provenance")
+    hwm_policy_row = {
+        "artifact": "portfolio-hwm-policy",
+        "as_of_date": hwm_policy["evaluation_date"],
+        "schema": "portfolio-hwm-policy/2",
+        "sha256": hwm_policy_hash,
+    }
     provenance = [
         {
             "artifact": "portfolio-report-generation",
@@ -11490,12 +11517,14 @@ def _panel_data(
             "schema": "portfolio-strategy-underwriting-policy/1",
             "sha256": underwriting_policy_hash,
         },
-        {
-            "artifact": "portfolio-hwm-policy",
-            "as_of_date": hwm_policy["evaluation_date"],
-            "schema": "portfolio-hwm-policy/2",
-            "sha256": hwm_policy_hash,
-        },
+        # #895 F9: the report already carries this identity row; ``provenance`` still
+        # names the report's own rows here (the assignment completes after this
+        # literal), so an identical row is not repeated and a differing one stays.
+        *(
+            [hwm_policy_row]
+            if hwm_policy_row not in provenance
+            else []
+        ),
         *(
             [
                 {
