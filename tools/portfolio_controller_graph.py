@@ -297,6 +297,9 @@ _PATH_STAGES = {
         "panel",
     ],
     "contracts/strategy-return-sources-v1.json": [],
+    # #899: the pinned bounds of the missing Matrixport NAV points; the report and the
+    # panel both read it to decide whether the numeric HWM can publish.
+    "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],
     "schemas/portfolio/strategy-return-sources.schema.json": [],
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
     # derived sleeves); the report, the panel and the HWM selection bind to it.
