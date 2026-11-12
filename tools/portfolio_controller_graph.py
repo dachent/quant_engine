@@ -367,6 +367,10 @@ _PATH_STAGES = {
     # completeness (N1), reading only that record's own declared pins; no
     # producer imports it and it writes no delivery artifact.
     "tools/check_release_closure.py": [],
+    # CI job-summary writer (#910): reads a junit file, writes markdown; no stage impact.
+    "tools/ci_summary.py": [],
+    # Regression-corpus release gate (#911): reads a registry and test files only.
+    "tools/check_regression_corpus.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/capture_fidelity_intake.py": [],
