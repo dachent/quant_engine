@@ -68,7 +68,8 @@
    "capture_stage": {
     "mode": "NEW_STAGE_REQUIRED",
     "tool": null,
-    "derivation": "tools/capture_stages/schwab_cash.py"
+    "derivation": "tools/capture_stages/schwab_cash.py",
+    "recorder": "tools/capture_stages/recorders.py (pages only; the statement PDF download through the browser download handler is not built)"
    },
    "login_stop": true,
    "freshness": {
@@ -88,12 +89,12 @@
    "credential_ref": null,
    "cdp_port": 9334,
    "window_hosts": [
+    "bcomplete.com",
     "johnhancock.com"
    ],
    "capture_stage": {
-    "mode": "NEW_STAGE_REQUIRED",
-    "tool": null,
-    "derivation": "tools/capture_stages/statement_browser.py"
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/capture_stages/recorders.py"
    },
    "login_stop": true,
    "freshness": {
@@ -123,9 +124,8 @@
     "composer.trade"
    ],
    "capture_stage": {
-    "mode": "NEW_STAGE_REQUIRED",
-    "tool": null,
-    "derivation": "tools/capture_stages/statement_browser.py"
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/capture_stages/recorders.py"
    },
    "login_stop": true,
    "freshness": {
@@ -162,7 +162,7 @@
    },
    "closure_checks": [
     "coverage",
-    "nav_identity",
+    "sum_equals_total",
     "bridge_receipt"
    ],
    "admits": [
@@ -204,7 +204,8 @@
    "cdp_port": null,
    "capture_stage": {
     "mode": "NEW_STAGE_REQUIRED",
-    "tool": null
+    "tool": null,
+    "blocked_on": "no TQQQ/SHV close exists in the hashed archive: the Quantbase price histories are fund NAV series, Schwab TQQQ trades stop 2026-10-19 and IBKR holds neither symbol on 2026-11-05"
    },
    "login_stop": false,
    "freshness": {
