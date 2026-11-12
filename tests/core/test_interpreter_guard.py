@@ -169,6 +169,7 @@ EXCUSED = {
     "yahoo_fetch_driver": "fetches vendor bytes",
     "release_driver": "orchestrates; its python stages are checked by required_python",
     "release_preflight": "static gate: reads run config and release roots, computes no figure",
+    "release_preflight_g1b": "consumer-contract rows: call the consumers' own checks, compute no figure",
     "release_measurements": "wall-clock and size measurements of the run",
     "release_canary": "filesystem timing and environment probe of the commit path; derives no figure",
     "verify_sleeve_ledger": "re-reads a ledger and compares digests",

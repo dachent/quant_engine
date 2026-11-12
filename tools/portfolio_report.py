@@ -7518,6 +7518,25 @@ def _implementation_return_attribution_contract(
     }
 
 
+def check_implementation_return_attribution(
+    path: Path,
+    *,
+    portfolio_as_of: str,
+    expected_policy_evidence: Mapping[str, Any] | None = None,
+) -> None:
+    """Run the report's own contract check on an attribution file; raises ``ReportValidationError``.
+
+    Release preflight calls this on the file the prep chain writes, minutes in, instead of learning the
+    same refusal 27 minutes into the attended build (R3 refusals 10, 11).
+    """
+
+    _implementation_return_attribution_contract(
+        path,
+        portfolio_as_of=portfolio_as_of,
+        expected_policy_evidence=expected_policy_evidence,
+    )
+
+
 _ADMITTED_PREHISTORY_BACKTEST_STATUS = "EVIDENCED"
 _ADMITTED_PREHISTORY_UNDECLARED_BACKTEST = frozenset({"UNAVAILABLE", "NOT_APPLICABLE"})
 _ACCEPTED_LIVE_VERSION_PREFIX = "accepted-live-path:"

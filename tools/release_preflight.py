@@ -33,6 +33,7 @@ import sys
 from typing import Any
 
 import release_driver as driver
+from release_preflight_g1b import ROWS_G1B
 
 GIB = 1 << 30
 RECEIPT_DIR = "preflight"
@@ -257,7 +258,11 @@ ROWS: tuple[tuple[str, Row], ...] = (
 )
 
 # every row a stage may recheck: the G0 rows and the G3 spec-pair row
-ROW_TABLE: dict[str, Row] = {**dict(ROWS), "g3:spec-pair": row_spec_pair}
+ROW_TABLE: dict[str, Row] = {
+    **dict(ROWS),
+    "g3:spec-pair": row_spec_pair,
+    **dict(ROWS_G1B),
+}
 
 # R3 refusal number (RULING-D section 2) -> where it is caught. "G0:<row>" is built here with a kill test in
 # tests/portfolio_operations/test_release_preflight.py; "guard:<name>" is a tool guard with its own test;
@@ -272,11 +277,11 @@ COVERAGE: dict[int, str] = {
     7: "G1:attended identity validation (not built)",
     8: "G1:sleeve-facts admission (not built)",
     9: "by design: the first calendar attempt",
-    10: "G1:attribution contract (not built)",
-    11: "G1:attribution contract (not built)",
+    10: "G1:g1:attribution-contract",
+    11: "G1:g1:attribution-contract",
     12: "G2:needs the build (not built)",
     13: "G1:finality evidence reader (not built)",
-    14: "G0:freshness against the consumer's limit (not built)",
+    14: "G1:g1:factor-freshness",
     15: "G0:authority:pointer-graph",
     16: "G0:inputs:release-inputs",
     17: "G2:payload size at candidate time (not built)",
