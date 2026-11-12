@@ -389,7 +389,7 @@ def test_the_shipped_graph_gates_attended_and_rechecks_the_moving_facts() -> Non
             (REPO_ROOT / "ops/mvp2-release/release-stages.json").read_text("utf-8")
         )["stages"]
     }
-    assert stages["attended"]["needs_gate"] == ["g0"]
+    assert stages["attended"]["needs_gate"] == ["g0", "g1"]
     for stage_id in ("lane-real", "lane-replica", "commit"):
         assert "repo:frozen" in stages[stage_id]["recheck"]
     table = pf.ROW_TABLE
