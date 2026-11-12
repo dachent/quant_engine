@@ -346,18 +346,21 @@ def test_a_symlink_retarget_with_identical_content_is_detected(world, tmp_path):
     assert live["n"] == 2
 
 
-def test_descriptor_opens_make_the_recording_incomplete(world):
+def test_a_descriptor_opened_from_a_path_inside_the_run_is_recorded_by_path(world):
     live = {"n": 0}
 
     def compute() -> dict[str, object]:
-        live["n"] += 1
         import os
 
+        live["n"] += 1
         fd = os.open(world["data"] / "a.json", os.O_RDONLY)
         with open(fd, "rb") as handle:
             return {"size": len(handle.read())}
 
     _run(world, "fd", compute)
+    _run(world, "fd", compute)
+    assert live["n"] == 1
+    (world["data"] / "a.json").write_text('{"v": 1000}', encoding="utf-8")
     _run(world, "fd", compute)
     assert live["n"] == 2
 
@@ -456,3 +459,40 @@ def test_default_mode_keeps_receipts_in_this_process_only(
     vr.clear_memory_receipts()  # a new process has nothing
     v.run()
     assert v.live == 2
+
+
+def test_a_declared_tree_is_part_of_the_read_set(world):
+    tree = world["data"] / "generation"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "a.bin").write_bytes(b"1")
+    (tree / "sub" / "b.bin").write_bytes(b"2")
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        import sys
+
+        live["n"] += 1
+        sys.audit("quant_engine.read_tree", str(tree))  # handle-based capture
+        return {"status": "PASS"}
+
+    _run(world, "tree", compute)
+    _run(world, "tree", compute)
+    assert live["n"] == 1
+    (tree / "sub" / "b.bin").write_bytes(
+        b"3"
+    )  # a file only the tree declaration covers
+    _run(world, "tree", compute)
+    assert live["n"] == 2
+    (tree / "c.bin").write_bytes(b"x")  # a new file in the declared tree
+    _run(world, "tree", compute)
+    assert live["n"] == 3
+
+
+def test_a_pinned_git_child_does_not_void_the_recording_but_another_one_does(world):
+    recorder = vr._Recorder()
+    sha = "b" * 40
+    recorder.on_event("subprocess.Popen", (None, f"git show {sha}:x.json", ".", None))
+    recorder.on_event("_winapi.CreateProcess", (None, "\x02", "."))
+    assert recorder.incomplete == []
+    recorder.on_event("_winapi.CreateProcess", (None, "\x02", "."))
+    assert recorder.incomplete == ["_winapi.CreateProcess"]

@@ -51,7 +51,7 @@ from typing import TypeVar
 
 from quant_engine.core import stage_timing
 
-RECEIPT_SCHEMA = 2
+RECEIPT_SCHEMA = 3
 MODE_ENV = "QE_VERIFICATION_RECEIPTS"
 # Read-only entry points (plan, status) must not write: they turn persistence off.
 PERSIST: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -88,7 +88,6 @@ _INCOMPLETE_EVENTS = frozenset(
         "socket.__new__",
         "sqlite3.connect",
         "mmap.__new__",
-        "ctypes.dlopen",
         "os.readlink",  # link targets are recorded by _probe(); a raw call is not
     }
 )
@@ -205,6 +204,39 @@ def _listing_digest(path: str) -> str | None:
         return None
 
 
+def _tree_fingerprint(path: str) -> list[object]:
+    """(relative path, size, mtime) of every file under ``path`` (cheap, no content)."""
+
+    rows: list[object] = []
+    for directory, names, files in os.walk(path):
+        names.sort()
+        for name in sorted(files):
+            full = os.path.join(directory, name)
+            try:
+                info = _REAL_STAT(full)
+            except OSError:
+                rows.append([os.path.relpath(full, path), None])
+                continue
+            rows.append([os.path.relpath(full, path), info.st_size, info.st_mtime_ns])
+    return rows
+
+
+def _tree_digest(path: str) -> str | None:
+    """Content digest of a whole tree: relative paths and file digests, sorted."""
+
+    if not os.path.isdir(path):
+        return None
+    files: list[str] = []
+    for directory, names, names_files in os.walk(path):
+        names.sort()
+        files.extend(os.path.join(directory, name) for name in sorted(names_files))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        digests = list(pool.map(_file_digest, files))
+    return _sha(
+        [[os.path.relpath(f, path), d] for f, d in zip(files, digests, strict=True)]
+    )
+
+
 class _Recorder:
     """Everything one verifier run touched, observed at the moment it touched it."""
 
@@ -214,6 +246,8 @@ class _Recorder:
         self.listings: dict[str, str | None] = {}
         self.probes: dict[str, list[object]] = {}
         self.incomplete: list[str] = []
+        self.trees: dict[str, list[object]] = {}
+        self.allowed_spawns = 0
         self.lock = threading.Lock()
 
     def flag(self, reason: str) -> None:
@@ -226,12 +260,24 @@ class _Recorder:
             and len(args) > 1
             and allowed_child_command(args[1])
         ):
+            self.allowed_spawns += 1  # its CreateProcess/exec event follows
             return
-        if (
-            event == "_winapi.CreateProcess"
-            and len(args) > 1
-            and allowed_child_command(args[1])
+        if event in {"_winapi.CreateProcess", "os.posix_spawn", "os.exec"} and (
+            self.allowed_spawns > 0
         ):
+            self.allowed_spawns -= 1
+            return
+        if event == "ctypes.dlopen" and args and args[0] == "kernel32":
+            return  # handle-based opens; the trees they read are declared via read_tree
+        if event == "ctypes.dlopen":
+            self.flag(event)
+            return
+        if event == "quant_engine.read_tree" and args:
+            path = _norm(args[0])
+            if path is not None:
+                with self.lock:
+                    if path not in self.trees:
+                        self.trees[path] = _tree_fingerprint(path)
             return
         if event == "os.posix_spawn" and len(args) > 1:
             return self.flag(event)
@@ -240,8 +286,7 @@ class _Recorder:
             return
         if event == "open" and args:
             if isinstance(args[0], int):
-                self.flag("open-by-descriptor")
-                return
+                return  # a descriptor from os.open (recorded by path) or a declared tree
             path = _norm(args[0])
             if path is None:
                 return
@@ -508,6 +553,11 @@ def _revalidate(body: Mapping[str, object]) -> str | None:
         and isinstance(listings, dict)
         and isinstance(probes, dict)
     )
+    trees = body.get("trees", {})
+    assert isinstance(trees, dict)
+    for path, expected_tree in trees.items():
+        if _tree_digest(path) != expected_tree:
+            return f"tree differs: {path}"
     paths = sorted({*reads, *writes})
     with ThreadPoolExecutor(max_workers=8) as pool:
         digests = dict(zip(paths, pool.map(_file_digest, paths), strict=True))
@@ -565,6 +615,12 @@ def _build_body(
             and _listing_digest(path) != observed
         ):
             return None, f"directory changed during verification: {path}"
+    trees: dict[str, str] = {}
+    for path, fingerprint in recorder.trees.items():
+        digest_now = _tree_digest(path)
+        if digest_now is None or _tree_fingerprint(path) != fingerprint:
+            return None, f"tree changed during verification: {path}"
+        trees[path] = digest_now
     probes: dict[str, list[object]] = {}
     created = tuple(
         root + os.sep for root in (*recorder.writes, *exclude) if root
@@ -587,6 +643,7 @@ def _build_body(
             "name": name,
             "key": key,
             "reads": reads,
+            "trees": trees,
             "listings": listings,
             "probes": {p: probes[p] for p in sorted(probes)},
             "writes": {p: d for p, d in written.items() if d is not None},
@@ -710,7 +767,7 @@ def run_with_receipt(
             assert isinstance(old_body, dict)
             if any(
                 old_body[field] != body_new[field]
-                for field in ("result", "reads", "listings", "probes")
+                for field in ("result", "reads", "trees", "listings", "probes")
             ):
                 raise VerificationReceiptMismatch(
                     f"live re-run of {name} disagrees with its stored receipt"
