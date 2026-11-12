@@ -635,3 +635,26 @@ def test_derived_sources_lint_and_preflight():
         cp.check_reader_parses(lambda: None).ok
         and cp.check_reader_parses(lambda: 1 / 0).code == "READER_REFUSES"
     )
+
+
+def test_governed_price_adapter_takes_exchange_holidays_from_the_capture_or_the_caller(
+    tmp_path,
+):
+    d = tmp_path / "p"
+    d.mkdir()
+    days = (
+        "2026-11-02",
+        "2026-11-03",
+        "2026-11-05",
+        "2026-11-06",
+    )  # Wed 11-04 is a (made-up) closed day
+    rows = "symbol,date,close\n" + "".join(f"AAA,{x},1.0\n" for x in days)
+    (d / "prices-a.csv").write_text(rows, encoding="utf-8")
+    (d / "prices-b.csv").write_text(rows, encoding="utf-8")
+    kw = dict(symbols=["AAA"], start="2026-11-02", end="2026-11-06")
+    assert (
+        ad.governed_price(d, **kw)[1]["coverage"]().code == "COVERAGE_GAP"
+    )  # a holiday is not assumed away
+    assert ad.governed_price(d, **kw, non_trading=["2026-11-04"])[1]["coverage"]().ok
+    (d / "non_trading_weekdays.txt").write_text("2026-11-04\n", encoding="utf-8")
+    assert ad.governed_price(d, **kw)[1]["coverage"]().ok

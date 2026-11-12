@@ -228,11 +228,18 @@ def schwab_cash_adapter(
 
 
 def governed_price(
-    capture_dir: Path, *, symbols: Sequence[str], start: str, end: str
+    capture_dir: Path,
+    *,
+    symbols: Sequence[str],
+    start: str,
+    end: str,
+    non_trading: Iterable[str] | None = None,
 ) -> tuple[str, Checks]:
     """Price capture (recorder owned by the price-pull work): ``prices-a.csv`` and ``prices-b.csv`` are two independent pulls
     with columns ``symbol,date,close``. Every symbol has a close on every expected weekday of [start, end] (coverage) and the
-    two pulls agree byte for byte after row normalisation (stability)."""
+    two pulls agree byte for byte after row normalisation (stability). Exchange holidays on weekdays have no bars: pass them as
+    ``non_trading`` (the NYSE calendar for the window) or leave it ``None`` to read the captured ``non_trading_weekdays.txt``
+    (one ISO date per line). With neither, a holiday is reported as a gap rather than assumed away."""
     import csv
     import hashlib
 
@@ -243,11 +250,22 @@ def governed_price(
             )
 
     a, b = rows("prices-a.csv"), rows("prices-b.csv")
+    if non_trading is None:
+        f = Path(capture_dir) / "non_trading_weekdays.txt"
+        holidays: list[str] = (
+            [x.strip() for x in f.read_text(encoding="utf-8").splitlines() if x.strip()]
+            if f.is_file()
+            else []
+        )
+    else:
+        holidays = list(non_trading)
 
     def coverage() -> cp.CheckResult:
         bad = 0
         for sym in symbols:
-            r = cp.check_coverage([d for s_, d, _c in a if s_ == sym], start, end)
+            r = cp.check_coverage(
+                [d for s_, d, _c in a if s_ == sym], start, end, non_trading=holidays
+            )
             bad += 0 if r.ok else 1
         return cp.CheckResult(
             "coverage", bad == 0, "OK" if bad == 0 else "COVERAGE_GAP", bad
