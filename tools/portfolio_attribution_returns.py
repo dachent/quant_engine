@@ -172,7 +172,9 @@ def _equity_curve(member: dict[str, Any], content: bytes) -> list[dict[str, str]
 
 def _close_blend(member: dict[str, Any], content: bytes) -> list[dict[str, str]]:
     series_id, layer, version, source = _identity(member)
-    tickers = [str(item) for item in member.get("tickers") or []]
+    if not isinstance(member.get("tickers"), list):
+        raise AttributionReturnsError(f"{series_id}: tickers must be a list")
+    tickers = [str(item) for item in member["tickers"]]
     if len(tickers) < 2 or len(set(tickers)) != len(tickers):
         raise AttributionReturnsError(f"{series_id}: a blend names two or more tickers")
     payload = json.loads(content.decode("utf-8"), parse_float=Decimal)

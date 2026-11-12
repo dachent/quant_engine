@@ -333,3 +333,10 @@ def test_close_blend_keeps_the_digits_of_a_fractional_close(tmp_path: Path) -> N
     value = _series(out, "benchmark:crypto")["2024-01-02"]
     assert value > 0
     assert abs(value - Decimal("1E-22") / 2) < Decimal("1E-30")
+
+
+def test_close_blend_refuses_tickers_that_are_not_a_list(tmp_path: Path) -> None:
+    spec = _blend_spec(tmp_path, _crypto(tmp_path))
+    spec["members"][0]["tickers"] = "AAABBB"
+    with pytest.raises(Error, match="tickers must be a list"):
+        _run(tmp_path, spec)
