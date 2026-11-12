@@ -1206,6 +1206,34 @@ def _schwab_selected_point_positions(
     return expected if financial_observation_date <= requested_as_of else None
 
 
+def _locate_run_observation(
+    reader: Any, generation: Path, recorded: object, sha256: object
+) -> Path:
+    """Where the receipt's run observation is on disk.
+
+    The receipt names the file, not the world it was built in (#907: an absolute path
+    moved the ledger generation id between byte-identical worlds).  A bare name is
+    found beside the generation or under one of its nearest ancestors, and only the
+    file whose bytes hash to the recorded sha256 is accepted.  A legacy absolute path
+    is still honoured.
+    """
+
+    text = str(recorded)
+    if Path(text).is_absolute():
+        return Path(reader._absolute_regular_path(text, "provider run observation"))
+    if Path(text).name != text:
+        raise MaterializationError("provider run observation name is not a bare name")
+    for ancestor in list(generation.resolve().parents)[:6]:
+        for candidate in (ancestor / text, *sorted(ancestor.glob(f"*/{text}"))):
+            if (
+                candidate.is_file()
+                and not candidate.is_symlink()
+                and hashlib.sha256(candidate.read_bytes()).hexdigest() == sha256
+            ):
+                return candidate
+    raise MaterializationError("provider run observation file is not beside the world")
+
+
 def _provider_admission_authority(
     generation: Path,
     contract: Mapping[str, Any],
@@ -1349,8 +1377,8 @@ def _provider_admission_authority(
         module_spec.loader.exec_module(reader)
         try:
             observation = reader._object(observation, "provider run observation")
-            observation_path = reader._absolute_regular_path(
-                observation["path"], "provider run observation"
+            observation_path = _locate_run_observation(
+                reader, generation, observation["path"], observation["sha256"]
             )
             observed, digest, size = reader._verified_json(
                 observation_path,

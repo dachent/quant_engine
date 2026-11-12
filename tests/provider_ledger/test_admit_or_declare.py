@@ -1609,7 +1609,13 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
     assert canonical_json_bytes(authority["sources"]) == policy_before
 
     generation = tmp_path / "staged" / "generations" / str(staged["generation_id"])
-    receipt = json.loads((generation / "admit-or-declare-receipt.json").read_bytes())
+    receipt_bytes = (generation / "admit-or-declare-receipt.json").read_bytes()
+    # Kill test (#907 item 5): the receipt is a ledger artifact, so an absolute world
+    # path in it moves the ledger generation id between byte-identical worlds.
+    assert str(tmp_path).encode() not in receipt_bytes
+    assert str(tmp_path).replace("\\", "\\\\").encode() not in receipt_bytes
+    receipt = json.loads(receipt_bytes)
+    assert receipt["run_observation"]["path"] == "run-observation.json"
     assert receipt["run_observation"]["financial_cutoff"] == DAY.isoformat()
     assert {
         row["provider_id"] for row in receipt["run_observation"]["providers"]

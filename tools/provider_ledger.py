@@ -3615,6 +3615,18 @@ _FINALITY_VALIDATORS: Final = {
 }
 
 
+def _path_free_ref(ref: Mapping[str, Any]) -> dict[str, Any]:
+    """A receipt names an evidence file by name, hash and size, never by the absolute
+    path of the world it was built in: the receipt is a ledger artifact, so a path would
+    move the ledger generation id between byte-identical worlds (#907)."""
+
+    return {
+        "path": Path(str(ref["path"])).name,
+        "sha256": ref["sha256"],
+        "size_bytes": ref["size_bytes"],
+    }
+
+
 def _validate_observed_finality_evidence(
     provider_id: str, selected: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -10590,7 +10602,7 @@ def _admit_or_declare_receipt(
             observed_receipt_providers.append(
                 {
                     "catalog_sha256": identity.catalog_sha256,
-                    "finality_evidence": selection["finality_evidence"],
+                    "finality_evidence": _path_free_ref(selection["finality_evidence"]),
                     "finality_interpretation": _validate_observed_finality_evidence(
                         provider_id, selection
                     ),
@@ -10669,7 +10681,7 @@ def _admit_or_declare_receipt(
         receipt["run_observation"] = {
             "captured_at_utc": observation["captured_at_utc"],
             "financial_cutoff": observation["financial_cutoff"],
-            "path": authority["run_observation_path"],
+            "path": Path(str(authority["run_observation_path"])).name,
             "policy_contract_sha256": authority["contract_raw_sha256"],
             "providers": observed_receipt_providers,
             "sha256": authority["run_observation_sha256"],
