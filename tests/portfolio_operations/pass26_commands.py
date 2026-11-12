@@ -423,7 +423,9 @@ def write(OUT: Path) -> None:
             + HWM
             + ["--provider-generations", C + "/replica-provider-generations.json"],
         ),
-        "lanes": (
+        # pass 26 ran both lanes in one command (``lanes``); the driver now runs the replica lane as its own
+        # stage, in a parallel group with the real lane (``lane-real``), so it is compared with that recorded row
+        "lane-replica": (
             "t_lanes.sh",
             [
                 PY,
@@ -457,12 +459,24 @@ def write(OUT: Path) -> None:
         ),
     }
     known = {
-        "lanes": [
+        "lane-replica": [
+            {
+                "flag": "command differs",
+                "reason": "the replica lane is the ceremony command, run in a parallel group beside the real lane",
+            },
+            {
+                "flag": "--out-dir",
+                "reason": "the ceremony writes straight into the replica lane directory (laneout/replica)",
+            },
+            {
+                "flag": "--real-panel-dir",
+                "reason": "the real lane is its own stage and carries the real panel directory",
+            },
             {
                 "flag": "--expected",
                 "reason": "pass 26 read the expected baseline from the repository; R3 reads it from the "
                 "pinned release-inputs root, which the baseline spec stage also needs",
-            }
+            },
         ]
         + [
             {

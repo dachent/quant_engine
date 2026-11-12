@@ -1894,35 +1894,26 @@
       }
     },
     {
-      "id": "lanes",
+      "id": "lane-replica",
+      "only_ceremony": "full",
       "requires": [
         "replica-spec"
       ],
-      "assert_equal": [
-        [
-          "{panel_gid}",
-          "{spec_panel_gid}"
-        ]
-      ],
+      "needs_attestation": true,
       "outputs": [
-        "{laneout}",
-        "{lane_replica}/replica-receipt.json",
-        "{lane_real}/pointers-after-dry-run.json",
-        "{lane_real}/commit-authorization.json"
+        "{lane_replica}",
+        "{lane_replica}/replica-receipt.json"
       ],
-      "guard_spec": "{prod_spec}",
       "argv": [
         "{python}",
         "{tools}/release_replica.py",
-        "lanes",
+        "ceremony",
         "--real-spec",
         "{prod_spec}",
         "--replica-spec",
         "{replica_spec}",
         "--out-dir",
-        "{laneout}",
-        "--real-panel-dir",
-        "{panel_root}/generations/{panel_gid}",
+        "{lane_replica}",
         "--replica-panel-dir",
         "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
         "--expected",
@@ -1953,8 +1944,70 @@
         "--clean-room",
         "{clean_room}"
       ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "guard_spec": "{prod_spec}",
+      "parallel_group": "lanes"
+    },
+    {
+      "id": "lane-real",
+      "requires": [
+        "replica-spec"
+      ],
+      "assert_equal": [
+        [
+          "{panel_gid}",
+          "{spec_panel_gid}"
+        ]
+      ],
+      "outputs": [
+        "{lane_real}",
+        "{lane_real}/pointers-after-dry-run.json",
+        "{lane_real}/commit-authorization.json"
+      ],
+      "guard_spec": "{prod_spec}",
+      "argv": [
+        "{python}",
+        "{tools}/release_replica.py",
+        "real-lane",
+        "--real-spec",
+        "{prod_spec}",
+        "--out-dir",
+        "{laneout}",
+        "--real-panel-dir",
+        "{panel_root}/generations/{panel_gid}",
+        "--replica-panel-dir",
+        "{replica_workspace}/dataPortfolio/control-panel/generations/{panel_gid}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--crosswalk",
+        "{crosswalk}",
+        {
+          "if": "release_inputs_root",
+          "args": [
+            "--strategy-basis",
+            "{release_inputs_strategy_basis}",
+            "--sleeve-facts",
+            "{sleeve_facts}",
+            "--provider-ledger",
+            "{ledger_catalog}",
+            "--ibkr-root",
+            "{ibkr_root}",
+            "--tag-map",
+            "{release_inputs_tag_map}"
+          ]
+        }
+      ],
       "needs_attestation": true,
-      "only_ceremony": "full"
+      "only_ceremony": "full",
+      "parallel_group": "lanes",
+      "announce_release": true
     },
     {
       "id": "ceremony",
@@ -2018,7 +2071,8 @@
       "id": "pack-probe",
       "explicit": true,
       "requires": [
-        "lanes",
+        "lane-replica",
+        "lane-real",
         "ceremony"
       ],
       "only_mode": "probe",
@@ -2051,7 +2105,8 @@
       "id": "commit",
       "explicit": true,
       "requires": [
-        "lanes"
+        "lane-replica",
+        "lane-real"
       ],
       "commit_gate": {
         "spec": "{prod_spec}",
