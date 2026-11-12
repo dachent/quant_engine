@@ -311,3 +311,25 @@ def test_close_blend_refuses_a_single_ticker_and_an_absent_ticker(
     absent["members"][0]["tickers"] = ["AAA", "ZZZ"]
     with pytest.raises(Error, match="no closes for ZZZ"):
         _run(tmp_path, absent)
+
+
+def test_close_blend_keeps_the_digits_of_a_fractional_close(tmp_path: Path) -> None:
+    """A JSON float must not pass through binary floating point."""
+
+    rows = [
+        {"Ticker": "AAA", "Date": "2024-01-01", "Close": "100.00000000000000000001"},
+        {"Ticker": "AAA", "Date": "2024-01-02", "Close": "100.00000000000000000002"},
+        {"Ticker": "BBB", "Date": "2024-01-01", "Close": "10"},
+        {"Ticker": "BBB", "Date": "2024-01-02", "Close": "10"},
+    ]
+    text = (
+        json.dumps({"rows": rows})
+        .replace('"100.00000000000000000001"', "100.00000000000000000001")
+        .replace('"100.00000000000000000002"', "100.00000000000000000002")
+    )
+    crypto = tmp_path / "crypto.json"
+    crypto.write_text(text, encoding="utf-8")
+    _, out = _run(tmp_path, _blend_spec(tmp_path, crypto))
+    value = _series(out, "benchmark:crypto")["2024-01-02"]
+    assert value > 0
+    assert abs(value - Decimal("1E-22") / 2) < Decimal("1E-30")

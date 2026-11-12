@@ -175,7 +175,7 @@ def _close_blend(member: dict[str, Any], content: bytes) -> list[dict[str, str]]
     tickers = [str(item) for item in member.get("tickers") or []]
     if len(tickers) < 2 or len(set(tickers)) != len(tickers):
         raise AttributionReturnsError(f"{series_id}: a blend names two or more tickers")
-    payload = json.loads(content.decode("utf-8"))
+    payload = json.loads(content.decode("utf-8"), parse_float=Decimal)
     closes: dict[str, dict[date, Decimal]] = {ticker: {} for ticker in tickers}
     for row in payload.get("rows") or []:
         ticker = str(row.get(member.get("ticker_field", "Ticker")))
