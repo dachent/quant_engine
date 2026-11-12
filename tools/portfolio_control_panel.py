@@ -74,6 +74,7 @@ from quant_engine.portfolio_ledger import (
 from quant_engine.portfolio_ledger.hwm_gap_bounds import (
     assess_gap_bounds_document,
     numerical_from_governed_proof,
+    proof_covers_spans,
 )
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
@@ -4970,6 +4971,8 @@ def _compute_panel_numerical_hwm(
             return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
         if governed_proof is None or governed_proof.get("status") != "AVAILABLE":
             return _unavailable("GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS")
+        if not proof_covers_spans(governed_proof, spans_by_strategy):
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
         return numerical_from_governed_proof(governed_proof, assessment)
 
     def _panel_decimal(value: object, field_name: str) -> Decimal:

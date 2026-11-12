@@ -105,6 +105,10 @@ PROOF: dict[str, Any] = {
     "current_drawdown": "-0.04",
     "maximum_drawdown": "-0.10",
     "receipt_sha256": "f" * 64,
+    "index_path": [
+        {"as_of": day}
+        for day in ("2026-01-26", "2026-01-28", "2026-07-02", "2026-07-04")
+    ],
 }
 
 
@@ -228,3 +232,16 @@ def test_both_closed_schemas_admit_the_bounded_summary_fields(
     assert node["additionalProperties"] is False
     assert "hwm_gap_bound" in node["properties"]
     assert "hwm_numerical_basis" in node["properties"]
+
+
+@pytest.mark.parametrize("compute", [_report, _panel])
+def test_a_proof_that_does_not_observe_the_span_endpoints_stays_unavailable(
+    compute: Any, tmp_path: Path
+) -> None:
+    """KILL: the bound speaks for a proof only when its path runs through the endpoints."""
+
+    for path in ([], [{"as_of": "2026-01-26"}, {"as_of": "2026-01-28"}]):
+        assert compute(tmp_path, proof={**PROOF, "index_path": path}) == {
+            "hwm_numerical_status": "UNAVAILABLE",
+            "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+        }

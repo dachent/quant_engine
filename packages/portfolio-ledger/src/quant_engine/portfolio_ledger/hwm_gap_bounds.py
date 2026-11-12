@@ -177,6 +177,28 @@ def assess_gap_bounds_document(
     }
 
 
+def proof_covers_spans(
+    proof: Mapping[str, Any],
+    spans_by_strategy: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> bool:
+    """The verified proof's path observes both endpoints of every span.
+
+    The bound says the missing day sits below the prior high; it speaks for this
+    proof only when the proof's own path runs through the span's endpoints.
+    """
+
+    path = proof.get("index_path")
+    if not isinstance(path, Sequence) or isinstance(path, (str, bytes)) or not path:
+        return False
+    observed = {str(row.get("as_of")) for row in path if isinstance(row, Mapping)}
+    return all(
+        str(span.get("span_start_date")) in observed
+        and str(span.get("span_end_date")) in observed
+        for spans in spans_by_strategy.values()
+        for span in spans
+    )
+
+
 def numerical_from_governed_proof(
     proof: Mapping[str, Any], assessment: Mapping[str, Any]
 ) -> dict[str, Any]:
