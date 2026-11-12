@@ -7,6 +7,7 @@ import io
 import json
 from pathlib import Path
 import sys
+from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
