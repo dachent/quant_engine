@@ -845,3 +845,109 @@ def test_the_window_is_365_days_for_a_full_year_of_daily_returns() -> None:
     summary = correlation._performance_summary(rows, 0)
     assert summary["window_days"] == 365
     assert summary["annualization_status"] == "AVAILABLE"
+
+
+def _span(start: date, end: date, value: str) -> Any:
+    return correlation.AcceptedSpan(start, end, float(value), value)
+
+
+def test_accepted_spans_are_compounded_into_the_summary_and_not_into_daily_rows() -> (
+    None
+):
+    """#904 item 9: the daily rows alone gave +5.8% for a strategy whose accepted return is -0.08%."""
+
+    from datetime import timedelta
+
+    rows = [
+        correlation.ReturnRow(
+            date(2026, 1, 1) + timedelta(days=offset),
+            0.0003,
+            "ACCOUNT_LIVE",
+            "v1",
+            "0.0003",
+        )
+        for offset in range(100)
+        if offset not in (30, 31, 32, 60, 61)
+    ]
+    spans = [
+        _span(date(2026, 1, 30), date(2026, 2, 2), "-0.0171"),
+        _span(date(2026, 3, 1), date(2026, 3, 4), "-0.0192"),
+    ]
+    bare = correlation._performance_summary(rows, 0)
+    full = correlation._performance_summary(rows, 0, spans)
+
+    expected = 1.0
+    for row in rows:
+        expected *= 1 + row.value
+    for span in spans:
+        expected *= 1 + span.value
+    assert round(float(cast(str, full["cumulative_return"])), 6) == round(
+        expected - 1, 6
+    )
+    assert full["cumulative_return"] != bare["cumulative_return"]
+    assert full["accepted_spans"] == 2
+    assert full["return_observations"] == len(rows)  # spans are not daily rows
+    # the drawdown sees the span steps
+    assert float(cast(str, full["maximum_drawdown"])) < float(
+        cast(str, bare["maximum_drawdown"])
+    )
+
+
+def test_the_specification_accepts_ordered_spans_and_refuses_overlaps() -> None:
+    base = {
+        "live_evidence_layer": "ACCOUNT_LIVE",
+        "series_id": "a",
+        "strategy_version": "v1",
+    }
+    ok = correlation._evidence_mode_definition(
+        {
+            **base,
+            "accepted_spans": [
+                {
+                    "start_date": "2026-01-30",
+                    "end_date": "2026-02-02",
+                    "return": "-0.01",
+                },
+                {
+                    "start_date": "2026-03-01",
+                    "end_date": "2026-03-04",
+                    "return": "-0.02",
+                },
+            ],
+        },
+        0,
+    )
+    assert [span.canonical_value for span in ok.accepted_spans] == ["-0.01", "-0.02"]
+    with pytest.raises(correlation.CorrelationError, match="overlap"):
+        correlation._evidence_mode_definition(
+            {
+                **base,
+                "accepted_spans": [
+                    {
+                        "start_date": "2026-01-30",
+                        "end_date": "2026-03-02",
+                        "return": "-0.01",
+                    },
+                    {
+                        "start_date": "2026-03-01",
+                        "end_date": "2026-03-04",
+                        "return": "-0.02",
+                    },
+                ],
+            },
+            0,
+        )
+    with pytest.raises(correlation.CorrelationError):
+        correlation._evidence_mode_definition(
+            {
+                **base,
+                "accepted_spans": [
+                    {
+                        "start_date": "2026-03-04",
+                        "end_date": "2026-03-01",
+                        "return": "0",
+                    }
+                ],
+            },
+            0,
+        )
