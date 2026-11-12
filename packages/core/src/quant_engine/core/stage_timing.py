@@ -67,6 +67,7 @@ def stage(name: str, **fields: object) -> Iterator[dict[str, object]]:
                 "hash_calls": after["hash_calls"] - before["hash_calls"],
                 "hash_bytes": after["hash_bytes"] - before["hash_bytes"],
                 "pid": os.getpid(),
+                "t_end": round(time.time(), 3),
                 **fields,
                 **extra,
             }
@@ -85,3 +86,57 @@ def timed(name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
         return wrapper
 
     return decorate
+
+
+VERIFIER_STAGES = ("financial_outcomes", "product_authority")
+
+
+def summarize(
+    path: str | os.PathLike[str],
+    started: float,
+    ended: float,
+    *,
+    silent_over: float = 60.0,
+) -> dict[str, object]:
+    """Digest one stage's timing log: verifier call counts and silent intervals.
+
+    A silent interval is a stretch of ``[started, ended]`` (epoch seconds) that no
+    logged stage, in any process of the stage, covers. Observation only.
+    """
+
+    rows: list[dict[str, object]] = []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except OSError:
+        pass
+    calls = {name: 0 for name in VERIFIER_STAGES}
+    spans: list[tuple[float, float]] = []
+    for row in rows:
+        if row.get("stage") in calls:
+            calls[str(row["stage"])] += 1
+        end, seconds = row.get("t_end"), row.get("seconds")
+        if isinstance(end, (int, float)) and isinstance(seconds, (int, float)):
+            spans.append((float(end) - float(seconds), float(end)))
+    spans.sort()
+    gaps: list[float] = []
+    cursor = started
+    for begin, end in spans:
+        if begin > cursor:
+            gaps.append(begin - cursor)
+        cursor = max(cursor, end)
+    if ended > cursor:
+        gaps.append(ended - cursor)
+    silent = [round(gap, 1) for gap in gaps if gap > silent_over]
+    return {
+        "logged_stages": len(rows),
+        "verifier_calls": calls,
+        "silent_intervals_over_limit": silent,
+        "max_silent_seconds": round(max(gaps), 1) if gaps else 0.0,
+    }

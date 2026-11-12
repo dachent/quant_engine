@@ -79,3 +79,37 @@ def test_runtime_environment_is_inspected_once_per_executable(
     assert pipeline.runtime_environment_sha256(Path("py-one")) == first
     pipeline.runtime_environment_sha256(Path("py-two"))
     assert calls == ["py-one", "py-two"]
+
+
+def test_summarize_counts_verifier_calls_and_finds_silent_intervals(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "t.jsonl"
+    rows = [
+        {"stage": "financial_outcomes", "seconds": 20.0, "t_end": 120.0},
+        {"stage": "product_authority", "seconds": 10.0, "t_end": 130.0},
+        {"stage": "financial_outcomes", "seconds": 5.0, "t_end": 400.0},
+    ]
+    log.write_text("\n".join(json.dumps(row) for row in rows) + "\nnot json\n", "utf-8")
+    result = stage_timing.summarize(log, 100.0, 500.0)
+    assert result["verifier_calls"] == {"financial_outcomes": 2, "product_authority": 1}
+    # silent: 130..395 (265 s) and 400..500 (100 s)
+    assert result["silent_intervals_over_limit"] == [265.0, 100.0]
+    assert result["max_silent_seconds"] == 265.0
+
+
+def test_summarize_of_a_missing_log_is_one_silent_interval(tmp_path: Path) -> None:
+    result = stage_timing.summarize(tmp_path / "none.jsonl", 0.0, 90.0)
+    assert result["logged_stages"] == 0
+    assert result["silent_intervals_over_limit"] == [90.0]
+
+
+def test_stage_records_its_end_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "t.jsonl"
+    monkeypatch.setenv(stage_timing.TIMING_LOG_ENV, str(log))
+    with stage_timing.stage("probe"):
+        pass
+    row = json.loads(log.read_text("utf-8"))
+    assert row["t_end"] > 1_000_000_000
