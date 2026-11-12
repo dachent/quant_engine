@@ -1329,6 +1329,15 @@ def _validated_inputs(
             )
         except _capture.CaptureRefused as exc:
             raise AttendedPreparationError(f"captured inputs: {exc.code}") from exc
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+        ) as exc:  # corrupt pin file, odd shapes: stable, not raw
+            raise AttendedPreparationError(
+                f"captured inputs: MALFORMED ({type(exc).__name__})"
+            ) from exc
     _pins(config, "preparation specification")
     retained_generations = config.get("retained_verified_generations")
     if isinstance(retained_generations, Mapping) and isinstance(

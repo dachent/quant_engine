@@ -289,17 +289,32 @@ def test_coverage_window_tolerance_and_vacuous():
     assert cp.check_coverage(
         [*days, "2026-11-04"], "2026-11-02", "2026-11-08"
     ).ok  # weekend not required
-    assert cp.check_coverage(days, "2026-11-02", "2026-11-06", max_missing=1).ok
-    assert not cp.check_coverage(
-        days[:2], "2026-11-02", "2026-11-06", max_missing=1
-    ).ok  # total missing is bounded too
     assert (
         cp.check_coverage([*days, "2026-11-09"], "2026-11-02", "2026-11-06").code
         == "OUT_OF_WINDOW"
     )
     assert cp.check_coverage([], "2026-11-06", "2026-11-02").code == "BAD_WINDOW"
     assert cp.check_coverage([], "2026-11-07", "2026-11-08").code == "NO_EXPECTED_DAYS"
-    assert cp.check_coverage([], "2026-11-02", "2026-11-06").code == "COVERAGE_GAP"
+    assert cp.check_coverage([], "2026-11-02", "2026-11-06").code == "NO_ROWS"
+    ten = [
+        f"2026-11-{d:02d}" for d in (2, 3, 4, 5, 6, 9, 10, 11, 12, 13)
+    ]  # a ten-weekday window: one miss is tolerable
+    assert cp.check_coverage(ten[:-1], "2026-11-02", "2026-11-13", max_missing=1).ok
+    assert (
+        cp.check_coverage(ten[:-1], "2026-11-02", "2026-11-13").code == "COVERAGE_GAP"
+    )
+    assert (
+        cp.check_coverage(ten[:-2], "2026-11-02", "2026-11-13", max_missing=2).code
+        == "TOLERANCE_OUT_OF_RANGE"
+    )
+    assert (
+        cp.check_coverage(days[:2], "2026-11-02", "2026-11-06", max_missing=99).code
+        == "TOLERANCE_OUT_OF_RANGE"
+    )
+    assert (
+        code_of(cp.check_coverage, ["20261102"], "2026-11-02", "2026-11-06")
+        == "BAD_DATE"
+    )
 
 
 def test_expected_dates_exact():
@@ -456,6 +471,15 @@ def read(s, pins, ev, *, name="balances.csv", cutoff=CUT, reader="reserve_nav"):
     )
 
 
+def manifest_of(s, **over):
+    return {
+        "source_id": s.source_id,
+        "captured_on": "2026-11-12",
+        "files": {"f": {"sha256": "0" * 64, "bytes": 1}},
+        **over,
+    }
+
+
 def test_verify_runs_every_check_and_never_masks():
     s = src(
         closure_checks=(
@@ -466,7 +490,7 @@ def test_verify_runs_every_check_and_never_masks():
             "nav_identity",
         )
     )
-    manifest = {"source_id": s.source_id, "files": {}}
+    manifest = manifest_of(s)
     checks = {
         "coverage": lambda: cp.check_coverage([], "2026-11-02", "2026-11-03"),
         "sum_equals_total": lambda: cp.check_sum_equals_total([1], 2),
@@ -476,23 +500,31 @@ def test_verify_runs_every_check_and_never_masks():
     v = cp.verify(s, manifest=manifest, as_of=CUT, cutoff=CUT, checks=checks)
     assert v.status == "FAIL"
     assert set(v.codes) == {
-        "coverage:COVERAGE_GAP", "sum_equals_total:TOTAL_MISMATCH", "stability:CHECK_NOT_RUN",
+        "coverage:NO_ROWS", "sum_equals_total:TOTAL_MISMATCH", "stability:CHECK_NOT_RUN",
         "cash_walk:CHECK_ERROR", "nav_identity:CHECK_BAD_RESULT",
     }  # fmt: skip
     liar = {
         "sum_equals_total": lambda: cp.check_stability("a" * 64, "a" * 64)
     }  # another check's passing result
+    one = src()
     assert cp.verify(
-        src(), manifest=manifest, as_of=CUT, cutoff=CUT, checks=liar
+        one, manifest=manifest_of(one), as_of=CUT, cutoff=CUT, checks=liar
     ).codes == ("sum_equals_total:CHECK_BAD_RESULT",)
     contradictory = {
         "sum_equals_total": lambda: cp.CheckResult("sum_equals_total", True, "WHATEVER")
     }
     assert (
         cp.verify(
-            src(), manifest=manifest, as_of=CUT, cutoff=CUT, checks=contradictory
+            one, manifest=manifest_of(one), as_of=CUT, cutoff=CUT, checks=contradictory
         ).status
         == "FAIL"
+    )
+    na = {"sum_equals_total": lambda: cp.not_applicable("sum_equals_total")}
+    assert (
+        cp.verify(
+            one, manifest=manifest_of(one), as_of=CUT, cutoff=CUT, checks=na
+        ).status
+        == "PASS"
     )
     assert (
         code_of(
@@ -516,6 +548,38 @@ def test_verify_runs_every_check_and_never_masks():
         )
         == "VERIFY_SOURCE_MISMATCH"
     )
+    assert (
+        code_of(
+            cp.verify,
+            src(closure_checks=()),
+            manifest=manifest_of(one),
+            as_of=CUT,
+            cutoff=CUT,
+            checks={},
+        )
+        == "VERIFY_NO_CHECKS"
+    )
+    assert (
+        code_of(
+            cp.verify,
+            one,
+            manifest=manifest_of(one, files={}),
+            as_of=CUT,
+            cutoff=CUT,
+            checks={},
+        )
+        == "VERIFY_EMPTY_MANIFEST"
+    )
+    late = cp.verify(
+        one,
+        manifest=manifest_of(one, captured_on="2026-11-01"),
+        as_of=CUT,
+        cutoff=CUT,
+        checks=good_check(),
+    )
+    assert (
+        "AS_OF_AFTER_CAPTURE" in late.codes
+    )  # a capture cannot claim an as-of after the day it was made
 
 
 @pytest.mark.parametrize(
@@ -609,7 +673,9 @@ def test_verdict_is_bound_to_the_manifest_asof_and_cutoff(tmp_path):
     run2.mkdir()
     (run2 / "balances.csv").write_bytes(b"other")
     mpath2 = tmp_path / "manifest2.json"
-    cp.hash_files(run2, mpath2, source_id=s.source_id, captured_on="d", tool="t")
+    cp.hash_files(
+        run2, mpath2, source_id=s.source_id, captured_on="2026-11-12", tool="t"
+    )
     assert (
         code_of(cp.admit_input, s, v, run_dir=run2, manifest_path=mpath2, **kw)
         == "ADMIT_VERDICT_MISMATCH"
@@ -688,20 +754,22 @@ def test_hash_files_refuses_symlinks_empty_and_overwrite(tmp_path):
             run,
             tmp_path / "m.json",
             source_id="s",
-            captured_on="d",
+            captured_on="2026-11-12",
             tool="t",
         )
         == "EMPTY_CAPTURE"
     )
     (run / "f").write_bytes(b"x")
-    cp.hash_files(run, tmp_path / "m.json", source_id="s", captured_on="d", tool="t")
+    cp.hash_files(
+        run, tmp_path / "m.json", source_id="s", captured_on="2026-11-12", tool="t"
+    )
     assert (
         code_of(
             cp.hash_files,
             run,
             tmp_path / "m.json",
             source_id="s",
-            captured_on="d",
+            captured_on="2026-11-12",
             tool="t",
         )
         == "CREATE_ONLY_EXISTS"
@@ -717,7 +785,7 @@ def test_hash_files_refuses_symlinks_empty_and_overwrite(tmp_path):
             run,
             tmp_path / "m2.json",
             source_id="s",
-            captured_on="d",
+            captured_on="2026-11-12",
             tool="t",
         )
         == "SYMLINK_IN_CAPTURE"
@@ -725,21 +793,22 @@ def test_hash_files_refuses_symlinks_empty_and_overwrite(tmp_path):
 
 
 def test_readmission_keeps_the_old_cycle_reproducible_and_is_create_only(tmp_path):
-    s, pins, ev = admitted(tmp_path, files={"balances.csv": b"v1"})
+    s, pins, ev = admitted(tmp_path, as_of="2026-11-04", files={"balances.csv": b"v1"})
     run2 = tmp_path / "run_b"
     run2.mkdir()
     (run2 / "balances.csv").write_bytes(b"v2")
     mp2 = tmp_path / "m_b.json"
-    m2 = cp.hash_files(run2, mp2, source_id=s.source_id, captured_on="d", tool="t")
+    m2 = cp.hash_files(
+        run2, mp2, source_id=s.source_id, captured_on="2026-11-14", tool="t"
+    )
     v2 = cp.verify(
-        s, manifest=m2, as_of="2026-11-13", cutoff="2026-11-13", checks=good_check()
+        s, manifest=m2, as_of="2026-11-06", cutoff="2026-11-13", checks=good_check()
     )
     cp.admit_input(
         s, v2, run_dir=run2, manifest_path=mp2, evidence_root=ev, pin_path=pins
     )
-    assert (
-        read(s, pins, ev, cutoff=CUT).read_bytes() == b"v1"
-    )  # the earlier cycle still resolves to its capture
+    # the 11-13 capture has as-of 11-06 and would win by as-of alone; the older cycle must still read ITS capture
+    assert read(s, pins, ev, cutoff=CUT).read_bytes() == b"v1"
     assert read(s, pins, ev, cutoff="2026-11-13").read_bytes() == b"v2"
     assert (
         code_of(
@@ -755,7 +824,7 @@ def test_readmission_keeps_the_old_cycle_reproducible_and_is_create_only(tmp_pat
     )
 
 
-def test_concurrent_admissions_all_survive(tmp_path):
+def test_concurrent_admissions_all_survive_and_same_source_admits_once(tmp_path):
     sources = {f"s{i}": src(source_id=f"s{i}") for i in range(8)}
     pins, ev, errors = tmp_path / "pins.json", tmp_path / "ev", []
     prepared = []
@@ -764,11 +833,32 @@ def test_concurrent_admissions_all_survive(tmp_path):
         run.mkdir()
         (run / "f.csv").write_bytes(sid.encode())
         mp = tmp_path / f"m_{sid}.json"
-        m = cp.hash_files(run, mp, source_id=sid, captured_on="d", tool="t")
+        m = cp.hash_files(run, mp, source_id=sid, captured_on="2026-11-12", tool="t")
         prepared.append(
             (
                 s,
                 cp.verify(s, manifest=m, as_of=CUT, cutoff=CUT, checks=good_check()),
+                run,
+                mp,
+            )
+        )
+    same = []  # four threads racing to admit the SAME source and cutoff: exactly one wins
+    for i in range(4):
+        run = tmp_path / f"same_{i}"
+        run.mkdir()
+        (run / "f.csv").write_bytes(b"same")
+        mp = tmp_path / f"same_{i}.json"
+        m = cp.hash_files(run, mp, source_id="s0", captured_on="2026-11-12", tool="t")
+        same.append(
+            (
+                sources["s0"],
+                cp.verify(
+                    sources["s0"],
+                    manifest=m,
+                    as_of=CUT,
+                    cutoff="2026-11-07",
+                    checks=good_check(),
+                ),
                 run,
                 mp,
             )
@@ -780,15 +870,19 @@ def test_concurrent_admissions_all_survive(tmp_path):
             cp.admit_input(
                 s, v, run_dir=run, manifest_path=mp, evidence_root=ev, pin_path=pins
             )
+        except cp.CaptureRefused as exc:
+            errors.append(exc.code)
         except Exception as exc:  # noqa: BLE001
-            errors.append(exc)
+            errors.append(repr(exc))
 
-    threads = [threading.Thread(target=go, args=(a,)) for a in prepared]
+    threads = [threading.Thread(target=go, args=(a,)) for a in [*prepared, *same]]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    assert errors == [] and set(json.loads(pins.read_text())["pins"]) == set(sources)
+    assert errors == ["CREATE_ONLY_EXISTS"] * 3
+    got = json.loads(pins.read_text())["pins"]
+    assert set(got) == set(sources) and set(got["s0"]) == {CUT, "2026-11-07"}
 
 
 def test_failed_pin_write_rolls_the_copy_back_so_a_retry_works(tmp_path):
@@ -866,9 +960,6 @@ def test_refresh_table_all_logins_at_once_age_and_exit_codes(tmp_path):
 
 
 def test_cli_real_contract_exit_code_and_table(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(cr, "cdp_window_state", lambda _s: cp.WINDOW_LOGIN_WALL)
-    monkeypatch.setattr(cr, "vault_ok", lambda _r: True)
-    monkeypatch.setattr(cr, "http_ok", lambda _s: True)
     argv = [
         "--cutoff",
         CUT,
@@ -879,17 +970,44 @@ def test_cli_real_contract_exit_code_and_table(tmp_path, capsys, monkeypatch):
         "--contracts",
         str(CONTRACT),
     ]
-    rc = cr.main(argv)
+    monkeypatch.setattr(cr, "vault_ok", lambda _r: True)
+    monkeypatch.setattr(cr, "http_ok", lambda _s: True)
+    monkeypatch.setattr(cr, "cmdkey_ok", lambda _n: False)
+    monkeypatch.setattr(cr, "cdp_window_state", lambda _s: cp.WINDOW_LOGIN_WALL)
+    assert cr.main(argv) == 3
     out = capsys.readouterr().out
-    assert rc == 3
     for token in (
         "BLOCKED_LOGIN",
         "sign in to SCHWAB",
         "BLOCKED_NOT_WIRED",
-        "UNVERIFIABLE_BY_DESIGN",
+        "BLOCKED_CREDENTIAL",
+        "BIT.com-API",
         "schwab_daily_cash",
     ):
         assert token in out
+    monkeypatch.setattr(cr, "cdp_window_state", lambda _s: cp.WINDOW_OK)
+    monkeypatch.setattr(cr, "cmdkey_ok", lambda _n: True)
+    assert cr.main(argv) == 4  # nothing for the owner; sources are ready to capture
+    pins = tmp_path / "bad.json"
+    pins.write_text('{"schema_version": 1, "pins": {}}')
+    with pytest.raises(SystemExit, match="PIN_SCHEMA"):
+        cr.main([*argv[:3], str(pins), *argv[4:]])
+
+
+def test_exit_code_classes():
+    row = lambda st: {"status": st}  # noqa: E731
+    assert cr.exit_code([row("SKIP_FRESH")]) == 0
+    assert (
+        cr.exit_code(
+            [row("SKIP_FRESH"), row("BLOCKED_NOT_WIRED"), row("UNVERIFIABLE_BY_DESIGN")]
+        )
+        == 5
+    )
+    assert cr.exit_code([row("READY"), row("BLOCKED_NOT_WIRED")]) == 4
+    assert (
+        cr.exit_code([row("READY"), row("BLOCKED_LOGIN"), row("BLOCKED_NOT_WIRED")])
+        == 3
+    )
 
 
 # ------------------------------------------------------------------ reader switch-over
@@ -905,7 +1023,9 @@ def admitted_for_reader(tmp_path):
     run.mkdir()
     (run / "model.csv").write_bytes(b"x,y\n1,2\n")
     mp = tmp_path / "m.json"
-    m = cp.hash_files(run, mp, source_id=s.source_id, captured_on="d", tool="t")
+    m = cp.hash_files(
+        run, mp, source_id=s.source_id, captured_on="2026-11-12", tool="t"
+    )
     v = cp.verify(
         s,
         manifest=m,
@@ -922,9 +1042,10 @@ READERS = cp.load_readers(CONTRACT)
 
 
 def spec_for(s, pins, ev, **over):
+    mf = json.loads(next((ev / s.source_id).rglob("capture-manifest.json")).read_text())
     block = {
-        "pins": cp.file_pin(pins), "evidence_root": str(ev),
-        "bindings": {"model_vs_actual_input": {"source_id": s.source_id, "name": "model.csv", "reader": "model_vs_actual"}},
+        "pins": str(pins), "evidence_root": str(ev),
+        "bindings": {"model_vs_actual_input": {"source_id": s.source_id, "name": "model.csv", "reader": "model_vs_actual", "manifest_sha256": cp.manifest_digest(mf)}},
     }  # fmt: skip
     block.update(over)
     return {"schema_version": 1, "captured_inputs": block}
@@ -939,7 +1060,8 @@ def test_resolve_switches_the_reader_and_refuses_everything_else(tmp_path):
             spec, cutoff=cutoff, sources=sources, readers=READERS
         )
 
-    out = run(spec_for(s, pins, ev))
+    spec = spec_for(s, pins, ev)
+    out = run(spec)
     pin = out["model_vs_actual_input"]
     assert set(pin) == {"path", "sha256", "size_bytes"} and "captured_inputs" not in out
     assert (
@@ -952,18 +1074,71 @@ def test_resolve_switches_the_reader_and_refuses_everything_else(tmp_path):
     assert (
         code_of(run, hand) == "UNCAPTURED_INPUT"
     )  # a hand-built pin cannot stand in for a captured one
-    assert code_of(run, spec_for(s, pins, ev), cutoff="2026-12-31") == "STALE_INPUT"
+    assert code_of(run, spec, cutoff="2026-12-31") == "STALE_INPUT"
     wrong = spec_for(s, pins, ev)
     wrong["captured_inputs"]["bindings"]["model_vs_actual_input"]["reader"] = "hwm"
     assert code_of(run, wrong) == "CAPTURED_INPUTS_SHAPE"
     assert run({"a": 1}) == {"a": 1}  # a legacy spec without the block is unchanged
+    assert code_of(run, {"captured_inputs": None}) == "CAPTURED_INPUTS_SHAPE"
     assert code_of(run, {"captured_inputs": {"pins": 1}}) == "CAPTURED_INPUTS_SHAPE"
-    forged = spec_for(s, pins, ev)
-    forged["captured_inputs"]["pins"] = {
-        **forged["captured_inputs"]["pins"],
-        "sha256": "0" * 64,
-    }  # the pin file is pinned
-    assert code_of(run, forged) == "HASH_MISMATCH"
+    other = spec_for(s, pins, ev)
+    other["captured_inputs"]["bindings"]["model_vs_actual_input"]["manifest_sha256"] = (
+        "0" * 64
+    )
+    assert (
+        code_of(run, other) == "MANIFEST_MISMATCH"
+    )  # the spec was planned against a different capture
+    # admitting an unrelated source later (the pin file is rewritten) must not move this spec
+    s2 = src(source_id="s2")
+    run2 = tmp_path / "run2"
+    run2.mkdir()
+    (run2 / "f.csv").write_bytes(b"x")
+    mp2 = tmp_path / "m2.json"
+    m2 = cp.hash_files(run2, mp2, source_id="s2", captured_on="2026-11-12", tool="t")
+    v2 = cp.verify(s2, manifest=m2, as_of=CUT, cutoff=CUT, checks=good_check())
+    cp.admit_input(
+        s2, v2, run_dir=run2, manifest_path=mp2, evidence_root=ev, pin_path=pins
+    )
+    assert run(spec)["model_vs_actual_input"] == pin
+
+
+def test_hand_built_pin_and_evidence_have_no_admitted_manifest(tmp_path):
+    s = src(
+        source_id="p123_model_live",
+        provider="PORTFOLIO123",
+        admits=("model_vs_actual",),
+    )
+    ev = tmp_path / "ev"
+    (ev / s.source_id / CUT).mkdir(parents=True)
+    (ev / s.source_id / CUT / "model.csv").write_bytes(b"forged")
+    digest = cp.sha256_file(ev / s.source_id / CUT / "model.csv")
+    pins = tmp_path / "pins.json"
+    entry = {
+        "as_of": CUT,
+        "cutoff": CUT,
+        "root": f"{s.source_id}/{CUT}",
+        "manifest_sha256": "0" * 64,
+        "files": {"model.csv": digest},
+    }
+    pins.write_text(
+        json.dumps({"schema_version": 2, "pins": {s.source_id: {CUT: entry}}})
+    )
+    kw = dict(
+        pin_path=pins,
+        evidence_root=ev,
+        cutoff=CUT,
+        sources=sources_of(s),
+        reader="model_vs_actual",
+    )
+    assert (
+        code_of(cp.captured_input, s.source_id, "model.csv", **kw) == "HASH_MISMATCH"
+    )  # no capture-manifest.json
+    (ev / s.source_id / CUT / "capture-manifest.json").write_text(
+        json.dumps({"files": {"model.csv": {"sha256": digest}}})
+    )
+    assert (
+        code_of(cp.captured_input, s.source_id, "model.csv", **kw) == "HASH_MISMATCH"
+    )  # manifest digest differs from the pin's
 
 
 def test_real_attended_preparation_refuses_a_source_the_real_contract_does_not_declare(
@@ -972,10 +1147,6 @@ def test_real_attended_preparation_refuses_a_source_the_real_contract_does_not_d
     import portfolio_attended_preparation as prep
 
     s, pins, ev = admitted_for_reader(tmp_path)
-    s2 = src(
-        source_id="not_in_contract"
-    )  # admit under an id the real contract does not know
-    assert s2.source_id not in cp.load_sources(CONTRACT, repo_root=ROOT)
     spec = {
         "schema_version": 1,
         "financial_data_cutoff": "2026-12-31",
@@ -989,6 +1160,22 @@ def test_real_attended_preparation_refuses_a_source_the_real_contract_does_not_d
     with pytest.raises(
         prep.AttendedPreparationError, match="captured inputs: UNCAPTURED_INPUT"
     ):
+        prep._validated_inputs(path, "2026-12-31", "2027-01-02")
+    spec["captured_inputs"] = {
+        "pins": 1
+    }  # a corrupt block is a stable refusal, not a raw exception
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(
+        prep.AttendedPreparationError, match="captured inputs: CAPTURED_INPUTS_SHAPE"
+    ):
+        prep._validated_inputs(path, "2026-12-31", "2027-01-02")
+    spec["captured_inputs"] = {
+        "pins": "p",
+        "evidence_root": "e",
+        "bindings": {"k": ["not", "a", "mapping"]},
+    }
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(prep.AttendedPreparationError, match="captured inputs: "):
         prep._validated_inputs(path, "2026-12-31", "2027-01-02")
 
 
@@ -1047,7 +1234,8 @@ def test_walk_plus_statement_check_catches_a_missing_post_ledger_trade():
 
 def test_statement_cash_parser():
     detail = "Total Cash and Cash Investments        $20.00     $30.00     $10.00\n"
-    box = "Cash and Cash Investments                 900.00 13%\n"  # asset-allocation box (counts T-bill ETFs): never used
+    box = "Cash and Cash Investments                 900.00 13%\n"  # asset-allocation box (counts T-bill ETFs from mid-2026)
+    sweep = "Bank Sweep      CHARLES SCHWAB       $1.00      $2.00\n"
     assert sc.parse_statement_cash(box + detail) == 30.0
     assert (
         sc.parse_statement_cash("Settled Debit Balance            (12.34)\n" + detail)
@@ -1059,16 +1247,19 @@ def test_statement_cash_parser():
         )
         == -7.5
     )
+    assert sc.parse_statement_cash(sweep + box) == 2.0
+    zero = "Total Cash and Cash Investments        $0.00     $0.00     $0.00\n"
     assert (
-        sc.parse_statement_cash(
-            "Bank Sweep      CHARLES SCHWAB       $1.00      $2.00\n" + box
-        )
-        == 2.0
-    )
+        sc.parse_statement_cash(zero + sweep) == 2.0
+    )  # a zero total beside a sweep row: the sweep is the balance
+    assert sc.parse_statement_cash(zero) == 0.0
+    assert (
+        sc.parse_statement_cash(box) == 900.0
+    )  # last resort only; the walk comparison is the arbiter
     assert (
         sc.parse_statement_cash(detail + detail) is None
     )  # two accounts' totals: ambiguous, refused
-    assert sc.parse_statement_cash(box) is None
+    assert sc.parse_statement_cash("nothing here") is None
 
 
 XML = """<FlexQueryResponse><FlexStatements>
@@ -1131,19 +1322,31 @@ class FakePage:
 ORIGIN = "https://app.example.test"
 
 
-def test_capture_pages_create_only_wall_redirect_and_marker(tmp_path):
+def test_capture_pages_whole_plan_or_nothing_wall_redirect_and_marker(tmp_path):
     long_text = "Account value\n" * 400
     page = FakePage(
         {f"{ORIGIN}/a": long_text, f"{ORIGIN}/b": "Please sign in to continue"}
     )
-    plan = [{"name": "a", "url": f"{ORIGIN}/a"}, {"name": "b", "url": f"{ORIGIN}/b"}]
+    plan = [
+        {"name": "a", "url": f"{ORIGIN}/a", "expect": "Account value"},
+        {"name": "b", "url": f"{ORIGIN}/b", "expect": "Account value"},
+    ]
     with pytest.raises(sb.StageBlocked) as e:
         sb.capture_pages(page, plan, tmp_path / "run", allowed_origin=ORIGIN)
     assert e.value.code == "BLOCKED_LOGIN"
-    assert (tmp_path / "run" / "a.txt").read_bytes() == long_text.encode() and not (
-        tmp_path / "run" / "b.txt"
-    ).exists()
-    with pytest.raises(FileExistsError):
+    assert not (tmp_path / "run").exists() and not list(
+        tmp_path.glob(".*staging")
+    )  # a wall on page two leaves nothing
+    ok = sb.capture_pages(
+        FakePage({f"{ORIGIN}/a": long_text}),
+        plan[:1],
+        tmp_path / "run",
+        allowed_origin=ORIGIN,
+    )
+    assert (
+        ok == ["a"] and (tmp_path / "run" / "a.txt").read_bytes() == long_text.encode()
+    )
+    with pytest.raises(FileExistsError):  # never overwrites a capture
         sb.capture_pages(
             FakePage({f"{ORIGIN}/a": long_text}),
             plan[:1],
@@ -1157,11 +1360,11 @@ def test_capture_pages_create_only_wall_redirect_and_marker(tmp_path):
     with pytest.raises(ValueError, match="REDIRECT_ORIGIN"):
         sb.capture_pages(
             off,
-            [{"name": "c", "url": f"{ORIGIN}/c"}],
+            [{"name": "c", "url": f"{ORIGIN}/c", "expect": "x"}],
             tmp_path / "r2",
             allowed_origin=ORIGIN,
         )
-    assert not (tmp_path / "r2" / "c.txt").exists()
+    assert not (tmp_path / "r2").exists()
     quiet = FakePage(
         {f"{ORIGIN}/d": "x" * 5000}
     )  # a long page that is not the expected statement
@@ -1172,6 +1375,16 @@ def test_capture_pages_create_only_wall_redirect_and_marker(tmp_path):
             tmp_path / "r3",
             allowed_origin=ORIGIN,
         )
+    timed_out = FakePage(
+        {f"{ORIGIN}/e": "session has timed out " + "x" * 4200}
+    )  # long wall text: still not a statement
+    with pytest.raises(sb.StageBlocked):
+        sb.capture_pages(
+            timed_out,
+            [{"name": "e", "url": f"{ORIGIN}/e", "expect": "Closing Balance"}],
+            tmp_path / "r4",
+            allowed_origin=ORIGIN,
+        )
 
 
 def test_capture_pages_refuses_foreign_origin_before_navigating_and_bad_names(tmp_path):
@@ -1179,18 +1392,27 @@ def test_capture_pages_refuses_foreign_origin_before_navigating_and_bad_names(tm
     with pytest.raises(ValueError, match="PLAN_ORIGIN"):
         sb.capture_pages(
             page,
-            [{"name": "a", "url": "https://evil.example.test/a"}],
-            tmp_path,
+            [{"name": "a", "url": "https://evil.example.test/a", "expect": "x"}],
+            tmp_path / "r",
             allowed_origin=ORIGIN,
         )
     assert page.visited == []
-    with pytest.raises(ValueError, match="PLAN_NAME"):
+    for bad in ("../a", "ab:cd", "CON", "nul.txt", "a b", "", "a."):
+        with pytest.raises(ValueError, match="PLAN_NAME"):
+            sb.capture_pages(
+                page,
+                [{"name": bad, "url": f"{ORIGIN}/a", "expect": "x"}],
+                tmp_path / "r",
+                allowed_origin=ORIGIN,
+            )
+    with pytest.raises(ValueError, match="PLAN_EXPECT"):
         sb.capture_pages(
             page,
-            [{"name": "../a", "url": f"{ORIGIN}/a"}],
-            tmp_path,
+            [{"name": "a", "url": f"{ORIGIN}/a"}],
+            tmp_path / "r",
             allowed_origin=ORIGIN,
         )
+    assert not (tmp_path / "r").exists()
 
 
 def test_login_wall_by_url_or_short_prompt_not_a_long_page_with_a_footer_link():
@@ -1275,3 +1497,269 @@ def test_composer_parser_closes_and_cutoff_rule():
     assert sb.latest_on_or_before(pts, "2026-09-01") is None
     with pytest.raises(ValueError, match="COMPOSER_TOTAL"):
         sb.parse_composer_statement("nothing")
+
+
+# ------------------------------------------------------------------ round-2 hardening
+
+
+def test_verdict_cannot_be_forged_replaced_copied_or_hand_built(tmp_path):
+    import copy
+    import dataclasses
+
+    s = src()
+    run, mpath, manifest = make_run(tmp_path)
+    good = cp.verify(s, manifest=manifest, as_of=CUT, cutoff=CUT, checks=good_check())
+    stale = cp.verify(
+        s, manifest=manifest, as_of="2026-09-01", cutoff=CUT, checks=good_check()
+    )
+    assert stale.status == "FAIL"
+    kw = dict(
+        run_dir=run,
+        manifest_path=mpath,
+        evidence_root=tmp_path / "ev",
+        pin_path=tmp_path / "p.json",
+    )
+    assert (
+        code_of(
+            cp.admit_input,
+            s,
+            dataclasses.replace(stale, status="PASS", codes=(), as_of=CUT),
+            **kw,
+        )
+        == "ADMIT_NOT_PASS"
+    )
+    assert (
+        code_of(
+            cp.admit_input, s, dataclasses.replace(good, manifest_sha256="0" * 64), **kw
+        )
+        == "ADMIT_NOT_PASS"
+    )
+    assert (
+        code_of(cp.admit_input, s, dataclasses.replace(good, cutoff="2026-11-07"), **kw)
+        == "ADMIT_NOT_PASS"
+    )
+    fake = cp.Verdict(
+        s.source_id, "PASS", (), (), good.manifest_sha256, CUT, CUT, good.token
+    )  # real token, forged codes
+    assert (
+        fake.issued_fields() == good.issued_fields()
+    )  # identical fields are the issued verdict: harmless
+    forged = copy.copy(stale)
+    object.__setattr__(forged, "status", "PASS")
+    assert code_of(cp.admit_input, s, forged, **kw) == "ADMIT_NOT_PASS"
+    assert (
+        code_of(
+            cp.admit_input,
+            s,
+            cp.Verdict(
+                s.source_id, "PASS", (), (), good.manifest_sha256, CUT, CUT, "x"
+            ),
+            **kw,
+        )
+        == "ADMIT_NOT_PASS"
+    )
+
+
+def test_pin_store_schema_stale_lock_orphan_and_reserved_manifest_name(tmp_path):
+    s = src()
+    run, mp, m = make_run(tmp_path)
+    v = cp.verify(s, manifest=m, as_of=CUT, cutoff=CUT, checks=good_check())
+    pins, ev = tmp_path / "pins.json", tmp_path / "ev"
+    pins.write_text('{"schema_version": 1, "pins": {"other": {}}}')
+    kw = dict(run_dir=run, manifest_path=mp, evidence_root=ev, pin_path=pins)
+    assert (
+        code_of(cp.admit_input, s, v, **kw) == "PIN_SCHEMA"
+    )  # never treated as empty, never overwritten
+    assert json.loads(pins.read_text())["schema_version"] == 1
+    pins.unlink()
+    lock = Path(str(pins) + ".lock")
+    lock.write_text("crashed holder")
+    import os
+    import time
+
+    old = time.time() - cp.LOCK_STALE_SECONDS - 5
+    os.utime(lock, (old, old))
+    (ev / s.source_id / CUT).mkdir(
+        parents=True
+    )  # orphan from a crash between rename and pin
+    (ev / s.source_id / CUT / "junk").write_bytes(b"x")
+    cp.admit_input(s, v, **kw)  # the stale lock is broken and the orphan replaced
+    assert not (ev / s.source_id / CUT / "junk").exists() and not lock.exists()
+    assert code_of(cp._safe_rel, "capture-manifest.json") == "UNSAFE_PATH"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "a.txt:ads",
+        "CON",
+        "nul.txt",
+        "a.",
+        "a b",
+        ".hidden",
+        "a/../b",
+        "a\\b",
+        "/abs",
+        "x\ny",
+        "con.csv",
+        "dir/COM1",
+    ],
+)
+def test_safe_rel_refuses(name):
+    assert code_of(cp._safe_rel, name) == "UNSAFE_PATH"
+
+
+def test_safe_rel_accepts_plain_nested_names():
+    assert cp._safe_rel("a/b_c-d.1.csv").as_posix() == "a/b_c-d.1.csv"
+
+
+def test_dates_have_one_spelling():
+    assert (
+        code_of(cp.freshness_code, src(), as_of="20261106", cutoff=CUT) == "BAD_AS_OF"
+    )
+    assert (
+        code_of(cp.freshness_code, src(), as_of="2026-W45-5", cutoff=CUT) == "BAD_AS_OF"
+    )
+    assert (
+        code_of(cp.freshness_code, src(), as_of=CUT, cutoff="20261106") == "BAD_CUTOFF"
+    )
+
+
+def test_lint_round2_gaps(tmp_path):
+    def bad(mutate, code):
+        assert (
+            code_of(cp.load_sources, write_contract(tmp_path, mutate), repo_root=ROOT)
+            == code
+        )
+
+    bad(
+        lambda d: _src(d).update(source_id="abc\n"), "CONTRACT_SOURCE_ID"
+    )  # trailing newline
+    bad(lambda d: _src(d, 4).update(credential_ref="tok\n"), "CONTRACT_CREDENTIAL_REF")
+    bad(lambda d: _src(d).update(provider=7), "CONTRACT_PROVIDER")
+    bad(
+        lambda d: _src(d)["capture_stage"].update(tool="../tools/x.py"),
+        "CONTRACT_STAGE_TOOL_MISSING",
+    )
+    bad(lambda d: _src(d)["capture_stage"].update(surprise=1), "CONTRACT_STAGE_MODE")
+    bad(lambda d: _src(d)["freshness"].update(extra=1), "CONTRACT_FRESHNESS")
+    bad(
+        lambda d: _src(d, 8).update(probe_url="https://user:pw@x.test/"),
+        "CONTRACT_PROBE_URL",
+    )
+    bad(lambda d: _src(d).update(check_params={"cash_walk": {}}), "CONTRACT_CHECKS")
+    bad(lambda d: d.update(sources=[[]]), "CONTRACT_SHAPE")
+    bad(
+        lambda d: _src(d)["closure_checks"].__setitem__(0, ["unhashable"]),
+        "CONTRACT_SHAPE",
+    )
+    bad(
+        lambda d: d["readers"].update(
+            hwm={"file": "tools/portfolio_report.py", "symbol": "cash_drag_status"}
+        ),
+        "CONTRACT_READER_MISSING",
+    )
+
+
+def test_real_readers_are_real_function_definitions():
+    readers = cp.load_readers(CONTRACT, repo_root=ROOT)
+    assert readers["model_vs_actual"]["config_key"] == "model_vs_actual_input"
+    assert (
+        "total_liquid" not in readers and "cash_drag" not in readers
+    )  # no admitted-input seam exists for them
+
+
+def test_cdp_probe_paths_are_segments_not_substrings_and_bad_urls_are_contained():
+    s = src()
+
+    def st(*u):
+        return cr.cdp_window_state(s, fetch=tabs(*u))
+
+    assert st("https://client.schwab.com/app/accounts/authorizations") == cp.WINDOW_OK
+    assert st("https://client.schwab.com/app/lessons") == cp.WINDOW_OK
+    assert st("https://client.schwab.com/?action=login") == cp.WINDOW_LOGIN_WALL
+    assert st("https://client.schwab.com/app#/signin") == cp.WINDOW_LOGIN_WALL
+    assert st("https://client.schwab.com/session-expired") == cp.WINDOW_LOGIN_WALL
+    assert (
+        st("http://[::1", "https://client.schwab.com/app/x") == cp.WINDOW_OK
+    )  # one malformed tab URL breaks nothing
+    assert st("http://[::1") == cp.WINDOW_ABSENT
+
+
+def test_cmdkey_probe_is_existence_only_and_bounded(monkeypatch):
+    assert cr.cmdkey_ok("bad name; rm") is False and cr.cmdkey_ok("-x") is False
+    seen = {}
+
+    class R:
+        returncode, stdout = 0, "Target: BIT.com-API\nType: Generic\nUser: u"
+
+    def fake_run(cmd, **k):
+        seen["cmd"] = cmd
+        return R()
+
+    monkeypatch.setattr(cr.subprocess, "run", fake_run)
+    assert cr.cmdkey_ok("BIT.com-API") is True and seen["cmd"] == [
+        "cmdkey",
+        "/list:BIT.com-API",
+    ]
+
+
+def test_preflight_store_probe_states():
+    cm = src(
+        transport="CREDENTIAL_MANAGER",
+        credential_ref="BIT.com-API",
+        login_stop=False,
+        cdp_port=None,
+        window_hosts=(),
+    )
+    kw = dict(window_state=ok_window, vault_ok=lambda _r: True)
+    assert (
+        cp.preflight(cm, **kw).status == "UNVERIFIABLE_BY_DESIGN"
+    )  # no probe supplied
+    assert cp.preflight(cm, store_ok=lambda _n: True, **kw).status == "READY"
+    p = cp.preflight(cm, store_ok=lambda _n: False, **kw)
+    assert p.status == "BLOCKED_CREDENTIAL" and "BIT.com-API" in p.owner_step
+
+
+def test_closure_tolerances_are_capped_and_boundaries_are_decimal_exact():
+    one_cent_break = [{"opening": 100.00, "ending": 100.02, "components": [0.01]}]
+    assert cp.check_nav_identity(one_cent_break, tol=0.0).code == "NAV_IDENTITY_BREAK"
+    assert cp.check_nav_identity(
+        one_cent_break
+    ).ok  # the declared default tolerance is one cent
+    assert (
+        cp.check_nav_identity(one_cent_break, tol=1e9).code == "TOLERANCE_OUT_OF_RANGE"
+    )
+    assert (
+        cp.check_cash_walk([{"nav": 1, "cash": 1}], over_nav_tol=1e12).code
+        == "TOLERANCE_OUT_OF_RANGE"
+    )
+    assert (
+        cp.check_cash_walk([{"nav": 10, "cash": -1e9}], allowed_negative=1e12).code
+        == "CASH_WALK_OUT_OF_BOUNDS"
+    )
+    assert (
+        cp.check_statement_cash({"d": 1.0}, {"d": 99.0}, tol=float("inf")).code
+        == "TOLERANCE_OUT_OF_RANGE"
+    )
+    assert cp.check_sum_equals_total(
+        [1, 2], 3.01, tol_per_part=0.005
+    ).ok  # per-line rounding allowance, declared
+    assert cp.check_sum_equals_total([1, 2], 3.02).code == "TOTAL_MISMATCH"
+    assert (
+        cp.check_sum_equals_total([1], 1, tol_per_part=1).code
+        == "TOLERANCE_OUT_OF_RANGE"
+    )
+    assert not cp.check_stability(
+        "a" * 64 + "\n", "a" * 64 + "\n"
+    ).ok  # a trailing newline is not a digest
+
+
+def test_bridge_needs_a_material_receipt():
+    kw = dict(first_nav_after=0.0, max_implied_move=0.05)
+    assert not cp.check_bridge_receipt(
+        last_nav_before=5000.0, receipt_legs=[0.01], receipt_total=0.01, **kw
+    ).ok  # no hole
+    assert cp.check_bridge_receipt(
+        last_nav_before=5000.0, receipt_legs=[5000.0], receipt_total=5000.0, **kw
+    ).ok

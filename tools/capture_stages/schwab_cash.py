@@ -65,6 +65,7 @@ def walk_cash(
 
 _AMT = r"(\(?\$?-?[\d,]+\.\d\d\)?)"
 _TOTAL = re.compile(r"Total Cash and Cash Investments\s+" + _AMT + r"\s+" + _AMT)
+_BOX = re.compile(r"Cash and Cash Investments\s+(-?[\d,]+\.\d\d)")
 _DEBIT = re.compile(r"Settled Debit Balance\s+\(([\d,]+\.\d\d)\)")
 _SWEEP = re.compile(
     r"Bank Sweep\s+CHARLES SCHWAB\s+\$?([\d,]+\.\d\d)\s+\$?([\d,]+\.\d\d)"
@@ -78,19 +79,29 @@ def _num(s: str) -> float:
 
 
 def parse_statement_cash(text: str) -> float | None:
-    """Ending settled cash from a statement's detail section (pdftotext -layout text), or None.
+    """Ending settled cash from a statement (pdftotext -layout text), or None. Order, validated against twelve month ends
+    of seven accounts (every strategy-window month end equals the walk to the cent):
 
-    The asset-allocation box "Cash and Cash Investments" is deliberately NOT used: from mid-2026 it counts T-bill
-    ETFs as cash investments, so it is not a cash balance. A parenthesised amount is negative. A statement that
-    carries several accounts' totals is ambiguous and returns None (refused, not guessed).
+    1. ``Settled Debit Balance (x)`` -> ``-x`` (an overdrawn account);
+    2. the detail line ``Total Cash and Cash Investments <begin> <end>`` -> ``end``, unless it is zero while a bank-sweep
+       row exists (then the sweep's ending balance is used);
+    3. the ``Bank Sweep ... <begin> <end>`` row -> ``end``;
+    4. last resort: the asset-allocation line ``Cash and Cash Investments <x> <pct>%`` -> ``x``. From mid-2026 that box also
+       counts T-bill ETFs, so this value is only ever compared, never trusted: the statement-cash check against the walk
+       fails loudly when it is wrong.
+
+    Several accounts' totals in one text are ambiguous and return None (refused, not guessed).
     """
     if m := _DEBIT.search(text):
         return -_num(m.group(1))
     totals = _TOTAL.findall(text)
     if len(totals) > 1:
         return None
-    if totals:
+    sweep = _SWEEP.search(text)
+    if totals and not (_num(totals[0][0]) == 0 and sweep):
         return _num(totals[0][1])
-    if m := _SWEEP.search(text):
-        return _num(m.group(2))
+    if sweep:
+        return _num(sweep.group(2))
+    if m := _BOX.search(text):
+        return _num(m.group(1))
     return None

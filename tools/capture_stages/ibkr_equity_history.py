@@ -77,6 +77,10 @@ def nav_vs_change_in_nav(
         end = rec.get("ending")
         if end in (None, ""):
             unchecked.append(d)
-        elif not abs(total - float(end)) <= tol:
+            continue
+        try:
+            if not abs(total - float(end)) <= tol:
+                mismatch.append(d)
+        except ValueError:
             mismatch.append(d)
     return {"mismatch": mismatch, "unchecked": unchecked}
