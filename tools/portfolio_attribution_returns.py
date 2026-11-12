@@ -21,6 +21,12 @@ Member kinds (all data in the spec, none in code):
   values, published as one series.
 * ``equity_curve``: daily returns from a total-equity column adjusted for a
   cash-added column (``(equity - added) / previous equity - 1``).
+* ``close_blend``: a daily-rebalanced equal-weight blend of tickers read from a
+  captured JSON of daily closes (``rows`` of ticker, date, close). A ticker's
+  return is the close over the close of the day before, and exists only when that
+  previous calendar day has a close (a gap is never bridged); the blend exists only
+  on dates where every ticker has a return. Used for seven-day markets, whose
+  returns must not be read on an exchange calendar.
 
 Workbooks are not an admitted source: no member kind reads one.
 """
@@ -29,7 +35,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import io
@@ -164,8 +170,59 @@ def _equity_curve(member: dict[str, Any], content: bytes) -> list[dict[str, str]
     return out
 
 
+def _close_blend(member: dict[str, Any], content: bytes) -> list[dict[str, str]]:
+    series_id, layer, version, source = _identity(member)
+    if not isinstance(member.get("tickers"), list):
+        raise AttributionReturnsError(f"{series_id}: tickers must be a list")
+    tickers = [str(item) for item in member["tickers"]]
+    if len(tickers) < 2 or len(set(tickers)) != len(tickers):
+        raise AttributionReturnsError(f"{series_id}: a blend names two or more tickers")
+    payload = json.loads(content.decode("utf-8"), parse_float=Decimal)
+    closes: dict[str, dict[date, Decimal]] = {ticker: {} for ticker in tickers}
+    for row in payload.get("rows") or []:
+        ticker = str(row.get(member.get("ticker_field", "Ticker")))
+        if ticker not in closes:
+            continue
+        day = _day(row.get(member.get("date_field", "Date")), series_id)
+        value = row.get(member.get("close_field", "Close"))
+        if value is None:
+            continue
+        if day in closes[ticker]:
+            raise AttributionReturnsError(f"{series_id}: {ticker} repeats {day}")
+        number = _decimal(value, series_id)
+        if number <= 0:
+            raise AttributionReturnsError(
+                f"{series_id}: {ticker} close is not positive"
+            )
+        closes[ticker][day] = number
+    returns: dict[str, dict[date, Decimal]] = {}
+    for ticker, series in closes.items():
+        if not series:
+            raise AttributionReturnsError(f"{series_id}: no closes for {ticker}")
+        returns[ticker] = {
+            day: close / series[day - timedelta(days=1)] - 1
+            for day, close in series.items()
+            if day - timedelta(days=1) in series
+        }
+    common = sorted(set.intersection(*(set(item) for item in returns.values())))
+    return [
+        {
+            "series_id": series_id,
+            "date": day.isoformat(),
+            "return": format(
+                sum(returns[ticker][day] for ticker in tickers) / len(tickers), "f"
+            ),
+            "evidence_layer": layer,
+            "version_ref": version,
+            "source_artifact_id": source,
+        }
+        for day in common
+    ]
+
+
 _KINDS: Final = {
     "carry": _carry,
+    "close_blend": _close_blend,
     "csv_series": _csv_series,
     "equity_curve": _equity_curve,
 }

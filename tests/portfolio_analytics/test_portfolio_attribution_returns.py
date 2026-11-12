@@ -238,3 +238,105 @@ def test_no_member_kind_reads_a_workbook(tmp_path: Path) -> None:
     spec["members"][0]["kind"] = "xlsx_column"
     with pytest.raises(Error, match="unknown member kind"):
         _run(tmp_path, spec)
+
+
+def _crypto(tmp_path: Path, drop: tuple[str, str] | None = None) -> Path:
+    closes = {
+        "AAA": {
+            "2024-01-01": 100,
+            "2024-01-02": 110,
+            "2024-01-03": 99,
+            "2024-01-04": 99,
+        },
+        "BBB": {"2024-01-01": 10, "2024-01-02": 10, "2024-01-03": 12, "2024-01-04": 6},
+    }
+    rows = [
+        {"Ticker": ticker, "Date": f"{day}T00:00:00", "Close": close}
+        for ticker, series in closes.items()
+        for day, close in series.items()
+        if (ticker, day) != drop
+    ]
+    path = tmp_path / "crypto.json"
+    path.write_text(json.dumps({"rows": rows}), encoding="utf-8")
+    return path
+
+
+def _blend_spec(tmp_path: Path, crypto: Path) -> dict[str, Any]:
+    return {
+        "as_of_date": "2024-02-01",
+        "method": "fixture",
+        "members": [
+            {
+                "kind": "close_blend",
+                "path": str(crypto),
+                "sha256": _sha(crypto),
+                "tickers": ["AAA", "BBB"],
+                "series_id": "benchmark:crypto",
+                "evidence_layer": "L",
+                "version_ref": "v",
+                "source_artifact_id": "s",
+            }
+        ],
+    }
+
+
+def test_close_blend_is_the_daily_rebalanced_mean_of_calendar_day_returns(
+    tmp_path: Path,
+) -> None:
+    _, rows = _run(tmp_path, _blend_spec(tmp_path, _crypto(tmp_path)))
+    blend = _series(rows, "benchmark:crypto")
+    assert blend == {
+        "2024-01-02": Decimal("0.05"),  # (110/100-1 + 10/10-1) / 2
+        "2024-01-03": Decimal("0.05"),  # (99/110-1 + 12/10-1) / 2 = (-0.1+0.2)/2
+        "2024-01-04": Decimal("-0.25"),  # (0 + (6/12-1)) / 2
+    }
+
+
+def test_close_blend_never_bridges_a_missing_day(tmp_path: Path) -> None:
+    crypto = _crypto(tmp_path, drop=("AAA", "2024-01-03"))
+    _, rows = _run(tmp_path, _blend_spec(tmp_path, crypto))
+    # AAA has no return on 01-03 (no close) or 01-04 (no close the day before)
+    assert set(_series(rows, "benchmark:crypto")) == {"2024-01-02"}
+
+
+def test_close_blend_refuses_a_single_ticker_and_an_absent_ticker(
+    tmp_path: Path,
+) -> None:
+    crypto = _crypto(tmp_path)
+    one = _blend_spec(tmp_path, crypto)
+    one["members"][0]["tickers"] = ["AAA"]
+    with pytest.raises(Error, match="two or more tickers"):
+        _run(tmp_path, one)
+    absent = _blend_spec(tmp_path, crypto)
+    absent["members"][0]["tickers"] = ["AAA", "ZZZ"]
+    with pytest.raises(Error, match="no closes for ZZZ"):
+        _run(tmp_path, absent)
+
+
+def test_close_blend_keeps_the_digits_of_a_fractional_close(tmp_path: Path) -> None:
+    """A JSON float must not pass through binary floating point."""
+
+    rows = [
+        {"Ticker": "AAA", "Date": "2024-01-01", "Close": "100.00000000000000000001"},
+        {"Ticker": "AAA", "Date": "2024-01-02", "Close": "100.00000000000000000002"},
+        {"Ticker": "BBB", "Date": "2024-01-01", "Close": "10"},
+        {"Ticker": "BBB", "Date": "2024-01-02", "Close": "10"},
+    ]
+    text = (
+        json.dumps({"rows": rows})
+        .replace('"100.00000000000000000001"', "100.00000000000000000001")
+        .replace('"100.00000000000000000002"', "100.00000000000000000002")
+    )
+    crypto = tmp_path / "crypto.json"
+    crypto.write_text(text, encoding="utf-8")
+    _, out = _run(tmp_path, _blend_spec(tmp_path, crypto))
+    value = _series(out, "benchmark:crypto")["2024-01-02"]
+    assert value > 0
+    assert abs(value - Decimal("1E-22") / 2) < Decimal("1E-30")
+
+
+def test_close_blend_refuses_tickers_that_are_not_a_list(tmp_path: Path) -> None:
+    spec = _blend_spec(tmp_path, _crypto(tmp_path))
+    spec["members"][0]["tickers"] = "AAABBB"
+    with pytest.raises(Error, match="tickers must be a list"):
+        _run(tmp_path, spec)
