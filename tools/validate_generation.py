@@ -196,6 +196,8 @@ def _history(out: Path) -> list[tuple[str, dict[str, Any]]]:
     """Retained findings of earlier generations beside this one, oldest first."""
 
     root = out.parent.parent
+    if root.name != "validation":
+        return []  # only the retained validation/<generation>/ siblings, never a glob of unrelated dirs
     found: list[tuple[float, str, dict[str, Any]]] = []
     for path in root.glob("*/findings.json"):
         if path.resolve() == out.resolve():
@@ -233,7 +235,9 @@ def write_owner_view(out: Path, view: dict[str, Any]) -> None:
         ("owner-view.js", owner_view.build.render_js(view)),
     ):
         target = out.with_name(name)
-        target.write_bytes(text.encode("utf-8"))
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_bytes(text.encode("utf-8"))
+        os.replace(temporary, target)
 
 
 def _ascii(text: str) -> str:
