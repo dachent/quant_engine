@@ -1205,14 +1205,10 @@ def _xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
 def _annualize_return_on_net_capital(
     return_on_net_capital: Decimal,
     span_days: int,
-) -> Decimal | None:
-    """Independently apply the governed annualization policy (#904).
+) -> Decimal:
+    """Independently apply the governed annualization policy (#904): geometric ACT/365."""
 
-    Geometric ACT/365 from 365 days; under a year there is no annual rate.
-    """
-
-    if span_days < 365:
-        return None
+    span_days = max(span_days, 1)
     if return_on_net_capital <= Decimal(-1):
         _fail()
     return (Decimal(1) + return_on_net_capital) ** (
@@ -2979,9 +2975,7 @@ def _independent_period_fields(
                     "reported_basis": None if ronc_annual is None else label(span),
                     "window_days": span,
                     "window_start_field": "opening_capital_date",
-                    "method": (
-                        "GEOMETRIC_ACT_365" if span >= _PERIOD_YEAR_DAYS else None
-                    ),
+                    "method": "GEOMETRIC_ACT_365",
                 },
                 "ytd_twr": {
                     "reported_basis": "CUMULATIVE",

@@ -21,6 +21,7 @@ for sub in ("tools", ""):
 
 import account_strategy_manifest as manifest  # noqa: E402
 import strategy_leverage as leverage  # noqa: E402
+import verify_account_manifest_generation as verifier  # noqa: E402
 
 
 @pytest.mark.parametrize("days", [5, 41, 280, 364])
@@ -39,18 +40,11 @@ def test_sleeve_return_per_year_is_geometric_act_365_from_365_days() -> None:
     assert one_year is not None and round(float(one_year), 6) == 0.08
 
 
-@pytest.mark.parametrize("days", [1, 40, 364])
-def test_return_on_net_capital_is_not_scaled_linearly_under_a_year(days: int) -> None:
-    """2.44% in 40 days was printed as 22.27%; the geometric figure is 26.9%."""
+@pytest.mark.parametrize("days", [1, 40, 364, 365, 400])
+def test_return_on_net_capital_is_geometric_act_365_at_every_window(days: int) -> None:
+    """2.44% in 40 days was printed as 22.27% (linear); geometric is 26.9%."""
 
-    assert (
-        manifest._annualize_return_on_net_capital(Decimal("0.0244"), days) is None
-    )
-
-
-def test_return_on_net_capital_is_geometric_act_365_from_a_year() -> None:
-    value = manifest._annualize_return_on_net_capital(Decimal("0.21"), 400)
-    assert value is not None
-    assert round(float(value), 6) == round(1.21 ** (365 / 400) - 1, 6)
-    exact = manifest._annualize_return_on_net_capital(Decimal("0.07"), 365)
-    assert exact is not None and round(float(exact), 6) == 0.07
+    value = manifest._annualize_return_on_net_capital(Decimal("0.0244"), days)
+    assert round(float(value), 6) == round(1.0244 ** (365 / days) - 1, 6)
+    # the verifier mirror agrees
+    assert value == verifier._annualize_return_on_net_capital(Decimal("0.0244"), days)
