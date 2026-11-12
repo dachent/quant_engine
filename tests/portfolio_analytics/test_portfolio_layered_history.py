@@ -5234,8 +5234,10 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
     p123 = next(
         row for row in coverage["strategies"] if row["strategy_id"] == "p123-ai-factor"
     )
+    # the version refusal is the backtest resolution's (above); the mode's reason is the
+    # unadmitted model-live layer, which decides the research series first
     assert p123["modes"]["LIVE_PLUS_BACKTEST"] == {
-        "reason": "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED",
+        "reason": "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED",
         "status": "REQUIRED_NOT_READY",
     }
 

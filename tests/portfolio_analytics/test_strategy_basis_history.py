@@ -53,7 +53,7 @@ DECLARATION = {
 # segments and coverage files carry the new layer admissions and mode statuses.  live-only
 # and excluded are the unmodified main's bytes.
 MAIN_OFF_DIGESTS: dict[str, str] = {
-    "coverage.json": "615200bdd5f7938eac5d44c85fd5715fc62da2f78bf43916fbdf6d34c971eae6",
+    "coverage.json": "b4a9cfb98d7da277a71cbbbded047c774856211ca29e60bb654fd3a4b40930b5",
     "excluded.csv": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
     "live-only.csv": "1bb846d9ce46e553449adedb485ff5e84451446c9b841cf749a715abeb270e15",
     "live-plus-backtest.csv": "af50bf378c0698f7c3c4e1017aca2aae447635c50768423b8f390857bd898f0f",
