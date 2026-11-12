@@ -7093,7 +7093,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "![21, 22, 23, 24, 25].includes(data.panel_schema_version)" in renderer
+    assert "![21, 22, 23, 24, 25, 26].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -15293,7 +15293,7 @@ def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
     ]
     assert len(conditions) == 1
     condition = conditions[0]
-    assert condition["if"]["properties"]["panel_schema_version"]["enum"] == [24, 25]
+    assert condition["if"]["properties"]["panel_schema_version"]["enum"] == [24, 25, 26]
     assert condition["then"]["properties"]["advisory"]["required"] == ["hwm_candidate"]
 
 

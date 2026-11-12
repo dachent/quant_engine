@@ -1778,6 +1778,7 @@ def test_n56_panel_schema_requires_the_cash_fields_only_from_version_23():
         23,
         24,
         25,
+        26,
     ]
     for definition in (
         "custody_handoff_custody_cash",
