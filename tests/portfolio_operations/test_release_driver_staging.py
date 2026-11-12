@@ -169,7 +169,9 @@ def test_every_flag_a_stage_passes_is_one_its_tool_declares_and_every_required_o
     assert (REPO_ROOT / "tools" / script).is_file()
     subcommand = [tokens[2]] if not tokens[2].startswith(("--", "{")) else []
     text = _help(script, subcommand)
-    used = {token for token in tokens if token.startswith("--")}
+    # a bare "--" ends the tool's own flags: what follows is another command's argv
+    own = tokens[: tokens.index("--")] if "--" in tokens else tokens
+    used = {token for token in own if token.startswith("--")}
     assert used <= _declared_flags(text), sorted(used - _declared_flags(text))
     always = {
         token for token in _tokens(stage, optional=False) if token.startswith("--")

@@ -434,12 +434,13 @@ def _merge_rows(
     cutoff: str,
     problems: list[str],
 ) -> tuple[
-    list[tuple[RowKey, dict[str, Any], dict[str, Any]]], list[tuple[RowKey, str, str]]
+    list[tuple[RowKey, dict[str, Any], dict[str, Any]]],
+    list[tuple[RowKey, str, str, str | None]],
 ]:
     am, an = a
     bm, bn = b
     agreed: list[tuple[RowKey, dict[str, Any], dict[str, Any]]] = []
-    undone: list[tuple[RowKey, str, str]] = []
+    undone: list[tuple[RowKey, str, str, str | None]] = []
     for key in sorted(set(am) | set(an) | set(bm) | set(bn)):
         in_a = "metric" if key in am else "not derivable" if key in an else None
         in_b = "metric" if key in bm else "not derivable" if key in bn else None
@@ -482,7 +483,13 @@ def _merge_rows(
             elif strict_reasons and ra.strip() != rb.strip():
                 problems.append(f"{key}: reason {ra.strip()!r} vs {rb.strip()!r}")
             else:
-                undone.append((key, ra.strip(), rb.strip()))
+                # applicability survives only when both independent derivations state it
+                flag_a, flag_b = (
+                    an[key].get("applicability"),
+                    bn[key].get("applicability"),
+                )
+                applicability = flag_a if flag_a == flag_b else None
+                undone.append((key, ra.strip(), rb.strip(), applicability))
     return agreed, undone
 
 
@@ -586,12 +593,13 @@ def assemble(
             "reason_b": rb,
             "critical": True,
             "authority_pointer": pointers,
+            **({"applicability": applicability} if applicability else {}),
         }
-        for key, ra, rb in undone
+        for key, ra, rb, applicability in undone
     ]
     inventory = json.dumps(
         sorted(
-            [list(key) for key, _, _ in agreed] + [list(key) for key, _, _ in undone]
+            [list(key) for key, _, _ in agreed] + [list(key) for key, _, _, _ in undone]
         ),
         separators=(",", ":"),
     ).encode()

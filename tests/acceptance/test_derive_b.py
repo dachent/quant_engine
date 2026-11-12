@@ -3447,6 +3447,13 @@ def test_oracle_v3_b_public_derive_uses_pinned_fund_scoped_capital(tmp_path: Pat
         for metric_id, entity in cash_reasons
         if metric_id == "date.strategy_cash.coverage_end"
     } == {"volatis-strategy|quantbase|volatis", "robuxio-crypto|matrixport|robuxio"}
+    # #895 F2: oracle B states these rows are inapplicable by policy (not gaps), as A does
+    flagged = {
+        (row["metric_id"], row["entity"])
+        for row in output["not_derivable"]
+        if row.get("applicability") == "INAPPLICABLE_BY_POLICY"
+    }
+    assert flagged >= set(cash_reasons)
     # robuxio holds no units in this selection, so its capital facts stay withheld.
     not_derivable_ids = {
         (row["metric_id"], row["entity"]) for row in output["not_derivable"]

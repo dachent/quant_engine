@@ -204,6 +204,7 @@ _PATH_STAGES = {
     "tools/release_spec_remap.py": [],
     "tools/release_hwm_calendar.py": [],
     "tools/release_provenance_spec.py": [],
+    "tools/post_commit_validation.py": [],
     "tools/release_post_commit.py": [],
     "tools/release_acceptance_inputs.py": [],
     # assembles expected-baseline.json from the two derivations alone; an operator step, no delivery artifact
