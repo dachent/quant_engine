@@ -138,3 +138,20 @@ def test_the_shipped_graph_runs_the_replica_ceremony_beside_the_real_lane() -> N
     # the real lane announces the release id while the ceremony runs
     assert real.get("announce_release") is True
     assert "real-lane" in real["argv"] and "ceremony" in replica["argv"]
+
+
+def test_a_refusal_of_one_member_leaves_the_siblings_leftovers_where_they_are(
+    world: dict[str, Any],  # noqa: F811
+) -> None:
+    # both outputs are left over; with --replace a would be moved aside, but b refuses for another
+    # reason (missing input), so nothing may have moved
+    world["cycle"].mkdir(parents=True, exist_ok=True)
+    (world["cycle"] / "a.out").write_text("old", encoding="utf-8")
+    b = _member("b", "a", inputs=["{cycle}/missing.txt"])
+    graph = _graph(world, [FIRST, _member("a", "b"), b])
+    assert _drive(world, graph, "--only", "first") == 0
+    code = driver.main(
+        ["run", "--config", str(world["config"]), "--graph", str(graph), "--replace"]
+    )
+    assert code == 2
+    assert (world["cycle"] / "a.out").read_text(encoding="utf-8") == "old"

@@ -1990,6 +1990,9 @@ def run_parallel(run: Run, jobs: Sequence[tuple[Mapping[str, Any], bool, bool]])
     shared, so state writes are serialized by ``run.lock``.
     """
 
+    # every member's refusals first, before any member moves a leftover aside: one refusal changes nothing
+    for stage, replace, resuming in jobs:
+        check_ready(run, stage, replace=replace, resuming=resuming)
     barrier = threading.Barrier(len(jobs))
     outcomes: dict[str, Any] = {}
     run.parallel_live.update(str(stage["id"]) for stage, _, _ in jobs)
@@ -2033,9 +2036,10 @@ def run_parallel(run: Run, jobs: Sequence[tuple[Mapping[str, Any], bool, bool]])
             raise error
     for error in errors:
         raise error
+    # a member that never started (its barrier broke) is a failure, not a pass
     return (
         1
-        if any(isinstance(v, dict) and v["status"] != "ok" for v in outcomes.values())
+        if any(value is None or value["status"] != "ok" for value in outcomes.values())
         else 0
     )
 
