@@ -45,6 +45,17 @@ def test_a_first_release_may_lose_its_no_release_row_but_must_not_keep_it() -> N
     assert any("committed release was not read" in p for p in problems)
 
 
+def test_a_row_whose_values_change_across_the_commit_is_refused() -> None:
+    """Review finding (Grok): same (check, entity, class), different observed/pointer."""
+
+    pre, post = _doc([NR]), _doc([NR])
+    pre["findings"][0].update(observed="2026-07-31", pointer="$.a[0]")
+    post["findings"][0].update(observed="2024-01-31", pointer="$.a[3]")
+    assert any("content changed" in p for p in pcv.compare(pre, post))
+    post["findings"][0].update(observed="2026-07-31", pointer="$.a[0]")
+    assert pcv.compare(pre, post) == []
+
+
 def test_a_row_that_vanishes_is_refused() -> None:
     assert any("vanished" in p for p in pcv.compare(_doc([NR]), _doc([])))
 

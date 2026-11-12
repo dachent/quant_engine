@@ -64,6 +64,23 @@ def rows(document: dict[str, Any]) -> set[Row]:
     return found
 
 
+def _content(document: dict[str, Any]) -> dict[Row, str]:
+    """Per row, a digest of what makes the finding what it is (values, pointer, defects)."""
+
+    return {
+        (str(f["check_id"]), str(f["entity"]), str(f["class"])): json.dumps(
+            [
+                f.get("observed"),
+                f.get("expected"),
+                f.get("pointer"),
+                f.get("defect_ids"),
+            ],
+            sort_keys=True,
+        )
+        for f in document["findings"]
+    }
+
+
 def compare(pre: dict[str, Any], post: dict[str, Any]) -> list[str]:
     """Reasons the post-commit run is not equivalent to the pre-commit run."""
 
@@ -85,6 +102,10 @@ def compare(pre: dict[str, Any], post: dict[str, Any]) -> list[str]:
         problems.append(f"row appeared after the commit: {' | '.join(row)}")
     for row in sorted(before - after):
         problems.append(f"row vanished after the commit: {' | '.join(row)}")
+    pre_content, post_content = _content(pre), _content(post)
+    for row in sorted(before & after):
+        if pre_content[row] != post_content[row]:
+            problems.append(f"row content changed after the commit: {' | '.join(row)}")
     return problems
 
 
