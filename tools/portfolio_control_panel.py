@@ -4943,15 +4943,17 @@ def _compute_panel_numerical_hwm(
         else catalog.get("epoch_hpr_receipts", []),
         "epoch_hpr_receipts",
     )
-    spans_by_strategy = {
-        _text(receipt.get("strategy_id"), "epoch HPR strategy_id"): _objects(
-            _object(receipt.get("receipt"), "epoch HPR receipt").get(
-                "span_return_receipts"
-            ),
-            "epoch HPR spans",
+    # A strategy named twice keeps every span: nothing is overwritten.
+    spans_by_strategy: dict[str, list[Mapping[str, Any]]] = {}
+    for receipt in hpr_receipts:
+        spans_by_strategy.setdefault(str(receipt.get("strategy_id")), []).extend(
+            _objects(
+                _object(receipt.get("receipt"), "epoch HPR receipt").get(
+                    "span_return_receipts"
+                ),
+                "epoch HPR spans",
+            )
         )
-        for receipt in hpr_receipts
-    }
     if any(spans_by_strategy.values()):
         # Mirrors the report: a gap set bounded away from a new peak publishes the
         # numeric HWM from the governed path (#899); anything else stays UNAVAILABLE.
