@@ -256,6 +256,9 @@ _PATH_STAGES = {
     "tools/capture_stages/ibkr_equity_history.py": [],
     "tools/capture_stages/schwab_cash.py": [],
     "tools/capture_stages/statement_browser.py": [],
+    "tools/capture_stages/recorders.py": [],
+    "tools/capture_stages/adapters.py": [],
+    "tools/capture_stages/chain.py": [],
     # Attaches to the owner's signed-in Portfolio123 tab and saves a fixed,
     # hash-pinned allowlist of read-only exports into a create-only directory; the
     # staging CLI and the generation read only the files and manifest they are handed.

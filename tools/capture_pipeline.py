@@ -71,7 +71,15 @@ RESERVED_NAMES = frozenset(
     }
 )
 MANIFEST_NAME = "capture-manifest.json"
-STAGE_KEYS = {"mode", "tool", "derivation", "pull_tool", "margin_setting"}
+STAGE_KEYS = {
+    "mode",
+    "tool",
+    "derivation",
+    "pull_tool",
+    "margin_setting",
+    "recorder",
+    "blocked_on",
+}
 MAX_TOL = 0.05
 MAX_OVER_NAV_TOL = 0.1
 MAX_MISSING_CAP = 10
