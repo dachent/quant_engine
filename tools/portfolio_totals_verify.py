@@ -662,8 +662,8 @@ def _check_twr(
                 path, date(end.year - 1, 12, 31), end_index
             ),
         }
-        for name, value in expected.items():
-            if block.get(name) != value:
+        for name, wanted in expected.items():
+            if block.get(name) != wanted:
                 raise _fail(
                     f"portfolio_twr_cumulative.{name} differs from the re-derivation"
                 )
