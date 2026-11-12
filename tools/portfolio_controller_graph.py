@@ -334,6 +334,8 @@ _PATH_STAGES = {
     # #894: owner account financing declaration; read by the leverage disclosure
     "schemas/portfolio/account-financing-declaration.schema.json": ["report", "panel"],
     "tools/account_financing.py": ["report", "panel"],
+    "tools/leverage_closure.py": ["report", "panel"],
+    "tools/leverage_disclosure.py": ["report", "panel"],
     "schemas/portfolio/sleeve-account-facts.schema.json": ["report", "panel"],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
     # source bytes only, and the release step runs it beside the IBKR builder.

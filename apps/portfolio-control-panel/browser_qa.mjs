@@ -351,8 +351,9 @@ try {
         // app.js renders them as their own "derived" count in the badge and a tile.
         const observedCount = leverageRows.filter((row) => row.coverage_status === "OBSERVED_ONLY").length;
         const derivedCount = leverageRows.filter((row) => row.coverage_status === "DERIVED").length;
-        const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY" && row.coverage_status !== "DERIVED");
-        const derivedBadge = derivedCount ? ` / derived ${derivedCount.toLocaleString("en-US")}` : "";
+        const coveredCount = leverageRows.filter((row) => String(row.coverage_status).startsWith("COMPLETE")).length;
+        const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY" && row.coverage_status !== "DERIVED" && !String(row.coverage_status).startsWith("COMPLETE"));
+        const derivedBadge = `${coveredCount ? ` / reconciled ${coveredCount.toLocaleString("en-US")}` : ""}${derivedCount ? ` / derived ${derivedCount.toLocaleString("en-US")}` : ""}`;
         if (leverageCoverageRows < declaredClasses.size
           || !leverageObservationKpi.includes(leverageRows.length.toLocaleString("en-US"))
           || (unavailable.length > 0 && leverageStatus !== `Observed ${observedCount.toLocaleString("en-US")}${derivedBadge} / unavailable ${unavailable.length.toLocaleString("en-US")}`)) {

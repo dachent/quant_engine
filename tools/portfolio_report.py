@@ -116,6 +116,8 @@ import sleeve_disclosures
 import strategy_basis
 import strategy_leverage
 import strategy_basis_disclosure
+import account_financing
+import leverage_disclosure
 from portfolio_totals_verify import (
     PortfolioTotalsVerificationError,
     verify_portfolio_totals,
@@ -292,6 +294,8 @@ STRATEGY_BASIS_EVIDENCE_NAME: Final = "strategy-basis-declaration.json"
 PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH: Final = "input/strategy-basis-declaration.json"
 PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH: Final = "input/sleeve-account-facts.json"
 IMPLEMENTATION_SLEEVE_EVIDENCE_NAME: Final = "implementation-sleeve-basis.json"
+# The owner account financing declaration a candidate was built with (#894).
+ACCOUNT_FINANCING_EVIDENCE_NAME: Final = "account-financing-declaration.json"
 PUBLISHED_IMPLEMENTATION_SLEEVE_RELATIVE_PATH: Final = (
     "input/implementation-sleeve-basis.json"
 )
@@ -8946,6 +8950,8 @@ def _leverage_disclosures(
     catalog: Mapping[str, Any],
     baseline_root: Path,
     provider_ledger_root: Path | None = None,
+    account_financing_path: Path | None = None,
+    cutoff: str | None = None,
 ) -> list[dict[str, Any]]:
     """Project additive, source-bound leverage observations without aggregation."""
     references = [
@@ -9032,6 +9038,45 @@ def _leverage_disclosures(
                     "strategy_id": strategy_id,
                 }
             )
+    if account_financing_path is not None:
+        if cutoff is None:
+            raise ReportValidationError("the financing declaration needs a cutoff")
+        try:
+            declaration = account_financing.load_declaration(
+                _regular_file_bytes(
+                    account_financing_path, "account financing declaration"
+                )
+            )
+            summary = leverage_disclosure.account_financing_rows(
+                declaration,
+                provider_catalog,
+                cutoff=cutoff,
+                generation_id=catalog_generation_id,
+                catalog_sha256=catalog_sha256,
+            )
+        except account_financing.FinancingDeclarationError as exc:
+            raise ReportValidationError(str(exc)) from exc
+        # The summary rows replace the placeholders they supersede for an account.
+        replaced = {
+            (row["account_id"], row["data_class"], row["measurement_basis"])
+            for row in summary
+        }
+        rows = [
+            row
+            for row in rows
+            if not (
+                row.get("classification") == "UNAVAILABLE_MEASURE"
+                and (
+                    row.get("account_id"),
+                    row.get("data_class"),
+                    "RECONCILED_FINANCING_COST"
+                    if row.get("measurement_basis") == "FINANCING_COST"
+                    else row.get("measurement_basis"),
+                )
+                in replaced
+            )
+        ]
+        rows.extend(summary)
     return sorted(
         rows,
         key=lambda item: (
@@ -10678,6 +10723,7 @@ def build_report_data(
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
     implementation_sleeve_basis_path: Path | None = None,
+    account_financing_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -11684,7 +11730,13 @@ def build_report_data(
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
         "leverage_disclosures": with_account_roles(
-            _leverage_disclosures(catalog, baseline_root, provider_ledger_root)
+            _leverage_disclosures(
+                catalog,
+                baseline_root,
+                provider_ledger_root,
+                account_financing_path,
+                str(calculation_cutoff_date or catalog.get("as_of_date")),
+            )
         ),
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": strategy_returns,
@@ -11697,6 +11749,19 @@ def build_report_data(
     }
     if calculation_cutoff_date is not None:
         report["calculation_cutoff_date"] = calculation_cutoff_date
+    if account_financing_path is not None:
+        report["provenance"] = [
+            *report["provenance"],
+            {
+                "artifact": account_financing.ARTIFACT_ID,
+                "schema": f"{account_financing.ARTIFACT_ID}/1",
+                "sha256": hashlib.sha256(
+                    _regular_file_bytes(
+                        account_financing_path, "account financing declaration"
+                    )
+                ).hexdigest(),
+            },
+        ]
     if current_epoch_details is not None:
         # Lifecycle fields (#592): derived from the crosswalk, the epoch's own
         # close and the tag map only.  A report built without a current-epoch
@@ -12867,6 +12932,7 @@ def build_candidate(
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
     implementation_sleeve_basis_path: Path | None = None,
+    account_financing_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -12903,6 +12969,7 @@ def build_candidate(
         strategy_basis_path=strategy_basis_path,
         sleeve_facts_path=sleeve_facts_path,
         implementation_sleeve_basis_path=implementation_sleeve_basis_path,
+        account_financing_path=account_financing_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -12925,6 +12992,13 @@ def build_candidate(
         _write_exact(
             candidate / SLEEVE_FACTS_EVIDENCE_NAME,
             _regular_file_bytes(sleeve_facts_path, "sleeve facts"),
+        )
+    if account_financing_path is not None:
+        _write_exact(
+            candidate / ACCOUNT_FINANCING_EVIDENCE_NAME,
+            _regular_file_bytes(
+                account_financing_path, "account financing declaration"
+            ),
         )
     if implementation_sleeve_basis_path is not None:
         _write_exact(
@@ -14687,6 +14761,13 @@ def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
     """The basis declaration a candidate was built with, when it carries one (#624)."""
 
     path = candidate_dir / STRATEGY_BASIS_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
+
+
+def _candidate_account_financing(candidate_dir: Path) -> Path | None:
+    """The financing declaration a candidate was built with, when it carries one (#894)."""
+
+    path = candidate_dir / ACCOUNT_FINANCING_EVIDENCE_NAME
     return path if path.is_file() and not path.is_symlink() else None
 
 
@@ -17000,6 +17081,7 @@ def verify_candidate(
         implementation_sleeve_basis_path=_candidate_implementation_sleeve_basis(
             candidate_dir
         ),
+        account_financing_path=_candidate_account_financing(candidate_dir),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -18084,6 +18166,7 @@ def publish_report(
         implementation_sleeve_basis_path=_candidate_implementation_sleeve_basis(
             candidate_dir
         ),
+        account_financing_path=_candidate_account_financing(candidate_dir),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -18580,6 +18663,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--strategy-basis", type=Path)
     build.add_argument("--sleeve-facts", type=Path)
     build.add_argument("--implementation-sleeve-basis", type=Path)
+    build.add_argument("--account-financing", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -18744,6 +18828,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 strategy_basis_path=args.strategy_basis,
                 sleeve_facts_path=args.sleeve_facts,
                 implementation_sleeve_basis_path=args.implementation_sleeve_basis,
+                account_financing_path=args.account_financing,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
