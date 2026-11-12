@@ -1032,6 +1032,13 @@
           ]
         },
         {
+          "if": "account_financing",
+          "args": [
+            "--pin",
+            "account_financing={account_financing}"
+          ]
+        },
+        {
           "if": "implementation_model_book_perf",
           "args": [
             "--pin",

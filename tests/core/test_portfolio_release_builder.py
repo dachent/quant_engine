@@ -4930,6 +4930,7 @@ def test_build_report_routes_schema10_epoch_binding_to_data_only_publication(
         "strategy_basis_path": None,
         "sleeve_facts_path": None,
         "implementation_sleeve_basis_path": None,
+        "account_financing_path": None,
     }
     report_calls = calls["tool_calls"]
     assert [call[1] for call in report_calls] == ["verify", "publish"]
@@ -4982,6 +4983,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_p
             "strategy_basis_path": None,
             "sleeve_facts_path": None,
             "implementation_sleeve_basis_path": None,
+            "account_financing_path": None,
             "epoch_manifest_generation_root": epoch_root,
             "epoch_manifest_generation_id": "d" * 64,
         }
@@ -5955,6 +5957,7 @@ def test_expected_model_annualisation_comes_from_the_base_spec_not_a_literal() -
 _OPTIONAL_REPORT_INPUTS = (
     ("strategy_basis", "strategy_basis_path", "--strategy-basis"),
     ("sleeve_facts", "sleeve_facts_path", "--sleeve-facts"),
+    ("account_financing", "account_financing_path", "--account-financing"),
     (
         "implementation_sleeve_basis",
         "implementation_sleeve_basis_path",
