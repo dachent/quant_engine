@@ -118,3 +118,7 @@ and the source group must pin both files in `expected_hashes` (the owner's
 attestation). Any other reference text is unchanged. Print the reference of a
 staged run with `python tools/portfolio_provenance.py capture-design-ref --run-dir
 <run>`. See `docs/providers/p123-capture.md` for what the capture must contain.
+
+## A sleeve-only change mints a new ledger generation id (#907)
+
+The provenance generation binds the sha256 of the sleeve-declared inputs, and the provider ledger embeds the provenance catalog. A change that touches only the sleeve inputs or the sleeve builder (R3c: 312f4a3d to 38e8239c) therefore produces a new ledger generation id whose rows are byte-identical to the previous one. The id is an identity of the whole derivation, not of the rows. It is deliberately not decoupled: every pin and receipt that names the generation id would have to be rebound. When a release carries such a change, expect the new id, compare the row digests (not the ids) to show the rows did not move, and rebuild the ledger once for all ledger-affecting changes of the same release.

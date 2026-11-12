@@ -392,7 +392,7 @@ def test_b_the_declared_strategy_moves_only_for_the_stated_reason(
     )
     block = after["strategy_basis"]
     assert block["strategies"] == [TOY_STRATEGY]
-    assert block["path"] == declaration.as_posix()
+    assert block["path"] == declaration.name
     assert len(block["sha256"]) == 64
     epoch = next(
         r

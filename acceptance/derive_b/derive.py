@@ -323,7 +323,8 @@ def output_input_path(qe_root: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(qe_root.resolve()).as_posix()
     except (ValueError, OSError):
-        return path.as_posix()
+        # outside the root: the file name only, never the machine's location
+        return path.name
 
 
 def manifest_input_paths(manifest: dict[str, object], qe_root: Path) -> dict[str, Path]:
@@ -4715,13 +4716,13 @@ def derive(
                 output,
                 declared_basis[0],
                 declared_basis[1],
-                strategy_basis.as_posix(),
+                strategy_basis.name,
                 sleeve_result,
                 aggregate,
             )
             output["strategy_basis"] = {
                 "schema": STRATEGY_BASIS_SCHEMA,
-                "path": strategy_basis.as_posix(),
+                "path": strategy_basis.name,
                 "sha256": declared_basis[1],
                 "strategies": declared_basis[0],
                 "restated_rows": sorted(moved),

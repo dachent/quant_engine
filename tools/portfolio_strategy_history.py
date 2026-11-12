@@ -2941,24 +2941,85 @@ def write_qsi_refresh_bundle(
         if source_id.startswith("qsi-price-history-"):
             sources[source_id] = qsi_price_root / item["filename"]
     sidecar = Path(str(result["destination"])) / "sources.local.json"
+    locators = {
+        **{source_id: path.resolve() for source_id, path in sorted(sources.items())},
+        _PREDECESSOR_MANIFEST: retained_manifest_path.resolve(),
+        _PREDECESSOR_RETURNS: retained_returns_path.resolve(),
+    }
+    for locator in locators.values():
+        _refuse_scratch_locator(locator)
     _write_exact(
         sidecar,
         canonical_json_bytes(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "bundle_id": manifest["bundle_id"],
                 "accepted_predecessor": {
-                    "manifest_path": str(retained_manifest_path.resolve()),
-                    "returns_path": str(retained_returns_path.resolve()),
+                    "manifest_path": str(locators[_PREDECESSOR_MANIFEST]),
+                    "returns_path": str(locators[_PREDECESSOR_RETURNS]),
                 },
                 "sources": {
-                    source_id: str(path.resolve())
-                    for source_id, path in sorted(sources.items())
+                    source_id: str(locators[source_id]) for source_id in sorted(sources)
+                },
+                # Each locator is bound to the bytes it named, so a moved or
+                # replaced file is refused by name instead of failing mid-derive.
+                "sha256": {
+                    key: hashlib.sha256(path.read_bytes()).hexdigest()
+                    for key, path in sorted(locators.items())
                 },
             }
         ),
     )
     return {**result, "sources_local": str(sidecar)}
+
+
+_PREDECESSOR_MANIFEST: Final = "accepted-predecessor-manifest"
+_PREDECESSOR_RETURNS: Final = "accepted-predecessor-returns"
+
+
+def _refuse_scratch_locator(path: Path) -> None:
+    """A release input is never read from scratch: a cleanup breaks the release."""
+
+    if any(part.lower() == "scratch" for part in path.parts):
+        raise StrategyHistoryError(
+            f"a release input must be read from a durable location, not scratch: {path}"
+        )
+
+
+def load_qsi_sources_sidecar(
+    path: Path, bundle_id: object
+) -> tuple[dict[str, Path], Path, Path]:
+    """The sidecar's locators, each verified against the hash it was written with.
+
+    Returns ``(sources, accepted_predecessor_manifest, accepted_predecessor_returns)``.
+    A locator under scratch, a missing file or a changed file is a refusal here, not a
+    failure part-way through a re-derive.
+    """
+
+    sidecar = json.loads(Path(path).read_bytes())
+    if sidecar.get("bundle_id") != bundle_id:
+        raise StrategyHistoryError("QSI refresh source sidecar names another bundle")
+    if sidecar.get("schema_version") != 2:
+        raise StrategyHistoryError("QSI refresh source sidecar schema is unsupported")
+    predecessor = sidecar["accepted_predecessor"]
+    locators = {
+        **{key: Path(value) for key, value in sidecar["sources"].items()},
+        _PREDECESSOR_MANIFEST: Path(predecessor["manifest_path"]),
+        _PREDECESSOR_RETURNS: Path(predecessor["returns_path"]),
+    }
+    hashes = sidecar["sha256"]
+    if set(hashes) != set(locators):
+        raise StrategyHistoryError("QSI refresh source sidecar hashes differ")
+    for key, locator in sorted(locators.items()):
+        _refuse_scratch_locator(locator)
+        try:
+            digest = hashlib.sha256(locator.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise StrategyHistoryError(f"QSI source {key} is unreadable") from exc
+        if digest != hashes[key]:
+            raise StrategyHistoryError(f"QSI source {key} changed since it was bound")
+    sources = {key: locators[key] for key in sidecar["sources"]}
+    return sources, locators[_PREDECESSOR_MANIFEST], locators[_PREDECESSOR_RETURNS]
 
 
 def _write_exact(path: Path, content: bytes) -> None:
