@@ -1736,6 +1736,29 @@
       "only_ceremony": "full"
     },
     {
+      "id": "release-note",
+      "guard_spec": "{prod_spec}",
+      "requires": [
+        "findings-panel",
+        "findings-targets"
+      ],
+      "outputs": [
+        "{production}/RELEASE-NOTE.md"
+      ],
+      "argv": [
+        "{python}",
+        "{tools}/release_note.py",
+        "--panel-validation",
+        "{panel_root}/validation/{panel_gid}",
+        "--targets-log",
+        "{production}/validate-targets.log",
+        "--out",
+        "{production}/RELEASE-NOTE.md"
+      ],
+      "explicit": true,
+      "only_ceremony": "full"
+    },
+    {
       "id": "attest",
       "only_scheme": "git-tree-v2",
       "requires": [
