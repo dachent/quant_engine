@@ -1074,14 +1074,14 @@ def _p123_eu_designer_curve(
         raise StrategyHistoryError("EU designer-model catalog series differs")
 
     rows: list[dict[str, str]] = []
-    model_live = 0
+    model_live_rows: list[dict[str, str]] = []
     reader = csv.DictReader(io.StringIO(returns_bytes.decode("utf-8")))
     for row in reader:
         layer = row.get("evidence_layer")
-        if layer == "PROVIDER_MODEL_LIVE":
-            model_live += 1
-            continue
-        if layer != "BACKTEST":
+        # The provider's own record after its launch is the model's live layer
+        # (MODEL_LIVE): admitted here as a layer of its own, never relabelled as
+        # backtest and never the owner's account.
+        if layer not in {"BACKTEST", "PROVIDER_MODEL_LIVE"}:
             raise StrategyHistoryError(
                 "EU designer-model carries an unexpected evidence layer"
             )
@@ -1089,12 +1089,13 @@ def _p123_eu_designer_curve(
         value = _decimal(row.get("return"), "EU designer-model return")
         if value <= -1:
             raise StrategyHistoryError("EU designer-model return is invalid")
-        rows.append(
+        target = rows if layer == "BACKTEST" else model_live_rows
+        target.append(
             {
                 "series_id": "EU [P123]",
                 "date": observed.isoformat(),
                 "return": format(value.normalize(), "f"),
-                "evidence_layer": "BACKTEST",
+                "evidence_layer": "BACKTEST" if layer == "BACKTEST" else "MODEL_LIVE",
                 "strategy_version": strategy_version,
             }
         )
@@ -1108,6 +1109,12 @@ def _p123_eu_designer_curve(
         raise StrategyHistoryError(
             "EU designer-model prehistory reaches the provider launch"
         )
+    model_live_dates = [row["date"] for row in model_live_rows]
+    if model_live_dates != sorted(set(model_live_dates)):
+        raise StrategyHistoryError("EU designer-model live calendar is not ordered")
+    if model_live_dates and model_live_dates[0] <= dates[-1]:
+        raise StrategyHistoryError("EU designer-model live overlaps the backtest")
+    model_live = len(model_live_rows)
     definition: dict[str, object] = {
         "compatibility_basis": "OWNER_LAYER_RULING_DESIGNER_MODEL_IS_PRODUCT_DESIGN_HISTORY",
         "coverage_disposition": "COMPLETE_STRICTLY_BEFORE_PROVIDER_LAUNCH",
@@ -1121,7 +1128,12 @@ def _p123_eu_designer_curve(
         "observed_start": dates[0],
         "provider_currency": str(series.get("currency") or ""),
         "provider_launch": provider_launch,
-        "provider_model_live_observations_not_admitted": model_live,
+        # The model-live rows travel in the bundle as their own layer.  The
+        # series' observed_end / return_observations describe the BACKTEST rows
+        # only, so every consumer of those fields reads the prehistory it did.
+        "model_live_observations": model_live,
+        "model_live_start": model_live_dates[0] if model_live_dates else None,
+        "model_live_end": model_live_dates[-1] if model_live_dates else None,
         "provider_revision_dates": list(series.get("provider_revision_dates") or []),
         "required_for_analysis": True,
         "return_observations": len(rows),
@@ -1136,7 +1148,7 @@ def _p123_eu_designer_curve(
         ],
         "strategy_version": strategy_version,
     }
-    return rows, definition
+    return [*rows, *model_live_rows], definition
 
 
 def _p123_eu_backtest(
@@ -2458,8 +2470,10 @@ def build_bundle(
         for history_row in rows:
             row_series_id = history_row["series_id"]
             boundary = boundaries.get(row_series_id)
-            if boundary is not None and date.fromisoformat(history_row["date"]) >= (
-                boundary
+            if (
+                boundary is not None
+                and history_row.get("evidence_layer") != "MODEL_LIVE"
+                and date.fromisoformat(history_row["date"]) >= boundary
             ):
                 excluded_by_series[row_series_id] = (
                     excluded_by_series.get(row_series_id, 0) + 1
@@ -2472,7 +2486,12 @@ def build_bundle(
             boundary = boundaries.get(series_id)
             if boundary is None:
                 continue
-            series_rows = [item for item in rows if item["series_id"] == series_id]
+            series_rows = [
+                item
+                for item in rows
+                if item["series_id"] == series_id
+                and item.get("evidence_layer") != "MODEL_LIVE"
+            ]
             if not series_rows:
                 raise StrategyHistoryError(
                     f"live inception excludes the whole history: {series_id}"

@@ -1160,7 +1160,11 @@ def _designer_generation(root: Path, rows: list[tuple[str, str, str]]) -> Path:
     return generation
 
 
-def test_designer_curve_admits_only_the_pre_launch_segment(tmp_path: Path) -> None:
+def test_designer_curve_admits_the_post_launch_rows_as_model_live(
+    tmp_path: Path,
+) -> None:
+    """Kill test: the EU designer curve is MODEL_LIVE after launch, never backtest."""
+
     generation = _designer_generation(
         tmp_path,
         [
@@ -1173,14 +1177,79 @@ def test_designer_curve_admits_only_the_pre_launch_segment(tmp_path: Path) -> No
 
     rows, definition = history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
 
-    assert [row["date"] for row in rows] == ["2024-02-15", "2024-02-16"]
-    assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
+    assert [(row["date"], row["evidence_layer"]) for row in rows] == [
+        ("2024-02-15", "BACKTEST"),
+        ("2024-02-16", "BACKTEST"),
+        ("2024-02-19", "MODEL_LIVE"),
+        ("2024-02-20", "MODEL_LIVE"),
+    ]
     assert {row["series_id"] for row in rows} == {"EU [P123]"}
+    # The definition still describes the BACKTEST rows, so prehistory consumers
+    # read what they always did; the live layer is counted beside it.
     assert definition["return_observations"] == 2
-    assert definition["provider_model_live_observations_not_admitted"] == 2
     assert definition["observed_end"] == "2024-02-16"
+    assert definition["model_live_observations"] == 2
+    assert (definition["model_live_start"], definition["model_live_end"]) == (
+        "2024-02-19",
+        "2024-02-20",
+    )
     assert definition["provider_launch"] == "2024-02-18"
     assert definition["strategy_version"] == DESIGNER_VERSION
+
+
+def test_bundle_keeps_eu_model_live_past_the_account_live_boundary(
+    tmp_path: Path,
+) -> None:
+    """The account-live boundary cuts backtest rows only; model live runs on."""
+
+    inputs = _bundle_inputs(tmp_path)
+    generation = _designer_generation(
+        tmp_path / "designer",
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-19", "0.03", "PROVIDER_MODEL_LIVE"),
+            ("2025-12-01", "0.04", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+    result = history.write_bundle(
+        tmp_path / "bundle",
+        **inputs,
+        p123_eu_designer_model_generation=generation,
+        p123_eu_strategy_version=DESIGNER_VERSION,
+        as_of_date="2026-09-17",
+        live_inceptions={"EU [P123]": "2025-11-21"},
+    )
+    returns = (Path(str(result["destination"])) / "returns.csv").read_text(
+        encoding="utf-8"
+    )
+    eu = [
+        line.split(",")
+        for line in returns.splitlines()[1:]
+        if line.startswith("EU [P123],")
+    ]
+    assert [(row[1], row[3]) for row in eu] == [
+        ("2024-02-15", "BACKTEST"),
+        ("2024-02-16", "BACKTEST"),
+        ("2024-02-19", "MODEL_LIVE"),
+        ("2025-12-01", "MODEL_LIVE"),
+    ]
+
+
+def test_designer_curve_refuses_model_live_that_overlaps_the_backtest(
+    tmp_path: Path,
+) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-16", "0.03", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+
+    with pytest.raises(history.StrategyHistoryError, match="overlaps the backtest"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
 
 
 def test_designer_curve_carries_the_currency_and_revision_dates(
