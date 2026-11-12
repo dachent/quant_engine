@@ -59,13 +59,22 @@ def test_replica_and_gross_labels_say_so() -> None:
     assert "gross of fees" in gross.label_text
 
 
+def _seg(layer, role, first, last, **kw):
+    return _label(layer=layer, entity_role=role, first=first, last=last, **kw)
+
+
 def test_headline_never_from_backtest_or_short_window() -> None:
-    assert sl.headline_allowed({sl.ACCOUNT_LIVE}, 400)
-    assert sl.headline_allowed({sl.MODEL_LIVE, sl.ACCOUNT_LIVE}, 400)
-    assert not sl.headline_allowed({sl.BACKTEST, sl.ACCOUNT_LIVE}, 6000)
-    assert not sl.headline_allowed({sl.ACCOUNT_LIVE}, 364)
-    assert not sl.headline_allowed({sl.COPY_RECORD}, 400)
-    assert not sl.headline_allowed(set(), 400)
+    live = _seg(sl.ACCOUNT_LIVE, "ACCOUNT", "2025-01-01", "2026-02-01")
+    model = _seg(sl.MODEL_LIVE, "MODEL_BOOK", "2025-01-01", "2026-02-01")
+    back = _seg(sl.BACKTEST, "SIM_TWIN", "2009-01-01", "2024-12-31")
+    short = _seg(sl.ACCOUNT_LIVE, "ACCOUNT", "2026-01-01", "2026-06-01")
+    copy = _seg(sl.COPY_RECORD, "COPY", "2025-01-01", "2026-02-01")
+    assert sl.headline_allowed([live])
+    assert sl.headline_allowed([model, live])
+    assert not sl.headline_allowed([back, live])  # backtest anywhere in the stitch
+    assert not sl.headline_allowed([short])
+    assert not sl.headline_allowed([copy])
+    assert not sl.headline_allowed([])
 
 
 def test_one_series_per_block() -> None:
@@ -73,6 +82,14 @@ def test_one_series_per_block() -> None:
     assert sl.check_block(one) == []
     assert sl.check_block({"series_labels": [_label().to_dict()] * 2})
     assert sl.check_block({})
+
+
+def test_forbidden_wording_anywhere_in_a_block_is_refused() -> None:
+    block = {
+        "series_labels": [_label().to_dict()],
+        "note": ["Portfolio123 provider-live book CAGR"],
+    }
+    assert any("forbidden wording" in p for p in sl.check_block(block))
 
 
 def test_forbidden_wording() -> None:

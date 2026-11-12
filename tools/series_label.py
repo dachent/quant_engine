@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Final, Mapping
+from typing import Any, Final, Mapping, Sequence
 
 BACKTEST: Final = "BACKTEST"
 MODEL_LIVE: Final = "MODEL_LIVE"
@@ -151,16 +151,31 @@ def require_series(label: SeriesLabel) -> SeriesLabel:
     return label
 
 
-def headline_allowed(layers_present: set[str], window_days: int) -> bool:
+def headline_allowed(segments: Sequence[SeriesLabel]) -> bool:
     """May an annualised return, CAGR or alpha be the headline of this series?
 
-    Never when any hypothetical BACKTEST observation is in it, never for a
-    COPY_RECORD, and never under one year of window (#904 shares this rule).
+    `segments` are the labelled segments the series is stitched from. Never when
+    any segment is BACKTEST (hypothetical) or a COPY_RECORD, and never when the
+    stitched window (first to last date of the segments) is under one year.
     """
 
-    if not layers_present or not layers_present <= {MODEL_LIVE, ACCOUNT_LIVE}:
+    if not segments or any(
+        label.layer not in {MODEL_LIVE, ACCOUNT_LIVE} for label in segments
+    ):
         return False
-    return window_days >= MIN_HEADLINE_DAYS
+    first = min(date.fromisoformat(label.first) for label in segments)
+    last = max(date.fromisoformat(label.last) for label in segments)
+    return (last - first).days >= MIN_HEADLINE_DAYS
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [text for item in value.values() for text in _strings(item)]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _strings(item)]
+    return []
 
 
 def check_block(block: Mapping[str, Any]) -> list[str]:
@@ -173,7 +188,11 @@ def check_block(block: Mapping[str, Any]) -> list[str]:
         require_series(label_from_dict(labels[0]))
     except (SeriesLabelError, KeyError, TypeError, ValueError) as exc:
         return [f"invalid series label: {exc}"]
-    return []
+    return [
+        f"forbidden wording: {word}"
+        for text in _strings(block)
+        for word in forbidden_wording(text)
+    ]
 
 
 def forbidden_wording(text: str) -> list[str]:
