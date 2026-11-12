@@ -15877,3 +15877,18 @@ def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(
     assert "vendor_gap_fills" not in bound
     with pytest.raises(panel.ControlPanelValidationError, match="vendor_gap_fills"):
         panel._rendered_files(*base_args, **base_kwargs, vendor_gap_fills=(staged, pin))
+
+
+def test_renderer_names_the_p123_layers_and_never_calls_the_copy_provider_live() -> (
+    None
+):
+    """RULING-E D2: the owner's P123 copy is not the provider's live book."""
+
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "provider-live book" not in renderer.lower()
+    assert "Model live (provider record, without my trades)" in renderer
+    assert "P123 copy (diagnostic)" in renderer
+    assert "layerLabels[provider.evidence_layer]" in renderer
+    assert 'COPY_RECORD: "P123 copy (diagnostic)"' in renderer
+    assert "evidence.copy_record" in renderer

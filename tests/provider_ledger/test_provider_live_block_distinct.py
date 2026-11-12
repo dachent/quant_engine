@@ -255,3 +255,12 @@ def test_admitted_provider_path_clears_a_prior_unavailable_declaration() -> None
     )
     assert "provider_live" not in refreshed[0]
     assert refreshed[0]["provider"]["return_observations"] == 1
+
+
+def test_a_copy_record_block_pasted_onto_another_strategy_is_refused() -> None:
+    copy = {**AI_PROVIDER_BLOCK, "evidence_layer": "COPY_RECORD"}
+    rows = [
+        {"strategy_id": "p123-ai-factor", "copy_record": copy},
+        {"strategy_id": "p123-eu", "copy_record": deepcopy(copy)},
+    ]
+    assert shared_provider_live_blocks(rows) == [("p123-ai-factor", "p123-eu")]

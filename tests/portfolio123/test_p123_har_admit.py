@@ -171,11 +171,17 @@ def test_admission_binds_by_the_list_and_records_every_hash(tmp_path: Path) -> N
     assert not (root / "strategy_9002_app_investment_perfdata_9002.csv").exists()
     equity = (root / "strategy_9001_perf.csv").read_text(encoding="utf-8").splitlines()
     assert equity == [
-        "Date,Total Equity,Cash Added",
-        "2026-01-06,101.0,10.0",
-        "2026-01-07,102.0,10.0",
-        "2026-01-09,104.0,10.0",
+        "Date,Total Equity,Cash Added,Marker",
+        "2026-01-05,100.0,0.0,0",
+        "2026-01-06,101.0,10.0,1",
+        "2026-01-07,102.0,10.0,1",
+        "2026-01-08,103.0,10.0,3",
+        "2026-01-09,104.0,10.0,1",
     ]
+    assert (
+        manifest["items"]["9001"]["equity_rows"]
+        == manifest["items"]["9001"]["perf_rows"]
+    )
     assert manifest["evidence_eligible"] is False
     assert manifest["items"]["9001"]["last_date"] == "2026-01-09"
     assert manifest["items"]["9002"]["last_date"] is None

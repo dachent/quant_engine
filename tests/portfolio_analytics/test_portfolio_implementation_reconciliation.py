@@ -2306,3 +2306,35 @@ def test_a_holiday_cutoff_is_held_to_the_last_trading_day() -> None:
         reconciliation.require_model_through_as_of(
             "tt-portfolio", date(2026, 4, 1), date(2026, 4, 3)
         )
+
+
+def test_a_copy_record_never_reaches_a_model_field() -> None:
+    """RULING-E D2: the copy and the model differ on the same dates; only the model is read."""
+
+    rows = [
+        {
+            "strategy_id": "p123-ai-factor",
+            "date": "2026-01-05",
+            "return": "0.10",
+            "evidence_layer": "MODEL_LIVE",
+        },
+        {
+            "strategy_id": "p123-ai-factor",
+            "date": "2026-01-05",
+            "return": "0.03",
+            "evidence_layer": "COPY_RECORD",
+        },
+        {
+            "strategy_id": "p123-ai-factor",
+            "date": "2026-01-06",
+            "return": "0.02",
+            "evidence_layer": "COPY_RECORD",
+        },
+    ]
+    model = reconciliation._returns(
+        rows,
+        strategy_id="p123-ai-factor",
+        exclude_layers=reconciliation.MODEL_EXCLUDED_LAYERS,
+        accepted_as_of=ACCEPTED_AS_OF,
+    )
+    assert model == {date(2026, 1, 5): 0.10}

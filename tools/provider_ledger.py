@@ -228,6 +228,12 @@ _SOURCE_FACT_TARGET: Final = {
     "positions": "positions",
     "transactions": "transactions",
 }
+# A provider-sourced product authority covers the precise layers its own rows
+# carry: P123 publishes the model's record and the owner's copy in one file, and
+# each row says which it is (MODEL_LIVE / COPY_RECORD), never PROVIDER_LIVE.
+_SOURCE_LAYER_FAMILY: Final = {
+    "PROVIDER_LIVE": frozenset({"PROVIDER_LIVE", "MODEL_LIVE", "COPY_RECORD"})
+}
 _MATRIXPORT: Final = "matrixport"
 _QUANTBASE: Final = "quantbase"
 # Provenance derives an account id from its tracker source alias (the bare
@@ -7742,7 +7748,7 @@ def _refresh_strategy_evidence(
     )
     for row in rows:
         layer = str(row.get("evidence_layer"))
-        if layer in {"ACCOUNT_LIVE", "PROVIDER_LIVE"}:
+        if layer in {"ACCOUNT_LIVE", "PROVIDER_LIVE", "MODEL_LIVE", "COPY_RECORD"}:
             by_strategy_layer[(str(row["strategy_id"]), layer)].append(row)
     refreshed: list[dict[str, Any]] = []
     strategy_ids = sorted({strategy_id for strategy_id, _ in by_strategy_layer})
@@ -7750,6 +7756,8 @@ def _refresh_strategy_evidence(
         prior = existing.get(strategy_id, {})
         account_rows = by_strategy_layer.get((strategy_id, "ACCOUNT_LIVE"), [])
         provider_rows = by_strategy_layer.get((strategy_id, "PROVIDER_LIVE"), [])
+        model_rows = by_strategy_layer.get((strategy_id, "MODEL_LIVE"), [])
+        copy_rows = by_strategy_layer.get((strategy_id, "COPY_RECORD"), [])
         account_providers = sorted(
             {
                 str(item["provider_id"])
@@ -7789,6 +7797,10 @@ def _refresh_strategy_evidence(
             for item in provider_rows
             if str(item.get("provider_id")) == provider_provider_id
         ] or provider_rows
+        if not provider_rows and (model_rows or copy_rows) and not prior_provider:
+            provider_provider_id = str(
+                (model_rows or copy_rows)[0].get("provider_id") or provider_provider_id
+            )
         top_provider_id = account_provider_id if account_rows else provider_provider_id
         top_generation = provider_generations.get(top_provider_id)
         refreshed_row = {
@@ -7886,6 +7898,79 @@ def _refresh_strategy_evidence(
             # longer admitted by the current source facts. Do not retain that
             # stale account scope on a provider-only refreshed receipt.
             refreshed_row.pop("account", None)
+        if model_rows or copy_rows:
+            # The old single provider block meant the copy. `provider` now holds the
+            # model's own live record (layer MODEL_LIVE) and `copy_record` the owner's
+            # P123 copy; each is recomputed from this generation, never carried.
+            refreshed_row.pop("provider", None)
+            if model_rows:
+                refreshed_row.pop("provider_live", None)
+            prior_copy = prior_provider
+            prior_provider = {}
+            accepted_provider_rows = []
+            copy_entity_id = str(copy_rows[0]["entity_id"]) if copy_rows else None
+            for key, layer_rows in (
+                ("provider", model_rows),
+                ("copy_record", copy_rows),
+            ):
+                refreshed_row.pop(key, None)
+                if not layer_rows:
+                    continue
+                entities = sorted({str(item["entity_id"]) for item in layer_rows})
+                block_provider = str(layer_rows[0]["provider_id"])
+                if len(entities) != 1:
+                    raise ProviderLedgerError(
+                        f"{key} block mixes entities in {strategy_id}"
+                    )
+                refreshed_row[key] = {
+                    **_path_statistics(layer_rows),
+                    **(
+                        {
+                            k: prior_copy[k]
+                            for k in ("cash_added_semantics", "model_entity_id")
+                            if k in prior_copy
+                        }
+                        if key == "copy_record"
+                        else {}
+                    ),
+                    "entity_id": entities[0],
+                    **(
+                        {
+                            "copy_entity_id": copy_entity_id,
+                            "model_entity_id": entities[0],
+                        }
+                        if key == "provider" and copy_entity_id
+                        else {}
+                    ),
+                    "evidence_layer": "MODEL_LIVE"
+                    if key == "provider"
+                    else "COPY_RECORD",
+                    "generation_as_of_date": (
+                        provider_as_of_dates[block_provider].isoformat()
+                        if provider_generations.get(block_provider) is not None
+                        else None
+                    ),
+                    "generation_id": str(layer_rows[0]["generation_id"]),
+                    "provider_id": block_provider,
+                    "return_series_sha256": hashlib.sha256(
+                        canonical_json_bytes(
+                            [
+                                {"date": str(i["date"]), "return": str(i["return"])}
+                                for i in sorted(
+                                    layer_rows, key=lambda i: str(i["date"])
+                                )
+                            ]
+                        )
+                    ).hexdigest(),
+                }
+            if "provider" in refreshed_row and "copy_record" in refreshed_row:
+                if (
+                    refreshed_row["provider"]["entity_id"]
+                    == refreshed_row["copy_record"]["entity_id"]
+                ):
+                    raise ProviderLedgerError(
+                        f"model live and copy record are one entity in {strategy_id}"
+                    )
         if accepted_provider_rows or prior_provider:
             provider_generation = provider_generations.get(provider_provider_id)
             if accepted_provider_rows:
@@ -7900,13 +7985,13 @@ def _refresh_strategy_evidence(
                 ),
                 "generation_as_of_date": (
                     provider_as_of_dates[provider_provider_id].isoformat()
-                    if provider_generation is not None
+                    if provider_generation is not None and accepted_provider_rows
                     else prior_provider.get("generation_as_of_date")
                     or prior.get("generation_as_of_date")
                 ),
                 "generation_id": (
                     provider_generation.generation_id
-                    if provider_generation is not None
+                    if provider_generation is not None and accepted_provider_rows
                     else prior_provider.get("generation_id")
                     or prior.get("generation_id")
                 ),
@@ -7956,21 +8041,52 @@ def _require_distinct_provider_live_blocks(
         )
 
 
+def _p123_declaration(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalise a strategy evidence row to (provider id, copy id, model id).
+
+    A first declaration names the owner's copy as the provider entity and the model
+    book as `model_entity_id`. A refreshed row holds the model's record in `provider`
+    (layer MODEL_LIVE) and the copy in `copy_record`; either may be the only block.
+    """
+
+    provider = item.get("provider")
+    copy = item.get("copy_record")
+    provider = provider if isinstance(provider, dict) else {}
+    copy = copy if isinstance(copy, dict) else {}
+    if not provider and not copy:
+        return None
+    if provider.get("evidence_layer") == "MODEL_LIVE":
+        copy_id = provider.get("copy_entity_id") or copy.get("entity_id")
+        model_id = provider.get("entity_id")
+    elif provider:
+        copy_id = provider.get("entity_id")
+        model_id = provider.get("model_entity_id")
+    else:
+        copy_id = copy.get("entity_id")
+        model_id = copy.get("model_entity_id")
+    provider_id = provider.get("provider_id") or copy.get("provider_id")
+    return {
+        "provider_id": provider_id or item.get("provider_id"),
+        "entity_id": copy_id,
+        "model_entity_id": model_id,
+    }
+
+
 def _portfolio123_provider_returns(
     provider_ref: Mapping[str, Any],
     manifest: GenerationManifest,
     evidence_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     p123_rows = [
-        item
+        {**item, "provider": declared}
         for item in evidence_rows
-        if isinstance(item.get("provider"), dict)
+        if (declared := _p123_declaration(item)) is not None
         and (
-            item["provider"].get("provider_id") == "portfolio123"
+            declared.get("provider_id") == "portfolio123"
             or item.get("provider_id") == "portfolio123"
         )
         and item.get("generation_id") == manifest.generation_id
-        and item["provider"].get("entity_id") not in {None, ""}
+        and declared.get("entity_id") not in {None, ""}
     ]
     if not p123_rows:
         return []
@@ -8036,8 +8152,13 @@ def _portfolio123_provider_returns(
         _text(item["provider"].get("entity_id"), "Portfolio123 entity_id"): {}
         for item in p123_rows
     }
+    model_entity_ids = {
+        str(item["provider"]["model_entity_id"])
+        for item in p123_rows
+        if item["provider"].get("model_entity_id") not in {None, ""}
+    }
     equity_observations: dict[str, dict[date, tuple[Decimal, Decimal]]] = {
-        entity_id: {} for entity_id in selected
+        entity_id: {} for entity_id in selected | dict.fromkeys(model_entity_ids)
     }
     for row in equity_table.to_pylist():
         entity_id = str(row.get("_entity_id") or "")
@@ -8163,7 +8284,11 @@ def _portfolio123_provider_returns(
                 {
                     "cost": None,
                     "date": managed_current[0].isoformat(),
-                    "evidence_layer": "PROVIDER_LIVE",
+                    "entity_id": entity_id,
+                    # The managed series is P123's bookkeeping of the owner following
+                    # a model (the copy). It is account-side evidence, never the
+                    # model's or the provider's live record (RULING-E D2).
+                    "evidence_layer": "COPY_RECORD",
                     "generation_id": manifest.generation_id,
                     "provider_id": "portfolio123",
                     "return": format(period_return, "f"),
@@ -8173,7 +8298,45 @@ def _portfolio123_provider_returns(
                     "strategy_name": str(p123["strategy_name"]),
                 }
             )
-    result.sort(key=lambda item: (str(item["strategy_id"]), str(item["date"])))
+    for p123 in p123_rows:
+        model_id = p123["provider"].get("model_entity_id")
+        if model_id in {None, ""}:
+            continue
+        ordered_model = sorted(equity_observations[str(model_id)].items())
+        if len(ordered_model) < 2:
+            raise ProviderLedgerError(
+                f"Portfolio123 model live curve is unavailable: {model_id}"
+            )
+        previous_equity = ordered_model[0][1][0]
+        for observed, (equity_value, cash_added) in ordered_model[1:]:
+            period_return = (equity_value - cash_added) / previous_equity - Decimal(1)
+            if period_return <= -1:
+                raise ProviderLedgerError("Portfolio123 model return is invalid")
+            previous_equity = equity_value
+            result.append(
+                {
+                    "cost": None,
+                    "date": observed.isoformat(),
+                    "entity_id": str(model_id),
+                    "evidence_layer": "MODEL_LIVE",
+                    "generation_id": manifest.generation_id,
+                    "provider_id": str(
+                        p123["provider"].get("provider_id") or p123.get("provider_id")
+                    ),
+                    "return": format(period_return, "f"),
+                    "return_basis": "OBSERVED",
+                    "return_type": "TOTAL",
+                    "strategy_id": str(p123["strategy_id"]),
+                    "strategy_name": str(p123["strategy_name"]),
+                }
+            )
+    result.sort(
+        key=lambda item: (
+            str(item["strategy_id"]),
+            str(item["evidence_layer"]),
+            str(item["date"]),
+        )
+    )
     return result
 
 
@@ -9652,13 +9815,39 @@ def _admissions(
                 ProviderFactAdmission(
                     provider_id=provider_provider_id,
                     fact_type="strategy_returns",
-                    evidence_layer=EvidenceLayer.PROVIDER_LIVE,
+                    evidence_layer=EvidenceLayer(
+                        provider.get("evidence_layer") or "PROVIDER_LIVE"
+                    ),
                     disposition=AdmissionDisposition.RECONCILIATION_ONLY,
                     effective_start=_day(
                         provider.get("observed_start"), "provider observed_start"
                     ),
                     effective_end=_day(
                         provider.get("observed_end"), "provider observed_end"
+                    ),
+                    strategy_id=strategy_id,
+                )
+            )
+        for block_key, block_layer, block_disposition in (
+            ("copy_record", EvidenceLayer.COPY_RECORD, "REFERENCE_ONLY"),
+        ):
+            if item.get(block_key) is None:
+                continue
+            block = _object(item[block_key], f"strategy evidence {block_key}")
+            admissions.append(
+                ProviderFactAdmission(
+                    provider_id=_text(
+                        block.get("provider_id") or item.get("provider_id"),
+                        f"strategy evidence {block_key} provider_id",
+                    ),
+                    fact_type="strategy_returns",
+                    evidence_layer=block_layer,
+                    disposition=AdmissionDisposition[block_disposition],
+                    effective_start=_day(
+                        block.get("observed_start"), f"{block_key} observed_start"
+                    ),
+                    effective_end=_day(
+                        block.get("observed_end"), f"{block_key} observed_end"
                     ),
                     strategy_id=strategy_id,
                 )
@@ -10163,7 +10352,11 @@ def _dataset_disposition(
             if item.item_kind is DatasetItemKind.PRODUCT_DATA_CLASS
             else "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
         )
-    elif actual_layers and actual_layers != {evidence_layer}:
+    elif actual_layers and not actual_layers <= (
+        _SOURCE_LAYER_FAMILY.get(evidence_layer, {evidence_layer})
+        if str(admission.get("transform") or "").startswith("P123_")
+        else {evidence_layer}
+    ):
         reason = "MATERIALIZED_EVIDENCE_LAYER_DIFFERS_FROM_PRODUCT_AUTHORITY"
     required_admission_facts = {
         _TARGET_ADMISSION_FACT[target_fact]

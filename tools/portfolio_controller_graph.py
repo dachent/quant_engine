@@ -278,6 +278,8 @@ _PATH_STAGES = {
     "tools/nested_strategy_tag_map.py": ["report", "panel"],
     "tools/lifecycle_fields.py": ["report", "panel"],
     "tools/sleeve_disclosures.py": ["report", "panel"],
+    # #897: the series label (layer, entity, window, basis) every report and panel series carries.
+    "tools/series_label.py": ["report", "panel"],
     # R2 (registry nine -> fifteen): the economic return-source registry and its
     # schema are read by tests and pinned by digest in the product contract (whose
     # own path carries the stage impact); no producer imports them.
