@@ -786,7 +786,9 @@ def _evidence_mode_returns(
 
 
 def _backtest_observations(composition: Mapping[str, object] | None) -> int:
-    value = None if composition is None else composition.get("backtest_observations_used")
+    value = (
+        None if composition is None else composition.get("backtest_observations_used")
+    )
     return value if isinstance(value, int) else 0
 
 
@@ -1456,7 +1458,9 @@ def _dependence_payload(
         series_id: _performance_summary(
             returns.get(series_id, []),
             _backtest_observations(
-                None if series_composition is None else series_composition.get(series_id)
+                None
+                if series_composition is None
+                else series_composition.get(series_id)
             ),
         )
         for series_id in spec.series_ids

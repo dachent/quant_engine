@@ -664,7 +664,9 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
     assert live_performance["annualization_status"] == "SUPPRESSED_UNDER_365D"
     # the combined path holds backtest observations: never an annualised headline
     assert combined_performance["cagr"] is None
-    assert combined_performance["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
+    assert (
+        combined_performance["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
+    )
     assert combined_performance["maximum_drawdown"] is not None
 
 
