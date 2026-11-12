@@ -129,6 +129,16 @@
       1
     ],
     [
+      "leverage_disclosure",
+      "account_financing",
+      1
+    ],
+    [
+      "leverage_disclosure",
+      "leverage_closure",
+      1
+    ],
+    [
       "portfolio_attended_preparation",
       "build_sleeve_facts_release",
       1
@@ -520,12 +530,22 @@
     ],
     [
       "portfolio_report",
+      "account_financing",
+      1
+    ],
+    [
+      "portfolio_report",
       "derived_epoch_perimeter",
       1
     ],
     [
       "portfolio_report",
       "holdings_identity",
+      1
+    ],
+    [
+      "portfolio_report",
+      "leverage_disclosure",
       1
     ],
     [
