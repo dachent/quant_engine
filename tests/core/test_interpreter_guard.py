@@ -168,6 +168,7 @@ EXCUSED = {
     "yahoo_fetch_driver": "fetches vendor bytes",
     "release_driver": "orchestrates; its python stages are checked by required_python",
     "release_measurements": "wall-clock and size measurements of the run",
+    "release_canary": "filesystem timing and environment probe of the commit path; derives no figure",
     "verify_sleeve_ledger": "re-reads a ledger and compares digests",
 }
 GUARDED_MARKERS = (
