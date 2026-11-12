@@ -593,3 +593,60 @@ def test_same_entity_free_sentence_groups_many_entities_into_one_row() -> None:
     md = ov.render_markdown(view)
     assert len(view["items"]) == 3 and md.count("Gap for each entity under Where.") == 1
     assert "Where: a, b, c" in md
+
+
+REAL_REGISTER = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "acceptance"
+        / "validate"
+        / "unreachable.json"
+    ).read_bytes()
+)["entries"]
+
+
+def test_the_shared_register_has_no_owner_view_errors() -> None:
+    assert ov.registry_errors(REAL_REGISTER) == []
+    assert any("owner_view" in e for e in REAL_REGISTER)
+
+
+def _classes(*findings: dict[str, Any]) -> list[str]:
+    view = ov.build_owner_view(doc(*findings), register=REAL_REGISTER, today=TODAY)
+    return [i["class"] for i in view["items"]]
+
+
+def test_register_seeds_composer_is_real_and_fund_scoped_cash_is_accepted_with_a_record() -> (
+    None
+):
+    composer = finding(
+        "expected.not_derivable",
+        entity="capital.account.cutoff:account-9cb2832ca2366f08",
+        defects=("B4",),
+    )
+    cash = finding(
+        "expected.not_derivable",
+        entity="capital.strategy_cash.cutoff:robuxio-crypto",
+    )
+    assert _classes(composer) == [ov.REAL_DATA_GAP]
+    view = ov.build_owner_view(doc(cash), register=REAL_REGISTER, today=TODAY)
+    assert (
+        view["items"][0]["class"] == ov.ACCEPTED_BY_DESIGN
+        and view["items"][0]["owner_record"]
+    )
+
+
+def test_register_seeds_split_the_dead_slot_from_the_real_per_strategy_gap() -> None:
+    f = finding(
+        "completeness.required_outputs",
+        entity="strategy_summary.cost_evidence_status",
+        observed={
+            "available": 0,
+            "unavailable": ["qsi", "robuxio-crypto", "volatis-strategy"],
+        },
+        defects=("E6",),
+    )
+    view = ov.build_owner_view(doc(f), register=REAL_REGISTER, today=TODAY)
+    by = {i["entity"]: i["class"] for i in view["items"]}
+    assert by["strategy_summary.cost_evidence_status"] == ov.CHECKER_BUG
+    assert by["robuxio-crypto"] == by["volatis-strategy"] == ov.REAL_DATA_GAP
+    assert "qsi" not in by  # qsi has costs: only the dead-slot verdict applies to it
