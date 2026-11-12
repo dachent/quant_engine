@@ -63,7 +63,7 @@ COST_RATE_KEYS: Final = ("fee_rates",)
 # on a subscription or a fund fee, and no tax-lot, tax-rate or realization input is
 # declared. The status says so; it is never a label for evidence that failed to arrive.
 AFTER_TAX_STATUS_NOT_APPLICABLE: Final = "NOT_APPLICABLE_PRE_TAX_REPORTING_SCOPE"
-BUILDER_VERSION: Final = "1.2.1"
+BUILDER_VERSION: Final = "1.2.2"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
 AVAILABLE_STATUSES: Final = {
