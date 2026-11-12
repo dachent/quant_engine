@@ -42,6 +42,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
+import subprocess
 import re
 import shlex
 import stat as stat_module
@@ -92,6 +94,7 @@ _INCOMPLETE_EVENTS = frozenset(
     }
 )
 
+_BENIGN_DLLS = frozenset({"kernel32", "user32", "tzres.dll"})
 _ENV_NAMES = ("TZ", "PYTHONUTF8", "PYTHONHASHSEED", "HOME", "USERPROFILE")
 
 
@@ -99,23 +102,32 @@ _PINNED_GIT_SHOW = re.compile(r"[0-9a-f]{40}:[^\s:]+")
 
 
 def allowed_child_command(command: object) -> bool:
-    """True only for ``git show <40-hex commit>:<path>``: content-addressed by an
-    immutable commit id, so the child cannot return different bytes later."""
+    """Read-only children whose output is a function of state already in the key:
+    ``git [-C dir] show <40-hex commit>:<path>`` (content-addressed by an immutable
+    commit id), ``git [-C dir] rev-parse --show-toplevel HEAD^{commit}`` (repository
+    HEAD is part of the key) and ``cmd /c ver`` (Windows version, part of the key)."""
 
     if isinstance(command, str):
         try:
             command = shlex.split(command, posix=False)
         except ValueError:
             return False
-    if isinstance(command, (list, tuple)) and all(isinstance(c, str) for c in command):
-        tokens = [str(c).strip('"') for c in command]
-        return (
-            len(tokens) == 3
-            and os.path.basename(tokens[0]).lower() in {"git", "git.exe"}
-            and tokens[1] == "show"
-            and _PINNED_GIT_SHOW.fullmatch(tokens[2]) is not None
-        )
-    return False
+    if not (
+        isinstance(command, (list, tuple)) and all(isinstance(c, str) for c in command)
+    ):
+        return False
+    tokens = [str(c).strip('"') for c in command]
+    program = os.path.basename(tokens[0]).lower() if tokens else ""
+    if program in {"cmd", "cmd.exe"}:
+        return [t.lower() for t in tokens[1:]] == ["/c", "ver"]
+    if program not in {"git", "git.exe"}:
+        return False
+    rest = tokens[1:]
+    if len(rest) >= 2 and rest[0] == "-C":
+        rest = rest[2:]
+    if len(rest) == 2 and rest[0] == "show":
+        return _PINNED_GIT_SHOW.fullmatch(rest[1]) is not None
+    return rest == ["rev-parse", "--show-toplevel", "HEAD^{commit}"]
 
 
 class VerificationReceiptMismatch(RuntimeError):
@@ -267,8 +279,8 @@ class _Recorder:
         ):
             self.allowed_spawns -= 1
             return
-        if event == "ctypes.dlopen" and args and args[0] == "kernel32":
-            return  # handle-based opens; the trees they read are declared via read_tree
+        if event == "ctypes.dlopen" and args and args[0] in _BENIGN_DLLS:
+            return  # handle-based opens (trees declared via read_tree); timezone lookups
         if event == "ctypes.dlopen":
             self.flag(event)
             return
@@ -437,6 +449,22 @@ def _record() -> Iterator[_Recorder]:
         yield recorder
     finally:
         _active.remove(recorder)
+
+
+def _repo_head(repo_root: Path) -> str:
+    """The checkout's HEAD commit (what the verifiers' own ``git rev-parse`` returns)."""
+
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return done.stdout.strip() if done.returncode == 0 else "no-git"
+    except (OSError, subprocess.SubprocessError):
+        return "no-git"
 
 
 def tool_identity(repo_root: Path) -> str:
@@ -718,6 +746,8 @@ def run_with_receipt(
             "name": name,
             "identity": dict(identity),
             "tool": tool_identity(repo_root),
+            "head": _repo_head(repo_root),
+            "os": platform.platform(),
             "environment": _environment_digest(),
         }
     )
