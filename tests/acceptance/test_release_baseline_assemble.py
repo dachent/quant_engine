@@ -826,3 +826,37 @@ def test_reproduces_the_r22_release_baseline_byte_for_byte(tmp_path: Path) -> No
     assert (
         tool.assemble(**files, **common, template=template, data_roots=roots) == built
     )
+
+
+def _flagged(flag: str | None) -> list[dict[str, Any]]:
+    row: dict[str, Any] = {
+        "metric_id": "capital.strategy_cash.cutoff",
+        "entity": "volatis-strategy",
+        "window": None,
+        "reason": "fund-scoped provider policy: no derived cash line",
+    }
+    if flag is not None:
+        row["applicability"] = flag
+    return [row]
+
+
+def test_policy_applicability_reaches_the_baseline_only_when_both_sides_state_it() -> (
+    None
+):
+    """#895 F2 kill test: the assembler rebuilt every not-derivable row with a fixed key
+    set, so the oracle's INAPPLICABLE_BY_POLICY never reached the validator."""
+
+    both = _doc(
+        _build(
+            a_nd=_flagged("INAPPLICABLE_BY_POLICY"),
+            b_nd=_flagged("INAPPLICABLE_BY_POLICY"),
+        )
+    )
+    assert both["not_derivable"][0]["applicability"] == "INAPPLICABLE_BY_POLICY"
+    for a_flag, b_flag in (
+        ("INAPPLICABLE_BY_POLICY", None),
+        (None, "INAPPLICABLE_BY_POLICY"),
+        (None, None),
+    ):
+        one = _doc(_build(a_nd=_flagged(a_flag), b_nd=_flagged(b_flag)))
+        assert "applicability" not in one["not_derivable"][0]

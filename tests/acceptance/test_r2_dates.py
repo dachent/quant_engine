@@ -36,7 +36,10 @@ COMPARISON = ("strategy_attribution", "benchmark_comparisons", 0)
 
 def _section(findings: list[checks.Finding], prefix: str) -> list[checks.Finding]:
     return [
-        f for f in findings if f.check_id == SECTION and f.entity.startswith(prefix)
+        f
+        for f in findings
+        if f.check_id in (SECTION, "dates.account_live_window")
+        and f.entity.startswith(prefix)
     ]
 
 

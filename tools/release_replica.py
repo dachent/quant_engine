@@ -2,7 +2,8 @@
 
 ``copy``      copy the live predecessor state a replica commit needs into a scratch root
               and write the replica root marker last (``quant_engine.core.replica_gate``).
-``ceremony``  preflight, dry-run, validation findings, COMMIT, post-release-verify,
+``ceremony``  preflight, dry-run, validation findings, COMMIT, post-commit validation
+              (the validator re-run on the committed release), post-release-verify,
               recovery rehearsal and clean-room restore on the REPLICA roots; writes the
               receipt a real-roots ``data_pipeline.py execute --commit`` must present.
 ``lanes``     run lane A (real roots: preflight and plan in parallel, dry-run, findings)
@@ -374,6 +375,48 @@ def replica_ceremony(a: argparse.Namespace, runner: Runner = _subprocess_runner)
         flag.unlink(missing_ok=True)
 
 
+def _post_commit_validation_commands(
+    coordination: Path, panel_dir: Path, out: Path, a: argparse.Namespace
+) -> list[list[str]]:
+    """Validate the panel again after the commit and compare with the pre-commit run.
+
+    The pre-commit findings sit at the validator's default location beside the
+    ``generations`` root; the post-commit run writes elsewhere, so the file the commit
+    sink anchored on is never overwritten (Ruling F section 6).
+    """
+
+    panel_dir = panel_dir.resolve()  # the validator writes beside the resolved path
+    pre = panel_dir.parent.parent / "validation" / panel_dir.name / "findings.json"
+    post = out / "post-commit-findings.json"
+    pointer = coordination / "CURRENT_RELEASE.json"
+    return [
+        _py(
+            "validate_generation.py",
+            str(panel_dir),
+            "--expected",
+            str(a.expected),
+            "--cutoff",
+            a.cutoff,
+            "--crosswalk",
+            str(a.crosswalk),
+            *_basis_flags(a),
+            "--release-pointer",
+            str(pointer),
+            "--out",
+            str(post),
+        ),
+        _py(
+            "post_commit_validation.py",
+            "--pre",
+            str(pre),
+            "--post",
+            str(post),
+            "--receipt",
+            str(out / "post-commit-validation-receipt.json"),
+        ),
+    ]
+
+
 def _replica_ceremony(a: argparse.Namespace, runner: Runner) -> int:
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -480,6 +523,17 @@ def _replica_ceremony(a: argparse.Namespace, runner: Runner) -> int:
     receipts = sorted(evidence.glob("*.json"))
     if not receipts:
         raise ReplicaToolError(f"preflight left no receipt in {evidence}")
+    if not go(
+        run_step(
+            "post-commit-validation",
+            _post_commit_validation_commands(
+                Path(replica_spec.coordination_root), Path(a.replica_panel_dir), out, a
+            ),
+            out,
+            runner,
+        )
+    ):
+        return finish(commit_result)
     for step in (
         run_step(
             "post-release-verify",
