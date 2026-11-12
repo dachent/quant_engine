@@ -66,10 +66,9 @@
     "client.schwab.com"
    ],
    "capture_stage": {
-    "mode": "NEW_STAGE_REQUIRED",
-    "tool": null,
-    "derivation": "tools/capture_stages/schwab_cash.py",
-    "recorder": "tools/capture_stages/recorders.py (pages only; the statement PDF download through the browser download handler is not built)"
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/capture_stages/recorders.py",
+    "derivation": "tools/capture_stages/schwab_cash.py"
    },
    "login_stop": true,
    "freshness": {
@@ -205,7 +204,8 @@
    "capture_stage": {
     "mode": "NEW_STAGE_REQUIRED",
     "tool": null,
-    "blocked_on": "no TQQQ/SHV close exists in the hashed archive: the Quantbase price histories are fund NAV series, Schwab TQQQ trades stop 2026-10-19 and IBKR holds neither symbol on 2026-11-05"
+    "derivation": "tools/capture_stages/adapters.py",
+    "blocked_on": "recorder owned by the price-pull work (sprint-data-bridge): no TQQQ/SHV close exists in the hashed archive; the verify adapter (governed_price: two independent pulls, coverage + stability) is declared here"
    },
    "login_stop": false,
    "freshness": {
@@ -286,6 +286,30 @@
     "stability"
    ],
    "admits": [],
+   "owner_declared_ok": false
+  },
+  {
+   "source_id": "model_vs_actual_audit_input",
+   "provider": "PORTFOLIO_ANALYTICS",
+   "transport": "DERIVED",
+   "credential_ref": null,
+   "cdp_port": null,
+   "capture_stage": {
+    "mode": "NEW_STAGE_REQUIRED",
+    "tool": null,
+    "derivation": "tools/capture_stages/adapters.py",
+    "blocked_on": "the audit-bridges builder (pulls, windows, components with O/D/I origin tags) is owned by sprint-data-bridge; the reader seam is the REAL parse_audit_input (closure check reader_parses) and the reader config key is model_vs_actual_input"
+   },
+   "login_stop": false,
+   "freshness": {
+    "max_age_days": 7
+   },
+   "closure_checks": [
+    "reader_parses"
+   ],
+   "admits": [
+    "model_vs_actual"
+   ],
    "owner_declared_ok": false
   }
  ]

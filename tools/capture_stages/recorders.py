@@ -39,6 +39,7 @@ PLAN_QUERY_RE = re.compile(
     r"planId=[0-9a-f-]{36}&plancode=[A-Z0-9]{3,12}&planGroup=[A-Z]{2,4}"
 )
 COMPOSER_LABELS = frozenset({"Statements", "Documents"})
+CLICK_LABELS = COMPOSER_LABELS | {"Search"}
 PRESIGNED_RE = re.compile(
     r"https://[a-z0-9.-]*\.?s3\.amazonaws\.com/[^?#\s]*statements/\d{4}-\d{2}\.pdf\?[^\s]+"
 )
@@ -257,6 +258,84 @@ SELECT_ACCOUNT_JS = """(suffix) => {
 }"""
 
 
+SET_RANGE_JS = """(label) => {
+  const sel = document.getElementById('date-range-select-id');
+  if (!sel) return false;
+  const o = [...sel.options].find(x => x.text.trim() === label);
+  if (!o) return false;
+  sel.value = o.value; sel.dispatchEvent(new Event('change', {bubbles: true})); return true;
+}"""
+STATEMENT_RANGE = "Last 5 years"
+SEARCH_LABEL = "Search"
+STATEMENT_DATE_RE = re.compile(r"(\d\d)/(\d\d)/(\d{4})	Statements")
+MAX_STATEMENTS = 60
+
+
+def statement_dates(text: str) -> list[str]:
+    """ISO dates of the ``Statements`` rows on a Schwab Statements page (newest first, as listed)."""
+    return [
+        f"{m.group(3)}-{m.group(1)}-{m.group(2)}"
+        for m in STATEMENT_DATE_RE.finditer(text)
+    ]
+
+
+def record_schwab_statements(
+    page: Any,
+    accounts: Sequence[str],
+    out_dir: Path,
+    *,
+    to_text: Callable[[Path], str] = pdf_to_text,
+) -> list[str]:
+    """Per account: Transaction History page text, then the Statements page (account selected by a fixed script, range set to
+    ``STATEMENT_RANGE`` by a fixed script, a real click on ``Search``), then every listed statement downloaded through the
+    page's download handler (``page.download_pdf(index, dest)``) with its ``pdftotext`` text. Files are
+    ``history-<s>.txt``, ``statements-<s>.txt`` and ``statement-<s>-<YYYY-MM-DD>.pdf/.txt``. The statement count on the page must
+    equal the number downloaded, and the whole run is renamed into place only when every account succeeded."""
+    st = _Staging(out_dir)
+    names: list[str] = []
+    try:
+        for suffix in accounts:
+            if not re.fullmatch(r"[0-9]{3,4}", suffix):
+                raise ValueError("ACCOUNT_SUFFIX")
+            for kind, path in (
+                ("history", "/app/accounts/history/#/"),
+                ("statements", "/app/accounts/statements/#/"),
+            ):
+                page.goto(SCHWAB_ORIGIN + path)
+                if not page.evaluate(SELECT_ACCOUNT_JS, suffix):
+                    raise StageBlocked("BLOCKED_LOGIN")
+                if kind == "statements":
+                    if not page.evaluate(SET_RANGE_JS, STATEMENT_RANGE):
+                        raise StageBlocked("BLOCKED_LOGIN")
+                    page.click_text(SEARCH_LABEL)
+                text = page.inner_text("body")
+                _check_page(page, text, suffix, SCHWAB_ORIGIN)
+                st.write_text(f"{kind}-{suffix}.txt", text)
+                names.append(f"{kind}-{suffix}")
+                if kind == "statements":
+                    dates = statement_dates(text)
+                    if (
+                        not dates
+                        or len(dates) > MAX_STATEMENTS
+                        or len(set(dates)) != len(dates)
+                    ):
+                        raise StageBlocked("BLOCKED_LOGIN")
+                    for i, d in enumerate(dates):
+                        pdf = st.tmp / f"statement-{suffix}-{d}.pdf"
+                        page.download_pdf(i, pdf)
+                        if not pdf.is_file() or not pdf.read_bytes().startswith(
+                            b"%PDF"
+                        ):
+                            raise ValueError("PDF_FETCH")
+                        st.write_text(f"statement-{suffix}-{d}.txt", to_text(pdf))
+                        names.append(f"statement-{suffix}-{d}")
+        st.commit()
+    except BaseException:
+        st.abort()
+        raise
+    return names
+
+
 def record_schwab_pages(
     page: Any,
     accounts: Sequence[str],
@@ -323,10 +402,19 @@ class PlaywrightPage:  # pragma: no cover - live only
         )
 
     def click_text(self, label: str) -> None:
-        if label not in COMPOSER_LABELS:
+        if label not in CLICK_LABELS:
             raise ValueError("LABEL")
         self._p.get_by_text(label, exact=True).first.click()
         self._p.wait_for_timeout(6000)
+
+    def download_pdf(self, index: int, dest: Path) -> None:
+        """Click the ``index``-th 'Click to Download PDF' button and save the download through the browser's handler."""
+        buttons = self._p.locator(
+            "button[aria-label^='Click to Download PDF'], button[title^='Click to Download PDF']"
+        )
+        with self._p.expect_download(timeout=60000) as info:
+            buttons.nth(index).click()
+        info.value.save_as(str(dest))
 
 
 def attach_page(

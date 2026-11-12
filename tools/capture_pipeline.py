@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
+import functools
 import hashlib
 import json
 import math
@@ -40,6 +41,7 @@ TRANSPORTS = (
     "FLEX_TOKEN_VAULT",
     "PUBLIC_HTTP",
     "CREDENTIAL_MANAGER",
+    "DERIVED",  # built from retained, hashed captures: no window, no credential, no network
 )
 VAULT_TRANSPORTS = ("API_VAULT", "FLEX_TOKEN_VAULT")
 # kind "owner-login-or-credential-manager": the credential lives in the operator's credential store (or the owner
@@ -145,6 +147,11 @@ def closure_check_names() -> tuple[str, ...]:
     return tuple(sorted(CLOSURE_CHECKS))
 
 
+@functools.lru_cache(maxsize=64)
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
 def load_readers(
     path: Path, *, repo_root: Path | None = None
 ) -> dict[str, dict[str, str]]:
@@ -169,7 +176,7 @@ def load_readers(
                 or not f.is_file()
                 or not re.search(
                     rf"^\s*def {re.escape(r['symbol'])}\b",
-                    f.read_text(encoding="utf-8"),
+                    _read_text(f),
                     re.M,
                 )
             ):
@@ -706,6 +713,16 @@ def not_applicable(name: str) -> CheckResult:
     return CheckResult(name, True, "NOT_APPLICABLE")
 
 
+def check_reader_parses(parse: Callable[[], object]) -> CheckResult:
+    """The producer/consumer seam: the artifact is accepted only if the REAL reader's own parser accepts it (``parse`` calls it).
+    Any exception is a failure with a stable code; the message is never carried."""
+    try:
+        parse()
+    except Exception:  # noqa: BLE001 - the reader's refusal is the verdict, whatever its type
+        return CheckResult("reader_parses", False, "READER_REFUSES", 1)
+    return CheckResult("reader_parses", True, "OK")
+
+
 CLOSURE_CHECKS: dict[str, Callable[..., CheckResult]] = {
     "nav_identity": check_nav_identity,
     "coverage": check_coverage,
@@ -716,6 +733,7 @@ CLOSURE_CHECKS: dict[str, Callable[..., CheckResult]] = {
     "bridge_receipt": check_bridge_receipt,
     "hwm_gap_bound": check_hwm_gap_bound,
     "stability": check_stability,
+    "reader_parses": check_reader_parses,
 }
 
 # ----------------------------------------------------------------------------- S3 verify
