@@ -61,6 +61,13 @@ def real_or_checker(klass: str) -> str:
 # ------------------------------------------------------------------------ registry
 
 
+def _text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+_MISSING = object()
+
+
 def _iso(value: Any) -> bool:
     try:
         date.fromisoformat(str(value))
@@ -89,20 +96,29 @@ def _entry_errors(position: int, entry: Any) -> list[str]:
     if "close_by" in entry and not _iso(entry["close_by"]):
         errors.append(f"{label}: close_by is not an ISO date")
     for key in _REQUIRED:
-        if not str(block.get(key) or "").strip():
-            errors.append(f"{label}: owner_view.{key} is required")
+        if not _text(block.get(key)):
+            errors.append(f"{label}: owner_view.{key} is required text")
+    for key in ("where", "number_affected", "proof_check"):
+        if key in block and not _text(block[key]):
+            errors.append(f"{label}: owner_view.{key} must be non-blank text")
+    if "entity_match" in block and not isinstance(block["entity_match"], str):
+        errors.append(f"{label}: entity_match must be a string")
+    when = block.get("when", {})
+    if not isinstance(when, Mapping) or not all(isinstance(k, str) for k in when):
+        errors.append(f"{label}: when must be an object with string keys")
     if klass == NEEDS_OWNER_DECISION:
         decision = block.get("decision")
         decision = decision if isinstance(decision, Mapping) else {}
         options = decision.get("options")
         if (
             not isinstance(options, list)
-            or not decision.get("question")
+            or not _text(decision.get("question"))
             or not 2 <= len(options) <= 3
+            or not all(_text(o) for o in options)
         ):
             errors.append(f"{label}: a decision needs a question and 2-3 options")
     if klass == ACCEPTED_BY_DESIGN and not (
-        block.get("owner_record") and _iso(block.get("reviewed_on"))
+        _text(block.get("owner_record")) and _iso(block.get("reviewed_on"))
     ):
         errors.append(
             f"{label}: ACCEPTED_BY_DESIGN needs owner_record and an ISO reviewed_on"
@@ -123,7 +139,11 @@ def _entry_errors(position: int, entry: Any) -> list[str]:
             "row is in the same state)"
         )
     try:
-        re.compile(block.get("entity_match", ".*"))
+        re.compile(
+            block["entity_match"]
+            if isinstance(block.get("entity_match"), str)
+            else ".*"
+        )
     except re.error as exc:
         errors.append(f"{label}: entity_match is not a regex: {exc}")
     return errors
@@ -194,16 +214,22 @@ def _matches(
 ) -> bool:
     if entry.get("check_id") != finding.get("check_id"):
         return False
-    wanted = entry.get("defect")
-    have = finding.get("defect_ids") or []
-    if (not have) if wanted == "NONE" else (wanted not in have):
+    wanted = str(entry.get("defect"))
+    have = sorted(set(finding.get("defect_ids") or []))
+    # the entry names the finding's whole defect set ("B4,B6"), or NONE for no defects:
+    # an entry for one defect never classifies a finding that also carries another
+    if (wanted == "NONE") != (not have) or (
+        have and sorted(p.strip() for p in wanted.split(",")) != have
+    ):
         return False
     block = entry["owner_view"]
     if (block.get("scope") == "row") != row:
         return False
     if not re.fullmatch(block.get("entity_match", ".*"), entity):
         return False
-    return all(facts.get(k) == v for k, v in (block.get("when") or {}).items())
+    return all(
+        facts.get(k, _MISSING) == v for k, v in (block.get("when") or {}).items()
+    )
 
 
 def _item(
@@ -246,7 +272,9 @@ def _item(
         }
     block = entry["owner_view"]
     number = _fill(str(block.get("number_affected") or "unknown"), facts)
-    if number.strip().lower().startswith("none") and not block.get("proof_check"):
+    if number.strip().lower().startswith(("none", "0", "zero", "nil")) and not _text(
+        block.get("proof_check")
+    ):
         number = "unknown"  # "none" must cite the check that proves it
     close_by = entry.get("close_by")
     return {
@@ -340,7 +368,6 @@ def build_owner_view(
                         since,
                     )
                 )
-            continue
         for entity, facts in expand(finding):
             entity_since = (
                 since
@@ -363,7 +390,7 @@ def build_owner_view(
                         entity_since,
                     )
                 )
-            if not matched:
+            if not matched and not row_matched:  # a row verdict never hides an entity
                 items.append(
                     _item(
                         UNCLASSIFIED,
@@ -379,7 +406,13 @@ def build_owner_view(
                 )
     reconcile(findings, items)
     items.sort(
-        key=lambda i: (ORDER.index(i["class"]), str(i["ref"]["check_id"]), i["entity"])
+        key=lambda i: (
+            ORDER.index(i["class"]),
+            str(i["ref"]["check_id"]),
+            i["entity"],
+            ",".join(i["ref"]["defect_ids"]),
+            i["what"],
+        )
     )
     counts = {k: 0 for k in ORDER}
     for item in items:
@@ -387,6 +420,7 @@ def build_owner_view(
     return {
         "schema": SCHEMA,
         "generation_id": findings_doc.get("generation_id"),
+        "evaluated_on": today.isoformat(),
         "compared_with": compared_with,
         "source_findings": len(findings),
         "source_summary": dict(findings_doc.get("summary") or {}),
@@ -456,6 +490,7 @@ def render_markdown(view: Mapping[str, Any]) -> str:
         f"**{verdict(view)}**",
         "",
     ]
+    lines += [f"Evaluated on {view['evaluated_on']}.", ""]
     if view.get("compared_with"):
         lines += [f"Compared with {view['compared_with']}.", ""]
     for klass in ORDER:

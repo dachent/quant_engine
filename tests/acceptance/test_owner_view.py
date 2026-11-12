@@ -397,3 +397,95 @@ def test_reconciliation_failure_writes_no_files(
     assert tvg._cli(str(gen_dir)) == 2
     out = gen_dir.parent.parent / "validation" / tvg.GEN
     assert not (out / "findings.json").exists()
+
+
+def test_malformed_field_types_never_crash_or_classify() -> None:
+    bad = [
+        entry(ov.REAL_DATA_GAP, block={"entity_match": ["^e$"]}),
+        entry(ov.REAL_DATA_GAP, block={"when": ["status=NONE"]}),
+        entry(
+            ov.NEEDS_OWNER_DECISION,
+            block={"decision": {"question": "q", "options": ["", None]}},
+        ),
+        entry(ov.REAL_DATA_GAP, block={"who": 1}),
+        entry(
+            ov.ACCEPTED_BY_DESIGN,
+            block={"owner_record": "   ", "reviewed_on": "2026-11-01"},
+        ),
+        entry(ov.CHECKER_BUG, block={"number_affected": "none", "proof_check": "   "}),
+    ]
+    assert len(ov.registry_errors(bad)) >= 6
+    view = ov.build_owner_view(
+        doc(finding("c.one", defects=("E1",))), register=bad, today=TODAY
+    )
+    assert [i["class"] for i in view["items"]] == [ov.UNCLASSIFIED]
+
+
+def test_zero_and_nil_also_need_a_proof_check() -> None:
+    for word in ("0", "zero", "nil"):
+        reg = [entry(ov.CHECKER_BUG, block={"number_affected": word})]
+        item = ov.build_owner_view(
+            doc(finding("c.one", defects=("E1",))), register=reg, today=TODAY
+        )["items"][0]
+        assert item["number_affected"] == "unknown"
+
+
+def test_entry_for_one_defect_never_classifies_a_finding_with_another_kill() -> None:
+    f = finding("c.one", defects=("B4", "B6"))
+    one = entry(ov.NOT_APPLICABLE, defect="B6")
+    both = entry(ov.NOT_APPLICABLE, defect="B4,B6")
+    assert (
+        ov.build_owner_view(doc(f), register=[one], today=TODAY)["items"][0]["class"]
+        == ov.UNCLASSIFIED
+    )
+    assert (
+        ov.build_owner_view(doc(f), register=[both], today=TODAY)["items"][0]["class"]
+        == ov.NOT_APPLICABLE
+    )
+
+
+def test_when_none_does_not_match_a_missing_key() -> None:
+    e = entry(ov.NOT_APPLICABLE, block={"when": {"observed.k": None}})
+    gone = ov.build_owner_view(
+        doc(finding("c.one", observed={"x": 1}, defects=("E1",))),
+        register=[e],
+        today=TODAY,
+    )
+    there = ov.build_owner_view(
+        doc(finding("c.one", observed={"k": None}, defects=("E1",))),
+        register=[e],
+        today=TODAY,
+    )
+    assert gone["items"][0]["class"] == ov.UNCLASSIFIED
+    assert there["items"][0]["class"] == ov.NOT_APPLICABLE
+
+
+def test_row_entry_and_entity_entry_both_show_the_real_minority() -> None:
+    f = finding("c.one", observed={"unavailable": ["p123", "crypto"]}, defects=("E1",))
+    reg = [
+        entry(ov.REAL_DATA_GAP, block={"entity_match": "^crypto$"}),
+        _row_entry(ov.CHECKER_BUG),
+    ]
+    view = ov.build_owner_view(doc(f), register=reg, today=TODAY)
+    assert sorted(i["class"] for i in view["items"]) == [
+        ov.CHECKER_BUG,
+        ov.REAL_DATA_GAP,
+    ]
+    assert view["real_items"] == 1  # the crypto gap is not shadowed by the row verdict
+
+
+def test_blocker_cannot_be_reclassified_by_the_register() -> None:
+    reg = [entry(ov.NOT_APPLICABLE, block={"entity_match": ".*"})]
+    view = ov.build_owner_view(
+        doc(finding("c.one", "BLOCKER_INVARIANT", defects=("E1",))),
+        register=reg,
+        today=TODAY,
+    )
+    assert [i["class"] for i in view["items"]] == [ov.BLOCKER]
+
+
+def test_output_is_deterministic_for_a_given_day() -> None:
+    d = doc(finding("a"), finding("b", defects=("E2",)), finding("a", entity="z"))
+    first = ov.render_js(ov.build_owner_view(d, today=TODAY))
+    second = ov.render_js(ov.build_owner_view(d, today=TODAY))
+    assert first == second and "2026-11-11" in first
