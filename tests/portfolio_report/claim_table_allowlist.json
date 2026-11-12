@@ -73,6 +73,11 @@
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^\\{\\} is counted gross: sleeve \\{\\}, margin and unallocated cash \\{\\}, equity \\{\\}$",
+   "justification": "a template (#906): every figure is substituted from the strategy basis disclosure when the headline note is rendered; the sentence states no figure of its own"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^(Identity: sleeve NAVs \\{\\} plus bucket \\{\\} against account NAV \\{\\} \\(difference \\{\\}\\)|Leverage disclosures: \\{\\} rows of this account and strategy|The account series also holds sleeve \\{\\} \\(\\{\\}\\), \\{\\} to \\{\\}, at the cutoff it \\{\\})",
    "justification": "a template: every number is substituted from the payload when it is rendered or built; the sentence states no figure of its own"
   },
