@@ -70,13 +70,17 @@ def row_free_space(run: driver.Run, env: Env) -> None:
     if "free_space_floor_gb" not in run.values:
         raise driver.Refusal("run config lacks free_space_floor_gb")
     floor = int(float(run.values["free_space_floor_gb"]) * GIB)
-    scratch = run.config.get("scratch_roots") or [str(run.cycle)]
     low = []
-    for item in [str(run.cycle), *map(str, scratch)]:
-        probe = Path(item)
-        while not probe.exists() and probe != probe.parent:
-            probe = probe.parent
-        if env.free_bytes(probe) < floor:
+    # the cycle may not exist yet: its nearest existing ancestor is the volume; a configured scratch root must exist
+    probe = run.cycle
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    if env.free_bytes(probe) < floor:
+        low.append(str(run.cycle))
+    for item in dict.fromkeys(map(str, run.config.get("scratch_roots", []))):
+        if not Path(item).exists():
+            raise driver.Refusal(f"scratch root {item} does not exist")
+        if env.free_bytes(Path(item)) < floor:
             low.append(item)
     if low:
         raise driver.Refusal(
@@ -249,8 +253,8 @@ COVERAGE: dict[int, str] = {
     17: "G2:payload size at candidate time (not built)",
     18: "G0:host:free-space",
     19: "G0:config:outside-workspace",
-    20: "guard:git-identity-retry",
-    21: "guard:git-identity-retry",
+    20: "guard:git-identity-retry (a transient identity read only; a scanner is not detected)",
+    21: "guard:git-identity-retry (a transient identity read only; a scanner is not detected)",
     22: "guard:require_checkout_is_spec_code",
     23: "guard:require_checkout_is_spec_code",
     24: "G0:config:paths",
@@ -319,6 +323,22 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
             f"gate {gate} has no receipt at {path}; run release_preflight.py {gate.lower()} first"
         )
     receipt = driver._read_json(path)
+    rows = receipt.get("rows")
+    if (
+        receipt.get("kind") != "release-preflight-g0-v1"
+        or not isinstance(rows, list)
+        or not rows
+    ):
+        raise driver.Refusal(f"gate {gate} receipt is malformed (no rows)")
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(receipt["written_at"])
+    except (KeyError, ValueError) as exc:
+        raise driver.Refusal(f"gate {gate} receipt has no readable written_at") from exc
+    limit = float(run.values.get("gate_receipt_max_age_hours", 24))
+    if age.total_seconds() > limit * 3600:
+        raise driver.Refusal(
+            f"gate {gate} receipt is older than {limit:g} h; run it again"
+        )
     if (
         receipt.get("config_sha256") != config_sha256(run)
         or receipt.get("code_commit") != run.values["code_commit"]
@@ -326,8 +346,8 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
         raise driver.Refusal(
             f"gate {gate} receipt is for another run configuration or code identity"
         )
-    if receipt.get("status") != "PASS":
-        failed = [r["row"] for r in receipt["rows"] if r["status"] != "PASS"]
+    failed = [r.get("row") for r in rows if r.get("status") != "PASS"]
+    if receipt.get("status") != "PASS" or failed:
         raise driver.Refusal(f"gate {gate} receipt is FAIL: {failed[:4]}")
 
 
@@ -349,8 +369,14 @@ def retire_release(
             f"release {release_id[:12]} is {journal.state}: only a non-terminal release is retired"
         )
     authority = coordination_root / "CURRENT_RELEASE.json"
-    if authority.is_file() and release_id in authority.read_text(encoding="utf-8"):
+    if (
+        authority.is_file()
+        and driver._read_json(authority).get("release_id") == release_id
+    ):
         raise driver.Refusal("the authority release is never retired")
+    destination = coordination_root / RETIRED_DIR / release_id
+    if destination.exists():
+        raise driver.Refusal(f"{destination} already exists")
     if not ticket.strip():
         raise driver.Refusal("retirement needs a ticket")
     target = archive_dir / release_id
@@ -369,7 +395,6 @@ def retire_release(
         "retired_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     driver._write_json(archive_dir / f"{release_id}.retirement.json", record)
-    destination = coordination_root / RETIRED_DIR / release_id
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.replace(source, destination)
     return destination

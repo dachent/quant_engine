@@ -430,7 +430,11 @@ class Run:
             )
             if done.returncode == 0:
                 return done.stdout.strip()
-            if done.stderr.strip() or attempt == 2:
+            if (
+                done.stderr.strip()
+                or attempt == 2
+                or args[0] not in ("rev-parse", "status")
+            ):
                 break
             self.git_retries.append(" ".join(args))
         raise Refusal(f"git {' '.join(args)} failed: {done.stderr.strip()}")

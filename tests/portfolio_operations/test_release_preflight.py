@@ -464,7 +464,9 @@ def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
         if where.startswith("G0:") and "(not built)" not in where:
             assert where[3:] in rows, (cause, where)
         elif where.startswith("guard:"):
-            assert where[6:] in source or where[6:] == "git-identity-retry", (
+            assert where[6:].split(" (")[0] in source or where[6:].startswith(
+                "git-identity-retry"
+            ), (
                 cause,
                 where,
             )
@@ -479,3 +481,74 @@ def test_every_r3_refusal_cause_is_built_or_named_as_not_built() -> None:
     for cause, where in pf.COVERAGE.items():
         if where.startswith(("G0:", "guard:")) and "(not built)" not in where:
             assert cause in named, (cause, where)
+
+
+# -- review findings (Grok) ---------------------------------------------------------------------
+
+
+def test_an_old_or_malformed_receipt_does_not_open_the_gate(
+    gworld: dict[str, Any],
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    receipt = pf.run_g0(run)
+    receipt["written_at"] = "2020-01-01T00:00:00+00:00"
+    pf.write_receipt(run, receipt)
+    with pytest.raises(driver.Refusal, match="older than"):
+        pf.verify_receipt(run, "G0")
+    pf.write_receipt(run, {**pf.run_g0(run), "rows": []})
+    with pytest.raises(driver.Refusal, match="malformed"):
+        pf.verify_receipt(run, "G0")
+    # a PASS status over a FAIL row is still refused
+    good = pf.run_g0(run)
+    good["rows"][0]["status"] = "FAIL"
+    pf.write_receipt(run, good)
+    with pytest.raises(driver.Refusal, match="FAIL"):
+        pf.verify_receipt(run, "G0")
+
+
+def test_retirement_refuses_an_existing_destination_before_archiving(
+    gworld: dict[str, Any],
+) -> None:
+    stale = _prepare(gworld["coordination"], gworld["root"], "stale3")
+    (gworld["coordination"] / pf.RETIRED_DIR / stale.release_id).mkdir(parents=True)
+    archive = gworld["tmp"] / "archive3"
+    with pytest.raises(driver.Refusal, match="already exists"):
+        pf.retire_release(gworld["coordination"], stale.release_id, "884", archive)
+    assert not archive.exists()
+
+
+def test_a_missing_scratch_root_fails_the_space_row(gworld: dict[str, Any]) -> None:
+    _config(gworld, scratch_roots=[str(gworld["tmp"] / "nope")])
+    _only_fails(gworld, "host:free-space")
+
+
+def test_verify_refuses_a_dirty_checkout(tmp_path: Path) -> None:
+    repo = tmp_path / "clone"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a").write_text("a", encoding="utf-8")
+    _git(repo, "add", "a")
+    _git(repo, "commit", "-q", "-m", "x")
+
+    class Spec:
+        code_commit = _git(repo, "rev-parse", "HEAD")
+
+    (repo / "a").write_text("changed", encoding="utf-8")
+    with pytest.raises(portfolio_qc.QualityControlFailure, match="clean"):
+        portfolio_qc.require_checkout_is_spec_code(Spec(), repo)
+
+
+def test_only_identity_reads_are_retried(
+    gworld: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = driver.load_run(gworld["config"], gworld["graph"])
+    calls = []
+
+    def empty(argv: Any, *a: Any, **k: Any) -> Any:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(driver.subprocess, "run", empty)
+    with pytest.raises(driver.Refusal):
+        run._git("log", "-1")
+    assert len(calls) == 1

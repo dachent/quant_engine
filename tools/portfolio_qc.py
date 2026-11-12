@@ -768,6 +768,17 @@ def require_checkout_is_spec_code(
         )
         return done.stdout.strip() if done.returncode == 0 else ""
 
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if dirty:
+        raise QualityControlFailure(
+            "post-release verify must run from a clean checkout"
+        )
     if spec.code_commit not in {rev("HEAD"), rev("HEAD^{tree}")}:
         raise QualityControlFailure(
             "post-release verify must run from the spec's code commit "
