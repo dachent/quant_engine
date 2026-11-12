@@ -295,3 +295,54 @@ def test_the_matrix_status_the_builder_may_emit_is_in_the_schema() -> None:
         ).read_bytes()
     )
     assert "DECLARED_COMPLETE" in json.dumps(schema)
+
+
+def test_non_usd_base_and_non_finite_amounts_are_not_converted() -> None:
+    """Reviewer findings: base currency must be USD; NaN must not crash."""
+
+    gbp = _record(
+        1,
+        evidence={
+            "currency": "EUR",
+            "date": "2026-07-10",
+            "generation_id": GEN,
+            "rate": "1.1",
+            "base_currency": "GBP",
+        },
+    )
+    assert baseline._fx_record_uncovered_reason(gbp, ADMISSION) == "FX_EVIDENCE_INVALID"
+    nan = _record(2, provider_usd={"status": "AVAILABLE", "value": "NaN"})
+    assert baseline._fx_record_uncovered_reason(nan, ADMISSION) == "FX_EVIDENCE_INVALID"
+    nan_native = _record(3, value="NaN")
+    assert baseline._fx_record_uncovered_reason(nan_native, ADMISSION) == (
+        "FX_EVIDENCE_INVALID"
+    )
+
+
+def _exceptions(matrix: Any) -> dict[str, str]:
+    _claims_, exceptions = baseline._fact_coverage(
+        [{"account_id": "account-a", "role": "INVESTMENT"}],
+        [],
+        [{"provider": "p", "record_id": "t"}],
+        [{"provider": "p", "record_id": "f"}],
+        [{"position_id": "p"}],
+        [],
+        0,
+        AS_OF,
+        coverage_matrix=matrix,
+    )
+    return {e["fact_type"]: e["status"] for e in exceptions}
+
+
+def test_exceptions_follow_the_claim_status() -> None:
+    declared = {"declared_start": "2025-11-03", "declared_end": "2026-11-06"}
+    matrix = [
+        _row(f, "account-a", status="DECLARED_COMPLETE", **declared)
+        for f in ("flows", "transactions", "positions")
+    ]
+    by_fact = _exceptions(matrix)
+    assert by_fact["positions"] == by_fact["transactions"] == by_fact["flows"] == "PASS"
+    partial = _exceptions([])
+    assert {partial[f] for f in ("flows", "transactions", "positions")} == {
+        "RETAINED_WITH_EXPLICIT_DISPOSITION"
+    }

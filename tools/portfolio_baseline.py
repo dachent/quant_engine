@@ -4707,6 +4707,8 @@ def _fx_record_uncovered_reason(
         return "OTHER_GENERATION"
     if evidence.get("currency") != amount.get("currency"):
         return "CURRENCY_DIFFERS"
+    if evidence.get("base_currency", "USD") != "USD":
+        return "FX_EVIDENCE_INVALID"
     try:
         event_day = _date(record.get("event_date"), "fx record event_date")
         rate = Decimal(str(evidence.get("rate")))
@@ -4716,6 +4718,7 @@ def _fx_record_uncovered_reason(
     if (
         evidence.get("date") != event_day.isoformat()
         or not rate.is_finite()
+        or not native.is_finite()
         or rate <= 0
     ):
         return "FX_EVIDENCE_INVALID"
@@ -4726,6 +4729,8 @@ def _fx_record_uncovered_reason(
         try:
             reported = Decimal(str(provider_usd.get("value")))
         except InvalidOperation:
+            return "FX_EVIDENCE_INVALID"
+        if not reported.is_finite():
             return "FX_EVIDENCE_INVALID"
         converted = native * rate
         if abs(converted - reported) > _FX_CLOSURE_TOLERANCE * abs(reported) + Decimal(
@@ -5137,6 +5142,11 @@ def _fact_coverage(
             **affected_counts,
         }
     fx_claim["record_count"] = 0
+    complete_facts = {
+        item["fact_type"]
+        for item in claims
+        if item["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    }
     exceptions: list[dict[str, Any]] = [
         {
             "exception_id": (
@@ -5147,7 +5157,11 @@ def _fact_coverage(
             "severity": (
                 "DISCLOSED_GAP" if positions else "BLOCKING_FOR_POSITION_ANALYSIS"
             ),
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "status": (
+                "PASS"
+                if "positions" in complete_facts
+                else "RETAINED_WITH_EXPLICIT_DISPOSITION"
+            ),
             "authority": "accepted current provider position snapshots",
             "disposition": "REPORT_ACCEPTED_ROWS_ONLY_NO_INFERENCE",
         },
@@ -5195,7 +5209,11 @@ def _fact_coverage(
             "fact_type": "transactions",
             "record_count": len(transactions),
             "severity": "DISCLOSED_GAP",
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "status": (
+                "PASS"
+                if "transactions" in complete_facts
+                else "RETAINED_WITH_EXPLICIT_DISPOSITION"
+            ),
             "authority": "account fact coverage matrix",
             "disposition": "ACCEPT_ONLY_NAMED_PROVIDER_ACCOUNT_INTERVALS",
         },
@@ -5204,7 +5222,11 @@ def _fact_coverage(
             "fact_type": "flows",
             "record_count": len(flows),
             "severity": "DISCLOSED_GAP",
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "status": (
+                "PASS"
+                if "flows" in complete_facts
+                else "RETAINED_WITH_EXPLICIT_DISPOSITION"
+            ),
             "authority": "account fact coverage matrix",
             "disposition": "MWR_UNAVAILABLE_OUTSIDE_COMPLETE_FLOW_INTERVALS",
         },
