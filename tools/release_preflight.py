@@ -32,6 +32,7 @@ import shutil
 import sys
 from typing import Any
 
+import release_canary as canary_tool
 import release_driver as driver
 
 GIB = 1 << 30
@@ -47,10 +48,15 @@ def _free_bytes(path: Path) -> int:
 
 
 class Env:
-    """The few things a test must replace: free disk space."""
+    """The few things a test must replace: free disk space and the canary."""
 
-    def __init__(self, free_bytes: DiskUsage = _free_bytes) -> None:
+    def __init__(
+        self,
+        free_bytes: DiskUsage = _free_bytes,
+        canary: Callable[..., dict[str, Any]] = canary_tool.canary,
+    ) -> None:
         self.free_bytes = free_bytes
+        self.canary = canary
 
 
 Row = Callable[[driver.Run, Env], None]  # raises driver.Refusal with the reason
@@ -244,6 +250,80 @@ def row_spec_pair(run: driver.Run, env: Env) -> None:
         raise driver.Refusal(problem)
 
 
+CANARY_BASELINE = "canary-baseline.json"
+
+# every run-config key a G0 row reads (a release config template must carry them; a test checks one does)
+CONFIG_KEYS = (
+    "free_space_floor_gb",
+    "scratch_roots",
+    "coordination_root",
+    "authority_roots",
+    "source_workspace",
+    "artifact_inputs",
+    "replica_relative_ok",
+    "pinned_files",
+    "evidence_dest",
+    "release_cutoffs",
+    "release_label",
+    "requested_as_of",
+    "release_inputs_root",
+)
+
+
+def _canary_inputs(run: driver.Run) -> tuple[list[Path], list[Path]]:
+    """The roots the commit writes to (coordination root and every authority root) and the bound files."""
+
+    roots = [_path(run, "coordination_root")]
+    authority = run.config.get("authority_roots")
+    if not isinstance(authority, dict) or not authority:
+        raise driver.Refusal("run config lacks authority_roots (root id to directory)")
+    roots += [Path(v) for v in authority.values()]
+    bound = [Path(item) for item in dict(run.config.get("pinned_files", {}))]
+    return list(dict.fromkeys(roots)), bound
+
+
+def _canary_fail(receipt: Mapping[str, Any]) -> str:
+    return "; ".join(
+        f"{c.get('id')}: {c.get('detail')}"
+        for c in receipt.get("checks", [])
+        if c.get("status") == "FAIL"
+    )[:400]
+
+
+def row_canary_baseline(run: driver.Run, env: Env) -> None:
+    """RULING-D 4.3: before the long lanes, exercise the real (synced) volume once and record the environment
+    fingerprint and step timings. A canary FAIL refuses now, not after a 75-minute lane. Writes the baseline
+    the commit compares with; run it at lane entry only (it replaces an earlier baseline of this cycle)."""
+
+    roots, bound = _canary_inputs(run)
+    receipt = env.canary(roots, bound)
+    if receipt.get("status") != "PASS":
+        raise driver.Refusal(f"commit-path canary failed: {_canary_fail(receipt)}")
+    driver.write_json(run.cycle / RECEIPT_DIR / CANARY_BASELINE, dict(receipt))
+
+
+def row_canary_commit_path(run: driver.Run, env: Env) -> None:
+    """The commit runs only if the canary, run again now against the baseline taken at lane entry, passes (no step
+    far slower than recorded, no bound file a cloud placeholder) and the environment fingerprint is unchanged
+    (a Windows update, a new OneDrive client or another interpreter between baseline and commit)."""
+
+    path = run.cycle / RECEIPT_DIR / CANARY_BASELINE
+    if not path.is_file():
+        raise driver.Refusal(
+            f"no canary baseline at {path}: the lane stage records it at entry"
+        )
+    baseline = driver.read_json(path)
+    roots, bound = _canary_inputs(run)
+    receipt = env.canary(roots, bound, baseline=baseline)
+    if receipt.get("status") != "PASS":
+        raise driver.Refusal(f"commit-path canary failed: {_canary_fail(receipt)}")
+    changes = canary_tool.diff_fingerprints(baseline, receipt)
+    if changes:
+        raise driver.Refusal(
+            f"environment fingerprint changed since the baseline: {changes[:3]}"
+        )
+
+
 ROWS: tuple[tuple[str, Row], ...] = (
     ("host:free-space", row_free_space),
     ("host:no-live-stage", row_no_live_stage),
@@ -256,8 +336,14 @@ ROWS: tuple[tuple[str, Row], ...] = (
     ("authority:no-stale-prepared", row_no_stale_prepared),
 )
 
-# every row a stage may recheck: the G0 rows and the G3 spec-pair row
-ROW_TABLE: dict[str, Row] = {**dict(ROWS), "g3:spec-pair": row_spec_pair}
+# every row a stage may recheck: the G0 rows, the G3 spec-pair row and the two canary rows (not G0: the baseline
+# row writes a file and the commit row needs it)
+ROW_TABLE: dict[str, Row] = {
+    **dict(ROWS),
+    "g3:spec-pair": row_spec_pair,
+    "canary:baseline": row_canary_baseline,
+    "canary:commit-path": row_canary_commit_path,
+}
 
 # R3 refusal number (RULING-D section 2) -> where it is caught. "G0:<row>" is built here with a kill test in
 # tests/portfolio_operations/test_release_preflight.py; "guard:<name>" is a tool guard with its own test;

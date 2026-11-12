@@ -576,5 +576,9 @@ release is never retired). `post-release-verify` refuses to run from a checkout 
 
 G3 (`g3:spec-pair`) compares the real and replica specs with the replica gate's own `topology` function; `lane-real` and `lane-replica` recheck it at entry, so a topology mismatch (R3 refusal 19) is found in seconds, not after the lane.
 
+The commit-path canary (`docs` section above) is wired in as two recheck rows, not G0 rows: `lane-real` declares `canary:baseline` (runs the canary over the coordination root and every authority root at lane entry, refuses on FAIL, and records `{cycle}/preflight/canary-baseline.json`), and `commit` declares `canary:commit-path` (refuses with no baseline, runs the canary again against the baseline timings, and refuses on a FAIL or any environment-fingerprint difference since the baseline).
+
+`ops/mvp2-release/run-config.release-a.example.json` is the value-free run-config template for release A (cutoff 2026-11-06, the same as R3c; `release_cutoffs` states it): every `<...>` is an operator path or pin, and the keys G0 reads are listed in `release_preflight.CONFIG_KEYS`. The cutoff of release B is a placeholder until the owner states it.
+
 Not built yet, and named in `release_preflight.COVERAGE` so a green G0 is not read as "inputs are fine": G1 consumer contracts
 (1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17) and the consumer freshness limit (14).

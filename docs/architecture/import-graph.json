@@ -755,6 +755,11 @@
     ],
     [
       "release_preflight",
+      "release_canary",
+      1
+    ],
+    [
+      "release_preflight",
       "release_driver",
       1
     ],
