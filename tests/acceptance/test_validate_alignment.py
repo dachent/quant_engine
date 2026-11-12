@@ -2280,7 +2280,7 @@ def test_a_blocked_row_whose_only_panel_row_is_funded_is_named_and_never_matched
     (found,) = _carried_apart(findings)
     assert found.observed["report"]["twr_status"] == "BLOCKED_ADMISSION"
     assert found.observed["report"]["epoch_admission_status"] == "BLOCKED"
-    assert found.observed["panel"]["status"] is None
+    assert found.observed["panel"]["status"] == "OK"
 
 
 def test_an_epoch_held_only_as_the_other_kind_is_not_read_against_a_sibling(
@@ -2783,7 +2783,8 @@ def _l6c(findings: list[checks.Finding]) -> dict[str, Any]:
         "account": sorted(
             f.klass
             for f in findings
-            if f.check_id == "capital.as_of_cutoff" and f.entity == "A1"
+            if f.check_id in ("capital.as_of_cutoff", "capital.current_capital_as_of")
+            and f.entity == "A1"
         ),
         "lens": sorted(
             f.klass

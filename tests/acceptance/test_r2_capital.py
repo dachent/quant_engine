@@ -30,7 +30,7 @@ from acceptance.validate import checks
 from acceptance.validate.generation import load_generation
 
 CASH_EVIDENCE = "capital.derived_cash_evidence"
-AS_OF = "capital.as_of_cutoff"
+AS_OF = "capital.current_capital_as_of"
 
 
 def _context(tmp_path: Path, spec: Spec) -> checks.Context:
