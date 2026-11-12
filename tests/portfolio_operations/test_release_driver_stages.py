@@ -598,7 +598,7 @@ def _offline(*extra: str, recorded: Path | None = None) -> int:
             "--recorded",
             str(recorded or FIXTURES / "pass26-commands.json"),
             "--through",
-            "lanes",
+            "lane-real",
             *extra,
         ]
     )
@@ -663,7 +663,7 @@ def test_the_offline_plan_names_a_flag_that_differs_from_the_recorded_run(
     def stale(row: dict[str, Any]) -> None:
         row["argv"][row["argv"].index("--cutoff") + 1] = "2026-09-10"
 
-    assert _offline(recorded=_mutated(tmp_path, "lanes", stale)) == 2
+    assert _offline(recorded=_mutated(tmp_path, "lane-replica", stale)) == 2
 
     def explained(row: dict[str, Any]) -> None:
         drop(row)
@@ -745,7 +745,8 @@ def test_the_stage_order_is_the_order_pass_26_ran_them() -> None:
         "replica-copy",
         "replica-provider-generations",
         "replica-spec",
-        "lanes",
+        "lane-replica",
+        "lane-real",
     ]
     ids = [stage["id"] for stage in _shipped()["stages"]]
     assert [i for i in ids if i in pass26] == pass26
@@ -1275,7 +1276,7 @@ def test_a_replica_only_run_plans_attest_and_ceremony_on_the_replica_and_never_t
     )
     stages = [line.split(":")[0] for line in lines]
     assert "ceremony" in stages and "replica-attest" in stages
-    assert "lanes" not in stages and "attest" not in stages
+    assert not {"lane-real", "lane-replica", "attest"} & set(stages)
     assert (
         stages.index("replica-copy")
         < stages.index("replica-attest")
@@ -1332,7 +1333,7 @@ def test_the_shipped_replica_only_stages_are_data_declared() -> None:
     assert ceremony["only_ceremony"] == attest["only_ceremony"] == "replica-only"
     assert ceremony["needs_attestation"] == "{replica_coordination_root}"
     assert "--out-dir" in ceremony["argv"] and "{lane_replica}" in ceremony["argv"]
-    for stage_id in ("lanes", "attest", "commit", "pack-evidence"):
+    for stage_id in ("lane-real", "lane-replica", "attest", "commit", "pack-evidence"):
         assert _stage(stage_id)["only_ceremony"] == "full"
 
 
