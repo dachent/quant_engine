@@ -760,6 +760,11 @@
     ],
     [
       "release_preflight",
+      "portfolio_attended_preparation",
+      1
+    ],
+    [
+      "release_preflight",
       "release_canary",
       1
     ],

@@ -349,6 +349,12 @@ def _pins(value: object, label: str) -> None:
             _pins(nested, f"{label}[{index}]")
 
 
+def verify_pins(value: object, label: str) -> None:
+    """Public entry of the consumer's own pin check (release preflight re-opens every pin where it will be read)."""
+
+    _pins(value, label)
+
+
 def _date(value: object, label: str) -> str:
     if not isinstance(value, str):
         raise AttendedPreparationError(f"{label} is invalid")

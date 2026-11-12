@@ -180,10 +180,81 @@ def test_the_shipped_graph_rechecks_the_moving_rows_at_lane_entry_and_before_the
             )
         )["stages"]
     }
-    moving = {"host:free-space", "repo:frozen", "authority:pointer-graph"}
+    moving = {
+        "host:free-space",
+        "repo:frozen",
+        "authority:pointer-graph",
+        "pins:resolve-in-world",
+    }
     for lane in ("lane-real", "lane-replica"):
         assert moving | {"g3:spec-pair"} <= set(stages[lane]["recheck"]), lane
     assert moving <= set(stages["commit"]["recheck"])
     assert "g0" in stages["attended"]["needs_gate"]
     for row in (r for s in stages.values() for r in s.get("recheck", [])):
         assert row in pf.ROW_TABLE, row
+
+
+# -- pins:resolve-in-world (recheck row; the generation exists only after attended) --------------------------------
+
+
+def _pinned_world(w: dict[str, Any]) -> Path:
+    import hashlib
+
+    run_dir = Path(json.loads(w["config"].read_text(encoding="utf-8"))["run"])
+    prep = run_dir / "preparation"
+    prep.mkdir(parents=True, exist_ok=True)
+    pinned = prep / "pinned-input.csv"
+    pinned.write_bytes(b"a,b\n1,2\n")
+    pin = {
+        "path": str(pinned),
+        "sha256": hashlib.sha256(pinned.read_bytes()).hexdigest(),
+        "size_bytes": pinned.stat().st_size,
+    }
+    (prep / "capital-input-generation.json").write_text(
+        json.dumps({"inputs": {"flows": pin}}), encoding="utf-8"
+    )
+    (prep / "invested-capital-result.json").write_text(
+        json.dumps({"inputs": []}), encoding="utf-8"
+    )
+    return pinned
+
+
+def _pins_row(w: dict[str, Any]) -> str | None:
+    run = driver.load_run(w["config"], w["graph"])
+    try:
+        pf.ROW_TABLE["pins:resolve-in-world"](run, pf.Env())
+    except driver.Refusal as exc:
+        return str(exc)
+    return None
+
+
+def test_refusal_25_pins_that_resolve_pass_and_a_moved_pinned_file_fails_only_this_row(
+    gworld: dict[str, Any],  # noqa: F811
+) -> None:
+    pinned = _pinned_world(gworld)
+    assert _pins_row(gworld) is None  # PASS baseline
+    assert set(_g0(gworld).values()) == {"PASS"}
+    pinned.rename(pinned.with_name("moved.csv"))
+    message = _pins_row(gworld)
+    assert (
+        message is not None
+        and "capital-input generation.inputs.flows is unavailable" in message
+    )
+    assert set(_g0(gworld).values()) == {
+        "PASS"
+    }  # no G0 row notices: only this row does
+
+
+def test_refusal_25_changed_bytes_and_a_relocated_world_fail_with_the_label(
+    gworld: dict[str, Any],  # noqa: F811
+) -> None:
+    pinned = _pinned_world(gworld)
+    pinned.write_bytes(b"a,b\n9,9\n")
+    assert "capital-input generation.inputs.flows pin differs" in str(_pins_row(gworld))
+    pinned.write_bytes(b"a,b\n1,2\n")
+    assert _pins_row(gworld) is None
+    run_dir = pinned.parent.parent
+    run_dir.rename(
+        run_dir.with_name(run_dir.name + "-relocated")
+    )  # the world moved: recorded paths are gone
+    assert "is unavailable" in str(_pins_row(gworld))

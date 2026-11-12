@@ -254,6 +254,31 @@ def row_spec_pair(run: driver.Run, env: Env) -> None:
 
 CANARY_BASELINE = "canary-baseline.json"
 
+# the capital-input generation and the receipt of the invested-capital build: both record file pins
+PIN_FILES = (
+    ("capital-input generation", "preparation/capital-input-generation.json"),
+    ("invested-capital result", "preparation/invested-capital-result.json"),
+)
+
+
+def row_pins_resolve(run: driver.Run, env: Env) -> None:
+    """Every {path, sha256, size_bytes} pin of the capital-input generation and its receipt resolves where it will
+    be read: the attended preparation's own pin check re-opens the file (no symlink, regular file) and recomputes its
+    hash and size. The label of the failing pin is in the refusal (``<label> is unavailable`` / ``pin differs``).
+    Exists only after ``attended`` wrote them, so it is a recheck row (lane entry, commit), not a G0/G1 row."""
+
+    import portfolio_attended_preparation as preparation
+
+    for name, relative in PIN_FILES:
+        document = _path(run, "run") / relative
+        if not document.is_file():
+            raise driver.Refusal(f"{name} is unavailable: {document}")
+        try:
+            preparation.verify_pins(driver.read_json(document), name)
+        except preparation.AttendedPreparationError as exc:
+            raise driver.Refusal(str(exc)) from exc
+
+
 # every run-config key a G0 row reads (a release config template must carry them; a test checks one does)
 CONFIG_KEYS = (
     "free_space_floor_gb",
@@ -347,6 +372,7 @@ ROW_TABLE: dict[str, Row] = {
     **dict(ROWS),
     **dict(G1_ROWS),
     "g3:spec-pair": row_spec_pair,
+    "pins:resolve-in-world": row_pins_resolve,
     "canary:baseline": row_canary_baseline,
     "canary:commit-path": row_canary_commit_path,
 }
@@ -379,6 +405,7 @@ COVERAGE: dict[int, str] = {
     22: "guard:require_checkout_is_spec_code",
     23: "guard:require_checkout_is_spec_code",
     24: "G0:config:paths",
+    25: "recheck:pins:resolve-in-world",  # not an R3 refusal: the pins of a relocated world (found after R3)
 }
 
 
