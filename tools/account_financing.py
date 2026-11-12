@@ -32,6 +32,27 @@ _KEYS = {"account_id", "scope", "facility", "verification", "evidence_ref"}
 _DAY = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
 
 
+ROLES: Final = frozenset({"RESERVE", "EXCLUDED_IMMATERIAL", "HISTORICAL_ONLY"})
+NAV_AUTHORITIES: Final = frozenset({"ACCOUNT_LIVE", "STATEMENT", "NONE"})
+_ROLE_KEYS = {
+    "sleeve_alias",
+    "role",
+    "ledger_account_id",
+    "nav_authority",
+    "admit_windows",
+    "evidence_ref",
+}
+_WINDOW_BASES: Final = frozenset(
+    {
+        "EXACT_FLOW_CLOSURE",
+        "EXACT_IDENTITY_CLOSURE",
+        "ACCOUNT_LIVE_RESIDUAL_MARKET",
+        "DERIVED_BRIDGE_WITH_CLOSURE",
+        "STATEMENT_POINTS",
+    }
+)
+
+
 class FinancingDeclarationError(ValueError):
     """The declaration is malformed."""
 
@@ -69,7 +90,9 @@ def load_declaration(raw: bytes) -> dict[str, Declared]:
         raise FinancingDeclarationError("declaration is not JSON") from exc
     if (
         not isinstance(top, dict)
-        or set(top) != {"schema_version", "artifact_id", "as_of_date", "accounts"}
+        or not {"schema_version", "artifact_id", "as_of_date", "accounts"} <= set(top)
+        or set(top)
+        - {"schema_version", "artifact_id", "as_of_date", "accounts", "sleeve_roles"}
         or top["schema_version"] != 1
         or top["artifact_id"] != ARTIFACT_ID
         or not isinstance(top["as_of_date"], str)
@@ -144,3 +167,71 @@ def classify(
             state, reason = "NOT_LEVERED", "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE"
         result[account] = AccountState(account, state, reason, tuple(conflicts))
     return result
+
+
+@dataclass(frozen=True)
+class SleeveRole:
+    """An account role by sleeve alias; the ledger id is None until a provider
+    generation exists (John Hancock, Composer)."""
+
+    sleeve_alias: str
+    role: str
+    ledger_account_id: str | None
+    nav_authority: str
+    admit_windows: tuple[tuple[str, str | None, str], ...]
+    evidence_ref: str
+
+
+def load_sleeve_roles(raw: bytes) -> dict[str, SleeveRole]:
+    """The ``sleeve_roles`` block of the single governed declaration (#900)."""
+
+    top = json.loads(raw)
+    declared = load_declaration(raw)
+    out: dict[str, SleeveRole] = {}
+    for row in top.get("sleeve_roles", []):
+        if not isinstance(row, dict) or set(row) != _ROLE_KEYS:
+            raise FinancingDeclarationError("a sleeve role row has the wrong keys")
+        alias, ledger = row["sleeve_alias"], row["ledger_account_id"]
+        windows = row["admit_windows"]
+        if (
+            not isinstance(alias, str)
+            or not alias.strip()
+            or row["role"] not in ROLES
+            or row["nav_authority"] not in NAV_AUTHORITIES
+            or not isinstance(windows, list)
+            or not isinstance(row["evidence_ref"], str)
+            or not row["evidence_ref"].strip()
+            or (ledger is not None and ledger not in declared)
+        ):
+            raise FinancingDeclarationError(f"sleeve role is invalid: {alias!r}")
+        if alias in out:
+            raise FinancingDeclarationError(f"sleeve role declared twice: {alias}")
+        parsed: list[tuple[str, str | None, str]] = []
+        for window in windows:
+            if (
+                not isinstance(window, dict)
+                or set(window) != {"start", "end", "basis"}
+                or not isinstance(window["start"], str)
+                or not _DAY.fullmatch(window["start"])
+                or not (
+                    window["end"] is None
+                    or (
+                        isinstance(window["end"], str) and _DAY.fullmatch(window["end"])
+                    )
+                )
+                or window["basis"] not in _WINDOW_BASES
+                or (window["end"] is not None and window["end"] < window["start"])
+            ):
+                raise FinancingDeclarationError(f"window is invalid on {alias}")
+            parsed.append((window["start"], window["end"], window["basis"]))
+        if row["role"] == "RESERVE" and row["nav_authority"] != "NONE" and not parsed:
+            raise FinancingDeclarationError(f"a reserve needs admit windows: {alias}")
+        out[alias] = SleeveRole(
+            alias,
+            row["role"],
+            ledger,
+            row["nav_authority"],
+            tuple(parsed),
+            row["evidence_ref"],
+        )
+    return out
