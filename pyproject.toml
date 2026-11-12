@@ -59,7 +59,6 @@ addopts = [
   "-ra",
   "--strict-config",
   "--strict-markers",
-  "--maxfail=1",
   "--timeout=900",
   "--timeout-method=thread",
   "-p",
