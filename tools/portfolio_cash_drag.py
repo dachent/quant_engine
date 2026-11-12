@@ -74,14 +74,14 @@ def derive_cash_drag(
         if abs(Decimal(cash[day]) - Decimal(figure)) > CENT / 2:
             return _unavailable(f"cash path does not close to the statement on {day}")
     drag = Decimal(0)
-    for day, before in zip(days, prior, strict=True):
+    for today, before in zip(days, prior, strict=True):
         navs = Decimal(nav[before.isoformat()])
         if navs <= 0:
             return _unavailable(f"nav is not positive on {before.isoformat()}")
         weight = Decimal(cash[before.isoformat()]) / navs
         drag += weight * (
-            Decimal(benchmark_returns[day.isoformat()])
-            - Decimal(cash_returns[day.isoformat()])
+            Decimal(benchmark_returns[today.isoformat()])
+            - Decimal(cash_returns[today.isoformat()])
         )
     return {
         "status": STATUS_EVIDENCED,
