@@ -4677,6 +4677,206 @@ def _build_audit_snapshot(
     }
 
 
+#: Relative tolerance of an FX conversion against the provider's own USD amount.
+_FX_CLOSURE_TOLERANCE: Final = Decimal("0.005")
+
+
+def _fx_record_uncovered_reason(
+    record: Mapping[str, Any], fx_admission: Mapping[str, Any]
+) -> str | None:
+    """Why the admitted generation does not convert one non-USD record, or None.
+
+    Covered means: the amount is available; the record carries event-time FX
+    evidence from this very generation, for its currency and its event date, at a
+    positive rate; the date lies inside the generation's interval; and, where the
+    provider published its own USD amount, native amount x rate closes against it
+    within ``_FX_CLOSURE_TOLERANCE``.
+
+    No ledger producer writes ``provider_usd_amount`` today (a capital anchor's
+    ``opening_nav`` is valued at the recognition-day close, a different rate day, so
+    it is not a closure reference); the closure applies when a producer carries one.
+    """
+
+    amount = record.get("amount")
+    if not isinstance(amount, Mapping) or amount.get("status") != "AVAILABLE":
+        return "AMOUNT_UNAVAILABLE"
+    evidence = record.get("event_time_fx")
+    if not isinstance(evidence, Mapping):
+        return "NO_FX_EVIDENCE"
+    if evidence.get("generation_id") != fx_admission["generation_id"]:
+        return "OTHER_GENERATION"
+    if evidence.get("currency") != amount.get("currency"):
+        return "CURRENCY_DIFFERS"
+    if evidence.get("base_currency", "USD") != "USD":
+        return "FX_EVIDENCE_INVALID"
+    try:
+        event_day = _date(record.get("event_date"), "fx record event_date")
+        rate = Decimal(str(evidence.get("rate")))
+        native = Decimal(str(amount.get("value")))
+    except (BaselineValidationError, InvalidOperation):
+        return "FX_EVIDENCE_INVALID"
+    if (
+        evidence.get("date") != event_day.isoformat()
+        or not rate.is_finite()
+        or not native.is_finite()
+        or rate <= 0
+    ):
+        return "FX_EVIDENCE_INVALID"
+    if not fx_admission["start"] <= event_day <= fx_admission["end"]:
+        return "OUTSIDE_GENERATION_INTERVAL"
+    provider_usd = record.get("provider_usd_amount")
+    if isinstance(provider_usd, Mapping) and provider_usd.get("status") == "AVAILABLE":
+        try:
+            reported = Decimal(str(provider_usd.get("value")))
+        except InvalidOperation:
+            return "FX_EVIDENCE_INVALID"
+        if not reported.is_finite():
+            return "FX_EVIDENCE_INVALID"
+        converted = native * rate
+        if abs(converted - reported) > _FX_CLOSURE_TOLERANCE * abs(reported) + Decimal(
+            "0.01"
+        ):
+            return "CLOSURE_FAILED"
+    return None
+
+
+def _declares_complete(row: Mapping[str, Any]) -> bool:
+    """An account/fact matrix row that declares its own completeness boundary.
+
+    Only the one completeness status counts, and only with a declared interval and
+    no missing interval: no other status, however it is dated, is a declaration.
+    """
+
+    return (
+        row.get("status") == "DECLARED_COMPLETE"
+        and row.get("declared_start") is not None
+        and row.get("declared_end") is not None
+        and not row.get("missing_intervals")
+    )
+
+
+def _matrix_completeness(
+    matrix: Sequence[Mapping[str, Any]] | None, fact_type: str
+) -> bool:
+    """True only when a matrix was supplied, holds rows for the fact, and every
+    row declares its own boundary.  No matrix is no evidence, never completeness."""
+
+    if matrix is None:
+        return False
+    rows = [row for row in matrix if row.get("fact_type") == fact_type]
+    return bool(rows) and all(_declares_complete(row) for row in rows)
+
+
+def _event_fact_claim(
+    fact_type: str,
+    records: Sequence[Mapping[str, Any]],
+    matrix: Sequence[Mapping[str, Any]] | None,
+    *,
+    authority: str,
+    partial_effect: str,
+    complete_effect: str,
+    noun: str,
+    gap_tail: str,
+) -> dict[str, Any]:
+    """The flows/transactions claim, decided by the account fact matrix (#895 M4)."""
+
+    complete = _matrix_completeness(matrix, fact_type)
+    providers = ", ".join(
+        sorted({str(item["provider"]) for item in records if item.get("provider")})
+    )
+    return {
+        "fact_type": fact_type,
+        "known_gaps": (
+            []
+            if complete
+            else [
+                (
+                    f"{len(records)} accepted {noun} records across "
+                    f"{providers or 'no providers'}; " + gap_tail
+                ),
+            ]
+        ),
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY" if complete else "PARTIAL",
+        "disposition": {
+            "authority": authority,
+            "code": "COMPLETE" if complete else "RETAINED_PROVIDER_INTERVAL_BOUNDARY",
+            "effect": complete_effect if complete else partial_effect,
+        },
+        "record_count": len(records),
+    }
+
+
+def _positions_claim(
+    positions: Sequence[Mapping[str, Any]],
+    provider_gaps: Sequence[str],
+    matrix: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    complete = _matrix_completeness(matrix, "positions")
+    complete = complete and bool(positions) and not provider_gaps
+    if not positions:
+        status = "FAILED"
+    else:
+        status = "COMPLETE_WITHIN_DECLARED_BOUNDARY" if complete else "PARTIAL"
+    return {
+        "fact_type": "positions",
+        "known_gaps": (
+            []
+            if complete
+            else list(provider_gaps)
+            if positions
+            else ["no accepted position source exists for this baseline"]
+        ),
+        "status": status,
+        "disposition": {
+            "authority": "accepted current provider position snapshots",
+            "code": (
+                "COMPLETE"
+                if complete
+                else "RETAINED_PROVIDER_SNAPSHOT_BOUNDARY"
+                if positions
+                else "RETAINED_NO_ACCEPTED_POSITION_SOURCE"
+            ),
+            "effect": (
+                "Investment accounts declare current position snapshot boundaries."
+                if complete
+                else "Only accepted current position rows are reported; accounts without reported rows remain unavailable."
+            ),
+        },
+        "record_count": len(positions),
+    }
+
+
+def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Costs are complete only when every sleeve cost is a known dollar amount."""
+
+    unknown = [
+        row
+        for row in costs
+        if not str(row.get("cost_status", "")).startswith("known")
+        or row.get("annual_external_cost_usd") is None
+    ]
+    complete = bool(costs) and not unknown
+    return {
+        "fact_type": "costs",
+        "known_gaps": (
+            []
+            if complete
+            else ["several current strategy costs remain unknown or conditional"]
+        ),
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY" if complete else "PARTIAL",
+        "disposition": {
+            "authority": "strategy cost-economics register",
+            "code": "COMPLETE" if complete else "RETAINED_UNKNOWN_OR_CONDITIONAL_COSTS",
+            "effect": (
+                "Costs read from the cost-economics register."
+                if complete
+                else "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional."
+            ),
+        },
+        "record_count": len(costs),
+    }
+
+
 def _fact_coverage(
     accounts: Sequence[Mapping[str, Any]],
     assignments: Sequence[Mapping[str, Any]],
@@ -4690,6 +4890,7 @@ def _fact_coverage(
     nav: Sequence[Mapping[str, Any]] = (),
     costs: Sequence[Mapping[str, Any]] = (),
     fx_admission: Mapping[str, Any] | None = None,
+    coverage_matrix: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
     unmapped = [
@@ -4802,78 +5003,34 @@ def _fact_coverage(
             },
             "record_count": len(nav),
         },
-        {
-            "fact_type": "flows",
-            "known_gaps": [
-                (
-                    f"{len(flows)} accepted flow records across "
-                    f"{', '.join(sorted({str(item['provider']) for item in flows if item.get('provider')})) or 'no providers'}; "
-                    "providers without an admitted flow path remain explicit in the account fact matrix"
-                )
-            ],
-            "status": "PARTIAL",
-            "disposition": {
-                "authority": "accepted provider-ledger and legacy flow evidence",
-                "code": "RETAINED_PROVIDER_INTERVAL_BOUNDARY",
-                "effect": "MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence.",
-            },
-            "record_count": len(flows),
-        },
-        {
-            "fact_type": "transactions",
-            "known_gaps": [
-                (
-                    f"{len(transactions)} accepted transaction records across "
-                    f"{', '.join(sorted({str(item['provider']) for item in transactions if item.get('provider')})) or 'no providers'}; "
-                    "providers without an admitted transaction path remain explicit in the account fact matrix"
-                )
-            ],
-            "status": "PARTIAL",
-            "disposition": {
-                "authority": "accepted provider-ledger and legacy transaction evidence",
-                "code": "RETAINED_PROVIDER_INTERVAL_BOUNDARY",
-                "effect": "Transaction analysis is limited to the named account/provider intervals; absence is never converted to zero activity.",
-            },
-            "record_count": len(transactions),
-        },
-        {
-            "fact_type": "positions",
-            "known_gaps": (
-                list(schwab_known_gaps)
-                if positions
-                else ["no accepted position source exists for this baseline"]
-            ),
-            "status": "PARTIAL" if positions else "FAILED",
-            "disposition": {
-                "authority": "accepted current provider position snapshots",
-                "code": (
-                    "RETAINED_PROVIDER_SNAPSHOT_BOUNDARY"
-                    if positions
-                    else "RETAINED_NO_ACCEPTED_POSITION_SOURCE"
-                ),
-                "effect": "Only accepted current position rows are reported; accounts without reported rows remain unavailable.",
-            },
-            "record_count": len(positions),
-        },
+        _event_fact_claim(
+            "flows",
+            flows,
+            coverage_matrix,
+            authority="accepted provider-ledger and legacy flow evidence",
+            partial_effect="MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence.",
+            complete_effect="Investment accounts declare admitted external-flow intervals.",
+            noun="flow",
+            gap_tail="providers without an admitted flow path remain explicit in the account fact matrix",
+        ),
+        _event_fact_claim(
+            "transactions",
+            transactions,
+            coverage_matrix,
+            authority="accepted provider-ledger and legacy transaction evidence",
+            partial_effect="Transaction analysis is limited to the named account/provider intervals; absence is never converted to zero activity.",
+            complete_effect="Investment accounts declare admitted transaction intervals.",
+            noun="transaction",
+            gap_tail="providers without an admitted transaction path remain explicit in the account fact matrix",
+        ),
+        _positions_claim(positions, schwab_known_gaps, coverage_matrix),
         {
             "fact_type": "fx",
             "known_gaps": [],
             "status": "FAILED",
             "disposition": {},
         },
-        {
-            "fact_type": "costs",
-            "known_gaps": [
-                "several current strategy costs remain unknown or conditional"
-            ],
-            "status": "PARTIAL",
-            "disposition": {
-                "authority": "strategy cost-economics register",
-                "code": "RETAINED_UNKNOWN_OR_CONDITIONAL_COSTS",
-                "effect": "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional.",
-            },
-            "record_count": len(costs),
-        },
+        _costs_claim(costs),
     ]
     non_usd_records = [
         item
@@ -4926,20 +5083,29 @@ def _fact_coverage(
     ):
         generation = str(fx_admission["generation_id"])[:8]
         fx_gaps: list[str] = []
-        if non_usd_records:
+        # Coverage is decided per record (#905): a record is converted only when
+        # the admitted generation priced it at its own event date, and the
+        # conversion closes against the provider's USD amount where one exists.
+        uncovered: dict[str, int] = {}
+        for item in non_usd_records:
+            reason = _fx_record_uncovered_reason(item, fx_admission)
+            if reason is not None:
+                uncovered[reason] = uncovered.get(reason, 0) + 1
+        uncovered_count = sum(uncovered.values())
+        if uncovered_count:
+            reasons = ", ".join(f"{key}={uncovered[key]}" for key in sorted(uncovered))
             fx_gaps.append(
                 "no independent FX series covers the unconverted records in the "
                 f"admitted generation {generation}; {affected_text}; "
+                f"{uncovered_count} of {len(non_usd_records)} are not converted "
+                f"({reasons}); "
                 "account NAV, current positions, allocations, and HWM current "
                 "values remain provider-reported USD authority"
             )
-        if window_start < admitted_start:
-            fx_gaps.append(
-                f"admitted FX generation {generation} starts "
-                f"{admitted_start.isoformat()}; FX-affected records from "
-                f"{window_start.isoformat()} precede it"
-            )
         if admitted_end < as_of_date:
+            # Native rows after the generation's end are excluded by the ledger
+            # (OUTSIDE_ADMITTED_FX_BOUNDARY) and are not records here, so the
+            # boundary itself is the evidence that they carry no FX rate.
             fx_gaps.append(
                 f"admitted FX generation {generation} ends "
                 f"{admitted_end.isoformat()}; dates through "
@@ -4961,6 +5127,7 @@ def _fact_coverage(
             "admitted_start": admitted_start.isoformat(),
             "admitted_end": admitted_end.isoformat(),
             **affected_counts,
+            "uncovered_record_count": uncovered_count,
         }
     else:
         fx_claim["known_gaps"] = [
@@ -4975,6 +5142,11 @@ def _fact_coverage(
             **affected_counts,
         }
     fx_claim["record_count"] = 0
+    complete_facts = {
+        item["fact_type"]
+        for item in claims
+        if item["status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    }
     exceptions: list[dict[str, Any]] = [
         {
             "exception_id": (
@@ -4985,7 +5157,11 @@ def _fact_coverage(
             "severity": (
                 "DISCLOSED_GAP" if positions else "BLOCKING_FOR_POSITION_ANALYSIS"
             ),
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "status": (
+                "PASS"
+                if "positions" in complete_facts
+                else "RETAINED_WITH_EXPLICIT_DISPOSITION"
+            ),
             "authority": "accepted current provider position snapshots",
             "disposition": "REPORT_ACCEPTED_ROWS_ONLY_NO_INFERENCE",
         },
@@ -5033,7 +5209,11 @@ def _fact_coverage(
             "fact_type": "transactions",
             "record_count": len(transactions),
             "severity": "DISCLOSED_GAP",
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "status": (
+                "PASS"
+                if "transactions" in complete_facts
+                else "RETAINED_WITH_EXPLICIT_DISPOSITION"
+            ),
             "authority": "account fact coverage matrix",
             "disposition": "ACCEPT_ONLY_NAMED_PROVIDER_ACCOUNT_INTERVALS",
         },
@@ -5042,7 +5222,11 @@ def _fact_coverage(
             "fact_type": "flows",
             "record_count": len(flows),
             "severity": "DISCLOSED_GAP",
-            "status": "RETAINED_WITH_EXPLICIT_DISPOSITION",
+            "status": (
+                "PASS"
+                if "flows" in complete_facts
+                else "RETAINED_WITH_EXPLICIT_DISPOSITION"
+            ),
             "authority": "account fact coverage matrix",
             "disposition": "MWR_UNAVAILABLE_OUTSIDE_COMPLETE_FLOW_INTERVALS",
         },
@@ -6380,19 +6564,6 @@ def build_catalog(
     missing_strategy_nav_count = sum(
         1 for item in strategy_nav_coverage if item["status"] == "UNAVAILABLE"
     )
-    fact_coverage, exceptions = _fact_coverage(
-        accounts,
-        assignments,
-        transactions,
-        flows,
-        positions,
-        provider_known_gaps,
-        missing_strategy_nav_count,
-        as_of,
-        nav=nav,
-        costs=costs,
-        fx_admission=fx_authority or None,
-    )
     fact_coverage_matrix, observation_windows, attribution_dispositions = (
         _coverage_evidence(
             accounts,
@@ -6405,6 +6576,20 @@ def build_catalog(
             flows,
             as_of,
         )
+    )
+    fact_coverage, exceptions = _fact_coverage(
+        accounts,
+        assignments,
+        transactions,
+        flows,
+        positions,
+        provider_known_gaps,
+        missing_strategy_nav_count,
+        as_of,
+        nav=nav,
+        costs=costs,
+        fx_admission=fx_authority or None,
+        coverage_matrix=fact_coverage_matrix,
     )
     unmapped = [
         *sorted(
