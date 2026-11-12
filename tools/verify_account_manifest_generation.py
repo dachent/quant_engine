@@ -25,7 +25,12 @@ from quant_engine.core.contracts import (
     SourceArtifact,
     canonical_json_bytes,
 )
-from quant_engine.core.strict_json import strict_json_loads
+from quant_engine.core.strict_json import (
+    StrictJSONError,
+    strict_json_loads,
+    strict_json_shared,
+    verify_shared_unmutated,
+)
 
 
 class IndependentVerificationError(ValueError):
@@ -928,8 +933,10 @@ def _report_subjects_semantic_sha256(entries: list[dict[str, object]]) -> str:
 
 
 def _strict_object(contents: bytes) -> dict[str, object]:
+    # Large payloads (the provider ledger) decode once per process and are shared;
+    # no caller below mutates a parsed subject, and ``verify`` re-checks that.
     try:
-        value = strict_json_loads(contents, label="authority subject")
+        value = strict_json_shared(contents, label="authority subject")
     except ValueError:
         _fail()
     if not isinstance(value, dict):
@@ -9485,7 +9492,12 @@ class IndependentAccountManifestVerifier:
                 selected_snapshots, normalized, retained_candidate
             )
         )
-        return _canonical_independent_report_bytes(report)
+        report_bytes = _canonical_independent_report_bytes(report)
+        try:
+            verify_shared_unmutated()
+        except StrictJSONError:
+            _fail()
+        return report_bytes
 
     def verify_finalized_report(
         self,
