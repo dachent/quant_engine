@@ -3990,7 +3990,7 @@ def derive(
             )
         try:
             declaration = load_declaration(
-                strategy_basis.read_bytes(), strategy_basis.as_posix()
+                strategy_basis.read_bytes(), strategy_basis.name
             )
         except OSError as exc:
             raise InputError(

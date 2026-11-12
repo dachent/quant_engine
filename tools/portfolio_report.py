@@ -62,6 +62,11 @@ from quant_engine.portfolio_ledger import (
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
 )
+from quant_engine.portfolio_ledger import (
+    assess_gap_bounds_document,
+    numerical_from_governed_proof,
+    proof_covers_spans,
+)
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
@@ -116,6 +121,8 @@ import sleeve_disclosures
 import strategy_basis
 import strategy_leverage
 import strategy_basis_disclosure
+import account_financing
+import leverage_disclosure
 from portfolio_totals_verify import (
     PortfolioTotalsVerificationError,
     verify_portfolio_totals,
@@ -188,6 +195,11 @@ HWM_POLICY: Final = (
 )
 _PORTABLE_HWM_POLICY: Final = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v4.json"
+)
+HWM_GAP_BOUNDS: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-gap-bounds-v1.json"
 )
 _PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
@@ -292,6 +304,11 @@ STRATEGY_BASIS_EVIDENCE_NAME: Final = "strategy-basis-declaration.json"
 PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH: Final = "input/strategy-basis-declaration.json"
 PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH: Final = "input/sleeve-account-facts.json"
 IMPLEMENTATION_SLEEVE_EVIDENCE_NAME: Final = "implementation-sleeve-basis.json"
+# The owner account financing declaration a candidate was built with (#894).
+ACCOUNT_FINANCING_EVIDENCE_NAME: Final = "account-financing-declaration.json"
+PUBLISHED_ACCOUNT_FINANCING_RELATIVE_PATH: Final = (
+    "input/account-financing-declaration.json"
+)
 PUBLISHED_IMPLEMENTATION_SLEEVE_RELATIVE_PATH: Final = (
     "input/implementation-sleeve-basis.json"
 )
@@ -2240,7 +2257,12 @@ def _annualization_label(
     periods = periods_per_year if isinstance(periods_per_year, int) else None
     if frequency is None and periods is not None:
         frequency = _FREQUENCY_BY_PERIODS_PER_YEAR.get(
-            periods, (f"PERIODS_PER_YEAR_{periods}", f"{periods}-per-year")
+            periods,
+            # a trading-day count derived from the dates (e.g. 261 weekdays with
+            # holidays kept) is still a daily series
+            ("DAILY_TRADING", "daily")
+            if 200 <= periods <= 270
+            else (f"PERIODS_PER_YEAR_{periods}", f"{periods}-per-year"),
         )[0]
     word = (
         None
@@ -2288,7 +2310,10 @@ def _comparison_annualization(
         start=metrics.get("observed_start"),
         end=metrics.get("observed_end"),
         observations=metrics.get("observations"),
-        periods_per_year=comparison.get("periods_per_year"),
+        # the periods a year the figures were scaled with: the series' own calendar
+        # when it replaced the declaration (metrics carries it only then)
+        periods_per_year=metrics.get("periods_per_year")
+        or comparison.get("periods_per_year"),
     )
 
 
@@ -7828,6 +7853,23 @@ def _strategies(
             and observed_end is not None
             else account_metrics.get("cagr")
         )
+        # one short-window rule (#904): the annualised figure exists from 365 days, as
+        # twr_annualised does; under it the window return and its day count stand alone
+        cagr_window_days = (
+            (
+                _date(observed_end, "window end")
+                - _date(window_open or observed_start, "window start")
+            ).days
+            if observed_start is not None and observed_end is not None
+            else None
+        )
+        cagr_suppressed = (
+            account_cagr is not None
+            and cagr_window_days is not None
+            and cagr_window_days < _ONE_YEAR_DAYS
+        )
+        if cagr_suppressed:
+            account_cagr = None
         cost_row = costs.get(strategy_id, {})
         gap_row = gaps.get(strategy_id, {})
         coverage_row = coverage.get(strategy_id, {})
@@ -8108,7 +8150,9 @@ def _strategies(
                 ),
                 "account_live_cagr": account_cagr,
                 "account_live_cagr_status": (
-                    "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
+                    "SUPPRESSED_UNDER_365D"
+                    if cagr_suppressed
+                    else "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
                     if canonical_account and account_cagr is not None
                     else "AVAILABLE_SOURCE_REPORTED_SAME_AUDIT_VINTAGE"
                     if legacy_account and account_cagr is not None
@@ -8995,6 +9039,8 @@ def _leverage_disclosures(
     catalog: Mapping[str, Any],
     baseline_root: Path,
     provider_ledger_root: Path | None = None,
+    account_financing_path: Path | None = None,
+    cutoff: str | None = None,
 ) -> list[dict[str, Any]]:
     """Project additive, source-bound leverage observations without aggregation."""
     references = [
@@ -9081,6 +9127,45 @@ def _leverage_disclosures(
                     "strategy_id": strategy_id,
                 }
             )
+    if account_financing_path is not None:
+        if cutoff is None:
+            raise ReportValidationError("the financing declaration needs a cutoff")
+        try:
+            declaration = account_financing.load_declaration(
+                _regular_file_bytes(
+                    account_financing_path, "account financing declaration"
+                )
+            )
+            summary = leverage_disclosure.account_financing_rows(
+                declaration,
+                provider_catalog,
+                cutoff=cutoff,
+                generation_id=catalog_generation_id,
+                catalog_sha256=catalog_sha256,
+            )
+        except account_financing.FinancingDeclarationError as exc:
+            raise ReportValidationError(str(exc)) from exc
+        # The summary rows replace the placeholders they supersede for an account.
+        replaced = {
+            (row["account_id"], row["data_class"], row["measurement_basis"])
+            for row in summary
+        }
+        rows = [
+            row
+            for row in rows
+            if not (
+                row.get("classification") == "UNAVAILABLE_MEASURE"
+                and (
+                    row.get("account_id"),
+                    row.get("data_class"),
+                    "RECONCILED_FINANCING_COST"
+                    if row.get("measurement_basis") == "FINANCING_COST"
+                    else row.get("measurement_basis"),
+                )
+                in replaced
+            )
+        ]
+        rows.extend(summary)
     return sorted(
         rows,
         key=lambda item: (
@@ -9379,6 +9464,7 @@ _HWM_NUMERICAL_REASONS: Final = (
     "ENDPOINT_NOT_RECONCILED",
     "MISSING_CONSUMPTION_CONTEXT",
     "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+    "GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS",
 )
 
 # Shared consumption-boundary validator codes → report reason codes.
@@ -9392,6 +9478,27 @@ _HWM_CONTRACT_REASON_MAP: Final = {
 }
 
 
+def _hwm_gap_assessment(
+    receipts: Mapping[str, Mapping[str, Any]], path: Path
+) -> dict[str, Any]:
+    """Assess every strategy's holding-period spans against the pinned point bounds."""
+
+    sha256, _size = hash_file(path)
+    try:
+        return assess_gap_bounds_document(
+            {
+                strategy_id: _objects(
+                    receipt["span_return_receipts"], "epoch HPR spans"
+                )
+                for strategy_id, receipt in receipts.items()
+            },
+            _load_json(path, "HWM gap bounds"),
+            sha256,
+        )
+    except ValueError as exc:
+        raise ReportValidationError(str(exc)) from exc
+
+
 def _hwm_numerical_from_envelope(
     catalog: Mapping[str, Any],
     policy_path: Path = HWM_POLICY,
@@ -9399,6 +9506,8 @@ def _hwm_numerical_from_envelope(
     value_basis_bounds: ValueBasisBounds | None = None,
     membership_starts: Mapping[str, date] | None = None,
     endpoint_exempt: frozenset[str] = frozenset(),
+    governed_proof: Mapping[str, Any] | None = None,
+    gap_bounds_path: Path = HWM_GAP_BOUNDS,
 ) -> dict[str, Any]:
     """Compute the numerical full-systematic HWM from the governed envelope.
 
@@ -9428,15 +9537,27 @@ def _hwm_numerical_from_envelope(
         assert reason in _HWM_NUMERICAL_REASONS, f"unknown reason code: {reason}"
         return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
 
-    if any(
-        receipt["span_return_receipts"]
-        for receipt in _epoch_hpr_receipts(
-            catalog,
-            calculation_cutoff_date=None,
-            value_basis_bounds=value_basis_bounds,
-        ).values()
-    ):
-        return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+    hpr_receipts = _epoch_hpr_receipts(
+        catalog,
+        calculation_cutoff_date=None,
+        value_basis_bounds=value_basis_bounds,
+    )
+    gap_bounded: tuple[dict[str, Any], dict[str, Any]] | None = None
+    if any(receipt["span_return_receipts"] for receipt in hpr_receipts.values()):
+        # A missing daily point can hide a new peak unless it is bounded away from
+        # one (#899).  A bounded gap set is then published from the governed
+        # PORT-HWM-4 path, which links the gap as an accepted interval; the
+        # envelope has no daily period for the missing day.
+        assessment = _hwm_gap_assessment(hpr_receipts, gap_bounds_path)
+        if assessment["status"] != "BOUNDED":
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        gap_bounded = (
+            assessment,
+            {
+                sid: _objects(r["span_return_receipts"], "epoch HPR spans")
+                for sid, r in hpr_receipts.items()
+            },
+        )
 
     raw = catalog.get("hwm_inputs")
     if raw is None:
@@ -9500,6 +9621,19 @@ def _hwm_numerical_from_envelope(
         return _unavailable(
             _HWM_CONTRACT_REASON_MAP.get(exc.code, "HWM_INPUTS_INVALID")
         )
+
+    if gap_bounded is not None:
+        # The envelope passed every gate above; only now may the governed path
+        # supply the numbers, and only if it is as current as the envelope and its
+        # path observes both endpoints of every span.
+        last_day = max((str(row.get("date")) for row in periods), default="")
+        if governed_proof is None or governed_proof.get("status") != "AVAILABLE":
+            return _unavailable("GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS")
+        if str(governed_proof.get("complete_through")) < last_day or (
+            not proof_covers_spans(governed_proof, gap_bounded[1])
+        ):
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        return numerical_from_governed_proof(governed_proof, gap_bounded[0])
 
     # Hash-bound return crosswalk admitted by the baseline catalog, indexed
     # as a multimap so duplicate references are detected, never overwritten.
@@ -10727,6 +10861,7 @@ def build_report_data(
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
     implementation_sleeve_basis_path: Path | None = None,
+    account_financing_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -11398,6 +11533,7 @@ def build_report_data(
         value_basis_bounds=value_basis_bounds,
         membership_starts=hwm_basis.membership_starts,
         endpoint_exempt=hwm_basis.endpoint_exempt,
+        governed_proof=governed_hwm_proof,
     )
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
@@ -11733,7 +11869,13 @@ def build_report_data(
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
         "leverage_disclosures": with_account_roles(
-            _leverage_disclosures(catalog, baseline_root, provider_ledger_root)
+            _leverage_disclosures(
+                catalog,
+                baseline_root,
+                provider_ledger_root,
+                account_financing_path,
+                str(calculation_cutoff_date or catalog.get("as_of_date")),
+            )
         ),
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": strategy_returns,
@@ -11746,6 +11888,19 @@ def build_report_data(
     }
     if calculation_cutoff_date is not None:
         report["calculation_cutoff_date"] = calculation_cutoff_date
+    if account_financing_path is not None:
+        report["provenance"] = [
+            *report["provenance"],
+            {
+                "artifact": account_financing.ARTIFACT_ID,
+                "schema": f"{account_financing.ARTIFACT_ID}/{account_financing.ARTIFACT_VERSION}",
+                "sha256": hashlib.sha256(
+                    _regular_file_bytes(
+                        account_financing_path, "account financing declaration"
+                    )
+                ).hexdigest(),
+            },
+        ]
     if current_epoch_details is not None:
         # Lifecycle fields (#592): derived from the crosswalk, the epoch's own
         # close and the tag map only.  A report built without a current-epoch
@@ -12916,6 +13071,7 @@ def build_candidate(
     strategy_basis_path: Path | None = None,
     sleeve_facts_path: Path | None = None,
     implementation_sleeve_basis_path: Path | None = None,
+    account_financing_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -12952,6 +13108,7 @@ def build_candidate(
         strategy_basis_path=strategy_basis_path,
         sleeve_facts_path=sleeve_facts_path,
         implementation_sleeve_basis_path=implementation_sleeve_basis_path,
+        account_financing_path=account_financing_path,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -12974,6 +13131,13 @@ def build_candidate(
         _write_exact(
             candidate / SLEEVE_FACTS_EVIDENCE_NAME,
             _regular_file_bytes(sleeve_facts_path, "sleeve facts"),
+        )
+    if account_financing_path is not None:
+        _write_exact(
+            candidate / ACCOUNT_FINANCING_EVIDENCE_NAME,
+            _regular_file_bytes(
+                account_financing_path, "account financing declaration"
+            ),
         )
     if implementation_sleeve_basis_path is not None:
         _write_exact(
@@ -14736,6 +14900,13 @@ def _candidate_strategy_basis(candidate_dir: Path) -> Path | None:
     """The basis declaration a candidate was built with, when it carries one (#624)."""
 
     path = candidate_dir / STRATEGY_BASIS_EVIDENCE_NAME
+    return path if path.is_file() and not path.is_symlink() else None
+
+
+def _candidate_account_financing(candidate_dir: Path) -> Path | None:
+    """The financing declaration a candidate was built with, when it carries one (#894)."""
+
+    path = candidate_dir / ACCOUNT_FINANCING_EVIDENCE_NAME
     return path if path.is_file() and not path.is_symlink() else None
 
 
@@ -17049,6 +17220,7 @@ def verify_candidate(
         implementation_sleeve_basis_path=_candidate_implementation_sleeve_basis(
             candidate_dir
         ),
+        account_financing_path=_candidate_account_financing(candidate_dir),
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -18133,6 +18305,7 @@ def publish_report(
         implementation_sleeve_basis_path=_candidate_implementation_sleeve_basis(
             candidate_dir
         ),
+        account_financing_path=_candidate_account_financing(candidate_dir),
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -18181,6 +18354,17 @@ def publish_report(
                 "strategy-basis-declaration",
                 # the version the declaration schema name carries, not a literal here
                 strategy_basis.DECLARATION_SCHEMA.rsplit("/", 1)[-1],
+            )
+        )
+    financing_declaration = candidate_dir / ACCOUNT_FINANCING_EVIDENCE_NAME
+    if financing_declaration.is_file() and not financing_declaration.is_symlink():
+        # the exact bytes the account financing rows were computed from (#894)
+        artifact_specs.append(
+            (
+                financing_declaration,
+                PUBLISHED_ACCOUNT_FINANCING_RELATIVE_PATH,
+                account_financing.ARTIFACT_ID,
+                account_financing.ARTIFACT_VERSION,
             )
         )
     sleeve_facts_evidence = candidate_dir / SLEEVE_FACTS_EVIDENCE_NAME
@@ -18525,6 +18709,7 @@ def publish_report(
     # disclosure), so no consumer needs the candidate directory.
     for evidence_name, published_relative in (
         (STRATEGY_BASIS_EVIDENCE_NAME, PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH),
+        (ACCOUNT_FINANCING_EVIDENCE_NAME, PUBLISHED_ACCOUNT_FINANCING_RELATIVE_PATH),
         (SLEEVE_FACTS_EVIDENCE_NAME, PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH),
         (
             IMPLEMENTATION_SLEEVE_EVIDENCE_NAME,
@@ -18629,6 +18814,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--strategy-basis", type=Path)
     build.add_argument("--sleeve-facts", type=Path)
     build.add_argument("--implementation-sleeve-basis", type=Path)
+    build.add_argument("--account-financing", type=Path)
     build.add_argument("--output-root", type=Path, required=True)
     verify = commands.add_parser("verify")
     verify.add_argument("--baseline-root", type=Path, required=True)
@@ -18793,6 +18979,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 strategy_basis_path=args.strategy_basis,
                 sleeve_facts_path=args.sleeve_facts,
                 implementation_sleeve_basis_path=args.implementation_sleeve_basis,
+                account_financing_path=args.account_financing,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )

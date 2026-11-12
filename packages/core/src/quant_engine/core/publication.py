@@ -879,6 +879,9 @@ def _capture_generation_directory(
     root = Path(root).absolute()
     files: dict[str, bytes] = {}
     directories: set[str] = set()
+    # Declares the tree this capture reads: it opens files through handles the audit hook
+    # cannot see by path (verification receipts record this as a read).
+    sys.audit("quant_engine.read_tree", str(root / "generations" / generation_id))
     if os.name == "nt":
         root = Path(_windows_api_path(root))
         root_stat = root.lstat()

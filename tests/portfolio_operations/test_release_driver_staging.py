@@ -659,6 +659,14 @@ def test_the_real_cycle_resolve_ledger_spec_and_ledger_stages_run_in_order(
         state["stages"][i]["status"]
         for i in ("cycle-resolve", "provenance", "ledger-spec", "ledger")
     ] == ["ok"] * 4
+    # every process stage got its own timing log and a summary of it (#882)
+    for stage_id in ("provenance", "ledger-spec", "ledger"):
+        record = state["stages"][stage_id]
+        assert Path(record["timing_log"]).parent == cycle / "stage-timing"
+        assert set(record["timing_summary"]["verifier_calls"]) == {
+            "financial_outcomes",
+            "product_authority",
+        }
     # a second run keeps them; a changed input of a finished stage is refused
     assert _run(staged, "run", "--through", "ledger") == 0
     roots = Path(staged["values"]["cycle_roots_file"])
@@ -1018,3 +1026,42 @@ def test_the_basis_group_is_absent_without_a_release_inputs_root() -> None:
     argv = driver.stage_argv(run, stage)
     assert "--strategy-basis" not in argv and "--tag-map" not in argv
     assert "--crosswalk" in argv
+
+
+def test_a_config_key_no_stage_reads_does_not_rebind_it_but_a_referenced_one_does(
+    pass26: Path,
+) -> None:
+    """#890: bind each stage to the configuration its closure references."""
+
+    config = json.loads((pass26 / "pass26-run.json").read_text(encoding="utf-8"))
+    graph = _shipped()
+    first = graph["stages"][0]["id"]
+    base = driver.Run(config, graph, offline=True)
+    referenced = {
+        name
+        for name in driver._PLACEHOLDER.findall(json.dumps(base.stage(first)))
+        if name in config
+        and isinstance(config[name], (str, int))
+        and name not in driver._ALWAYS_BOUND_CONFIG
+    }
+    unused = "payload_budget_note_for_test"
+    assert unused not in config
+    with_unused = driver.Run({**config, unused: "a"}, graph, offline=True)
+    changed_unused = driver.Run({**config, unused: "b"}, graph, offline=True)
+    assert with_unused.stage_binding(first) == changed_unused.stage_binding(first)
+    # an identity key always rebinds, even though no template names it
+    moved = driver.Run(
+        {**config, "mode": "probe" if config["mode"] != "probe" else "release"},
+        graph,
+        offline=True,
+    )
+    assert moved.stage_binding(first) != base.stage_binding(first)
+    # a key some stage template references rebinds the stages whose closure reads it
+    for key in sorted(referenced):
+        changed = driver.Run(
+            {**config, key: str(config[key]) + "x"}, graph, offline=True
+        )
+        assert changed.stage_binding(first) != base.stage_binding(first), key
+        break
+    else:
+        pytest.skip("the first stage references no scalar config key")

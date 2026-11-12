@@ -46,7 +46,7 @@
   ],
   "properties": {
     "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital"},
-    "panel_schema_version": { "enum": [21, 22, 23, 24, 25] },
+    "panel_schema_version": { "enum": [21, 22, 23, 24, 25, 26] },
     "account_manifest": {
       "anyOf": [
         { "$ref": "#/$defs/account_manifest_v7" },
@@ -698,6 +698,8 @@
         "hwm_index": { "$ref": "#/$defs/decimal" },
         "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
         "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_gap_bound": { "type": "object" },
+        "hwm_numerical_basis": { "const": "PORT-HWM-4_GOVERNED_WITH_BOUNDED_MISSING_POINTS" },
         "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
         "hwm_numerical_reason": { "type": "string", "minLength": 1 },
         "nav_coverage": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
@@ -1014,14 +1016,14 @@
       "else": {"properties": {"strategies": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}, {"required": ["parent_strategy_id"]}, {"required": ["sleeve_id"]}]}}}, "performance": {"items": {"not": {"anyOf": [{"required": ["lifecycle_state"]}, {"required": ["retired_on"]}, {"required": ["closed_on"]}, {"required": ["parent_assignment_id"]}, {"required": ["sleeve_label"]}, {"required": ["parent_strategy_id"]}, {"required": ["sleeve_id"]}]}}}}}
     },
     {
-      "if": {"properties": {"panel_schema_version": {"enum": [24, 25]}}, "required": ["panel_schema_version"]},
+      "if": {"properties": {"panel_schema_version": {"enum": [24, 25, 26]}}, "required": ["panel_schema_version"]},
       "then": {
         "required": ["position_snapshots"],
         "properties": {"advisory": {"required": ["hwm_candidate"]}}
       }
     },
     {
-      "if": {"properties": {"panel_schema_version": {"enum": [23, 25]}}, "required": ["panel_schema_version"]},
+      "if": {"properties": {"panel_schema_version": {"enum": [23, 25, 26]}}, "required": ["panel_schema_version"]},
       "then": {
         "properties": {
           "custody_current_capital": {"$ref": "#/$defs/custody_handoff_current_capital_v3"}
@@ -1246,7 +1248,7 @@
       }
     },
     {
-      "if": {"properties": {"panel_schema_version": {"enum": [22, 23, 24, 25]}}, "required": ["panel_schema_version"]},
+      "if": {"properties": {"panel_schema_version": {"enum": [22, 23, 24, 25, 26]}}, "required": ["panel_schema_version"]},
       "then": {
         "properties": {
           "dependence_analysis": {"required": ["weight_basis", "weight_authority"]},
@@ -3135,8 +3137,8 @@
         "amount": {"$ref": "#/$defs/leverage_amount"},
         "classification": {"type": "string", "minLength": 1},
         "coverage_reason": {"type": "string", "minLength": 1},
-        "coverage_status": {"enum": ["OBSERVED_ONLY", "COMPLETE_WITHIN_DECLARED_BOUNDARY", "UNAVAILABLE", "DERIVED"]},
-        "data_class": {"enum": ["FINANCING_COST", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE", "SLEEVE_EQUITY", "SLEEVE_FINANCING_LIABILITY"]},
+        "coverage_status": {"enum": ["OBSERVED_ONLY", "COMPLETE_WITHIN_DECLARED_BOUNDARY", "COMPLETE_RECONCILED", "COMPLETE_DECLARED", "OBSERVED_UNRECONCILED", "UNAVAILABLE", "DERIVED"]},
+        "data_class": {"enum": ["FINANCING_COST", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE", "ACCOUNT_FINANCING", "SLEEVE_EQUITY", "SLEEVE_FINANCING_LIABILITY"]},
         "included_in_nav": {"type": ["boolean", "null"]},
         "measurement_basis": {"type": "string", "minLength": 1},
         "native_source_record_id": {"type": ["string", "null"]},
@@ -3284,12 +3286,15 @@
             "window_end": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
           }
         },
-        "headline_minus_summed_epoch_twr": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
+        "headline_minus_summed_epoch_twr": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "annualised_act_365": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "trailing_12_months": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "year_to_date": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
       },
       "allOf": [
         {
           "if": {"properties": {"status": {"const": "AVAILABLE"}}, "required": ["status"]},
-          "then": {"required": ["basis", "value", "index_base", "current_index", "window_start", "window_end", "window_days", "source", "summed_epoch_twr", "headline_minus_summed_epoch_twr"]},
+          "then": {"required": ["basis", "value", "index_base", "current_index", "window_start", "window_end", "window_days", "source", "summed_epoch_twr", "headline_minus_summed_epoch_twr", "annualised_act_365", "trailing_12_months", "year_to_date"]},
           "else": {"required": ["reason"]}
         }
       ]

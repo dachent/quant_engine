@@ -456,7 +456,8 @@ def _derive_sleeve(
     span = (end - opening).days
     twr = index - 1
     annualised: Decimal | None = None
-    if span > 0 and index > 0:
+    if span >= 365 and index > 0:
+        # from 365 days only (#904): a shorter window publishes its return, not a rate
         annualised = index ** (Decimal(365) / Decimal(span)) - 1
     bucket = _bucket_line(facts, end)
     live_nav: list[tuple[str, Decimal]] = [
@@ -738,6 +739,16 @@ def compare_published(
     ]
     if figures.annualised is not None:
         checks.append(("account_live_cagr", figures.annualised, RATE_TOLERANCE))
+    elif row.get("account_live_cagr") is not None:
+        found.append(
+            Finding(
+                "PUBLISHED_FIGURE_DIFFERS",
+                f"{where}.account_live_cagr",
+                None,
+                row.get("account_live_cagr"),
+                "account_live_cagr is published for a window under 365 days",
+            )
+        )
     checks.extend(
         (name, figures.max_drawdown, RATE_TOLERANCE) for name in drawdown_published
     )
@@ -1590,7 +1601,9 @@ _LEVERAGE_PUBLISHED = (
 )
 
 
-def derive_leverage(facts: Mapping[str, Any], strategy_id: str) -> dict[str, Decimal]:
+def derive_leverage(
+    facts: Mapping[str, Any], strategy_id: str
+) -> dict[str, Decimal | None]:
     """A sleeve's unlevered and levered figures from the sleeve facts alone.
 
     Written from the definition, not from the producer: the account loan of a day is the
@@ -1655,13 +1668,15 @@ def derive_leverage(facts: Mapping[str, Any], strategy_id: str) -> dict[str, Dec
             raise Refusal(WINDOW_EMPTY, "a return is not annualisable")
         exponent = Decimal(365) / Decimal(span)
         last = nav_rows[-1]
+        # from 365 days only (#904): a shorter window publishes its return, not a rate
+        short = span < 365
         return {
             "unlevered_cumulative": unlevered - 1,
-            "unlevered_annualised": unlevered**exponent - 1,
+            "unlevered_annualised": None if short else unlevered**exponent - 1,
             "unlevered_max_drawdown": worst[0],
             "unlevered_current_drawdown": unlevered / peaks[0] - 1,
             "levered_cumulative": levered - 1,
-            "levered_annualised": levered**exponent - 1,
+            "levered_annualised": None if short else levered**exponent - 1,
             "levered_max_drawdown": worst[1],
             "levered_current_drawdown": levered / peaks[1] - 1,
             "peak_gross_to_equity": peak_ratio,
@@ -1670,19 +1685,26 @@ def derive_leverage(facts: Mapping[str, Any], strategy_id: str) -> dict[str, Dec
 
 
 def compare_leverage(
-    row: Mapping[str, Any], derived: Mapping[str, Decimal]
+    row: Mapping[str, Any], derived: Mapping[str, Decimal | None]
 ) -> list[str]:
     """Each published levered/unlevered figure that differs from the derivation."""
 
     differences: list[str] = []
     for published, name in _LEVERAGE_PUBLISHED:
+        expected = derived[name]
+        if expected is None:
+            # an annualised figure under a year must not be published at all
+            if row.get(published) is not None:
+                differences.append(
+                    f"{published}: published {row.get(published)}, "
+                    "not annualisable under 365 days"
+                )
+            continue
         try:
             value = _dec(row.get(published), published)
         except Refusal:
             differences.append(f"{published}: not published (derived {derived[name]})")
             continue
-        if abs(value - derived[name]) > LEVERAGE_TOLERANCE:
-            differences.append(
-                f"{published}: published {value}, derived {derived[name]}"
-            )
+        if abs(value - expected) > LEVERAGE_TOLERANCE:
+            differences.append(f"{published}: published {value}, derived {expected}")
     return differences

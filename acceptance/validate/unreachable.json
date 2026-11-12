@@ -559,6 +559,470 @@
       "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-31",
       "reason": "role label now honoured (F2); no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 905,
+      "owner": "sprint-fx",
+      "class": "BUILDER_NOT_WIRED",
+      "close_by": "2026-12-15",
+      "reason": "portfolio_baseline fx gap clause fires whenever any non-USD record exists, never testing coverage (F7)",
+      "defect": "E3",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "what": "The FX status is marked partial whenever any foreign-currency record exists, although each record carries a dollar amount.",
+        "fix": "Derive FX coverage per record (PR 922, #905).",
+        "who": "Engineering (#905)",
+        "how_long": "in review",
+        "finding_entity_match": "^fact_status\\.fx$",
+        "entity_match": "^fact_status\\.fx$",
+        "number_affected": "No headline figure was found to depend on it; not yet proven by a check."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "TWO_COMPONENTS_DISAGREE",
+      "close_by": "2026-12-15",
+      "reason": "hwm_summary reads PORT-HWM-3 forced UNAVAILABLE by code-literal Matrixport receipts while hwm_governed_proof is AVAILABLE (F8; owner ruling on bridge vs fill)",
+      "defect": "E2",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "what": "The portfolio high-water mark is reported unavailable while its governed proof is available.",
+        "fix": "Publish the governed numeric HWM with its stated bound (PR 923, #899).",
+        "who": "Engineering (#899)",
+        "how_long": "in review",
+        "entity_match": "^hwm_summary$",
+        "where": "Portfolio; crypto strategy",
+        "number_affected": "Portfolio high-water mark and the crypto strategy drawdown figures."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 894,
+      "owner": "sprint-leverage",
+      "class": "NEVER_SATISFIABLE",
+      "close_by": "2026-12-15",
+      "reason": "leverage rows are literal OBSERVED_ONLY/UNAVAILABLE and scoped to all active accounts (F3-F5)",
+      "defect": "E8",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "Borrowing cost and exposure are not reconciled for the accounts under Where; the checker counts every active account, so this may not apply to some of them.",
+        "fix": "Account financing declaration and loan row (PR 921, #894); then each account is declared MARGIN or NONE.",
+        "who": "Engineering (#894)",
+        "how_long": "in review",
+        "entity_match": ".*",
+        "number_affected": "Unknown until the declaration lands; the IBKR margin loan size is the known open figure."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-31",
+      "reason": "after-tax is a literal (no tax-lot, rate or realization input exists), cash-drag and cost slots are unwired (F6, F10)",
+      "defect": "E6",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "what": "After-tax return is never computed for the strategies under Where.",
+        "fix": "Declare the pre-tax reporting scope (PR 930, #901); a true after-tax figure needs the owner's tax-lot and rate inputs.",
+        "who": "Engineering (#901); owner inputs",
+        "how_long": "scope in review; after-tax needs inputs",
+        "finding_entity_match": "^strategy_summary\\.after_tax_status$",
+        "entity_match": ".*",
+        "number_affected": "After-tax return column for the strategy."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-31",
+      "reason": "after-tax is a literal (no tax-lot, rate or realization input exists), cash-drag and cost slots are unwired (F6, F10)",
+      "defect": "E6",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "what": "Cash drag is never computed for the strategies under Where; the status is authored text.",
+        "fix": "Build the cash-path derivation and the Schwab daily cash capture (#901 b).",
+        "who": "Engineering (#901)",
+        "how_long": "several days after the capture exists",
+        "finding_entity_match": "^strategy_summary\\.cash_drag_status$",
+        "entity_match": ".*",
+        "number_affected": "Cash drag column for the strategy."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED",
+      "close_by": "2026-12-15",
+      "reason": "benchmark slot of the provenance version catalog is a dead UNAVAILABLE placeholder (F6)",
+      "defect": "E5",
+      "owner_view": {
+        "owner_class": "CHECKER_BUG",
+        "what": "The benchmark check reads an unused slot of the version catalog, not the benchmark comparison the report holds.",
+        "fix": "Wire the status to the evidence the report holds (PR 928, #901 a).",
+        "who": "Engineering (#901)",
+        "how_long": "in review",
+        "finding_entity_match": "^strategy_summary\\.benchmark_evidence_status$",
+        "scope": "row",
+        "row_scope_reason": "the slot is dead for every strategy, so the check is wrong the same way for all",
+        "number_affected": "No figure; the check reads the wrong field."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED",
+      "close_by": "2026-12-15",
+      "reason": "benchmark slot of the provenance version catalog is a dead UNAVAILABLE placeholder (F6)",
+      "defect": "E5",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "The crypto strategy has no benchmark comparison: its selected benchmark generation was not available to the build.",
+        "fix": "Assign the 50/50 benchmark and close the blend (PR 929, #901 d).",
+        "who": "Engineering (#901)",
+        "how_long": "in review",
+        "finding_entity_match": "^strategy_summary\\.benchmark_evidence_status$",
+        "entity_match": "^robuxio-crypto$",
+        "number_affected": "Benchmark block of the crypto strategy."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-31",
+      "reason": "after-tax is a literal (no tax-lot, rate or realization input exists), cash-drag and cost slots are unwired (F6, F10)",
+      "defect": "E6",
+      "owner_view": {
+        "owner_class": "CHECKER_BUG",
+        "what": "The cost check reads an unused slot of the version catalog, not the costs the report holds.",
+        "fix": "Wire the status to the evidence the report holds (PR 928, #901 a).",
+        "who": "Engineering (#901)",
+        "how_long": "in review",
+        "finding_entity_match": "^strategy_summary\\.cost_evidence_status$",
+        "scope": "row",
+        "row_scope_reason": "the slot is dead for every strategy, so the check is wrong the same way for all",
+        "number_affected": "No figure; the check reads the wrong field."
+      }
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-31",
+      "reason": "after-tax is a literal (no tax-lot, rate or realization input exists), cash-drag and cost slots are unwired (F6, F10)",
+      "defect": "E6",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "The strategies under Where have no annual cost in dollars (the fee basis is a rate or unknown).",
+        "fix": "Enter the fee basis for the strategy (#901).",
+        "who": "Engineering (#901); owner fee basis",
+        "how_long": "about 1 day once the basis is known",
+        "finding_entity_match": "^strategy_summary\\.cost_evidence_status$",
+        "entity_match": "^(robuxio-crypto|volatis-strategy)$",
+        "number_affected": "Cost column and cost rate for the strategy."
+      }
+    },
+    {
+      "check_id": "dates.section_as_of_vs_cutoff",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_SCOPE_TOO_WIDE",
+      "close_by": "2026-12-15",
+      "reason": "source clock judges finite-boundary providers with no active account or strategy; the validator has no provider-to-account mapping to recompute the exemption from (needs a provider field on the crosswalk) (F2)",
+      "defect": "C5",
+      "owner_view": {
+        "owner_class": "NOT_APPLICABLE",
+        "what": "The alpaca clock is old because the only alpaca account closed in 2025.",
+        "fix": "Make the rule skip providers with no current account (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "finding_check_id": "dates.source_clock",
+        "entity_match": "^alpaca$",
+        "when": {
+          "observed": "2026-07-17"
+        }
+      }
+    },
+    {
+      "check_id": "dates.section_as_of_vs_cutoff",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_SCOPE_TOO_WIDE",
+      "close_by": "2026-12-15",
+      "reason": "source clock judges finite-boundary providers with no active account or strategy; the validator has no provider-to-account mapping to recompute the exemption from (needs a provider field on the crosswalk) (F2)",
+      "defect": "C5",
+      "owner_view": {
+        "owner_class": "NOT_APPLICABLE",
+        "what": "The fidelity clock is old because there is no fidelity account.",
+        "fix": "Make the rule skip providers with no current account (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "finding_check_id": "dates.source_clock",
+        "entity_match": "^fidelity$",
+        "when": {
+          "observed": "2024-10-03"
+        }
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "C5",
+      "owner_view": {
+        "owner_class": "NOT_APPLICABLE",
+        "what": "The last observation of the closed alpaca account is not derivable: the account closed in 2025.",
+        "fix": "Exempt closed accounts from the capital and date rows (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "finding_check_id": "expected.not_derivable",
+        "entity_match": "^date\\.source_last_observation:account-0acb9e17da731d0e$"
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "B4",
+      "owner_view": {
+        "owner_class": "NOT_APPLICABLE",
+        "what": "The closed alpaca account's value is dated at its close, not the cutoff; the value matches.",
+        "fix": "Exempt closed accounts from the cutoff-date row (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "finding_check_id": "expected.capital.account.cutoff",
+        "entity_match": "^account-0acb9e17da731d0e\\|.*",
+        "when": {
+          "observed.as_of": "2025-11-24"
+        }
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "B4",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "The Composer account (excluded as immaterial) has no accepted capital value; it is part of retained-excluded capital.",
+        "fix": "Capture the Composer balance or record an accepted excluded value (#900).",
+        "who": "Engineering (#900)",
+        "how_long": "about 1 day once captured",
+        "finding_check_id": "expected.not_derivable",
+        "entity_match": "^capital\\.account\\.cutoff:account-9cb2832ca2366f08$",
+        "number_affected": "Retained-excluded capital; with it Total liquid stays blank."
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "B6",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "Retained-excluded capital is not current: the Composer account has no accepted value, so Total liquid stays blank.",
+        "fix": "Capture the Composer balance or record an accepted excluded value (#900).",
+        "who": "Engineering (#900)",
+        "how_long": "about 1 day once captured",
+        "finding_check_id": "expected.not_derivable",
+        "entity_match": "^capital\\.retained_excluded\\.cutoff:.*",
+        "number_affected": "Total liquid on the front page."
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "C5",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "The last observation date of the Composer account is not derivable (no captured series).",
+        "fix": "Capture the Composer balance history (#900).",
+        "who": "Engineering (#900)",
+        "how_long": "about 1 day once captured",
+        "finding_check_id": "expected.not_derivable",
+        "entity_match": "^date\\.source_last_observation:account-9cb2832ca2366f08$"
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "B4,B6",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "Capital of the reserve accounts has no accepted value; Total liquid depends on it.",
+        "fix": "Admit the captured Schwab and IBKR reserve values and enter John Hancock from a statement each cycle (#900).",
+        "who": "Engineering (#900); owner statement",
+        "how_long": "about 2 days plus a statement",
+        "finding_check_id": "expected.not_derivable",
+        "entity_match": "^capital\\.(portfolio\\.liquid|reserve)\\.cutoff:.*",
+        "number_affected": "Total liquid and reserve on the front page; systematic capital is not affected."
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "NONE",
+      "owner_view": {
+        "owner_class": "ACCEPTED_BY_DESIGN",
+        "what": "No derived strategy cash line exists for the fund-scoped provider rows under Where.",
+        "fix": "None: the rule should not emit it (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "finding_check_id": "expected.not_derivable",
+        "entity_match": "^capital\\.strategy_cash\\.cutoff:(robuxio-crypto|volatis-strategy)$",
+        "number_affected": "None: no strategy cash line exists to measure.",
+        "owner_record": "amended PROVIDER_CUSTODY_PERIMETER decision (fund-scoped providers carry no derived strategy cash line)",
+        "reviewed_on": "2026-11-12"
+      }
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped rows are now flagged by the oracle and not findings (F2, next baseline regeneration); remaining rows are data gaps: Composer account balance, reserve NAVs, John Hancock (F10), and an oracle-scope artefact for owner-excluded account dates",
+      "defect": "N56",
+      "owner_view": {
+        "owner_class": "ACCEPTED_BY_DESIGN",
+        "what": "Strategy cash coverage does not apply to the fund-scoped provider rows under Where.",
+        "fix": "None: the rule should not emit it (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "finding_check_id": "expected.not_derivable",
+        "entity_match": "^date\\.strategy_cash\\.coverage_end:(robuxio-crypto|volatis-strategy)\\|.*",
+        "number_affected": "None: no strategy cash line exists to measure.",
+        "owner_record": "amended PROVIDER_CUSTODY_PERIMETER decision (fund-scoped providers carry no derived strategy cash line)",
+        "reviewed_on": "2026-11-12"
+      }
+    },
+    {
+      "check_id": "universe.inactive_accounts_in_current",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "role label now honoured (F2); no test passes real builder output through this check yet (Ruling C reachability control)",
+      "defect": "D6",
+      "owner_view": {
+        "owner_class": "CHECKER_BUG",
+        "what": "A history-only IBKR account appears in the tables under Where; the builder labels it history-only and the rule ignores the label.",
+        "fix": "Make the rule honour the role label (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "entity_match": ".*",
+        "number_affected": "None: rows of an account with no current assignment."
+      }
+    },
+    {
+      "check_id": "lint.payload_size",
+      "issue": 893,
+      "owner": "sprint-runtime-build",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-15",
+      "reason": "the 50 MB literal was replaced by the committed budget in #893; entry closes when a builder fixture passes the check",
+      "defect": "F5",
+      "owner_view": {
+        "owner_class": "CHECKER_BUG",
+        "what": "The panel data file is flagged for size against a fixed limit that is not relative to the previous release.",
+        "fix": "Relative payload-budget rule from the previous committed release (PR 918, #893).",
+        "who": "Engineering (#893)",
+        "how_long": "in review",
+        "scope": "row",
+        "row_scope_reason": "one file, one limit",
+        "number_affected": "None: no figure depends on the file size."
+      }
+    },
+    {
+      "check_id": "lint.invested_capital_vs_contributions",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_COMPARES_DIFFERENT_QUANTITIES",
+      "close_by": "2026-12-15",
+      "reason": "owner contributions vs epoch opening NAV (F2, M10)",
+      "defect": "B7",
+      "owner_view": {
+        "owner_class": "CHECKER_BUG",
+        "what": "Invested capital and net contributed capital are different quantities and are compared directly.",
+        "fix": "Compare like with like or bridge them (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "in review",
+        "scope": "row",
+        "row_scope_reason": "one comparison rule applied to every listed strategy",
+        "number_affected": "No figure; the comparison is the defect."
+      }
+    },
+    {
+      "check_id": "preservation.report_to_panel",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_BUG",
+      "close_by": "2026-12-15",
+      "reason": "portfolio-hwm-policy provenance row appended by both builders (F9)",
+      "defect": "NONE",
+      "owner_view": {
+        "owner_class": "BUILDER_NOT_WIRED",
+        "what": "One provenance row is duplicated in the panel.",
+        "fix": "Drop the duplicate in the panel builder (#895).",
+        "who": "Engineering (#895)",
+        "how_long": "small",
+        "scope": "row",
+        "row_scope_reason": "a single duplicated key",
+        "number_affected": "None: the duplicate is byte-identical."
+      }
+    },
+    {
+      "check_id": "lint.internal_tokens_displayed",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED",
+      "close_by": "2026-12-15",
+      "reason": "known_gap tokens are not humanised (F9)",
+      "defect": "F3",
+      "owner_view": {
+        "owner_class": "REAL_DATA_GAP",
+        "what": "A gate note shows internal codes; one records a real six-month Schwab transaction export gap.",
+        "fix": "Close the export gap and write the note in plain words (#895).",
+        "who": "Engineering; owner export",
+        "how_long": "1 to 2 days",
+        "scope": "row",
+        "row_scope_reason": "the row is one gate note",
+        "number_affected": "Schwab transactions coverage."
+      }
     }
   ]
 }

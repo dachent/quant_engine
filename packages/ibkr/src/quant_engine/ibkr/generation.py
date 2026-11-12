@@ -945,7 +945,25 @@ def _normalize(
         nav.append({"record_id": _record_id("nav", nav_payload), **nav_payload})
 
         for report in statement.cash_reports:
-            if report.level_of_detail != "Currency":
+            # Flex states each currency's cash as a Currency line and the
+            # account's net cash as one BaseCurrency / BASE_SUMMARY line.  An
+            # account that borrows in its base currency (a margin loan) shows
+            # its loan only on the base line.  A consumer sums ONE level.
+            if report.level_of_detail == "Currency":
+                aggregation = "CURRENCY"
+                currency = report.currency
+                debit_class, credit_class = "CASH_DEBIT_BALANCE", "CASH_BALANCE"
+            elif (
+                report.level_of_detail == "BaseCurrency"
+                and report.currency == "BASE_SUMMARY"
+            ):
+                aggregation = "BASE_SUMMARY"
+                currency = statement.base_currency
+                debit_class, credit_class = (
+                    "NET_CASH_DEBIT_BALANCE",
+                    "NET_CASH_BALANCE",
+                )
+            else:
                 continue
             report_available = report.reported_account_matches_statement
             for basis, field, value in (
@@ -961,9 +979,7 @@ def _normalize(
                 row = source_row(
                     "financing-liability",
                     {
-                        "classification": (
-                            "CASH_DEBIT_BALANCE" if value < 0 else "CASH_BALANCE"
-                        ),
+                        "classification": debit_class if value < 0 else credit_class,
                         "measurement_basis": basis,
                         "source_record_id": (
                             f"cash-report:{account_id}:{report.to_date.isoformat()}"
@@ -974,8 +990,9 @@ def _normalize(
                     },
                     available=report_available,
                     value=value,
-                    currency=report.currency,
+                    currency=currency,
                 )
+                row["aggregation_level"] = aggregation
                 row["as_of_date"] = report.to_date.isoformat()
                 row["period_start"] = report.from_date.isoformat()
                 row["period_end"] = report.to_date.isoformat()

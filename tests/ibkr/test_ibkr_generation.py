@@ -3185,3 +3185,59 @@ def test_flex_only_stage_summary_has_no_tws_echo(tmp_path: Path) -> None:
     summary = stage_generation_candidate(spec, tmp_path / "out")
     assert summary["coverage_status"] == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
     assert not [key for key in summary if key.startswith("tws")]
+
+
+def test_a_base_only_cash_line_becomes_a_net_loan_row_not_a_dropped_loan(
+    tmp_path: Path,
+) -> None:
+    """Kill test (#894): Flex states a margin loan only on the BASE_SUMMARY line."""
+
+    path = tmp_path / "base-only.xml"
+    path.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 3),
+            "114",
+            native_sections=(
+                '<CashReport><CashReportCurrency accountId="SYNTH-RAW" '
+                'currency="BASE_SUMMARY" levelOfDetail="BaseCurrency" '
+                'fromDate="20260103" toDate="20260103" startingCash="-50" '
+                'endingCash="-50" endingSettledCash="-50" brokerInterest="-1" />'
+                '<CashReportCurrency accountId="SYNTH-RAW" currency="EUR" '
+                'levelOfDetail="Currency" fromDate="20260103" toDate="20260103" '
+                'startingCash="5" endingCash="5" endingSettledCash="5" />'
+                "</CashReport>"
+            ),
+        ),
+        encoding="utf-8",
+    )
+    statement = parse_flex_file(path, artifact_id="synthetic/base-only.xml").statements[
+        0
+    ]
+    catalog = ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+    rows = catalog["financing_liability_observations"]
+    base = [r for r in rows if r["aggregation_level"] == "BASE_SUMMARY"]
+    assert {r["classification"] for r in base} == {"NET_CASH_DEBIT_BALANCE"}
+    assert {r["amount"]["value"] for r in base} == {"-50"}
+    assert {r["amount"]["currency"] for r in base} == {"USD"}
+    currency = [r for r in rows if r["aggregation_level"] == "CURRENCY"]
+    assert {r["classification"] for r in currency} == {"CASH_BALANCE"}
+    # the two levels never share a record id, so a consumer can sum one level
+    assert len({r["record_id"] for r in rows}) == len(rows)

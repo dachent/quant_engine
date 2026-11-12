@@ -184,6 +184,10 @@ def pre_chain(
             authorities["portfolio123_version_evidence_path"].resolve()
         ),
     }
+    # optional (#904 item 9): the cycle's accepted multi-day return spans receipt
+    spans_receipt = cycle / "accepted-return-spans.json"
+    if spans_receipt.is_file():
+        selected["accepted_return_spans_path"] = str(spans_receipt.resolve())
     selected_path = work / "dependence-selected-inputs.json"
     selected_path.parent.mkdir(parents=True, exist_ok=True)
     selected_path.write_text(

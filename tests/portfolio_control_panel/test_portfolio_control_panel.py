@@ -7093,7 +7093,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "![21, 22, 23, 24, 25].includes(data.panel_schema_version)" in renderer
+    assert "![21, 22, 23, 24, 25, 26].includes(data.panel_schema_version)" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -14059,7 +14059,7 @@ def test_panel_schema22_publication_records_input_report_version(
         assert provenance["sha256"] == selected_sha
 
 
-def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
+def test_renderer_accepts_panel_schema21_through_26_and_refuses_27(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     import textwrap
@@ -14079,7 +14079,7 @@ def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
     node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
 
     pages: dict[int, Path] = {}
-    for version in (21, 22, 23, 24, 25, 26):
+    for version in (21, 22, 23, 24, 25, 26, 27):
         page_root = tmp_path / f"renderer-v{version}"
         shutil.copytree(candidate, page_root)
         data_path = page_root / "data" / "dashboard_data.json"
@@ -14107,7 +14107,7 @@ def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
         const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
         const results = [];
         try {
-          for (const version of [21, 22, 23, 24, 25, 26]) {
+          for (const version of [21, 22, 23, 24, 25, 26, 27]) {
             const page = await browser.newPage();
             const errors = [];
             page.on("pageerror", error => errors.push(String(error)));
@@ -14145,12 +14145,12 @@ def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
         env=env,
     )
     evidence = json.loads(result.stdout.strip().splitlines()[-1])
-    assert [item["version"] for item in evidence] == [21, 22, 23, 24, 25, 26]
-    for item in evidence[:5]:
+    assert [item["version"] for item in evidence] == [21, 22, 23, 24, 25, 26, 27]
+    for item in evidence[:6]:
         assert item["state"] == "ready" and not item["errorVisible"]
         assert item["kpis"]
         assert not item["errors"]
-    unsupported = evidence[5]
+    unsupported = evidence[6]
     assert unsupported["state"] == "error" and unsupported["errorVisible"]
     assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
     assert any("missing or unsupported" in error for error in unsupported["errors"])
@@ -15272,7 +15272,11 @@ def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
     renderer = (REPOSITORY_ROOT / "apps/portfolio-control-panel/app.js").read_text(
         encoding="utf-8"
     )
-    emitted = {panel.PANEL_SCHEMA_VERSION, panel.CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION}
+    emitted = {
+        panel.PANEL_SCHEMA_VERSION,
+        panel.CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION,
+        panel.ACCOUNT_FINANCING_PANEL_SCHEMA_VERSION,
+    }
     allow_list = re.search(
         r"!\[([0-9, ]+)\]\.includes\(data\.panel_schema_version\)", renderer
     )
@@ -15280,7 +15284,7 @@ def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
     renderer_versions = {int(item) for item in allow_list.group(1).split(",")}
     schema_versions = set(schema["properties"]["panel_schema_version"]["enum"])
 
-    assert emitted == {24, 25}
+    assert emitted == {24, 25, 26}
     assert emitted <= schema_versions and emitted <= renderer_versions
     assert schema_versions == renderer_versions
 
@@ -15293,7 +15297,7 @@ def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
     ]
     assert len(conditions) == 1
     condition = conditions[0]
-    assert condition["if"]["properties"]["panel_schema_version"]["enum"] == [24, 25]
+    assert condition["if"]["properties"]["panel_schema_version"]["enum"] == [24, 25, 26]
     assert condition["then"]["properties"]["advisory"]["required"] == ["hwm_candidate"]
 
 
@@ -15350,6 +15354,11 @@ def test_the_report_version_selects_the_panel_version() -> None:
     assert panel._panel_schema_version_for(3) == 25
     assert panel._panel_schema_version_for(4) == 25
     assert panel._panel_schema_version_for(True) == 24
+    # account financing rows (#894) select 26 whatever the report version
+    financing = [{"data_class": "ACCOUNT_FINANCING"}]
+    assert panel._panel_schema_version_for(5, financing) == 26
+    assert panel._panel_schema_version_for(2, financing) == 26
+    assert panel._panel_schema_version_for(5, [{"data_class": "FINANCING_COST"}]) == 25
 
 
 def test_a_pdf_locator_outside_the_streams_is_refused(tmp_path: Path) -> None:
@@ -15868,3 +15877,18 @@ def test_vendor_gap_fills_input_is_pinned_bound_and_closed_against_receipts(
     assert "vendor_gap_fills" not in bound
     with pytest.raises(panel.ControlPanelValidationError, match="vendor_gap_fills"):
         panel._rendered_files(*base_args, **base_kwargs, vendor_gap_fills=(staged, pin))
+
+
+def test_renderer_names_the_p123_layers_and_never_calls_the_copy_provider_live() -> (
+    None
+):
+    """RULING-E D2: the owner's P123 copy is not the provider's live book."""
+
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert "provider-live book" not in renderer.lower()
+    assert "Model live (provider record, without my trades)" in renderer
+    assert "P123 copy (diagnostic)" in renderer
+    assert "layerLabels[provider.evidence_layer]" in renderer
+    assert 'COPY_RECORD: "P123 copy (diagnostic)"' in renderer
+    assert "evidence.copy_record" in renderer

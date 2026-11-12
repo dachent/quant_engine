@@ -147,12 +147,16 @@ def world(tmp_path: Path) -> dict[str, Any]:
     pre_file.write_text(json.dumps(before), encoding="utf-8")
     # the commit
     (coordination / "releases" / RID).mkdir()
+    release_json = json.dumps(
+        {"release_id": RID, "previous_authority": {"release_id": PRED}}
+    ).encode()
+    (coordination / "releases" / RID / "release.json").write_bytes(release_json)
     (coordination / "CURRENT_RELEASE.json").write_text(
         json.dumps(
             {
                 "authority_schema_version": 1,
                 "release_id": RID,
-                "release_manifest_sha256": "d" * 64,
+                "release_manifest_sha256": _sha(release_json),
                 "state": "COMMITTED",
             }
         ),
@@ -288,6 +292,28 @@ def test_a_committed_release_passes_every_step_and_writes_create_only_evidence(
     assert tool.main(world["args"]) == 1
 
 
+def test_the_predecessor_is_read_from_the_committed_manifest_not_the_cycle(
+    world: dict[str, Any],
+) -> None:
+    """Kill test (#907): a corrective release succeeds R3, not the cycle's pin."""
+
+    stale = "e" * 64
+    resolved = json.loads(world["resolved"].read_bytes())
+    resolved["predecessor"] = {"release_id": stale}
+    world["resolved"].write_text(json.dumps(resolved), encoding="utf-8")
+    assert tool.main(world["args"]) == 0
+    receipt = json.loads(Path(_flag(world["args"], "--out")).read_bytes())
+    assert receipt["predecessor_release_id"] == PRED
+
+
+def test_a_manifest_that_is_not_the_one_current_release_names_is_refused(
+    world: dict[str, Any],
+) -> None:
+    path = world["coordination"] / "releases" / RID / "release.json"
+    path.write_bytes(path.read_bytes() + b" ")
+    assert tool.main(world["args"]) == 1
+
+
 @pytest.mark.parametrize(
     ("mode", "message"),
     [
@@ -347,8 +373,17 @@ def test_the_commit_and_pointer_state_must_be_exactly_this_release(
     elif mutate == "other-spec":
         _rewrite(world["commit"], spec_sha256="0" * 64)
     elif mutate == "is-predecessor":
+        # a manifest that names itself as its own predecessor
+        looped = json.dumps(
+            {"release_id": PRED, "previous_authority": {"release_id": PRED}}
+        ).encode()
+        (coordination / "releases" / PRED / "release.json").write_bytes(looped)
         _rewrite(world["commit"], release_id=PRED)
-        _rewrite(coordination / "CURRENT_RELEASE.json", release_id=PRED)
+        _rewrite(
+            coordination / "CURRENT_RELEASE.json",
+            release_id=PRED,
+            release_manifest_sha256=_sha(looped),
+        )
     elif mutate == "pointer-names-other-release":
         _rewrite(coordination / "CURRENT_RELEASE.json", release_id="e" * 64)
     elif mutate == "predecessor-dir-gone":
@@ -441,3 +476,29 @@ def test_the_stage_runs_the_same_validator_command_as_the_pre_commit_findings() 
     # everything but the details file the pre-commit stage adds
     assert after == pre[: pre.index("--details-out")]
     assert "--validate-argv" not in post
+
+
+@pytest.mark.parametrize(("code", "passes"), [(0, True), (1, False)])
+def test_the_published_panel_render_check_is_a_step_when_the_panel_dir_is_given(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str], code: int, passes: bool
+) -> None:
+    """#912: a failing rendered-UI check refuses the release; without the flag nothing changes."""
+
+    (world["tools"] / "published_render_check.py").write_text(
+        f"import sys\nassert '--panel-dir' in sys.argv and '--out-dir' in sys.argv\nsys.exit({code})\n",
+        encoding="utf-8",
+    )
+    args = [
+        *world["args"][:1],
+        "--published-panel-dir",
+        str(world["tmp"] / "panel"),
+        *world["args"][1:],
+    ]
+    status = tool.main(args)
+    if passes:
+        assert status == 0
+        receipt = json.loads(Path(_flag(args, "--out")).read_bytes())
+        assert "published-render" in [s["step"] for s in receipt["steps"]]
+    else:
+        assert status == 1
+        assert "published-render exited 1" in capsys.readouterr().err

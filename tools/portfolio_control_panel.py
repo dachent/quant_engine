@@ -71,6 +71,11 @@ from quant_engine.portfolio_ledger import (
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
 )
+from quant_engine.portfolio_ledger import (
+    assess_gap_bounds_document,
+    numerical_from_governed_proof,
+    proof_covers_spans,
+)
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
@@ -162,6 +167,8 @@ CORE_BENCHMARK_COUNT: Final = 11
 # is version 25; every other panel is 24.  Versions 22 and 23 (the same split before
 # the position snapshot split and the governed HWM candidate) stay readable.
 CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 25
+# A panel whose leverage disclosures carry the owner's account financing rows (#894) is 26.
+ACCOUNT_FINANCING_PANEL_SCHEMA_VERSION: Final = 26
 BUILDER_VERSION: Final = "2.13.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
@@ -221,6 +228,11 @@ ACCOUNT_MANIFEST_INDEPENDENT_VERIFICATION_SCHEMA = (
 )
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
+)
+_HWM_GAP_BOUNDS = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-gap-bounds-v1.json"
 )
 DEPENDENCE_POLICY = (
     Path(__file__).resolve().parents[1]
@@ -751,7 +763,7 @@ def _validated_strategy_evidence(
         )
         paths = [
             (name, _object(row[name], f"strategy evidence {name}"))
-            for name in ("account", "provider")
+            for name in ("account", "provider", "copy_record")
             if row.get(name) is not None
         ]
         if not paths:
@@ -4911,6 +4923,8 @@ def _compute_panel_numerical_hwm(
     *,
     membership_starts: Mapping[str, date] | None = None,
     endpoint_exempt: frozenset[str] = frozenset(),
+    governed_proof: Mapping[str, Any] | None = None,
+    gap_bounds_path: Path | None = None,
 ) -> dict[str, Any]:
     """Recompute the numerical full-systematic HWM from the governed
     baseline catalog so the panel can reconcile it against the report.
@@ -4935,16 +4949,44 @@ def _compute_panel_numerical_hwm(
         else catalog.get("epoch_hpr_receipts", []),
         "epoch_hpr_receipts",
     )
-    if any(
-        _objects(
+    # Mirrors the report's receipt rules: one receipt per strategy, two-day spans
+    # with no subscription inside them.
+    spans_by_strategy: dict[str, list[Mapping[str, Any]]] = {}
+    for receipt in hpr_receipts:
+        key = str(receipt.get("strategy_id"))
+        if key in spans_by_strategy:
+            raise ControlPanelValidationError(
+                "epoch HPR receipt strategy is duplicated"
+            )
+        spans = _objects(
             _object(receipt.get("receipt"), "epoch HPR receipt").get(
                 "span_return_receipts"
             ),
             "epoch HPR spans",
         )
-        for receipt in hpr_receipts
-    ):
-        return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        if any(
+            span.get("span_days", 2) != 2
+            or span.get("subscription_events_in_span", 0) != 0
+            for span in spans
+        ):
+            raise ControlPanelValidationError("epoch HPR span differs")
+        spans_by_strategy[key] = list(spans)
+    gap_bounded: tuple[dict[str, Any], dict[str, Any]] | None = None
+    if any(spans_by_strategy.values()):
+        # Mirrors the report: a gap set bounded away from a new peak publishes the
+        # numeric HWM from the governed path (#899); anything else stays UNAVAILABLE.
+        bounds_path = gap_bounds_path or _HWM_GAP_BOUNDS
+        try:
+            assessment = assess_gap_bounds_document(
+                spans_by_strategy,
+                _load_json(bounds_path, "HWM gap bounds"),
+                hash_file(bounds_path)[0],
+            )
+        except ValueError as exc:
+            raise ControlPanelValidationError(str(exc)) from exc
+        if assessment["status"] != "BOUNDED":
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        gap_bounded = (assessment, spans_by_strategy)
 
     def _panel_decimal(value: object, field_name: str) -> Decimal:
         if not isinstance(value, str):
@@ -4975,6 +5017,19 @@ def _compute_panel_numerical_hwm(
         membership_starts=membership_starts,
         endpoint_exempt=endpoint_exempt,
     )
+
+    if gap_bounded is not None:
+        # The envelope passed every gate above; only now may the governed path
+        # supply the numbers, and only if it is as current as the envelope and its
+        # path observes both endpoints of every span.
+        last_day = max((str(row.get("date")) for row in periods), default="")
+        if governed_proof is None or governed_proof.get("status") != "AVAILABLE":
+            return _unavailable("GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS")
+        if str(governed_proof.get("complete_through")) < last_day or (
+            not proof_covers_spans(governed_proof, gap_bounded[1])
+        ):
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        return numerical_from_governed_proof(governed_proof, gap_bounded[0])
 
     crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
@@ -5513,7 +5568,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     )
     se_text = alpha.get("annualized_standard_error") if alpha else None
     se = _alpha_decimal(se_text)
-    t_stat = net / se if net is not None and se is not None and se != 0 else None
+    t_stat = net / se if net is not None and se is not None and se > 0 else None
     backtest = composition.get("backtest_observations_used")
     live = composition.get("live_observations")
     used = composition.get("calculation_observations_used")
@@ -5540,8 +5595,44 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         else None
     )
     periods = association.get("periods_per_year")
+    # #904 item 11: one rule for whether an alpha may stand as a headline tile.  It
+    # needs a standard error (so a t-statistic) and no hypothetical backtest in the
+    # series it was fitted on; |t| < 2 reads "not distinguishable from zero".
+    if t_stat is None:
+        inference = "NO_STANDARD_ERROR"
+    elif abs(t_stat) < 2:
+        inference = "NOT_DISTINGUISHABLE_FROM_ZERO"
+    else:
+        inference = "DISTINGUISHABLE_FROM_ZERO"
+    # the composition decides, and an unknown composition fails closed: a fit whose
+    # backtest count is absent or malformed is never a headline
+    layers = row.get("evidence_layers")
+    includes_backtest = (
+        isinstance(backtest, int)
+        and not isinstance(backtest, bool)
+        and backtest > 0
+        or (isinstance(layers, list) and "BACKTEST" in layers)
+    )
+    composition_known = isinstance(backtest, int) and not isinstance(backtest, bool)
+    if net is None and gross is None:
+        headline_status = "UNAVAILABLE_NO_ALPHA"
+    elif includes_backtest:
+        headline_status = "NOT_A_HEADLINE_INCLUDES_BACKTEST"
+    elif not composition_known:
+        headline_status = "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
+    elif t_stat is None:
+        headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
+    else:
+        headline_status = "HEADLINE_ALLOWED"
     return {
         "status": "AVAILABLE" if available else "UNAVAILABLE",
+        "inference": inference,
+        "headline_status": headline_status,
+        # one headline alpha per strategy: the fit on the accepted live return series
+        # with a standard error and t-statistic; every other fit is secondary
+        "lens_role": "HEADLINE"
+        if headline_status == "HEADLINE_ALLOWED"
+        else "SECONDARY",
         "unavailable_reason": unavailable_reason,
         "window_start": start,
         "window_end": end,
@@ -5576,6 +5667,16 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "factor_as_of_date": factor_end if isinstance(factor_end, str) else None,
         "factor_staleness_days": staleness,
     }
+
+
+def _alpha_headline_status(row: Mapping[str, Any] | None) -> str:
+    if row is None:
+        return "UNAVAILABLE"
+    return str(_alpha_context(row)["headline_status"])
+
+
+def _alpha_headline(row: Mapping[str, Any] | None) -> bool:
+    return _alpha_headline_status(row) == "HEADLINE_ALLOWED"
 
 
 def _factor_analysis(
@@ -9736,11 +9837,26 @@ def _strategy_underwriting(
                     "hybrid_aligned_observations": factor_value(
                         hybrid_factor, "coverage", "aligned_observations"
                     ),
-                    "live_net_alpha": factor_value(
-                        live_factor, "alpha", "net_annualized"
+                    # #904 items 10 and 11: an alpha is a headline only with a standard
+                    # error and no hypothetical backtest in its series; its context
+                    # (t-statistic, inference, backtest share) travels with it
+                    "live_net_alpha": (
+                        factor_value(live_factor, "alpha", "net_annualized")
+                        if _alpha_headline(live_factor)
+                        else None
                     ),
-                    "hybrid_net_alpha": factor_value(
-                        hybrid_factor, "alpha", "net_annualized"
+                    "live_net_alpha_status": _alpha_headline_status(live_factor),
+                    "live_net_alpha_context": (
+                        None if live_factor is None else _alpha_context(live_factor)
+                    ),
+                    "hybrid_net_alpha": (
+                        factor_value(hybrid_factor, "alpha", "net_annualized")
+                        if _alpha_headline(hybrid_factor)
+                        else None
+                    ),
+                    "hybrid_net_alpha_status": _alpha_headline_status(hybrid_factor),
+                    "hybrid_net_alpha_context": (
+                        None if hybrid_factor is None else _alpha_context(hybrid_factor)
                     ),
                     "live_net_alpha_window": _alpha_window(live_factor),
                     "hybrid_net_alpha_window": _alpha_window(hybrid_factor),
@@ -10158,9 +10274,17 @@ def _alpha_window(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def _panel_schema_version_for(report_schema_version: object) -> int:
-    """The panel version a report version selects: custody coverage reports are 25."""
+def _panel_schema_version_for(
+    report_schema_version: object, leverage_rows: object = None
+) -> int:
+    """The panel version a report selects: custody coverage reports are 25, and a report
+    that carries account financing rows (#894) is 26."""
 
+    if isinstance(leverage_rows, list) and any(
+        isinstance(row, dict) and row.get("data_class") == "ACCOUNT_FINANCING"
+        for row in leverage_rows
+    ):
+        return ACCOUNT_FINANCING_PANEL_SCHEMA_VERSION
     if report_schema_version in {3, 4, 5}:
         return CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
     return PANEL_SCHEMA_VERSION
@@ -11055,6 +11179,7 @@ def _panel_data(
         epoch_hpr_receipts,
         membership_starts=hwm_starts,
         endpoint_exempt=hwm_exempt,
+        governed_proof=governed_hwm_proof,
     )
     # The coverage rows inherit the current cutoff values and weights of the strategy
     # rows; the summary says which weight set it shows (the report says the same).
@@ -11682,7 +11807,7 @@ def _panel_data(
             "weekly_returns_sha256": accepted_weekly_returns.get("source_sha256"),
         },
         "panel_schema_version": _panel_schema_version_for(
-            report.get("report_schema_version")
+            report.get("report_schema_version"), report.get("leverage_disclosures")
         ),
         "performance": normalized_performance,
         "position_snapshots": position_snapshots,

@@ -433,6 +433,10 @@ def test_independent_verifier_rejects_each_tampered_total() -> None:
             amount_usd="1"
         ),
         lambda r: r["portfolio_twr_cumulative"].update(value="0.11"),
+        # the rate and trailing windows are re-derived too (#904 item 1)
+        lambda r: r["portfolio_twr_cumulative"].update(annualised_act_365="9.99"),
+        lambda r: r["portfolio_twr_cumulative"].update(trailing_12_months="9.99"),
+        lambda r: r["portfolio_twr_cumulative"].update(year_to_date="9.99"),
         lambda r: r["portfolio_mwr_annualised"].update(
             window_equivalent_cumulative="0.5"
         ),

@@ -6,7 +6,9 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
+from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
@@ -1252,3 +1254,101 @@ def test_designer_curve_refuses_an_unexpected_evidence_layer(tmp_path: Path) -> 
 
     with pytest.raises(history.StrategyHistoryError, match="unexpected evidence layer"):
         history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def _refresh_for_sidecar(root: Path) -> tuple[dict[str, object], Path, dict[str, Any]]:
+    inputs = _bundle_inputs(root)
+    current = root / "qsi-current.zip"
+    extension = root / "qsi-extension.json"
+    _qsi_current_archive(current, revised=True)
+    _qsi_price_extension(extension, inputs["qsi_price_root"])
+    retained = history.write_bundle(
+        root / "retained",
+        **inputs,
+        as_of_date="2026-09-17",
+        live_inceptions={"QSI": "2026-01-05"},
+    )
+    retained_path = Path(str(retained["destination"]))
+    refreshed = history.write_qsi_refresh_bundle(
+        root / "refreshed",
+        retained_manifest_path=retained_path / "manifest.json",
+        retained_returns_path=retained_path / "returns.csv",
+        qsi_subscription_archive=inputs["qsi_subscription_archive"],
+        qsi_current_subscription_archive=current,
+        qsi_appendix_workbook=inputs["qsi_appendix_workbook"],
+        qsi_price_root=inputs["qsi_price_root"],
+        price_extension_json=extension,
+        as_of_date="2026-09-17",
+    )
+    return refreshed, Path(str(refreshed["destination"])), inputs
+
+
+def test_the_qsi_sources_sidecar_binds_each_locator_to_its_hash(
+    tmp_path: Path,
+) -> None:
+    """#907: a replaced source is refused by name before the re-derive starts."""
+
+    _, bundle_root, inputs = _refresh_for_sidecar(tmp_path)
+    manifest = json.loads((bundle_root / "manifest.json").read_bytes())
+    sidecar_path = bundle_root / "sources.local.json"
+    sources, _seed_manifest, _seed_returns = history.load_qsi_sources_sidecar(
+        sidecar_path, manifest["bundle_id"]
+    )
+    assert sources
+    with pytest.raises(history.StrategyHistoryError, match="another bundle"):
+        history.load_qsi_sources_sidecar(sidecar_path, "0" * 64)
+    victim = inputs["qsi_subscription_archive"]
+    victim.write_bytes(victim.read_bytes() + b"x")
+    with pytest.raises(history.StrategyHistoryError, match="changed since"):
+        history.load_qsi_sources_sidecar(sidecar_path, manifest["bundle_id"])
+
+
+def test_a_qsi_source_under_scratch_is_refused_at_write_and_at_read(
+    tmp_path: Path,
+) -> None:
+    """Kill test (#907): a scratch cleanup between S3 and the last re-derive."""
+
+    scratch = tmp_path / "scratch" / "run"
+    scratch.mkdir(parents=True)
+    with pytest.raises(history.StrategyHistoryError, match="not scratch"):
+        _refresh_for_sidecar(scratch)
+    durable = tmp_path / "durable"
+    durable.mkdir()
+    _, bundle_root, _ = _refresh_for_sidecar(durable)
+    manifest = json.loads((bundle_root / "manifest.json").read_bytes())
+    sidecar_path = bundle_root / "sources.local.json"
+    sidecar = json.loads(sidecar_path.read_bytes())
+    key = sorted(sidecar["sources"])[0]
+    moved = tmp_path / "scratch" / "moved.bin"
+    moved.write_bytes(Path(sidecar["sources"][key]).read_bytes())
+    sidecar["sources"][key] = str(moved)
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+    with pytest.raises(history.StrategyHistoryError, match="not scratch"):
+        history.load_qsi_sources_sidecar(sidecar_path, manifest["bundle_id"])
+
+
+def test_a_junction_into_scratch_is_refused_even_though_its_path_looks_durable(
+    tmp_path: Path,
+) -> None:
+    """Review of #907: the scratch check follows the locator to where it points."""
+
+    import os
+
+    real = tmp_path / "scratch" / "inputs"
+    real.mkdir(parents=True)
+    link = tmp_path / "durable-inputs"
+    try:
+        os.symlink(real, link, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("cannot create a directory link here")
+        # a junction needs no privilege on Windows
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(real)],
+            capture_output=True,
+            check=False,
+        )
+        if made.returncode != 0:
+            pytest.skip("cannot create a junction here")
+    with pytest.raises(history.StrategyHistoryError, match="not scratch"):
+        history._refuse_scratch_locator(link / "archive.zip")

@@ -12,8 +12,9 @@ below with a reason, and adding a tool without doing either fails here rather th
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
+
+import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml"
@@ -23,6 +24,9 @@ TOOLS = REPOSITORY_ROOT / "tools"
 # A directory target was tried and rejected: mypy fails on module-path mapping for this
 # layout without --explicit-package-bases, so the list stays explicit and this test guards it.
 UNCHECKED_TOOLS: dict[str, str] = {
+    # passes strict mypy on its own (``mypy tools/release_canary.py``); kept out of the shared invocation
+    # line, which every release-tool PR edits and conflicts on
+    "release_canary.py": "checked standalone; see the comment above",
     # mypy refuses these two alongside tools/account_strategy_manifest.py: they import it as
     # a top-level module, so it is "found twice under different module names". Resolving that
     # needs --explicit-package-bases or a MYPYPATH change across the whole invocation.
@@ -43,10 +47,14 @@ UNCHECKED_TOOLS: dict[str, str] = {
 
 
 def _mypy_arguments() -> list[str]:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    match = re.search(r"run: uv run --frozen --no-sync mypy (?P<targets>[^\n]+)", text)
-    assert match is not None, "the quality workflow no longer invokes mypy as expected"
-    return match.group("targets").split()
+    # The command may be a one-line scalar or a folded one (one target per line); the parsed
+    # step text is the same either way.
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for step in workflow["jobs"]["quality"]["steps"]:
+        run = str(step.get("run", ""))
+        if run.startswith("uv run --frozen --no-sync mypy "):
+            return run.split()[5:]
+    raise AssertionError("the quality workflow no longer invokes mypy as expected")
 
 
 def test_every_tool_is_type_checked_or_excluded_on_the_record() -> None:

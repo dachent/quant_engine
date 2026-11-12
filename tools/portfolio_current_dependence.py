@@ -14,7 +14,7 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import date
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any, Final
 
@@ -225,7 +225,7 @@ def _selected_inputs(path: Path) -> dict[str, Path]:
         "financial_input_contract_path",
         "provider_admission_receipt_path",
     }
-    optional = {"portfolio123_version_evidence_path"}
+    optional = {"portfolio123_version_evidence_path", "accepted_return_spans_path"}
     if set(payload) - optional != required or payload.get("schema_version") != 1:
         raise CurrentDependenceError("selected dependence inputs schema differs")
     resolved: dict[str, Path] = {}
@@ -246,7 +246,66 @@ def _selected_inputs(path: Path) -> dict[str, Path]:
             resolved["portfolio123_version_evidence_path"],
             "selected dependence inputs.portfolio123_version_evidence_path",
         )
+    if "accepted_return_spans_path" in resolved:
+        _regular_file(
+            resolved["accepted_return_spans_path"],
+            "selected dependence inputs.accepted_return_spans_path",
+        )
     return resolved
+
+
+def _accepted_spans(
+    selected: Mapping[str, Path] | None,
+) -> dict[str, list[dict[str, str]]]:
+    """The accepted multi-day returns per series from the selected spans receipt (#904 item 9).
+
+    The receipt is ``{"schema_version": 1, "spans": [{"series_id", "start_date",
+    "end_date", "return"}]}``.  Spans are a hash-bound input of the generation and reach
+    only the performance summary: they are never daily rows.
+    """
+
+    if selected is None or "accepted_return_spans_path" not in selected:
+        return {}
+    payload = _json_bytes(
+        _regular_file(selected["accepted_return_spans_path"], "accepted return spans"),
+        "accepted return spans",
+    )
+    if (
+        set(payload) != {"schema_version", "spans"}
+        or payload.get("schema_version") != 1
+    ):
+        raise CurrentDependenceError("accepted return spans schema differs")
+    result: dict[str, list[dict[str, str]]] = {}
+    for item in _objects(payload.get("spans"), "accepted return spans.spans"):
+        if set(item) != {"end_date", "return", "series_id", "start_date"}:
+            raise CurrentDependenceError("accepted return span keys differ")
+        series = _text(item["series_id"], "accepted return span series_id")
+        result.setdefault(series, []).append(
+            {
+                "end_date": _day(item["end_date"], "span end_date").isoformat(),
+                "return": _text(item["return"], "span return"),
+                "start_date": _day(item["start_date"], "span start_date").isoformat(),
+            }
+        )
+    for series_spans in result.values():
+        series_spans.sort(key=lambda span: span["start_date"])
+        previous_end = ""
+        for span in series_spans:
+            if (
+                span["end_date"] <= span["start_date"]
+                or span["start_date"] < previous_end
+            ):
+                raise CurrentDependenceError("accepted return spans overlap or invert")
+            try:
+                value = Decimal(span["return"])
+            except InvalidOperation as exc:
+                raise CurrentDependenceError(
+                    "accepted return span is not a decimal"
+                ) from exc
+            if not value.is_finite() or value <= Decimal(-1):
+                raise CurrentDependenceError("accepted return span must be above -1")
+            previous_end = span["end_date"]
+    return result
 
 
 def _selected_input_authority(selected: Mapping[str, Path]) -> dict[str, Any]:
@@ -278,6 +337,11 @@ def _selected_input_authority(selected: Mapping[str, Path]) -> dict[str, Any]:
     if evidence is not None:
         result["portfolio123_version_evidence_sha256"] = _sha256(
             _regular_file(evidence, "selected Portfolio123 version evidence")
+        )
+    spans = selected.get("accepted_return_spans_path")
+    if spans is not None:
+        result["accepted_return_spans_sha256"] = _sha256(
+            _regular_file(spans, "selected accepted return spans")
         )
     return result
 
@@ -1384,6 +1448,7 @@ def build_source(
         if selected_inputs_path is not None
         else None
     )
+    accepted_spans = _accepted_spans(selected)
     if selected is None:
         (
             projection,
@@ -1450,6 +1515,13 @@ def build_source(
             selected=selected,
         )
     policy_series = _objects(policy.get("series"), "dependence policy series")
+    unknown_span_series = set(accepted_spans) - {
+        str(row["series_id"]) for row in policy_series
+    }
+    if unknown_span_series:
+        raise CurrentDependenceError(
+            "accepted return spans name a series outside the policy"
+        )
     required_ids = [str(row["strategy_id"]) for row in policy_series]
     restatement = _history_restatement(history_manifest)
     unknown_restated = sorted(set(restatement) - set(required_ids))
@@ -1565,6 +1637,11 @@ def build_source(
                         if row["strategy_id"] == policy_row["strategy_id"]
                     ),
                     "history strategy version",
+                ),
+                **(
+                    {"accepted_spans": accepted_spans[str(policy_row["series_id"])]}
+                    if str(policy_row["series_id"]) in accepted_spans
+                    else {}
                 ),
             }
             for policy_row in policy_series

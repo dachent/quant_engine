@@ -112,6 +112,12 @@ _PATH_STAGES = {
     # Observational stage timings written to stderr and a log file; nothing here is hashed
     # into any delivery artifact, so it affects no stage.
     "packages/core/src/quant_engine/core/stage_timing.py": [],
+    # The one strict decoder for authority bytes (duplicate members, nonfinite values): it can
+    # accept or refuse any stage's inputs, so it carries every stage's impact.
+    "packages/core/src/quant_engine/core/strict_json.py": list(_STAGE_ORDER),
+    # The hash-bound receipt that decides whether a verifier runs again: it can accept or refuse
+    # any stage's inputs, so it carries every stage's impact.
+    "packages/core/src/quant_engine/core/verification_receipt.py": list(_STAGE_ORDER),
     "packages/core/src/quant_engine/core/parallel_hash.py": [],
     # The regular NYSE closures: the implementation builders hold a model's expected end to its last
     # trading day, so it can refuse the reconciliation and attribution that the report and panel read.
@@ -218,6 +224,8 @@ _PATH_STAGES = {
     "schemas/portfolio/baseline-declared-inputs.schema.json": [],
     "tools/release_restore_world.py": [],
     "tools/release_evidence_pack.py": [],
+    # operator-run commit-path canary; writes nothing the release binds, no delivery artifact
+    "tools/release_canary.py": [],
     "tools/check_gitleaks_suppressions.py": [],
     "tools/check_push_policy.py": [],
     "tools/check_repository_boundary.py": [],
@@ -272,6 +280,8 @@ _PATH_STAGES = {
     "tools/nested_strategy_tag_map.py": ["report", "panel"],
     "tools/lifecycle_fields.py": ["report", "panel"],
     "tools/sleeve_disclosures.py": ["report", "panel"],
+    # #897: the series label (layer, entity, window, basis) every report and panel series carries.
+    "tools/series_label.py": ["report", "panel"],
     # R2 (registry nine -> fifteen): the economic return-source registry and its
     # schema are read by tests and pinned by digest in the product contract (whose
     # own path carries the stage impact); no producer imports them.
@@ -300,6 +310,9 @@ _PATH_STAGES = {
         "panel",
     ],
     "contracts/strategy-return-sources-v1.json": [],
+    # #899: the pinned bounds of the missing Matrixport NAV points; the report and the
+    # panel both read it to decide whether the numeric HWM can publish.
+    "contracts/portfolio-hwm-gap-bounds-v1.json": ["report", "panel"],
     "schemas/portfolio/strategy-return-sources.schema.json": [],
     # #567 stage 5: the effective epoch perimeter (a residual parent replaced by its
     # derived sleeves); the report, the panel and the HWM selection bind to it.
@@ -334,6 +347,11 @@ _PATH_STAGES = {
     "tools/schwab_page_actions.py": [],
     "tools/schwab_rollback.py": [],
     "schemas/portfolio/nested-strategy-tag-map.schema.json": [],
+    # #894: owner account financing declaration; read by the leverage disclosure
+    "schemas/portfolio/account-financing-declaration.schema.json": ["report", "panel"],
+    "tools/account_financing.py": ["report", "panel"],
+    "tools/leverage_closure.py": ["report", "panel"],
+    "tools/leverage_disclosure.py": ["report", "panel"],
     "schemas/portfolio/sleeve-account-facts.schema.json": ["report", "panel"],
     # #567 stage 4b: the retired-Quantbase-fund facts builder; reads admitted
     # source bytes only, and the release step runs it beside the IBKR builder.
@@ -371,6 +389,11 @@ _PATH_STAGES = {
     "tools/ci_summary.py": [],
     # Regression-corpus release gate (#911): reads a registry and test files only.
     "tools/check_regression_corpus.py": [],
+    # Post-release rendered-UI check of a published panel (#912): reads the published panel and
+    # a contract, writes only its own receipt and screenshot; imports no producer.
+    "tools/published_render_check.py": [],
+    "apps/portfolio-control-panel/published_render_check.mjs": [],
+    "apps/portfolio-control-panel/render_contract.json": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/capture_fidelity_intake.py": [],

@@ -6603,7 +6603,7 @@ def test_c4c3b_derives_literal_predecessor_closing_nav_epoch(
         "gain": Decimal("5.22"),
         "return_on_net_capital": Decimal("0.026257545271629778672032193158953722334"),
         "annualized_return_on_net_capital": Decimal(
-            "3.194668008048289738430583501006036217303"
+            "22.41661876406777892577243670987370180127"
         ),
         "xirr_diagnostic": Decimal("36.7834343328871588776166047964976054625"),
         "observation_linked_return": Decimal(
@@ -7909,7 +7909,7 @@ def _c4c4a_predecessor_candidate() -> dict[str, object]:
         "current_value": "204.02",
         "gain": "5.22",
         "return_on_net_capital": "0.026257545271629778672032193158953722334",
-        "annualized_return_on_net_capital": "3.194668008048289738430583501006036217303",
+        "annualized_return_on_net_capital": "22.41661876406777892577243670987370180127",
         "xirr_diagnostic": "36.7834343328871588776166047964976054625",
         "observation_linked_return": "0.026257545271629778672032193158953722334",
         "observed_hwm_index": "102.6257545271629778672032193158953722334",
@@ -14578,7 +14578,16 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
                     ("canonical_json_bytes", None),
                 ),
             ),
-            ("quant_engine.core.strict_json", 0, (("strict_json_loads", None),)),
+            (
+                "quant_engine.core.strict_json",
+                0,
+                (
+                    ("StrictJSONError", None),
+                    ("strict_json_loads", None),
+                    ("strict_json_shared", None),
+                    ("verify_shared_unmutated", None),
+                ),
+            ),
         }
     )
     expected_snapshot_roles = (
@@ -14902,7 +14911,7 @@ def test_c4d1a_core_contract_objects_are_identical_and_pinned(
         ),
         "quant_engine.core.strict_json": (
             "packages/core/src/quant_engine/core/strict_json.py",
-            "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
+            "348bb5048676bce1db75ba2f2f482bbddeb71c05d6a98bc9ff1d11e7d1be5316",
         ),
     }
     modules = {
@@ -15284,7 +15293,7 @@ def _c4d1b_parent_core_table() -> tuple[dict[str, object], set[bytes]]:
     expected_pins = {
         "quant_engine.core.snapshots": "ba9e0ee78c84a0c3ec38cab2e778284bcf02335c5958266f0823a04072e4e653",
         "quant_engine.core.contracts": "619c4f0c7ad51fa868a2e0213371310efb337bf6be2797e31150518d6f179fc9",
-        "quant_engine.core.strict_json": "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
+        "quant_engine.core.strict_json": "348bb5048676bce1db75ba2f2f482bbddeb71c05d6a98bc9ff1d11e7d1be5316",
     }
     modules = {
         "quant_engine.core.snapshots": snapshots_module,

@@ -372,11 +372,23 @@ def p_leverage_tiles(payload: Payload) -> Result:
         return skip("no leverage rows")
     observed = [r for r in rows if r.get("coverage_status") == "OBSERVED_ONLY"]
     derived = [r for r in rows if r.get("coverage_status") == "DERIVED"]
+    # reconciled / declared rows (#894) passed their closure check: they are covered
+    covered = [r for r in rows if str(r.get("coverage_status")).startswith("COMPLETE")]
     unavailable = [
-        r for r in rows if r.get("coverage_status") not in {"OBSERVED_ONLY", "DERIVED"}
+        r
+        for r in rows
+        if r.get("coverage_status") not in {"OBSERVED_ONLY", "DERIVED"}
+        and not str(r.get("coverage_status")).startswith("COMPLETE")
     ]
     statuses = {str(r.get("coverage_status")) for r in rows}
-    stray = statuses - {"OBSERVED_ONLY", "UNAVAILABLE", "DERIVED"}
+    stray = statuses - {
+        "OBSERVED_ONLY",
+        "UNAVAILABLE",
+        "DERIVED",
+        "COMPLETE_RECONCILED",
+        "COMPLETE_DECLARED",
+        "OBSERVED_UNRECONCILED",
+    }
     with_amount = sum(1 for r in observed if get(r, "amount", "value") is not None)
     no_amount = len(rows) - sum(
         1 for r in rows if get(r, "amount", "value") is not None
@@ -384,12 +396,13 @@ def p_leverage_tiles(payload: Payload) -> Result:
     if stray:
         return bad(
             "coverage statuses other than OBSERVED_ONLY/DERIVED/UNAVAILABLE exist: "
-            f"{names(stray)}; the three tiles ({len(observed)} observed, {len(derived)} "
-            f"derived, {len(unavailable)} unavailable) do not name them"
+            f"{names(stray)}; the tiles ({len(observed)} observed, {len(covered)} covered, "
+            f"{len(derived)} derived, {len(unavailable)} unavailable) do not name them"
         )
     return ok(
-        f"{len(observed)} observed ({with_amount} with an amount) + {len(derived)} "
-        f"derived + {len(unavailable)} unavailable = {len(rows)}; {no_amount} rows "
+        f"{len(observed)} observed ({with_amount} with an amount) + {len(covered)} "
+        f"covered + {len(derived)} derived + {len(unavailable)} unavailable = "
+        f"{len(rows)}; {no_amount} rows "
         "have no amount"
     )
 

@@ -2306,3 +2306,66 @@ def test_a_holiday_cutoff_is_held_to_the_last_trading_day() -> None:
         reconciliation.require_model_through_as_of(
             "tt-portfolio", date(2026, 4, 1), date(2026, 4, 3)
         )
+
+
+def test_a_copy_record_never_reaches_a_model_field() -> None:
+    """RULING-E D2: the copy and the model differ on the same dates; only the model is read."""
+
+    rows = [
+        {
+            "strategy_id": "p123-ai-factor",
+            "date": "2026-01-05",
+            "return": "0.10",
+            "evidence_layer": "MODEL_LIVE",
+        },
+        {
+            "strategy_id": "p123-ai-factor",
+            "date": "2026-01-05",
+            "return": "0.03",
+            "evidence_layer": "COPY_RECORD",
+        },
+        {
+            "strategy_id": "p123-ai-factor",
+            "date": "2026-01-06",
+            "return": "0.02",
+            "evidence_layer": "COPY_RECORD",
+        },
+    ]
+    model = reconciliation._returns(
+        rows,
+        strategy_id="p123-ai-factor",
+        exclude_layers=reconciliation.MODEL_EXCLUDED_LAYERS,
+        accepted_as_of=ACCEPTED_AS_OF,
+    )
+    assert model == {date(2026, 1, 5): 0.10}
+
+
+def test_the_reconciliation_tracking_error_scales_with_the_series_own_calendar() -> (
+    None
+):
+    """#904 items 7 and 13: calendar-daily dates are scaled with 365, not a hard-coded 252."""
+
+    from datetime import date as _date, timedelta as _td
+
+    days = [_date(2026, 1, 1) + _td(days=n) for n in range(120)]
+    model = {day: 0.001 * ((n * 7) % 11 - 5) for n, day in enumerate(days)}
+    actual = {
+        day: value * 0.9 + 0.0003 * (n % 3)
+        for n, (day, value) in enumerate(model.items())
+    }
+    metrics = reconciliation.relative_metrics(model, actual, accepted_as_of=days[-1])
+    active = [actual[d] - model[d] for d in days]
+    import math as _m
+    import statistics as _s
+
+    expected = _s.stdev(active) * _m.sqrt(365)
+    assert round(metrics["annualized_tracking_error"], 6) == round(expected, 6)
+
+
+def test_sparse_calendar_dates_are_not_scaled_as_calendar_daily() -> None:
+    """Review finding: every-five-days dates were scaled with 365 (2.2x too large)."""
+
+    days = [date(2026, 1, 2) + timedelta(days=5 * n) for n in range(40)]
+    assert reconciliation._periods_per_year(days) == round(39 * 365 / (5 * 39))
+    weekly = [date(2026, 1, 2) + timedelta(days=7 * n) for n in range(30)]
+    assert reconciliation._periods_per_year(weekly) == 52

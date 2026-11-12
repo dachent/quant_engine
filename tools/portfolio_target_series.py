@@ -2038,7 +2038,8 @@ def _overlap_reconciliation(
     else:
         correlation = statistics.correlation(account_values, provider_values)
     differences = [left - right for left, right in zip(account_values, provider_values)]
-    tracking_error = statistics.pstdev(differences) * math.sqrt(252)
+    # sample standard deviation, like every other tracking error (#904 item 13)
+    tracking_error = statistics.stdev(differences) * math.sqrt(252)
     account_overlap = [
         {"return": format(account[day].normalize(), "f")} for day in common
     ]
@@ -4510,18 +4511,14 @@ def _qsi_source_revision_admission(
     rows: list[dict[str, str]] | None = None
     try:
         if sources_path is not None:
-            sidecar = json.loads(Path(sources_path).read_bytes())
-            if sidecar.get("bundle_id") != bundle["bundle_id"]:
-                raise TargetSeriesError(
-                    "QSI refresh source sidecar names another bundle"
-                )
+            sources, seed_manifest, seed_returns = history.load_qsi_sources_sidecar(
+                Path(sources_path), bundle["bundle_id"]
+            )
             verified = history.verify_qsi_refresh_bundle(
                 bundle_content,
-                sources={key: Path(value) for key, value in sidecar["sources"].items()},
-                seed_manifest_path=Path(
-                    sidecar["accepted_predecessor"]["manifest_path"]
-                ),
-                seed_returns_path=Path(sidecar["accepted_predecessor"]["returns_path"]),
+                sources=sources,
+                seed_manifest_path=seed_manifest,
+                seed_returns_path=seed_returns,
             )
             receipt = verified["qsi_source_revision"]
             predecessor = receipt["accepted_predecessor"]

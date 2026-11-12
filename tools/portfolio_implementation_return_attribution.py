@@ -907,6 +907,7 @@ def _ai_attribution(
     model_returns = reconciliation._returns(
         ledger.get("provider_strategy_returns", []),
         strategy_id="p123-ai-factor",
+        exclude_layers=reconciliation.MODEL_EXCLUDED_LAYERS,
         accepted_as_of=accepted_as_of,
     )
     account_returns = reconciliation._returns(

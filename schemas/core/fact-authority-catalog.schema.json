@@ -66,7 +66,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE", "PREDECESSOR", "SHADOW_OOS", "BACKTEST", "STATIC_HISTORY", "CONCEPTUAL_STRESS"]
+            "enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE", "MODEL_LIVE", "COPY_RECORD", "OFFICIAL_VEHICLE", "PREDECESSOR", "SHADOW_OOS", "BACKTEST", "STATIC_HISTORY", "CONCEPTUAL_STRESS"]
           }
         },
         "finalization_state": {"enum": ["PROVISIONAL", "FINAL"]},

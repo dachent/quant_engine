@@ -270,9 +270,12 @@ try {
     page.setDefaultTimeout(QA_PAGE_TIMEOUT_MS);
     const consoleEvents = [];
     const requestFailures = [];
-    page.on("console", (message) => consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() }));
+    // #908: the optional owner-view.js is written by the validator AFTER this QA stage; its
+    // absence at QA time is expected and is not a page failure.
+    const isOwnerViewSidecar = (url) => /\/validation\/[0-9a-f]{64}\/owner-view\.js$/.test(url ?? "");
+    page.on("console", (message) => { if (!(isOwnerViewSidecar(message.location()?.url) && /Failed to load resource/.test(message.text()))) consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() }); });
     page.on("pageerror", (error) => consoleEvents.push({ type: "pageerror", text: error.message, location: {} }));
-    page.on("requestfailed", (request) => requestFailures.push({ url: request.url(), method: request.method(), failure: request.failure()?.errorText ?? "unknown" }));
+    page.on("requestfailed", (request) => isOwnerViewSidecar(request.url()) || requestFailures.push({ url: request.url(), method: request.method(), failure: request.failure()?.errorText ?? "unknown" }));
     const navigationUrl = `${baseUrl}${capture.view ? `#${capture.view}` : ""}`;
     const target = `${path.basename(html)}${capture.view ? `#${capture.view}` : ""}`;
     console.log(`QA capture ${capture.name}: ${navigationUrl}`);
@@ -351,8 +354,9 @@ try {
         // app.js renders them as their own "derived" count in the badge and a tile.
         const observedCount = leverageRows.filter((row) => row.coverage_status === "OBSERVED_ONLY").length;
         const derivedCount = leverageRows.filter((row) => row.coverage_status === "DERIVED").length;
-        const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY" && row.coverage_status !== "DERIVED");
-        const derivedBadge = derivedCount ? ` / derived ${derivedCount.toLocaleString("en-US")}` : "";
+        const coveredCount = leverageRows.filter((row) => String(row.coverage_status).startsWith("COMPLETE")).length;
+        const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY" && row.coverage_status !== "DERIVED" && !String(row.coverage_status).startsWith("COMPLETE"));
+        const derivedBadge = `${coveredCount ? ` / reconciled ${coveredCount.toLocaleString("en-US")}` : ""}${derivedCount ? ` / derived ${derivedCount.toLocaleString("en-US")}` : ""}`;
         if (leverageCoverageRows < declaredClasses.size
           || !leverageObservationKpi.includes(leverageRows.length.toLocaleString("en-US"))
           || (unavailable.length > 0 && leverageStatus !== `Observed ${observedCount.toLocaleString("en-US")}${derivedBadge} / unavailable ${unavailable.length.toLocaleString("en-US")}`)) {

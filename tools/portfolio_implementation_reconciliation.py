@@ -21,7 +21,7 @@ import math
 from pathlib import Path
 import re
 import statistics
-from typing import Any, Final, Iterable, Mapping, Sequence, cast
+from typing import Any, Collection, Final, Iterable, Mapping, Sequence, cast
 from xml.etree import ElementTree
 
 import pyarrow.parquet as parquet  # type: ignore[import-untyped]
@@ -65,6 +65,11 @@ _TICKER_ENTRY = re.compile(r"(?:^|\s)([^\s|]+):USA\|")
 _P123_HAR_PROVENANCE_FIELDS: Final = frozenset(
     {"_entity_id", "_entity_type", "_source_artifact", "_source_row", "_transport"}
 )
+
+
+# The model in every reconciliation is the model's own record; a COPY_RECORD (the
+# owner's P123 copy, account-side) never reaches a model field.
+MODEL_EXCLUDED_LAYERS: Final = ("COPY_RECORD",)
 
 
 class ImplementationReconciliationError(ValueError):
@@ -348,6 +353,7 @@ def p123_provider_return_policy(
     if _returns(
         ledger.get("provider_strategy_returns", []),
         strategy_id="p123-ai-factor",
+        exclude_layers=MODEL_EXCLUDED_LAYERS,
         accepted_as_of=accepted_as_of,
     ):
         return None
@@ -524,6 +530,26 @@ def _relative_drawdown(model: Sequence[float], actual: Sequence[float]) -> float
     return drawdown
 
 
+def _periods_per_year(common: Sequence[date]) -> int:
+    """Periods a year the common dates carry (#904 item 7), the attribution rule.
+
+    365 when the dates include weekends (calendar-daily), otherwise the observed
+    trading dates a year, the exchange-calendar 252 kept within 2%; windows under
+    four weeks keep 252 (a calendar cannot be read from them).
+    """
+
+    span_days = (common[-1] - common[0]).days
+    if span_days < 28:
+        return 252
+    observed = min(max(round((len(common) - 1) * 365 / span_days), 1), 366)
+    weekend = sum(1 for day in common if day.weekday() >= 5)
+    if weekend * 5 >= len(common):
+        # calendar-daily only when the dates are dense enough to be daily at all; a
+        # sparse series (every five days, weekly) keeps its own observed frequency
+        return 365 if len(common) >= 0.8 * 365 * span_days / 365 else observed
+    return 252 if abs(observed - 252) <= 252 * 0.02 else observed
+
+
 def relative_metrics(
     model: Mapping[date, float],
     actual: Mapping[date, float],
@@ -543,9 +569,10 @@ def relative_metrics(
     ]
     model_cumulative = _compound(model_values)
     actual_cumulative = _compound(actual_values)
-    tracking_error = statistics.stdev(active) * math.sqrt(252)
+    periods = _periods_per_year(common)
+    tracking_error = statistics.stdev(active) * math.sqrt(periods)
     information_ratio = (
-        statistics.fmean(active) / statistics.stdev(active) * math.sqrt(252)
+        statistics.fmean(active) / statistics.stdev(active) * math.sqrt(periods)
         if statistics.stdev(active) > 0
         else None
     )
@@ -605,6 +632,7 @@ def _returns(
     *,
     strategy_id: str,
     evidence_layer: str | None = None,
+    exclude_layers: Collection[str] = (),
     accepted_as_of: date,
 ) -> dict[date, float]:
     result: dict[date, float] = {}
@@ -612,6 +640,8 @@ def _returns(
         if row.get("strategy_id") != strategy_id:
             continue
         if evidence_layer is not None and row.get("evidence_layer") != evidence_layer:
+            continue
+        if row.get("evidence_layer") in exclude_layers:
             continue
         observed = date.fromisoformat(str(row.get("date") or ""))
         if observed > accepted_as_of:
@@ -1632,6 +1662,7 @@ def _ai_reconciliation(
     provider = _returns(
         ledger.get("provider_strategy_returns", []),
         strategy_id="p123-ai-factor",
+        exclude_layers=MODEL_EXCLUDED_LAYERS,
         accepted_as_of=accepted_as_of,
     )
     account = _returns(

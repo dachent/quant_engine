@@ -127,6 +127,36 @@ def check_commit_result(path: Path, spec_file: Path) -> str:
     return release_id
 
 
+def committed_predecessor(spec: dict[str, Any], release_id: str) -> str:
+    """The release this one succeeded, read from its committed release manifest.
+
+    The cycle manifest names the predecessor it was planned against, which a
+    corrective release (R3c after R3) makes stale; the committed manifest's
+    ``previous_authority`` is what the commit actually recorded.
+    """
+
+    coordination = Path(spec["coordination_root"])
+    current = _read_object(coordination / "CURRENT_RELEASE.json", "CURRENT_RELEASE")
+    path = coordination / "releases" / release_id / "release.json"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise Refusal("the committed release manifest is unreadable") from exc
+    if _sha(raw) != current.get("release_manifest_sha256"):
+        raise Refusal("the release manifest is not the one CURRENT_RELEASE names")
+    # parse the bytes that were hashed, never a second read of the file
+    try:
+        manifest = json.loads(raw)
+    except ValueError as exc:
+        raise Refusal("the committed release manifest is not JSON") from exc
+    if not isinstance(manifest, dict):
+        raise Refusal("the committed release manifest is not a JSON object")
+    previous = manifest.get("previous_authority")
+    if manifest.get("release_id") != release_id or not isinstance(previous, dict):
+        raise Refusal("the committed release manifest names no previous authority")
+    return _hex(previous.get("release_id"), _HEX64, "previous_authority release_id")
+
+
 def check_pointers(
     spec: dict[str, Any],
     before: dict[str, Any],
@@ -291,9 +321,8 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             )
     before = _read_object(Path(args.pre_pointers), "pre-commit pointer snapshot")
     after = release_driver.pointer_snapshot(spec_file)
-    moved = check_pointers(
-        spec, before, after, release_id, cycle["predecessor"]["release_id"]
-    )
+    predecessor_id = committed_predecessor(spec, release_id)
+    moved = check_pointers(spec, before, after, release_id, predecessor_id)
     # the text mode json.dump of the hand-run snapshot, with LF line endings
     _create_only(
         Path(args.post_pointers),
@@ -342,7 +371,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             ],
         ),
     )
-    plan = (
+    plan: tuple[tuple[str, list[str]], ...] = (
         (
             "post-release-verify",
             [
@@ -386,6 +415,23 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             ],
         ),
     )
+    if args.published_panel_dir:
+        # #912: render the published panel and compare the DOM with its payload (optional so
+        # existing drivers keep their step list; the driver passes the published panel dir).
+        plan = (
+            *plan,
+            (
+                "published-render",
+                [
+                    py,
+                    str(tools / "published_render_check.py"),
+                    "--panel-dir",
+                    str(args.published_panel_dir),
+                    "--out-dir",
+                    str(post_dir / "published-render"),
+                ],
+            ),
+        )
     post_receipt_id = ""
     for name, argv in plan:
         log = Path(args.log_dir) / f"{name}.log"
@@ -412,8 +458,10 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         "moved_pointers": moved,
         "post_commit_findings_sha256": _sha(Path(args.post_findings).read_bytes()),
         "post_release_receipt_id": post_receipt_id,
+        "cycle_predecessor_release_id": cycle["predecessor"]["release_id"],
         "pre_commit_findings_sha256": _sha(Path(args.pre_findings).read_bytes()),
-        "predecessor_release_id": cycle["predecessor"]["release_id"],
+        "predecessor_release_id": predecessor_id,
+        "published_render_checked": bool(args.published_panel_dir),
         "release_id": release_id,
         "spec_sha256": _sha(spec_file.read_bytes()),
         "steps": steps,
@@ -447,6 +495,11 @@ def _parser() -> argparse.ArgumentParser:
         v.add_argument(f"--{flag}", required=True)
     v.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     v.add_argument("--tools-dir", default=None)
+    v.add_argument(
+        "--published-panel-dir",
+        default=None,
+        help="published panel directory; when given the rendered-UI check runs (#912)",
+    )
     v.add_argument(
         "validator_argv",
         nargs=argparse.REMAINDER,

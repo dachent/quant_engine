@@ -10,6 +10,11 @@ from quant_engine.portfolio_ledger.allocation import (
     reconcile_allocation_bridge,
 )
 
+from quant_engine.portfolio_ledger.hwm_gap_bounds import (
+    assess_gap_bounds_document,
+    numerical_from_governed_proof,
+    proof_covers_spans,
+)
 from quant_engine.portfolio_ledger.models import (
     Account,
     AccountRole,
@@ -132,6 +137,9 @@ from quant_engine.portfolio_ledger.strategy_versions import (
 __version__ = "0.2.0"
 
 __all__ = [
+    "assess_gap_bounds_document",
+    "numerical_from_governed_proof",
+    "proof_covers_spans",
     "Account",
     "AccountPoolAssignment",
     "AccountPositionReconciliation",

@@ -290,18 +290,24 @@ def test_strategy_rows_open_where_their_manifest_rows_open(
             date.fromisoformat(end) - date.fromisoformat(row["return_window_start"])
         ).days
         assert row["window_days"] == days
-        assert row["account_live_cagr_annualization"]["window_days"] == days
-        assert (
-            row["account_live_cagr_annualization"]["window_start"]
-            == row["return_window_start"]
-        )
         assert row["annualisation_basis"]["twr"]["window_days"] == days
         assert row["annualisation_basis"]["account_live_cagr"]["window_days"] == days
         cumulative = row["account_live_cumulative_return"]
-        assert row["account_live_cagr"] == reporter._cagr(
-            cumulative, row["return_window_start"], end
-        )
-        if days >= 365:
+        if days < 365:
+            # one short-window rule (#904): CAGR is suppressed like twr_annualised
+            assert row["account_live_cagr"] is None
+            assert row["account_live_cagr_status"] == "SUPPRESSED_UNDER_365D"
+            assert row["account_live_cagr_annualization"] is None
+            assert row["twr_annualised"] is None
+        else:
+            assert row["account_live_cagr_annualization"]["window_days"] == days
+            assert (
+                row["account_live_cagr_annualization"]["window_start"]
+                == row["return_window_start"]
+            )
+            assert row["account_live_cagr"] == reporter._cagr(
+                cumulative, row["return_window_start"], end
+            )
             assert row["twr_annualised"] == row["account_live_cagr"]
         checked += 1
     assert checked

@@ -359,3 +359,7 @@ required. If interventions exceed two in one sprint, escalate the scaffold
 defect itself to the owner rather than repeating the pattern. When context
 pressure degrades recall, end early with complete issue-recorded evidence
 rather than pushing on.
+
+## Toolchain pin
+
+The repository pins uv in `pyproject.toml` (`[tool.uv] required-version`, currently `>=0.11.28,<0.12`) and CI installs one version inside that range. Run `uv` locally at a version inside the same range (a newer uv, such as 0.12.x, refuses to run here); `tests/ci/test_uv_toolchain_pin.py` fails if a workflow drifts out of the range.
