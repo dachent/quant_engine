@@ -144,7 +144,13 @@ def committed_predecessor(spec: dict[str, Any], release_id: str) -> str:
         raise Refusal("the committed release manifest is unreadable") from exc
     if _sha(raw) != current.get("release_manifest_sha256"):
         raise Refusal("the release manifest is not the one CURRENT_RELEASE names")
-    manifest = _read_object(path, "release manifest")
+    # parse the bytes that were hashed, never a second read of the file
+    try:
+        manifest = json.loads(raw)
+    except ValueError as exc:
+        raise Refusal("the committed release manifest is not JSON") from exc
+    if not isinstance(manifest, dict):
+        raise Refusal("the committed release manifest is not a JSON object")
     previous = manifest.get("previous_authority")
     if manifest.get("release_id") != release_id or not isinstance(previous, dict):
         raise Refusal("the committed release manifest names no previous authority")
