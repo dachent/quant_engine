@@ -1730,6 +1730,42 @@ FEES_STATUS_DOCUMENTED_RATE: Final = "DOCUMENTED_RATE_NOT_DOLLAR"
 COST_STATUS_DOCUMENTED_RATE: Final = "documented_rate_percent"
 COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 
+# The evidence statuses of a strategy row, read from the evidence the report holds
+# for the same row (its fees label and its benchmark assignment and comparison),
+# never from a placeholder slot of the version catalog.
+EVIDENCE_STATUS_EVIDENCED: Final = "EVIDENCED"
+EVIDENCE_STATUS_RATE_ONLY: Final = "EVIDENCED_DOCUMENTED_RATE_NOT_DOLLAR"
+EVIDENCE_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
+EVIDENCE_STATUS_UPPER_BOUND_ONLY: Final = "UNAVAILABLE_UPPER_BOUND_ONLY"
+EVIDENCE_STATUS_COMPARISON_MISSING: Final = "UNAVAILABLE_COMPARISON_NOT_ADMITTED"
+
+
+def cost_evidence_status_for_fees(fees_status: object) -> str:
+    """Cost evidence a row earns: a known dollar cost or documented percent rates.
+
+    A contract cap is the most the contract allows, never evidence of a cost, so a
+    capped row stays unavailable; so does a row with no amount and no documented rate.
+    """
+
+    if fees_status == FEES_STATUS_EVIDENCED:
+        return EVIDENCE_STATUS_EVIDENCED
+    if fees_status == FEES_STATUS_DOCUMENTED_RATE:
+        return EVIDENCE_STATUS_RATE_ONLY
+    if fees_status == FEES_STATUS_UPPER_BOUND:
+        return EVIDENCE_STATUS_UPPER_BOUND_ONLY
+    return EVIDENCE_STATUS_UNAVAILABLE
+
+
+def benchmark_evidence_status_for(assignment_status: object, comparison_status: object) -> str:
+    """Benchmark evidence: an evidenced assignment and an admitted comparison."""
+
+    if not str(assignment_status or "").startswith("EVIDENCED"):
+        return EVIDENCE_STATUS_UNAVAILABLE
+    if not str(comparison_status or "").startswith("DESCRIPTIVE"):
+        return EVIDENCE_STATUS_COMPARISON_MISSING
+    return EVIDENCE_STATUS_EVIDENCED
+
+
 
 def fees_status_for_cost(cost_status: object, annual_cost: object) -> str | None:
     """The fees label a cost row earns: a known cost is evidenced, a cap is a bound.
@@ -3036,6 +3072,14 @@ def _merge_attribution(
                     }
                 ),
             }
+        )
+        row = result[-1]
+        row["cost_evidence_status"] = cost_evidence_status_for_fees(
+            row.get("fees_status")
+        )
+        row["benchmark_evidence_status"] = benchmark_evidence_status_for(
+            row.get("benchmark_assignment_status"),
+            row.get("benchmark_comparison_status"),
         )
     return result
 
@@ -8167,8 +8211,6 @@ def _strategies(
                 "live_boundary_observed_start": live_boundary.get("observed_start"),
                 "live_boundary_observed_end": live_boundary.get("observed_end"),
                 **live_boundary_basis,
-                "cost_evidence_status": version_costs.get("status", "UNAVAILABLE"),
-                "benchmark_evidence_status": benchmark.get("status", "UNAVAILABLE"),
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
                 "source_route_ids": source_route.get("source_ids", []),
                 "strategy_evidence_layers": layer_inventory,
