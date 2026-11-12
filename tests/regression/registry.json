@@ -37,6 +37,84 @@
       "status": "covered",
       "test": "tests/regression/test_ci_reports_every_failure.py::test_pytest_has_no_maxfail",
       "kill": "pyproject addopts contains --maxfail=1 on the pre-fix tree, so the assertion fails."
+    },
+    "portfolio_twr_no_annual_rate": {
+      "defect": "Portfolio TWR published only as a cumulative figure beside an annual MWR (#904 item 1).",
+      "status": "covered",
+      "kill": "Pre-fix build_portfolio_twr has no annualised_act_365 / trailing_12_months / year_to_date keys, so the lookup raises KeyError.",
+      "test": "tests/regression/test_portfolio_twr_no_annual_rate.py::test_portfolio_twr_no_annual_rate"
+    },
+    "short_window_account_cagr": {
+      "defect": "Account CAGR published for a window under 365 days (#904 items 2-3).",
+      "status": "covered",
+      "kill": "Pre-fix _strategy_period_fields publishes account_live_cagr for 210 days; the status is not SUPPRESSED_UNDER_365D.",
+      "test": "tests/regression/test_short_window_account_cagr.py::test_short_window_account_cagr"
+    },
+    "sleeve_rate_short_window": {
+      "defect": "Sleeve return per year published from a 280-day window (#904 items 3-4).",
+      "status": "covered",
+      "kill": "Pre-fix _annualise returns a number for 280 days.",
+      "test": "tests/regression/test_sleeve_rate_short_window.py::test_sleeve_rate_short_window"
+    },
+    "ronc_linear_short_window": {
+      "defect": "Return on net capital scaled linearly under a year and geometrically above (#904 item 5).",
+      "status": "covered",
+      "kill": "Pre-fix 40-day RONC of 2.44% is 22.27% (linear) instead of the geometric ACT/365 figure.",
+      "test": "tests/regression/test_ronc_linear_short_window.py::test_ronc_linear_short_window"
+    },
+    "mwr_short_window_not_primary": {
+      "defect": "Money-weighted XIRR shown as the headline for a window under a year (#904 item 4).",
+      "status": "covered",
+      "kill": "Pre-fix app.js has no mwrShortWindow rule, so the assertion fails.",
+      "test": "tests/regression/test_mwr_short_window_not_primary.py::test_mwr_short_window_not_primary"
+    },
+    "calendar_series_scaled_with_252": {
+      "defect": "Calendar-daily series annualised with 252 periods a year (#904 item 6).",
+      "status": "covered",
+      "kill": "Pre-fix attribution scales a 7-day-a-week series with the declared 252.",
+      "test": "tests/regression/test_calendar_series_scaled_with_252.py::test_calendar_series_scaled_with_252"
+    },
+    "reconciliation_tracking_error_252": {
+      "defect": "Reconciliation tracking error scaled with a hard-coded 252 on any calendar (#904 item 7).",
+      "status": "covered",
+      "kill": "Pre-fix tracking error equals stdev * sqrt(252) for a calendar-daily series, not sqrt(365).",
+      "test": "tests/regression/test_reconciliation_tracking_error_252.py::test_reconciliation_tracking_error_252"
+    },
+    "dependence_summary_day_count": {
+      "defect": "Dependence summary annualised on 365.25 days and one period short (#904 item 8).",
+      "status": "covered",
+      "kill": "Pre-fix window is first-to-last row (365 days) and uses a 365.25 exponent, so window_days and cagr differ.",
+      "test": "tests/regression/test_dependence_summary_day_count.py::test_dependence_summary_day_count"
+    },
+    "accepted_spans_omitted_from_dependence": {
+      "defect": "Robuxio accepted multi-day return spans omitted from the dependence summary (#904 item 9).",
+      "status": "covered",
+      "kill": "Pre-fix _performance_summary takes no spans, so the call raises TypeError and the cumulative return is the daily rows alone.",
+      "test": "tests/regression/test_accepted_spans_omitted_from_dependence.py::test_accepted_spans_omitted_from_dependence"
+    },
+    "hybrid_cagr_published": {
+      "defect": "CAGR published on a hybrid series that is mostly vendor backtest (#904 item 10).",
+      "status": "covered",
+      "kill": "Pre-fix a series with backtest observations still carries a cagr value.",
+      "test": "tests/regression/test_hybrid_cagr_published.py::test_hybrid_cagr_published"
+    },
+    "alpha_headline_without_standard_error": {
+      "defect": "Alpha tile published as a headline with no standard error, or on a backtest-dominated fit (#904 item 11).",
+      "status": "covered",
+      "kill": "Pre-fix _alpha_context has no headline_status key, so the lookup raises KeyError.",
+      "test": "tests/regression/test_alpha_headline_without_standard_error.py::test_alpha_headline_without_standard_error"
+    },
+    "epoch_table_shared_end_date": {
+      "defect": "Epoch table printed every figure against one shared end date (#904 item 12).",
+      "status": "covered",
+      "kill": "Pre-fix app.js has no per-figure window note (ownWindowNote).",
+      "test": "tests/regression/test_epoch_table_shared_end_date.py::test_epoch_table_shared_end_date"
+    },
+    "tracking_error_population_std": {
+      "defect": "Tracking error computed with the population standard deviation and unlabelled (#904 item 13).",
+      "status": "covered",
+      "kill": "Pre-fix portfolio_target_series uses pstdev for the tracking error, so the source assertion fails.",
+      "test": "tests/regression/test_tracking_error_population_std.py::test_tracking_error_population_std"
     }
   },
   "tickets": {
@@ -79,6 +157,23 @@
     "910": {
       "cases": [
         "ci_reports_every_failure"
+      ]
+    },
+    "904": {
+      "cases": [
+        "accepted_spans_omitted_from_dependence",
+        "alpha_headline_without_standard_error",
+        "calendar_series_scaled_with_252",
+        "dependence_summary_day_count",
+        "epoch_table_shared_end_date",
+        "hybrid_cagr_published",
+        "mwr_short_window_not_primary",
+        "portfolio_twr_no_annual_rate",
+        "reconciliation_tracking_error_252",
+        "ronc_linear_short_window",
+        "short_window_account_cagr",
+        "sleeve_rate_short_window",
+        "tracking_error_population_std"
       ]
     }
   }

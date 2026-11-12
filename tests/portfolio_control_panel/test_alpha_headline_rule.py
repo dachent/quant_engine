@@ -41,7 +41,7 @@ def _row(
             "confidence_status": "AVAILABLE_OLS",
         },
         "coverage": {
-            "observed_start": "2026-01-02",
+            "observed_start": "2025-01-02",
             "observed_end": "2026-11-06",
             "aligned_observations": used,
         },
@@ -128,3 +128,14 @@ def test_only_the_allowed_fit_is_the_headline_lens() -> None:
     assert panel._alpha_context(_row("0.2", "0.05", 0))["lens_role"] == "HEADLINE"
     assert panel._alpha_context(_row("0.2", None, 0))["lens_role"] == "SECONDARY"
     assert panel._alpha_context(_row("0.2", "0.05", 5))["lens_role"] == "SECONDARY"
+
+
+def test_a_live_fit_under_a_year_is_not_a_headline() -> None:
+    """The layer helper requires a year of live window (sprint-p123 headline_allowed)."""
+
+    row = _row("0.20", "0.05", 0)
+    row["coverage"]["observed_start"] = "2026-03-01"  # 250 days to 2026-11-06
+    ctx = panel._alpha_context(row)
+    assert ctx["headline_status"] == "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
+    assert ctx["lens_role"] == "SECONDARY"
+    assert round(float(ctx["t_stat"]), 6) == round(0.20 / 0.05, 6)
