@@ -1290,6 +1290,15 @@ def _receipt_identity(spec: PipelineSpec) -> dict[str, object]:
     }
 
 
+def _receipt_bookkeeping_roots(spec: PipelineSpec) -> tuple[Path, ...]:
+    """State directories the verifiers only append bookkeeping to (one file per call)."""
+
+    return (
+        spec.state_root / "financial-verification-ledger",
+        spec.state_root / verification_receipt.RECEIPT_DIRECTORY,
+    )
+
+
 def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any]:
     """Run the verifier, or reuse its hash-bound receipt when every input is unchanged.
 
@@ -1311,6 +1320,7 @@ def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any
         state_root=spec.state_root,
         compute=lambda: _verify_financial_outcomes_live(spec, caller),
         on_reuse=reused,
+        exclude_roots=_receipt_bookkeeping_roots(spec),
     )
 
 
@@ -1902,6 +1912,7 @@ def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | Non
         repo_root=repo_root,
         state_root=spec.state_root,
         compute=lambda: _financial_mvp_product_authority_live(spec),
+        exclude_roots=_receipt_bookkeeping_roots(spec),
     )
 
 

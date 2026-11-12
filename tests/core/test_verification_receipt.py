@@ -213,3 +213,222 @@ def test_off_mode_always_runs_live_and_refresh_detects_disagreement(
     path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(vr.VerificationReceiptMismatch):
         v.run()
+
+
+# -- review findings: every one of these must void or refuse the receipt ----------------
+
+
+def _run(world, name, compute, **extra):
+    return vr.run_with_receipt(
+        name,
+        {},
+        repo_root=world["repo"],
+        state_root=world["state"],
+        compute=compute,
+        **extra,
+    )
+
+
+def test_an_optional_file_that_did_not_exist_and_appears_voids_the_receipt(world):
+    optional = world["data"] / "override.json"
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        try:
+            return {"cfg": json.loads(optional.read_text(encoding="utf-8"))}
+        except FileNotFoundError:
+            return {"cfg": {}}
+
+    assert _run(world, "opt", compute) == {"cfg": {}}
+    assert _run(world, "opt", compute) == {"cfg": {}} and live["n"] == 1
+    optional.write_text('{"limit": 0}', encoding="utf-8")
+    assert _run(world, "opt", compute) == {"cfg": {"limit": 0}}
+    assert live["n"] == 2
+
+
+def test_path_exists_alone_is_recorded_as_a_probe(world):
+    flag = world["data"] / "halt.flag"
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        return {"halted": flag.exists()}  # no listing, no read
+
+    assert _run(world, "flag", compute) == {"halted": False}
+    assert _run(world, "flag", compute) == {"halted": False} and live["n"] == 1
+    flag.write_text("x", encoding="utf-8")
+    assert _run(world, "flag", compute) == {"halted": True}
+
+
+def test_a_directory_entry_type_swap_changes_the_listing(world):
+    entry = world["data"] / "entry"
+    entry.write_text("x", encoding="utf-8")
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        return {
+            "is_dir": [
+                e.is_dir()
+                for e in __import__("os").scandir(world["data"])
+                if e.name == "entry"
+            ]
+        }
+
+    _run(world, "types", compute)
+    entry.unlink()
+    entry.mkdir()
+    assert _run(world, "types", compute) == {"is_dir": [True]}
+    assert live["n"] == 2
+
+
+def test_a_written_file_that_is_corrupted_later_voids_the_receipt(world):
+    out = world["state"] / "summary.json"
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        out.write_text('{"ok": true}', encoding="utf-8")
+        return {"status": "PASS"}
+
+    _run(world, "writer", compute)
+    assert _run(world, "writer", compute) == {"status": "PASS"} and live["n"] == 1
+    out.write_text("", encoding="utf-8")  # same path, different content
+    _run(world, "writer", compute)
+    assert live["n"] == 2 and out.read_text(encoding="utf-8") == '{"ok": true}'
+
+
+def test_a_non_python_file_under_tools_is_part_of_the_read_set(world):
+    contract = world["repo"] / "tools" / "contract.json"
+    contract.write_text('{"v": 1}', encoding="utf-8")
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        return json.loads(contract.read_text(encoding="utf-8"))
+
+    _run(world, "contract", compute)
+    contract.write_text('{"v": 2}', encoding="utf-8")
+    assert _run(world, "contract", compute) == {"v": 2} and live["n"] == 2
+
+
+def test_a_python_source_edit_between_two_calls_in_one_process_changes_the_key(world):
+    v = Verifier(world)
+    v.run()
+    (world["repo"] / "tools" / "v.py").write_text("x = 99\n", encoding="utf-8")
+    v.run()  # no clear_memory_receipts(): the identity is recomputed every call
+    assert v.live == 2
+
+
+def test_a_symlink_retarget_with_identical_content_is_detected(world, tmp_path):
+    first, second = world["data"] / "one.json", world["data"] / "two.json"
+    first.write_text('{"v": 1}', encoding="utf-8")
+    second.write_text('{"v": 1}', encoding="utf-8")
+    link = tmp_path / "link.json"
+    try:
+        link.symlink_to(first)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        return {
+            "link": link.is_symlink(),
+            "v": json.loads(link.read_text("utf-8"))["v"],
+        }
+
+    _run(world, "link", compute)
+    link.unlink()
+    link.symlink_to(second)
+    _run(world, "link", compute)
+    assert live["n"] == 2
+
+
+def test_descriptor_opens_make_the_recording_incomplete(world):
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        import os
+
+        fd = os.open(world["data"] / "a.json", os.O_RDONLY)
+        with open(fd, "rb") as handle:
+            return {"size": len(handle.read())}
+
+    _run(world, "fd", compute)
+    _run(world, "fd", compute)
+    assert live["n"] == 2
+
+
+def test_refresh_does_not_cry_wolf_when_an_input_legitimately_changed(
+    world, monkeypatch: pytest.MonkeyPatch
+):
+    v = Verifier(world)
+    v.run()
+    (world["data"] / "a.json").write_text('{"v": 10}', encoding="utf-8")
+    monkeypatch.setenv(vr.MODE_ENV, "refresh")
+    assert v.run()["total"] == 12  # stale receipt: no comparison, just re-store
+
+
+def test_a_deleted_receipt_file_is_not_served_from_memory(world):
+    v = Verifier(world)
+    v.run()
+    for path in (world["state"] / vr.RECEIPT_DIRECTORY).glob("toy-*.json"):
+        path.unlink()
+    v.run()
+    assert v.live == 2
+
+
+def test_the_source_tree_never_uses_dir_fd_relative_io():
+    """The recorder cannot resolve ``dir_fd``-relative paths (documented limit)."""
+
+    root = Path(__file__).resolve().parents[2]
+    offenders = [
+        str(path.relative_to(root))
+        for top in ("tools", "packages")
+        for path in (root / top).rglob("*.py")
+        if "dir_fd" in path.read_text(encoding="utf-8", errors="ignore")
+        and path.name
+        not in {
+            "verification_receipt.py",
+            "publication.py",
+        }  # publication.py: commit-time renames, never inside a wrapped verifier
+    ]
+    assert offenders == []
+
+
+def test_dir_fd_relative_io_makes_the_recording_incomplete(world):
+    import os
+
+    if os.open not in os.supports_dir_fd:
+        pytest.skip("dir_fd unsupported on this platform")
+    live = {"n": 0}
+
+    def compute() -> dict[str, object]:
+        live["n"] += 1
+        directory = os.open(world["data"], os.O_RDONLY)
+        try:
+            return {"size": os.stat("a.json", dir_fd=directory).st_size}
+        finally:
+            os.close(directory)
+
+    _run(world, "dirfd", compute)
+    _run(world, "dirfd", compute)
+    assert live["n"] == 2
+
+
+def test_installing_the_recorder_keeps_os_capability_checks_true(world):
+    import os
+
+    before = {
+        name: (os.open in getattr(os, name), os.stat in getattr(os, name))
+        for name in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks")
+    }
+    _run(world, "cap", lambda: {"ok": True})  # installs the recorder
+    after = {
+        name: (os.open in getattr(os, name), os.stat in getattr(os, name))
+        for name in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks")
+    }
+    assert before == after
