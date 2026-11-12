@@ -105,6 +105,7 @@ PROOF: dict[str, Any] = {
     "current_drawdown": "-0.04",
     "maximum_drawdown": "-0.10",
     "receipt_sha256": "f" * 64,
+    "complete_through": "2026-09-03",
     "index_path": [
         {"as_of": day}
         for day in ("2026-01-26", "2026-01-28", "2026-07-02", "2026-07-04")
@@ -112,9 +113,30 @@ PROOF: dict[str, Any] = {
 }
 
 
+def _catalog(**extra: Any) -> dict[str, Any]:
+    """A catalog whose envelope passes the (stubbed) contract gates."""
+
+    return {
+        "epoch_hpr_receipts": _receipts(),
+        "hwm_inputs": {"periods": [{"date": "2026-09-03"}]},
+        "hwm_acceptance_record": {},
+        "allocations": [],
+        "source_artifacts": [],
+        "strategy_returns": [],
+        "as_of_date": "2026-09-03",
+        **extra,
+    }
+
+
+@pytest.fixture(autouse=True)
+def _contract_gates_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(reporter, "validate_hwm_inputs_envelope", lambda *a, **k: None)
+    monkeypatch.setattr(panel, "_validate_panel_hwm_envelope", lambda *a, **k: None)
+
+
 def _report(tmp_path: Path, proof: Any = PROOF, **override: Any) -> dict[str, Any]:
     return reporter._hwm_numerical_from_envelope(
-        {"epoch_hpr_receipts": _receipts()},
+        _catalog(),
         governed_proof=proof,
         gap_bounds_path=_bounds(tmp_path, **override),
     )
@@ -122,7 +144,7 @@ def _report(tmp_path: Path, proof: Any = PROOF, **override: Any) -> dict[str, An
 
 def _panel(tmp_path: Path, proof: Any = PROOF, **override: Any) -> dict[str, Any]:
     return panel._compute_panel_numerical_hwm(
-        {},
+        _catalog(epoch_hpr_receipts=[]),
         _receipts(),
         governed_proof=proof,
         gap_bounds_path=_bounds(tmp_path, **override),
@@ -174,11 +196,11 @@ def test_a_missing_point_stays_unavailable(compute: Any, tmp_path: Path) -> None
     path.write_bytes(json.dumps(document).encode("utf-8"))
     kwargs = {"governed_proof": PROOF, "gap_bounds_path": path}
     if compute is _report:
-        result = reporter._hwm_numerical_from_envelope(
-            {"epoch_hpr_receipts": _receipts()}, **kwargs
-        )
+        result = reporter._hwm_numerical_from_envelope(_catalog(), **kwargs)
     else:
-        result = panel._compute_panel_numerical_hwm({}, _receipts(), **kwargs)
+        result = panel._compute_panel_numerical_hwm(
+            _catalog(epoch_hpr_receipts=[]), _receipts(), **kwargs
+        )
     assert result["hwm_numerical_reason"] == "MISSING_DAILY_POINT_CAN_HIDE_PEAK"
 
 
@@ -245,3 +267,51 @@ def test_a_proof_that_does_not_observe_the_span_endpoints_stays_unavailable(
             "hwm_numerical_status": "UNAVAILABLE",
             "hwm_numerical_reason": "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
         }
+
+
+def test_the_envelope_gates_run_before_the_governed_numbers_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KILL (reviewer finding): bounded gaps never bypass the PORT-HWM-3 envelope gates."""
+
+    bounds = _bounds(tmp_path)
+
+    def report(catalog: dict[str, Any]) -> dict[str, Any]:
+        return reporter._hwm_numerical_from_envelope(
+            catalog, governed_proof=PROOF, gap_bounds_path=bounds
+        )
+
+    no_inputs = _catalog()
+    del no_inputs["hwm_inputs"]
+    assert report(no_inputs)["hwm_numerical_reason"] == "NO_HWM_INPUTS"
+    no_context = _catalog()
+    del no_context["hwm_acceptance_record"]
+    assert report(no_context)["hwm_numerical_reason"] == "MISSING_CONSUMPTION_CONTEXT"
+
+    def refuse(*_a: Any, **_k: Any) -> None:
+        raise reporter.HwmInputsContractError("ENDPOINT_NOT_RECONCILED", "x")
+
+    monkeypatch.setattr(reporter, "validate_hwm_inputs_envelope", refuse)
+    assert report(_catalog())["hwm_numerical_reason"] == "ENDPOINT_NOT_RECONCILED"
+    monkeypatch.undo()
+
+    # panel: an envelope the contract refuses raises, never publishes
+    def panel_refuse(*_a: Any, **_k: Any) -> None:
+        raise panel.ControlPanelValidationError("envelope refused")
+
+    monkeypatch.setattr(panel, "_validate_panel_hwm_envelope", panel_refuse)
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._compute_panel_numerical_hwm(
+            _catalog(epoch_hpr_receipts=[]),
+            _receipts(),
+            governed_proof=PROOF,
+            gap_bounds_path=bounds,
+        )
+
+
+@pytest.mark.parametrize("compute", [_report, _panel])
+def test_a_governed_proof_older_than_the_envelope_stays_unavailable(
+    compute: Any, tmp_path: Path
+) -> None:
+    result = compute(tmp_path, proof={**PROOF, "complete_through": "2026-08-30"})
+    assert result["hwm_numerical_reason"] == "MISSING_DAILY_POINT_CAN_HIDE_PEAK"

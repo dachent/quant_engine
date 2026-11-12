@@ -4955,6 +4955,7 @@ def _compute_panel_numerical_hwm(
                 "epoch HPR spans",
             )
         )
+    gap_bounded: tuple[dict[str, Any], dict[str, Any]] | None = None
     if any(spans_by_strategy.values()):
         # Mirrors the report: a gap set bounded away from a new peak publishes the
         # numeric HWM from the governed path (#899); anything else stays UNAVAILABLE.
@@ -4969,11 +4970,7 @@ def _compute_panel_numerical_hwm(
             raise ControlPanelValidationError(str(exc)) from exc
         if assessment["status"] != "BOUNDED":
             return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
-        if governed_proof is None or governed_proof.get("status") != "AVAILABLE":
-            return _unavailable("GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS")
-        if not proof_covers_spans(governed_proof, spans_by_strategy):
-            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
-        return numerical_from_governed_proof(governed_proof, assessment)
+        gap_bounded = (assessment, spans_by_strategy)
 
     def _panel_decimal(value: object, field_name: str) -> Decimal:
         if not isinstance(value, str):
@@ -5004,6 +5001,19 @@ def _compute_panel_numerical_hwm(
         membership_starts=membership_starts,
         endpoint_exempt=endpoint_exempt,
     )
+
+    if gap_bounded is not None:
+        # The envelope passed every gate above; only now may the governed path
+        # supply the numbers, and only if it is as current as the envelope and its
+        # path observes both endpoints of every span.
+        last_day = max((str(row.get("date")) for row in periods), default="")
+        if governed_proof is None or governed_proof.get("status") != "AVAILABLE":
+            return _unavailable("GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS")
+        if str(governed_proof.get("complete_through")) < last_day or (
+            not proof_covers_spans(governed_proof, gap_bounded[1])
+        ):
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        return numerical_from_governed_proof(governed_proof, gap_bounded[0])
 
     crosswalk: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in _objects(catalog.get("strategy_returns", []), "strategy_returns"):
