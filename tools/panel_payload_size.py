@@ -17,6 +17,8 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from acceptance.validate import payload_rule
+
 BUDGET_PATH = (
     Path(__file__).resolve().parents[1]
     / "apps"
@@ -131,12 +133,23 @@ def raise_budgets(
     return result
 
 
+def _as_of(generation: Path) -> Any:
+    candidate = json.loads((generation / "candidate.json").read_bytes())
+    return candidate.get("portfolio_as_of")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("generation", type=Path)
     parser.add_argument("--budget", type=Path, default=BUDGET_PATH)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--no-check", action="store_true")
+    parser.add_argument(
+        "--previous",
+        type=Path,
+        help="the previous committed generation: check against the relative rule of "
+        "#893 (limits computed from its measured sizes) instead of the file limits",
+    )
     parser.add_argument(
         "--raise-block",
         action="append",
@@ -163,7 +176,21 @@ def main(argv: list[str] | None = None) -> int:
     report: dict[str, Any] = {"physical": sizes, "blocks": blocks}
     findings: list[str] = []
     if not args.no_check:
-        findings = check(blocks, sizes, json.loads(args.budget.read_bytes()))
+        budget = json.loads(args.budget.read_bytes())
+        if args.previous is not None:
+            previous_data = json.loads(
+                (args.previous / "data" / "dashboard_data.json").read_bytes()
+            )
+            days = payload_rule.added_days(
+                _as_of(args.previous), _as_of(args.generation)
+            )
+            budget = payload_rule.derive_budget(
+                budget,
+                block_sizes(previous_data),
+                physical(args.previous),
+                days,
+            )
+        findings = check(blocks, sizes, budget)
         report["findings"] = findings
     if args.raise_all:
         args.raise_block = sorted(set(args.raise_block) | set(blocks))

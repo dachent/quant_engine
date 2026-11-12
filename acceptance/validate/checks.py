@@ -34,7 +34,7 @@ from pathlib import Path
 import re
 from typing import Any, cast
 
-from . import facts_bindings, shell, sleeve_basis
+from . import facts_bindings, payload_rule, shell, sleeve_basis
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -9619,10 +9619,90 @@ def _physical_sizes(ctx: Context) -> dict[str, int]:
     return sizes
 
 
+def _previous_payload(
+    ctx: Context, cached: Mapping[str, int]
+) -> tuple[dict[str, int] | None, dict[str, int] | None, int | None, bool, Any]:
+    """#893: ``(blocks, physical, added_days, unknown, schema)`` of the previous committed panel.
+
+    The previous release is the generation ``CURRENT.json`` names while this candidate is
+    still a candidate.  ``unknown`` is True when the candidate already is the current
+    generation (post-commit re-check): the predecessor is no longer discoverable and only
+    the ceiling applies.  ``(None, None, None, False)``: no previous release, file limits.
+    """
+
+    pointer = ctx.gen.external.current_pointer
+    previous_id = pointer.get("generation_id") if isinstance(pointer, dict) else None
+    if not isinstance(previous_id, str) or not previous_id:
+        return None, None, None, False, None
+    if previous_id == ctx.gen.generation_id:
+        return None, None, None, True, None
+    key = f"payload_previous:{previous_id}"
+    if key not in ctx._cache:
+        previous_dir = ctx.gen.gen_dir.parent / previous_id
+        result: tuple[Any, ...] = (None, None, None, None)
+        try:
+            panel = json.loads((previous_dir / PANEL).read_bytes())
+            candidate = json.loads((previous_dir / CANDIDATE).read_bytes())
+            files = {
+                path.relative_to(previous_dir).as_posix(): path.stat().st_size
+                for path in previous_dir.rglob("*")
+                if path.is_file()
+            }
+            physical = {"total_bytes": sum(files.values())}
+            for name, rel in (
+                ("index_html_bytes", "index.html"),
+                ("dashboard_data_json_bytes", "data/dashboard_data.json"),
+                ("dashboard_data_js_bytes", "data/dashboard_data.js"),
+            ):
+                if rel in files:
+                    physical[name] = files[rel]
+            days = payload_rule.added_days(
+                candidate.get("portfolio_as_of"),
+                ctx.gen.candidate.get("portfolio_as_of"),
+            )
+            if isinstance(panel, dict) and days is not None:
+                result = (
+                    payload_block_bytes(panel),
+                    physical,
+                    days,
+                    panel.get("panel_schema_version"),
+                )
+        except (OSError, ValueError):
+            pass
+        ctx._cache[key] = result
+    blocks, physical, days, schema = ctx._cache[key]
+    return blocks, physical, days, False, schema
+
+
+def _effective_payload_budget(ctx: Context) -> tuple[dict[str, Any] | None, str]:
+    """The file budget with every limit recomputed by the relative rule (#893), cached."""
+
+    budget, source = _payload_budget(ctx)
+    if budget is None:
+        return None, source
+    if "payload_effective" not in ctx._cache:
+        cached = ctx._cache.get("payload_block_bytes")
+        if not isinstance(cached, dict):
+            cached = payload_block_bytes(ctx.panel)
+            ctx._cache["payload_block_bytes"] = cached
+        blocks, physical, days, unknown, schema = _previous_payload(ctx, cached)
+        ctx._cache["payload_effective"] = payload_rule.derive_budget(
+            budget,
+            blocks,
+            physical,
+            days,
+            previous_unknown=unknown,
+            allowances=payload_rule.active_allowances(
+                schema, ctx.panel.get("panel_schema_version")
+            ),
+        )
+    return ctx._cache["payload_effective"], source
+
+
 def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
     """#540: the payload against its committed budget; every overrun blocks (regression)."""
 
-    budget, source = _payload_budget(ctx)
+    budget, source = _effective_payload_budget(ctx)
     if budget is None:
         yield _finding(
             "lint.payload_size",
@@ -9652,8 +9732,8 @@ def _payload_budget_findings(ctx: Context) -> Iterator[Finding]:
             PANEL,
             f"$.{entity}" if entity in cached else "(payload size)",
             ("F5",),
-            f"{text}: {measured} B > {limit} B (payload_budget.json); raising a budget "
-            "is an explicit edit in the change that grows the block",
+            f"{text}: {measured} B > {limit} B (payload_budget.json, relative to the previous release, #893); "
+            "raising a budget is an explicit edit in the change that grows the block",
         )
 
 
@@ -9667,7 +9747,24 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
         for rel, value in scan.files.items()
         if not (scan.report_embedded_only and rel == REPORT)
     }
-    large = {rel: size for rel, (size, _) in sorted(files.items()) if size > 50_000_000}
+    # #895 A6: a file with a committed budget is "large" only past that budget; the
+    # fixed 50 MB threshold stays for files the budget does not name.
+    effective, _ = _effective_payload_budget(ctx)
+    file_limits = {
+        "index.html": "index_html_bytes",
+        "data/dashboard_data.json": "dashboard_data_json_bytes",
+        "data/dashboard_data.js": "dashboard_data_js_bytes",
+    }
+
+    def _large_at(rel: str) -> int:
+        key = file_limits.get(rel)
+        if effective is not None and key in effective["physical"]:
+            return int(effective["physical"][key])
+        return 50_000_000
+
+    large = {
+        rel: size for rel, (size, _) in sorted(files.items()) if size > _large_at(rel)
+    }
     by_sha: dict[str, list[str]] = {}
     for rel, (size, digest) in files.items():
         if size > 10_000_000:
