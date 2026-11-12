@@ -137,6 +137,7 @@ CALENDAR_PERIODS_PER_YEAR: Final = 365
 # A series whose dates include weekends at this share or more is calendar-daily.
 _CALENDAR_WEEKEND_SHARE: Final = Decimal("0.2")
 _TRADING_CALENDAR_TOLERANCE: Final = Decimal("0.02")
+_MIN_DERIVATION_SPAN_DAYS: Final = 28
 ANNUALIZATION_MAX_FREQUENCY_SHARE: Final = Decimal("1.2")
 PERIODS_BASIS_DECLARED: Final = "DECLARED"
 PERIODS_BASIS_DERIVED: Final = "DERIVED_FROM_DATES"
@@ -157,7 +158,8 @@ def _effective_periods_per_year(
     if declared < DAILY_PERIODS_PER_YEAR:
         return declared, PERIODS_BASIS_DECLARED
     span_days = (common[-1] - common[0]).days
-    if span_days <= 0:
+    if span_days < _MIN_DERIVATION_SPAN_DAYS:
+        # a calendar cannot be read from under four weeks of dates
         return declared, PERIODS_BASIS_DECLARED
     weekend = sum(1 for day in common if day.weekday() >= 5)
     if Decimal(weekend) >= _CALENDAR_WEEKEND_SHARE * len(common):
@@ -192,12 +194,13 @@ def _check_annualization_frequency(
                 required.to_integral_value(rounding="ROUND_CEILING")
             ),
         )
-    if not upper:
+    if not upper or span_days < _MIN_DERIVATION_SPAN_DAYS:
         return
     # Too MANY observations for the declared frequency (daily dates declared weekly)
     # is as wrong as too few.
     allowed = ANNUALIZATION_MAX_FREQUENCY_SHARE * periods_per_year * span_days / 365
-    if Decimal(len(common)) > allowed + 1:
+    # two periods of slack: the window opens and closes between period boundaries
+    if Decimal(len(common)) > allowed + 2:
         raise AnnualizationFrequencyError(
             periods_per_year=periods_per_year,
             observations=len(common),
