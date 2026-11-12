@@ -64,7 +64,7 @@ FIRST = {
 }
 
 
-def _state(world: dict[str, Any]) -> dict[str, Any]:
+def _state(world: dict[str, Any]) -> dict[str, Any]:  # noqa: F811
     return json.loads((world["cycle"] / driver.STATE_NAME).read_text(encoding="utf-8"))
 
 
@@ -105,9 +105,10 @@ def test_a_refusal_of_one_member_starts_no_member(
     graph = _graph(world, [FIRST, _member("a", "b"), _member("b", "a")])
     assert _drive(world, graph) == 2
     assert not (world["cycle"] / "a.out").exists()
-    assert "a" not in _state(world)["stages"] or _state(world)["stages"]["a"].get(
-        "status"
-    ) != "ok"
+    assert (
+        "a" not in _state(world)["stages"]
+        or _state(world)["stages"]["a"].get("status") != "ok"
+    )
 
 
 def test_a_stage_alone_in_its_group_runs_like_any_stage(
@@ -119,11 +120,16 @@ def test_a_stage_alone_in_its_group_runs_like_any_stage(
 
 
 def test_the_shipped_graph_runs_the_replica_ceremony_beside_the_real_lane() -> None:
-    stages = {s["id"]: s for s in json.loads(SHIPPED.read_text(encoding="utf-8"))["stages"]}
+    stages = {
+        s["id"]: s for s in json.loads(SHIPPED.read_text(encoding="utf-8"))["stages"]
+    }
     real, replica = stages["lane-real"], stages["lane-replica"]
     assert real["parallel_group"] == replica["parallel_group"] == "lanes"
     # neither waits for the other; both wait for the replica spec
-    assert "lane-replica" not in real["requires"] and "lane-real" not in replica["requires"]
+    assert (
+        "lane-replica" not in real["requires"]
+        and "lane-real" not in replica["requires"]
+    )
     # the commit needs the ceremony receipt AND the real lane, exactly as it did with one stage
     assert set(stages["commit"]["requires"]) == {"lane-real", "lane-replica"}
     assert "replica_receipt" in stages["commit"]["commit_gate"]
@@ -132,4 +138,3 @@ def test_the_shipped_graph_runs_the_replica_ceremony_beside_the_real_lane() -> N
     # the real lane announces the release id while the ceremony runs
     assert real.get("announce_release") is True
     assert "real-lane" in real["argv"] and "ceremony" in replica["argv"]
-

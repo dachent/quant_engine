@@ -1982,9 +1982,7 @@ def _report(run: Run, stage: Mapping[str, Any], result: Mapping[str, Any]) -> No
             print(f"{stage['id']}: release id not readable yet ({refusal})", flush=True)
 
 
-def run_parallel(
-    run: Run, jobs: Sequence[tuple[Mapping[str, Any], bool, bool]]
-) -> int:
+def run_parallel(run: Run, jobs: Sequence[tuple[Mapping[str, Any], bool, bool]]) -> int:
     """Run the stages of one parallel group at the same time; 0 when all are ok, 1 when one failed.
 
     Every member passes its refusals and moves leftovers aside before any member creates an output
