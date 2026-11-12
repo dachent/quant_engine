@@ -111,6 +111,14 @@ def check_bound_files(files: Sequence[Path], fs: RealFs) -> dict[str, str]:
     """Every bound file is fully present locally: attributes only, content is never read."""
 
     bad: list[str] = []
+    expanded: list[Path] = []
+    for item in files:
+        expanded.extend(
+            sorted(p for p in item.rglob("*") if p.is_file())
+            if item.is_dir()
+            else [item]
+        )
+    files = expanded
     for path in files:
         try:
             attributes = fs.attributes(path)

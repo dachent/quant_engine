@@ -197,3 +197,15 @@ def test_unwritable_receipt_is_usage_error(tmp_path: Path) -> None:
     root.mkdir()
     out = tmp_path / "no" / "such" / "receipt.json"
     assert canary_module.main(["run", "--root", str(root), "--out", str(out)]) == 3
+
+
+def test_bound_directory_is_walked(tmp_path: Path) -> None:
+    folder = tmp_path / "gen"
+    folder.mkdir()
+    (folder / "a.json").write_bytes(b"x")
+
+    class Fs(canary_module.RealFs):
+        def attributes(self, path: Path) -> int:
+            return 0x400000
+
+    assert canary_module.check_bound_files([folder], Fs())["status"] == "FAIL"
