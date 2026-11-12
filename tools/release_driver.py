@@ -193,6 +193,7 @@ class Run:
         # stages of one parallel group run in threads of this process: the state file is shared
         self.lock = threading.RLock()
         self.parallel_live: set[str] = set()
+        self.git_retries: list[str] = []
         # roots a replica-only run must never write into
         self.real_roots = [
             Path(str(item))
@@ -417,12 +418,22 @@ class Run:
 
     # -- repository identity -----------------------------------------------------------
     def _git(self, *args: str) -> str:
-        done = subprocess.run(
-            ["git", *args], cwd=self.repo, capture_output=True, text=True, check=False
-        )
-        if done.returncode != 0:
-            raise Refusal(f"git {' '.join(args)} failed: {done.stderr.strip()}")
-        return done.stdout.strip()
+        # an identity read that fails with no message is a transient (R3 refusal 20: another process
+        # scanning the tree): read it once more and record that it happened
+        for attempt in (1, 2):
+            done = subprocess.run(
+                ["git", *args],
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if done.returncode == 0:
+                return done.stdout.strip()
+            if done.stderr.strip() or attempt == 2:
+                break
+            self.git_retries.append(" ".join(args))
+        raise Refusal(f"git {' '.join(args)} failed: {done.stderr.strip()}")
 
     @property
     def scheme(self) -> str:
@@ -991,6 +1002,21 @@ def check_needs_config(run: Run, stage: Mapping[str, Any]) -> None:
         )
 
 
+def check_gates(run: Run, stage: Mapping[str, Any]) -> None:
+    """The stage's upfront-QC gates: ``needs_gate`` receipts (PASS, same config and code identity) and ``recheck``
+    rows run live now (pointers move between the receipt and the stage, R3 refusal 15)."""
+
+    needs, recheck = stage.get("needs_gate", []), stage.get("recheck", [])
+    if not (needs or recheck) or run.offline:
+        return
+    import release_preflight
+
+    for gate in needs:
+        release_preflight.verify_receipt(run, gate)
+    if recheck:
+        release_preflight.recheck(run, recheck)
+
+
 def check_ready(
     run: Run,
     stage: Mapping[str, Any],
@@ -1005,6 +1031,7 @@ def check_ready(
     run.require_frozen_repo()
     check_config_paths(run)
     check_no_live_stage(run)
+    check_gates(run, stage)
     if "argv" in stage:
         check_script_in_repo(run, stage, stage_argv(run, stage))
     check_probe_guard(run, stage)

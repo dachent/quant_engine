@@ -95,6 +95,8 @@
         "release_inputs": {"$ref": "#/$defs/strings"},
         "only_ceremony": {"enum": ["full", "replica-only"]},
         "parallel_group": {"type": "string", "minLength": 1},
+        "needs_gate": {"$ref": "#/$defs/strings"},
+        "recheck": {"$ref": "#/$defs/strings"},
         "announce_release": {"type": "boolean"},
         "needs_config": {"$ref": "#/$defs/strings"},
         "needs_attestation": {"type": ["boolean", "string"]},
