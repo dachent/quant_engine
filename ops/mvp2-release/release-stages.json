@@ -1896,7 +1896,7 @@
     },
     {
       "id": "lane-replica",
-      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph"],
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph", "g3:spec-pair"],
       "only_ceremony": "full",
       "requires": [
         "replica-spec"
@@ -1957,7 +1957,7 @@
     },
     {
       "id": "lane-real",
-      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph"],
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph", "g3:spec-pair"],
       "requires": [
         "replica-spec"
       ],

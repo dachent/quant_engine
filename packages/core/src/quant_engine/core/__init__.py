@@ -52,6 +52,7 @@ from quant_engine.core.replica_gate import (
     build_receipt as build_replica_receipt,
     is_replica_spec,
     replica_anchor,
+    topology as replica_topology,
     verify_receipt as verify_replica_receipt,
 )
 from quant_engine.core.release_inputs import (
@@ -258,6 +259,7 @@ __all__ = [
     "canonical_json_bytes",
     "is_replica_spec",
     "replica_anchor",
+    "replica_topology",
     "verify_replica_receipt",
     "inventory_identity",
     "InterpreterRefusal",

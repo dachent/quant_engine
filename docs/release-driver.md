@@ -537,6 +537,10 @@ The operator records the pin the command prints (`calendar_authority_sha256`) in
 direct hash confirmation at commit covers it. Without the seed keys there is no pin, and the `calendar-seed` stage refuses (it needs `calendar_authority_sha256`);
 `config --require-calendar` still writes the pin from an existing authority file for the later `calendar-authority` attempts.
 
+## Commit-path canary
+
+`tools/release_canary.py run --root <root>... [--bound-file <file>...] [--baseline <json>] [--out <receipt>]` exercises the real (synced) volume before the commit, which no scratch rehearsal does: bound files are not cloud placeholders (attributes only), a pointer-sized create/write/fsync/atomic-replace/lock/rename/delete cycle runs in a `.canary-<pid>-<rand>` directory beside each root (always removed), timings stay within 10 x the recorded baseline (2 s floor), and an environment fingerprint (Windows build, OneDrive client, cloud-files driver, volume type, interpreter and package hashes, git version) is recorded. `release_canary.py diff A B` shows a fingerprint change between two releases. Exit 0 PASS, 1 FAIL, 3 usage. Handle listing is skipped unless a lister is injected (`SKIPPED_NOT_AVAILABLE`, a failure only with `--require-handles`). It writes nothing inside a root.
+
 ## Parallel groups (the replica ceremony beside the real lane)
 
 Consecutive stages that name the same `parallel_group` run at the same time, as threads of one driver process. Every member
@@ -570,5 +574,7 @@ stage entry (pointers move between the receipt and the lanes). Stale releases ar
 and hash-verified into the archive with a retirement record, then moved to `releases-retired/` (never deleted; the authority
 release is never retired). `post-release-verify` refuses to run from a checkout that is not the spec's code commit (22, 23).
 
+G3 (`g3:spec-pair`) compares the real and replica specs with the replica gate's own `topology` function; `lane-real` and `lane-replica` recheck it at entry, so a topology mismatch (R3 refusal 19) is found in seconds, not after the lane.
+
 Not built yet, and named in `release_preflight.COVERAGE` so a green G0 is not read as "inputs are fine": G1 consumer contracts
-(1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17), the consumer freshness limit (14) and G3 spec pair.
+(1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17) and the consumer freshness limit (14).
