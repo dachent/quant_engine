@@ -47,6 +47,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -189,6 +190,9 @@ class Run:
         }
         self._stage_bindings: dict[str, str] = {}
         self.confirmed_release_id: str | None = None
+        # stages of one parallel group run in threads of this process: the state file is shared
+        self.lock = threading.RLock()
+        self.parallel_live: set[str] = set()
         # roots a replica-only run must never write into
         self.real_roots = [
             Path(str(item))
@@ -443,7 +447,8 @@ class Run:
 
     # -- state --------------------------------------------------------------------------
     def save(self) -> None:
-        _write_json(self.state_path, self.state)
+        with self.lock:
+            _write_json(self.state_path, self.state)
 
     def stage(self, stage_id: str) -> Mapping[str, Any]:
         for row in self.graph["stages"]:
@@ -1453,6 +1458,9 @@ def check_no_live_stage(run: Run) -> None:
     """Refuse while a stage this run launched is still alive (the PID and start token it recorded)."""
 
     for stage_id, record in sorted(run.state["stages"].items()):
+        if stage_id in run.parallel_live:
+            # a sibling of this stage's parallel group, launched by this very process
+            continue
         if record.get("status") == "running" and process_alive(
             int(record.get("pid", 0)), record.get("process_started")
         ):
@@ -1544,16 +1552,18 @@ def _launch(
         env=dict(env),
         start_new_session=os.name != "nt",
     )
-    record["pid"] = child.pid
-    record["process_started"] = process_started(child.pid)
-    run.save()
+    with run.lock:
+        record["pid"] = child.pid
+        record["process_started"] = process_started(child.pid)
+        run.save()
     try:
         return child.wait()
     except BaseException:
         if child.poll() is None:
             _kill_tree(child.pid)
-        record["status"] = "interrupted"
-        run.save()
+        with run.lock:
+            record["status"] = "interrupted"
+            run.save()
         raise
 
 
@@ -1584,6 +1594,25 @@ def execute_stage(
     *,
     replace: bool,
     resuming: bool = False,
+    barrier: threading.Barrier | None = None,
+) -> dict[str, Any]:
+    """Run one stage. In a parallel group every member passes its refusals and moves its leftovers
+    aside, then waits at ``barrier``, before any member creates an output directory."""
+
+    try:
+        return _execute_stage(run, stage, replace, resuming, barrier)
+    except BaseException:
+        if barrier is not None:
+            barrier.abort()
+        raise
+
+
+def _execute_stage(
+    run: Run,
+    stage: Mapping[str, Any],
+    replace: bool,
+    resuming: bool,
+    barrier: threading.Barrier | None,
 ) -> dict[str, Any]:
     check_ready(run, stage, replace=replace, resuming=resuming)
     outputs = _outputs(run, stage)
@@ -1591,20 +1620,23 @@ def execute_stage(
     previous = run.state["stages"].get(stage["id"], {})
     if "state_snapshot_to" in stage:
         # the state as it is before this stage: a stage that archives it must not archive itself as running
-        _write_json(
-            Path(run.expand(stage["state_snapshot_to"])),
-            {
-                "stages": {
-                    key: value
-                    for key, value in run.state["stages"].items()
-                    if key != stage["id"]
-                }
-            },
-        )
+        with run.lock:
+            _write_json(
+                Path(run.expand(stage["state_snapshot_to"])),
+                {
+                    "stages": {
+                        key: value
+                        for key, value in run.state["stages"].items()
+                        if key != stage["id"]
+                    }
+                },
+            )
     if not resuming:
         for path in _claimed_outputs(run, stage):
             if path.exists():
                 path.rename(path.with_name(f"{path.name}.prev-{stamp}"))
+    if barrier is not None:
+        barrier.wait()
     spec_file = (
         Path(run.expand(stage["pointers_unchanged"]))
         if "pointers_unchanged" in stage
@@ -1631,8 +1663,9 @@ def execute_stage(
         "inputs": {},
         "failures": [],
     }
-    run.state["stages"][stage["id"]] = record
-    run.save()
+    with run.lock:
+        run.state["stages"][stage["id"]] = record
+        run.save()
     _timing(run, f"{stage['id']} start attempt={attempt} resumed={resuming}")
     rc = 0
     stdout_to = Path(run.expand(stage["stdout_to"])) if "stdout_to" in stage else None
@@ -1641,9 +1674,10 @@ def execute_stage(
             _BUILTINS[stage["builtin"]](run, outputs[0] if outputs else log_path)
         except Refusal as refusal:
             log_path.write_text(str(refusal), encoding="utf-8")
-            record["status"] = "failed"
-            record["failures"] = [str(refusal)]
-            run.save()
+            with run.lock:
+                record["status"] = "failed"
+                record["failures"] = [str(refusal)]
+                run.save()
             raise
         log_path.write_text(f"builtin {stage['builtin']}\n", encoding="utf-8")
     else:
@@ -1680,6 +1714,31 @@ def execute_stage(
     for path in outputs:
         if not path.exists():
             failures.append(f"declared output {path} was not produced")
+    with run.lock:
+        _finish_record(run, stage, record, failures, elapsed, rc, previous, outputs)
+    counters = _counters(run, stage, log_path, *([stdout_to] if stdout_to else []))
+    if counters is not None:
+        with run.lock:
+            record["work_counters"] = counters
+            run.save()
+    _timing(
+        run,
+        f"{stage['id']} {record['status']} rc={rc} seconds={elapsed}"
+        + (f" counters={json.dumps(counters, sort_keys=True)}" if counters else ""),
+    )
+    return record
+
+
+def _finish_record(
+    run: Run,
+    stage: Mapping[str, Any],
+    record: dict[str, Any],
+    failures: list[str],
+    elapsed: float,
+    rc: int,
+    previous: Mapping[str, Any],
+    outputs: Sequence[Path],
+) -> None:
     record.update(
         {
             "status": "ok" if not failures else "failed",
@@ -1697,17 +1756,8 @@ def execute_stage(
             "outputs": {str(path): path_digest(path) for path in outputs},
         }
     )
-    counters = _counters(run, stage, log_path, *([stdout_to] if stdout_to else []))
-    if counters is not None:
-        record["work_counters"] = counters
     run.state["stages"][stage["id"]] = record
     run.save()
-    _timing(
-        run,
-        f"{stage['id']} {record['status']} rc={rc} seconds={elapsed}"
-        + (f" counters={json.dumps(counters, sort_keys=True)}" if counters else ""),
-    )
-    return record
 
 
 def validate_graph(graph: Mapping[str, Any]) -> None:
@@ -1897,6 +1947,144 @@ def offline_plan(
     return lines, problems
 
 
+def _groups(run: Run, selected: Sequence[str]) -> list[list[str]]:
+    """Consecutive selected stages that share a ``parallel_group`` form one batch; every other stage is its own."""
+
+    batches: list[list[str]] = []
+    for stage_id in selected:
+        group = run.stage(stage_id).get("parallel_group")
+        if (
+            group is not None
+            and batches
+            and run.stage(batches[-1][0]).get("parallel_group") == group
+        ):
+            batches[-1].append(stage_id)
+        else:
+            batches.append([stage_id])
+    return batches
+
+
+def _report(run: Run, stage: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    print(f"{stage['id']}: {result['status']} in {result['seconds']}s", flush=True)
+    if result["status"] != "ok":
+        for failure in result["failures"]:
+            print(f"  {failure}", file=sys.stderr)
+        print(f"  log: {result['log']}", file=sys.stderr)
+    elif stage.get("announce_release"):
+        # the owner can read the release id and the findings while the sibling stage is still running
+        try:
+            print(
+                f"{stage['id']}: release {run.derive('release_id')} is PREPARED on the real roots; "
+                "the commit stays gated on the other stages of this group",
+                flush=True,
+            )
+        except Refusal as refusal:
+            print(f"{stage['id']}: release id not readable yet ({refusal})", flush=True)
+
+
+def run_parallel(run: Run, jobs: Sequence[tuple[Mapping[str, Any], bool, bool]]) -> int:
+    """Run the stages of one parallel group at the same time; 0 when all are ok, 1 when one failed.
+
+    Every member passes its refusals and moves leftovers aside before any member creates an output
+    (``barrier``); a refusal of any member stops the group before a process starts. The state file is
+    shared, so state writes are serialized by ``run.lock``.
+    """
+
+    # every member's refusals first, before any member moves a leftover aside: one refusal changes nothing
+    for stage, replace, resuming in jobs:
+        check_ready(run, stage, replace=replace, resuming=resuming)
+    barrier = threading.Barrier(len(jobs))
+    outcomes: dict[str, Any] = {}
+    run.parallel_live.update(str(stage["id"]) for stage, _, _ in jobs)
+
+    def work(stage: Mapping[str, Any], replace: bool, resuming: bool) -> None:
+        try:
+            result = execute_stage(
+                run, stage, replace=replace, resuming=resuming, barrier=barrier
+            )
+        except threading.BrokenBarrierError:
+            outcomes[stage["id"]] = None
+            return
+        except BaseException as exc:  # noqa: BLE001 - reported by the caller, in stage order
+            outcomes[stage["id"]] = exc
+            return
+        outcomes[stage["id"]] = result
+        _report(run, stage, result)
+        waiting = [str(s["id"]) for s, _, _ in jobs if s["id"] not in outcomes]
+        if waiting:
+            print(f"  still running: {', '.join(waiting)}", flush=True)
+
+    threads = [
+        threading.Thread(target=work, args=job, name=str(job[0]["id"]), daemon=True)
+        for job in jobs
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            while thread.is_alive():
+                thread.join(timeout=0.5)
+    except KeyboardInterrupt:
+        for name in stop_own(run):
+            print(f"stopped {name}", file=sys.stderr)
+        raise
+    finally:
+        run.parallel_live.clear()
+    errors = [value for value in outcomes.values() if isinstance(value, BaseException)]
+    for error in errors:
+        if isinstance(error, Refusal):
+            raise error
+    for error in errors:
+        raise error
+    # a member that never started (its barrier broke) is a failure, not a pass
+    return (
+        1
+        if any(value is None or value["status"] != "ok" for value in outcomes.values())
+        else 0
+    )
+
+
+def run_selected(
+    run: Run, selected: Sequence[str], *, only: str | None, replace: bool
+) -> int:
+    for batch in _groups(run, selected):
+        jobs: list[tuple[Mapping[str, Any], bool, bool]] = []
+        for stage_id in batch:
+            stage = run.stage(stage_id)
+            record = run.state["stages"].get(stage_id)
+            if record and record["status"] == "ok" and only is None:
+                verify_kept(run, stage, record)
+                print(f"{stage_id}: ok (kept)")
+                continue
+            resuming = bool(
+                record
+                and record["status"] in ("failed", "interrupted")
+                and "resume" in stage
+                and not replace
+            )
+            jobs.append((stage, replace or (bool(record) and not resuming), resuming))
+        if len(jobs) > 1:
+            print(
+                f"parallel group {jobs[0][0]['parallel_group']}: "
+                + ", ".join(str(stage["id"]) for stage, _, _ in jobs)
+                + f" start {_now()}",
+                flush=True,
+            )
+            if run_parallel(run, jobs) != 0:
+                return 1
+            continue
+        for stage, stage_replace, resuming in jobs:
+            print(
+                f"{stage['id']}: {'resume' if resuming else 'start'} {_now()}",
+                flush=True,
+            )
+            result = execute_stage(run, stage, replace=stage_replace, resuming=resuming)
+            _report(run, stage, result)
+            if result["status"] != "ok":
+                return 1
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -2039,35 +2227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(mode_line(run), flush=True)
         for stage_id in reconcile_state(run):
             print(f"{stage_id}: interrupted earlier; will resume from its own boundary")
-        for stage_id in selected:
-            stage = run.stage(stage_id)
-            record = run.state["stages"].get(stage_id)
-            if record and record["status"] == "ok" and args.only is None:
-                verify_kept(run, stage, record)
-                print(f"{stage_id}: ok (kept)")
-                continue
-            resuming = bool(
-                record
-                and record["status"] in ("failed", "interrupted")
-                and "resume" in stage
-                and not args.replace
-            )
-            print(
-                f"{stage_id}: {'resume' if resuming else 'start'} {_now()}", flush=True
-            )
-            result = execute_stage(
-                run,
-                stage,
-                replace=args.replace or (bool(record) and not resuming),
-                resuming=resuming,
-            )
-            print(f"{stage_id}: {result['status']} in {result['seconds']}s")
-            if result["status"] != "ok":
-                for failure in result["failures"]:
-                    print(f"  {failure}", file=sys.stderr)
-                print(f"  log: {result['log']}", file=sys.stderr)
-                return 1
-        return 0
+        return run_selected(run, selected, only=args.only, replace=args.replace)
     except KeyboardInterrupt:
         print(
             "interrupted: the stage's process tree was stopped; rerun to resume",

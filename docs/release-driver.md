@@ -159,7 +159,7 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 | preparation | `prep-spec` (`release_prepare_inputs.py prep-spec`: the attended preparation spec; pins the calendar authority) |
 | attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
 | tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
-| replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
+| replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lane-replica` + `lane-real` (one parallel group; real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
 | release | `pack-probe` or `commit` then `pack-evidence` (explicit) |
 
 `preflight`, `plan`, `dry-run`, `findings-panel` and `findings-targets` remain as explicit
@@ -533,3 +533,13 @@ direct hash confirmation at commit covers it. Without the seed keys there is no 
 ## Commit-path canary
 
 `tools/release_canary.py run --root <root>... [--bound-file <file>...] [--baseline <json>] [--out <receipt>]` exercises the real (synced) volume before the commit, which no scratch rehearsal does: bound files are not cloud placeholders (attributes only), a pointer-sized create/write/fsync/atomic-replace/lock/rename/delete cycle runs in a `.canary-<pid>-<rand>` directory beside each root (always removed), timings stay within 10 x the recorded baseline (2 s floor), and an environment fingerprint (Windows build, OneDrive client, cloud-files driver, volume type, interpreter and package hashes, git version) is recorded. `release_canary.py diff A B` shows a fingerprint change between two releases. Exit 0 PASS, 1 FAIL, 3 usage. Handle listing is skipped unless a lister is injected (`SKIPPED_NOT_AVAILABLE`, a failure only with `--require-handles`). It writes nothing inside a root.
+
+## Parallel groups (the replica ceremony beside the real lane)
+
+Consecutive stages that name the same `parallel_group` run at the same time, as threads of one driver process. Every member
+passes its refusals and moves leftovers aside before any member creates an output (a refusal of one starts none); the state file
+is written under a lock; a failed member fails the run while the others finish and stay recorded. `lane-real` and `lane-replica`
+are one group: when the real lane finishes, the driver prints the release id (`announce_release`) while the ceremony is still
+running, so the owner can read and confirm; `commit` requires both stages and stays gated on the ceremony receipt, so nothing is
+given up. The replica lane is the ceremony command in a full ceremony (`release_replica.py ceremony`); the real lane is
+`release_replica.py real-lane`. `release_replica.py lanes` (both in one process) remains for scripts.

@@ -389,3 +389,16 @@ def test_copy_without_a_committed_release_has_no_companions_to_carry(
     )
     rr.copy_replica(spec, ws, tmp_path / "replica")
     assert not (tmp_path / "replica" / "first" / "index.html").exists()
+
+
+def test_real_lane_command_runs_lane_a_alone_with_the_basis_inputs() -> None:
+    # the driver runs it beside `ceremony` in a parallel group: it needs no replica argument
+    argv = [
+        "real-lane", "--real-spec", "r", "--out-dir", "o", "--real-panel-dir", "q",
+        "--expected", "e", "--cutoff", "2026-09-17", "--crosswalk", "c",
+        *[v for a, f in BASIS.items() for v in (f, f"{a}.json")],
+    ]  # fmt: skip
+    parsed = rr._parser().parse_args(argv)
+    assert parsed.command == "real-lane" and not hasattr(parsed, "replica_spec")
+    for attr in BASIS:
+        assert getattr(parsed, attr) == Path(f"{attr}.json")
