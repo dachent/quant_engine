@@ -436,17 +436,202 @@ def test_chain_reports_wall_failure_and_unreadable_capture_without_admitting(tmp
 
 def test_contract_lists_the_recorders_honestly():
     s = cp.load_sources(CONTRACT, repo_root=ROOT)
-    assert (
-        s["john_hancock_nav"].stage_mode
-        == s["composer_balance"].stage_mode
-        == "EXISTING_RECORDER"
-    )
+    for sid in ("john_hancock_nav", "composer_balance", "schwab_daily_cash"):
+        assert (
+            s[sid].stage_mode == "EXISTING_RECORDER"
+            and s[sid].stage_tool == "tools/capture_stages/recorders.py"
+            or sid == "john_hancock_nav"
+            or sid == "composer_balance"
+        )
     assert "bcomplete.com" in s["john_hancock_nav"].window_hosts
+    assert s["schwab_daily_cash"].stage_mode == "EXISTING_RECORDER"
     assert (
-        s["schwab_daily_cash"].stage_mode == "NEW_STAGE_REQUIRED"
-        and "pages only" in s["schwab_daily_cash"].capture_stage["recorder"]
-    )
-    assert (
-        "no TQQQ/SHV close" in s["governed_price_tqqq_shv"].capture_stage["blocked_on"]
+        "sprint-data-bridge" in s["governed_price_tqqq_shv"].capture_stage["blocked_on"]
     )
     json.dumps(dict(s["ibkr_flex_history"].capture_stage))  # serialisable
+
+
+# ------------------------------------------------------------------ Schwab statements recorder, price and audit adapters
+
+
+class SchwabFake(FakePage):
+    def __init__(self, dates, **kw):
+        super().__init__({}, **kw)
+        self.dates, self.ranges, self.downloads = dates, [], []
+
+    def inner_text(self, _sel):
+        rows = "".join(
+            f"{m}/{d}/{y}\tStatements\nAccount ending in 123\n"
+            for y, m, d in (x.split("-") for x in self.dates)
+        )
+        return "Account ending in 123 " * 80 + rows
+
+    def evaluate(self, script, arg=None):
+        if script == rec.SET_RANGE_JS:
+            self.ranges.append(arg)
+            return True
+        return super().evaluate(script, arg)
+
+    def download_pdf(self, index, dest):
+        self.downloads.append(index)
+        Path(dest).write_bytes(b"%PDF-1.4 stmt")
+
+
+def test_schwab_statements_recorder_downloads_every_listed_statement(tmp_path):
+    page = SchwabFake(["2026-10-31", "2026-09-30"])
+    texts = {
+        f"statement-123-{d}.pdf": f"text {d}" for d in ("2026-10-31", "2026-09-30")
+    }
+    names = rec.record_schwab_statements(
+        page, ["123"], tmp_path / "run", to_text=to_text_from(texts)
+    )
+    assert (
+        page.ranges == ["Last 5 years"]
+        and page.clicked == ["Search"]
+        and page.downloads == [0, 1]
+    )
+    assert (
+        tmp_path / "run" / "statement-123-2026-09-30.txt"
+    ).read_text() == "text 2026-09-30"
+    assert names[:2] == ["history-123", "statements-123"] and len(names) == 4
+    assert rec.statement_dates("x\n10/31/2026\tStatements\n") == ["2026-10-31"]
+
+
+def test_schwab_statements_recorder_refuses_empty_lists_bad_pdfs_and_walls(tmp_path):
+    with pytest.raises(sb.StageBlocked):  # no statements listed: not the expected page
+        rec.record_schwab_statements(SchwabFake([]), ["123"], tmp_path / "a")
+    bad = SchwabFake(["2026-10-31"])
+    bad.download_pdf = lambda i, dest: Path(dest).write_bytes(b"<html>")
+    with pytest.raises(ValueError, match="PDF_FETCH"):
+        rec.record_schwab_statements(
+            bad, ["123"], tmp_path / "b", to_text=to_text_from({})
+        )
+    with pytest.raises(sb.StageBlocked):  # unknown account in the selector
+        rec.record_schwab_statements(
+            SchwabFake(["2026-10-31"]), ["999"], tmp_path / "c"
+        )
+    assert not any((tmp_path / n).exists() for n in "abc")
+
+
+def test_schwab_adapter_derives_statement_cash_from_the_capture(tmp_path):
+    from tools.capture_stages import schwab_cash as sc
+
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "history-123.txt").write_text("header\n", encoding="utf-8")
+    detail = "Total Cash and Cash Investments        $20.00     $100.00     $10.00\n"
+    (d / "statement-123-2026-10-31.txt").write_text(detail, encoding="utf-8")
+    (d / "statement-123-2020-01-31.txt").write_text(
+        "unparseable", encoding="utf-8"
+    )  # predates the walk: out of scope
+    ledger = [
+        {
+            "kind": "Journal",
+            "event_date": "2026-10-01",
+            "settle_date": "2026-10-01",
+            "amount": 100.0,
+        }
+    ]
+    nav = {"2026-10-01": 100.0, "2026-10-31": 100.0}
+    adapter = ad.schwab_cash_adapter(
+        suffix="123",
+        nav_by_date=nav,
+        ledger_transactions=ledger,
+        anchor_date="2026-10-31",
+        anchor_cash=100.0,
+        ledger_end="2026-10-31",
+    )
+    as_of, checks = adapter(d, {})
+    assert (
+        as_of == "2026-10-31"
+        and checks["statement_cash"]().ok
+        and checks["cash_walk"]().ok
+    )
+    (d / "statement-123-2026-10-31.txt").write_text("unparseable", encoding="utf-8")
+    with pytest.raises(ValueError, match="STATEMENT_UNPARSED"):
+        adapter(d, {})[1]["statement_cash"]()
+    assert sc.parse_statement_cash(detail) == 100.0
+
+
+def test_governed_price_adapter_coverage_and_two_pull_stability(tmp_path):
+    d = tmp_path / "p"
+    d.mkdir()
+    rows = "symbol,date,close\n" + "".join(
+        f"AAA,2026-11-0{i},1.{i}\n" for i in (2, 3, 4, 5, 6)
+    )
+    (d / "prices-a.csv").write_text(rows, encoding="utf-8")
+    (d / "prices-b.csv").write_text(rows, encoding="utf-8")
+    _a, checks = ad.governed_price(
+        d, symbols=["AAA"], start="2026-11-02", end="2026-11-06"
+    )
+    assert checks["coverage"]().ok and checks["stability"]().ok
+    (d / "prices-b.csv").write_text(rows.replace("1.4", "1.9"), encoding="utf-8")
+    assert (
+        ad.governed_price(d, symbols=["AAA"], start="2026-11-02", end="2026-11-06")[1][
+            "stability"
+        ]().code
+        == "PAGE_UNSTABLE"
+    )
+    assert (
+        ad.governed_price(d, symbols=["BBB"], start="2026-11-02", end="2026-11-06")[1][
+            "coverage"
+        ]().code
+        == "COVERAGE_GAP"
+    )
+
+
+def test_audit_adapter_uses_the_real_reader_validator(tmp_path):
+    import portfolio_model_vs_actual as mva
+
+    d = tmp_path / "a"
+    d.mkdir()
+    good = {
+        "artifact": mva.AUDIT_INPUT_ARTIFACT,
+        "schema_version": mva.AUDIT_INPUT_SCHEMA_VERSION,
+        "closure_tolerance_pp": 0.5,
+        "pulls": [],
+        "strategies": [],
+        "as_of": CUT,
+    }
+    (d / "audit-input.json").write_text(json.dumps(good), encoding="utf-8")
+    as_of, checks = ad.model_vs_actual_audit(d)
+    assert as_of == CUT and checks["reader_parses"]().ok
+    (d / "audit-input.json").write_text(
+        json.dumps({**good, "artifact": "something-else"}), encoding="utf-8"
+    )
+    assert ad.model_vs_actual_audit(d)[1]["reader_parses"]().code == "READER_REFUSES"
+    (d / "audit-input.json").write_text("not json", encoding="utf-8")
+    with pytest.raises(ValueError):
+        ad.model_vs_actual_audit(d)
+
+
+def test_derived_sources_lint_and_preflight():
+    s = cp.load_sources(CONTRACT, repo_root=ROOT)
+    audit = s["model_vs_actual_audit_input"]
+    assert (
+        audit.transport == "DERIVED"
+        and audit.admits == ("model_vs_actual",)
+        and audit.login_stop is False
+    )
+    assert (
+        cp.preflight(
+            audit, window_state=lambda _s: "OK", vault_ok=lambda _r: True
+        ).status
+        == "BLOCKED_NOT_WIRED"
+    )
+    wired = cp.Source(
+        **{
+            **audit.__dict__,
+            "capture_stage": {"mode": "EXISTING_RECORDER", "tool": "x"},
+        }
+    )
+    assert (
+        cp.preflight(
+            wired, window_state=lambda _s: "OK", vault_ok=lambda _r: True
+        ).status
+        == "READY"
+    )
+    assert (
+        cp.check_reader_parses(lambda: None).ok
+        and cp.check_reader_parses(lambda: 1 / 0).code == "READER_REFUSES"
+    )

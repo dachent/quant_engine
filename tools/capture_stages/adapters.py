@@ -156,7 +156,7 @@ def schwab_cash(
     anchor_date: str,
     anchor_cash: float,
     ledger_end: str,
-    statement_cash_by_date: Mapping[str, float],
+    statement_cash_by_date: Mapping[str, float] | None = None,
     allowed_negative: float = 0.0,
 ) -> tuple[str, Checks]:
     """Settle-basis cash walk for one account from the ledger's transactions plus the captured post-ledger history rows (trade
@@ -191,9 +191,97 @@ def schwab_cash(
             allowed_negative=allowed_negative,
         ),
         "statement_cash": lambda: cp.check_statement_cash(
-            walk, dict(statement_cash_by_date)
+            walk,
+            dict(statement_cash_by_date)
+            if statement_cash_by_date is not None
+            else statement_cash_from_capture(
+                capture_dir, suffix, first=min(nav_by_date), last=anchor_date
+            ),
         ),
     }
+
+
+def statement_cash_from_capture(
+    capture_dir: Path, suffix: str, *, first: str, last: str
+) -> dict[str, float]:
+    """Month-end statement cash parsed from the captured ``statement-<suffix>-<YYYY-MM-DD>.txt`` files dated inside
+    ``[first, last]`` (older statements predate the walk and are out of scope). A statement that does not parse is an error,
+    never a skipped month."""
+    out: dict[str, float] = {}
+    for p in sorted(Path(capture_dir).glob(f"statement-{suffix}-????-??-??.txt")):
+        day = p.stem[-10:]
+        if not first <= day <= last:
+            continue
+        value = sc.parse_statement_cash(p.read_text(encoding="utf-8", errors="replace"))
+        if value is None:
+            raise ValueError("STATEMENT_UNPARSED")
+        out[day] = value
+    return out
+
+
+def schwab_cash_adapter(
+    **context: Any,
+) -> Callable[[Path, Mapping[str, Any]], tuple[str, Checks]]:
+    """The chain's ``adapter(capture_dir, params)`` for one account, with the ledger-side context (NAV by date, ledger
+    transactions, anchor, ledger end) bound by the caller that holds the provider ledger."""
+    return lambda capture_dir, _params: schwab_cash(capture_dir, **context)
+
+
+def governed_price(
+    capture_dir: Path, *, symbols: Sequence[str], start: str, end: str
+) -> tuple[str, Checks]:
+    """Price capture (recorder owned by the price-pull work): ``prices-a.csv`` and ``prices-b.csv`` are two independent pulls
+    with columns ``symbol,date,close``. Every symbol has a close on every expected weekday of [start, end] (coverage) and the
+    two pulls agree byte for byte after row normalisation (stability)."""
+    import csv
+    import hashlib
+
+    def rows(name: str) -> list[tuple[str, str, str]]:
+        with (Path(capture_dir) / name).open(newline="", encoding="utf-8") as fh:
+            return sorted(
+                (r["symbol"], r["date"], r["close"]) for r in csv.DictReader(fh)
+            )
+
+    a, b = rows("prices-a.csv"), rows("prices-b.csv")
+
+    def coverage() -> cp.CheckResult:
+        bad = 0
+        for sym in symbols:
+            r = cp.check_coverage([d for s_, d, _c in a if s_ == sym], start, end)
+            bad += 0 if r.ok else 1
+        return cp.CheckResult(
+            "coverage", bad == 0, "OK" if bad == 0 else "COVERAGE_GAP", bad
+        )
+
+    def digest(r: list[tuple[str, str, str]]) -> str:
+        return hashlib.sha256(chr(10).join(",".join(x) for x in r).encode()).hexdigest()
+
+    return end, {
+        "coverage": coverage,
+        "stability": lambda: cp.check_stability(digest(a), digest(b)),
+    }
+
+
+def model_vs_actual_audit(
+    capture_dir: Path, *, name: str = "audit-input.json"
+) -> tuple[str, Checks]:
+    """The audit-bridges artifact (built by the work that owns its content) is accepted only if the REAL reader's own validator,
+    ``portfolio_model_vs_actual.parse_audit_input``, accepts the captured bytes: the producer/consumer seam. ``as_of`` is the
+    artifact's own ``as_of`` when it carries one."""
+    import hashlib
+    import json
+
+    raw = (Path(capture_dir) / name).read_bytes()
+
+    def parse() -> object:
+        try:
+            import portfolio_model_vs_actual as mva
+        except ImportError:  # pragma: no cover
+            from tools import portfolio_model_vs_actual as mva
+        return mva.parse_audit_input(raw, hashlib.sha256(raw).hexdigest())
+
+    as_of = str(json.loads(raw.decode("utf-8")).get("as_of", ""))
+    return as_of, {"reader_parses": lambda: cp.check_reader_parses(parse)}
 
 
 def ibkr_flex(

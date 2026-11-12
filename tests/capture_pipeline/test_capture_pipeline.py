@@ -55,7 +55,7 @@ def sources_of(s):
 
 def test_real_contract_loads_with_real_readers_and_tools():
     s = cp.load_sources(CONTRACT, repo_root=ROOT)
-    assert len(s) == 10 and all(x.closure_checks for x in s.values())
+    assert len(s) == 11 and all(x.closure_checks for x in s.values())
     assert s["matrixport_margin"].transport == "CREDENTIAL_MANAGER"
 
 
