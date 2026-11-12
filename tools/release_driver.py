@@ -126,6 +126,11 @@ def path_digest(path: Path) -> str | None:
     return None
 
 
+# public names for the upfront-QC gate (release_preflight): the architecture check forbids reaching for private ones
+read_json = _read_json
+write_json = _write_json
+
+
 class Run:
     """One release run: configuration, derived ids, state and the repository identity."""
 
@@ -485,6 +490,9 @@ def _outputs(run: Run, stage: Mapping[str, Any]) -> list[Path]:
 def _inside(path: Path, root: Path) -> bool:
     resolved, base = path.resolve(), root.resolve()
     return resolved == base or base in resolved.parents
+
+
+inside = _inside
 
 
 def stage_argv(
@@ -1206,6 +1214,9 @@ def _link_like(path: Path) -> bool:
         return getattr(path.lstat(), "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
     except OSError:
         return False
+
+
+link_like = _link_like
 
 
 def _resolved_cycle(run: Run) -> dict[str, Any]:

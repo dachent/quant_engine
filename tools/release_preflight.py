@@ -32,9 +32,7 @@ import shutil
 import sys
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import release_driver as driver  # noqa: E402
+import release_driver as driver
 
 GIB = 1 << 30
 RECEIPT_DIR = "preflight"
@@ -105,14 +103,14 @@ def row_config_paths(run: driver.Run, env: Env) -> None:
     evidence destination is outside the cycle; no configured root is a link."""
 
     driver.check_config_paths(run)
-    if "evidence_dest" in run.values and driver._inside(
+    if "evidence_dest" in run.values and driver.inside(
         Path(run.values["evidence_dest"]), run.cycle
     ):
         raise driver.Refusal(
             f"evidence_dest {run.values['evidence_dest']} lies inside the cycle {run.cycle}"
         )
     for key in ("cycle", "evidence_dest", "coordination_root", "source_workspace"):
-        if key in run.values and driver._link_like(Path(run.values[key])):
+        if key in run.values and driver.link_like(Path(run.values[key])):
             raise driver.Refusal(f"config {key}={run.values[key]} is a link")
 
 
@@ -131,7 +129,7 @@ def row_outside_workspace(run: driver.Run, env: Env) -> None:
             *map(str, run.config.get("artifact_inputs", [])),
             *dict(run.config.get("pinned_files", {})),
         ]
-        if str(Path(item)) not in allowed and driver._inside(Path(item), workspace)
+        if str(Path(item)) not in allowed and driver.inside(Path(item), workspace)
     ]
     if inside:
         raise driver.Refusal(
@@ -310,7 +308,7 @@ def receipt_path(run: driver.Run, gate: str) -> Path:
 
 def write_receipt(run: driver.Run, receipt: Mapping[str, Any]) -> Path:
     path = receipt_path(run, str(receipt["gate"]))
-    driver._write_json(path, dict(receipt))
+    driver.write_json(path, dict(receipt))
     return path
 
 
@@ -322,7 +320,7 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
         raise driver.Refusal(
             f"gate {gate} has no receipt at {path}; run release_preflight.py {gate.lower()} first"
         )
-    receipt = driver._read_json(path)
+    receipt = driver.read_json(path)
     rows = receipt.get("rows")
     if (
         receipt.get("kind") != "release-preflight-g0-v1"
@@ -371,7 +369,7 @@ def retire_release(
     authority = coordination_root / "CURRENT_RELEASE.json"
     if (
         authority.is_file()
-        and driver._read_json(authority).get("release_id") == release_id
+        and driver.read_json(authority).get("release_id") == release_id
     ):
         raise driver.Refusal("the authority release is never retired")
     destination = coordination_root / RETIRED_DIR / release_id
@@ -394,7 +392,7 @@ def retire_release(
         "tree_sha256": digest,
         "retired_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    driver._write_json(archive_dir / f"{release_id}.retirement.json", record)
+    driver.write_json(archive_dir / f"{release_id}.retirement.json", record)
     destination.parent.mkdir(parents=True, exist_ok=True)
     os.replace(source, destination)
     return destination
