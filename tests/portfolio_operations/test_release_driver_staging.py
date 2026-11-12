@@ -385,7 +385,7 @@ def test_the_offline_plan_prints_every_staging_stage_without_reading_the_run(
 def test_a_default_offline_plan_leaves_the_explicit_calendar_stage_out(
     pass26: Path,
 ) -> None:
-    code, printed = _plan(pass26, "--through", "lanes")
+    code, printed = _plan(pass26, "--through", "lane-real")
     assert code == 0 and not any(
         line.startswith("calendar-authority:") for line in printed.splitlines()
     )
@@ -417,7 +417,7 @@ def test_optional_groups_are_omitted_when_the_run_does_not_configure_them(
 def test_the_offline_plan_binds_no_release_inputs_and_shows_where_they_are(
     pass26: Path,
 ) -> None:
-    code, printed = _plan(pass26, "--only", "lanes")
+    code, printed = _plan(pass26, "--only", "lane-real")
     assert code == 0
     assert "/in/release-inputs/acceptance/expected-baseline.json" in printed.replace(
         "\\", "/"
@@ -986,7 +986,7 @@ def test_the_validating_stages_pass_the_basis_inputs_the_attended_run_used() -> 
         "--tag-map": "{release_inputs_tag_map}",
     }
     stages = {s["id"]: s for s in graph["stages"]}
-    for stage_id in ("findings-panel", "ceremony", "lanes"):
+    for stage_id in ("findings-panel", "ceremony", "lane-replica", "lane-real"):
         groups = [
             item
             for item in stages[stage_id]["argv"]

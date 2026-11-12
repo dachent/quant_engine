@@ -94,6 +94,8 @@
         "replica_spec_guard": {"type": "string"},
         "release_inputs": {"$ref": "#/$defs/strings"},
         "only_ceremony": {"enum": ["full", "replica-only"]},
+        "parallel_group": {"type": "string", "minLength": 1},
+        "announce_release": {"type": "boolean"},
         "needs_config": {"$ref": "#/$defs/strings"},
         "needs_attestation": {"type": ["boolean", "string"]},
         "state_snapshot_to": {"type": "string"},
