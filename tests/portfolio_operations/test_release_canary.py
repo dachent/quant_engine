@@ -3,19 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 from pathlib import Path
-import sys
 
 import pytest
 
-_PATH = Path(__file__).resolve().parents[2] / "tools" / "release_canary.py"
-_SPEC = importlib.util.spec_from_file_location("release_canary", _PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-canary_module = importlib.util.module_from_spec(_SPEC)
-sys.modules["release_canary"] = canary_module
-_SPEC.loader.exec_module(canary_module)
+import release_canary as canary_module
 
 FP = {"windows_build": "1.1", "volumes": {}}
 
