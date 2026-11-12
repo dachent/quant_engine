@@ -41,6 +41,7 @@ from acceptance.validate.checks import (  # noqa: E402
     CLASSES,
     Context,
     Finding,
+    owner_view,
     FactsSources,
     StrategyBasisRefusal,
     expected_exclusions,
@@ -174,6 +175,58 @@ def _write_json(path: Path, value: Any) -> None:
     with open(temporary, "wb") as handle:
         handle.write(content.encode("utf-8"))
     os.replace(temporary, path)
+
+
+REGISTER_PATH = _REPOSITORY_ROOT / "acceptance" / "validate" / "unreachable.json"
+
+
+def _register_entries() -> list[dict[str, Any]]:
+    """The one register (#895/#908); absent means nothing is classified."""
+
+    if not REGISTER_PATH.is_file():
+        return []
+    return list(json.loads(REGISTER_PATH.read_bytes()).get("entries") or [])
+
+
+def _history(out: Path) -> list[tuple[str, dict[str, Any]]]:
+    """Retained findings of earlier generations beside this one, oldest first."""
+
+    root = out.parent.parent
+    found: list[tuple[float, str, dict[str, Any]]] = []
+    for path in root.glob("*/findings.json"):
+        if path.resolve() == out.resolve():
+            continue
+        try:
+            found.append(
+                (
+                    path.stat().st_mtime,
+                    path.parent.name[:8],
+                    json.loads(path.read_bytes()),
+                )
+            )
+        except (OSError, ValueError):
+            continue
+    return [(label, doc) for _, label, doc in sorted(found, key=lambda t: t[0])]
+
+
+def write_owner_view(
+    out: Path, document: dict[str, Any], findings: Sequence[Finding]
+) -> None:
+    """Sidecars beside findings.json: owner-view.json/.md/.js (never inside a generation)."""
+
+    view = owner_view.build.build_owner_view(
+        document,
+        messages=[f.message for f in findings],
+        register=_register_entries(),
+        history=_history(out),
+    )
+    _write_json(out.with_name("owner-view.json"), view)
+    for name, text in (
+        ("owner-view.md", owner_view.build.render_markdown(view)),
+        ("owner-view.js", owner_view.build.render_js(view)),
+    ):
+        target = out.with_name(name)
+        target.write_bytes(text.encode("utf-8"))
 
 
 def _ascii(text: str) -> str:
@@ -387,6 +440,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     try:
         _write_json(out, document)
+        write_owner_view(out, document, findings)
         if args.details_out is not None:
             if _inside(args.details_out, generation.gen_dir):
                 raise ContractError("refusing to write details inside the generation")
@@ -412,7 +466,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ],
                 },
             )
-    except (OSError, ContractError) as exc:
+    except (OSError, ContractError, owner_view.build.ReconciliationError) as exc:
         print(_ascii(f"validate_generation: ERROR: {exc}"), file=sys.stderr)
         return EXIT_ERROR
     _print_summary(findings, out, generation_id)
