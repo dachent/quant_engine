@@ -342,7 +342,7 @@
       // N55 (general): `provider_comparison_reason` is the not-ready reason surface for
       // ANY comparison path, not a benchmark-only or N55-only field; render it beside the
       // disposition whenever the report publishes one.
-      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "No accepted exact-date provider/model comparison")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
+      return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "Model live vs My live comparison not published")}</span>${row.provider_comparison_reason ? `<span class="cell-secondary">${safe(row.provider_comparison_reason)}</span>` : ""}`;
     }
     // A5: `provider_annualization.label` already encodes basis/window (and "(<1 year)"
     // when short); render it beside the annualized figure it describes.

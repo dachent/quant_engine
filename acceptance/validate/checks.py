@@ -35,7 +35,7 @@ import re
 from typing import Any, cast
 
 from .. import owner_view as owner_view  # re-exported: the runner uses it
-from . import facts_bindings, payload_rule, shell, sleeve_basis
+from . import facts_bindings, layers, payload_rule, shell, sleeve_basis
 from .generation import (
     APP,
     PAYLOAD_FILES,
@@ -12336,6 +12336,23 @@ def _stale_implementation_findings(
     )
 
 
+def check_layer_labels(ctx: Context) -> Iterator[Finding]:
+    """Sprint p123: every series block carries one layer label; no backtest headline."""
+
+    for file, document in (("report", ctx.report), ("panel", ctx.panel)):
+        for path, block in layers.series_blocks(document):
+            for row_id, problem in layers.block_problems(block):
+                yield _finding(
+                    row_id,
+                    BLOCKER_INVARIANT,
+                    path,
+                    problem,
+                    "one labelled series",
+                    file,
+                    path,
+                )
+
+
 CHECKS: tuple[tuple[str, Check], ...] = (
     ("identity.required_sections", check_required_sections),
     ("identity.generation_id", check_generation_id),
@@ -12360,6 +12377,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("capital.account_identity", check_account_identity),
     ("returns.sleeve_basis", check_sleeve_basis),
     ("returns.sleeve_leverage", check_sleeve_leverage),
+    (layers.CHECK_ID, check_layer_labels),
     ("universe.authority_missing", check_universe_authority),
     ("universe.active_set_consistent", check_active_universe),
     ("universe.hardcoded_count_text", check_hardcoded_count_text),
