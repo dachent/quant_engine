@@ -71,7 +71,7 @@ from quant_engine.portfolio_ledger import (
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
 )
-from quant_engine.portfolio_ledger.hwm_gap_bounds import (
+from quant_engine.portfolio_ledger import (
     assess_gap_bounds_document,
     numerical_from_governed_proof,
     proof_covers_spans,
