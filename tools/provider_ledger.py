@@ -7915,7 +7915,6 @@ def _refresh_strategy_evidence(
             prior_copy = prior_provider
             prior_provider = {}
             accepted_provider_rows = []
-            p123_generation = provider_generations.get("portfolio123")
             for key, layer_rows in (
                 ("provider", model_rows),
                 ("copy_record", copy_rows),
@@ -7924,6 +7923,7 @@ def _refresh_strategy_evidence(
                 if not layer_rows:
                     continue
                 entities = sorted({str(item["entity_id"]) for item in layer_rows})
+                block_provider = str(layer_rows[0]["provider_id"])
                 if len(entities) != 1:
                     raise ProviderLedgerError(
                         f"{key} block mixes entities in {strategy_id}"
@@ -7944,12 +7944,12 @@ def _refresh_strategy_evidence(
                     if key == "provider"
                     else "COPY_RECORD",
                     "generation_as_of_date": (
-                        provider_as_of_dates["portfolio123"].isoformat()
-                        if p123_generation is not None
+                        provider_as_of_dates[block_provider].isoformat()
+                        if provider_generations.get(block_provider) is not None
                         else None
                     ),
                     "generation_id": str(layer_rows[0]["generation_id"]),
-                    "provider_id": "portfolio123",
+                    "provider_id": block_provider,
                     "return_series_sha256": hashlib.sha256(
                         canonical_json_bytes(
                             [
@@ -8287,7 +8287,9 @@ def _portfolio123_provider_returns(
                     "entity_id": str(model_id),
                     "evidence_layer": "MODEL_LIVE",
                     "generation_id": manifest.generation_id,
-                    "provider_id": "portfolio123",
+                    "provider_id": str(
+                        p123["provider"].get("provider_id") or p123.get("provider_id")
+                    ),
                     "return": format(period_return, "f"),
                     "return_basis": "OBSERVED",
                     "return_type": "TOTAL",
