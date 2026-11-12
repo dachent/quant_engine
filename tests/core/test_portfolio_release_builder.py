@@ -2491,7 +2491,7 @@ def test_generation_id_requires_canonical_hash(value: object) -> None:
         (False, None, "UNKNOWN"),
     ),
 )
-@pytest.mark.parametrize("lens_workers", ("1", "4"))
+@pytest.mark.parametrize("lens_workers", ("1", "4", "16"))
 def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6209,9 +6209,19 @@ def test_lens_worker_count_rejects_a_non_positive_setting(
         builder._lens_worker_count(5)
 
 
+def test_lens_worker_count_defaults_to_half_the_cpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #889: the release machine has 32 logical CPUs; the old default (a quarter, cap 8) ran 8
+    monkeypatch.delenv(builder._LENS_WORKERS_ENV, raising=False)
+    for cpus, expected in ((32, 16), (64, 16), (8, 4), (2, 1), (1, 1)):
+        monkeypatch.setattr(builder.os, "cpu_count", lambda cpus=cpus: cpus)
+        assert builder._lens_worker_count(48) == expected, cpus
+
+
 def test_lens_worker_count_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(builder._LENS_WORKERS_ENV, "64")
-    assert builder._lens_worker_count(26) == 8
+    assert builder._lens_worker_count(26) == 16
     assert builder._lens_worker_count(3) == 3
     monkeypatch.setenv(builder._LENS_WORKERS_ENV, "1")
     assert builder._lens_worker_count(26) == 1
