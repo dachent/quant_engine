@@ -153,23 +153,40 @@ def test_the_validator_accepts_exactly_the_values_the_producer_emits_when_eviden
     assert not any(validate_checks.is_available(value) for value in unavailable)
 
 
-def test_unknown_labels_are_never_admitted_and_the_allowlist_equals_the_producers() -> (
-    None
-):
+def test_only_a_version_compatible_comparison_evidences_a_benchmark() -> None:
     """Kill test: prefix matching admitted any DESCRIPTIVE*/EVIDENCED* string."""
 
     import portfolio_attribution
 
-    assert reporter._ADMITTED_BENCHMARK_COMPARISONS == frozenset(  # noqa: SLF001
+    assert reporter._ADMITTED_BENCHMARK_COMPARISONS <= frozenset(  # noqa: SLF001
         portfolio_attribution.AVAILABLE_STATUSES
     )
-    assert (
-        reporter.benchmark_evidence_status_for("EVIDENCED", "DESCRIPTIVE_NO_METRICS")
-        == "UNAVAILABLE_COMPARISON_NOT_ADMITTED"
-    )
-    assert (
-        reporter.benchmark_evidence_status_for(
-            "EVIDENCED_BUT_NOT", "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE"
+    for assignment, comparison in (
+        ("EVIDENCED", "DESCRIPTIVE_NO_METRICS"),
+        ("EVIDENCED", "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED"),
+        ("EVIDENCED_BUT_NOT", "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE"),
+    ):
+        assert reporter.benchmark_evidence_status_for(assignment, comparison) != (
+            "EVIDENCED"
         )
-        == "UNAVAILABLE"
-    )
+
+
+def test_a_row_without_attribution_reads_unavailable_not_absent() -> None:
+    """Gemini finding 1: absent keys silently bypassed the E5/E6 validator rows."""
+
+    source = (ROOT / "tools" / "portfolio_report.py").read_text(encoding="utf-8")
+    assert '"cost_evidence_status": EVIDENCE_STATUS_UNAVAILABLE' in source
+    assert '"benchmark_evidence_status": EVIDENCE_STATUS_UNAVAILABLE' in source
+
+
+def test_a_rejected_lineage_withdraws_the_evidence_statuses() -> None:
+    import portfolio_control_panel as panel
+
+    row = {
+        "strategy_id": "tt-portfolio",
+        "cost_evidence_status": "EVIDENCED",
+        "benchmark_evidence_status": "EVIDENCED",
+    }
+    (out,) = panel._suppress_unmatched_strategy_performance([row])  # noqa: SLF001
+    assert out["cost_evidence_status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+    assert out["benchmark_evidence_status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"

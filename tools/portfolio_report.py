@@ -1733,13 +1733,11 @@ COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 # The evidence statuses of a strategy row, read from the evidence the report holds
 # for the same row (its fees label and its benchmark assignment and comparison),
 # never from a placeholder slot of the version catalog.
-# The comparison statuses the attribution producer emits for an admitted comparison
-# (portfolio_attribution.AVAILABLE_STATUSES); an unknown label is never admitted.
+# The one comparison status that evidences a benchmark: the attribution producer
+# refuses an EVIDENCED assignment unless its comparison is version-compatible
+# (portfolio_attribution.build_catalog); any other label is never admitted.
 _ADMITTED_BENCHMARK_COMPARISONS: Final = frozenset(
-    {
-        "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
-        "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
-    }
+    {"DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE"}
 )
 EVIDENCE_STATUS_EVIDENCED: Final = "EVIDENCED"
 EVIDENCE_STATUS_RATE_ONLY: Final = "EVIDENCED_DOCUMENTED_RATE_NOT_DOLLAR"
@@ -7856,6 +7854,12 @@ def _strategies(
             if version
             else {}
         )
+        # The slots are placeholders, never the source of the evidence statuses (they are
+        # derived from the row's own evidence in _merge_attribution); a malformed slot
+        # is still refused, and a row with no attribution merged reads UNAVAILABLE.
+        for slot in ("costs", "benchmark"):
+            if version:
+                _object(version.get(slot), f"strategy version {slot}")
         source_route = (
             _object(version.get("source_route"), "strategy version source route")
             if version
@@ -8212,6 +8216,8 @@ def _strategies(
                 "live_boundary_observed_start": live_boundary.get("observed_start"),
                 "live_boundary_observed_end": live_boundary.get("observed_end"),
                 **live_boundary_basis,
+                "cost_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
+                "benchmark_evidence_status": EVIDENCE_STATUS_UNAVAILABLE,
                 "source_route_status": source_route.get("status", "UNAVAILABLE"),
                 "source_route_ids": source_route.get("source_ids", []),
                 "strategy_evidence_layers": layer_inventory,
