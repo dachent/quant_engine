@@ -2980,7 +2980,12 @@ _PREDECESSOR_RETURNS: Final = "accepted-predecessor-returns"
 def _refuse_scratch_locator(path: Path) -> None:
     """A release input is never read from scratch: a cleanup breaks the release."""
 
-    if any(part.lower() == "scratch" for part in path.parts):
+    # the locator as written and where it really points (a junction can hide scratch)
+    try:
+        real = path.resolve().parts
+    except OSError:
+        real = ()
+    if any(part.lower() == "scratch" for part in (*path.parts, *real)):
         raise StrategyHistoryError(
             f"a release input must be read from a durable location, not scratch: {path}"
         )

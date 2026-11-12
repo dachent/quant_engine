@@ -19,12 +19,28 @@ def test_every_workflow_uv_version_satisfies_the_required_version() -> None:
     allowed = SpecifierSet(pin)
     found = 0
     for workflow in sorted((_ROOT / ".github" / "workflows").glob("*.yml")):
-        text = workflow.read_text(encoding="utf-8")
-        for match in re.finditer(
-            r"setup-uv[^\n]*\n(?:[^\n]*\n){0,4}?\s+version:\s*\"([^\"]+)\"", text
-        ):
-            found += 1
-            assert Version(match.group(1)) in allowed, (workflow.name, match.group(1))
+        lines = workflow.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if "setup-uv" not in line or "uses:" not in line:
+                continue
+            # the step's own `with:` block: lines indented deeper than the `uses:` key
+            indent = len(line) - len(line.lstrip())
+            step = []
+            for later in lines[index + 1 :]:
+                if later.strip() and len(later) - len(later.lstrip()) < indent:
+                    break
+                if later.strip().startswith("- "):
+                    break
+                step.append(later)
+            versions = [
+                match.group(1)
+                for text in step
+                if (match := re.match(r"\s*version:\s*[\"']?([0-9][^\"'\s#]*)", text))
+            ]
+            assert versions, f"{workflow.name} installs uv without a pinned version"
+            for version in versions:
+                found += 1
+                assert Version(version) in allowed, (workflow.name, version)
     assert found, "no workflow pins uv"
 
 

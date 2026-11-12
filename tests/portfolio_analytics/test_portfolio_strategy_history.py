@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -1324,3 +1325,30 @@ def test_a_qsi_source_under_scratch_is_refused_at_write_and_at_read(
     sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
     with pytest.raises(history.StrategyHistoryError, match="not scratch"):
         history.load_qsi_sources_sidecar(sidecar_path, manifest["bundle_id"])
+
+
+def test_a_junction_into_scratch_is_refused_even_though_its_path_looks_durable(
+    tmp_path: Path,
+) -> None:
+    """Review of #907: the scratch check follows the locator to where it points."""
+
+    import os
+
+    real = tmp_path / "scratch" / "inputs"
+    real.mkdir(parents=True)
+    link = tmp_path / "durable-inputs"
+    try:
+        os.symlink(real, link, target_is_directory=True)
+    except OSError:
+        if os.name != "nt":
+            pytest.skip("cannot create a directory link here")
+        # a junction needs no privilege on Windows
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(real)],
+            capture_output=True,
+            check=False,
+        )
+        if made.returncode != 0:
+            pytest.skip("cannot create a junction here")
+    with pytest.raises(history.StrategyHistoryError, match="not scratch"):
+        history._refuse_scratch_locator(link / "archive.zip")
