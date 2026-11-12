@@ -159,7 +159,7 @@ exit code, log path, output digests and, when the stage writes them, `work_count
 | preparation | `prep-spec` (`release_prepare_inputs.py prep-spec`: the attended preparation spec; pins the calendar authority) |
 | attended | `attended` (QA hold), `qa-browser`, `qa-interaction`, `qa-native`, `resume` |
 | tail | `recipe-probe`, `registries`, `recipe`, `pipeline-spec`, `semantic`, `financial-artifacts`, `provider-generations`, `production-spec` |
-| replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lanes` (real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
+| replica ceremony | `replica-copy`, `replica-provider-generations`, `replica-spec`, `lane-replica` + `lane-real` (one parallel group; real lane: preflight, plan, dry-run, findings; replica lane: preflight, dry-run, findings, commit, post-release verify, rehearsal, clean-room restore) |
 | release | `pack-probe` or `commit` then `pack-evidence` (explicit) |
 
 `preflight`, `plan`, `dry-run`, `findings-panel` and `findings-targets` remain as explicit
@@ -529,3 +529,13 @@ previous pass's configuration is never carried (it is dropped and re-derived), a
 The operator records the pin the command prints (`calendar_authority_sha256`) in the pass evidence, where the release owner's
 direct hash confirmation at commit covers it. Without the seed keys there is no pin, and the `calendar-seed` stage refuses (it needs `calendar_authority_sha256`);
 `config --require-calendar` still writes the pin from an existing authority file for the later `calendar-authority` attempts.
+
+## Parallel groups (the replica ceremony beside the real lane)
+
+Consecutive stages that name the same `parallel_group` run at the same time, as threads of one driver process. Every member
+passes its refusals and moves leftovers aside before any member creates an output (a refusal of one starts none); the state file
+is written under a lock; a failed member fails the run while the others finish and stay recorded. `lane-real` and `lane-replica`
+are one group: when the real lane finishes, the driver prints the release id (`announce_release`) while the ceremony is still
+running, so the owner can read and confirm; `commit` requires both stages and stays gated on the ceremony receipt, so nothing is
+given up. The replica lane is the ceremony command in a full ceremony (`release_replica.py ceremony`); the real lane is
+`release_replica.py real-lane`. `release_replica.py lanes` (both in one process) remains for scripts.
