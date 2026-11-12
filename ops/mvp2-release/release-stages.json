@@ -2188,6 +2188,8 @@
         "{post_commit}/logs",
         "--out",
         "{post_commit}/post-commit-verify.json",
+        "--published-panel-dir",
+        "{panel_root}/generations/{panel_gid}",
         "--pre-findings",
         "{panel_root}/validation/{panel_gid}/findings.json",
         "--post-findings",
