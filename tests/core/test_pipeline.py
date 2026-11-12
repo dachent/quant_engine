@@ -1769,3 +1769,47 @@ def test_spec_code_identity_scheme_is_versioned_and_legacy_bytes_unchanged(
         _parse({**value, "code_identity_scheme": "git-commit-v1"})
     with pytest.raises(PipelineValidationError):
         _parse({**value, "code_identity_scheme": "git-tree-v3"})
+
+
+def test_financial_outcomes_boundary_reuses_a_receipt_and_still_counts_the_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#883/#885: the second boundary re-hashes the read-set instead of re-running."""
+
+    from quant_engine.core import verification_receipt
+
+    verification_receipt.clear_memory_receipts()
+    raw, _, _, _ = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    watched = tmp_path / "watched.json"
+    watched.write_text('{"v": 1}', encoding="utf-8")
+    live = {"n": 0}
+
+    def fake_live(_spec: object, caller: str) -> dict[str, object]:
+        live["n"] += 1
+        value = json.loads(watched.read_text(encoding="utf-8"))["v"]
+        pipeline_module._with_financial_outcomes_module(
+            lambda module: module._write_verification_ledger(
+                spec, caller, {k: 0 for k in module._WORK_COUNTER_KEYS}, []
+            )
+        )
+        return {"status": "PASS", "v": value}
+
+    monkeypatch.setattr(pipeline_module, "_verify_financial_outcomes_live", fake_live)
+    first = pipeline_module._verify_financial_outcomes(spec, "pipeline.one")
+    second = pipeline_module._verify_financial_outcomes(spec, "pipeline.two")
+    assert first == second == {"status": "PASS", "v": 1}
+    assert live["n"] == 1
+    assert _verification_callers(spec.state_root) == ["pipeline.one", "pipeline.two"]
+    reused = [
+        json.loads(p.read_bytes())
+        for p in (spec.state_root / "financial-verification-ledger").glob("*.json")
+        if json.loads(p.read_bytes())["caller"] == "pipeline.two"
+    ]
+    assert len(reused[0]["receipt_reused_sha256"]) == 64
+    # kill test: a changed input is never answered from the receipt
+    watched.write_text('{"v": 2}', encoding="utf-8")
+    third = pipeline_module._verify_financial_outcomes(spec, "pipeline.three")
+    assert third == {"status": "PASS", "v": 2}
+    assert live["n"] == 2
+    verification_receipt.clear_memory_receipts()

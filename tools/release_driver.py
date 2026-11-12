@@ -60,6 +60,7 @@ from quant_engine.core import (
 )
 
 from quant_engine.core import InterpreterRefusal, require_interpreter
+from quant_engine.core import STAGE_TIMING_LOG_ENV, summarize_stage_timing
 import release_cycle_manifest
 
 GRAPH_DEFAULT = (
@@ -146,6 +147,11 @@ def path_digest(path: Path) -> str | None:
     return None
 
 
+# public names for the upfront-QC gate (release_preflight): the architecture check forbids reaching for private ones
+read_json = _read_json
+write_json = _write_json
+
+
 class Run:
     """One release run: configuration, derived ids, state and the repository identity."""
 
@@ -213,6 +219,7 @@ class Run:
         # stages of one parallel group run in threads of this process: the state file is shared
         self.lock = threading.RLock()
         self.parallel_live: set[str] = set()
+        self.git_retries: list[str] = []
         # roots a replica-only run must never write into
         self.real_roots = [
             Path(str(item))
@@ -450,12 +457,26 @@ class Run:
 
     # -- repository identity -----------------------------------------------------------
     def _git(self, *args: str) -> str:
-        done = subprocess.run(
-            ["git", *args], cwd=self.repo, capture_output=True, text=True, check=False
-        )
-        if done.returncode != 0:
-            raise Refusal(f"git {' '.join(args)} failed: {done.stderr.strip()}")
-        return done.stdout.strip()
+        # an identity read that fails with no message is a transient (R3 refusal 20: another process
+        # scanning the tree): read it once more and record that it happened
+        for attempt in (1, 2):
+            done = subprocess.run(
+                ["git", *args],
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if done.returncode == 0:
+                return done.stdout.strip()
+            if (
+                done.stderr.strip()
+                or attempt == 2
+                or args[0] not in ("rev-parse", "status")
+            ):
+                break
+            self.git_retries.append(" ".join(args))
+        raise Refusal(f"git {' '.join(args)} failed: {done.stderr.strip()}")
 
     @property
     def scheme(self) -> str:
@@ -503,6 +524,9 @@ def _outputs(run: Run, stage: Mapping[str, Any]) -> list[Path]:
 def _inside(path: Path, root: Path) -> bool:
     resolved, base = path.resolve(), root.resolve()
     return resolved == base or base in resolved.parents
+
+
+inside = _inside
 
 
 def stage_argv(
@@ -1024,6 +1048,21 @@ def check_needs_config(run: Run, stage: Mapping[str, Any]) -> None:
         )
 
 
+def check_gates(run: Run, stage: Mapping[str, Any]) -> None:
+    """The stage's upfront-QC gates: ``needs_gate`` receipts (PASS, same config and code identity) and ``recheck``
+    rows run live now (pointers move between the receipt and the stage, R3 refusal 15)."""
+
+    needs, recheck = stage.get("needs_gate", []), stage.get("recheck", [])
+    if not (needs or recheck) or run.offline:
+        return
+    import release_preflight
+
+    for gate in needs:
+        release_preflight.verify_receipt(run, gate)
+    if recheck:
+        release_preflight.recheck(run, recheck)
+
+
 def check_ready(
     run: Run,
     stage: Mapping[str, Any],
@@ -1038,6 +1077,7 @@ def check_ready(
     run.require_frozen_repo()
     check_config_paths(run)
     check_no_live_stage(run)
+    check_gates(run, stage)
     if "argv" in stage:
         check_script_in_repo(run, stage, stage_argv(run, stage))
     check_probe_guard(run, stage)
@@ -1208,6 +1248,9 @@ def _link_like(path: Path) -> bool:
         return getattr(path.lstat(), "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
     except OSError:
         return False
+
+
+link_like = _link_like
 
 
 def _resolved_cycle(run: Run) -> dict[str, Any]:
@@ -1683,6 +1726,7 @@ def _execute_stage(
     attempt = len(list(log_dir.glob(f"{stage['id']}.*.log"))) + 1
     log_path = log_dir / f"{stage['id']}.{attempt}.log"
     started = time.monotonic()
+    started_epoch = time.time()
     started_at = _now()
     record: dict[str, Any] = {
         "status": "running",
@@ -1720,6 +1764,12 @@ def _execute_stage(
             **os.environ,
             **{k: run.expand(v) for k, v in stage.get("env", {}).items()},
         }
+        # Every stage and every child it starts appends to one timing log (#882).
+        timing_dir = run.cycle / "stage-timing"
+        timing_dir.mkdir(parents=True, exist_ok=True)
+        timing_log = timing_dir / f"{stage['id']}.{attempt}.jsonl"
+        env.setdefault(STAGE_TIMING_LOG_ENV, str(timing_log))
+        record["timing_log"] = env[STAGE_TIMING_LOG_ENV]
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:
@@ -1750,14 +1800,28 @@ def _execute_stage(
     with run.lock:
         _finish_record(run, stage, record, failures, elapsed, rc, previous, outputs)
     counters = _counters(run, stage, log_path, *([stdout_to] if stdout_to else []))
-    if counters is not None:
+    timing_summary = None
+    if "timing_log" in record:
+        timing_summary = summarize_stage_timing(
+            record["timing_log"], started_epoch, time.time()
+        )
+    if counters is not None or timing_summary is not None:
         with run.lock:
-            record["work_counters"] = counters
+            if counters is not None:
+                record["work_counters"] = counters
+            if timing_summary is not None:
+                record["timing_summary"] = timing_summary
             run.save()
     _timing(
         run,
         f"{stage['id']} {record['status']} rc={rc} seconds={elapsed}"
-        + (f" counters={json.dumps(counters, sort_keys=True)}" if counters else ""),
+        + (f" counters={json.dumps(counters, sort_keys=True)}" if counters else "")
+        + (
+            f" verifier_calls={json.dumps(timing_summary['verifier_calls'], sort_keys=True)}"
+            f" max_silent_seconds={timing_summary['max_silent_seconds']}"
+            if timing_summary
+            else ""
+        ),
     )
     return record
 

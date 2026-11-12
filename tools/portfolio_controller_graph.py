@@ -112,6 +112,12 @@ _PATH_STAGES = {
     # Observational stage timings written to stderr and a log file; nothing here is hashed
     # into any delivery artifact, so it affects no stage.
     "packages/core/src/quant_engine/core/stage_timing.py": [],
+    # The one strict decoder for authority bytes (duplicate members, nonfinite values): it can
+    # accept or refuse any stage's inputs, so it carries every stage's impact.
+    "packages/core/src/quant_engine/core/strict_json.py": list(_STAGE_ORDER),
+    # The hash-bound receipt that decides whether a verifier runs again: it can accept or refuse
+    # any stage's inputs, so it carries every stage's impact.
+    "packages/core/src/quant_engine/core/verification_receipt.py": list(_STAGE_ORDER),
     "packages/core/src/quant_engine/core/parallel_hash.py": [],
     # The regular NYSE closures: the implementation builders hold a model's expected end to its last
     # trading day, so it can refuse the reconciliation and attribution that the report and panel read.
@@ -194,6 +200,8 @@ _PATH_STAGES = {
     "tools/check_fact_admission.py": [],
     "tools/verify_release_restore.py": [],
     "tools/release_driver.py": [],
+    # #884 G0 upfront-QC gate: reads a run config and release roots, writes only its own receipt
+    "tools/release_preflight.py": [],
     "tools/release_fresh_world.py": [],
     "tools/release_cycle_manifest.py": [],
     "tools/release_cycle_seeds.py": [],
@@ -366,6 +374,8 @@ _PATH_STAGES = {
     "tools/check_release_closure.py": [],
     # CI job-summary writer (#910): reads a junit file, writes markdown; no stage impact.
     "tools/ci_summary.py": [],
+    # Regression-corpus release gate (#911): reads a registry and test files only.
+    "tools/check_regression_corpus.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/capture_fidelity_intake.py": [],
