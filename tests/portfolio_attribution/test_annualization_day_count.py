@@ -152,3 +152,38 @@ def test_the_lower_bound_still_refuses_weekly_dates_declared_daily() -> None:
         _metrics(account, reference, 252)
 
     assert "minimum_observations" in refusal.value.detail
+
+
+@pytest.mark.parametrize("declared", [52, 12])
+def test_a_short_window_does_not_exempt_a_coarse_declaration(declared: int) -> None:
+    """Review finding: 28 daily observations in 27 days declared weekly or monthly."""
+
+    days = _calendar(date(2026, 1, 1), 28)
+    account = _series(days, "0.001")
+    reference = {day: value / 2 for day, value in _series(days, "0.001").items()}
+    with pytest.raises(attribution.AnnualizationFrequencyError):
+        _metrics(account, reference, declared)
+
+
+def test_the_refusal_sentence_reads_once_for_each_direction() -> None:
+    days = [date(2026, 1, 2) + timedelta(days=7 * index) for index in range(27)]
+    weekly = attribution.AnnualizationFrequencyError(
+        periods_per_year=252,
+        observations=27,
+        observed_start=days[0].isoformat(),
+        observed_end=days[-1].isoformat(),
+        minimum_observations=101,
+    )
+    row = attribution._frequency_refused_comparison({}, weekly)
+    assert "that 252 that" not in row["disposition"]
+    assert row["disposition"].endswith("are fewer than the 101 that frequency implies.")
+    dense = attribution.AnnualizationFrequencyError(
+        periods_per_year=12,
+        observations=200,
+        observed_start="2026-01-01",
+        observed_end="2026-07-19",
+        maximum_observations=8,
+    )
+    assert attribution._frequency_refused_comparison({}, dense)[
+        "disposition"
+    ].endswith("are more than the 8 that frequency implies.")

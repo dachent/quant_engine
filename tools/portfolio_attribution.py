@@ -194,7 +194,11 @@ def _check_annualization_frequency(
                 required.to_integral_value(rounding="ROUND_CEILING")
             ),
         )
-    if not upper or span_days < _MIN_DERIVATION_SPAN_DAYS:
+    if not upper:
+        return
+    if periods_per_year >= DAILY_PERIODS_PER_YEAR and span_days < _MIN_DERIVATION_SPAN_DAYS:
+        # a daily declaration is not judged on under four weeks of dates; a coarse one
+        # (weekly, monthly) is, at any length
         return
     # Too MANY observations for the declared frequency (daily dates declared weekly)
     # is as wrong as too few.
@@ -875,8 +879,14 @@ def _frequency_refused_comparison(
         "disposition": (
             "Annualized figures are unavailable: the comparison declares "
             f"{refusal.detail['periods_per_year']} periods a year but its "
-            f"{refusal.sentence.removesuffix(' periods a year implies')} "
-            "that frequency implies."
+            f"{refusal.detail['observations']} common observations over "
+            f"{refusal.detail['observed_start']}..{refusal.detail['observed_end']} "
+            + (
+                f"are fewer than the {refusal.detail['minimum_observations']}"
+                if "minimum_observations" in refusal.detail
+                else f"are more than the {refusal.detail['maximum_observations']}"
+            )
+            + " that frequency implies."
         ),
         "legacy_baseline_delta": None,
         "legacy_baseline_disposition": "NOT_APPLICABLE",
