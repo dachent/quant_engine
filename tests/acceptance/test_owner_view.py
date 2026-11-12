@@ -584,3 +584,12 @@ def test_derived_check_id_and_finding_entity_scope() -> None:
         ov.UNCLASSIFIED,
         ov.UNCLASSIFIED,
     ]
+
+
+def test_same_entity_free_sentence_groups_many_entities_into_one_row() -> None:
+    f = finding("c.one", observed={"unavailable": ["a", "b", "c"]}, defects=("E1",))
+    reg = [entry(ov.REAL_DATA_GAP, block={"what": "Gap for {entity}."})]
+    view = ov.build_owner_view(doc(f), register=reg, today=TODAY)
+    md = ov.render_markdown(view)
+    assert len(view["items"]) == 3 and md.count("Gap for each entity under Where.") == 1
+    assert "Where: a, b, c" in md

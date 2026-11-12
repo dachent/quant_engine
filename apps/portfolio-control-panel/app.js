@@ -4006,7 +4006,7 @@
     const groups = new Map();
     for (const item of view.items) {
       // same grouping key as the markdown page: rows that differ in any shown field stay apart
-      const key = JSON.stringify([item.class, item.what, item.fix, item.number_affected, item.who,
+      const key = JSON.stringify([item.class, item.what_all, item.fix, item.number_affected, item.who,
         item.how_long, item.overdue, item.owner_record ?? null, item.since ?? null,
         item.decision ?? null]);
       if (!groups.has(key)) groups.set(key, []);
@@ -4017,7 +4017,7 @@
       const box = document.createElement(checker.has(first.class) ? "details" : "div");
       box.className = `owner-item owner-${first.real_or_checker}`;
       const head = document.createElement(checker.has(first.class) ? "summary" : "strong");
-      head.textContent = `${first.word}: ${first.what}`;
+      head.textContent = `${first.word}: ${rows.length === 1 ? first.what : first.what_all}`;
       box.appendChild(head);
       const ref = first.ref || {};
       const lines = [

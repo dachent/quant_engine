@@ -270,6 +270,7 @@ def _item(
             "real_or_checker": "real",
             "what": message
             or f"{finding.get('check_id')} on {entity}: not classified yet.",
+            "what_all": message or f"{finding.get('check_id')}: not classified yet.",
             "where": entity,
             "number_affected": "unknown",
             "decision": None,
@@ -289,6 +290,10 @@ def _item(
         **common,
         "real_or_checker": real_or_checker(klass),
         "what": _fill(block["what"], facts),
+        # the same sentence for every entity of a group: the entities go under Where
+        "what_all": _fill(
+            block["what"], {**facts, "entity": "each entity under Where"}
+        ),
         "where": _fill(str(block.get("where") or entity), facts),
         "number_affected": number,
         "decision": block.get("decision"),
@@ -491,7 +496,7 @@ def _group(items: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
     for item in items:
         key = (
             item["class"],
-            item["what"],
+            item["what_all"],
             item["fix"],
             item["number_affected"],
             item["who"],
@@ -523,7 +528,7 @@ def render_markdown(view: Mapping[str, Any]) -> str:
         for rows in _group(group):
             first = rows[0]
             where = ", ".join(sorted({r["where"] for r in rows}))
-            lines.append(f"- {first['what']}")
+            lines.append(f"- {first['what'] if len(rows) == 1 else first['what_all']}")
             lines.append(f"  - Where: {where}")
             lines.append(f"  - Number affected: {first['number_affected']}")
             lines.append(
