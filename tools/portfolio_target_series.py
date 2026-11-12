@@ -9421,6 +9421,32 @@ def _strategy_history_returns(
                 f"strategy history observation bounds differ: {series_id}"
             )
         grouped[series_id] = accepted
+        declared_live = definition.get("model_live_observations")
+        if declared_live is not None:
+            # The model-live layer is checked against its own declared window, as
+            # the backtest is against observed_start/observed_end: its first row
+            # is on or after the provider launch and strictly after the backtest.
+            live_rows = sorted(
+                (model_live_out or {}).get(series_id, []),
+                key=lambda item: item["date"],
+            )
+            launch = definition.get("provider_launch")
+            if (
+                len(live_rows) != declared_live
+                or (
+                    live_rows
+                    and live_rows[0]["date"] != definition.get("model_live_start")
+                )
+                or (
+                    live_rows
+                    and live_rows[-1]["date"] != definition.get("model_live_end")
+                )
+                or (live_rows and live_rows[0]["date"] <= definition["observed_end"])
+                or (live_rows and launch and live_rows[0]["date"] < str(launch))
+            ):
+                raise TargetSeriesError(
+                    f"strategy history model-live bounds differ: {series_id}"
+                )
 
     proof = {
         "as_of_date": history_as_of.isoformat(),

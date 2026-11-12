@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 import io
 from typing import Any, Final, Mapping, Sequence
 
-from series_label import BACKTEST, SeriesLabel, label_from_dict
+from series_label import BACKTEST, MODEL_LIVE, SeriesLabel, label_from_dict
 
 # Matrixport product NAV (the Robuxio model-live layer) starts here; the backtest
 # layer ends strictly before it.
@@ -188,6 +188,11 @@ def refresh_labels(
     segments = []
     for raw in definition.get("segment_labels", []):
         segment = label_from_dict(raw)
+        if segment.layer == MODEL_LIVE:
+            # The model-live layer rides beside the capped rows and is not capped
+            # by the account boundary; its window is carried as built.
+            segments.append(raw)
+            continue
         last = min(segment.last, dates[-1])
         count = _count(series_rows, segment.first, last)
         if count:

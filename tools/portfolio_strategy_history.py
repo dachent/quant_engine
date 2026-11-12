@@ -1216,6 +1216,12 @@ def _p123_eu_designer_curve(
         raise StrategyHistoryError("EU designer-model live calendar is not ordered")
     if model_live_dates and model_live_dates[0] <= dates[-1]:
         raise StrategyHistoryError("EU designer-model live overlaps the backtest")
+    if model_live_dates and model_live_dates[0] < provider_launch:
+        # Nothing between the backtest's last day and the provider's launch is the
+        # model's live record; a row dated there is neither layer.
+        raise StrategyHistoryError(
+            "EU designer-model live precedes the provider launch"
+        )
     model_live = len(model_live_rows)
     definition: dict[str, object] = {
         "compatibility_basis": "OWNER_LAYER_RULING_DESIGNER_MODEL_IS_PRODUCT_DESIGN_HISTORY",
@@ -1250,6 +1256,40 @@ def _p123_eu_designer_curve(
         ],
         "strategy_version": strategy_version,
     }
+    # One labelled series per layer: the series label is the BACKTEST rows' (what
+    # observed_end and return_observations describe); the MODEL_LIVE rows travel
+    # beside it as a segment label of their own layer, never under the backtest's.
+    entity = "Portfolio123 EU designer-model equity curve"
+    layer_series.attach_label(
+        definition,
+        layer_series.series_label(
+            entity_id=entity,
+            entity_role="DESIGNER_MODEL",
+            first=dates[0],
+            last=dates[-1],
+            observations=len(rows),
+            return_basis="PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_LEVEL_RATIO",
+            cost_basis="NET",
+            currency=str(series.get("currency") or "USD"),
+        ),
+        segments=(
+            [
+                SeriesLabel(
+                    layer="MODEL_LIVE",
+                    entity_id=entity,
+                    entity_role="DESIGNER_MODEL",
+                    first=model_live_dates[0],
+                    last=model_live_dates[-1],
+                    observations=model_live,
+                    currency=str(series.get("currency") or "USD"),
+                    return_basis="PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_LEVEL_RATIO",
+                    cost_basis="NET",
+                )
+            ]
+            if model_live_rows
+            else []
+        ),
+    )
     return [*rows, *model_live_rows], definition
 
 

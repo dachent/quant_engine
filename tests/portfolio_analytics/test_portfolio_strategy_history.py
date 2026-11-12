@@ -1252,6 +1252,73 @@ def test_designer_curve_refuses_model_live_that_overlaps_the_backtest(
         history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
 
 
+def test_designer_curve_refuses_model_live_before_the_provider_launch(
+    tmp_path: Path,
+) -> None:
+    """A row between the backtest's end and the launch belongs to neither layer."""
+
+    generation = _designer_generation(
+        tmp_path,
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-17", "0.03", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+
+    with pytest.raises(history.StrategyHistoryError, match="precedes the provider"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_labels_each_layer_and_the_bundle_keeps_the_live_label(
+    tmp_path: Path,
+) -> None:
+    """The series label is the backtest's; the model-live rows carry their own label."""
+
+    rows = [
+        ("2024-02-15", "0.01", "BACKTEST"),
+        ("2024-02-16", "0.02", "BACKTEST"),
+        ("2024-02-19", "0.03", "PROVIDER_MODEL_LIVE"),
+        ("2025-12-01", "0.04", "PROVIDER_MODEL_LIVE"),
+    ]
+    _rows, definition = history._p123_eu_designer_curve(
+        _designer_generation(tmp_path / "curve", rows), DESIGNER_VERSION
+    )
+    [series_label] = definition["series_labels"]
+    assert series_label["layer"] == "BACKTEST"
+    assert series_label["window"] == {
+        "first": "2024-02-15",
+        "last": "2024-02-16",
+        "observations": 2,
+    }
+    [live_label] = definition["segment_labels"]
+    assert live_label["layer"] == "MODEL_LIVE"
+    assert live_label["window"] == {
+        "first": "2024-02-19",
+        "last": "2025-12-01",
+        "observations": 2,
+    }
+
+    # After the account-live cap the backtest label is refit and the live one stays.
+    inputs = _bundle_inputs(tmp_path)
+    result = history.write_bundle(
+        tmp_path / "bundle",
+        **inputs,
+        p123_eu_designer_model_generation=_designer_generation(
+            tmp_path / "designer", rows
+        ),
+        p123_eu_strategy_version=DESIGNER_VERSION,
+        as_of_date="2026-09-17",
+        live_inceptions={"EU [P123]": "2025-11-21"},
+    )
+    manifest = json.loads(
+        (Path(str(result["destination"])) / "manifest.json").read_text(encoding="utf-8")
+    )
+    eu = next(item for item in manifest["series"] if item["series_id"] == "EU [P123]")
+    assert eu["series_labels"][0]["layer"] == "BACKTEST"
+    assert [item["layer"] for item in eu["segment_labels"]] == ["MODEL_LIVE"]
+
+
 def test_designer_curve_carries_the_currency_and_revision_dates(
     tmp_path: Path,
 ) -> None:
