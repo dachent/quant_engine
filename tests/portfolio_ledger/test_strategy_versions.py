@@ -119,3 +119,18 @@ def test_same_layer_same_version_can_be_concatenated() -> None:
 
     assert comparison.concatenation_allowed is True
     assert comparison.model_vs_actual_allowed is False
+
+
+def test_a_copy_record_never_concatenates_and_is_not_an_actual() -> None:
+    copy = compare_strategy_evidence(
+        _evidence(EvidenceLayer.COPY_RECORD), _evidence(EvidenceLayer.COPY_RECORD)
+    )
+    assert copy.concatenation_allowed is False
+    against_backtest = compare_strategy_evidence(
+        _evidence(EvidenceLayer.BACKTEST), _evidence(EvidenceLayer.COPY_RECORD)
+    )
+    assert against_backtest.model_vs_actual_allowed is False
+    model = compare_strategy_evidence(
+        _evidence(EvidenceLayer.MODEL_LIVE), _evidence(EvidenceLayer.ACCOUNT_LIVE)
+    )
+    assert model.model_vs_actual_allowed is True

@@ -21,7 +21,7 @@ import math
 from pathlib import Path
 import re
 import statistics
-from typing import Any, Final, Iterable, Mapping, Sequence, cast
+from typing import Any, Collection, Final, Iterable, Mapping, Sequence, cast
 from xml.etree import ElementTree
 
 import pyarrow.parquet as parquet  # type: ignore[import-untyped]
@@ -65,6 +65,11 @@ _TICKER_ENTRY = re.compile(r"(?:^|\s)([^\s|]+):USA\|")
 _P123_HAR_PROVENANCE_FIELDS: Final = frozenset(
     {"_entity_id", "_entity_type", "_source_artifact", "_source_row", "_transport"}
 )
+
+
+# The model in every reconciliation is the model's own record; a COPY_RECORD (the
+# owner's P123 copy, account-side) never reaches a model field.
+MODEL_EXCLUDED_LAYERS: Final = ("COPY_RECORD",)
 
 
 class ImplementationReconciliationError(ValueError):
@@ -605,6 +610,7 @@ def _returns(
     *,
     strategy_id: str,
     evidence_layer: str | None = None,
+    exclude_layers: Collection[str] = (),
     accepted_as_of: date,
 ) -> dict[date, float]:
     result: dict[date, float] = {}
@@ -612,6 +618,8 @@ def _returns(
         if row.get("strategy_id") != strategy_id:
             continue
         if evidence_layer is not None and row.get("evidence_layer") != evidence_layer:
+            continue
+        if row.get("evidence_layer") in exclude_layers:
             continue
         observed = date.fromisoformat(str(row.get("date") or ""))
         if observed > accepted_as_of:
@@ -1632,6 +1640,7 @@ def _ai_reconciliation(
     provider = _returns(
         ledger.get("provider_strategy_returns", []),
         strategy_id="p123-ai-factor",
+        exclude_layers=MODEL_EXCLUDED_LAYERS,
         accepted_as_of=accepted_as_of,
     )
     account = _returns(

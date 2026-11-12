@@ -1466,8 +1466,9 @@ def shared_provider_live_blocks(
 
     owners: dict[bytes, str] = {}
     shared: list[tuple[str, str]] = []
-    for row in rows:
-        block = row.get("provider")
+    for row, block in (
+        (row, row.get(key)) for row in rows for key in ("provider", "copy_record")
+    ):
         if not isinstance(block, Mapping):
             continue
         series_digest = block.get("return_series_sha256")
