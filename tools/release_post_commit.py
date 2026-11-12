@@ -278,7 +278,13 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     if head != commit or not clean:
         raise Refusal("repository is not clean at the harness code commit")
     release_id = check_commit_result(Path(args.commit_result), spec_file)
-    for target in (args.post_pointers, args.out, args.rehearsal_root, args.clean_room):
+    for target in (
+        args.post_pointers,
+        args.out,
+        args.rehearsal_root,
+        args.clean_room,
+        args.post_findings,
+    ):
         if Path(target).exists():
             raise Refusal(
                 f"output exists and outputs are create-only: {Path(target).name}"
@@ -298,6 +304,37 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     py = sys.executable
     spec_arg = str(spec_file)
     steps: list[dict[str, Any]] = []
+    # Ruling F section 6: the validator is re-run on the committed release (explicit
+    # pointer, own --out) and must show zero blockers and the pre-commit row set.
+    validate_argv = _read_object(Path(args.validate_argv), "validator command")["argv"]
+    if not isinstance(validate_argv, list) or not all(
+        isinstance(item, str) for item in validate_argv
+    ):
+        raise Refusal("validator command argv must be a list of strings")
+    coordination = Path(str(spec["coordination_root"]))
+    revalidate = (
+        (
+            "post-commit-validate",
+            [
+                *validate_argv,
+                "--release-pointer",
+                str(coordination / "CURRENT_RELEASE.json"),
+                "--out",
+                str(args.post_findings),
+            ],
+        ),
+        (
+            "post-commit-validation",
+            [
+                py,
+                str(tools / "post_commit_validation.py"),
+                "--pre",
+                str(args.pre_findings),
+                "--post",
+                str(args.post_findings),
+            ],
+        ),
+    )
     plan = (
         (
             "post-release-verify",
@@ -314,6 +351,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
                 str(post_dir),
             ],
         ),
+        *revalidate,
         (
             "recovery-rehearsal",
             [
@@ -365,7 +403,9 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         "cycle_manifest_sha256": cycle["cycle_manifest_sha256"],
         "harness_code_commit": commit,
         "moved_pointers": moved,
+        "post_commit_findings_sha256": _sha(Path(args.post_findings).read_bytes()),
         "post_release_receipt_id": post_receipt_id,
+        "pre_commit_findings_sha256": _sha(Path(args.pre_findings).read_bytes()),
         "predecessor_release_id": cycle["predecessor"]["release_id"],
         "release_id": release_id,
         "spec_sha256": _sha(spec_file.read_bytes()),
@@ -392,6 +432,9 @@ def _parser() -> argparse.ArgumentParser:
         "clean-room",
         "harness-code-commit",
         "post-pointers",
+        "pre-findings",
+        "post-findings",
+        "validate-argv",
         "log-dir",
         "out",
     ):

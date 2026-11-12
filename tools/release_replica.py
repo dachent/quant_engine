@@ -374,6 +374,47 @@ def replica_ceremony(a: argparse.Namespace, runner: Runner = _subprocess_runner)
         flag.unlink(missing_ok=True)
 
 
+def _post_commit_validation_commands(
+    coordination: Path, panel_dir: Path, out: Path, a: argparse.Namespace
+) -> list[list[str]]:
+    """Validate the panel again after the commit and compare with the pre-commit run.
+
+    The pre-commit findings sit at the validator's default location beside the
+    ``generations`` root; the post-commit run writes elsewhere, so the file the commit
+    sink anchored on is never overwritten (Ruling F section 6).
+    """
+
+    pre = panel_dir.parent.parent / "validation" / panel_dir.name / "findings.json"
+    post = out / "post-commit-findings.json"
+    pointer = coordination / "CURRENT_RELEASE.json"
+    return [
+        _py(
+            "validate_generation.py",
+            str(panel_dir),
+            "--expected",
+            str(a.expected),
+            "--cutoff",
+            a.cutoff,
+            "--crosswalk",
+            str(a.crosswalk),
+            *_basis_flags(a),
+            "--release-pointer",
+            str(pointer),
+            "--out",
+            str(post),
+        ),
+        _py(
+            "post_commit_validation.py",
+            "--pre",
+            str(pre),
+            "--post",
+            str(post),
+            "--receipt",
+            str(out / "post-commit-validation-receipt.json"),
+        ),
+    ]
+
+
 def _replica_ceremony(a: argparse.Namespace, runner: Runner) -> int:
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -480,6 +521,15 @@ def _replica_ceremony(a: argparse.Namespace, runner: Runner) -> int:
     receipts = sorted(evidence.glob("*.json"))
     if not receipts:
         raise ReplicaToolError(f"preflight left no receipt in {evidence}")
+    if not go(
+        run_step(
+            "post-commit-validation",
+            _post_commit_validation_commands(spec, Path(a.replica_panel_dir), out, a),
+            out,
+            runner,
+        )
+    ):
+        return finish(commit_result)
     for step in (
         run_step(
             "post-release-verify",

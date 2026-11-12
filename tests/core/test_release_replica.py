@@ -124,6 +124,8 @@ def test_ceremony_runs_every_step_in_order_and_issues_a_valid_receipt(
         "validate_generation.py",
         "validate_release_targets.py",
         "data_pipeline.py",
+        "validate_generation.py",
+        "post_commit_validation.py",
         "portfolio_qc.py",
         "data_recovery_rehearsal.py",
         "verify_release_restore.py",
@@ -191,6 +193,7 @@ def test_the_parser_takes_the_basis_inputs_on_ceremony_and_lanes() -> None:
     [
         "portfolio_qc.py",
         "validate_release_targets.py",
+        "post_commit_validation.py",
         "data_recovery_rehearsal.py",
         "verify_release_restore.py",
     ],
@@ -402,3 +405,39 @@ def test_real_lane_command_runs_lane_a_alone_with_the_basis_inputs() -> None:
     assert parsed.command == "real-lane" and not hasattr(parsed, "replica_spec")
     for attr in BASIS:
         assert getattr(parsed, attr) == Path(f"{attr}.json")
+
+
+def test_post_commit_validation_runs_after_the_commit_with_its_own_out(
+    tmp_path: Path, specs: Any
+) -> None:
+    """#896: the validator is re-run after the commit; it never overwrites the findings
+    the commit sink anchored on and it names the committed release pointer."""
+
+    runner = FakeRunner()
+    assert rr.replica_ceremony(_args(tmp_path), runner) == 0
+    validators = [
+        c for c in runner.calls if Path(c[1]).name == "validate_generation.py"
+    ]
+    assert len(validators) == 2
+    pre, post = validators
+    assert "--out" not in pre and "--release-pointer" not in pre
+    assert post[post.index("--out") + 1].endswith("post-commit-findings.json")
+    assert post[post.index("--release-pointer") + 1].endswith("CURRENT_RELEASE.json")
+    names = [Path(c[1]).name for c in runner.calls]
+    assert names.index("post_commit_validation.py") > names.index(
+        "validate_generation.py", 3
+    )
+
+
+def test_a_receipt_without_the_post_commit_validation_step_is_refused(
+    tmp_path: Path, specs: Any
+) -> None:
+    assert rr.replica_ceremony(_args(tmp_path), FakeRunner()) == 0
+    path = tmp_path / "out" / "replica-receipt.json"
+    receipt = json.loads(path.read_bytes())
+    receipt["steps"] = [
+        s for s in receipt["steps"] if s["name"] != "post-commit-validation"
+    ]
+    path.write_bytes(json.dumps(receipt).encode())
+    with pytest.raises(replica_gate.ReplicaGateError):
+        replica_gate.verify_receipt(path, specs[0])

@@ -60,6 +60,26 @@ print(json.dumps({"profile": "post-release-verify", "receipt_file": "r" * 64 + "
 sys.exit(3 if mode == "qc-fails" else 0)
 """
 
+STUB_VALIDATE_GENERATION = """
+import json, pathlib, sys
+a = sys.argv
+pointer = pathlib.Path(a[a.index("--release-pointer") + 1])
+assert json.loads(pointer.read_text())["state"] == "COMMITTED"
+mode = (pathlib.Path(__file__).parent / "mode.txt").read_text()
+rows = [{"check_id": "x", "entity": "e", "class": "NOT_READY"}]
+if mode == "post-commit-blocker":
+    rows.append({"check_id": "identity.publication_state", "entity": "generation", "class": "BLOCKER_AUTHORITY"})
+pathlib.Path(a[a.index("--out") + 1]).write_text(json.dumps({"generation_id": "g" * 64, "findings": rows}))
+"""
+
+STUB_POST_COMMIT_VALIDATION = """
+import json, pathlib, sys
+a = sys.argv
+pre = json.loads(pathlib.Path(a[a.index("--pre") + 1]).read_text())
+post = json.loads(pathlib.Path(a[a.index("--post") + 1]).read_text())
+sys.exit(0 if post["findings"] == pre["findings"] else 6)
+"""
+
 STUB_REHEARSAL = (
     """
 import pathlib, sys
@@ -94,6 +114,24 @@ def world(tmp_path: Path) -> dict[str, Any]:
     (tools / "data_recovery_rehearsal.py").write_text(STUB_REHEARSAL, encoding="utf-8")
     (tools / "verify_release_restore.py").write_text(STUB_RESTORE, encoding="utf-8")
     (tools / "mode.txt").write_text("ok", encoding="utf-8")
+    (tools / "post_commit_validation.py").write_text(
+        STUB_POST_COMMIT_VALIDATION, encoding="utf-8"
+    )
+    findings = {
+        "generation_id": "g" * 64,
+        "findings": [{"check_id": "x", "entity": "e", "class": "NOT_READY"}],
+    }
+    pre_findings = tmp_path / "validation" / "pre-findings.json"
+    pre_findings.parent.mkdir()
+    pre_findings.write_text(json.dumps(findings), encoding="utf-8")
+    validate_argv = tmp_path / "validate-argv.json"
+    validate_argv.write_text(
+        json.dumps({"argv": [sys.executable, str(tools / "validate_generation.py")]}),
+        encoding="utf-8",
+    )
+    (tools / "validate_generation.py").write_text(
+        STUB_VALIDATE_GENERATION, encoding="utf-8"
+    )
     coordination = tmp_path / "coord"
     (coordination / "releases" / PRED).mkdir(parents=True)
     root = tmp_path / "root-a"
@@ -191,6 +229,9 @@ def world(tmp_path: Path) -> dict[str, Any]:
         "--clean-room", str(tmp_path / "post" / "clean-room"),
         "--harness-code-commit", head,
         "--post-pointers", str(tmp_path / "post" / "post-commit-pointers.json"),
+        "--pre-findings", str(pre_findings),
+        "--post-findings", str(tmp_path / "post" / "post-commit-findings.json"),
+        "--validate-argv", str(validate_argv),
         "--log-dir", str(tmp_path / "post" / "logs"),
         "--out", str(tmp_path / "post" / "post-commit-verify.json"),
         "--repo-root", str(repo),
@@ -232,9 +273,13 @@ def test_a_committed_release_passes_every_step_and_writes_create_only_evidence(
     assert receipt["moved_pointers"] == ["CURRENT_RELEASE", "a"]
     assert [step["step"] for step in receipt["steps"]] == [
         "post-release-verify",
+        "post-commit-validate",
+        "post-commit-validation",
         "recovery-rehearsal",
         "clean-room-restore",
     ]
+    assert len(receipt["pre_commit_findings_sha256"]) == 64
+    assert len(receipt["post_commit_findings_sha256"]) == 64
     assert all(step["rc"] == 0 for step in receipt["steps"])
     assert str(world["tmp"]) not in json.dumps(receipt)
     # the post-commit snapshot is the same document the hand-run snapshot wrote
@@ -255,6 +300,8 @@ def test_a_committed_release_passes_every_step_and_writes_create_only_evidence(
         ("bad-receipt", "does not match"),
         ("rehearsal-fails", "recovery-rehearsal exited 4"),
         ("restore-fails", "clean-room-restore exited 5"),
+        # kill test (#896): a blocker that exists only after the commit is a refusal
+        ("post-commit-blocker", "post-commit-validation exited 6"),
     ],
 )
 def test_a_failing_step_or_a_receipt_that_is_not_for_this_release_is_a_refusal(
