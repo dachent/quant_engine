@@ -217,7 +217,11 @@ def b_closed_epochs_current(payload: Payload) -> None:
 def f_inception_week_mixed(payload: Payload) -> None:
     for line in _mode_lines(payload, "LIVE_PLUS_BACKTEST"):
         if line.get("series_id") == "strategy:A":
-            line["origin"] = [[0, 1, "BACKTEST"], [2, 2, "MIXED"], [3, 9, "ACCOUNT_LIVE"]]
+            line["origin"] = [
+                [0, 1, "BACKTEST"],
+                [2, 2, "MIXED"],
+                [3, 9, "ACCOUNT_LIVE"],
+            ]
 
 
 def p_inception_week_mixed(payload: Payload) -> Result:

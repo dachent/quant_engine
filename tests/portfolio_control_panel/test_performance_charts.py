@@ -56,7 +56,9 @@ def _mode() -> dict[str, Any]:
         ],
     )
     beta = _strategy("Beta", 2, [1.02, 1.04, 1.05, 1.07], [[2, 5, "ACCOUNT_LIVE"]])
-    gamma = _strategy("Gamma", 1, [1.0, 1.01, 1.02, 1.03, 1.04], [[1, 5, "ACCOUNT_LIVE"]])
+    gamma = _strategy(
+        "Gamma", 1, [1.0, 1.01, 1.02, 1.03, 1.04], [[1, 5, "ACCOUNT_LIVE"]]
+    )
     equal = {
         "series_id": "portfolio:equal_weight",
         "display_name": "Equal-weight portfolio",
