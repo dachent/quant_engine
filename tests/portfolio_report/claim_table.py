@@ -373,9 +373,7 @@ def p_leverage_tiles(payload: Payload) -> Result:
     observed = [r for r in rows if r.get("coverage_status") == "OBSERVED_ONLY"]
     derived = [r for r in rows if r.get("coverage_status") == "DERIVED"]
     # reconciled / declared rows (#894) passed their closure check: they are covered
-    covered = [
-        r for r in rows if str(r.get("coverage_status")).startswith("COMPLETE")
-    ]
+    covered = [r for r in rows if str(r.get("coverage_status")).startswith("COMPLETE")]
     unavailable = [
         r
         for r in rows
