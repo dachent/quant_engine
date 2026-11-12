@@ -151,3 +151,4 @@ def test_qa_scripts_tolerate_only_the_missing_owner_view_sidecar() -> None:
     for name in ("browser_qa.mjs", "interaction_qa.mjs"):
         text = (PANEL / name).read_bytes().decode("utf-8")
         assert "owner-view" in text and "[0-9a-f]{64}" in text, name
+        assert "Failed to load resource" in text, name

@@ -34,6 +34,7 @@ NOT_RENDERER_TEXT = {
     r"[1-9][0-9,]* backtest": "built from a count at render time (`${n} backtest ...`); the count has no literal in the source",
     r" · observed basis": "a negative pin: the check asserts this suffix is NOT printed",
     r"\/validation\/[0-9a-f]{64}\/owner-view\.js$": "a URL test on the optional owner-view sidecar request, not page text",
+    r"Failed to load resource": "Chromium console text for a failed request, not page text",
     r"^[A-Za-z][A-Za-z0-9+.-]*:": "a URL-scheme test on a request address, not page text",
     r"(?:Z|[+-]\d{2}:\d{2})$": "a timestamp-format validator on payload values, not page text",
     r"^-?(?:0|[1-9]\d*)(?:\.\d+)?$": "a numeric-format validator on payload values, not page text",
