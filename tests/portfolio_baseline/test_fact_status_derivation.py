@@ -346,3 +346,42 @@ def test_exceptions_follow_the_claim_status() -> None:
     assert {partial[f] for f in ("flows", "transactions", "positions")} == {
         "RETAINED_WITH_EXPLICIT_DISPOSITION"
     }
+
+
+def test_every_investment_account_needs_its_own_declared_row() -> None:
+    """KILL (reviewer finding): an account with no matrix row blocks COMPLETE."""
+
+    declared = {"declared_start": "2025-11-03", "declared_end": "2026-11-06"}
+    matrix = [_row("flows", "account-a", status="DECLARED_COMPLETE", **declared)]
+    claims, _ = baseline._fact_coverage(
+        [
+            {"account_id": "account-a", "role": "INVESTMENT"},
+            {"account_id": "account-b", "role": "INVESTMENT"},
+        ],
+        [],
+        [],
+        [{"provider": "p", "record_id": "f"}],
+        [],
+        [],
+        0,
+        AS_OF,
+        coverage_matrix=matrix,
+    )
+    assert {c["fact_type"]: c["status"] for c in claims}["flows"] == "PARTIAL"
+
+
+def test_a_declared_boundary_must_be_ordered_and_reach_the_cutoff() -> None:
+    short = {"declared_start": "2025-11-03", "declared_end": "2026-01-01"}
+    inverted = {"declared_start": "2026-11-01", "declared_end": "2026-01-01"}
+    for bounds, extra in (
+        (short, {}),
+        (inverted, {}),
+        (
+            {"declared_start": "2025-11-03", "declared_end": "2026-11-06"},
+            {"unavailable_amount_count": 5},
+        ),
+    ):
+        row = _row(
+            "positions", "account-a", status="DECLARED_COMPLETE", **bounds, **extra
+        )
+        assert _claims([row])["positions"]["status"] == "PARTIAL"
