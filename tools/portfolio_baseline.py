@@ -4740,37 +4740,57 @@ def _fx_record_uncovered_reason(
     return None
 
 
-def _declares_complete(row: Mapping[str, Any]) -> bool:
+def _declares_complete(row: Mapping[str, Any], as_of_date: date) -> bool:
     """An account/fact matrix row that declares its own completeness boundary.
 
-    Only the one completeness status counts, and only with a declared interval and
-    no missing interval: no other status, however it is dated, is a declaration.
+    Only the one completeness status counts, with a declared interval that is
+    ordered and reaches the cutoff, no missing interval and no unavailable amount.
     """
 
+    if row.get("status") != "DECLARED_COMPLETE":
+        return False
+    try:
+        start = _date(row.get("declared_start"), "declared_start")
+        end = _date(row.get("declared_end"), "declared_end")
+    except BaselineValidationError:
+        return False
     return (
-        row.get("status") == "DECLARED_COMPLETE"
-        and row.get("declared_start") is not None
-        and row.get("declared_end") is not None
+        start <= end
+        and end >= as_of_date
         and not row.get("missing_intervals")
+        and row.get("missing_interval_start") is None
+        and row.get("missing_interval_end") is None
+        and not row.get("unavailable_amount_count")
     )
 
 
 def _matrix_completeness(
-    matrix: Sequence[Mapping[str, Any]] | None, fact_type: str
+    matrix: Sequence[Mapping[str, Any]] | None,
+    fact_type: str,
+    investment_accounts: set[str],
+    as_of_date: date,
 ) -> bool:
-    """True only when a matrix was supplied, holds rows for the fact, and every
-    row declares its own boundary.  No matrix is no evidence, never completeness."""
+    """True only when a matrix was supplied and every investment account has exactly
+    one row for the fact, and each row declares its own boundary.  No matrix, a
+    missing account or a duplicate row is no evidence, never completeness."""
 
-    if matrix is None:
+    if matrix is None or not investment_accounts:
         return False
     rows = [row for row in matrix if row.get("fact_type") == fact_type]
-    return bool(rows) and all(_declares_complete(row) for row in rows)
+    by_account = [str(row.get("account_id")) for row in rows]
+    return (
+        sorted(by_account) == sorted(investment_accounts)
+        and len(set(by_account)) == len(by_account)
+        and all(_declares_complete(row, as_of_date) for row in rows)
+    )
 
 
 def _event_fact_claim(
     fact_type: str,
     records: Sequence[Mapping[str, Any]],
     matrix: Sequence[Mapping[str, Any]] | None,
+    investment_accounts: set[str],
+    as_of_date: date,
     *,
     authority: str,
     partial_effect: str,
@@ -4780,7 +4800,7 @@ def _event_fact_claim(
 ) -> dict[str, Any]:
     """The flows/transactions claim, decided by the account fact matrix (#895 M4)."""
 
-    complete = _matrix_completeness(matrix, fact_type)
+    complete = _matrix_completeness(matrix, fact_type, investment_accounts, as_of_date)
     providers = ", ".join(
         sorted({str(item["provider"]) for item in records if item.get("provider")})
     )
@@ -4810,8 +4830,12 @@ def _positions_claim(
     positions: Sequence[Mapping[str, Any]],
     provider_gaps: Sequence[str],
     matrix: Sequence[Mapping[str, Any]] | None,
+    investment_accounts: set[str],
+    as_of_date: date,
 ) -> dict[str, Any]:
-    complete = _matrix_completeness(matrix, "positions")
+    complete = _matrix_completeness(
+        matrix, "positions", investment_accounts, as_of_date
+    )
     complete = complete and bool(positions) and not provider_gaps
     if not positions:
         status = "FAILED"
@@ -4893,6 +4917,9 @@ def _fact_coverage(
     coverage_matrix: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     investment_count = sum(1 for item in accounts if item["role"] == "INVESTMENT")
+    investment_ids = {
+        str(item["account_id"]) for item in accounts if item["role"] == "INVESTMENT"
+    }
     unmapped = [
         item for item in assignments if item.get("mapping_status") == "UNMAPPED"
     ]
@@ -5007,6 +5034,8 @@ def _fact_coverage(
             "flows",
             flows,
             coverage_matrix,
+            investment_ids,
+            as_of_date,
             authority="accepted provider-ledger and legacy flow evidence",
             partial_effect="MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence.",
             complete_effect="Investment accounts declare admitted external-flow intervals.",
@@ -5017,13 +5046,17 @@ def _fact_coverage(
             "transactions",
             transactions,
             coverage_matrix,
+            investment_ids,
+            as_of_date,
             authority="accepted provider-ledger and legacy transaction evidence",
             partial_effect="Transaction analysis is limited to the named account/provider intervals; absence is never converted to zero activity.",
             complete_effect="Investment accounts declare admitted transaction intervals.",
             noun="transaction",
             gap_tail="providers without an admitted transaction path remain explicit in the account fact matrix",
         ),
-        _positions_claim(positions, schwab_known_gaps, coverage_matrix),
+        _positions_claim(
+            positions, schwab_known_gaps, coverage_matrix, investment_ids, as_of_date
+        ),
         {
             "fact_type": "fx",
             "known_gaps": [],

@@ -4944,17 +4944,28 @@ def _compute_panel_numerical_hwm(
         else catalog.get("epoch_hpr_receipts", []),
         "epoch_hpr_receipts",
     )
-    # A strategy named twice keeps every span: nothing is overwritten.
+    # Mirrors the report's receipt rules: one receipt per strategy, two-day spans
+    # with no subscription inside them.
     spans_by_strategy: dict[str, list[Mapping[str, Any]]] = {}
     for receipt in hpr_receipts:
-        spans_by_strategy.setdefault(str(receipt.get("strategy_id")), []).extend(
-            _objects(
-                _object(receipt.get("receipt"), "epoch HPR receipt").get(
-                    "span_return_receipts"
-                ),
-                "epoch HPR spans",
+        key = str(receipt.get("strategy_id"))
+        if key in spans_by_strategy:
+            raise ControlPanelValidationError(
+                "epoch HPR receipt strategy is duplicated"
             )
+        spans = _objects(
+            _object(receipt.get("receipt"), "epoch HPR receipt").get(
+                "span_return_receipts"
+            ),
+            "epoch HPR spans",
         )
+        if any(
+            span.get("span_days", 2) != 2
+            or span.get("subscription_events_in_span", 0) != 0
+            for span in spans
+        ):
+            raise ControlPanelValidationError("epoch HPR span differs")
+        spans_by_strategy[key] = list(spans)
     gap_bounded: tuple[dict[str, Any], dict[str, Any]] | None = None
     if any(spans_by_strategy.values()):
         # Mirrors the report: a gap set bounded away from a new peak publishes the

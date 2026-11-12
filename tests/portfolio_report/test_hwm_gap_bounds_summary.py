@@ -315,3 +315,26 @@ def test_a_governed_proof_older_than_the_envelope_stays_unavailable(
 ) -> None:
     result = compute(tmp_path, proof={**PROOF, "complete_through": "2026-08-30"})
     assert result["hwm_numerical_reason"] == "MISSING_DAILY_POINT_CAN_HIDE_PEAK"
+
+
+def test_the_panel_mirrors_the_report_receipt_rules(tmp_path: Path) -> None:
+    """KILL (reviewer finding): duplicate strategy receipts and a subscription inside a span refuse."""
+
+    bounds = _bounds(tmp_path)
+    two = _receipts() * 2
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._compute_panel_numerical_hwm(
+            _catalog(epoch_hpr_receipts=[]),
+            two,
+            governed_proof=PROOF,
+            gap_bounds_path=bounds,
+        )
+    sub = _receipts()
+    sub[0]["receipt"]["span_return_receipts"][0]["subscription_events_in_span"] = 1
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._compute_panel_numerical_hwm(
+            _catalog(epoch_hpr_receipts=[]),
+            sub,
+            governed_proof=PROOF,
+            gap_bounds_path=bounds,
+        )
