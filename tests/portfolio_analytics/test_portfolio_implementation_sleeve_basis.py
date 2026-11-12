@@ -20,6 +20,7 @@ import pytest
 
 import portfolio_implementation_sleeve_basis as sbm
 import portfolio_report as reporter
+import series_label
 import strategy_basis
 
 STRATEGY = "strategy-x"
@@ -563,7 +564,7 @@ def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(
         refs["attribution"],
     )
     assert list(ids) == [STRATEGY]
-    assert "PROVIDER_ADMIT_OR_DECLARE_V1" in ids[STRATEGY]
+    assert series_label.LABEL_TEXT[series_label.MODEL_LIVE] in ids[STRATEGY]
     assert "2026-08-14" in ids[STRATEGY]
     assert attribution is not None and reconciliation is not None
     assert attribution[STRATEGY]["bridge"]["status"] == sbm.BRIDGE_STATUS
@@ -749,8 +750,12 @@ def test_the_bridge_names_why_the_ledger_excludes_the_model_returns() -> None:
     assert disclosure["policy_effective_start"] == "2026-08-14"
     assert disclosure["authority_ref"].endswith("issue:303")
     assert disclosure["receipt_sha256"] == hashlib.sha256(RECEIPT).hexdigest()
-    assert "not ledger admitted" in disclosure["statement"]
-    assert "ruling" in disclosure["statement"]
+    statement = disclosure["statement"]
+    # kill test (D11): the text is built from the layer labels, with no ledger claim
+    assert series_label.LABEL_TEXT[series_label.MODEL_LIVE] in statement
+    assert series_label.LABEL_TEXT[series_label.ACCOUNT_LIVE] in statement
+    for untrue in ("not ledger admitted", "excludes", "ruling", "provider ledger"):
+        assert untrue not in statement
     # an absent exclusion is refused rather than papered over
     with pytest.raises(sbm.SleeveBasisError):
         sbm.exclusion_disclosure(b'{"dispositions": []}', "0" * 64, "portfolio123")
