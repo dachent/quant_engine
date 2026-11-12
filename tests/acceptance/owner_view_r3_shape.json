@@ -1,0 +1,617 @@
+{
+ "findings": [
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E3"
+   ],
+   "entity": "fact_status.fx",
+   "expected": "x",
+   "observed": "x",
+   "pointer": "x"
+  },
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E2"
+   ],
+   "entity": "hwm_summary",
+   "expected": "x",
+   "observed": {
+    "hwm_numerical_status": "x",
+    "reason": "x"
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E8"
+   ],
+   "entity": "leverage_disclosures.financing_cost",
+   "expected": "x",
+   "observed": {
+    "applicable_accounts": 0,
+    "rows": 0,
+    "uncovered_accounts": {
+     "account-1b44c987969b9e47": "OBSERVED_ONLY|UNAVAILABLE",
+     "account-38b653b91ff43a10": "NO_ROW",
+     "account-58e75e8d952fa1b8": "NO_ROW",
+     "account-61092059d066f056": "NO_ROW",
+     "account-702c489650e59956": "OBSERVED_ONLY|UNAVAILABLE",
+     "account-98f5986706ed53c5": "NO_ROW",
+     "account-a13937e26b8ae46d": "NO_ROW",
+     "account-c63d2a487e019790": "NO_ROW",
+     "account-cff10c44aedcf5e8": "NO_ROW",
+     "account-d2e5821e608e25f1": "NO_ROW",
+     "account-d69701da9143c430": "OBSERVED_ONLY|UNAVAILABLE"
+    }
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E8"
+   ],
+   "entity": "leverage_disclosures.gross_exposure",
+   "expected": "x",
+   "observed": {
+    "applicable_accounts": 0,
+    "rows": 0,
+    "uncovered_accounts": {
+     "account-1b44c987969b9e47": "OBSERVED_ONLY|UNAVAILABLE",
+     "account-38b653b91ff43a10": "NO_ROW",
+     "account-58e75e8d952fa1b8": "NO_ROW",
+     "account-61092059d066f056": "NO_ROW",
+     "account-702c489650e59956": "UNAVAILABLE",
+     "account-98f5986706ed53c5": "NO_ROW",
+     "account-a13937e26b8ae46d": "NO_ROW",
+     "account-c63d2a487e019790": "NO_ROW",
+     "account-cff10c44aedcf5e8": "NO_ROW",
+     "account-d2e5821e608e25f1": "NO_ROW",
+     "account-d69701da9143c430": "OBSERVED_ONLY|UNAVAILABLE"
+    }
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E6"
+   ],
+   "entity": "strategy_summary.after_tax_status",
+   "expected": "x",
+   "observed": {
+    "available": 0,
+    "unavailable": [
+     "grizzlybears-vtma",
+     "p123-ai-factor",
+     "p123-eu",
+     "qsi",
+     "robuxio-crypto",
+     "tt-portfolio",
+     "volatis-strategy"
+    ]
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E5"
+   ],
+   "entity": "strategy_summary.benchmark_evidence_status",
+   "expected": "x",
+   "observed": {
+    "available": 0,
+    "unavailable": [
+     "grizzlybears-vtma",
+     "p123-ai-factor",
+     "p123-eu",
+     "qsi",
+     "robuxio-crypto",
+     "tt-portfolio",
+     "volatis-strategy"
+    ]
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E6"
+   ],
+   "entity": "strategy_summary.cash_drag_status",
+   "expected": "x",
+   "observed": {
+    "available": 0,
+    "unavailable": [
+     "grizzlybears-vtma",
+     "p123-ai-factor",
+     "p123-eu",
+     "qsi",
+     "robuxio-crypto",
+     "tt-portfolio",
+     "volatis-strategy"
+    ]
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "completeness.required_outputs",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "E6"
+   ],
+   "entity": "strategy_summary.cost_evidence_status",
+   "expected": "x",
+   "observed": {
+    "available": 0,
+    "unavailable": [
+     "grizzlybears-vtma",
+     "p123-ai-factor",
+     "p123-eu",
+     "qsi",
+     "robuxio-crypto",
+     "tt-portfolio",
+     "volatis-strategy"
+    ]
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "dates.section_as_of_vs_cutoff",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C3"
+   ],
+   "entity": "decomposition:ECONOMIC_FACTOR:LIVE_ONLY",
+   "expected": "x",
+   "observed": {
+    "as_of": "2026-08-31",
+    "status": "AVAILABLE"
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "dates.section_as_of_vs_cutoff",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C3"
+   ],
+   "entity": "decomposition:ECONOMIC_FACTOR:LIVE_PLUS_BACKTEST",
+   "expected": "x",
+   "observed": {
+    "as_of": "2026-08-31",
+    "status": "AVAILABLE"
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "dates.section_as_of_vs_cutoff",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C3"
+   ],
+   "entity": "decomposition:RETURN_INDUSTRY:LIVE_ONLY",
+   "expected": "x",
+   "observed": {
+    "as_of": "2026-08-31",
+    "status": "AVAILABLE"
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "dates.section_as_of_vs_cutoff",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C3"
+   ],
+   "entity": "decomposition:RETURN_INDUSTRY:LIVE_PLUS_BACKTEST",
+   "expected": "x",
+   "observed": {
+    "as_of": "2026-08-31",
+    "status": "AVAILABLE"
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "dates.source_clock",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C5"
+   ],
+   "entity": "alpaca",
+   "expected": "x",
+   "observed": "2026-07-17",
+   "pointer": "x"
+  },
+  {
+   "check_id": "dates.source_clock",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C5"
+   ],
+   "entity": "fidelity",
+   "expected": "x",
+   "observed": "2024-10-03",
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.capital.account.cutoff",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "B4"
+   ],
+   "entity": "account-0acb9e17da731d0e|2026-07-17",
+   "expected": "x",
+   "observed": {
+    "as_of": "2025-11-24",
+    "view": "x"
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "B4"
+   ],
+   "entity": "capital.account.cutoff:account-9cb2832ca2366f08",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "B4",
+    "B6"
+   ],
+   "entity": "capital.portfolio.liquid.cutoff:portfolio",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "B4",
+    "B6"
+   ],
+   "entity": "capital.reserve.cutoff:reserve-capital",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "B6"
+   ],
+   "entity": "capital.retained_excluded.cutoff:portfolio",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [],
+   "entity": "capital.strategy_cash.cutoff:robuxio-crypto",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [],
+   "entity": "capital.strategy_cash.cutoff:volatis-strategy",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C5"
+   ],
+   "entity": "date.source_last_observation:account-0acb9e17da731d0e",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "C5"
+   ],
+   "entity": "date.source_last_observation:account-9cb2832ca2366f08",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "N56"
+   ],
+   "entity": "date.strategy_cash.coverage_end:robuxio-crypto|matrixport|account-d2e5821e608e25f1",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "expected.not_derivable",
+   "class": "NOT_READY",
+   "defect_ids": [
+    "N56"
+   ],
+   "entity": "date.strategy_cash.coverage_end:volatis-strategy|quantbase|account-58e75e8d952fa1b8",
+   "expected": "x",
+   "observed": null,
+   "pointer": "x"
+  },
+  {
+   "check_id": "lint.extreme_alpha",
+   "class": "WARNING",
+   "defect_ids": [
+    "A3"
+   ],
+   "entity": "decomposition alpha",
+   "expected": "x",
+   "observed": {
+    "extreme_abs_over_50pct": {
+     "ECONOMIC_FACTOR:GrizzlyBears VTMA:us-economic:LIVE_PLUS_BACKTEST": "x",
+     "ETF_STYLE:GrizzlyBears VTMA:multi-asset-style:LIVE_PLUS_BACKTEST": "x",
+     "ETF_STYLE:GrizzlyBears VTMA:us-equity-style:LIVE_PLUS_BACKTEST": "x",
+     "ETF_STYLE:Robuxio Crypto (High Sharpe High Vol):multi-asset-style:LIVE_PLUS_BACKTEST": "x",
+     "RETURN_INDUSTRY:GrizzlyBears VTMA:us-industry:LIVE_PLUS_BACKTEST": "x",
+     "RETURN_SECTOR:GrizzlyBears VTMA:us-sector:LIVE_PLUS_BACKTEST": "x"
+    },
+    "sign_contradiction_between_modes": {
+     "ECONOMIC_FACTOR:GrizzlyBears VTMA:us-economic": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "ECONOMIC_FACTOR:QSI:us-economic": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "ECONOMIC_FACTOR:TT Portfolio:us-economic": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "ETF_STYLE:TT Portfolio:multi-asset-style": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "ETF_STYLE:TT Portfolio:us-equity-style": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "RETURN_INDUSTRY:GrizzlyBears VTMA:us-industry": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "RETURN_INDUSTRY:QSI:us-industry": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "RETURN_INDUSTRY:TT Portfolio:us-industry": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     },
+     "RETURN_SECTOR:GrizzlyBears VTMA:us-sector": {
+      "LIVE_ONLY": "x",
+      "LIVE_PLUS_BACKTEST": "x"
+     }
+    }
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "lint.extreme_cagr",
+   "class": "WARNING",
+   "defect_ids": [
+    "A2"
+   ],
+   "entity": "cagr",
+   "expected": "x",
+   "observed": {
+    "LIVE_PLUS_BACKTEST:GrizzlyBears VTMA": {
+     "cagr": "x",
+     "cumulative_return": "x"
+    },
+    "LIVE_PLUS_BACKTEST:Robuxio Crypto (High Sharpe High Vol)": {
+     "cagr": "x",
+     "cumulative_return": "x"
+    }
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "lint.internal_tokens_displayed",
+   "class": "WARNING",
+   "defect_ids": [
+    "F3"
+   ],
+   "entity": "gates.note",
+   "expected": "x",
+   "observed": {
+    "gates[3]:positions": 2
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "lint.invested_capital_vs_contributions",
+   "class": "WARNING",
+   "defect_ids": [
+    "B7"
+   ],
+   "entity": "invested_capital",
+   "expected": "x",
+   "observed": {
+    "p123-ai-factor": {
+     "invested_capital_usd": "x",
+     "net_contributed_capital": "x"
+    },
+    "qsi": {
+     "invested_capital_usd": "x",
+     "net_contributed_capital": "x"
+    },
+    "tt-portfolio": {
+     "invested_capital_usd": "x",
+     "net_contributed_capital": "x"
+    }
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "lint.payload_size",
+   "class": "WARNING",
+   "defect_ids": [
+    "F5"
+   ],
+   "entity": "generation",
+   "expected": "x",
+   "observed": {
+    "duplicate_large_files": {},
+    "files_over_50MB": {
+     "data/dashboard_data.json": 0
+    }
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "lint.short_window_annualization",
+   "class": "WARNING",
+   "defect_ids": [
+    "A5"
+   ],
+   "entity": "annualized",
+   "expected": "x",
+   "observed": {
+    "account_manifest.annualized_return_on_net_capital:account-1b44c987969b9e47-s2|p123-ai-factor|2026-01-30": 0,
+    "account_manifest.annualized_return_on_net_capital:account-38b653b91ff43a10|qsi|2026-01-05": 0,
+    "account_manifest.annualized_return_on_net_capital:account-38b653b91ff43a10|tt-portfolio|2025-11-25": 0,
+    "account_manifest.annualized_return_on_net_capital:account-61092059d066f056|grizzlybears-vtma|2026-01-02": 0,
+    "account_manifest.annualized_return_on_net_capital:account-98f5986706ed53c5|qsi|2026-01-05": 0,
+    "account_manifest.annualized_return_on_net_capital:account-98f5986706ed53c5|tt-portfolio|2025-11-25": 0,
+    "account_manifest.annualized_return_on_net_capital:account-a13937e26b8ae46d|tt-portfolio|2025-12-29": 0,
+    "account_manifest.annualized_return_on_net_capital:account-c63d2a487e019790|tt-portfolio|2025-11-25": 0,
+    "account_manifest.annualized_return_on_net_capital:account-cff10c44aedcf5e8|tt-portfolio|2025-11-25": 0,
+    "account_manifest.annualized_return_on_net_capital:account-d2e5821e608e25f1|robuxio-crypto|2025-12-06": 0,
+    "account_manifest.annualized_return_on_net_capital:account-d69701da9143c430|p123-eu|2025-11-20": 0,
+    "account_manifest.mwr_xirr:account-1b44c987969b9e47-s1|p123-conn-1911998-andreas-sc-ai-mq-live|2026-01-26": 0,
+    "account_manifest.mwr_xirr:account-1b44c987969b9e47-s2|p123-ai-factor|2026-01-30": 0,
+    "account_manifest.mwr_xirr:account-1b44c987969b9e47-s3|p123-conn-1951348-higher-beta-earnings|2026-06-22": 0,
+    "account_manifest.mwr_xirr:account-1b44c987969b9e47-s4|p123-conn-1956961-ai-largecap-ls|2026-07-15": 0,
+    "account_manifest.mwr_xirr:account-1b44c987969b9e47-s5|p123-conn-1958970-high-octane|2026-07-22": 0,
+    "account_manifest.mwr_xirr:account-38b653b91ff43a10|qsi|2026-01-05": 0,
+    "account_manifest.mwr_xirr:account-38b653b91ff43a10|tt-portfolio|2025-11-25": 0,
+    "account_manifest.mwr_xirr:account-58e75e8d952fa1b8-crisis|quantbase-crisis-factor-investing|2024-07-24": 0,
+    "account_manifest.mwr_xirr:account-58e75e8d952fa1b8-singleindex|quantbase-single-index-leveraged-in-out|2024-07-24": 0,
+    "account_manifest.mwr_xirr:account-61092059d066f056|grizzlybears-vtma|2026-01-02": 0,
+    "account_manifest.mwr_xirr:account-702c489650e59956|tt-portfolio|2025-11-25": 0,
+    "account_manifest.mwr_xirr:account-98f5986706ed53c5|qsi|2026-01-05": 0,
+    "account_manifest.mwr_xirr:account-98f5986706ed53c5|tt-portfolio|2025-11-25": 0,
+    "account_manifest.mwr_xirr:account-a13937e26b8ae46d|tt-portfolio|2025-12-29": 0,
+    "account_manifest.mwr_xirr:account-c63d2a487e019790|tt-portfolio|2025-11-25": 0,
+    "account_manifest.mwr_xirr:account-cff10c44aedcf5e8|tt-portfolio|2025-11-25": 0,
+    "account_manifest.mwr_xirr:account-d2e5821e608e25f1|robuxio-crypto|2025-12-06": 0,
+    "account_manifest.mwr_xirr:account-d69701da9143c430|p123-eu|2025-11-20": 0,
+    "benchmark.grizzlybears-vtma.active_return_annualized": 0,
+    "benchmark.grizzlybears-vtma.tracking_error_annualized": 0,
+    "benchmark.p123-ai-factor.active_return_annualized": 0,
+    "benchmark.p123-ai-factor.tracking_error_annualized": 0,
+    "benchmark.p123-eu.active_return_annualized": 0,
+    "benchmark.p123-eu.tracking_error_annualized": 0,
+    "benchmark.qsi.active_return_annualized": 0,
+    "benchmark.qsi.tracking_error_annualized": 0,
+    "benchmark.tt-portfolio.active_return_annualized": 0,
+    "benchmark.tt-portfolio.tracking_error_annualized": 0,
+    "dependence.LIVE_ONLY:AI Factor [P123]": 0,
+    "dependence.LIVE_ONLY:EU [P123]": 0,
+    "dependence.LIVE_ONLY:GrizzlyBears VTMA": 0,
+    "dependence.LIVE_ONLY:QSI": 0,
+    "dependence.LIVE_ONLY:Robuxio Crypto (High Sharpe High Vol)": 0,
+    "dependence.LIVE_ONLY:TT Portfolio": 0,
+    "strategy_summary.account_live_cagr:grizzlybears-vtma": 0,
+    "strategy_summary.account_live_cagr:p123-ai-factor": 0,
+    "strategy_summary.account_live_cagr:p123-eu": 0,
+    "strategy_summary.account_live_cagr:qsi": 0,
+    "strategy_summary.account_live_cagr:robuxio-crypto": 0,
+    "strategy_summary.account_live_cagr:tt-portfolio": 0,
+    "twr_mwr.mwr_xirr:account-1b44c987969b9e47-s2|p123-ai-factor|2026-01-30": 0,
+    "twr_mwr.mwr_xirr:account-38b653b91ff43a10|qsi|2026-01-05": 0,
+    "twr_mwr.mwr_xirr:account-38b653b91ff43a10|tt-portfolio|2025-11-25": 0,
+    "twr_mwr.mwr_xirr:account-61092059d066f056|grizzlybears-vtma|2026-01-02": 0,
+    "twr_mwr.mwr_xirr:account-702c489650e59956|tt-portfolio|2025-11-25": 0,
+    "twr_mwr.mwr_xirr:account-98f5986706ed53c5|qsi|2026-01-05": 0,
+    "twr_mwr.mwr_xirr:account-98f5986706ed53c5|tt-portfolio|2025-11-25": 0,
+    "twr_mwr.mwr_xirr:account-a13937e26b8ae46d|tt-portfolio|2025-12-29": 0,
+    "twr_mwr.mwr_xirr:account-c63d2a487e019790|tt-portfolio|2025-11-25": 0,
+    "twr_mwr.mwr_xirr:account-cff10c44aedcf5e8|tt-portfolio|2025-11-25": 0,
+    "twr_mwr.mwr_xirr:account-d2e5821e608e25f1|robuxio-crypto|2025-12-06": 0,
+    "twr_mwr.mwr_xirr:account-d69701da9143c430|p123-eu|2025-11-20": 0
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "preservation.report_to_panel",
+   "class": "WARNING",
+   "defect_ids": [],
+   "entity": "provenance->provenance",
+   "expected": "x",
+   "observed": {
+    "duplicated_keys": 0,
+    "first": 1
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "universe.inactive_accounts_in_current",
+   "class": "WARNING",
+   "defect_ids": [
+    "D6"
+   ],
+   "entity": "report.fact_coverage_matrix",
+   "expected": "x",
+   "observed": {
+    "account-2d0a996cf7ab4876": 0
+   },
+   "pointer": "x"
+  },
+  {
+   "check_id": "universe.inactive_accounts_in_current",
+   "class": "WARNING",
+   "defect_ids": [
+    "D6"
+   ],
+   "entity": "report.leverage_disclosures",
+   "expected": "x",
+   "observed": {
+    "account-2d0a996cf7ab4876": 0
+   },
+   "pointer": "x"
+  }
+ ],
+ "generation_id": "r3shape",
+ "summary": {}
+}
