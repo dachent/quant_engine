@@ -38,6 +38,7 @@ def doc(*findings: dict[str, Any]) -> dict[str, Any]:
 def entry(klass: str, **kw: Any) -> dict[str, Any]:
     block = {
         "owner_class": klass,
+        "entity_match": ".*",
         "what": "Thing is wrong for {entity}.",
         "fix": "do it",
         "who": "loader",
@@ -228,3 +229,27 @@ def test_cli_writes_sidecars_that_reconcile_to_findings(tmp_path: Path) -> None:
     assert (
         (out / "owner-view.js").read_bytes().startswith(b"window.PORTFOLIO_OWNER_VIEW")
     )
+
+
+def test_entry_must_state_its_entity_scope() -> None:
+    e = entry(ov.NOT_APPLICABLE)
+    del e["owner_view"]["entity_match"]
+    assert any("entity_match" in m for m in ov.registry_errors([e]))
+    view = ov.build_owner_view(
+        doc(finding("c.one", defects=("E1",))), register=[e], today=TODAY
+    )
+    assert (
+        view["items"][0]["class"] == ov.UNCLASSIFIED
+    )  # a catch-all by omission is refused
+
+
+def test_row_scope_classifies_the_whole_row_once() -> None:
+    f = finding(
+        "c.one",
+        observed={"uncovered_accounts": {"a1": "X", "a2": "Y"}},
+        defects=("E1",),
+    )
+    e = entry(ov.CHECKER_BUG, block={"scope": "row"})
+    del e["owner_view"]["entity_match"]
+    view = ov.build_owner_view(doc(f), register=[e], today=TODAY)
+    assert [i["class"] for i in view["items"]] == [ov.CHECKER_BUG]

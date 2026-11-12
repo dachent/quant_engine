@@ -82,6 +82,13 @@ def _entry_errors(position: int, entry: Mapping[str, Any]) -> list[str]:
         block.get("owner_record") and block.get("reviewed_on")
     ):
         errors.append(f"{label}: ACCEPTED_BY_DESIGN needs owner_record and reviewed_on")
+    if block.get("scope", "entity") not in ("entity", "row"):
+        errors.append(f"{label}: scope must be 'entity' or 'row'")
+    if block.get("scope") != "row" and "entity_match" not in block:
+        errors.append(
+            f"{label}: an entry must say which entities it covers (entity_match) "
+            "or declare scope 'row' (every entity of the row is in the same state)"
+        )
     try:
         re.compile(block.get("entity_match", ".*"))
     except re.error as exc:
@@ -148,6 +155,7 @@ def _matches(
     finding: Mapping[str, Any],
     entity: str,
     facts: Mapping[str, Any],
+    row: bool = False,
 ) -> bool:
     if entry.get("check_id") != finding.get("check_id"):
         return False
@@ -155,6 +163,8 @@ def _matches(
     if wanted and wanted not in (finding.get("defect_ids") or []):
         return False
     block = entry["owner_view"]
+    if (block.get("scope") == "row") != row:
+        return False
     if not re.search(block.get("entity_match", ".*"), entity):
         return False
     return all(facts.get(k) == v for k, v in (block.get("when") or {}).items())
@@ -263,6 +273,29 @@ def build_owner_view(
             items.append(
                 _item(BLOCKER, finding, index, entity, message, None, {}, today, since)
             )
+            continue
+        whole = str(finding.get("entity", ""))
+        row_facts = expand({**finding, "observed": None})[0][1]
+        _flat("observed", finding.get("observed"), row_facts)
+        row_matched = [
+            e for e in entries if _matches(e, finding, whole, row_facts, True)
+        ]
+        if row_matched:  # the entry asserts one state for every entity of the row
+            for entry in row_matched:
+                klass = entry["owner_view"]["owner_class"]
+                items.append(
+                    _item(
+                        klass,
+                        finding,
+                        index,
+                        whole,
+                        message,
+                        entry,
+                        row_facts,
+                        today,
+                        since,
+                    )
+                )
             continue
         for entity, facts in expand(finding):
             matched = [e for e in entries if _matches(e, finding, entity, facts)]
