@@ -56,3 +56,19 @@ def test_a_non_positive_nav_is_unavailable() -> None:
     nav = _series("2026-01-01", 4, "1000")
     nav["2026-01-02"] = "0"
     assert cd.derive_cash_drag(**_inputs(nav=nav))["status"] == "UNAVAILABLE"
+
+
+def test_exchange_day_windows_weight_a_monday_return_by_the_friday_close() -> None:
+    # Fri 2026-01-02, Mon 2026-01-05, Tue 2026-01-06
+    nav = {"2026-01-02": "1000", "2026-01-05": "1000", "2026-01-06": "1000"}
+    cash = {"2026-01-02": "200", "2026-01-05": "0", "2026-01-06": "0"}
+    out = cd.derive_cash_drag(
+        start="2026-01-05",
+        end="2026-01-06",
+        nav=nav,
+        cash=cash,
+        benchmark_returns={"2026-01-05": "0.03", "2026-01-06": "0.01"},
+        cash_returns={"2026-01-05": "0", "2026-01-06": "0"},
+    )
+    # Monday uses Friday's 20% weight, Tuesday uses Monday's 0%
+    assert Decimal(out["cash_drag"]) == Decimal("0.006")

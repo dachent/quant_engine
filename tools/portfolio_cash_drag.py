@@ -5,7 +5,7 @@ cash, less what the cash itself earned: ``sum_t w[t-1] * (r_bench[t] - r_cash[t]
 with ``w[t-1] = cash[t-1] / nav[t-1]`` (prior-close weights, so a day's own flows
 never decide it).  It is derived only when the path is complete:
 
-* every calendar day of the window carries a NAV and a cash balance, with no gap;
+* every observation day of the window carries a NAV and a cash balance, with no gap;
 * every benchmark return of the window is present on the days it is used;
 * the cash path closes against the broker statement: each statement cash figure
   supplied equals the path's balance on its date to the cent.
@@ -18,7 +18,7 @@ the caller binds them to hashed captures.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from typing import Any, Final
 
@@ -55,19 +55,43 @@ def derive_cash_drag(
         return _unavailable("the window has fewer than two days")
     if cash_returns is None:
         return _unavailable("the cash yield is not stated")
-    days = [first + timedelta(days=n) for n in range((last - first).days + 1)]
-    prior = [first - timedelta(days=1)] + days[:-1]
+    # The observation days are the benchmark's own dates in the window (calendar days
+    # for a seven-day market, exchange days otherwise); each needs a close balance on
+    # the day and on the observation before it, so a weekend return is weighted by the
+    # Friday close.
+    days = sorted(
+        d
+        for d in (date.fromisoformat(k) for k in benchmark_returns)
+        if first <= d <= last
+    )
+    if len(days) < 2:
+        return _unavailable(
+            "the benchmark has fewer than two observations in the window"
+        )
+    nav_days = sorted(date.fromisoformat(k) for k in nav)
+    prior: list[date] = []
+    for d in days:
+        earlier = [n for n in nav_days if n < d]
+        if not earlier:
+            return _unavailable(f"no nav before {d.isoformat()}")
+        prior.append(earlier[-1])
     for label, series, needed in (
-        ("nav", nav, [prior[0], *days]),
-        ("cash", cash, [prior[0], *days]),
-        ("benchmark return", benchmark_returns, days),
+        ("nav", nav, [*prior, *days]),
+        ("cash", cash, [*prior, *days]),
         ("cash return", cash_returns, days),
     ):
-        missing = [d.isoformat() for d in needed if d.isoformat() not in series]
+        missing = sorted({x.isoformat() for x in needed if x.isoformat() not in series})
         if missing:
             return _unavailable(
                 f"no daily {label} path: {len(missing)} day(s) missing, first {missing[0]}"
             )
+    gap = [
+        (b.isoformat(), d.isoformat())
+        for b, d in zip(prior, days, strict=True)
+        if (d - b).days > 4
+    ]
+    if gap:
+        return _unavailable(f"nav path has a gap before {gap[0][1]}")
     for day, figure in sorted((statement_cash or {}).items()):
         if day not in cash:
             return _unavailable(f"statement cash on {day} has no path balance")
