@@ -2028,6 +2028,17 @@
         "--crosswalk",
         "{crosswalk}",
         {
+          "if": "retire_ticket",
+          "args": [
+            "--coordination-root",
+            "{coordination_root}",
+            "--retire-ticket",
+            "{retire_ticket}",
+            "--archive-dir",
+            "{evidence_dest}/retired-releases"
+          ]
+        },
+        {
           "if": "release_inputs_root",
           "args": [
             "--strategy-basis",

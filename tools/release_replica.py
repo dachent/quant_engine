@@ -626,6 +626,7 @@ def real_lane(a: argparse.Namespace, runner: Runner = _subprocess_runner) -> int
         )
         steps.extend([pre.result(), plan.result()])
     rc = 0
+    release_id: str | None = None
     if all(step["rc"] == 0 for step in steps):
         dry = run_step(
             "dry-run",
@@ -650,10 +651,25 @@ def real_lane(a: argparse.Namespace, runner: Runner = _subprocess_runner) -> int
                 )
             )
     rc = 0 if all(step["rc"] == 0 for step in steps) else 1
+    retired = _retire_failed_release(a, release_id) if rc != 0 else None
     (out / "real-lane.json").write_bytes(
-        canonical_json_bytes({"rc": rc, "steps": steps})
+        canonical_json_bytes({"rc": rc, "steps": steps, "retired": retired})
     )
     return rc
+
+
+def _retire_failed_release(a: argparse.Namespace, release_id: str | None) -> str | None:
+    """A lane that failed after its dry-run leaves a PREPARED release nothing will commit: archive and retire it
+    (never delete), so the next run's no-stale-prepared row is not blocked by it. Needs the three arguments."""
+
+    if not (release_id and a.retire_ticket and a.coordination_root and a.archive_dir):
+        return None
+    import release_preflight
+
+    moved = release_preflight.retire_release(
+        Path(a.coordination_root), release_id, a.retire_ticket, Path(a.archive_dir)
+    )
+    return str(moved)
 
 
 def lanes(a: argparse.Namespace, runner: Runner = _subprocess_runner) -> int:
@@ -737,6 +753,10 @@ def _parser() -> argparse.ArgumentParser:
             cmd.add_argument("--clean-room", type=Path, required=True)
         if name != "ceremony":
             cmd.add_argument("--real-panel-dir", type=Path, required=True)
+        if name == "real-lane":
+            cmd.add_argument("--coordination-root", type=Path)
+            cmd.add_argument("--retire-ticket")
+            cmd.add_argument("--archive-dir", type=Path)
     return parser
 
 

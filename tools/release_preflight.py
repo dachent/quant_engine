@@ -541,6 +541,29 @@ def retire_release(
     return destination
 
 
+def retire_stale(
+    coordination_root: Path,
+    ticket: str,
+    archive_dir: Path,
+    keep: Sequence[str] = (),
+) -> list[str]:
+    """Retire every non-terminal release except those named in ``keep`` (an abandoned run's leftovers). An
+    unreadable release directory is refused, not skipped: it needs a person to look at it."""
+
+    retired = []
+    for entry in non_terminal_releases(coordination_root):
+        release_id, _, state = entry.partition(":")
+        if release_id in keep:
+            continue
+        if state == "UNREADABLE":
+            raise driver.Refusal(
+                f"release {release_id[:12]} is unreadable: not retired"
+            )
+        retire_release(coordination_root, release_id, ticket, archive_dir)
+        retired.append(release_id)
+    return retired
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -553,8 +576,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     retire.add_argument("--release-id", required=True)
     retire.add_argument("--ticket", required=True)
     retire.add_argument("--archive-dir", type=Path, required=True)
+    stale = sub.add_parser("retire-stale")
+    stale.add_argument("--coordination-root", type=Path, required=True)
+    stale.add_argument("--ticket", required=True)
+    stale.add_argument("--archive-dir", type=Path, required=True)
+    stale.add_argument("--keep", action="append", default=[], metavar="RELEASE_ID")
     args = parser.parse_args(argv)
     try:
+        if args.command == "retire-stale":
+            done = retire_stale(
+                args.coordination_root, args.ticket, args.archive_dir, args.keep
+            )
+            print(f"retired {len(done)} release(s)")
+            return 0
         if args.command == "retire":
             moved = retire_release(
                 args.coordination_root,

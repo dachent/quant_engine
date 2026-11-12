@@ -33,6 +33,12 @@ from quant_engine.core import ReleaseInputsError, load_release_inputs
 
 # configured directories a pass writes outside the cycle (create-only: the driver refuses an existing run
 # or replica workspace); the cycle directory itself holds every other output and goes aside whole
+DEFAULT_FREE_SPACE_FLOOR_GB: Final = 60
+# the ticket a failed lane's PREPARED release is retired under (the upfront-QC ticket); --set-json overrides it
+DEFAULT_RETIRE_TICKET: Final = "884"
+STAGE_GRAPH: Final = (
+    Path(__file__).resolve().parents[1] / "ops" / "mvp2-release" / "release-stages.json"
+)
 CONFIGURED_OUTPUTS: Final = ("run", "qa", "evidence_dest", "replica_workspace")
 # files the new cycle's preparation spec still names, relative to the cycle directory; more (a generation directory
 # staged outside the graph) are named with --carry
@@ -199,6 +205,8 @@ def config(
     release_inputs_root: Path | None = None,
     release_inputs_manifest_sha256: str | None = None,
     sets: Sequence[str] = (),
+    json_sets: Sequence[str] = (),
+    data_roots: Sequence[str] = (),
     require_calendar: bool = False,
 ) -> dict[str, Any]:
     cfg = _json(previous, "previous run configuration")
@@ -221,6 +229,15 @@ def config(
         if not (sep and key):
             raise WorldError(f"--set expects KEY=VALUE, got {item!r}")
         cfg[key] = value
+    for item in json_sets:
+        key, sep, value = item.partition("=")
+        if not (sep and key):
+            raise WorldError(f"--set-json expects KEY=JSON, got {item!r}")
+        try:
+            cfg[key] = json.loads(value)
+        except ValueError as exc:
+            raise WorldError(f"--set-json {key}: not JSON ({exc})") from exc
+    _gate_defaults(cfg, data_roots)
     # a path that is gone, or that lies inside the cycle ``move-aside`` is about to move away, is stale
     cycle = Path(str(cfg["cycle"])) if cfg.get("cycle") else None
     if cycle is not None:
@@ -278,6 +295,47 @@ def config(
         "calendar_authority_sha256": cfg.get("calendar_authority_sha256"),
         "calendar_pin": calendar_pin,
     }
+
+
+def _gate_defaults(cfg: dict[str, Any], data_roots: Sequence[str]) -> None:
+    """Keys the G0 gate reads, so a generated configuration needs no hand patch.
+
+    Only what is derivable is filled: the floor, the cutoff of the run's own label (release B's stays the
+    owner's to state), the authority roots from the real data-root directories the operator passes
+    (``--data-root ID=DIR``, a known provider root of the stage graph), and an ``evidence_dest`` that is a
+    sibling of the cycle (one inside the cycle goes aside with it, and the config:paths row refuses it).
+    """
+
+    cfg.setdefault("free_space_floor_gb", DEFAULT_FREE_SPACE_FLOOR_GB)
+    cfg.setdefault("retire_ticket", DEFAULT_RETIRE_TICKET)
+    label, as_of = cfg.get("release_label"), cfg.get("requested_as_of")
+    if isinstance(label, str) and isinstance(as_of, str):
+        cutoffs = cfg.setdefault("release_cutoffs", {})
+        if isinstance(cutoffs, dict):
+            cutoffs.setdefault(label, as_of)
+    if data_roots:
+        known = set(
+            json.loads(STAGE_GRAPH.read_text(encoding="utf-8"))["provider_roots"]
+        )
+        roots: dict[str, str] = dict(cfg.get("authority_roots") or {})
+        for item in data_roots:
+            key, sep, value = item.partition("=")
+            if not (sep and key and value):
+                raise WorldError(f"--data-root expects ID=DIR, got {item!r}")
+            if key not in known:
+                raise WorldError(
+                    f"--data-root {key!r} is not a provider root of the stage graph"
+                )
+            roots[key] = Path(value).as_posix()
+        cfg["authority_roots"] = roots
+    cycle = Path(str(cfg["cycle"])) if cfg.get("cycle") else None
+    if cycle is not None:
+        dest = cfg.get("evidence_dest")
+        if not isinstance(dest, str) or _inside(Path(dest), cycle):
+            cfg["evidence_dest"] = (cycle.parent / f"{cycle.name}-evidence").as_posix()
+    scratch = cfg.get("scratch_roots")
+    if cycle is not None and not scratch:
+        cfg["scratch_roots"] = [cycle.parent.as_posix()]
 
 
 def _calendar_pin_from_seed(cfg: Mapping[str, Any]) -> str | None:
@@ -503,6 +561,14 @@ def _parser() -> argparse.ArgumentParser:
     cfg.add_argument("--release-inputs-root", type=Path)
     cfg.add_argument("--release-inputs-manifest-sha256")
     cfg.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    cfg.add_argument("--set-json", action="append", default=[], metavar="KEY=JSON")
+    cfg.add_argument(
+        "--data-root",
+        action="append",
+        default=[],
+        metavar="ID=DIR",
+        help="a provider data root of the previous authority release (becomes authority_roots)",
+    )
     cfg.add_argument("--require-calendar", action="store_true")
     aside = commands.add_parser("move-aside")
     aside.add_argument("--config", type=Path, required=True)
@@ -550,6 +616,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 release_inputs_root=args.release_inputs_root,
                 release_inputs_manifest_sha256=args.release_inputs_manifest_sha256,
                 sets=args.set,
+                json_sets=args.set_json,
+                data_roots=args.data_root,
                 require_calendar=args.require_calendar,
             )
         elif args.command == "move-aside":

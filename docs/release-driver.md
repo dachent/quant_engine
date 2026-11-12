@@ -596,3 +596,9 @@ candidate directory without a release pointer is exercised only by a real run; a
 still refuse the release, but the recovery rehearsal and the clean-room restore run after the receipt is written,
 every step runs, and the outcome goes to `rehearsal-receipt.json` (`qe-post-commit-rehearsal/1`, `blocking: false`).
 A failed rehearsal is a finding for the owner, not a refusal.
+
+### Usable by default (G0 config, stale PREPARED releases)
+
+`release_fresh_world.py config` fills the keys G0 reads: `free_space_floor_gb` (60), `release_cutoffs` for the run's own label (release B's cutoff stays the owner's: `--set-json release_cutoffs='{"A":"...","B":"..."}'`), `authority_roots` from `--data-root ID=DIR` (a provider root of the stage graph), `scratch_roots` and an `evidence_dest` that is a sibling of the cycle (one inside the cycle is replaced), and `retire_ticket` (`884`). `--set-json KEY=JSON` stores dict and list values; `--set` still stores strings.
+
+A `real-lane` that fails after its dry-run retires the PREPARED release it made (archive, then move aside, never delete) when `retire_ticket` is configured, so the next run's `authority:no-stale-prepared` row is not blocked. Leftovers of an abandoned run: `release_preflight.py retire-stale --coordination-root DIR --ticket N --archive-dir DIR [--keep RELEASE_ID]`.

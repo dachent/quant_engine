@@ -849,6 +849,11 @@
       1
     ],
     [
+      "release_replica",
+      "release_preflight",
+      1
+    ],
+    [
       "release_spec_remap",
       "release_cycle_manifest",
       1
