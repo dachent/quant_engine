@@ -441,6 +441,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         "moved_pointers": moved,
         "post_commit_findings_sha256": _sha(Path(args.post_findings).read_bytes()),
         "post_release_receipt_id": post_receipt_id,
+        "cycle_predecessor_release_id": cycle["predecessor"]["release_id"],
         "pre_commit_findings_sha256": _sha(Path(args.pre_findings).read_bytes()),
         "predecessor_release_id": predecessor_id,
         "release_id": release_id,

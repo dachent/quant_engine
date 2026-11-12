@@ -15272,7 +15272,11 @@ def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
     renderer = (REPOSITORY_ROOT / "apps/portfolio-control-panel/app.js").read_text(
         encoding="utf-8"
     )
-    emitted = {panel.PANEL_SCHEMA_VERSION, panel.CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION}
+    emitted = {
+        panel.PANEL_SCHEMA_VERSION,
+        panel.CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION,
+        panel.ACCOUNT_FINANCING_PANEL_SCHEMA_VERSION,
+    }
     allow_list = re.search(
         r"!\[([0-9, ]+)\]\.includes\(data\.panel_schema_version\)", renderer
     )
@@ -15280,7 +15284,7 @@ def test_every_panel_reader_accepts_the_versions_the_builder_emits() -> None:
     renderer_versions = {int(item) for item in allow_list.group(1).split(",")}
     schema_versions = set(schema["properties"]["panel_schema_version"]["enum"])
 
-    assert emitted == {24, 25}
+    assert emitted == {24, 25, 26}
     assert emitted <= schema_versions and emitted <= renderer_versions
     assert schema_versions == renderer_versions
 
@@ -15350,6 +15354,11 @@ def test_the_report_version_selects_the_panel_version() -> None:
     assert panel._panel_schema_version_for(3) == 25
     assert panel._panel_schema_version_for(4) == 25
     assert panel._panel_schema_version_for(True) == 24
+    # account financing rows (#894) select 26 whatever the report version
+    financing = [{"data_class": "ACCOUNT_FINANCING"}]
+    assert panel._panel_schema_version_for(5, financing) == 26
+    assert panel._panel_schema_version_for(2, financing) == 26
+    assert panel._panel_schema_version_for(5, [{"data_class": "FINANCING_COST"}]) == 25
 
 
 def test_a_pdf_locator_outside_the_streams_is_refused(tmp_path: Path) -> None:
