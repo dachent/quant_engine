@@ -190,3 +190,10 @@ def test_prior_receipt_is_a_usable_baseline(tmp_path: Path) -> None:
 def test_no_roots_is_a_usage_error() -> None:
     with pytest.raises(canary_module.CanaryError):
         canary_module.canary([], None, fingerprint_fn=_fp)
+
+
+def test_unwritable_receipt_is_usage_error(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    out = tmp_path / "no" / "such" / "receipt.json"
+    assert canary_module.main(["run", "--root", str(root), "--out", str(out)]) == 3

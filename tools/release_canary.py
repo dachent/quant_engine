@@ -420,7 +420,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 3
     text = json.dumps(receipt, indent=1, sort_keys=True) + "\n"
     if args.out:
-        args.out.write_bytes(text.encode("utf-8"))
+        try:
+            args.out.write_bytes(text.encode("utf-8"))
+        except OSError as exc:
+            print(f"release-canary: cannot write receipt: {exc}", file=sys.stderr)
+            return 3
     print(text, end="")
     return 0 if receipt["status"] == "PASS" else 1
 
