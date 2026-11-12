@@ -8313,6 +8313,10 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
                 "provider counted as current at the common EOD although its data ends earlier",
             )
         elif day < cutoff:
+            if _finite_provider_without_active_account(ctx, row):
+                # C5 (#895 F2): a finite-boundary provider that no active account of the
+                # crosswalk draws on ends where its selected manifest ends, by design.
+                continue
             yield _finding(
                 "dates.source_clock",
                 NOT_READY,
@@ -8342,6 +8346,41 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
                 ("C5",),
                 "recurring source is stale at the cutoff (labelled STALE)",
             )
+
+
+_FINITE_BOUNDARY_BASIS = "FINITE_SELECTED_MANIFEST_BOUNDARY"
+
+
+def _finite_provider_without_active_account(
+    ctx: Context, row: Mapping[str, Any]
+) -> bool:
+    """Recomputed, not read from the label: the row says finite and not applicable, and
+    the authoritative crosswalk shows no account of that provider active at the cutoff.
+
+    A missing or unreadable crosswalk, or a provider the crosswalk names with an active
+    account, leaves the finding in place; the producer's own label alone grants nothing.
+    """
+
+    finality = row.get("finality")
+    source = row.get("source_id")
+    crosswalk = ctx.gen.external.crosswalk
+    crosswalk_rows = rows(crosswalk, "rows") if isinstance(crosswalk, dict) else []
+    if (
+        row.get("applies_to_latest_common_eod") is not False
+        or not isinstance(finality, Mapping)
+        or finality.get("basis") != _FINITE_BOUNDARY_BASIS
+        or not isinstance(source, str)
+        or not source.strip()
+        or not crosswalk_rows
+    ):
+        return False
+    wanted = source.strip().casefold()
+    return not any(
+        isinstance(item.get("provider"), str)
+        and item["provider"].strip().casefold() == wanted
+        and _epoch_covers_cutoff(item, ctx.cutoff)
+        for item in crosswalk_rows
+    )
 
 
 def check_weekly_current_week(ctx: Context) -> Iterator[Finding]:
