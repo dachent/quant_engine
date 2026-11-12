@@ -85,3 +85,19 @@ def test_a_label_without_the_finite_basis_grants_nothing(tmp_path):
     row = {**FINITE_ROW, "finality": {"basis": "PROVIDER_FINAL"}}
     found = _source_clock_rows(tmp_path, row, active=False)
     assert [f.klass for f in found] == ["NOT_READY"]
+
+
+def test_a_provider_the_crosswalk_never_names_is_not_exempt(tmp_path):
+    # No account is ever recorded for this provider: nothing proves it feeds no active
+    # strategy, so the finding stays.
+    row = {**FINITE_ROW, "source_id": "fidelity"}
+    spec = Spec(
+        report=[_append(("source_clock", "source_data_as_of"), row)],
+        post_write=[_crosswalk_with_providers([])],
+    )
+    found = [
+        f
+        for f in run(build(tmp_path, spec))
+        if f.check_id == "dates.source_clock" and f.entity == "fidelity"
+    ]
+    assert [f.klass for f in found] == ["NOT_READY"]

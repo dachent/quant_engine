@@ -4603,7 +4603,9 @@ def _number_text(value: float) -> str:
     return format(value, ".12g")
 
 
-_MACHINE_PARAMETERISED = re.compile(r"\b([a-z]+(?:_[a-z]+)+):([A-Za-z0-9_:.-]+)")
+_MACHINE_PARAMETERISED = re.compile(
+    r"\b([a-z]+(?:_[a-z]+)+):([A-Za-z0-9_:.-]*[A-Za-z0-9_])"
+)
 _MACHINE_UPPER = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
 
 
@@ -11520,11 +11522,7 @@ def _panel_data(
         # #895 F9: the report already carries this identity row; ``provenance`` still
         # names the report's own rows here (the assignment completes after this
         # literal), so an identical row is not repeated and a differing one stays.
-        *(
-            [hwm_policy_row]
-            if hwm_policy_row not in provenance
-            else []
-        ),
+        *([hwm_policy_row] if hwm_policy_row not in provenance else []),
         *(
             [
                 {

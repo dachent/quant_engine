@@ -33,7 +33,9 @@ REAL_NOTE = "transport WEB_CONTRACT; manual_export_partial:2026-02-14-2026-08-14
 
 def test_real_gate_note_tokens_become_words(panel):
     shown = panel._operator_readable(REAL_NOTE)
-    assert shown == "transport web contract; manual export partial (2026-02-14-2026-08-14)"
+    assert (
+        shown == "transport web contract; manual export partial (2026-02-14-2026-08-14)"
+    )
     assert checks._MACHINE_WORD.findall(shown) == []
 
 
@@ -48,3 +50,9 @@ def test_the_note_before_the_fix_was_a_validator_finding(panel):
 @pytest.mark.parametrize("value", [None, "", "plain text", 3])
 def test_other_values_are_unchanged(panel, value):
     assert panel._operator_readable(value) == value
+
+
+def test_a_trailing_full_stop_is_not_swallowed_by_the_argument(panel):
+    assert panel._operator_readable("see manual_export_partial:2026-02-14.") == (
+        "see manual export partial (2026-02-14)."
+    )

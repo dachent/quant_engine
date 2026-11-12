@@ -4805,9 +4805,9 @@ def test_report_dependence_identity_does_not_replace_report_artifact_identity(
     # #895 F9: the panel states the HWM policy identity once. When the report already
     # carries the identical row the panel does not repeat it (preservation of the report
     # row must not read as a duplicated one); the kill case is the old unconditional append.
-    assert [r for r in data["provenance"] if r["artifact"] == "portfolio-hwm-policy"] == [
-        hwm_policy_provenance
-    ]
+    assert [
+        r for r in data["provenance"] if r["artifact"] == "portfolio-hwm-policy"
+    ] == [hwm_policy_provenance]
     repeated = json.loads(json.dumps(report))
     repeated["provenance"] = [*repeated.get("provenance", []), hwm_policy_provenance]
     repeated_root = tmp_path / "report-with-hwm-row"

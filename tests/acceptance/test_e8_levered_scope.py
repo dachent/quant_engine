@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from test_validate_generation import Spec, _set, build, run
+from test_validate_generation import Spec, build, run
 
-STATE = {"data_class": "ACCOUNT_FINANCING", "measurement_basis": "ACCOUNT_FINANCING_STATE"}
+STATE = {
+    "data_class": "ACCOUNT_FINANCING",
+    "measurement_basis": "ACCOUNT_FINANCING_STATE",
+}
 
 
 def _uncovered(report: dict[str, Any]) -> None:
@@ -22,8 +25,13 @@ def _uncovered(report: dict[str, Any]) -> None:
 def _state(account: str, classification: str):
     def mutate(report: dict[str, Any]) -> None:
         report["leverage_disclosures"].append(
-            {"account_id": account, "strategy_id": None, **STATE, "classification": classification,
-             "coverage_status": "COMPLETE_DECLARED"}
+            {
+                "account_id": account,
+                "strategy_id": None,
+                **STATE,
+                "classification": classification,
+                "coverage_status": "COMPLETE_DECLARED",
+            }
         )
 
     return mutate
@@ -52,8 +60,12 @@ def test_not_levered_accounts_leave_the_check(tmp_path):
 
 
 def test_levered_and_incidental_debit_stay_applicable(tmp_path):
-    found = _e8(tmp_path, _state("A1", "LEVERED"), _state("B1", "INCIDENTAL_DEBIT"),
-                _state("B2", "NOT_LEVERED"))
+    found = _e8(
+        tmp_path,
+        _state("A1", "LEVERED"),
+        _state("B1", "INCIDENTAL_DEBIT"),
+        _state("B2", "NOT_LEVERED"),
+    )
     assert _uncovered_accounts(found) == {"A1", "B1"}
 
 
@@ -63,6 +75,30 @@ def test_all_accounts_not_levered_is_silent(tmp_path):
 
 
 def test_an_unreadable_classification_does_not_narrow(tmp_path):
-    found = _e8(tmp_path, _state("A1", "MAYBE"), _state("B1", "NOT_LEVERED"),
-                _state("B2", "NOT_LEVERED"))
+    found = _e8(
+        tmp_path,
+        _state("A1", "MAYBE"),
+        _state("B1", "NOT_LEVERED"),
+        _state("B2", "NOT_LEVERED"),
+    )
+    assert _uncovered_accounts(found) == {"A1"}
+
+
+def test_a_not_levered_row_without_evidence_does_not_narrow(tmp_path):
+    # An account with no debit evidence defaults to NOT_LEVERED in the builder; the
+    # declaration narrows the check only when its own coverage is stated available.
+    def unevidenced(report):
+        report["leverage_disclosures"].append(
+            {
+                "account_id": "A1",
+                "strategy_id": None,
+                **STATE,
+                "classification": "NOT_LEVERED",
+                "coverage_status": "OBSERVED_UNRECONCILED",
+            }
+        )
+
+    found = _e8(
+        tmp_path, unevidenced, _state("B1", "NOT_LEVERED"), _state("B2", "NOT_LEVERED")
+    )
     assert _uncovered_accounts(found) == {"A1"}

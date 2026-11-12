@@ -7896,7 +7896,8 @@ def _dated_sections(
     # M5 (#895 F2): the provider reference comparisons carry their own observed end,
     # published beside the benchmark ones. A provider series that ended before the
     # cutoff is a stale input; it is labelled NOT_READY with its true end date, never a
-    # commit refusal (a missing or non-date value is skipped here: the schema owns it).
+    # commit refusal for staleness itself (a non-date value or one after the cutoff is
+    # refused like the benchmark rows; an absent end date is skipped, the schema owns it).
     provider_rows = node(ctx.report, "strategy_attribution", "comparisons")
     for position, row in enumerate(
         provider_rows if isinstance(provider_rows, list) else []
@@ -8032,8 +8033,6 @@ def _date_role_is_valid(role: tuple[str, Any], status: Any, value: Any) -> bool:
         return (
             isinstance(detail.get("strategy_id"), str)
             and bool(detail["strategy_id"].strip())
-            and isinstance(detail.get("reference_series_id"), str)
-            and bool(detail["reference_series_id"].strip())
             and _canonical_iso_day(value) is not None
             and value == detail.get("observed_end")
         )
@@ -8375,7 +8374,12 @@ def _finite_provider_without_active_account(
     ):
         return False
     wanted = source.strip().casefold()
-    return not any(
+    known = {
+        item["provider"].strip().casefold()
+        for item in crosswalk_rows
+        if isinstance(item.get("provider"), str)
+    }
+    return wanted in known and not any(
         isinstance(item.get("provider"), str)
         and item["provider"].strip().casefold() == wanted
         and _epoch_covers_cutoff(item, ctx.cutoff)
@@ -8843,6 +8847,8 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
             }
             if all(
                 row.get("classification") == "NOT_LEVERED"
+                and is_available(row.get("coverage_status"))
+                and "UNVERIFIED" not in str(row.get("coverage_reason"))
                 for row in disclosures
                 if str(row.get("account_id")) == account
                 and row.get("data_class") == "ACCOUNT_FINANCING"
