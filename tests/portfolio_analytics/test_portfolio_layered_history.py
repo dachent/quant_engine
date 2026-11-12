@@ -3796,6 +3796,15 @@ def test_unadmitted_model_live_keeps_the_account_out_and_the_strategy_not_ready(
     )
     assert p123["modes"]["LIVE_ONLY"]["status"] == "AVAILABLE"
     assert p123["modes"]["LIVE_PLUS_BACKTEST"]["status"] == "REQUIRED_NOT_READY"
+    # The unadmitted layer decides first, whatever the backtest's own state: the
+    # research series is never AVAILABLE for want of its model-live layer, and the
+    # reason does not hide behind a backtest reason (this fixture is not pre-admitted).
+    for strategy in ("p123-ai-factor", "p123-eu"):
+        row = next(r for r in coverage["strategies"] if r["strategy_id"] == strategy)
+        assert row["modes"]["LIVE_PLUS_BACKTEST"] == {
+            "reason": "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED",
+            "status": "REQUIRED_NOT_READY",
+        }
     validate_layered_history_generation(
         artifacts=artifacts,
         manifest_content=manifest_content,

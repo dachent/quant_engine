@@ -6004,9 +6004,15 @@ def build_layered_history_generation(
         hybrid_reason = live_reason
         if exclusion_reason is None and strategy_id in model_live_layers:
             # The research series stands on backtest + model live; the account
-            # does not decide it.
-            hybrid_state = "AVAILABLE"
-            hybrid_reason = None
+            # does not decide it.  A model-live layer the contract has not
+            # admitted decides it first: the series is never AVAILABLE, even for
+            # an instant, without that layer.
+            if model_live_layers[strategy_id][1]:
+                hybrid_state = "AVAILABLE"
+                hybrid_reason = None
+            else:
+                hybrid_state = "REQUIRED_NOT_READY"
+                hybrid_reason = "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
         if (
             exclusion_reason is None
             and hybrid_state == "AVAILABLE"
@@ -6025,14 +6031,6 @@ def build_layered_history_generation(
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
-        if (
-            exclusion_reason is None
-            and strategy_id in model_live_layers
-            and hybrid_state == "AVAILABLE"
-            and not model_live_layers[strategy_id][1]
-        ):
-            hybrid_state = "REQUIRED_NOT_READY"
-            hybrid_reason = "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
         if hybrid_state == "REQUIRED_NOT_READY":
             hybrid_not_ready.append(strategy_id)
         strategy_segments = [
@@ -8417,8 +8415,12 @@ def validate_layered_history_generation(
         if admitted_backtest and expected_version_status != "EVIDENCED":
             raise TargetSeriesError("unapproved backtest entered a selected mode")
         if exclusion_reason is None and strategy_id in model_live_layers:
-            hybrid_status = "AVAILABLE"
-            hybrid_reason = None
+            if model_live_layers[strategy_id][1]:
+                hybrid_status = "AVAILABLE"
+                hybrid_reason = None
+            else:
+                hybrid_status = "REQUIRED_NOT_READY"
+                hybrid_reason = "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
         if (
             exclusion_reason is None
             and hybrid_status == "AVAILABLE"
@@ -8439,14 +8441,6 @@ def validate_layered_history_generation(
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
-        if (
-            exclusion_reason is None
-            and strategy_id in model_live_layers
-            and hybrid_status == "AVAILABLE"
-            and not model_live_layers[strategy_id][1]
-        ):
-            hybrid_status = "REQUIRED_NOT_READY"
-            hybrid_reason = "REQUIRED_NOT_READY_MODEL_LIVE_NOT_ADMITTED"
         expected_modes: dict[str, dict[str, str | None]] = {
             "LIVE_ONLY": {"reason": live_reason, "status": live_status},
             "LIVE_PLUS_BACKTEST": {
