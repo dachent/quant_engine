@@ -14578,7 +14578,16 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
                     ("canonical_json_bytes", None),
                 ),
             ),
-            ("quant_engine.core.strict_json", 0, (("strict_json_loads", None),)),
+            (
+                "quant_engine.core.strict_json",
+                0,
+                (
+                    ("StrictJSONError", None),
+                    ("strict_json_loads", None),
+                    ("strict_json_shared", None),
+                    ("verify_shared_unmutated", None),
+                ),
+            ),
         }
     )
     expected_snapshot_roles = (
@@ -14902,7 +14911,7 @@ def test_c4d1a_core_contract_objects_are_identical_and_pinned(
         ),
         "quant_engine.core.strict_json": (
             "packages/core/src/quant_engine/core/strict_json.py",
-            "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
+            "a41faf372e4298110e96d275769ab2453e689349269f532333d6a09844880cde",
         ),
     }
     modules = {
@@ -15284,7 +15293,7 @@ def _c4d1b_parent_core_table() -> tuple[dict[str, object], set[bytes]]:
     expected_pins = {
         "quant_engine.core.snapshots": "ba9e0ee78c84a0c3ec38cab2e778284bcf02335c5958266f0823a04072e4e653",
         "quant_engine.core.contracts": "619c4f0c7ad51fa868a2e0213371310efb337bf6be2797e31150518d6f179fc9",
-        "quant_engine.core.strict_json": "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
+        "quant_engine.core.strict_json": "a41faf372e4298110e96d275769ab2453e689349269f532333d6a09844880cde",
     }
     modules = {
         "quant_engine.core.snapshots": snapshots_module,
