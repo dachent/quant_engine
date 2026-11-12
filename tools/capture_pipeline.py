@@ -888,7 +888,8 @@ def _read_pins(pin_path: Path) -> dict[str, dict[str, Any]]:
         or not isinstance(doc.get("pins"), dict)
     ):
         raise CaptureRefused("PIN_SCHEMA")  # never treated as empty, never overwritten
-    return doc["pins"]
+    pins: dict[str, dict[str, Any]] = doc["pins"]
+    return pins
 
 
 def admit_input(
@@ -1003,7 +1004,7 @@ def _entry_for(
         for e in by_cutoff.values()
         if _iso(e["cutoff"], "BAD_CUTOFF") < c and _iso(e["as_of"], "BAD_AS_OF") <= c
     ]
-    return max(cands, key=lambda e: _iso(e["as_of"], "BAD_AS_OF"), default=None)  # type: ignore[no-any-return]
+    return max(cands, key=lambda e: _iso(e["as_of"], "BAD_AS_OF"), default=None)
 
 
 def _resolve(
