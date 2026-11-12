@@ -156,7 +156,7 @@
         "disposition": {"enum": ["AUTHORITATIVE", "RECONCILIATION_ONLY", "REFERENCE_ONLY", "BLOCKED_GAP"]},
         "effective_end": {"type": "string", "format": "date"},
         "effective_start": {"type": "string", "format": "date"},
-        "evidence_layer": {"enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE", "PREDECESSOR", "SHADOW_OOS", "BACKTEST", "CONCEPTUAL_STRESS"]},
+        "evidence_layer": {"enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE", "MODEL_LIVE", "COPY_RECORD", "OFFICIAL_VEHICLE", "PREDECESSOR", "SHADOW_OOS", "BACKTEST", "CONCEPTUAL_STRESS"]},
         "fact_type": {"type": "string", "minLength": 1},
         "pool_id": {"type": ["string", "null"]},
         "provider_id": {"type": "string", "minLength": 1},
