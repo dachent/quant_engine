@@ -70,3 +70,15 @@ def test_small_inputs_are_fresh_mutable_objects():
     a["a"].append(2)
     assert b == {"a": [1]}
     verify_shared_unmutated()
+
+
+def test_a_mutated_shared_object_is_evicted_and_never_served_again():
+    raw = _big_payload()
+    shared = strict_json_shared(raw, label="t")
+    assert isinstance(shared, dict)
+    shared["flag"] = False
+    with pytest.raises(StrictJSONError, match="mutated"):
+        verify_shared_unmutated()
+    fresh = strict_json_shared(raw, label="t")
+    assert fresh is not shared and fresh["flag"] is True
+    verify_shared_unmutated()

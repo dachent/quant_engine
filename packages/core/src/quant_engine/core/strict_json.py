@@ -128,10 +128,14 @@ def strict_json_shared(value: bytes, *, label: str) -> object:
 def verify_shared_unmutated() -> None:
     """Raise if any caller mutated an object handed out by ``strict_json_shared``."""
 
+    global _shared_bytes
     with _shared_lock:
-        entries = list(_shared.values())
-    for parsed, digest in entries:
+        entries = list(_shared.items())
+    for key, (parsed, digest) in entries:
         if _tree_digest(parsed) != digest:
+            with _shared_lock:  # never serve a mutated object again
+                if _shared.pop(key, None) is not None:
+                    _shared_bytes -= len(key) * 4
             raise StrictJSONError("shared parsed JSON was mutated by a caller")
 
 
