@@ -659,6 +659,14 @@ def test_the_real_cycle_resolve_ledger_spec_and_ledger_stages_run_in_order(
         state["stages"][i]["status"]
         for i in ("cycle-resolve", "provenance", "ledger-spec", "ledger")
     ] == ["ok"] * 4
+    # every process stage got its own timing log and a summary of it (#882)
+    for stage_id in ("provenance", "ledger-spec", "ledger"):
+        record = state["stages"][stage_id]
+        assert Path(record["timing_log"]).parent == cycle / "stage-timing"
+        assert set(record["timing_summary"]["verifier_calls"]) == {
+            "financial_outcomes",
+            "product_authority",
+        }
     # a second run keeps them; a changed input of a finished stage is refused
     assert _run(staged, "run", "--through", "ledger") == 0
     roots = Path(staged["values"]["cycle_roots_file"])

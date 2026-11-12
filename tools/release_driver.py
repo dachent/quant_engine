@@ -60,6 +60,7 @@ from quant_engine.core import (
 )
 
 from quant_engine.core import InterpreterRefusal, require_interpreter
+from quant_engine.core import STAGE_TIMING_LOG_ENV, summarize_stage_timing
 import release_cycle_manifest
 
 GRAPH_DEFAULT = (
@@ -1692,6 +1693,7 @@ def _execute_stage(
     attempt = len(list(log_dir.glob(f"{stage['id']}.*.log"))) + 1
     log_path = log_dir / f"{stage['id']}.{attempt}.log"
     started = time.monotonic()
+    started_epoch = time.time()
     started_at = _now()
     record: dict[str, Any] = {
         "status": "running",
@@ -1729,6 +1731,12 @@ def _execute_stage(
             **os.environ,
             **{k: run.expand(v) for k, v in stage.get("env", {}).items()},
         }
+        # Every stage and every child it starts appends to one timing log (#882).
+        timing_dir = run.cycle / "stage-timing"
+        timing_dir.mkdir(parents=True, exist_ok=True)
+        timing_log = timing_dir / f"{stage['id']}.{attempt}.jsonl"
+        env.setdefault(STAGE_TIMING_LOG_ENV, str(timing_log))
+        record["timing_log"] = env[STAGE_TIMING_LOG_ENV]
         if stdout_to is not None:
             stdout_to.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("wb") as log:
@@ -1759,14 +1767,28 @@ def _execute_stage(
     with run.lock:
         _finish_record(run, stage, record, failures, elapsed, rc, previous, outputs)
     counters = _counters(run, stage, log_path, *([stdout_to] if stdout_to else []))
-    if counters is not None:
+    timing_summary = None
+    if "timing_log" in record:
+        timing_summary = summarize_stage_timing(
+            record["timing_log"], started_epoch, time.time()
+        )
+    if counters is not None or timing_summary is not None:
         with run.lock:
-            record["work_counters"] = counters
+            if counters is not None:
+                record["work_counters"] = counters
+            if timing_summary is not None:
+                record["timing_summary"] = timing_summary
             run.save()
     _timing(
         run,
         f"{stage['id']} {record['status']} rc={rc} seconds={elapsed}"
-        + (f" counters={json.dumps(counters, sort_keys=True)}" if counters else ""),
+        + (f" counters={json.dumps(counters, sort_keys=True)}" if counters else "")
+        + (
+            f" verifier_calls={json.dumps(timing_summary['verifier_calls'], sort_keys=True)}"
+            f" max_silent_seconds={timing_summary['max_silent_seconds']}"
+            if timing_summary
+            else ""
+        ),
     )
     return record
 

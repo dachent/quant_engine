@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import functools
 from datetime import date, datetime
 from enum import StrEnum
 import hashlib
@@ -18,9 +19,9 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
+from typing import Any, BinaryIO, Callable, Final, Mapping, Self, TypeVar, cast
 
-from quant_engine.core import parallel_hash, stage_timing
+from quant_engine.core import parallel_hash, stage_timing, verification_receipt
 from quant_engine.core.authority import FreshnessPolicy
 from quant_engine.core.code_identity import (
     COMMIT_SCHEME,
@@ -56,6 +57,7 @@ from quant_engine.core.release import (
 )
 
 
+T = TypeVar("T")
 _SCHEMA_VERSION: Final = 1
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1283,12 +1285,74 @@ def _provider_admission_validator() -> Callable[..., None]:
             sys.modules[module_name] = previous
 
 
-def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any]:
-    """Run the repository's single product completion verifier at this boundary.
+def _receipt_identity(spec: PipelineSpec) -> dict[str, object] | None:
+    """The spec binding of a receipt, or None for anything that is not a real spec."""
 
-    The verifier records every call in its own ledger under ``spec.state_root``;
-    ``caller`` only names this boundary, so counts never travel through return values.
+    digest = getattr(spec, "spec_sha256", None)
+    state_root = getattr(spec, "state_root", None)
+    if not isinstance(digest, str) or not isinstance(state_root, Path):
+        return None
+    return {"spec_sha256": digest, "state_root": str(state_root.resolve())}
+
+
+def _read_only_receipts(
+    function: Callable[[PipelineSpec], T],
+) -> Callable[[PipelineSpec], T]:
+    """Plan and status never write: verification receipts stay in memory for them."""
+
+    @functools.wraps(function)
+    def wrapper(spec: PipelineSpec) -> T:
+        restore = verification_receipt.PERSIST.set(False)
+        try:
+            return function(spec)
+        finally:
+            verification_receipt.PERSIST.reset(restore)
+
+    return wrapper
+
+
+def _receipt_bookkeeping_roots(spec: PipelineSpec) -> tuple[Path, ...]:
+    """State directories the verifiers only append bookkeeping to (one file per call)."""
+
+    return (
+        spec.state_root / "financial-verification-ledger",
+        verification_receipt.receipt_directory(spec.state_root),
+    )
+
+
+def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any]:
+    """Run the verifier, or reuse its hash-bound receipt when every input is unchanged.
+
+    The verifier is a function of its code and the files it reads; the receipt
+    records that read-set (see ``verification_receipt``) and a reuse re-hashes all
+    of it. The per-call ledger entry is still written, marked as a reuse.
     """
+
+    repo_root = Path(__file__).resolve().parents[5]
+    identity = _receipt_identity(spec)
+    if identity is None:
+        return _verify_financial_outcomes_live(spec, caller)
+
+    def reused(receipt_sha256: str) -> None:
+        _with_financial_outcomes_module(
+            lambda module: module.record_receipt_reuse(spec, caller, receipt_sha256)
+        )
+
+    return verification_receipt.run_with_receipt(
+        "financial_outcomes",
+        identity,
+        repo_root=repo_root,
+        state_root=spec.state_root,
+        compute=lambda: _verify_financial_outcomes_live(spec, caller),
+        on_reuse=reused,
+        exclude_roots=_receipt_bookkeeping_roots(spec),
+    )
+
+
+def _with_financial_outcomes_module(call: Callable[[Any], T]) -> T:
+    """Load the verifier module as the boundary always did and run ``call`` with the
+    tools directory on ``sys.path`` (the verifier imports its siblings lazily)."""
+
     tools_root = Path(__file__).resolve().parents[5] / "tools"
     path = tools_root / "portfolio_financial_outcomes.py"
     if path.is_symlink() or not path.is_file():
@@ -1303,14 +1367,26 @@ def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any
     try:
         sys.path.insert(0, str(tools_root))
         module_spec.loader.exec_module(module)
-        proof = module.validate_financial_outcomes(spec, caller=caller)
+        return call(module)
+    finally:
+        sys.path[:] = previous_path
+
+
+def _verify_financial_outcomes_live(spec: PipelineSpec, caller: str) -> dict[str, Any]:
+    """Run the repository's single product completion verifier at this boundary.
+
+    The verifier records every call in its own ledger under ``spec.state_root``;
+    ``caller`` only names this boundary, so counts never travel through return values.
+    """
+    try:
+        proof = _with_financial_outcomes_module(
+            lambda module: module.validate_financial_outcomes(spec, caller=caller)
+        )
         if not isinstance(proof, dict) or proof.get("status") != "PASS":
             raise PipelineValidationError("financial outcomes did not pass")
         return cast(dict[str, Any], proof)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise PipelineValidationError(f"financial outcomes failed: {exc}") from exc
-    finally:
-        sys.path[:] = previous_path
 
 
 def _governed_hwm_input_policy(
@@ -1844,6 +1920,23 @@ def _expected_hwm_input_authority(
 
 @stage_timing.timed("product_authority")
 def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | None:
+    repo_root = Path(__file__).resolve().parents[5]
+    identity = _receipt_identity(spec)
+    if identity is None:
+        return _financial_mvp_product_authority_live(spec)
+    return verification_receipt.run_with_receipt(
+        "product_authority",
+        identity,
+        repo_root=repo_root,
+        state_root=spec.state_root,
+        compute=lambda: _financial_mvp_product_authority_live(spec),
+        exclude_roots=_receipt_bookkeeping_roots(spec),
+    )
+
+
+def _financial_mvp_product_authority_live(
+    spec: PipelineSpec,
+) -> dict[str, Any] | None:
     product_matches = [
         item for item in spec.gates if item.gate_id == _FINANCIAL_MVP_PRODUCT_GATE
     ]
@@ -4092,6 +4185,7 @@ def _production_hwm_available(authority: Mapping[str, Any] | None) -> bool:
     return isinstance(hwm, Mapping) and hwm.get("state") == "AVAILABLE"
 
 
+@_read_only_receipts
 def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     """Return the exact non-mutating execution and release plan."""
 
@@ -4956,6 +5050,7 @@ def execute_pipeline(
     }
 
 
+@_read_only_receipts
 def pipeline_status(spec: PipelineSpec) -> dict[str, object]:
     _validate_portfolio_orchestration(spec, verify_runtime=False)
     product_authority = _financial_mvp_product_authority(spec)
