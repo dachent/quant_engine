@@ -38,6 +38,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import stat as stat_module
 import sys
 import threading
@@ -84,6 +86,29 @@ _INCOMPLETE_EVENTS = frozenset(
 )
 
 _ENV_NAMES = ("TZ", "PYTHONUTF8", "PYTHONHASHSEED", "HOME", "USERPROFILE")
+
+
+_PINNED_GIT_SHOW = re.compile(r"[0-9a-f]{40}:[^\s:]+")
+
+
+def allowed_child_command(command: object) -> bool:
+    """True only for ``git show <40-hex commit>:<path>``: content-addressed by an
+    immutable commit id, so the child cannot return different bytes later."""
+
+    if isinstance(command, str):
+        try:
+            command = shlex.split(command, posix=False)
+        except ValueError:
+            return False
+    if isinstance(command, (list, tuple)) and all(isinstance(c, str) for c in command):
+        tokens = [str(c).strip('"') for c in command]
+        return (
+            len(tokens) == 3
+            and os.path.basename(tokens[0]).lower() in {"git", "git.exe"}
+            and tokens[1] == "show"
+            and _PINNED_GIT_SHOW.fullmatch(tokens[2]) is not None
+        )
+    return False
 
 
 class VerificationReceiptMismatch(RuntimeError):
@@ -188,6 +213,20 @@ class _Recorder:
             self.incomplete.append(reason)
 
     def on_event(self, event: str, args: tuple[object, ...]) -> None:
+        if (
+            event == "subprocess.Popen"
+            and len(args) > 1
+            and allowed_child_command(args[1])
+        ):
+            return
+        if (
+            event == "_winapi.CreateProcess"
+            and len(args) > 1
+            and allowed_child_command(args[1])
+        ):
+            return
+        if event == "os.posix_spawn" and len(args) > 1:
+            return self.flag(event)
         if event in _INCOMPLETE_EVENTS:
             self.flag(event)
             return

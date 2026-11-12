@@ -432,3 +432,13 @@ def test_installing_the_recorder_keeps_os_capability_checks_true(world):
         for name in ("supports_dir_fd", "supports_fd", "supports_follow_symlinks")
     }
     assert before == after
+
+
+def test_only_a_pinned_git_show_child_is_allowed():
+    sha = "a" * 40
+    assert vr.allowed_child_command(["git", "show", f"{sha}:contracts/x.json"])
+    assert vr.allowed_child_command(f"git show {sha}:contracts/x.json")
+    assert not vr.allowed_child_command(["git", "show", "HEAD:contracts/x.json"])
+    assert not vr.allowed_child_command(["git", "status"])
+    assert not vr.allowed_child_command(["gh", "api", "x"])
+    assert not vr.allowed_child_command(["git", "show", f"{sha}:a", "--textconv"])
