@@ -2038,7 +2038,8 @@ def _overlap_reconciliation(
     else:
         correlation = statistics.correlation(account_values, provider_values)
     differences = [left - right for left, right in zip(account_values, provider_values)]
-    tracking_error = statistics.pstdev(differences) * math.sqrt(252)
+    # sample standard deviation, like every other tracking error (#904 item 13)
+    tracking_error = statistics.stdev(differences) * math.sqrt(252)
     account_overlap = [
         {"return": format(account[day].normalize(), "f")} for day in common
     ]

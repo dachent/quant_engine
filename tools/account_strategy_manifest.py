@@ -4173,12 +4173,22 @@ def _in_window(day: str, w0: str | None, w1: str | None) -> bool:
 def _annualize_return_on_net_capital(
     return_on_net_capital: Decimal,
     span_days: int,
-) -> Decimal:
-    """Apply the governed piecewise annualization policy to simple RONC."""
+) -> Decimal | None:
+    """Annualise simple RONC geometrically, ACT/365, at every window length.
 
-    if span_days < 365:
-        return return_on_net_capital * Decimal(365) / Decimal(max(span_days, 1))
+    #904: the old rule scaled linearly under a year (2.4% in 40 days printed as 22.3%)
+    and geometrically above, a different convention from every other annualised
+    return.  The figure stays labelled ANNUALISED_FROM_DAYS under a year and the
+    panel shows the window return, not this rate, as the primary figure there.
+    """
+
+    if span_days <= 0:
+        span_days = 1
     if return_on_net_capital <= Decimal(-1):
+        if span_days < 365:
+            # a loss of more than the capital in a short window has no growth base
+            # for a geometric rate; the window return stands alone
+            return None
         raise ManifestError(
             "annualized RONC requires a strictly positive compounded growth base"
         )
@@ -5341,13 +5351,7 @@ def _period_return_fields(
                 ),
                 "window_days": span_days,
                 "window_start_field": "opening_capital_date",
-                "method": (
-                    None
-                    if span_days is None
-                    else "GEOMETRIC_ACT_365"
-                    if span_days >= _PERIOD_ANNUALISATION_MIN_DAYS
-                    else "LINEAR_ACT_365"
-                ),
+                "method": None if span_days is None else "GEOMETRIC_ACT_365",
             },
             "ytd_twr": {"reported_basis": "CUMULATIVE", "window_days": None},
             "calendar_year_twr": {

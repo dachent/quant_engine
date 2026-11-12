@@ -82,11 +82,11 @@ class SleeveLeverage:
     loan_rule: str
     allocation_rule: str
     unlevered_cumulative: Decimal
-    unlevered_annualised: Decimal
+    unlevered_annualised: Decimal | None
     unlevered_max_drawdown: Decimal
     unlevered_current_drawdown: Decimal
     levered_cumulative: Decimal
-    levered_annualised: Decimal
+    levered_annualised: Decimal | None
     levered_max_drawdown: Decimal
     levered_current_drawdown: Decimal
     peak_gross_to_equity: Decimal
@@ -299,9 +299,17 @@ def _drawdown(index: Decimal, peak: Decimal) -> Decimal:
     return index / peak - _ONE
 
 
-def _annualise(index: Decimal, window_days: int, name: str) -> Decimal:
+def _annualise(index: Decimal, window_days: int, name: str) -> Decimal | None:
+    """ACT/365 geometric, from 365 days only: one short-window rule (#904).
+
+    Under a year the window return is the figure; an annual rate extrapolated from
+    it is not published (``None``), as ``twr_annualised`` is not.
+    """
+
     if index <= 0 or window_days <= 0:
         raise SleeveLeverageError("RETURN_NOT_ANNUALISABLE", f"{name} index {index}")
+    if window_days < ANNUALISATION_DAYS:
+        return None
     years = Decimal(window_days) / Decimal(ANNUALISATION_DAYS)
     return (index.ln() / years).exp() - _ONE
 

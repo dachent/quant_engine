@@ -658,8 +658,15 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
     assert combined_performance["return_observations"] == 19
     assert live_performance["observed_start"] == days[10].isoformat()
     assert combined_performance["observed_start"] == days[0].isoformat()
-    assert live_performance["annualization_basis"] == "ACTUAL_DAYS_365_25"
-    assert live_performance["cagr"] is not None
+    assert live_performance["annualization_basis"] == "ACT_365_FROM_OPENING_CLOSE"
+    # nine daily observations: under 365 days, no annualised figure (#904)
+    assert live_performance["cagr"] is None
+    assert live_performance["annualization_status"] == "SUPPRESSED_UNDER_365D"
+    # the combined path holds backtest observations: never an annualised headline
+    assert combined_performance["cagr"] is None
+    assert (
+        combined_performance["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
+    )
     assert combined_performance["maximum_drawdown"] is not None
 
 
@@ -738,7 +745,27 @@ def test_performance_summary_compounds_and_fails_closed_on_invalid_returns() -> 
     summary = correlation._performance_summary(rows)
     assert float(cast(str, summary["cumulative_return"])) == pytest.approx(-0.01)
     assert float(cast(str, summary["maximum_drawdown"])) == pytest.approx(-0.1)
-    assert float(cast(str, summary["cagr"])) == pytest.approx(-0.0100068, rel=1e-5)
+    # the rows themselves are BACKTEST: never annualised, whatever the caller says
+    assert summary["cagr"] is None
+    assert summary["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
+    assert correlation._performance_summary(rows, 0)["cagr"] is None
+    # a live path of 365 days + the opening interval: ACT/365 geometric
+    live = [
+        correlation.ReturnRow(date(2025, 1, 1), 0.1, "ACCOUNT_LIVE", "v1", "0.1"),
+        correlation.ReturnRow(date(2026, 1, 1), -0.1, "ACCOUNT_LIVE", "v1", "-0.1"),
+    ]
+    summary = correlation._performance_summary(live, 0)
+    assert summary["window_days"] == 365 + 365
+    assert round(float(cast(str, summary["cagr"])), 6) == round(
+        0.99 ** (365 / 730) - 1, 6
+    )
+    # an unknown composition fails closed
+    assert (
+        correlation._performance_summary(live, None)["annualization_status"]
+        == "SUPPRESSED_COMPOSITION_UNKNOWN"
+    )
+    assert correlation._backtest_observations({}) is None
+    assert correlation._backtest_observations(None) == 0
 
     with pytest.raises(correlation.CorrelationError, match="greater than -1"):
         correlation._performance_summary(
@@ -787,3 +814,34 @@ def test_combined_mode_ignores_unmatched_backtest_and_rejects_duplicate_layer_da
     )
     with pytest.raises(correlation.CorrelationError, match="within an evidence layer"):
         correlation.build_correlation(duplicate_spec, duplicate_root)
+
+
+def test_every_hypothetical_layer_blocks_the_annualised_figure() -> None:
+    """Review finding: only the literal BACKTEST layer suppressed."""
+
+    for layer in ("BACKTEST", "SHADOW_OOS", "PREDECESSOR", "CONCEPTUAL_STRESS"):
+        rows = [
+            correlation.ReturnRow(date(2025, 1, 1), 0.1, layer, "v1", "0.1"),
+            correlation.ReturnRow(date(2026, 1, 1), -0.1, layer, "v1", "-0.1"),
+        ]
+        summary = correlation._performance_summary(rows, 0)
+        assert summary["cagr"] is None, layer
+        assert summary["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
+
+
+def test_the_window_is_365_days_for_a_full_year_of_daily_returns() -> None:
+    from datetime import timedelta
+
+    rows = [
+        correlation.ReturnRow(
+            date(2025, 1, 6) + timedelta(days=offset),
+            0.001,
+            "ACCOUNT_LIVE",
+            "v1",
+            "0.001",
+        )
+        for offset in range(365)
+    ]
+    summary = correlation._performance_summary(rows, 0)
+    assert summary["window_days"] == 365
+    assert summary["annualization_status"] == "AVAILABLE"

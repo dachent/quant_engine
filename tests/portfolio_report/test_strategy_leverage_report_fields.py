@@ -159,6 +159,10 @@ def test_the_independent_derivation_equals_the_producer() -> None:
     independent = sleeve_basis.derive_leverage(_validator_facts(), "strat_s2")
     produced = _derived().payload()
     for name, value in independent.items():
+        if value is None:
+            # an annual rate under 365 days is not published by either side (#904)
+            assert produced[name] is None, name
+            continue
         assert abs(value - sl.Decimal(produced[name])) < sl.Decimal("1e-9"), name
     assert not sleeve_basis.compare_leverage(
         reporter._leverage_row_fields(_derived()), independent

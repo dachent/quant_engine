@@ -53,6 +53,7 @@ TOTALS_SCHEMA_VERSION: Final = 1
 DECIMAL_PRECISION: Final = 100
 PERIMETER_TOLERANCE: Final = Decimal("1e-18")
 ANNUALISATION_MINIMUM_DAYS: Final = 365
+TRAILING_ANCHOR_TOLERANCE_DAYS: Final = 7
 TWR_BASIS: Final = "GOVERNED_HWM_INDEX"
 OPEN_RULE: Final = "CURRENT_OF_EPOCHS_OPEN_AT_CUTOFF_MINUS_GAIN_OF_ALL_EPOCHS"
 
@@ -227,6 +228,42 @@ def _summed_epoch_twr(
     }
 
 
+def _one_year_before(day: date) -> date:
+    """The calendar anniversary a year earlier (29 February falls back to 28)."""
+
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:
+        return day.replace(year=day.year - 1, day=28)
+
+
+def _index_return_since(
+    path: Sequence[Mapping[str, Any]], anchor: date, end_index: Decimal
+) -> str | None:
+    """Return of the governed index from its last observation on or before ``anchor``.
+
+    None when the index starts after the anchor: a trailing window is never filled
+    with a shorter one.
+    """
+
+    base: Decimal | None = None
+    base_day: date | None = None
+    previous: date | None = None
+    for item in path:
+        day = _day(item["as_of"], "index date")
+        if previous is not None and day <= previous:
+            return None  # an unordered path has no trailing window
+        previous = day
+        if day <= anchor:
+            base, base_day = _decimal(item["index"], "index"), day
+    if base is None or base_day is None or base <= 0:
+        return None
+    if (anchor - base_day).days > TRAILING_ANCHOR_TOLERANCE_DAYS:
+        # the base must be the index at the anchor, not a stale observation before it
+        return None
+    return _text(end_index / base - 1)
+
+
 def build_portfolio_twr(
     governed_hwm_proof: Mapping[str, Any] | None,
     rows: Sequence[Mapping[str, Any]],
@@ -253,6 +290,21 @@ def build_portfolio_twr(
         start = _day(first["as_of"], "index start")
         end = _day(last["as_of"], "index end")
         summed = _summed_epoch_twr(rows)
+        window_days = (end - start).days
+        # ACT/365 geometric, from 365 days only (#904 item 1): the same convention and
+        # the same short-window rule as every other annualised return
+        annualised = (
+            _text(
+                (current_index / base_index) ** (Decimal(365) / Decimal(window_days))
+                - 1
+            )
+            if window_days >= ANNUALISATION_MINIMUM_DAYS
+            else None
+        )
+        trailing_12m = _index_return_since(path, _one_year_before(end), current_index)
+        year_to_date = _index_return_since(
+            path, date(end.year - 1, 12, 31), current_index
+        )
         difference = None
         if summed["status"] == "AVAILABLE":
             difference = _text(headline - _decimal(summed["value"], "summed twr"))
@@ -267,7 +319,10 @@ def build_portfolio_twr(
         "current_index": _text(current_index),
         "window_start": start.isoformat(),
         "window_end": end.isoformat(),
-        "window_days": (end - start).days,
+        "window_days": window_days,
+        "annualised_act_365": annualised,
+        "trailing_12_months": trailing_12m,
+        "year_to_date": year_to_date,
         "source": {
             "artifact": "hwm_governed_proof",
             "policy_id": governed_hwm_proof.get("policy_id"),

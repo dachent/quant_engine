@@ -2512,6 +2512,12 @@ def _metrics(
         "observation_count": len(actual),
         "r_squared": _number(r2),
         "rmse": _number(float(np.sqrt(np.mean(residual**2)))),
+        # #904 item 13: the tracking error names the scaling it carries
+        "tracking_error_annualization": {
+            "estimator": "SAMPLE_STD_X_SQRT_PERIODS",
+            "periods_per_year": periods_per_year,
+            "observations": len(actual),
+        },
         "tracking_error_annualized": _number(tracking_error),
     }
     return result

@@ -604,8 +604,10 @@ def test_epoch_legend_describes_the_annualisation_kernel(tmp_path: Path) -> None
     )
 
     assert "annualized RONC is a simple diagnostic" not in legend
-    assert "simple under 365 days and geometric at 365 days or more" in legend
-    assert "span counted from the opening-capital date" in legend
+    # #904: geometric ACT/365 at every window, no rate shown under a year
+    assert "simple under 365 days" not in legend
+    assert "geometric ACT/365 from the opening-capital date" in legend
+    assert "not shown as a rate for a window under 365 days" in legend
 
 
 # ---- N71 (A15): a difference in loss is percentage points ------------------------

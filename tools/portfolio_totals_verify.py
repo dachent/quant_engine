@@ -587,6 +587,32 @@ def _summed_epoch(rows: Sequence[Mapping[str, Any]]) -> tuple[str, Decimal | Non
     return "AVAILABLE", wealth - 1
 
 
+def _verify_year_before(day: date) -> date:
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:
+        return day.replace(year=day.year - 1, day=28)
+
+
+def _verify_index_return_since(
+    path: Sequence[Mapping[str, Any]], anchor: date, end_index: Decimal
+) -> str | None:
+    """Written from the definition: the index on the last date at or before the anchor,
+    taken only when that date is within seven days of the anchor and the path ascends."""
+
+    dates = [date.fromisoformat(item["as_of"]) for item in path]
+    if any(later <= earlier for earlier, later in zip(dates, dates[1:])):
+        return None
+    candidates = [(day, item) for day, item in zip(dates, path) if day <= anchor]
+    if not candidates:
+        return None
+    base_day, base_item = candidates[-1]
+    base = _d(base_item["index"])
+    if base <= 0 or (anchor - base_day).days > 7:
+        return None
+    return _text(end_index / base - 1)
+
+
 def _check_twr(
     block: Mapping[str, Any],
     proof: Mapping[str, Any] | None,
@@ -617,6 +643,30 @@ def _check_twr(
             or block.get("current_index") != _text(_d(last["index"]))
         ):
             raise _fail("portfolio_twr_cumulative differs from the governed HWM index")
+        # the rate and the trailing windows (#904 item 1), re-derived from the path
+        days = (end - start).days
+        end_index = _d(last["index"])
+        expected = {
+            "annualised_act_365": (
+                _text(
+                    (end_index / _d(first["index"])) ** (Decimal(365) / Decimal(days))
+                    - 1
+                )
+                if days >= 365
+                else None
+            ),
+            "trailing_12_months": _verify_index_return_since(
+                path, _verify_year_before(end), end_index
+            ),
+            "year_to_date": _verify_index_return_since(
+                path, date(end.year - 1, 12, 31), end_index
+            ),
+        }
+        for name, wanted in expected.items():
+            if block.get(name) != wanted:
+                raise _fail(
+                    f"portfolio_twr_cumulative.{name} differs from the re-derivation"
+                )
         summed = block["summed_epoch_twr"]
         status, value = _summed_epoch(rows)
         if summed["status"] != status:

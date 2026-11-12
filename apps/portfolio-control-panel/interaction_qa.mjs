@@ -417,7 +417,11 @@ if (!epochManifest || !Array.isArray(epochManifest.rows)) {
       exactMoney(row.current_value) + derivedNote,
       exactMoney(row.gain) + (row.post_liquidation_income != null ? `incl. post-liquidation income ${exactMoney(row.post_liquidation_income)}` : ""),
       exactPct(row.return_on_net_capital),
-      exactPct(row.annualized_return_on_net_capital), exactPct(row.observation_linked_return),
+      // under one year the cell shows the window return, not the rate (#904)
+      row.annualisation_basis?.annualized_return_on_net_capital?.reported_basis === "ANNUALISED_FROM_DAYS"
+        ? `—not shown: ${row.annualisation_basis.annualized_return_on_net_capital.window_days} day window (under 1 year); the window return is the figure`
+        : exactPct(row.annualized_return_on_net_capital),
+      exactPct(row.observation_linked_return),
       exactFixed(row.observed_hwm_index, 2), exactPct(signedDrawdown(row.observed_max_drawdown)),
     ];
     return rendered.cells[2].primary === row.start

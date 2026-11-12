@@ -9196,7 +9196,14 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                     "cagr": cagr,
                     "cumulative_return": cumulative,
                 }
-            days = _window_days(perf.get("observed_start"), perf.get("observed_end"))
+            # the producer's own window (it opens one interval before the first
+            # return), so the two agree at exactly 365 days
+            published_days = perf.get("window_days")
+            days = (
+                published_days
+                if isinstance(published_days, int)
+                else _window_days(perf.get("observed_start"), perf.get("observed_end"))
+            )
             if cagr is not None and days is not None and days < ONE_YEAR_DAYS:
                 short[f"dependence.{mode}:{series}"] = days
     for row in rows(ctx.report, "strategy_summary"):
@@ -9291,6 +9298,50 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                     None,
                     summary.get("benchmark_annualization"),
                 )
+    # provider comparisons (#904 item 15): the same rule as the benchmark ones
+    provider_comparisons = node(ctx.report, "strategy_attribution", "comparisons")
+    for row in provider_comparisons if isinstance(provider_comparisons, list) else []:
+        metrics = row.get("metrics") if isinstance(row, dict) else None
+        if not isinstance(metrics, Mapping):
+            continue
+        days = _window_days(metrics.get("observed_start"), metrics.get("observed_end"))
+        for key, value in metrics.items():
+            amount = to_decimal(value)
+            if "annualized" not in key or amount is None:
+                continue
+            if days is not None and days < ONE_YEAR_DAYS:
+                summary = comparison_labels.get(str(row.get("strategy_id")), {})
+                if summary.get("provider_comparison_status") == (
+                    "UNAVAILABLE_POLICY_NOT_ADMITTED"
+                ):
+                    # the summary withholds this comparison's figures by policy;
+                    # the raw comparison row is not a published figure
+                    continue
+                short_window(
+                    f"provider.{row.get('strategy_id')}.{key}",
+                    days,
+                    summary,
+                    None,
+                    summary.get("provider_annualization"),
+                )
+    # the sleeve levered and unlevered "return per year": published only from 365 days
+    for row in rows(ctx.report, "strategy_summary"):
+        for kind in ("unlevered", "levered"):
+            annual = to_decimal(row.get(f"return_{kind}_annualised"))
+            window = row.get(f"return_{kind}_window_days")
+            if (
+                annual is not None
+                and isinstance(window, int)
+                and not isinstance(window, bool)
+                and window < ONE_YEAR_DAYS
+            ):
+                short_window(
+                    f"strategy_summary.return_{kind}_annualised:{row.get('strategy_id')}",
+                    window,
+                )
+                blocking[
+                    f"strategy_summary.return_{kind}_annualised:{row.get('strategy_id')}"
+                ] = window
     if extreme:
         yield _finding(
             "lint.extreme_cagr",
