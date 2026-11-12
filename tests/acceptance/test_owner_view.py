@@ -243,13 +243,157 @@ def test_entry_must_state_its_entity_scope() -> None:
     )  # a catch-all by omission is refused
 
 
-def test_row_scope_classifies_the_whole_row_once() -> None:
+def _row_entry(klass: str) -> dict[str, Any]:
+    e = entry(
+        klass, block={"scope": "row", "row_scope_reason": "all entities identical"}
+    )
+    del e["owner_view"]["entity_match"]
+    return e
+
+
+def test_row_scope_classifies_a_uniform_row_once() -> None:
     f = finding(
         "c.one",
-        observed={"uncovered_accounts": {"a1": "X", "a2": "Y"}},
+        observed={"uncovered_accounts": {"a1": "X", "a2": "X"}},
         defects=("E1",),
     )
-    e = entry(ov.CHECKER_BUG, block={"scope": "row"})
-    del e["owner_view"]["entity_match"]
-    view = ov.build_owner_view(doc(f), register=[e], today=TODAY)
+    view = ov.build_owner_view(
+        doc(f), register=[_row_entry(ov.CHECKER_BUG)], today=TODAY
+    )
     assert [i["class"] for i in view["items"]] == [ov.CHECKER_BUG]
+
+
+def test_row_scope_never_hides_a_minority_entity_kill() -> None:
+    f = finding(
+        "c.one",
+        observed={"uncovered_accounts": {"a1": "NO_ROW", "a2": "DEBIT"}},
+        defects=("E1",),
+    )
+    view = ov.build_owner_view(
+        doc(f), register=[_row_entry(ov.NOT_APPLICABLE)], today=TODAY
+    )
+    assert {i["entity"]: i["class"] for i in view["items"]} == {
+        "a1": ov.UNCLASSIFIED,
+        "a2": ov.UNCLASSIFIED,
+    }
+    assert view["real_items"] == 2
+
+
+def test_row_scope_needs_a_reason() -> None:
+    e = _row_entry(ov.CHECKER_BUG)
+    del e["owner_view"]["row_scope_reason"]
+    assert any("row_scope_reason" in m for m in ov.registry_errors([e]))
+
+
+@pytest.mark.parametrize("defect", ["", None, "  "])
+def test_defect_is_required(defect: Any) -> None:
+    e = entry(ov.NOT_APPLICABLE)
+    e["defect"] = defect
+    view = ov.build_owner_view(
+        doc(finding("c.one", defects=("E9",))), register=[e], today=TODAY
+    )
+    assert view["items"][0]["class"] == ov.UNCLASSIFIED and view["registry_errors"]
+
+
+def test_defect_none_matches_only_findings_without_defects() -> None:
+    e = entry(ov.NOT_APPLICABLE, defect="NONE")
+    view = ov.build_owner_view(
+        doc(finding("c.one"), finding("c.one", entity="z", defects=("E1",))),
+        register=[e],
+        today=TODAY,
+    )
+    assert sorted(i["class"] for i in view["items"]) == [
+        ov.NOT_APPLICABLE,
+        ov.UNCLASSIFIED,
+    ]
+
+
+def test_entity_match_is_anchored() -> None:
+    e = entry(ov.NOT_APPLICABLE, block={"entity_match": "ibkr"})
+    view = ov.build_owner_view(
+        doc(finding("c.one", entity="not-ibkr-reserve", defects=("E1",))),
+        register=[e],
+        today=TODAY,
+    )
+    assert view["items"][0]["class"] == ov.UNCLASSIFIED
+
+
+def test_first_match_wins_one_item_per_entity() -> None:
+    reg = [entry(ov.REAL_DATA_GAP), entry(ov.NOT_APPLICABLE)]
+    view = ov.build_owner_view(
+        doc(finding("c.one", defects=("E1",))), register=reg, today=TODAY
+    )
+    assert [i["class"] for i in view["items"]] == [ov.REAL_DATA_GAP]
+
+
+def test_malformed_register_never_crashes_the_page() -> None:
+    reg = [
+        entry(ov.NEEDS_OWNER_DECISION, block={"decision": "pick one"}),
+        entry(ov.REAL_DATA_GAP, close_by="soon"),
+        entry(
+            ov.ACCEPTED_BY_DESIGN, block={"owner_record": "r", "reviewed_on": "soon"}
+        ),
+        "not an object",
+    ]
+    assert len(ov.registry_errors(reg)) == 4
+    view = ov.build_owner_view(
+        doc(finding("c.one", defects=("E1",))), register=reg, today=TODAY
+    )
+    assert view["items"][0]["class"] == ov.UNCLASSIFIED
+
+
+def test_since_is_per_entity_inside_a_split_finding() -> None:
+    old = doc(finding("c.one", observed={"uncovered_accounts": {"a1": "X"}}))
+    new = finding("c.one", observed={"uncovered_accounts": {"a1": "X", "a2": "X"}})
+    view = ov.build_owner_view(doc(new), history=[("r22", old)], today=TODAY)
+    assert {i["entity"]: i["since"] for i in view["items"]} == {"a1": "r22", "a2": None}
+
+
+def test_group_does_not_merge_different_overdue_or_records() -> None:
+    reg = [
+        entry(
+            ov.ACCEPTED_BY_DESIGN,
+            block={
+                "entity_match": "^a$",
+                "owner_record": "ruling-A",
+                "reviewed_on": "2026-11-01",
+            },
+            close_by="2026-11-01",
+        ),
+        entry(
+            ov.ACCEPTED_BY_DESIGN,
+            block={
+                "entity_match": "^b$",
+                "owner_record": "ruling-B",
+                "reviewed_on": "2026-11-01",
+            },
+            close_by="2099-01-01",
+        ),
+    ]
+    f = finding("c.one", observed={"unavailable": ["a", "b"]}, defects=("E1",))
+    md = ov.render_markdown(ov.build_owner_view(doc(f), register=reg, today=TODAY))
+    assert "ruling-A" in md and "ruling-B" in md and md.count("PAST ITS FIX DATE") == 1
+
+
+def test_js_escapes_script_close() -> None:
+    reg = [entry(ov.CHECKER_BUG, block={"what": "</script><script>alert(1)"})]
+    text = ov.render_js(
+        ov.build_owner_view(
+            doc(finding("c.one", defects=("E1",))), register=reg, today=TODAY
+        )
+    )
+    assert "</script>" not in text and "<" not in text
+
+
+def test_reconciliation_failure_writes_no_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gen_dir = tvg.build(tmp_path, tvg.CASES["liquid_identity"][2])
+    monkeypatch.setattr(
+        ov,
+        "reconcile",
+        lambda *a, **k: (_ for _ in ()).throw(ov.ReconciliationError("x")),
+    )
+    assert tvg._cli(str(gen_dir)) == 2
+    out = gen_dir.parent.parent / "validation" / tvg.GEN
+    assert not (out / "findings.json").exists()

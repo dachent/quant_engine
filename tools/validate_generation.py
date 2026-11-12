@@ -185,7 +185,11 @@ def _register_entries() -> list[dict[str, Any]]:
 
     if not REGISTER_PATH.is_file():
         return []
-    return list(json.loads(REGISTER_PATH.read_bytes()).get("entries") or [])
+    try:
+        entries = json.loads(REGISTER_PATH.read_bytes()).get("entries") or []
+    except (OSError, ValueError, AttributeError):
+        return []  # an unreadable register classifies nothing: every finding is real
+    return list(entries) if isinstance(entries, list) else []
 
 
 def _history(out: Path) -> list[tuple[str, dict[str, Any]]]:
@@ -200,26 +204,29 @@ def _history(out: Path) -> list[tuple[str, dict[str, Any]]]:
             found.append(
                 (
                     path.stat().st_mtime,
-                    path.parent.name[:8],
+                    path.parent.name[:12],
                     json.loads(path.read_bytes()),
                 )
             )
         except (OSError, ValueError):
             continue
-    return [(label, doc) for _, label, doc in sorted(found, key=lambda t: t[0])]
+    return [(label, doc) for _, label, doc in sorted(found, key=lambda t: (t[0], t[1]))]
 
 
-def write_owner_view(
+def make_owner_view(
     out: Path, document: dict[str, Any], findings: Sequence[Finding]
-) -> None:
-    """Sidecars beside findings.json: owner-view.json/.md/.js (never inside a generation)."""
-
-    view = owner_view.build.build_owner_view(
+) -> dict[str, Any]:
+    return owner_view.build.build_owner_view(
         document,
         messages=[f.message for f in findings],
         register=_register_entries(),
         history=_history(out),
     )
+
+
+def write_owner_view(out: Path, view: dict[str, Any]) -> None:
+    """Sidecars beside findings.json: owner-view.json/.md/.js (never inside a generation)."""
+
     _write_json(out.with_name("owner-view.json"), view)
     for name, text in (
         ("owner-view.md", owner_view.build.render_markdown(view)),
@@ -439,8 +446,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         findings=findings,
     )
     try:
+        view = make_owner_view(out, document, findings)  # before any file is written
         _write_json(out, document)
-        write_owner_view(out, document, findings)
+        write_owner_view(out, view)
         if args.details_out is not None:
             if _inside(args.details_out, generation.gen_dir):
                 raise ContractError("refusing to write details inside the generation")

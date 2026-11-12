@@ -61,33 +61,66 @@ def real_or_checker(klass: str) -> str:
 # ------------------------------------------------------------------------ registry
 
 
-def _entry_errors(position: int, entry: Mapping[str, Any]) -> list[str]:
+def _iso(value: Any) -> bool:
+    try:
+        date.fromisoformat(str(value))
+    except ValueError:
+        return False
+    return isinstance(value, str)
+
+
+def _entry_errors(position: int, entry: Any) -> list[str]:
+    if not isinstance(entry, Mapping):
+        return [f"entry {position}: not an object"]
     block = entry.get("owner_view")
     if block is None:
         return []
     label = f"entry {position} ({entry.get('check_id')}/{entry.get('defect')})"
+    if not isinstance(block, Mapping):
+        return [f"{label}: owner_view is not an object"]
     klass = block.get("owner_class")
     if klass not in OWNER_CLASSES:
         return [f"{label}: owner_class {klass!r} is not one of the six"]
     errors: list[str] = []
+    if not isinstance(entry.get("defect"), str) or not entry["defect"].strip():
+        errors.append(
+            f"{label}: defect is required (a defect id, or NONE for a finding with none)"
+        )
+    if "close_by" in entry and not _iso(entry["close_by"]):
+        errors.append(f"{label}: close_by is not an ISO date")
     for key in _REQUIRED:
         if not str(block.get(key) or "").strip():
             errors.append(f"{label}: owner_view.{key} is required")
     if klass == NEEDS_OWNER_DECISION:
-        decision = block.get("decision") or {}
-        options = decision.get("options") or []
-        if not decision.get("question") or not 2 <= len(options) <= 3:
+        decision = block.get("decision")
+        decision = decision if isinstance(decision, Mapping) else {}
+        options = decision.get("options")
+        if (
+            not isinstance(options, list)
+            or not decision.get("question")
+            or not 2 <= len(options) <= 3
+        ):
             errors.append(f"{label}: a decision needs a question and 2-3 options")
     if klass == ACCEPTED_BY_DESIGN and not (
-        block.get("owner_record") and block.get("reviewed_on")
+        block.get("owner_record") and _iso(block.get("reviewed_on"))
     ):
-        errors.append(f"{label}: ACCEPTED_BY_DESIGN needs owner_record and reviewed_on")
+        errors.append(
+            f"{label}: ACCEPTED_BY_DESIGN needs owner_record and an ISO reviewed_on"
+        )
     if block.get("scope", "entity") not in ("entity", "row"):
         errors.append(f"{label}: scope must be 'entity' or 'row'")
     if block.get("scope") != "row" and "entity_match" not in block:
         errors.append(
             f"{label}: an entry must say which entities it covers (entity_match) "
-            "or declare scope 'row' (every entity of the row is in the same state)"
+            "or declare scope 'row'"
+        )
+    if (
+        block.get("scope") == "row"
+        and not str(block.get("row_scope_reason") or "").strip()
+    ):
+        errors.append(
+            f"{label}: scope 'row' needs row_scope_reason (why every entity of the "
+            "row is in the same state)"
         )
     try:
         re.compile(block.get("entity_match", ".*"))
@@ -106,7 +139,9 @@ def _usable(entries: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     return [
         entry
         for n, entry in enumerate(entries)
-        if entry.get("owner_view") and not _entry_errors(n, entry)
+        if isinstance(entry, Mapping)
+        and entry.get("owner_view")
+        and not _entry_errors(n, entry)
     ]
 
 
@@ -160,12 +195,13 @@ def _matches(
     if entry.get("check_id") != finding.get("check_id"):
         return False
     wanted = entry.get("defect")
-    if wanted and wanted not in (finding.get("defect_ids") or []):
+    have = finding.get("defect_ids") or []
+    if (not have) if wanted == "NONE" else (wanted not in have):
         return False
     block = entry["owner_view"]
     if (block.get("scope") == "row") != row:
         return False
-    if not re.search(block.get("entity_match", ".*"), entity):
+    if not re.fullmatch(block.get("entity_match", ".*"), entity):
         return False
     return all(facts.get(k) == v for k, v in (block.get("when") or {}).items())
 
@@ -264,6 +300,8 @@ def build_owner_view(
     for label, doc in history:
         for old in doc.get("findings") or []:
             first_seen.setdefault((old.get("check_id"), old.get("entity")), label)
+            for sub, _ in expand(old):
+                first_seen.setdefault((old.get("check_id"), sub), label)
     items: list[dict[str, Any]] = []
     for index, finding in enumerate(findings):
         message = messages[index] if index < len(messages) else ""
@@ -277,9 +315,15 @@ def build_owner_view(
         whole = str(finding.get("entity", ""))
         row_facts = expand({**finding, "observed": None})[0][1]
         _flat("observed", finding.get("observed"), row_facts)
-        row_matched = [
-            e for e in entries if _matches(e, finding, whole, row_facts, True)
-        ]
+        states = {
+            tuple(sorted((k, str(v)) for k, v in f.items() if k.startswith("entity_")))
+            for _, f in expand(finding)
+        }
+        row_matched = (
+            [e for e in entries if _matches(e, finding, whole, row_facts, True)][:1]
+            if len(states) == 1  # differing entity states are never classified as one
+            else []
+        )
         if row_matched:  # the entry asserts one state for every entity of the row
             for entry in row_matched:
                 klass = entry["owner_view"]["owner_class"]
@@ -298,8 +342,13 @@ def build_owner_view(
                 )
             continue
         for entity, facts in expand(finding):
-            matched = [e for e in entries if _matches(e, finding, entity, facts)]
-            for entry in matched:
+            entity_since = (
+                since
+                if entity == finding.get("entity")
+                else first_seen.get((finding.get("check_id"), entity))
+            )
+            matched = [e for e in entries if _matches(e, finding, entity, facts)][:1]
+            for entry in matched:  # first match wins
                 klass = entry["owner_view"]["owner_class"]
                 items.append(
                     _item(
@@ -311,7 +360,7 @@ def build_owner_view(
                         entry,
                         facts,
                         today,
-                        since,
+                        entity_since,
                     )
                 )
             if not matched:
@@ -325,7 +374,7 @@ def build_owner_view(
                         None,
                         facts,
                         today,
-                        since,
+                        entity_since,
                     )
                 )
     reconcile(findings, items)
@@ -385,7 +434,17 @@ def verdict(view: Mapping[str, Any]) -> str:
 def _group(items: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
     groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
     for item in items:
-        key = (item["class"], item["what"], item["fix"], item["number_affected"])
+        key = (
+            item["class"],
+            item["what"],
+            item["fix"],
+            item["number_affected"],
+            item["who"],
+            item["how_long"],
+            item["overdue"],
+            item.get("owner_record"),
+            item["since"],
+        )
         groups.setdefault(key, []).append(item)
     return list(groups.values())
 
@@ -438,6 +497,5 @@ def render_markdown(view: Mapping[str, Any]) -> str:
 def render_js(view: Mapping[str, Any]) -> str:
     payload = dict(view)
     payload["verdict"] = verdict(view)
-    return (
-        "window.PORTFOLIO_OWNER_VIEW = " + json.dumps(payload, sort_keys=True) + ";\n"
-    )
+    text = json.dumps(payload, sort_keys=True).replace("<", "\\u003c")
+    return "window.PORTFOLIO_OWNER_VIEW = " + text + ";\n"
