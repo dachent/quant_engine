@@ -31,7 +31,6 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 assert _SPEC is not None and _SPEC.loader is not None
 history = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = history
 _SPEC.loader.exec_module(history)
 
 INCEPTION = date(2025, 8, 14)
@@ -205,7 +204,6 @@ def _bundle_inputs(tmp_path: Path) -> dict[str, Path]:
     spec = importlib.util.spec_from_file_location("_sh_fixtures", module_path)
     assert spec is not None and spec.loader is not None
     fixtures = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = fixtures
     spec.loader.exec_module(fixtures)
     return fixtures._bundle_inputs(tmp_path)
 
