@@ -8,9 +8,7 @@ row's own ``fees_status`` and its benchmark assignment and comparison statuses.
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-import sys
 from typing import Any
 
 import pytest
@@ -18,18 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _load(name: str, path: Path) -> Any:
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-reporter = _load(
-    "report_evidence_status_wiring_reporter", ROOT / "tools" / "portfolio_report.py"
-)
+import portfolio_report as reporter  # noqa: E402
 from acceptance.validate import checks as validate_checks  # noqa: E402
 
 

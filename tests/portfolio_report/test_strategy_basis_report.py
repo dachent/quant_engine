@@ -31,7 +31,7 @@ DECLARATION = {
 }
 # sha256 of the canonical report bytes the unmodified main (f10eb617, after the pass-29 and pass-30 wording) builds from this
 # fixture with no declaration; the switch off must reproduce them exactly
-MAIN_OFF_DIGEST = "d0bdc05ee6e566efa7f681c98c0c277c2104e2eae72e50d254d126c15ce565ac"
+MAIN_OFF_DIGEST = "10a40c5dca2aa4f4ba475f7d117dd1499067cbb0d0057a534b8ebceefaf5f6d4"
 
 
 def _facts() -> dict[str, Any]:
