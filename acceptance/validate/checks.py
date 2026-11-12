@@ -9625,22 +9625,45 @@ def _previous_payload(
     """#893: ``(blocks, physical, added_days, unknown, schema)`` of the previous committed panel.
 
     The previous release is the generation ``CURRENT.json`` names while this candidate is
-    still a candidate.  ``unknown`` is True when the candidate already is the current
-    generation (post-commit re-check): the predecessor is no longer discoverable and only
-    the ceiling applies.  ``(None, None, None, False)``: no previous release, file limits.
+    still a candidate.  Once the candidate already is the current generation (post-commit
+    re-check) the predecessor is the one its release target records as ``previous_pointer``.
+    Either way the predecessor's ``generation.json`` must hash to the pointer's
+    ``manifest_sha256``: a stale, replaced or modified directory is not a baseline.
+    ``unknown`` is True when the predecessor of a committed candidate cannot be found or
+    verified: only the ceiling applies.  ``(None, None, None, False, None)``: no usable
+    previous release for a candidate, the file limits apply.
     """
 
     pointer = ctx.gen.external.current_pointer
-    previous_id = pointer.get("generation_id") if isinstance(pointer, dict) else None
-    if not isinstance(previous_id, str) or not previous_id:
+    pointer_id = pointer.get("generation_id") if isinstance(pointer, dict) else None
+    if not isinstance(pointer_id, str) or not pointer_id:
         return None, None, None, False, None
-    if previous_id == ctx.gen.generation_id:
-        return None, None, None, True, None
+    committed = pointer_id == ctx.gen.generation_id
+    previous_id: str | None = pointer_id
+    expected_sha = pointer.get("manifest_sha256") if isinstance(pointer, dict) else None
+    if committed:
+        previous_id = None
+        for target, _ in _release_targets(ctx):
+            recorded = target.get("previous_pointer")
+            if isinstance(recorded, dict) and isinstance(
+                recorded.get("generation_id"), str
+            ):
+                previous_id = recorded["generation_id"]
+                expected_sha = recorded.get("manifest_sha256")
+                break
+        if previous_id is None:
+            return None, None, None, True, None
     key = f"payload_previous:{previous_id}"
     if key not in ctx._cache:
-        previous_dir = ctx.gen.gen_dir.parent / previous_id
+        previous_dir = ctx.gen.gen_dir.parent / str(previous_id)
         result: tuple[Any, ...] = (None, None, None, None)
         try:
+            manifest_bytes = (previous_dir / GENERATION_MANIFEST).read_bytes()
+            if (
+                isinstance(expected_sha, str)
+                and hashlib.sha256(manifest_bytes).hexdigest() != expected_sha
+            ):
+                raise ValueError("the previous generation is not the one pointed at")
             panel = json.loads((previous_dir / PANEL).read_bytes())
             candidate = json.loads((previous_dir / CANDIDATE).read_bytes())
             files = {
@@ -9671,6 +9694,8 @@ def _previous_payload(
             pass
         ctx._cache[key] = result
     blocks, physical, days, schema = ctx._cache[key]
+    if blocks is None and committed:
+        return None, None, None, True, None
     return blocks, physical, days, False, schema
 
 
@@ -9759,7 +9784,9 @@ def check_lint_payload_size(ctx: Context) -> Iterator[Finding]:
     def _large_at(rel: str) -> int:
         key = file_limits.get(rel)
         if effective is not None and key in effective["physical"]:
-            return int(effective["physical"][key])
+            # over its budget is a blocker already; the warning is for files that are
+            # also past 50 MB, whatever their budget
+            return max(50_000_000, int(effective["physical"][key]))
         return 50_000_000
 
     large = {

@@ -90,14 +90,19 @@ def _round_up(value: float) -> int:
 
 
 def added_days(previous_as_of: Any, as_of: Any) -> int | None:
-    """Calendar days from the previous release's as-of date to this one, never negative."""
+    """Calendar days from the previous release's as-of date to this one.
+
+    ``None`` when either date is unusable or the previous release is *later* than this
+    one: that is not a predecessor, so it cannot set a baseline.
+    """
 
     try:
         previous = date.fromisoformat(str(previous_as_of)[:10])
         current = date.fromisoformat(str(as_of)[:10])
     except ValueError:
         return None
-    return max(0, (current - previous).days)
+    days = (current - previous).days
+    return days if days >= 0 else None
 
 
 def relative_limit(previous: int, days: int, extra: float = 0.0) -> int:
@@ -160,5 +165,6 @@ def derive_budget(
             file_limit,
             committed.get(PHYSICAL_COMMITTED.get(key, "")),
             (previous_physical or {}).get(key),
+            max(extra_by_block.values(), default=0.0),
         )
     return derived

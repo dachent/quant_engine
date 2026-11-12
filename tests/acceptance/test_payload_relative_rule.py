@@ -80,9 +80,9 @@ def test_a_previous_release_that_cannot_be_found_leaves_only_the_ceiling() -> No
     assert over({"grow": payload_rule.ceiling(990_000) + 1}, derived) == ["grow"]
 
 
-def test_added_days_never_negative_and_unparsable_is_none() -> None:
+def test_added_days_is_none_when_unusable_or_the_previous_is_later() -> None:
     assert payload_rule.added_days("2026-09-17", "2026-11-06") == 50
-    assert payload_rule.added_days("2026-11-06", "2026-09-17") == 0
+    assert payload_rule.added_days("2026-11-06", "2026-09-17") is None
     assert payload_rule.added_days(None, "2026-09-17") is None
     assert payload_rule.added_days("garbage", "2026-09-17") is None
 
@@ -104,17 +104,34 @@ def _write_generation(root: Path, gen_id: str, as_of: str, grow_bytes: int) -> P
         json.dumps({"portfolio_as_of": as_of}).encode()
     )
     (gen / "index.html").write_bytes(b"<html></html>")
+    (gen / "generation.json").write_bytes(gen_id.encode())
     return gen
 
 
-def _ctx(root: Path, pointer: dict[str, Any] | None, as_of: str, gen_id: str) -> Any:
+def _sha(gen_id: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(gen_id.encode()).hexdigest()
+
+
+def _ctx(
+    root: Path,
+    pointer: dict[str, Any] | None,
+    as_of: str,
+    gen_id: str,
+    manifest: dict[str, Any] | None = None,
+) -> Any:
     return SimpleNamespace(
         _cache={},
         gen=SimpleNamespace(
             gen_dir=root / gen_id,
             generation_id=gen_id,
             candidate={"portfolio_as_of": as_of},
-            external=SimpleNamespace(current_pointer=pointer),
+            external=SimpleNamespace(
+                current_pointer=pointer,
+                release_manifest=manifest,
+                release_manifest_path="release.json",
+            ),
         ),
     )
 
@@ -124,19 +141,121 @@ def test_the_validator_reads_the_previous_generation_the_pointer_names(
 ) -> None:
     _write_generation(tmp_path, "prev", "2026-09-17", 1000)
     _write_generation(tmp_path, "cand", "2026-09-24", 1020)
-    ctx = _ctx(tmp_path, {"generation_id": "prev"}, "2026-09-24", "cand")
+    ctx = _ctx(
+        tmp_path,
+        {"generation_id": "prev", "manifest_sha256": _sha("prev")},
+        "2026-09-24",
+        "cand",
+    )
     blocks, physical, days, unknown, _schema = checks._previous_payload(ctx, {})
     assert days == 7 and unknown is False
     assert blocks is not None and blocks["grow"] == len(json.dumps("x" * 1000))
     assert physical is not None and physical["total_bytes"] > 0
 
 
-def test_a_candidate_that_is_already_current_has_no_discoverable_predecessor(
+def test_a_committed_candidate_finds_its_predecessor_in_the_release_target(
+    tmp_path: Path,
+) -> None:
+    _write_generation(tmp_path, "prev", "2026-09-17", 1000)
+    _write_generation(tmp_path, "cand", "2026-09-24", 1020)
+    manifest = {
+        "targets": [
+            {
+                "root_id": "portfolio-panel",
+                "proposed_generation_id": "cand",
+                "previous_pointer": {
+                    "generation_id": "prev",
+                    "manifest_sha256": _sha("prev"),
+                },
+            }
+        ]
+    }
+    ctx = _ctx(tmp_path, {"generation_id": "cand"}, "2026-09-24", "cand", manifest)
+    blocks, _physical, days, unknown, _schema = checks._previous_payload(ctx, {})
+    assert blocks is not None and days == 7 and unknown is False
+
+
+def test_a_committed_candidate_with_no_verifiable_predecessor_has_only_the_ceiling(
     tmp_path: Path,
 ) -> None:
     _write_generation(tmp_path, "cand", "2026-09-24", 1020)
-    ctx = _ctx(tmp_path, {"generation_id": "cand"}, "2026-09-24", "cand")
+    ctx = _ctx(
+        tmp_path, {"generation_id": "cand"}, "2026-09-24", "cand", {"targets": []}
+    )
     assert checks._previous_payload(ctx, {}) == (None, None, None, True, None)
+    # the recorded predecessor is gone from disk: same
+    manifest = {
+        "targets": [
+            {
+                "root_id": "portfolio-panel",
+                "proposed_generation_id": "cand",
+                "previous_pointer": {"generation_id": "gone"},
+            }
+        ]
+    }
+    ctx = _ctx(tmp_path, {"generation_id": "cand"}, "2026-09-24", "cand", manifest)
+    assert checks._previous_payload(ctx, {}) == (None, None, None, True, None)
+
+
+def test_a_previous_generation_that_is_not_the_one_pointed_at_is_no_baseline(
+    tmp_path: Path,
+) -> None:
+    _write_generation(tmp_path, "prev", "2026-09-17", 1000)
+    _write_generation(tmp_path, "cand", "2026-09-24", 1020)
+    ctx = _ctx(
+        tmp_path,
+        {"generation_id": "prev", "manifest_sha256": "0" * 64},
+        "2026-09-24",
+        "cand",
+    )
+    assert checks._previous_payload(ctx, {}) == (None, None, None, False, None)
+
+
+def test_a_previous_release_dated_after_the_candidate_is_no_baseline(
+    tmp_path: Path,
+) -> None:
+    _write_generation(tmp_path, "prev", "2026-10-01", 1000)
+    _write_generation(tmp_path, "cand", "2026-09-24", 1020)
+    ctx = _ctx(
+        tmp_path,
+        {"generation_id": "prev", "manifest_sha256": _sha("prev")},
+        "2026-09-24",
+        "cand",
+    )
+    assert checks._previous_payload(ctx, {}) == (None, None, None, False, None)
+
+
+def test_a_declared_allowance_also_widens_the_physical_limits() -> None:
+    derived = derive({"grow": 1_000_000}, 0, allowances={"grow": 0.10})
+    physical = checks.payload_budget_findings({}, {"total_bytes": 2_060_000}, derived)
+    assert physical == []
+    assert derive({"grow": 1_000_000}, 0)["physical"]["total_bytes"] < 2_060_000
+
+
+def test_a_file_under_50mb_is_never_reported_as_over_50mb() -> None:
+    ctx = SimpleNamespace(
+        repo_root=None,
+        _cache={
+            "payload_effective": {
+                "blocks": {},
+                "unlisted_block_max_bytes": 1,
+                "other_blocks_max_bytes": 1,
+                "physical": {"dashboard_data_js_bytes": 45_753_000},
+            }
+        },
+        gen=SimpleNamespace(
+            scan=SimpleNamespace(
+                files={"data/dashboard_data.js": (46_000_000, "a")},
+                report_embedded_only=False,
+            ),
+            app_js="",
+        ),
+        panel={},
+    )
+    warned = [
+        f for f in checks.check_lint_payload_size(ctx) if f.entity == "generation"
+    ]
+    assert warned == []
 
 
 def test_no_current_pointer_means_the_file_limits() -> None:
@@ -209,3 +328,39 @@ def test_the_50mb_warning_follows_the_budget_not_a_literal() -> None:
     sizes = [f.observed for f in findings if f.entity == "generation"]
     assert sizes and "other.bin" in sizes[0]["files_over_50MB"]
     assert "data/dashboard_data.json" not in sizes[0]["files_over_50MB"]
+
+
+def test_the_script_keeps_the_relative_budget_after_raising_another_block(
+    tmp_path: Path,
+) -> None:
+    import panel_payload_size as script
+
+    def gen(name: str, as_of: str, grow: int) -> Path:
+        path = tmp_path / name
+        (path / "data").mkdir(parents=True)
+        (path / "data" / "dashboard_data.json").write_bytes(
+            json.dumps({"grow": "x" * grow, "other": "y"}).encode()
+        )
+        (path / "candidate.json").write_bytes(
+            json.dumps({"portfolio_as_of": as_of}).encode()
+        )
+        return path
+
+    previous = gen("prev", "2026-09-17", 1_000_000)
+    candidate = gen(
+        "cand", "2026-09-24", 1_044_000
+    )  # +4.4 %: inside 7 days of allowance
+    budget = dict(BUDGET)
+    budget["blocks"] = {"grow": 1_002_000, "other": 5_000}
+    budget["physical"] = {}
+    budget_file = tmp_path / "budget.json"
+    budget_file.write_text(json.dumps(budget))
+    argv = [str(candidate), "--budget", str(budget_file), "--previous", str(previous)]
+    assert script.main([*argv, "--out", str(tmp_path / "r.json")]) == 0
+    # raising an unrelated block must not drop the relative rule for "grow"
+    assert (
+        script.main(
+            [*argv, "--raise-block", "other", "--out", str(tmp_path / "r.json")]
+        )
+        == 0
+    )

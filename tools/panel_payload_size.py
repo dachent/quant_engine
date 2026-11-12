@@ -175,22 +175,31 @@ def main(argv: list[str] | None = None) -> int:
     sizes = physical(args.generation)
     report: dict[str, Any] = {"physical": sizes, "blocks": blocks}
     findings: list[str] = []
+    previous_data = (
+        json.loads((args.previous / "data" / "dashboard_data.json").read_bytes())
+        if args.previous is not None
+        else None
+    )
+
+    def effective(file_budget: dict[str, Any]) -> dict[str, Any]:
+        """The file budget, recomputed from the previous release when one is given."""
+
+        if previous_data is None:
+            return file_budget
+        return payload_rule.derive_budget(
+            file_budget,
+            block_sizes(previous_data),
+            physical(args.previous),
+            payload_rule.added_days(_as_of(args.previous), _as_of(args.generation)),
+            allowances=payload_rule.active_allowances(
+                previous_data.get("panel_schema_version"),
+                data.get("panel_schema_version"),
+            ),
+        )
+
     if not args.no_check:
         budget = json.loads(args.budget.read_bytes())
-        if args.previous is not None:
-            previous_data = json.loads(
-                (args.previous / "data" / "dashboard_data.json").read_bytes()
-            )
-            days = payload_rule.added_days(
-                _as_of(args.previous), _as_of(args.generation)
-            )
-            budget = payload_rule.derive_budget(
-                budget,
-                block_sizes(previous_data),
-                physical(args.previous),
-                days,
-            )
-        findings = check(blocks, sizes, budget)
+        findings = check(blocks, sizes, effective(budget))
         report["findings"] = findings
     if args.raise_all:
         args.raise_block = sorted(set(args.raise_block) | set(blocks))
@@ -214,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         args.budget.write_bytes(
             (json.dumps(raised, indent=2) + chr(10)).encode("utf-8")
         )
-        findings = check(blocks, sizes, raised)
+        findings = check(blocks, sizes, effective(raised))
         report["findings"] = findings
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.out:
