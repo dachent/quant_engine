@@ -2264,7 +2264,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     "payload_block_over_budget": (
         "lint.payload_size",
         checks.BLOCKER_REGRESSION,
-        Spec(panel=[_set(("positions",), "x" * 400000)]),
+        Spec(panel=[_set(("positions",), "x" * 600000)]),
     ),
     "payload_unbudgeted_block_over_maximum": (
         "lint.payload_size",
