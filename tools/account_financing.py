@@ -22,6 +22,7 @@ import re
 from typing import Final
 
 ARTIFACT_ID: Final = "account-financing-declaration"
+ARTIFACT_VERSION: Final = "1"
 FACILITIES: Final = frozenset(
     {"MARGIN_USED", "MARGIN_AVAILABLE_UNUSED", "NO_MARGIN_FACILITY"}
 )

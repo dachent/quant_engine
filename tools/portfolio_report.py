@@ -11757,7 +11757,7 @@ def build_report_data(
             *report["provenance"],
             {
                 "artifact": account_financing.ARTIFACT_ID,
-                "schema": f"{account_financing.ARTIFACT_ID}/1",
+                "schema": f"{account_financing.ARTIFACT_ID}/{account_financing.ARTIFACT_VERSION}",
                 "sha256": hashlib.sha256(
                     _regular_file_bytes(
                         account_financing_path, "account financing declaration"
@@ -18228,7 +18228,7 @@ def publish_report(
                 financing_declaration,
                 PUBLISHED_ACCOUNT_FINANCING_RELATIVE_PATH,
                 account_financing.ARTIFACT_ID,
-                "1",
+                account_financing.ARTIFACT_VERSION,
             )
         )
     sleeve_facts_evidence = candidate_dir / SLEEVE_FACTS_EVIDENCE_NAME
