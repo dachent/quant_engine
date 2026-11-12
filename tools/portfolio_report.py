@@ -62,6 +62,11 @@ from quant_engine.portfolio_ledger import (
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
 )
+from quant_engine.portfolio_ledger import (
+    assess_gap_bounds_document,
+    numerical_from_governed_proof,
+    proof_covers_spans,
+)
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
@@ -188,6 +193,11 @@ HWM_POLICY: Final = (
 )
 _PORTABLE_HWM_POLICY: Final = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v4.json"
+)
+HWM_GAP_BOUNDS: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-gap-bounds-v1.json"
 )
 _PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
@@ -9330,6 +9340,7 @@ _HWM_NUMERICAL_REASONS: Final = (
     "ENDPOINT_NOT_RECONCILED",
     "MISSING_CONSUMPTION_CONTEXT",
     "MISSING_DAILY_POINT_CAN_HIDE_PEAK",
+    "GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS",
 )
 
 # Shared consumption-boundary validator codes → report reason codes.
@@ -9343,6 +9354,27 @@ _HWM_CONTRACT_REASON_MAP: Final = {
 }
 
 
+def _hwm_gap_assessment(
+    receipts: Mapping[str, Mapping[str, Any]], path: Path
+) -> dict[str, Any]:
+    """Assess every strategy's holding-period spans against the pinned point bounds."""
+
+    sha256, _size = hash_file(path)
+    try:
+        return assess_gap_bounds_document(
+            {
+                strategy_id: _objects(
+                    receipt["span_return_receipts"], "epoch HPR spans"
+                )
+                for strategy_id, receipt in receipts.items()
+            },
+            _load_json(path, "HWM gap bounds"),
+            sha256,
+        )
+    except ValueError as exc:
+        raise ReportValidationError(str(exc)) from exc
+
+
 def _hwm_numerical_from_envelope(
     catalog: Mapping[str, Any],
     policy_path: Path = HWM_POLICY,
@@ -9350,6 +9382,8 @@ def _hwm_numerical_from_envelope(
     value_basis_bounds: ValueBasisBounds | None = None,
     membership_starts: Mapping[str, date] | None = None,
     endpoint_exempt: frozenset[str] = frozenset(),
+    governed_proof: Mapping[str, Any] | None = None,
+    gap_bounds_path: Path = HWM_GAP_BOUNDS,
 ) -> dict[str, Any]:
     """Compute the numerical full-systematic HWM from the governed envelope.
 
@@ -9379,15 +9413,27 @@ def _hwm_numerical_from_envelope(
         assert reason in _HWM_NUMERICAL_REASONS, f"unknown reason code: {reason}"
         return {"hwm_numerical_status": "UNAVAILABLE", "hwm_numerical_reason": reason}
 
-    if any(
-        receipt["span_return_receipts"]
-        for receipt in _epoch_hpr_receipts(
-            catalog,
-            calculation_cutoff_date=None,
-            value_basis_bounds=value_basis_bounds,
-        ).values()
-    ):
-        return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+    hpr_receipts = _epoch_hpr_receipts(
+        catalog,
+        calculation_cutoff_date=None,
+        value_basis_bounds=value_basis_bounds,
+    )
+    gap_bounded: tuple[dict[str, Any], dict[str, Any]] | None = None
+    if any(receipt["span_return_receipts"] for receipt in hpr_receipts.values()):
+        # A missing daily point can hide a new peak unless it is bounded away from
+        # one (#899).  A bounded gap set is then published from the governed
+        # PORT-HWM-4 path, which links the gap as an accepted interval; the
+        # envelope has no daily period for the missing day.
+        assessment = _hwm_gap_assessment(hpr_receipts, gap_bounds_path)
+        if assessment["status"] != "BOUNDED":
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        gap_bounded = (
+            assessment,
+            {
+                sid: _objects(r["span_return_receipts"], "epoch HPR spans")
+                for sid, r in hpr_receipts.items()
+            },
+        )
 
     raw = catalog.get("hwm_inputs")
     if raw is None:
@@ -9451,6 +9497,19 @@ def _hwm_numerical_from_envelope(
         return _unavailable(
             _HWM_CONTRACT_REASON_MAP.get(exc.code, "HWM_INPUTS_INVALID")
         )
+
+    if gap_bounded is not None:
+        # The envelope passed every gate above; only now may the governed path
+        # supply the numbers, and only if it is as current as the envelope and its
+        # path observes both endpoints of every span.
+        last_day = max((str(row.get("date")) for row in periods), default="")
+        if governed_proof is None or governed_proof.get("status") != "AVAILABLE":
+            return _unavailable("GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS")
+        if str(governed_proof.get("complete_through")) < last_day or (
+            not proof_covers_spans(governed_proof, gap_bounded[1])
+        ):
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        return numerical_from_governed_proof(governed_proof, gap_bounded[0])
 
     # Hash-bound return crosswalk admitted by the baseline catalog, indexed
     # as a multimap so duplicate references are detected, never overwritten.
@@ -11349,6 +11408,7 @@ def build_report_data(
         value_basis_bounds=value_basis_bounds,
         membership_starts=hwm_basis.membership_starts,
         endpoint_exempt=hwm_basis.endpoint_exempt,
+        governed_proof=governed_hwm_proof,
     )
     hwm_summary: dict[str, Any]
     hwm_provenance: list[dict[str, Any]] = []
