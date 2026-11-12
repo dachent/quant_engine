@@ -6919,6 +6919,144 @@ def test_report_projects_hash_bound_leverage_disclosures_to_report(
         reporter.build_report_data(baseline_root, provider_ledger_root=provider_root)
 
 
+def test_report_emits_account_financing_rows_from_the_owner_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#894: a declared account gets an explicit state row; placeholders it replaces go."""
+    monkeypatch.setattr(
+        reporter,
+        "_PORTABLE_HWM_PRODUCT_CONTRACT",
+        _bind_synthetic_product_contract(tmp_path / "report-contract"),
+    )
+    quiet = "account-" + "e" * 16
+    debit = "account-" + "f" * 16
+    nav = [
+        {
+            "account_id": account,
+            "as_of_date": "2026-01-03",
+            "mapping_status": "MAPPED",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+            "provider_id": "ibkr",
+            "record_id": f"ibkr:nav-{account}",
+            "strategy_id": "strategy-1",
+        }
+        for account in (quiet, debit)
+    ]
+    posting = {
+        "account_id": debit,
+        "accounting_date": "2026-01-03",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        "classification": "BROKER_DEBIT_INTEREST",
+        "mapping_status": "MAPPED",
+        "measurement_basis": "CASH_POSTING",
+        "provider_id": "ibkr",
+        "record_id": "ibkr:posting-1",
+        "source_amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1"},
+        "strategy_id": "strategy-1",
+    }
+    provider_catalog = {
+        "financing_cost_observations": [posting],
+        "financing_liability_observations": [],
+        "leverage_exposure_observations": [],
+        "nav_observations": nav,
+        "positions": [],
+        "provider_generations": [{"provider_id": "ibkr"}],
+        "reconciliation_checks": [],
+    }
+    provider_bytes = canonical_json_bytes(provider_catalog)
+    provider_root = tmp_path / "provider-ledger"
+    provider_dir = provider_root / "generations" / ("a" * 64)
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider-ledger.json").write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "2",
+            "sha256": hashlib.sha256(provider_bytes).hexdigest(),
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+    declaration = tmp_path / "account-financing-declaration.json"
+    declaration.write_bytes(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_id": "account-financing-declaration",
+                "as_of_date": "2026-01-03",
+                "accounts": [
+                    {
+                        "account_id": account,
+                        "scope": "ACTIVE",
+                        "facility": facility,
+                        "verification": "VERIFIED",
+                        "evidence_ref": "owner",
+                    }
+                    for account, facility in (
+                        (quiet, "NO_MARGIN_FACILITY"),
+                        (debit, "MARGIN_AVAILABLE_UNUSED"),
+                    )
+                ],
+            }
+        ).encode()
+    )
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root,
+        provider_ledger_root=provider_root,
+        account_financing_path=declaration,
+    )
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    report_schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "report-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert not list(
+        Draft202012Validator(report_schema, format_checker=FormatChecker()).iter_errors(
+            report
+        )
+    )
+    states = {
+        row["account_id"]: row
+        for row in report["leverage_disclosures"]
+        if row["data_class"] == "ACCOUNT_FINANCING"
+    }
+    assert states[quiet]["classification"] == "NOT_LEVERED"
+    assert states[quiet]["coverage_status"] == "COMPLETE_DECLARED"
+    assert states[debit]["classification"] == "INCIDENTAL_DEBIT"
+    assert any(
+        item["artifact"] == "account-financing-declaration"
+        for item in report["provenance"]
+    )
+    # the cost placeholder is replaced by the summary row for the debit account
+    cost_rows = [
+        row
+        for row in report["leverage_disclosures"]
+        if row["account_id"] == debit and row["data_class"] == "FINANCING_COST"
+    ]
+    assert not any(row["classification"] == "UNAVAILABLE_MEASURE" for row in cost_rows)
+    assert any(
+        row["measurement_basis"] == "RECONCILED_FINANCING_COST" for row in cost_rows
+    )
+    # an account the ledger never saw makes the build refuse
+    declaration.write_bytes(
+        declaration.read_bytes().replace(
+            quiet.encode(), ("account-" + "9" * 16).encode()
+        )
+    )
+    with pytest.raises(reporter.ReportValidationError, match="no single provider"):
+        reporter.build_report_data(
+            baseline_root,
+            provider_ledger_root=provider_root,
+            account_financing_path=declaration,
+        )
+
+
 def _coverage_detail(account_id: str, fact_type: str) -> dict[str, Any]:
     return {
         "account_id": account_id,
