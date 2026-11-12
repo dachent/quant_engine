@@ -33,9 +33,10 @@ TICKET = re.compile(r"^[0-9]{1,6}$")
 
 def _test_functions(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    # module level only: pytest does not collect a nested def
     return {
         node.name
-        for node in ast.walk(tree)
+        for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     }
 
@@ -47,6 +48,7 @@ def check_structure(registry: dict[str, Any], root: Path = ROOT) -> list[str]:
     if not isinstance(cases, dict) or not isinstance(tickets, dict):
         return ["registry needs object keys 'cases' and 'tickets'"]
     referenced: set[str] = set()
+    used_tests: dict[str, str] = {}
     for case_id, case in cases.items():
         if not CASE_ID.fullmatch(case_id):
             found.append(f"case id {case_id!r} is not snake_case")
@@ -64,19 +66,26 @@ def check_structure(registry: dict[str, Any], root: Path = ROOT) -> list[str]:
             )
         node = str(case.get("test", ""))
         path_text, _, func = node.partition("::")
-        path = root / path_text
-        if not path_text.startswith("tests/regression/") or not path.is_file():
+        path = (root / path_text).resolve()
+        folder = (root / "tests" / "regression").resolve()
+        if folder not in path.parents or not path.is_file():
             found.append(
                 f"{case_id}: test file {path_text!r} not under tests/regression"
             )
         elif func not in _test_functions(path):
             found.append(f"{case_id}: {func!r} is not a test function in {path_text}")
+        elif node in used_tests:
+            found.append(f"{case_id}: shares test {node} with {used_tests[node]}")
         else:
+            used_tests[node] = case_id
             referenced.add(path.name)
     for ticket, entry in tickets.items():
         if not TICKET.fullmatch(ticket):
             found.append(f"ticket key {ticket!r} is not a number")
         cited = entry.get("cases", [])
+        if not isinstance(cited, list):
+            found.append(f"#{ticket}: cases must be a list")
+            continue
         exempt = str(entry.get("exempt", "")).strip()
         if bool(cited) == bool(exempt):
             found.append(f"#{ticket}: give either cases or an exempt reason")
@@ -90,8 +99,12 @@ def check_structure(registry: dict[str, Any], root: Path = ROOT) -> list[str]:
     return found
 
 
-def check_release(registry: dict[str, Any], closed: Sequence[str]) -> list[str]:
-    found = check_structure(registry)
+def check_release(
+    registry: dict[str, Any], closed: Sequence[str], root: Path = ROOT
+) -> list[str]:
+    found = check_structure(registry, root)
+    if not closed:
+        found.append("release gate needs the closed ticket list (--closed)")
     cases = registry.get("cases", {})
     for case_id, case in cases.items():
         if case.get("status") != "covered":
@@ -112,11 +125,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--closed", nargs="*", default=[], metavar="TICKET")
-    parser.add_argument("--registry", type=Path, default=REGISTRY)
     args = parser.parse_args(argv)
     if args.closed and not args.release:
         parser.error("--closed needs --release")
-    registry = json.loads(args.registry.read_text(encoding="utf-8"))
+    if args.release and not args.closed:
+        parser.error("--release needs --closed with at least one ticket")
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
     found = (
         check_release(registry, args.closed)
         if args.release
