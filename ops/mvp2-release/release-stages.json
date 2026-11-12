@@ -1095,6 +1095,7 @@
     },
     {
       "id": "attended",
+      "needs_gate": ["g0"],
       "requires": [
         "pre-chain",
         "prep-spec"
@@ -1895,6 +1896,7 @@
     },
     {
       "id": "lane-replica",
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph"],
       "only_ceremony": "full",
       "requires": [
         "replica-spec"
@@ -1955,6 +1957,7 @@
     },
     {
       "id": "lane-real",
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph"],
       "requires": [
         "replica-spec"
       ],
@@ -2104,6 +2107,7 @@
     {
       "id": "commit",
       "explicit": true,
+      "recheck": ["host:free-space", "repo:frozen", "authority:pointer-graph"],
       "requires": [
         "lane-replica",
         "lane-real"
