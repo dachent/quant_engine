@@ -29,6 +29,7 @@ SYNTHETIC = (
 # The real audit figures live in the governed data root, never in Git: an optional local run
 # points this variable at that file (its sha256 is pinned in the root's manifest.json).
 REAL_INPUT_ENV = "MODEL_VS_ACTUAL_AUDIT_INPUT"
+FRESH_CUTOFF = "2026-11-06"
 SHA = "a" * 64
 
 
@@ -484,20 +485,14 @@ def _assert_staged_shape(raw: bytes, *, fresh: bool) -> None:
     """`fresh` is True for the governed input: its windows must reach the cutoff."""
 
     sha = hashlib.sha256(raw).hexdigest()
-    block = mva.build_model_vs_actual(
-        _panel_for_staged(),
-        raw,
-        sha,
-        **({} if fresh else {"max_window_lag_days": None}),
-    )
+    panel = _panel_for_staged()
+    if fresh:
+        # the governed input is refreshed to the release cutoff it is stamped with
+        panel["invested_capital"]["complete_through"] = FRESH_CUTOFF
+    kwargs = {} if fresh else {"max_window_lag_days": None}
+    block = mva.build_model_vs_actual(panel, raw, sha, **kwargs)
     assert _errors(block) == []
-    mva.verify_model_vs_actual(
-        block,
-        _panel_for_staged(),
-        raw,
-        sha,
-        **({} if fresh else {"max_window_lag_days": None}),
-    )
+    mva.verify_model_vs_actual(block, panel, raw, sha, **kwargs)
     ids = {s["strategy_id"] for s in block["strategies"]}
     assert ids == {
         "p123-eu",
