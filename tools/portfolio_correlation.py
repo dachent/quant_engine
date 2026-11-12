@@ -379,16 +379,19 @@ def _evidence_mode_definition(
         _strict_keys(raw, {"end_date", "return", "start_date"}, span_name)
         start = _day(raw["start_date"], f"{span_name}.start_date")
         end = _day(raw["end_date"], f"{span_name}.end_date")
-        if end <= start:
+        if (end - start).days < 2:
             raise CorrelationError(f"{span_name} does not span a gap")
         if spans and start < spans[-1].end_date:
             raise CorrelationError(f"{name}.accepted_spans overlap or are unordered")
         text = _text(raw["return"], f"{span_name}.return")
+        span_value = _finite(text, f"{span_name}.return")
+        if span_value <= -1.0:
+            raise CorrelationError(f"{span_name}.return must be greater than -1")
         spans.append(
             AcceptedSpan(
                 start,
                 end,
-                _finite(text, f"{span_name}.return"),
+                span_value,
                 _canonical_decimal(text, f"{span_name}.return"),
             )
         )
@@ -505,6 +508,10 @@ def _load_spec(path: Path) -> Specification:
             _objects(root.get("evidence_mode_series", []), "evidence_mode_series")
         )
     )
+    as_of = _day(root["as_of_date"], "as_of_date")
+    for definition in evidence_mode_series:
+        if any(span.end_date > as_of for span in definition.accepted_spans):
+            raise CorrelationError("an accepted span ends after as_of_date")
     if schema_version == 2:
         if len({item.series_id for item in evidence_mode_series}) != len(
             evidence_mode_series
@@ -917,6 +924,12 @@ def _performance_summary(
     wealth = 1.0
     peak = 1.0
     maximum_drawdown = 0.0
+    for span in spans:
+        if span.start_date < accepted[0].day:
+            raise CorrelationError("an accepted span starts before the first daily row")
+        if any(span.start_date < item.day <= span.end_date for item in accepted):
+            # a span replaces a gap; a daily row inside it would count the same days twice
+            raise CorrelationError("an accepted span covers a day that has a daily row")
     steps = sorted(
         [(item.day, item.value) for item in accepted]
         + [(span.end_date, span.value) for span in spans],

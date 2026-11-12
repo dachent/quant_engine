@@ -14,7 +14,7 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import date
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import Any, Final
 
@@ -287,8 +287,24 @@ def _accepted_spans(
                 "start_date": _day(item["start_date"], "span start_date").isoformat(),
             }
         )
-    for spans in result.values():
-        spans.sort(key=lambda span: span["start_date"])
+    for series_spans in result.values():
+        series_spans.sort(key=lambda span: span["start_date"])
+        previous_end = ""
+        for span in series_spans:
+            if (
+                span["end_date"] <= span["start_date"]
+                or span["start_date"] < previous_end
+            ):
+                raise CurrentDependenceError("accepted return spans overlap or invert")
+            try:
+                value = Decimal(span["return"])
+            except InvalidOperation as exc:
+                raise CurrentDependenceError(
+                    "accepted return span is not a decimal"
+                ) from exc
+            if not value.is_finite() or value <= Decimal(-1):
+                raise CurrentDependenceError("accepted return span must be above -1")
+            previous_end = span["end_date"]
     return result
 
 
@@ -1499,6 +1515,13 @@ def build_source(
             selected=selected,
         )
     policy_series = _objects(policy.get("series"), "dependence policy series")
+    unknown_span_series = set(accepted_spans) - {
+        str(row["series_id"]) for row in policy_series
+    }
+    if unknown_span_series:
+        raise CurrentDependenceError(
+            "accepted return spans name a series outside the policy"
+        )
     required_ids = [str(row["strategy_id"]) for row in policy_series]
     restatement = _history_restatement(history_manifest)
     unknown_restated = sorted(set(restatement) - set(required_ids))

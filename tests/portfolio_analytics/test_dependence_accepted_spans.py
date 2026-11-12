@@ -85,3 +85,41 @@ def test_a_malformed_receipt_is_refused(tmp_path: Path, payload: object) -> None
     receipt = _write(tmp_path / "spans.json", payload)
     with pytest.raises(dependence.CurrentDependenceError):
         dependence._accepted_spans({"accepted_return_spans_path": receipt})
+
+
+def test_overlapping_or_bad_value_spans_are_refused_at_build(tmp_path: Path) -> None:
+    for spans in (
+        [
+            {
+                "series_id": "a",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-10",
+                "return": "0.01",
+            },
+            {
+                "series_id": "a",
+                "start_date": "2026-01-05",
+                "end_date": "2026-01-12",
+                "return": "0.01",
+            },
+        ],
+        [
+            {
+                "series_id": "a",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-10",
+                "return": "-1.2",
+            }
+        ],
+        [
+            {
+                "series_id": "a",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-10",
+                "return": "x",
+            }
+        ],
+    ):
+        receipt = _write(tmp_path / "s.json", {"schema_version": 1, "spans": spans})
+        with pytest.raises(dependence.CurrentDependenceError):
+            dependence._accepted_spans({"accepted_return_spans_path": receipt})

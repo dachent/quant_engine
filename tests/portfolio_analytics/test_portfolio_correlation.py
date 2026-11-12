@@ -867,7 +867,7 @@ def test_accepted_spans_are_compounded_into_the_summary_and_not_into_daily_rows(
             "0.0003",
         )
         for offset in range(100)
-        if offset not in (30, 31, 32, 60, 61)
+        if offset not in (30, 31, 32, 59, 60, 61, 62)
     ]
     spans = [
         _span(date(2026, 1, 30), date(2026, 2, 2), "-0.0171"),
@@ -951,3 +951,38 @@ def test_the_specification_accepts_ordered_spans_and_refuses_overlaps() -> None:
             },
             0,
         )
+
+
+def test_a_span_that_overlaps_daily_rows_or_leaves_the_window_is_refused() -> None:
+    """Review findings: double-counted days, a span before the first row."""
+
+    from datetime import timedelta
+
+    rows = [
+        correlation.ReturnRow(
+            date(2026, 1, 1) + timedelta(days=n), 0.01, "ACCOUNT_LIVE", "v1", "0.01"
+        )
+        for n in range(10)
+    ]
+    with pytest.raises(correlation.CorrelationError, match="daily row"):
+        correlation._performance_summary(
+            rows, 0, [_span(date(2026, 1, 3), date(2026, 1, 6), "0.05")]
+        )
+    with pytest.raises(correlation.CorrelationError, match="before the first"):
+        correlation._performance_summary(
+            rows, 0, [_span(date(2025, 12, 20), date(2025, 12, 25), "0.05")]
+        )
+
+
+def test_the_specification_refuses_one_day_spans_and_losses_beyond_capital() -> None:
+    base = {
+        "live_evidence_layer": "ACCOUNT_LIVE",
+        "series_id": "a",
+        "strategy_version": "v1",
+    }
+    for span in (
+        {"start_date": "2026-01-01", "end_date": "2026-01-02", "return": "0.01"},
+        {"start_date": "2026-01-01", "end_date": "2026-01-05", "return": "-1.5"},
+    ):
+        with pytest.raises(correlation.CorrelationError):
+            correlation._evidence_mode_definition({**base, "accepted_spans": [span]}, 0)
