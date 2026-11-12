@@ -74,13 +74,24 @@ def active_allowances(
     schema: Any,
     table: tuple[ContentAllowance, ...] | None = None,
 ) -> dict[str, float]:
-    """Extra fraction per block for a release that changes the panel schema version."""
+    """Extra fraction per block for a release that moves the panel schema version up.
 
-    if previous_schema == schema or not isinstance(schema, int):
+    Every entry for a version in (previous, schema] counts, so a release that skips a
+    version carries both changes; no previous version, a downgrade or an equal version
+    declares nothing.
+    """
+
+    if (
+        isinstance(previous_schema, bool)
+        or isinstance(schema, bool)
+        or not isinstance(previous_schema, int)
+        or not isinstance(schema, int)
+        or schema <= previous_schema
+    ):
         return {}
     out: dict[str, float] = {}
     for entry in CONTENT_ALLOWANCES if table is None else table:
-        if entry.schema_version == schema:
+        if previous_schema < entry.schema_version <= schema:
             out[entry.block] = out.get(entry.block, 0.0) + entry.extra_fraction
     return out
 
@@ -105,8 +116,12 @@ def added_days(previous_as_of: Any, as_of: Any) -> int | None:
     return days if days >= 0 else None
 
 
-def relative_limit(previous: int, days: int, extra: float = 0.0) -> int:
-    return _round_up(previous * (1 + GROWTH_PER_DAY * days + MARGIN + extra))
+def relative_limit(
+    previous: int, days: int, extra: float = 0.0, extra_bytes: int = 0
+) -> int:
+    return _round_up(
+        previous * (1 + GROWTH_PER_DAY * days + MARGIN + extra) + extra_bytes
+    )
 
 
 def ceiling(committed: int) -> int:
@@ -147,11 +162,13 @@ def derive_budget(
         committed_size: int | None,
         prev: int | None,
         extra: float = 0.0,
+        extra_bytes: int = 0,
     ) -> int:
-        top = ceiling(committed_size if committed_size else file_limit)
+        # the reviewed floor is explicit: the ceiling never sits below it
+        top = max(ceiling(committed_size if committed_size else file_limit), file_limit)
         if previous_unknown or prev is None or days is None:
             return top if previous_unknown else file_limit
-        return min(top, max(file_limit, relative_limit(prev, days, extra)))
+        return min(top, max(file_limit, relative_limit(prev, days, extra, extra_bytes)))
 
     for name, file_limit in budget["blocks"].items():
         derived["blocks"][name] = pick(
@@ -160,11 +177,20 @@ def derive_budget(
             (previous_blocks or {}).get(name),
             extra_by_block.get(name, 0.0),
         )
+    extra_bytes = math.ceil(
+        sum(
+            fraction * (previous_blocks or {}).get(name, 0)
+            for name, fraction in extra_by_block.items()
+        )
+    )
     for key, file_limit in budget["physical"].items():
         derived["physical"][key] = pick(
             file_limit,
             committed.get(PHYSICAL_COMMITTED.get(key, "")),
             (previous_physical or {}).get(key),
-            max(extra_by_block.values(), default=0.0),
+            0.0,
+            # a declared block change grows every physical file that carries the panel
+            # by at most the bytes the declaration allows, not by a fraction of the file
+            extra_bytes,
         )
     return derived
