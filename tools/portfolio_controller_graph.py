@@ -368,6 +368,11 @@ _PATH_STAGES = {
     "tools/ci_summary.py": [],
     # Regression-corpus release gate (#911): reads a registry and test files only.
     "tools/check_regression_corpus.py": [],
+    # Post-release rendered-UI check of a published panel (#912): reads the published panel and
+    # a contract, writes only its own receipt and screenshot; imports no producer.
+    "tools/published_render_check.py": [],
+    "apps/portfolio-control-panel/published_render_check.mjs": [],
+    "apps/portfolio-control-panel/render_contract.json": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/capture_fidelity_intake.py": [],

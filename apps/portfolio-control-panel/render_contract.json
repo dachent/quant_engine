@@ -1,0 +1,9 @@
+{
+  "contract_id": "qe-panel-render-contract/1",
+  "checks": [
+    {"id": "banner_heading_matches_readiness", "kind": "text_equals", "selector": "#command-heading", "pointer": "/advisory/readiness", "transform": "underscore_to_space"},
+    {"id": "banner_reason_matches_payload", "kind": "text_equals", "selector": "#command-reason", "pointer": "/advisory/reason"},
+    {"id": "no_stale_do_not_expand_banner", "kind": "forbidden_text", "phrases": ["Do not expand systematic risk"], "unless": {"pointer": "/advisory/readiness", "equals": "DO_NOT_EXPAND_SYSTEMATIC_RISK"}},
+    {"id": "gate_rows_match_payload_gates", "kind": "count_equals", "selector": "#gate-stack .gate-row", "pointer": "/gates"}
+  ]
+}

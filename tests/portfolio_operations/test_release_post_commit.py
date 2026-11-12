@@ -382,3 +382,24 @@ def test_the_manifest_and_graph_wire_the_stage_after_commit() -> None:
     argv = " ".join(item for item in post["argv"] if isinstance(item, str))
     assert "{resolved_cycle}" in argv and "{code_commit}" in argv
     assert "post-commit" in stages["pack-evidence"]["argv"]
+
+
+@pytest.mark.parametrize(("code", "passes"), [(0, True), (1, False)])
+def test_the_published_panel_render_check_is_a_step_when_the_panel_dir_is_given(
+    world: dict[str, Any], capsys: pytest.CaptureFixture[str], code: int, passes: bool
+) -> None:
+    """#912: a failing rendered-UI check refuses the release; without the flag nothing changes."""
+
+    (world["tools"] / "published_render_check.py").write_text(
+        f"import sys\nassert '--panel-dir' in sys.argv and '--out-dir' in sys.argv\nsys.exit({code})\n",
+        encoding="utf-8",
+    )
+    args = [*world["args"], "--published-panel-dir", str(world["tmp"] / "panel")]
+    status = tool.main(args)
+    if passes:
+        assert status == 0
+        receipt = json.loads(Path(_flag(args, "--out")).read_bytes())
+        assert receipt["steps"][-1]["step"] == "published-render"
+    else:
+        assert status == 1
+        assert "published-render exited 1" in capsys.readouterr().err

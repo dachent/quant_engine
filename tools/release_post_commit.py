@@ -298,7 +298,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     py = sys.executable
     spec_arg = str(spec_file)
     steps: list[dict[str, Any]] = []
-    plan = (
+    plan: tuple[tuple[str, list[str]], ...] = (
         (
             "post-release-verify",
             [
@@ -341,6 +341,23 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             ],
         ),
     )
+    if args.published_panel_dir:
+        # #912: render the published panel and compare the DOM with its payload (optional so
+        # existing drivers keep their step list; the driver passes the published panel dir).
+        plan = (
+            *plan,
+            (
+                "published-render",
+                [
+                    py,
+                    str(tools / "published_render_check.py"),
+                    "--panel-dir",
+                    str(args.published_panel_dir),
+                    "--out-dir",
+                    str(post_dir / "published-render"),
+                ],
+            ),
+        )
     post_receipt_id = ""
     for name, argv in plan:
         log = Path(args.log_dir) / f"{name}.log"
@@ -398,6 +415,11 @@ def _parser() -> argparse.ArgumentParser:
         v.add_argument(f"--{flag}", required=True)
     v.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     v.add_argument("--tools-dir", default=None)
+    v.add_argument(
+        "--published-panel-dir",
+        default=None,
+        help="published panel directory; when given the rendered-UI check runs (#912)",
+    )
     return parser
 
 
