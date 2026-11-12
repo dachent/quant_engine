@@ -135,6 +135,16 @@
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^Partial: causal attribution without the connected-model mix$",
    "justification": "the status label of PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE: it names which part of the causal attribution is missing, not a quantity; the status is derived and validated by the report and panel verifiers"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^[(]annualized, sample std . .252, [{][}] daily observations over [{][}] days[{][}][)]$",
+   "justification": "label of the reconciliation tracking error: the estimator and scaling are the producer's fixed method and the count and span are the row's own observations and dates, printed from the same fields (#904 item 13)"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^(no standard error: not a headline|includes hypothetical backtest: not a live result, no headline)$",
+   "justification": "rendered only when the alpha context's headline_status says the alpha is not a headline (no standard error, or a backtest in its series); the status is computed and kill-tested in test_alpha_headline_rule (#904 items 10 and 11)"
   }
  ]
 }
