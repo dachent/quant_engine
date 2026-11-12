@@ -41,6 +41,20 @@ LABEL_TEXT: Final = {
     COPY_RECORD: "P123 copy (diagnostic)",
 }
 FORBIDDEN_WORDS: Final = ("provider-live book", "provider live book")
+# Two series kinds, never mixed.  The internal mode ids stay (digest-pinned);
+# these are the only display names for them.
+RESEARCH_SERIES_LABEL: Final = "Research series (backtest + model live)"
+MY_LIVE_SERIES_LABEL: Final = "My live"
+MODE_LABELS: Final = {
+    "LIVE_PLUS_BACKTEST": RESEARCH_SERIES_LABEL,
+    "LIVE_ONLY": MY_LIVE_SERIES_LABEL,
+}
+# Layers a series kind may contain.  The account is never in the research series
+# and a model-live row is never in the my-live series.
+SERIES_KIND_LAYERS: Final = {
+    "LIVE_PLUS_BACKTEST": frozenset({BACKTEST, MODEL_LIVE}),
+    "LIVE_ONLY": frozenset({ACCOUNT_LIVE}),
+}
 MIN_HEADLINE_DAYS: Final = 365
 _COST_BASES: Final = frozenset({"GROSS", "NET"})
 # Roles that can legitimately carry each layer.
@@ -198,3 +212,20 @@ def check_block(block: Mapping[str, Any]) -> list[str]:
 def forbidden_wording(text: str) -> list[str]:
     lowered = text.lower()
     return [word for word in FORBIDDEN_WORDS if word in lowered]
+
+
+def kind_allows(mode: str, layer: str) -> bool:
+    """May a row of `layer` sit in the series kind of `mode`?
+
+    A strategy with no model-live layer keeps its backtest-then-account research
+    series; that splice is declared per strategy by the contract, and callers use
+    `kind_allows_without_model_live` for it.
+    """
+
+    return layer in SERIES_KIND_LAYERS[mode]
+
+
+def kind_allows_without_model_live(mode: str, layer: str) -> bool:
+    if mode == "LIVE_PLUS_BACKTEST":
+        return layer in {BACKTEST, ACCOUNT_LIVE}
+    return kind_allows(mode, layer)
