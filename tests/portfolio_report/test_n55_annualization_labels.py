@@ -448,10 +448,14 @@ def test_cagr_and_mwr_carry_their_basis_and_window_at_version_four(
 ) -> None:
     report, _ = world_with_attribution
     labelled = 0
+    suppressed = 0
     for row in report["strategy_summary"]:
         cagr = row["account_live_cagr_annualization"]
         if row["account_live_cagr"] is None:
             assert cagr is None
+            suppressed += int(
+                row["account_live_cagr_status"] == "SUPPRESSED_UNDER_365D"
+            )
         else:
             labelled += 1
             assert cagr["basis"] == "CALENDAR_DAYS_COMPOUNDED_OVER_365"
@@ -487,7 +491,8 @@ def test_cagr_and_mwr_carry_their_basis_and_window_at_version_four(
             assert mwr["window_start"] == row["mwr_opening_date"]
             assert mwr["window_end"] == row["mwr_terminal_date"]
             assert mwr["short_window"] is (mwr["window_days"] < 365)
-    assert labelled
+    # the fixture windows are all under a year: the rule (#904) suppresses their CAGR
+    assert labelled or suppressed
 
 
 def _merged(catalog: dict[str, Any], strategy_id: str) -> dict[str, Any]:
@@ -620,12 +625,22 @@ def test_the_schema_admits_the_labels_at_four_only_and_closes_their_shape(
     assert _summary_errors(5, rows) == []
     assert _summary_errors(3, rows)
 
+    def _with_label(copy: list[dict[str, Any]]) -> dict[str, Any]:
+        # CAGR is suppressed under a year (#904), so no fixture row carries a CAGR
+        # label; the shape under test is the label's, which the MWR label shares
+        target = next(r for r in copy if r["mwr_annualization"])
+        target["account_live_cagr_annualization"] = deepcopy(
+            target["mwr_annualization"]
+        )
+        return target
+
     forged = _schema_rows(report)
-    target = next(r for r in forged if r["account_live_cagr_annualization"])
+    target = _with_label(forged)
+    assert _summary_errors(5, forged) == []
     target["account_live_cagr_annualization"]["short_window"] = "yes"
     assert _summary_errors(5, forged)
     extra = _schema_rows(report)
-    target = next(r for r in extra if r["account_live_cagr_annualization"])
+    target = _with_label(extra)
     target["account_live_cagr_annualization"]["note"] = "x"
     assert _summary_errors(5, extra)
 

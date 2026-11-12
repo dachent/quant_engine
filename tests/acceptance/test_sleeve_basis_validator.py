@@ -137,9 +137,9 @@ def test_the_figures_are_the_hand_computed_ones() -> None:
     assert figures.opening_nav == 992
     assert figures.liability_line == -1400
     assert figures.parent_equity == synth.PARENT_EQUITY
-    assert figures.annualised is not None
-    expected = (synth.TWR_NUM / synth.TWR_DEN) ** (365 / synth.WINDOW_DAYS) - 1
-    assert abs(float(figures.annualised) - expected) < 1e-9 * abs(expected)
+    # a 4-day window: no annual rate (#904 short-window rule)
+    assert figures.window_days < 365
+    assert figures.annualised is None
 
 
 def test_the_entry_day_is_excluded_and_transfers_are_end_of_day_flows() -> None:
@@ -382,14 +382,18 @@ def test_an_internally_consistent_forgery_is_caught_by_the_comparison() -> None:
 def _published(figures: Any, perimeter: Decimal, weight: Decimal) -> dict[str, Any]:
     """A panel stating the declared strategy exactly as the derivation says."""
 
-    assert figures.annualised is not None
+    # a window under 365 days has no annual rate (#904): the honest row publishes none
     return {
         "strategies": [
             {
                 "strategy_id": figures.strategy_id,
                 "return_scope": {"basis": "SLEEVE_EPOCH"},
                 "account_live_cumulative_return": format(figures.twr, "f"),
-                "account_live_cagr": format(figures.annualised, "f"),
+                "account_live_cagr": (
+                    None
+                    if figures.annualised is None
+                    else format(figures.annualised, "f")
+                ),
                 "account_live_max_drawdown": format(figures.max_drawdown, "f"),
                 "hwm_max_drawdown": format(figures.max_drawdown, "f"),
                 "hwm_current_drawdown": format(figures.current_drawdown, "f"),

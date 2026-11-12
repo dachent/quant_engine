@@ -31,7 +31,8 @@ DECLARATION = {
 }
 # sha256 of the canonical report bytes the unmodified main (f10eb617, after the pass-29 and pass-30 wording) builds from this
 # fixture with no declaration; the switch off must reproduce them exactly
-MAIN_OFF_DIGEST = "10a40c5dca2aa4f4ba475f7d117dd1499067cbb0d0057a534b8ebceefaf5f6d4"
+# #904: re-pinned when CAGR under 365 days became null (this fixture is a 28-day window)
+MAIN_OFF_DIGEST = "e24cbcb5adeb50f5c2cd8467a565a358b38f00d16f298aa2882b645c4ee56620"
 
 
 def _facts() -> dict[str, Any]:
@@ -84,7 +85,8 @@ def test_with_the_switch_on_the_row_stands_on_the_sleeve(
     assert on["current_value_usd"] == "104"
     assert on["hwm_max_drawdown"] == on["account_live_max_drawdown"]
     assert on["hwm_current_drawdown"] is not None
-    assert on["account_live_cagr"] != off["account_live_cagr"]
+    # the 28-day sleeve window is under a year: CAGR is suppressed on both sides (#904)
+    assert on["account_live_cagr"] is None and off["account_live_cagr"] is None
     assert on["systematic_weight"] != off["systematic_weight"]
     scope = on["return_scope"]
     assert scope["basis"] == "SLEEVE_EPOCH"

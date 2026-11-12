@@ -288,7 +288,9 @@ def _panel(
             "account_live_cumulative_return": format(figures.twr, "f"),
             "current_value_usd": format(figures.value, "f"),
             "cost_rate_denominator_usd": format(figures.value, "f"),
-            "account_live_cagr": format(figures.annualised or D(0), "f"),
+            "account_live_cagr": (
+                None if figures.annualised is None else format(figures.annualised, "f")
+            ),
             "account_live_max_drawdown": format(figures.max_drawdown, "f"),
             "hwm_max_drawdown": format(figures.max_drawdown, "f"),
             "hwm_current_drawdown": format(figures.current_drawdown, "f"),

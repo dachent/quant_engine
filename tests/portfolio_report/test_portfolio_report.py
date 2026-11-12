@@ -6675,7 +6675,7 @@ def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
                     "cagr": "0.11",
                     "cumulative_return": "0.1",
                     "first_date": "2025-01-01",
-                    "last_date": "2025-12-31",
+                    "last_date": "2026-01-01",
                     "max_drawdown": "-0.2",
                     "return_observations": 252,
                 },
@@ -6694,7 +6694,7 @@ def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
     assert row["account_live_cumulative_return"] == "0.1"
     assert row["account_live_max_drawdown"] == "-0.2"
     assert row["account_live_observed_start"] == "2025-01-01"
-    assert row["account_live_observed_end"] == "2025-12-31"
+    assert row["account_live_observed_end"] == "2026-01-01"
     assert row["account_live_source_generation_as_of_date"] == "2025-12-31"
     assert row["account_live_source_sha256"] == "c" * 64
     assert row["account_live_return_series_sha256"] is None

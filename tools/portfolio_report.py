@@ -7785,6 +7785,23 @@ def _strategies(
             and observed_end is not None
             else account_metrics.get("cagr")
         )
+        # one short-window rule (#904): the annualised figure exists from 365 days, as
+        # twr_annualised does; under it the window return and its day count stand alone
+        cagr_window_days = (
+            (
+                _date(observed_end, "window end")
+                - _date(window_open or observed_start, "window start")
+            ).days
+            if observed_start is not None and observed_end is not None
+            else None
+        )
+        cagr_suppressed = (
+            account_cagr is not None
+            and cagr_window_days is not None
+            and cagr_window_days < _ONE_YEAR_DAYS
+        )
+        if cagr_suppressed:
+            account_cagr = None
         cost_row = costs.get(strategy_id, {})
         gap_row = gaps.get(strategy_id, {})
         coverage_row = coverage.get(strategy_id, {})
@@ -8067,7 +8084,9 @@ def _strategies(
                 ),
                 "account_live_cagr": account_cagr,
                 "account_live_cagr_status": (
-                    "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
+                    "SUPPRESSED_UNDER_365D"
+                    if cagr_suppressed
+                    else "AVAILABLE_DERIVED_SAME_CANONICAL_PATH"
                     if canonical_account and account_cagr is not None
                     else "AVAILABLE_SOURCE_REPORTED_SAME_AUDIT_VINTAGE"
                     if legacy_account and account_cagr is not None

@@ -135,6 +135,11 @@
    "file": "apps/portfolio-control-panel/app.js",
    "pattern": "^Partial: causal attribution without the connected-model mix$",
    "justification": "the status label of PARTIAL_CAUSAL_ATTRIBUTION_MODEL_MIX_UNAVAILABLE: it names which part of the causal attribution is missing, not a quantity; the status is derived and validated by the report and panel verifiers"
+  },
+  {
+   "file": "apps/portfolio-control-panel/app.js",
+   "pattern": "^not annualized: [{][}] day window [(]under 1 year[)]$",
+   "justification": "rendered only on the branch where the producer published no annual rate because the window is under 365 days (#904 short-window rule); the day count is the row's own window_days, computed from the same field it prints"
   }
  ]
 }

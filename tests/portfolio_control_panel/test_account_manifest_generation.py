@@ -6603,7 +6603,7 @@ def test_c4c3b_derives_literal_predecessor_closing_nav_epoch(
         "gain": Decimal("5.22"),
         "return_on_net_capital": Decimal("0.026257545271629778672032193158953722334"),
         "annualized_return_on_net_capital": Decimal(
-            "3.194668008048289738430583501006036217303"
+            "22.41661876406777892577243670987370180127"
         ),
         "xirr_diagnostic": Decimal("36.7834343328871588776166047964976054625"),
         "observation_linked_return": Decimal(
@@ -7909,7 +7909,7 @@ def _c4c4a_predecessor_candidate() -> dict[str, object]:
         "current_value": "204.02",
         "gain": "5.22",
         "return_on_net_capital": "0.026257545271629778672032193158953722334",
-        "annualized_return_on_net_capital": "3.194668008048289738430583501006036217303",
+        "annualized_return_on_net_capital": "22.41661876406777892577243670987370180127",
         "xirr_diagnostic": "36.7834343328871588776166047964976054625",
         "observation_linked_return": "0.026257545271629778672032193158953722334",
         "observed_hwm_index": "102.6257545271629778672032193158953722334",
