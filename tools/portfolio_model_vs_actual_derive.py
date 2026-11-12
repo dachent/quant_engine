@@ -18,6 +18,7 @@ import copy
 import datetime as dt
 import hashlib
 import io
+import math
 import json
 from pathlib import Path
 import sys
@@ -277,6 +278,8 @@ def _op_adjclose_extension(c: _Ctx, s: dict[str, Any], op: dict[str, Any]) -> No
 
     gap3 = (acc - mod) * 100
     n3 = len([d for d in rets if lo < d <= hi])
+    if n3 == 0:
+        raise DeriveError("no account returns in the extension window")
     w3 = {
         "window_id": op["new_window"],
         "label": f"{op['new_label']}",
@@ -444,6 +447,14 @@ def check_closure(artifact: dict[str, Any]) -> None:
     for s in artifact["strategies"]:
         for w in s["windows"]:
             gap = w["account_return_pct"] - w["model_return_pct"]
+            values = [gap, *(x["pp"] for x in w["components"])]
+            if not all(
+                isinstance(v, (int, float)) and math.isfinite(v) for v in values
+            ):
+                raise DeriveError(
+                    f"window {s['strategy_id']}/{w['window_id']} has a "
+                    "non-finite or non-numeric return or component"
+                )
             staged = w.get("audit_gap_pp")
             if staged is not None and abs(gap - staged) > tol:
                 raise DeriveError(

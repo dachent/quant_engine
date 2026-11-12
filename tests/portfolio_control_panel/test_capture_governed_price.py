@@ -95,3 +95,43 @@ def test_request_shape(tmp_path: Path) -> None:
     assert len(seen) == 2 and seen[0] == seen[1]
     assert "/v8/finance/chart/AAA?period1=" in seen[0]
     assert "interval=1d&events=div%7Csplit&includeAdjustedClose=true" in seen[0]
+
+
+def test_kill_non_finite_close_refused(tmp_path: Path) -> None:
+    body = _body(DAYS).replace(b"10.0", b"NaN", 1)
+    assert _run(tmp_path, lambda url: body) == 2
+    assert not (tmp_path / "run").exists()
+
+
+def test_kill_length_mismatch_refused(tmp_path: Path) -> None:
+    chart = json.loads(_body(DAYS))
+    chart["chart"]["result"][0]["indicators"]["quote"][0]["close"].pop()
+    assert _run(tmp_path, lambda url: json.dumps(chart).encode()) == 2
+
+
+def test_kill_duplicate_bar_refused(tmp_path: Path) -> None:
+    assert _run(tmp_path, lambda url: _body([DAYS[0], DAYS[0], DAYS[1]])) == 2
+
+
+def test_kill_bad_symbol_refused(tmp_path: Path) -> None:
+    assert _run(tmp_path, lambda url: _body(DAYS), "AAA,B/B") == 2
+
+
+def test_raw_bodies_kept_with_hashes(tmp_path: Path) -> None:
+    assert _run(tmp_path, lambda url: _body(DAYS)) == 0
+    sums = (tmp_path / "run" / "SHA256SUMS.txt").read_text().splitlines()
+    assert len(sums) == 4 and sums[0].endswith("  raw-a-AAA.json")
+    import hashlib
+
+    first = sums[0].split()[0]
+    raw = (tmp_path / "run" / "raw-a-AAA.json").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == first
+
+
+def test_symbol_gap_is_flagged(tmp_path: Path) -> None:
+    def fetch(url: str) -> bytes:
+        return _body(DAYS[:-1] if "BBB" in url else DAYS)
+
+    assert _run(tmp_path, fetch) == 3
+    gaps = (tmp_path / "run" / "symbol_gaps.csv").read_bytes()
+    assert gaps == b"symbol,date\nBBB,2026-11-06\n"
