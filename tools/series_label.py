@@ -36,7 +36,7 @@ ENTITY_ROLES: Final = frozenset(
 # The only user-facing wording for a layer.
 LABEL_TEXT: Final = {
     BACKTEST: "Backtest (hypothetical, before model live)",
-    MODEL_LIVE: "Model live (provider record, none of my trades)",
+    MODEL_LIVE: "Model live (provider record, without my trades)",
     ACCOUNT_LIVE: "My live (my account: fills, fees, timing)",
     COPY_RECORD: "P123 copy (diagnostic)",
 }
