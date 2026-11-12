@@ -4771,6 +4771,7 @@ def _event_fact_claim(
     partial_effect: str,
     complete_effect: str,
     noun: str,
+    gap_tail: str,
 ) -> dict[str, Any]:
     """The flows/transactions claim, decided by the account fact matrix (#895 M4)."""
 
@@ -4786,9 +4787,7 @@ def _event_fact_claim(
             else [
                 (
                     f"{len(records)} accepted {noun} records across "
-                    f"{providers or 'no providers'}; "
-                    "providers without an admitted "
-                    f"{noun} path remain explicit in the account fact matrix"
+                    f"{providers or 'no providers'}; " + gap_tail
                 ),
             ]
         ),
@@ -4833,7 +4832,7 @@ def _positions_claim(
                 else "RETAINED_NO_ACCEPTED_POSITION_SOURCE"
             ),
             "effect": (
-                "Every investment account declares complete current position snapshots."
+                "Investment accounts declare current position snapshot boundaries."
                 if complete
                 else "Only accepted current position rows are reported; accounts without reported rows remain unavailable."
             ),
@@ -4864,7 +4863,7 @@ def _costs_claim(costs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "authority": "strategy cost-economics register",
             "code": "COMPLETE" if complete else "RETAINED_UNKNOWN_OR_CONDITIONAL_COSTS",
             "effect": (
-                "Every sleeve cost is a known dollar amount."
+                "Costs read from the cost-economics register."
                 if complete
                 else "Gross-to-net and after-tax conclusions remain unavailable where a sleeve cost is unknown or conditional."
             ),
@@ -5005,8 +5004,9 @@ def _fact_coverage(
             coverage_matrix,
             authority="accepted provider-ledger and legacy flow evidence",
             partial_effect="MWR remains unavailable outside accounts and intervals with complete admitted external-flow evidence.",
-            complete_effect="Every investment account declares a complete admitted external-flow interval.",
+            complete_effect="Investment accounts declare admitted external-flow intervals.",
             noun="flow",
+            gap_tail="providers without an admitted flow path remain explicit in the account fact matrix",
         ),
         _event_fact_claim(
             "transactions",
@@ -5014,8 +5014,9 @@ def _fact_coverage(
             coverage_matrix,
             authority="accepted provider-ledger and legacy transaction evidence",
             partial_effect="Transaction analysis is limited to the named account/provider intervals; absence is never converted to zero activity.",
-            complete_effect="Every investment account declares a complete admitted transaction interval.",
+            complete_effect="Investment accounts declare admitted transaction intervals.",
             noun="transaction",
+            gap_tail="providers without an admitted transaction path remain explicit in the account fact matrix",
         ),
         _positions_claim(positions, schwab_known_gaps, coverage_matrix),
         {
