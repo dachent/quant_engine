@@ -1,0 +1,85 @@
+{
+  "cases": {
+    "atyr_reverse_split_alias": {
+      "defect": "Reverse-split alias missing: a ticker renamed by a reverse split resolves to nothing.",
+      "status": "open"
+    },
+    "ibkr_total_cash_loan_dropped": {
+      "defect": "IBKR total-cash loan dropped by the leverage disclosure (E8).",
+      "status": "open"
+    },
+    "d8_publication_check_never_passes": {
+      "defect": "D8 publication-state check can never pass for a committed release.",
+      "status": "open"
+    },
+    "robuxio_gross_net_splice": {
+      "defect": "Robuxio hybrid line joins a GROSS backtest to a NET live path.",
+      "status": "open"
+    },
+    "grizzlybears_3x_replica_scale": {
+      "defect": "GrizzlyBears 3x replica shown with no scale warning.",
+      "status": "open"
+    },
+    "matrixport_gap_days": {
+      "defect": "Matrixport gap days not accounted for in the return chain.",
+      "status": "open"
+    },
+    "validator_fixture_values_no_builder_emits": {
+      "defect": "Validator fixtures carry values no builder ever emits, so a check passes on fixtures and fails on real output.",
+      "status": "open"
+    },
+    "scratch_path_sidecar_read": {
+      "defect": "A sidecar is read from a scratch path instead of the hashed input.",
+      "status": "open"
+    },
+    "ci_reports_every_failure": {
+      "defect": "CI test step stopped at the first failure (maxfail=1) and hid the rest (#910).",
+      "status": "covered",
+      "test": "tests/regression/test_ci_reports_every_failure.py::test_pytest_has_no_maxfail",
+      "kill": "pyproject addopts contains --maxfail=1 on the pre-fix tree, so the assertion fails."
+    }
+  },
+  "tickets": {
+    "894": {
+      "cases": [
+        "ibkr_total_cash_loan_dropped"
+      ]
+    },
+    "895": {
+      "cases": [
+        "validator_fixture_values_no_builder_emits"
+      ]
+    },
+    "896": {
+      "cases": [
+        "d8_publication_check_never_passes"
+      ]
+    },
+    "899": {
+      "cases": [
+        "matrixport_gap_days"
+      ]
+    },
+    "902": {
+      "cases": [
+        "robuxio_gross_net_splice"
+      ]
+    },
+    "903": {
+      "cases": [
+        "grizzlybears_3x_replica_scale"
+      ]
+    },
+    "907": {
+      "cases": [
+        "atyr_reverse_split_alias",
+        "scratch_path_sidecar_read"
+      ]
+    },
+    "910": {
+      "cases": [
+        "ci_reports_every_failure"
+      ]
+    }
+  }
+}

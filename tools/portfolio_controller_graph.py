@@ -194,6 +194,8 @@ _PATH_STAGES = {
     "tools/check_fact_admission.py": [],
     "tools/verify_release_restore.py": [],
     "tools/release_driver.py": [],
+    # #884 G0 upfront-QC gate: reads a run config and release roots, writes only its own receipt
+    "tools/release_preflight.py": [],
     "tools/release_fresh_world.py": [],
     "tools/release_cycle_manifest.py": [],
     "tools/release_cycle_seeds.py": [],
@@ -364,6 +366,10 @@ _PATH_STAGES = {
     # completeness (N1), reading only that record's own declared pins; no
     # producer imports it and it writes no delivery artifact.
     "tools/check_release_closure.py": [],
+    # CI job-summary writer (#910): reads a junit file, writes markdown; no stage impact.
+    "tools/ci_summary.py": [],
+    # Regression-corpus release gate (#911): reads a registry and test files only.
+    "tools/check_regression_corpus.py": [],
     "tools/codex_scope_guard.py": [],
     "tools/issue_guard.py": [],
     "tools/capture_fidelity_intake.py": [],
