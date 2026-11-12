@@ -59,6 +59,7 @@ export function evaluate(contract, payload, dom) {
       return { ...base, status: hit && !released ? "FAIL" : "PASS", code: hit && !released ? "FORBIDDEN_TEXT_PRESENT" : "OK" };
     }
     if (expected === undefined) return { ...base, status: "FAIL", code: "PAYLOAD_VALUE_MISSING" };
+    if (expected === null) return { ...base, status: "FAIL", code: "PAYLOAD_VALUE_NULL" };
     if (check.kind === "count_equals") {
       const found = dom.count(check.selector);
       const ok = Array.isArray(expected) && found === expected.length;
@@ -90,6 +91,7 @@ async function main() {
   const html = path.resolve(options.html);
   const output = path.resolve(options.output);
   const contract = JSON.parse(await readFile(options.contract, "utf8"));
+  if (!Array.isArray(contract.checks) || contract.checks.length === 0) throw new Error("contract has no checks");
   const payload = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
   const { chromium } = await import(pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href);
   const browser = await chromium.launch({
@@ -138,7 +140,8 @@ async function main() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().catch((error) => {
-    console.error(`RENDER_CHECK_ERROR ${error.message}`);
+    // name only: a JSON parse message can quote payload text, and this log is retained
+    console.error(`RENDER_CHECK_ERROR ${error.name}`);
     process.exitCode = 2;
   });
 }

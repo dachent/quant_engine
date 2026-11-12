@@ -179,6 +179,18 @@ def test_output_is_create_only(tmp_path, monkeypatch) -> None:
         check.run(tmp_path / "panel", tmp_path / "out")
 
 
+def test_empty_or_partial_contract_cannot_pass(tmp_path, monkeypatch) -> None:
+    runtime = require_browser_runtime(ROOT)
+    monkeypatch.setenv("PLAYWRIGHT_MODULE", runtime.playwright_module)
+    monkeypatch.setenv("PLAYWRIGHT_EXECUTABLE_PATH", runtime.executable)
+    contract = tmp_path / "empty.json"
+    contract.write_text(
+        json.dumps({"contract_id": "t", "checks": []}), encoding="utf-8"
+    )
+    receipt = check.run(_panel(tmp_path / "panel"), tmp_path / "out", contract)
+    assert receipt["status"] == "FAIL"
+
+
 def test_shipped_contract_names_the_stale_banner_rule() -> None:
     shipped = json.loads(check.CONTRACT.read_text("utf-8"))
     rule = next(

@@ -384,6 +384,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         "moved_pointers": moved,
         "post_release_receipt_id": post_receipt_id,
         "predecessor_release_id": cycle["predecessor"]["release_id"],
+        "published_render_checked": bool(args.published_panel_dir),
         "release_id": release_id,
         "spec_sha256": _sha(spec_file.read_bytes()),
         "steps": steps,

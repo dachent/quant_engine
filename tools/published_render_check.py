@@ -79,7 +79,16 @@ def run(panel_dir: Path, out_dir: Path, contract: Path = CONTRACT) -> dict[str, 
         result_file = out_dir / "render-check.json"
         if done.returncode in (0, 1) and result_file.is_file():
             result = json.loads(result_file.read_text(encoding="utf-8"))
-            receipt.update(status=result["status"], checks=result["checks"])
+            wanted = {
+                c["id"] for c in json.loads(contract.read_text("utf-8"))["checks"]
+            }
+            got = {c["id"] for c in result["checks"]}
+            if not wanted or wanted != got:
+                receipt.update(
+                    status="FAIL", code="CHECK_RESULTS_INCOMPLETE", checks=[]
+                )
+            else:
+                receipt.update(status=result["status"], checks=result["checks"])
         else:
             receipt.update(status="FAIL", code="RENDER_CHECK_DID_NOT_RUN", checks=[])
     with receipt_path.open("xb") as handle:
