@@ -2941,7 +2941,7 @@ def test_the_run_observation_identity_ignores_roots_and_finality_directories() -
                     "root": f"{root}/{provider}",
                     "generation_id": "a" * 64,
                     "finality_evidence": {
-                        "path": f"{evidence_dir}\{provider}\finality.json",
+                        "path": f"{evidence_dir}{chr(92)}{provider}{chr(92)}finality.json",
                         "sha256": evidence_sha,
                         "size_bytes": 10,
                     },

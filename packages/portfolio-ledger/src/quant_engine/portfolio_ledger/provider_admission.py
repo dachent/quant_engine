@@ -816,7 +816,7 @@ def run_observation_identity(observation: Mapping[str, Any]) -> tuple[str, int]:
             row.pop("root", None)
             evidence = row.get("finality_evidence")
             if isinstance(evidence, dict) and isinstance(evidence.get("path"), str):
-                evidence["path"] = re.split(r"[\/]", evidence["path"])[-1]
+                evidence["path"] = re.split(r"[\\/]", evidence["path"])[-1]
     content = json.dumps(
         normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
