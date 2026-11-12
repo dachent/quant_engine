@@ -1334,8 +1334,9 @@ def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any
         return _verify_financial_outcomes_live(spec, caller)
 
     def reused(receipt_sha256: str) -> None:
-        module = _load_financial_outcomes_module()
-        module.record_receipt_reuse(spec, caller, receipt_sha256)
+        _with_financial_outcomes_module(
+            lambda module: module.record_receipt_reuse(spec, caller, receipt_sha256)
+        )
 
     return verification_receipt.run_with_receipt(
         "financial_outcomes",
@@ -1348,7 +1349,10 @@ def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any
     )
 
 
-def _load_financial_outcomes_module() -> Any:
+def _with_financial_outcomes_module(call: Callable[[Any], T]) -> T:
+    """Load the verifier module as the boundary always did and run ``call`` with the
+    tools directory on ``sys.path`` (the verifier imports its siblings lazily)."""
+
     tools_root = Path(__file__).resolve().parents[5] / "tools"
     path = tools_root / "portfolio_financial_outcomes.py"
     if path.is_symlink() or not path.is_file():
@@ -1363,9 +1367,9 @@ def _load_financial_outcomes_module() -> Any:
     try:
         sys.path.insert(0, str(tools_root))
         module_spec.loader.exec_module(module)
+        return call(module)
     finally:
         sys.path[:] = previous_path
-    return module
 
 
 def _verify_financial_outcomes_live(spec: PipelineSpec, caller: str) -> dict[str, Any]:
@@ -1374,28 +1378,15 @@ def _verify_financial_outcomes_live(spec: PipelineSpec, caller: str) -> dict[str
     The verifier records every call in its own ledger under ``spec.state_root``;
     ``caller`` only names this boundary, so counts never travel through return values.
     """
-    tools_root = Path(__file__).resolve().parents[5] / "tools"
-    path = tools_root / "portfolio_financial_outcomes.py"
-    if path.is_symlink() or not path.is_file():
-        raise PipelineValidationError("financial outcome verifier is unavailable")
-    module_spec = importlib.util.spec_from_file_location(
-        "quant_engine_pipeline_financial_outcomes", path
-    )
-    if module_spec is None or module_spec.loader is None:
-        raise PipelineValidationError("financial outcome verifier is unavailable")
-    module = importlib.util.module_from_spec(module_spec)
-    previous_path = list(sys.path)
     try:
-        sys.path.insert(0, str(tools_root))
-        module_spec.loader.exec_module(module)
-        proof = module.validate_financial_outcomes(spec, caller=caller)
+        proof = _with_financial_outcomes_module(
+            lambda module: module.validate_financial_outcomes(spec, caller=caller)
+        )
         if not isinstance(proof, dict) or proof.get("status") != "PASS":
             raise PipelineValidationError("financial outcomes did not pass")
         return cast(dict[str, Any], proof)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise PipelineValidationError(f"financial outcomes failed: {exc}") from exc
-    finally:
-        sys.path[:] = previous_path
 
 
 def _governed_hwm_input_policy(

@@ -1788,9 +1788,10 @@ def test_financial_outcomes_boundary_reuses_a_receipt_and_still_counts_the_call(
     def fake_live(_spec: object, caller: str) -> dict[str, object]:
         live["n"] += 1
         value = json.loads(watched.read_text(encoding="utf-8"))["v"]
-        module = pipeline_module._load_financial_outcomes_module()
-        module._write_verification_ledger(
-            spec, caller, {k: 0 for k in module._WORK_COUNTER_KEYS}, []
+        pipeline_module._with_financial_outcomes_module(
+            lambda module: module._write_verification_ledger(
+                spec, caller, {k: 0 for k in module._WORK_COUNTER_KEYS}, []
+            )
         )
         return {"status": "PASS", "v": value}
 
