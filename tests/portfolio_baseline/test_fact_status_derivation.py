@@ -267,3 +267,31 @@ def test_costs_complete_only_when_every_cost_is_a_known_amount() -> None:
     assert _claims([], costs=[known, unknown])["costs"]["status"] == "PARTIAL"
     assert _claims([], costs=[known, rate])["costs"]["status"] == "PARTIAL"
     assert _claims([], costs=[])["costs"]["status"] == "PARTIAL"
+
+
+def test_only_the_declared_complete_status_declares_a_boundary() -> None:
+    """KILL: a dated row with any other status is not a declaration (reviewer finding)."""
+
+    garbage = _row(
+        "positions",
+        "account-a",
+        status="GARBAGE",
+        declared_start="2025-11-03",
+        declared_end="2026-11-06",
+    )
+    assert _claims([garbage])["positions"]["status"] == "PARTIAL"
+
+
+def test_the_matrix_status_the_builder_may_emit_is_in_the_schema() -> None:
+    import json
+    from pathlib import Path
+
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "schemas"
+            / "portfolio"
+            / "baseline-catalog.schema.json"
+        ).read_bytes()
+    )
+    assert "DECLARED_COMPLETE" in json.dumps(schema)

@@ -998,7 +998,7 @@
         "observed_start": {"type": ["string", "null"], "format": "date"},
         "provider_id": {"type": "string", "minLength": 1},
         "record_count": {"type": "integer", "minimum": 0},
-        "status": {"enum": ["OBSERVED_NOT_COMPLETENESS_PROOF", "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF", "NO_ACCEPTED_FACT_PATH"]},
+        "status": {"enum": ["OBSERVED_NOT_COMPLETENESS_PROOF", "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF", "NO_ACCEPTED_FACT_PATH", "DECLARED_COMPLETE"]},
         "unavailable_amount_count": {"type": "integer", "minimum": 0}
       }
     }

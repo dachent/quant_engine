@@ -4691,6 +4691,10 @@ def _fx_record_uncovered_reason(
     positive rate; the date lies inside the generation's interval; and, where the
     provider published its own USD amount, native amount x rate closes against it
     within ``_FX_CLOSURE_TOLERANCE``.
+
+    No ledger producer writes ``provider_usd_amount`` today (a capital anchor's
+    ``opening_nav`` is valued at the recognition-day close, a different rate day, so
+    it is not a closure reference); the closure applies when a producer carries one.
     """
 
     amount = record.get("amount")
@@ -4732,15 +4736,17 @@ def _fx_record_uncovered_reason(
 
 
 def _declares_complete(row: Mapping[str, Any]) -> bool:
-    """An account/fact matrix row that declares its own completeness boundary."""
+    """An account/fact matrix row that declares its own completeness boundary.
 
-    status = str(row.get("status", ""))
+    Only the one completeness status counts, and only with a declared interval and
+    no missing interval: no other status, however it is dated, is a declaration.
+    """
+
     return (
-        row.get("declared_start") is not None
+        row.get("status") == "DECLARED_COMPLETE"
+        and row.get("declared_start") is not None
         and row.get("declared_end") is not None
         and not row.get("missing_intervals")
-        and status != "NO_ACCEPTED_FACT_PATH"
-        and not status.endswith("NOT_COMPLETENESS_PROOF")
     )
 
 
