@@ -150,3 +150,40 @@ def test_census_without_the_pin_says_so_precisely_and_with_the_pin_it_skips(
     findings = _run(gen_dir, pinned, repo)
     assert _census_findings(findings) == []
     assert _expected_findings(findings) == []
+
+
+def _labelled(account: str, role: str | None):
+    return _append(
+        ("fact_coverage_matrix",),
+        {
+            "account_id": account,
+            "fact_type": "flows",
+            "status": "OBSERVED_NOT_COMPLETENESS_PROOF",
+            "account_role": role,
+        },
+    )
+
+
+def test_a_history_only_labelled_account_is_not_a_current_account_finding(
+    tmp_path: Path,
+) -> None:
+    """#895 F2 kill test: the builder labels HISTORY_ONLY_NO_CURRENT_ASSIGNMENT and the
+    validator used to ignore the label, warning on every such account."""
+
+    spec = Spec(report=[_labelled("H9", "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT")])
+    assert _only(_generation_findings(build(tmp_path, spec)), INACTIVE) == []
+
+
+def test_a_wrong_or_missing_role_label_is_still_reported(tmp_path: Path) -> None:
+    for name, role in (("a", "PRODUCT"), ("b", None), ("c", "HISTORY_ONLY")):
+        spec = Spec(report=[_labelled("H9", role)])
+        found = _only(_generation_findings(build(tmp_path / name, spec)), INACTIVE)
+        assert [f.klass for f in found] == [checks.WARNING], name
+
+
+def test_a_history_only_label_does_not_excuse_an_excluded_account(
+    tmp_path: Path,
+) -> None:
+    spec = Spec(report=[_labelled("X1", "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT")])
+    found = _only(_generation_findings(build(tmp_path, spec)), INACTIVE)
+    assert [f.klass for f in found] == [checks.BLOCKER_AUTHORITY]

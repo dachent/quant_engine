@@ -49,21 +49,12 @@
     },
     {
       "check_id": "dates.section_as_of_vs_cutoff",
-      "defect": "C3",
-      "issue": 895,
-      "owner": "sprint-qc-validator",
-      "class": "RULE_SCOPE_TOO_WIDE",
-      "close_by": "2026-12-15",
-      "reason": "French lenses publish monthly with a 45-day lag (F2)"
-    },
-    {
-      "check_id": "dates.section_as_of_vs_cutoff",
       "defect": "C5",
       "issue": 895,
       "owner": "sprint-qc-validator",
       "class": "RULE_SCOPE_TOO_WIDE",
       "close_by": "2026-12-15",
-      "reason": "source clock judges finite-boundary providers with no active account or strategy (F2)"
+      "reason": "source clock judges finite-boundary providers with no active account or strategy; the validator has no provider-to-account mapping to recompute the exemption from (needs a provider field on the crosswalk) (F2)"
     },
     {
       "check_id": "expected",
@@ -88,14 +79,6 @@
       "class": "BUILDER_BUG",
       "close_by": "2026-12-15",
       "reason": "portfolio-hwm-policy provenance row appended by both builders (F9)"
-    },
-    {
-      "check_id": "universe.inactive_accounts_in_current",
-      "issue": 895,
-      "owner": "sprint-qc-validator",
-      "class": "RULE_IGNORES_LABEL",
-      "close_by": "2026-12-15",
-      "reason": "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT role label is never read (F2)"
     },
     {
       "check_id": "lint.payload_size",
@@ -568,6 +551,14 @@
       "class": "UNPROVEN_NO_BUILDER_FIXTURE",
       "close_by": "2026-12-31",
       "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "universe.inactive_accounts_in_current",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "role label now honoured (F2); no test passes real builder output through this check yet (Ruling C reachability control)"
     }
   ]
 }

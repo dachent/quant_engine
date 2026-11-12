@@ -5363,6 +5363,29 @@ def _view_ids(
     ]
 
 
+_HISTORY_ONLY_ROLE = "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT"
+
+
+def _history_only_accounts(
+    ctx: Context, file: str, path: Sequence[str | int], key: str
+) -> set[str]:
+    """Accounts whose every row in the view carries the history-only role label.
+
+    The builder names an account with no current assignment (``_label_account_roles``);
+    the validator still decides which accounts are outside the current universe, and
+    uses the label only to tell a disclosed history row from an unlabelled one.
+    """
+
+    document = ctx.report if file == REPORT else ctx.panel
+    value = node(document, *path)
+    roles: dict[str, set[Any]] = {}
+    if isinstance(value, list):
+        for row in value:
+            if isinstance(row, dict) and row.get(key) is not None:
+                roles.setdefault(str(row[key]), set()).add(row.get("account_role"))
+    return {a for a, seen in roles.items() if seen == {_HISTORY_ONLY_ROLE}}
+
+
 def check_active_universe(ctx: Context) -> Iterator[Finding]:
     """D9: every current view carries exactly the active strategy universe."""
 
@@ -5569,10 +5592,11 @@ def check_inactive_accounts(ctx: Context) -> Iterator[Finding]:
             for account, count in sorted(counts.items())
             if account in reference.excluded_accounts
         }
+        disclosed = _history_only_accounts(ctx, file, path, key)
         unknown = {
             account: count
             for account, count in sorted(counts.items())
-            if account not in reference.excluded_accounts
+            if account not in reference.excluded_accounts and account not in disclosed
         }
         if excluded:
             yield _finding(
@@ -8208,8 +8232,10 @@ def check_section_dates(ctx: Context) -> Iterator[Finding]:
             klass = NOT_READY
             message = _bound_message(bound, "section")
         elif lag is not None:
-            klass = NOT_READY
-            message = lag
+            # C3 (#895 F2): a lens that ends in the last month its governed sources can
+            # have published (recomputed above from the plan's own lag policy) is current
+            # for those sources.  Only a lens older than the policy allows is a finding.
+            continue
         elif is_available(status) or after:
             klass = BLOCKER_AUTHORITY
             message = (
