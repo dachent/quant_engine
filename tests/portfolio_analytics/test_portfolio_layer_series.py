@@ -347,3 +347,178 @@ def test_bundle_without_the_opt_in_inputs_adds_no_series(tmp_path: Path) -> None
     )
     ids = {item["series_id"] for item in json.loads(manifest)["series"]}
     assert not any("[GAV" in item or "[vendor 1x]" in item for item in ids)
+
+
+# ------------------------------------------- model-live layer survives the boundary
+
+
+def test_nav_file_stopping_far_before_model_live_is_refused(tmp_path: Path) -> None:
+    """Kill test (Grok 8): a chain that ends months early is not 'strictly before'."""
+
+    nav = _nav_csv(tmp_path / "nav.csv")
+    with pytest.raises(layers.LayerSeriesError, match="before model-live inception"):
+        layers.net_returns_from_nav(nav.read_bytes(), before=date(2025, 11, 1))
+    layers.require_reaches(date(2025, 8, 10), INCEPTION, "x")
+    with pytest.raises(layers.LayerSeriesError):
+        layers.require_reaches(date(2025, 8, 1), INCEPTION, "x")
+
+
+def test_a_segment_label_can_name_the_model_live_layer() -> None:
+    label = layers.series_label(
+        entity_id="matrixport product NAV",
+        entity_role="PRODUCT_NAV",
+        first="2025-08-14",
+        last="2025-09-01",
+        observations=10,
+        return_basis="PRODUCT_NAV_BALANCE_CHAIN",
+        cost_basis="NET",
+        layer="MODEL_LIVE",
+    )
+    assert label.layer == "MODEL_LIVE"
+    assert (
+        layers.series_label(
+            entity_id="e",
+            entity_role="VENDOR_SERIES",
+            first="2025-01-01",
+            last="2025-01-02",
+            observations=2,
+            return_basis="b",
+            cost_basis="NET",
+        ).layer
+        == "BACKTEST"
+    )
+    with pytest.raises(layers.LayerSeriesError):
+        layers.series_label(
+            entity_id="e",
+            entity_role="VENDOR_SERIES",
+            first="2025-01-01",
+            last="2025-01-02",
+            observations=2,
+            return_basis="b",
+            cost_basis="NET",
+            layer="PROVIDER_LIVE",
+        )
+
+
+def _mixed_rows() -> list[dict[str, str]]:
+    return [
+        *(
+            {"date": f"2025-08-{day:02d}", "evidence_layer": "BACKTEST"}
+            for day in range(1, 14)
+        ),
+        *(
+            {"date": f"2025-08-{day:02d}", "evidence_layer": "MODEL_LIVE"}
+            for day in range(14, 21)
+        ),
+    ]
+
+
+def test_refresh_keeps_a_model_live_segment_apart_from_the_backtest_one() -> None:
+    """Kill test (Gemini 4): refitting never folds MODEL_LIVE rows into BACKTEST."""
+
+    backtest = layers.series_label(
+        entity_id="e",
+        entity_role="VENDOR_SERIES",
+        first="2025-08-01",
+        last="2025-08-13",
+        observations=13,
+        return_basis="b",
+        cost_basis="NET",
+    )
+    model = layers.series_label(
+        entity_id="e",
+        entity_role="PRODUCT_NAV",
+        first="2025-08-14",
+        last="2025-08-20",
+        observations=7,
+        return_basis="b",
+        cost_basis="NET",
+        layer="MODEL_LIVE",
+    )
+    definition = layers.attach_label(
+        {"series_id": "s"}, backtest, segments=[backtest, model]
+    )
+    layers.refresh_labels(definition, _mixed_rows())
+    first, second = definition["segment_labels"]
+    assert (first["layer"], first["window"]["last"]) == ("BACKTEST", "2025-08-13")
+    assert first["window"]["observations"] == 13
+    assert (second["layer"], second["window"]["first"]) == ("MODEL_LIVE", "2025-08-14")
+    assert second["window"]["observations"] == 7
+    assert definition["series_labels"][0]["window"]["last"] == "2025-08-20"
+
+
+def test_account_boundary_never_deletes_a_model_live_labelled_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill test (Grok 8): the boundary cuts hypothetical rows, not the model-live NAV."""
+
+    rows = [
+        {
+            "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+            "date": (date(2025, 11, 20) + timedelta(days=index)).isoformat(),
+            "return": "0.001",
+            "evidence_layer": "MODEL_LIVE",
+            "strategy_version": "v1",
+        }
+        for index in range(30)
+    ]
+    definition = history._definition(
+        series_id="Robuxio Crypto (High Sharpe High Vol)",
+        version="v1",
+        rows=rows,
+        history_status="ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        compatibility_basis="TEST",
+        frequency="DAILY_CONTINUOUS",
+        implementation_status="TEST",
+        method="TEST",
+        source={"sha256": "0" * 64, "size_bytes": 1, "source_id": "test"},
+    )
+    model = layers.series_label(
+        entity_id="matrixport product NAV",
+        entity_role="PRODUCT_NAV",
+        first=rows[0]["date"],
+        last=rows[-1]["date"],
+        observations=len(rows),
+        return_basis="PRODUCT_NAV_BALANCE_CHAIN",
+        cost_basis="NET",
+        layer="MODEL_LIVE",
+    )
+    layers.attach_label(definition, model, segments=[model])
+    monkeypatch.setattr(
+        history, "_robuxio_series", lambda *args, **kwargs: [(rows, definition)]
+    )
+    inputs = _bundle_inputs(tmp_path)
+    returns, manifest = history.build_bundle(
+        **inputs,
+        as_of_date="2026-08-03",
+        robuxio_track_record_generation=tmp_path,
+        robuxio_strategy_version="v1",
+        live_inceptions={"Robuxio Crypto (High Sharpe High Vol)": "2025-12-07"},
+    )
+    kept = [
+        row
+        for row in csv.DictReader(io.StringIO(returns.decode()))
+        if row["series_id"] == "Robuxio Crypto (High Sharpe High Vol)"
+    ]
+    assert len(kept) == 30
+    assert {row["evidence_layer"] for row in kept} == {"MODEL_LIVE"}
+    payload = json.loads(manifest)
+    out = next(
+        item
+        for item in payload["series"]
+        if item["series_id"] == "Robuxio Crypto (High Sharpe High Vol)"
+    )
+    assert out["series_labels"][0]["layer"] == "MODEL_LIVE"
+    assert out["series_labels"][0]["window"]["observations"] == 30
+
+
+def test_vendor_basis_label_states_the_per_day_compounding(tmp_path: Path) -> None:
+    """Kill test (Grok 7): the line compounds same-day events, so the label says so."""
+
+    blended, live, _levels, _boundary = _trade_files(tmp_path)
+    _rows, definition = history._grizzly_vendor_basis(blended, live)
+    assert "COMPOUNDED_PER_CALENDAR_DAY" in definition["method"]
+    assert "COMPOUNDED_PER_CALENDAR_DAY" in (
+        definition["series_labels"][0]["basis"]["return_basis"]
+    )
+    assert "BETWEEN_TRADE_EVENTS" not in json.dumps(definition)

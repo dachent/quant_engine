@@ -254,6 +254,7 @@ def _return_rows(
     series_id: str,
     version: str,
     values: Iterable[tuple[date, Decimal]],
+    evidence_layer: str = "BACKTEST",
 ) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     seen: set[date] = set()
@@ -266,7 +267,7 @@ def _return_rows(
                 "series_id": series_id,
                 "date": observed.isoformat(),
                 "return": _canonical_return(period_return),
-                "evidence_layer": "BACKTEST",
+                "evidence_layer": evidence_layer,
                 "strategy_version": version,
             }
         )
@@ -1102,6 +1103,12 @@ def _robuxio_series(
     ]
     if len(kept) < 2:
         raise StrategyHistoryError("Robuxio GAV history is empty before model live")
+    try:
+        layer_series.require_reaches(
+            date.fromisoformat(kept[-1]["date"]), model_live_inception, "GAV history"
+        )
+    except layer_series.LayerSeriesError as exc:
+        raise StrategyHistoryError(f"Robuxio GAV history: {exc}") from exc
     gav_definition = dict(gross_definition) | {
         "observed_end": kept[-1]["date"],
         "observed_start": kept[0]["date"],
@@ -1870,7 +1877,7 @@ def _grizzly_vendor_basis(
         compatibility_basis="VENDOR_STATED_1X_MODEL_LEVELS_NOT_THE_3X_SPXL_REPLICA",
         frequency="TRADE_EVENT_IRREGULAR",
         implementation_status="MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY",
-        method="VENDOR_MODEL_LEVEL_RATIO_BETWEEN_TRADE_EVENTS",
+        method="VENDOR_MODEL_LEVEL_RATIO_COMPOUNDED_PER_CALENDAR_DAY",
         source=blended_source,
     ) | {
         "comparison_of_series_id": _GRIZZLY_SERIES_ID,
@@ -1886,7 +1893,7 @@ def _grizzly_vendor_basis(
             first=rows[0]["date"],
             last=rows[-1]["date"],
             observations=len(rows),
-            return_basis="VENDOR_MODEL_LEVEL_RATIO_BETWEEN_TRADE_EVENTS",
+            return_basis="VENDOR_MODEL_LEVEL_RATIO_COMPOUNDED_PER_CALENDAR_DAY",
             cost_basis="GROSS",
         ),
         display_name=layer_series.VENDOR_BASIS_DISPLAY_NAME,
@@ -2783,12 +2790,15 @@ def build_bundle(
             boundary = boundaries.get(series_id)
             if boundary is None:
                 continue
+            all_rows = [item for item in rows if item["series_id"] == series_id]
             series_rows = [
-                item
-                for item in rows
-                if item["series_id"] == series_id
-                and item.get("evidence_layer") != "MODEL_LIVE"
+                item for item in all_rows if item.get("evidence_layer") != "MODEL_LIVE"
             ]
+            if not series_rows and all_rows:
+                # a series that is entirely MODEL_LIVE has no hypothetical row for
+                # the account boundary to cap and is never deleted by it
+                layer_series.refresh_labels(definition, all_rows)
+                continue
             if not series_rows:
                 raise StrategyHistoryError(
                     f"live inception excludes the whole history: {series_id}"
@@ -2803,7 +2813,7 @@ def build_bundle(
                 definition["coverage_disposition"] = (
                     "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION"
                 )
-            layer_series.refresh_labels(definition, series_rows)
+            layer_series.refresh_labels(definition, all_rows)
 
     rows.sort(key=lambda item: (item["series_id"], item["date"]))
     if any(date.fromisoformat(row["date"]) > accepted_as_of for row in rows):

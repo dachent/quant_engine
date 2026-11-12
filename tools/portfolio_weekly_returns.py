@@ -32,6 +32,8 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
+import series_label
+
 
 BUILDER_VERSION: Final = "0.5.0"
 SCHEMA_VERSION: Final = 2
@@ -103,8 +105,56 @@ DAILY_BENCHMARK_SOURCE_ID: Final = "yahoo-adjusted-etf-daily"
 GAP_FILL_SPEC_NAME: Final = "spec.json"
 GAP_FILL_MODE: Final = "LIVE_PLUS_BACKTEST"
 GAP_FILL_ORIGIN_FLAGS: Final = frozenset(
-    {"ORIGIN_DERIVED", "ORIGIN_PROVIDER_MODEL_LIVE"}
+    {"ORIGIN_DERIVED", "ORIGIN_MODEL_LIVE", "ORIGIN_PROVIDER_MODEL_LIVE"}
 )
+# Every week of the research series names the one layer it is: a week holding any
+# hypothetical day is BACKTEST, so a boundary week never promotes backtest days to a
+# live record; the live layer is MODEL_LIVE where the strategy has a model-live
+# source and the account only where it has none (flagged, never annualised).
+ORIGIN_BACKTEST_FLAG: Final = "ORIGIN_BACKTEST"
+ORIGIN_FLAG_BY_LAYER: Final = {
+    "MODEL_LIVE": "ORIGIN_MODEL_LIVE",
+    "ACCOUNT_LIVE": "ORIGIN_ACCOUNT_LIVE",
+}
+_SEGMENT_ROLES: Final = {
+    "BACKTEST": "VENDOR_SERIES",
+    "MODEL_LIVE": "MODEL_BOOK",
+    "ACCOUNT_LIVE": "ACCOUNT",
+}
+
+
+def _flag_week_origins(
+    metadata: dict[str, list[Any]],
+    backtest_days: Iterable[date],
+    live_layer: str,
+) -> None:
+    flag = ORIGIN_FLAG_BY_LAYER.get(live_layer)
+    if flag is None:
+        return
+    backtest_weeks = {_week_start(day).isoformat() for day in backtest_days}
+    for key, entry in metadata.items():
+        origin = ORIGIN_BACKTEST_FLAG if key in backtest_weeks else flag
+        entry[4] = [*entry[4], origin]
+
+
+def _segment_labels(
+    series_id: str,
+    segments: Sequence[tuple[str, Sequence[tuple[date, Decimal]]]],
+) -> list[series_label.SeriesLabel]:
+    return [
+        series_label.SeriesLabel(
+            layer=layer,
+            entity_id=series_id,
+            entity_role=_SEGMENT_ROLES[layer],
+            first=min(row[0] for row in rows).isoformat(),
+            last=max(row[0] for row in rows).isoformat(),
+            observations=len(rows),
+            currency="USD",
+            return_basis="STRATEGY_TOTAL_RETURN",
+        )
+        for layer, rows in segments
+        if rows and layer in _SEGMENT_ROLES
+    ]
 
 
 class WeeklyReturnError(ValueError):
@@ -774,7 +824,8 @@ def _strategy_rows(
                 if live_inception_raw is not None
                 else None
             )
-            live = indexed.get((series_id, "ACCOUNT_LIVE", version), [])
+            live_layer = str(item.get("live_evidence_layer") or "ACCOUNT_LIVE")
+            live = indexed.get((series_id, live_layer, version), [])
             if live_inception is not None:
                 live = [row for row in live if row[0] >= live_inception]
             backtest = indexed.get((series_id, "BACKTEST", version), [])
@@ -784,7 +835,7 @@ def _strategy_rows(
                 backtest = []
             selected = live if mode == "LIVE_ONLY" else [*backtest, *live]
             span_links: list[AcceptedSpan] = []
-            if series_id in accepted.spans:
+            if series_id in accepted.spans and live_layer == "ACCOUNT_LIVE":
                 # The receipt hashes the whole epoch.  Where the epoch runs past the
                 # common cutoff the returns source is projected to it and cannot
                 # reproduce that hash; the receipt binding above is the authority.
@@ -822,6 +873,21 @@ def _strategy_rows(
             values, observation_meta, calendar_basis = _weekly_series(
                 selected, as_of=as_of
             )
+            research_detail: dict[str, Any] = {}
+            if mode == GAP_FILL_MODE and live:
+                _flag_week_origins(
+                    observation_meta, [row[0] for row in backtest], live_layer
+                )
+                labels = _segment_labels(
+                    series_id, [("BACKTEST", backtest), (live_layer, live)]
+                )
+                research_detail = {
+                    "headline_allowed": series_label.headline_allowed(labels),
+                    "layer_flags": list(item.get("layer_flags") or []),
+                    "research_live_inception": live[0][0].isoformat(),
+                    "research_live_layer": live_layer,
+                    "segment_labels": [label.to_dict() for label in labels],
+                }
             fill_detail: dict[str, Any] | None = None
             if mode == GAP_FILL_MODE and series_id in fills:
                 values, observation_meta, fill_detail = _apply_gap_fill(
@@ -833,6 +899,7 @@ def _strategy_rows(
             mode_coverage[mode] = {
                 **_coverage(values),
                 **({"gap_fill": fill_detail} if fill_detail is not None else {}),
+                **research_detail,
                 "backtest_daily_observations": len(backtest)
                 if mode != "LIVE_ONLY"
                 else 0,

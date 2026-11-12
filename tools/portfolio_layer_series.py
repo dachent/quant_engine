@@ -22,7 +22,7 @@ from decimal import Decimal, InvalidOperation
 import io
 from typing import Any, Final, Mapping, Sequence
 
-from series_label import BACKTEST, MODEL_LIVE, SeriesLabel, label_from_dict
+from series_label import BACKTEST, LAYERS, MODEL_LIVE, SeriesLabel, label_from_dict
 
 # Matrixport product NAV (the Robuxio model-live layer) starts here; the backtest
 # layer ends strictly before it.
@@ -35,6 +35,21 @@ VENDOR_BASIS_DISPLAY_NAME: Final = "Vendor basis 1x (vendor-stated)"
 GRIZZLY_REPLICA_ENTITY: Final = "grizzlybulls VTMA 3x SPXL replica"
 GRIZZLY_VENDOR_ENTITY: Final = "grizzlybulls VTMA vendor model (1x, vendor-stated)"
 MISMATCH_TOLERANCE: Final = Decimal("0.000001")
+# A backtest series that is cut strictly before model-live inception must reach it:
+# a file that stops earlier would be labelled as ending before model live while
+# leaving a hole that no layer owns.
+MAX_GAP_BEFORE_MODEL_LIVE_DAYS: Final = 7
+
+
+def require_reaches(last: date, before: date, what: str) -> None:
+    """The series' last day is within a week of the model-live inception."""
+
+    if (before - last).days > MAX_GAP_BEFORE_MODEL_LIVE_DAYS:
+        raise LayerSeriesError(
+            f"{what} ends {last.isoformat()}, more than "
+            f"{MAX_GAP_BEFORE_MODEL_LIVE_DAYS} days before model-live inception "
+            f"{before.isoformat()}"
+        )
 
 
 class LayerSeriesError(ValueError):
@@ -97,6 +112,7 @@ def net_returns_from_nav(
             returns.append((current[0], net))
     if len(returns) < 2:
         raise LayerSeriesError("NAV file holds no history before model-live inception")
+    require_reaches(returns[-1][0], before, "NAV file")
     return returns, {
         "daily_change_percent_disagrees_with_balance_days": column_disagrees,
         "file_first_date": nav[0][0].isoformat(),
@@ -140,9 +156,17 @@ def series_label(
     cost_basis: str,
     leverage_factor: int = 1,
     currency: str = "USD",
+    layer: str = BACKTEST,
 ) -> SeriesLabel:
+    """A label for a segment; BACKTEST unless the caller names another layer.
+
+    The Matrixport product NAV segment is MODEL_LIVE, never BACKTEST.
+    """
+
+    if layer not in LAYERS:
+        raise LayerSeriesError(f"unknown layer {layer!r}")
     return SeriesLabel(
-        layer=BACKTEST,
+        layer=layer,
         entity_id=entity_id,
         entity_role=entity_role,
         first=first,
@@ -171,10 +195,6 @@ def attach_label(
     return definition
 
 
-def _count(rows: Sequence[Mapping[str, str]], first: str, last: str) -> int:
-    return sum(1 for row in rows if first <= row["date"] <= last)
-
-
 def refresh_labels(
     definition: dict[str, Any], series_rows: Sequence[Mapping[str, str]]
 ) -> None:
@@ -193,10 +213,16 @@ def refresh_labels(
             # by the account boundary; its window is carried as built.
             segments.append(raw)
             continue
-        last = min(segment.last, dates[-1])
-        count = _count(series_rows, segment.first, last)
-        if count:
-            segments.append(_refit(segment, segment.first, last, count))
+        # a segment owns only the rows of its own layer: a MODEL_LIVE tail is never
+        # counted into, or refitted onto, the BACKTEST segment (and the reverse)
+        owned = [
+            row["date"]
+            for row in series_rows
+            if segment.first <= row["date"] <= segment.last
+            and row.get("evidence_layer", segment.layer) == segment.layer
+        ]
+        if owned:
+            segments.append(_refit(segment, owned[0], owned[-1], len(owned)))
     if "segment_labels" in definition:
         definition["segment_labels"] = segments
 
