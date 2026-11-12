@@ -3983,3 +3983,55 @@
     document.addEventListener("DOMContentLoaded", init);
   }
 })();
+
+// #908: the generated owner view (validation/<generation>/owner-view.js, written by the
+// validator after this generation is sealed) is shown first.  Text only, never HTML.
+(function ownerView() {
+  "use strict";
+  const render = () => {
+    const view = window.PORTFOLIO_OWNER_VIEW;
+    const verdict = document.getElementById("owner-view-verdict");
+    const host = document.getElementById("owner-view-items");
+    if (!view || !verdict || !host) return;
+    verdict.textContent = view.verdict;
+    host.textContent = "";
+    const checker = new Set(["CHECKER_BUG", "NOT_APPLICABLE"]);
+    const groups = new Map();
+    for (const item of view.items) {
+      const key = [item.class, item.what, item.fix, item.number_affected].join("");
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    for (const rows of groups.values()) {
+      const first = rows[0];
+      const box = document.createElement(checker.has(first.class) ? "details" : "div");
+      box.className = `owner-item owner-${first.real_or_checker}`;
+      const head = document.createElement(checker.has(first.class) ? "summary" : "strong");
+      head.textContent = `${first.word}: ${first.what}`;
+      box.appendChild(head);
+      const lines = [
+        `Where: ${[...new Set(rows.map((r) => r.where))].join(", ")}`,
+        `Number affected: ${first.number_affected}`,
+        `Fix: ${first.fix} (${first.who}; ${first.how_long})${first.overdue ? " PAST ITS FIX DATE" : ""}`,
+      ];
+      if (first.decision) lines.push(`Decision: ${first.decision.question} ${first.decision.options.join(" / ")}`);
+      if (first.owner_record) lines.push(`Owner record: ${first.owner_record}`);
+      for (const text of lines) {
+        const p = document.createElement("p");
+        p.textContent = text;
+        box.appendChild(p);
+      }
+      host.appendChild(box);
+    }
+  };
+  const match = /\/generations\/([0-9a-f]{64})\//.exec(window.location.pathname);
+  if (!match) return;
+  const script = document.createElement("script");
+  script.src = `../../validation/${match[1]}/owner-view.js`;
+  script.onload = render;
+  script.onerror = () => {
+    const verdict = document.getElementById("owner-view-verdict");
+    if (verdict) verdict.textContent = "Owner view not generated for this release: treat every gap as real.";
+  };
+  document.head.appendChild(script);
+})();
