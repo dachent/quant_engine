@@ -194,6 +194,8 @@ _PATH_STAGES = {
     "tools/check_fact_admission.py": [],
     "tools/verify_release_restore.py": [],
     "tools/release_driver.py": [],
+    # #884 G0 upfront-QC gate: reads a run config and release roots, writes only its own receipt
+    "tools/release_preflight.py": [],
     "tools/release_fresh_world.py": [],
     "tools/release_cycle_manifest.py": [],
     "tools/release_cycle_seeds.py": [],
