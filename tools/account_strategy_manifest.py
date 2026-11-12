@@ -4173,7 +4173,7 @@ def _in_window(day: str, w0: str | None, w1: str | None) -> bool:
 def _annualize_return_on_net_capital(
     return_on_net_capital: Decimal,
     span_days: int,
-) -> Decimal:
+) -> Decimal | None:
     """Annualise simple RONC geometrically, ACT/365, at every window length.
 
     #904: the old rule scaled linearly under a year (2.4% in 40 days printed as 22.3%)
@@ -4185,6 +4185,10 @@ def _annualize_return_on_net_capital(
     if span_days <= 0:
         span_days = 1
     if return_on_net_capital <= Decimal(-1):
+        if span_days < 365:
+            # a loss of more than the capital in a short window has no growth base
+            # for a geometric rate; the window return stands alone
+            return None
         raise ManifestError(
             "annualized RONC requires a strictly positive compounded growth base"
         )

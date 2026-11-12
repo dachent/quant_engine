@@ -456,7 +456,8 @@ def _derive_sleeve(
     span = (end - opening).days
     twr = index - 1
     annualised: Decimal | None = None
-    if span > 0 and index > 0:
+    if span >= 365 and index > 0:
+        # from 365 days only (#904): a shorter window publishes its return, not a rate
         annualised = index ** (Decimal(365) / Decimal(span)) - 1
     bucket = _bucket_line(facts, end)
     live_nav: list[tuple[str, Decimal]] = [
@@ -738,6 +739,16 @@ def compare_published(
     ]
     if figures.annualised is not None:
         checks.append(("account_live_cagr", figures.annualised, RATE_TOLERANCE))
+    elif row.get("account_live_cagr") is not None:
+        found.append(
+            Finding(
+                "PUBLISHED_FIGURE_DIFFERS",
+                f"{where}.account_live_cagr",
+                None,
+                row.get("account_live_cagr"),
+                "account_live_cagr is published for a window under 365 days",
+            )
+        )
     checks.extend(
         (name, figures.max_drawdown, RATE_TOLERANCE) for name in drawdown_published
     )

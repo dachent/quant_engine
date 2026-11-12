@@ -48,3 +48,24 @@ def test_return_on_net_capital_is_geometric_act_365_at_every_window(days: int) -
     assert round(float(value), 6) == round(1.0244 ** (365 / days) - 1, 6)
     # the verifier mirror agrees
     assert value == verifier._annualize_return_on_net_capital(Decimal("0.0244"), days)
+
+
+def test_a_loss_beyond_the_capital_in_a_short_window_has_no_rate_not_an_error() -> None:
+    """Review finding: -105% in 40 days aborted the manifest build (old code returned a figure)."""
+
+    assert manifest._annualize_return_on_net_capital(Decimal("-1.05"), 40) is None
+    assert verifier._annualize_return_on_net_capital(Decimal("-1.05"), 40) is None
+    with pytest.raises(Exception):
+        manifest._annualize_return_on_net_capital(Decimal("-1.05"), 400)
+
+
+def test_the_sleeve_validator_derives_no_cagr_under_a_year_and_flags_a_published_one() -> (
+    None
+):
+    """Review finding: the independent derivation still produced a CAGR at 280 days."""
+
+    from acceptance.validate import sleeve_basis
+
+    source = Path(sleeve_basis.__file__).read_text(encoding="utf-8")
+    assert "if span >= 365 and index > 0:" in source
+    assert "account_live_cagr is published for a window under 365 days" in source

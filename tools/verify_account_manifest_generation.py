@@ -1205,11 +1205,13 @@ def _xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
 def _annualize_return_on_net_capital(
     return_on_net_capital: Decimal,
     span_days: int,
-) -> Decimal:
+) -> Decimal | None:
     """Independently apply the governed annualization policy (#904): geometric ACT/365."""
 
     span_days = max(span_days, 1)
     if return_on_net_capital <= Decimal(-1):
+        if span_days < 365:
+            return None
         _fail()
     return (Decimal(1) + return_on_net_capital) ** (
         Decimal(365) / Decimal(span_days)
