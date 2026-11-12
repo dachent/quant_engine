@@ -4341,6 +4341,14 @@ def _validate_history_corrections(
                 raise FinancialMvpContractError(
                     f"backtest entered LIVE_ONLY: {correction_id}"
                 )
+            if hybrid.startswith("INCLUDE") and hybrid != (
+                "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+            ):
+                # Only the exact-version admission is judged against live inception
+                # below; any other inclusion would slip past that check.
+                raise FinancialMvpContractError(
+                    f"backtest research admission differs: {correction_id}"
+                )
             if hybrid == "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY" and (
                 capture_status != "CAPTURED_GOVERNED"
                 or version_status != "EVIDENCED"

@@ -3532,6 +3532,19 @@ def test_layer_boundaries_copy_account_and_model_live() -> None:
     ):
         _validate(overlapping)
 
+    # The strict-before rule cannot be dodged by a different admission string: a
+    # backtest runs into model-live inception under an inclusion the check did not
+    # recognise, and is refused for that admission.
+    relabelled_admission = copy.deepcopy(_contract())
+    backtest = _history_correction(relabelled_admission, "p123-ai-backtest-candidate")
+    backtest["interval"]["observed_end"] = "2025-05-12"
+    backtest["mode_admission"]["LIVE_PLUS_BACKTEST"] = "INCLUDE_MODEL_LIVE_RESEARCH"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="backtest research admission differs",
+    ):
+        _validate(relabelled_admission)
+
 
 def test_history_truth_recurrence_mutations_fail_closed() -> None:
     unbound_echo = copy.deepcopy(_contract())
