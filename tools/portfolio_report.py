@@ -4894,6 +4894,9 @@ def _derived_value_index(
     return found
 
 
+derived_value_index = _derived_value_index  # public name: the release preflight (G1) reads finality evidence with it
+
+
 def _derived_value_basis(
     index: Sequence[Mapping[str, Any]] | None, account_id: object, as_of_date: object
 ) -> dict[str, Any] | None:

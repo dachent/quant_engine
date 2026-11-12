@@ -1095,7 +1095,7 @@
     },
     {
       "id": "attended",
-      "needs_gate": ["g0"],
+      "needs_gate": ["g0", "g1"],
       "requires": [
         "pre-chain",
         "prep-spec"

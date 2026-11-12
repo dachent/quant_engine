@@ -1911,6 +1911,9 @@ def _build_sleeve_facts(
     return sleeve_release.selected_paths(selection, destination)
 
 
+build_sleeve_facts = _build_sleeve_facts  # public name: the release preflight (G1) calls the same builder
+
+
 def _preparation_input_identity(
     *,
     preparation_spec_path: Path,

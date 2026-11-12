@@ -576,5 +576,6 @@ release is never retired). `post-release-verify` refuses to run from a checkout 
 
 G3 (`g3:spec-pair`) compares the real and replica specs with the replica gate's own `topology` function; `lane-real` and `lane-replica` recheck it at entry, so a topology mismatch (R3 refusal 19) is found in seconds, not after the lane.
 
-Not built yet, and named in `release_preflight.COVERAGE` so a green G0 is not read as "inputs are fine": G1 consumer contracts
-(1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17) and the consumer freshness limit (14).
+G1 (`release_preflight.py g1 --config run.json`, after the prep chain, before `attended`; `attended` needs a G1 receipt too) calls the consumers' own validators on the run's inputs: `g1:ledger-spec` (`provider_ledger.build_catalog`; refusals 1-4), `g1:attended-launch` (`check_attended_launch`; 7), `g1:sleeve-facts` (`build_sleeve_facts` into a scratch directory; 8), `g1:finality-evidence` (`derived_value_index`; 13).
+
+Not built yet, and named in `release_preflight.COVERAGE` so a green gate is not read as "inputs are fine": G1 attribution contract (10, 11), G2 product measurements (12, 17) and the consumer freshness limit (14).
