@@ -14,7 +14,7 @@ from quant_engine.core import verification_receipt as vr
 
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv(vr.MODE_ENV, raising=False)
+    monkeypatch.setenv(vr.MODE_ENV, "persist")
     vr.clear_memory_receipts()
     yield
     vr.clear_memory_receipts()
@@ -442,3 +442,17 @@ def test_only_a_pinned_git_show_child_is_allowed():
     assert not vr.allowed_child_command(["git", "status"])
     assert not vr.allowed_child_command(["gh", "api", "x"])
     assert not vr.allowed_child_command(["git", "show", f"{sha}:a", "--textconv"])
+
+
+def test_default_mode_keeps_receipts_in_this_process_only(
+    world, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv(vr.MODE_ENV, raising=False)
+    v = Verifier(world)
+    v.run()
+    v.run()
+    assert v.live == 1 and len(v.reused) == 1  # in-process verify-once
+    assert not vr.receipt_directory(world["state"]).exists()  # nothing persisted
+    vr.clear_memory_receipts()  # a new process has nothing
+    v.run()
+    assert v.live == 2

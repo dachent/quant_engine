@@ -24,9 +24,12 @@ forgery-proof (the same property as the replay receipts they sit beside). They
 never cover the freshness gate, fact admission or pointer snapshots: only callers
 that wrap a pure function of files do.
 
-``QE_VERIFICATION_RECEIPTS``: ``off`` always runs live; ``refresh`` runs live and
-raises if a still-valid stored receipt for the same key disagrees (the weekly
-off-path full re-run); anything else is the default behaviour above.
+``QE_VERIFICATION_RECEIPTS``: unset keeps receipts in this process only (in-process
+verify-once); ``persist`` also stores and reads them beside the state root so
+separate processes (preflight, dry-run, commit, post-release-verify) reuse them;
+``refresh`` is ``persist`` that always runs live and raises if a still-valid stored
+receipt for the same key disagrees (the weekly off-path full re-run); ``off``
+always runs live.
 """
 
 from __future__ import annotations
@@ -449,8 +452,15 @@ def receipt_directory(state_root: Path) -> Path:
     return state_root.parent / f"{state_root.name}.{RECEIPT_DIRECTORY}"
 
 
+def persistence_enabled() -> bool:
+    """Cross-process reuse is opt-in (``persist`` or ``refresh``); the default keeps
+    receipts in this process only (#883 1b). Plan/status never persist."""
+
+    return PERSIST.get() and os.environ.get(MODE_ENV, "") in {"persist", "refresh"}
+
+
 def _receipt_path(state_root: Path | None, name: str, key: str) -> Path | None:
-    if state_root is None:
+    if state_root is None or not persistence_enabled():
         return None
     return receipt_directory(state_root) / f"{name}-{key[:32]}.json"
 
@@ -605,7 +615,7 @@ def _store(
         "receipt_sha256": _sha(body),
     }
     path = _receipt_path(state_root, name, key)
-    if path is not None and PERSIST.get():
+    if path is not None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.is_symlink():
