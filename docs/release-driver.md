@@ -578,3 +578,18 @@ G3 (`g3:spec-pair`) compares the real and replica specs with the replica gate's 
 
 Not built yet, and named in `release_preflight.COVERAGE` so a green G0 is not read as "inputs are fine": G1 consumer contracts
 (1-4, 7, 8, 10, 11, 13), G2 product measurements (12, 17) and the consumer freshness limit (14).
+
+## Product gate (G2) and the non-blocking rehearsal
+
+`g2` is a builtin stage between `attended` and `qa-browser`. It measures the built panel candidate with the
+consumers' own code: `panel_payload_size` against its committed budget (R3 refusal 17) and the stage's own
+`validator_argv` (`validate_generation.py`, R3 refusals 12 and 16). Rows: `g2:candidate`, `g2:payload-size`,
+`g2:validator-findings`; PASS and FAIL only. The receipt `{cycle}/preflight/g2.json` is bound to the run
+configuration, the code identity and the candidate id, and `qa-browser` declares `needs_gate: ["g2"]`. Run it by hand
+with `python tools/release_preflight_g2.py g2 --config run.json`. Whether `validate_generation.py` accepts a
+candidate directory without a release pointer is exercised only by a real run; a refusal there is a FAIL, never a pass.
+
+`post-commit-verify` passes `--rehearsal-out`: the post-release verify, the revalidation and the rendered-UI check
+still refuse the release, but the recovery rehearsal and the clean-room restore run after the receipt is written,
+every step runs, and the outcome goes to `rehearsal-receipt.json` (`qe-post-commit-rehearsal/1`, `blocking: false`).
+A failed rehearsal is a finding for the owner, not a refusal.

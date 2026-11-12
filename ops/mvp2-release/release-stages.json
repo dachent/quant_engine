@@ -1223,9 +1223,45 @@
       ]
     },
     {
-      "id": "qa-browser",
+      "id": "g2",
       "requires": [
         "attended"
+      ],
+      "builtin": "g2",
+      "validator_argv": [
+        "{python}",
+        "{tools}/validate_generation.py",
+        "{run}/stages/panel/candidates/{candidate_id}",
+        "--expected",
+        "{expected_baseline_arg}",
+        "--cutoff",
+        "{requested_as_of}",
+        "--out",
+        "{cycle}/preflight/g2-findings.json",
+        {
+          "if": "release_inputs_root",
+          "args": [
+            "--strategy-basis",
+            "{release_inputs_strategy_basis}",
+            "--sleeve-facts",
+            "{sleeve_facts}",
+            "--provider-ledger",
+            "{ledger_catalog}",
+            "--ibkr-root",
+            "{ibkr_root}",
+            "--tag-map",
+            "{release_inputs_tag_map}"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "qa-browser",
+      "requires": [
+        "g2"
+      ],
+      "needs_gate": [
+        "g2"
       ],
       "env": {
         "PLAYWRIGHT_MODULE": "{playwright_module}",
@@ -2188,6 +2224,8 @@
         "{post_commit}/logs",
         "--out",
         "{post_commit}/post-commit-verify.json",
+        "--rehearsal-out",
+        "{post_commit}/rehearsal-receipt.json",
         "--published-panel-dir",
         "{panel_root}/generations/{panel_gid}",
         "--pre-findings",

@@ -15,8 +15,8 @@ Usage::
 run configuration and code identity. Run G0 again at lane entry and immediately before the commit: pointers move
 between the first run and those moments (R3 refusal 15).
 
-Not built here (named, so a green G0 is not read as "inputs are fine"): the consumer-contract gate G1, the product
-measurements G2 and the spec-pair gate G3 (see COVERAGE).
+Not built here (named, so a green G0 is not read as "inputs are fine"): the consumer-contract gate G1 (see
+COVERAGE). G2 (product measurements on the panel candidate) is ``release_preflight_g2``; G3 (spec pair) is a row here.
 """
 
 from __future__ import annotations
@@ -274,12 +274,12 @@ COVERAGE: dict[int, str] = {
     9: "by design: the first calendar attempt",
     10: "G1:attribution contract (not built)",
     11: "G1:attribution contract (not built)",
-    12: "G2:needs the build (not built)",
+    12: "G2:g2:validator-findings",
     13: "G1:finality evidence reader (not built)",
     14: "G0:freshness against the consumer's limit (not built)",
     15: "G0:authority:pointer-graph",
     16: "G0:inputs:release-inputs",
-    17: "G2:payload size at candidate time (not built)",
+    17: "G2:g2:payload-size",
     18: "G0:host:free-space",
     19: "G0:config:outside-workspace",  # and G3: g3:spec-pair, rechecked at lane entry
     20: "guard:git-identity-retry (a transient identity read only; a scanner is not detected)",
@@ -354,7 +354,7 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
     receipt = driver.read_json(path)
     rows = receipt.get("rows")
     if (
-        receipt.get("kind") != "release-preflight-g0-v1"
+        receipt.get("kind") != f"release-preflight-{gate.lower()}-v1"
         or not isinstance(rows, list)
         or not rows
     ):
@@ -375,6 +375,10 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
         raise driver.Refusal(
             f"gate {gate} receipt is for another run configuration or code identity"
         )
+    if "candidate_id" in receipt and receipt["candidate_id"] != run.expand(
+        "{candidate_id}"
+    ):
+        raise driver.Refusal(f"gate {gate} receipt is for another panel candidate")
     failed = [r.get("row") for r in rows if r.get("status") != "PASS"]
     if receipt.get("status") != "PASS" or failed:
         raise driver.Refusal(f"gate {gate} receipt is FAIL: {failed[:4]}")

@@ -50,6 +50,8 @@ import release_driver
 
 RESOLVED_SCHEMA = "qe-release-resolved-cycle/1"
 RECEIPT_SCHEMA = "qe-post-commit-verify/1"
+REHEARSAL_SCHEMA = "qe-post-commit-rehearsal/1"
+REHEARSAL_STEPS = ("recovery-rehearsal", "clean-room-restore")
 RESOLVED_SCHEMA_FILE = (
     Path(__file__).resolve().parents[1]
     / "schemas"
@@ -314,6 +316,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         args.rehearsal_root,
         args.clean_room,
         args.post_findings,
+        *([args.rehearsal_out] if args.rehearsal_out else []),
     ):
         if Path(target).exists():
             raise Refusal(
@@ -432,6 +435,11 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
                 ],
             ),
         )
+    non_blocking = bool(args.rehearsal_out)
+    rehearsal_plan = tuple(item for item in plan if item[0] in REHEARSAL_STEPS)
+    if non_blocking:
+        # the rehearsal runs after the receipt is written and can no longer refuse the release
+        plan = tuple(item for item in plan if item[0] not in REHEARSAL_STEPS)
     post_receipt_id = ""
     for name, argv in plan:
         log = Path(args.log_dir) / f"{name}.log"
@@ -462,6 +470,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         "pre_commit_findings_sha256": _sha(Path(args.pre_findings).read_bytes()),
         "predecessor_release_id": predecessor_id,
         "published_render_checked": bool(args.published_panel_dir),
+        "rehearsal": "NON_BLOCKING" if non_blocking else "BLOCKING",
         "release_id": release_id,
         "spec_sha256": _sha(spec_file.read_bytes()),
         "steps": steps,
@@ -469,6 +478,53 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
     _create_only(
         Path(args.out), (json.dumps(receipt, indent=1, sort_keys=True) + "\n").encode()
     )
+    if non_blocking:
+        run_rehearsal(rehearsal_plan, args, repo, release_id)
+    return receipt
+
+
+def run_rehearsal(
+    plan: Sequence[tuple[str, list[str]]],
+    args: argparse.Namespace,
+    repo: Path,
+    release_id: str,
+) -> dict[str, Any]:
+    """Run the recovery rehearsal and the clean-room restore after the release is verified.
+
+    The outcome is recorded in its own create-only receipt and never refuses: a failed or crashed rehearsal is a
+    finding for the owner, not a reason to stop a verified release (RULING-D 5.2). Every step runs even if an
+    earlier one failed, so one pass names every failure.
+    """
+
+    steps: list[dict[str, Any]] = []
+    for name, argv in plan:
+        entry: dict[str, Any] = {"step": name}
+        try:
+            log = Path(args.log_dir) / f"{name}.log"
+            entry["rc"] = _run_step(argv, log, repo)
+            entry["log_sha256"] = _sha(log.read_bytes())
+        except (Refusal, OSError) as exc:
+            entry["rc"] = -1
+            entry["error"] = str(exc)[:300]
+        steps.append(entry)
+    receipt: dict[str, Any] = {
+        "schema_version": REHEARSAL_SCHEMA,
+        "release_id": release_id,
+        "status": "PASS" if all(item["rc"] == 0 for item in steps) else "FAIL",
+        "blocking": False,
+        "steps": steps,
+    }
+    try:
+        _create_only(
+            Path(args.rehearsal_out),
+            (json.dumps(receipt, indent=1, sort_keys=True) + "\n").encode(),
+        )
+    except (Refusal, OSError) as exc:
+        receipt["status"] = "FAIL"
+        print(
+            f"release-post-commit: rehearsal receipt not written: {exc}",
+            file=sys.stderr,
+        )
     return receipt
 
 
@@ -493,6 +549,11 @@ def _parser() -> argparse.ArgumentParser:
         "out",
     ):
         v.add_argument(f"--{flag}", required=True)
+    v.add_argument(
+        "--rehearsal-out",
+        default=None,
+        help="run the rehearsal after the receipt and record it here; it never refuses the release",
+    )
     v.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     v.add_argument("--tools-dir", default=None)
     v.add_argument(
