@@ -6675,7 +6675,7 @@ def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
                     "cagr": "0.11",
                     "cumulative_return": "0.1",
                     "first_date": "2025-01-01",
-                    "last_date": "2025-12-31",
+                    "last_date": "2026-01-01",
                     "max_drawdown": "-0.2",
                     "return_observations": 252,
                 },

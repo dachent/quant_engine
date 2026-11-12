@@ -3914,7 +3914,8 @@ def test_flow_before_first_available_nav_without_predecessor_is_absorbed_by_open
     assert stats["current_value"] == manifest_module.Decimal("150")
     assert stats["gain"] == manifest_module.Decimal("0")
     assert stats["return_on_net_capital"] == manifest_module.Decimal("0")
-    assert stats["annualized_return_on_net_capital"] == manifest_module.Decimal("0")
+    # span under 365 days: no annual rate (#904)
+    assert stats["annualized_return_on_net_capital"] is None
     assert stats["observation_linked_return"] == manifest_module.Decimal("0")
     assert stats["capital_flow_trace"] == []
     assert all(
@@ -4779,9 +4780,8 @@ def test_annualized_return_on_net_capital_uses_governed_piecewise_policy(
             manifest_module.Decimal(current) - manifest_module.Decimal("100")
         ) / manifest_module.Decimal("100")
         expected = (
-            simple_return
-            * manifest_module.Decimal("365")
-            / manifest_module.Decimal(span_days)
+            # one short-window rule (#904): no annual rate under 365 days
+            None
             if span_days < 365
             else (
                 (manifest_module.Decimal(1) + simple_return)

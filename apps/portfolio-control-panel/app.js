@@ -65,6 +65,14 @@
   const currency = (value) => number(value) == null ? "—" : money.format(Number(value));
   const currencyExact = (value) => number(value) == null ? "Not available" : moneyExact.format(Number(value));
   const pct = (value, digits = 1) => number(value) == null ? "—" : `${(Number(value) * 100).toFixed(digits)}%`;
+  // One short-window rule: the MWR is an XIRR, annualized by construction.  Under 365 days the
+  // window return is the figure and the annualized rate is a note, never the primary number.
+  const mwrShortWindow = (row) => {
+    const days = Math.round((Date.parse(row.mwr_terminal_date) - Date.parse(row.mwr_opening_date)) / 86400000);
+    const rate = number(row.mwr_xirr);
+    if (!(days > 0 && days < 365) || rate == null || rate <= -1) return null;
+    return { days, rate, windowReturn: Math.pow(1 + rate, days / 365) - 1 };
+  };
   const decimal = (value, digits = 3) => number(value) == null ? "—" : Number(value).toFixed(digits);
   const formatDate = (value) => {
     if (!value) return "—";
@@ -1122,7 +1130,7 @@
         accountRows.push(
           `<tr><td colspan="2"><span class="cell-primary">${who} on ${safe(basis.label)}</span><span class="cell-secondary">${safe(formatDate(window.start))} to ${safe(formatDate(window.end))}${windowConvention(window) ? ` (${safe(windowConvention(window))})` : ""} · ${integer.format(basis.observations || 0)} observations · series ${safe(String((basis.series || {}).sha256 || "").slice(0, 8))}</span></td></tr>`,
           `<tr><td>Cumulative return</td><td class="numeric">${pct(figures.account_live_cumulative_return, 4)}</td></tr>`,
-          `<tr><td>Annualized${annualized ? ` <span class="cell-secondary">${safe(annualized)}</span>` : ""}</td><td class="numeric">${pct(figures.account_live_cagr, 4)}</td></tr>`,
+          `<tr><td>Annualized${annualized ? ` <span class="cell-secondary">${safe(annualized)}</span>` : ""}</td><td class="numeric">${figures.account_live_cagr == null && figures.account_live_cagr_status === "SUPPRESSED_UNDER_365D" ? "— (under 1 year, not annualized)" : pct(figures.account_live_cagr, 4)}</td></tr>`,
           `<tr><td>Maximum drawdown</td><td class="numeric">${pct(figures.account_live_max_drawdown, 4)}</td></tr>`,
           `<tr><td>Current drawdown (from the high-water mark)</td><td class="numeric">${pct(figures.hwm_current_drawdown, 4)}</td></tr>`,
           `<tr><td>Current value (whole account)</td><td class="numeric">${currencyExact(figures.current_value_usd)}</td></tr>`,
@@ -1541,8 +1549,7 @@
       const days = Math.round((closed - opened) / 86400000);
       const rate = number(row.mwr_xirr);
       if (!(days > 0 && days < 365) || rate == null) return "";
-      const windowEquivalent = Math.pow(1 + Number(rate), days / 365) - 1;
-      return `<span class="cell-secondary">annualized from ${integer.format(days)} days · ${pct(windowEquivalent)} over the window (derived)</span>`;
+      return `<span class="cell-secondary">return over the ${integer.format(days)} day window (under 1 year, not annualized); the XIRR of ${pct(rate)} is not a yearly rate</span>`;
     };
     const rows = mappedPerformance.map((row) => {
       if (performanceLineageMismatch) {
@@ -1558,11 +1565,11 @@
       const observedStart = row.observed_start || row.effective_start || "—";
       const observedEnd = row.observed_end || row.effective_end || "—";
       const evidence = row.nav_observations != null ? `${integer.format(row.nav_observations)} account NAV observations` : "—";
-      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
+      return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}${sleeveEpochRowNote(row)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}${flowTiming}${closedNote}</td><td class="numeric">${pct(mwrShortWindow(row) ? mwrShortWindow(row).windowReturn : row.mwr_xirr)}${mwrBasisNote(row)}</td><td>${statusText(row.mwr_status)}${["NO_ACCEPTED_FACT_PATH", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF"].includes(row.mwr_flow_path_status) ? `<span class="cell-secondary">flow path unproven</span>` : ""}</td></tr>`;
     });
     const performanceHeaders = performanceLineageMismatch
       ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
-      : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Epoch return (TWR, cumulative)", "numeric", "Time-weighted return over the observed interval. Cumulative, not annualized. Labelled “Accepted return” before this release."], ["Return status"], ["MWR (annualized)", "numeric", "Money-weighted return (annualized internal rate of return on the cash flows). Annualized even for windows under one year."], ["MWR status"]];
+      : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Epoch return (TWR, cumulative)", "numeric", "Time-weighted return over the observed interval. Cumulative, not annualized. Labelled “Accepted return” before this release."], ["Return status"], ["MWR (annualized from 1 year; window return below)", "numeric", "Money-weighted return: the annualized internal rate of return on the cash flows from one year of window; under one year the return over the window itself is shown and the annualized rate is only a note."], ["MWR status"]];
     const performanceFooter = !performanceLineageMismatch && mappedPerformance.length
       ? `<tr class="total-row"><th scope="row" colspan="3">All ${mappedPerformance.length} epochs in this table · ${new Set(mappedPerformance.map((row) => row.strategy_name)).size} strategies</th><td colspan="5" class="cell-note"><span class="cell-secondary">${data.portfolio_mwr_annualised?.status === "AVAILABLE" ? "" : "Portfolio-level MWR is not published in this snapshot. "}${data.portfolio_twr_cumulative?.status === "AVAILABLE" ? "The portfolio TWR is the governed index candidate shown on Performance &amp; HWM, with the acceptance state stated there. " : "Portfolio-level TWR is not published in this snapshot. "}Each row is one account × strategy epoch; epoch returns are not added.</span></td></tr>`
       : "";
@@ -1834,7 +1841,10 @@
       const cumulative = returnBasisCell(row, kind, () => `${pct(field("cumulative"), 2)}${windowNote(row, kind)}`);
       // the payload key keeps the producer's spelling (return_<kind>_annualised); written with an escape so
       // the page source spells the word one way
-      const annualized = returnBasisCell(row, kind, () => pct(field("annual\x69sed"), 2));
+      // one short-window rule: the producer publishes no annual rate under 365 days
+      const annualized = returnBasisCell(row, kind, () => (number(field("annual\x69sed")) == null && number(field("window_days")) != null && number(field("window_days")) < 365
+        ? `—<span class="cell-secondary">not annualized: ${integer.format(number(field("window_days")))} day window (under 1 year)</span>`
+        : pct(field("annual\x69sed"), 2)));
       const drawdown = returnBasisCell(row, kind, () => `${pct(field("max_drawdown"), 2)}${number(field("current_drawdown")) == null ? "" : `<span class="cell-secondary">current ${pct(field("current_drawdown"), 2)}</span>`}`);
       return cumulative + annualized + drawdown;
     };
@@ -1853,7 +1863,7 @@
       const mwrLabel = row.mwr_annualization?.label;
       const cumulativeCell = performanceLineageMismatch
         ? withheld
-        : `${pct(row.account_live_cumulative_return)}${accountWindowStart(row) ? `<span class="cell-secondary">since ${formatDateHtml(accountWindowStart(row))}${sinceKind(row)}</span>` : ""}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${annualizationSuffix(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${annualizationSuffix(mwrLabel)}</span>` : ""}`;
+        : `${pct(row.account_live_cumulative_return)}${accountWindowStart(row) ? `<span class="cell-secondary">since ${formatDateHtml(accountWindowStart(row))}${sinceKind(row)}</span>` : ""}${row.account_live_cagr != null ? `<span class="cell-secondary">CAGR ${pct(row.account_live_cagr)}${annualizationSuffix(cagrLabel)}</span>` : ""}${row.mwr_xirr != null ? (mwrShortWindow(row) ? `<span class="cell-secondary">MWR ${pct(mwrShortWindow(row).windowReturn)} over ${integer.format(mwrShortWindow(row).days)} days (not annualized)</span>` : `<span class="cell-secondary">MWR ${pct(row.mwr_xirr)}${annualizationSuffix(mwrLabel)}</span>`) : ""}`;
       const drawdownCell = performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown);
       return `<tr><td>${safe(row.strategy_name)}${scopeNote(row)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${cumulativeCell}</td><td class="numeric">${drawdownCell}</td>${basisCells(row, "unlevered")}${basisCells(row, "levered")}${grossToEquityCell(row)}<td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDateHtml(row.version_effective_start)}–${endDateHtml(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
