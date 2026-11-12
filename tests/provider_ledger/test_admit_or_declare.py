@@ -267,7 +267,7 @@ def _retained_p123_admit_or_declare_fixture() -> tuple[
     correction = next(
         item
         for item in contract["history_corrections"]["corrections"]
-        if item["correction_id"] == "p123-eu-provider-live"
+        if item["correction_id"] == "p123-eu-copy-record"
     )
     assert correction["capture"] == {
         "status": "CAPTURED_GOVERNED",
