@@ -222,11 +222,10 @@ def spec_pair_mismatch(
     """G3: what the replica's spec binds must equal what the real spec binds, by the replica gate's own
     ``topology`` (the function the commit gate runs). Returns the refusal text, or None when equal."""
 
-    from quant_engine.core import replica_anchor
-    from quant_engine.core.replica_gate import topology
+    from quant_engine.core import replica_anchor, replica_topology
 
-    wanted = topology(real_spec, real_anchor)
-    got = topology(replica_spec, replica_anchor(replica_spec), real_anchor)
+    wanted = replica_topology(real_spec, real_anchor)
+    got = replica_topology(replica_spec, replica_anchor(replica_spec), real_anchor)
     if wanted != got:
         return "replica ran a different topology than the real spec"
     return None
