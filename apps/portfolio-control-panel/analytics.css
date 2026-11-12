@@ -1388,3 +1388,9 @@ details.orthogonal-data { margin-top: 12px; }
   z-index: 1;
   background: rgb(16 26 36);
 }
+
+.owner-view { border: 1px solid var(--line, #3a4658); border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
+.owner-view p { margin: 4px 0; }
+.owner-item { margin: 8px 0; padding-left: 10px; border-left: 3px solid #888; }
+.owner-item.owner-real { border-left-color: #d9534f; }
+.owner-item.owner-accepted { border-left-color: #c9a227; }

@@ -34,6 +34,7 @@ from pathlib import Path
 import re
 from typing import Any, cast
 
+from .. import owner_view as owner_view  # re-exported: the runner uses it
 from . import facts_bindings, payload_rule, shell, sleeve_basis
 from .generation import (
     APP,

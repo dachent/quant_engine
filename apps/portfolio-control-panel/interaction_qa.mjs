@@ -165,6 +165,8 @@ const browser = await chromium.launch({
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const consoleErrors = [];
 page.on("console", (message) => {
+  // #908: the optional owner-view.js is written after QA; its absence is expected.
+  if (/\/validation\/[0-9a-f]{64}\/owner-view\.js$/.test(message.location()?.url ?? "") && /Failed to load resource/.test(message.text())) return;
   if (message.type() === "error") consoleErrors.push(message.text());
 });
 await page.goto(pathToFileURL(html).href, { waitUntil: "load" });

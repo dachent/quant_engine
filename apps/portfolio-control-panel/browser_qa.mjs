@@ -270,9 +270,12 @@ try {
     page.setDefaultTimeout(QA_PAGE_TIMEOUT_MS);
     const consoleEvents = [];
     const requestFailures = [];
-    page.on("console", (message) => consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() }));
+    // #908: the optional owner-view.js is written by the validator AFTER this QA stage; its
+    // absence at QA time is expected and is not a page failure.
+    const isOwnerViewSidecar = (url) => /\/validation\/[0-9a-f]{64}\/owner-view\.js$/.test(url ?? "");
+    page.on("console", (message) => { if (!(isOwnerViewSidecar(message.location()?.url) && /Failed to load resource/.test(message.text()))) consoleEvents.push({ type: message.type(), text: message.text(), location: message.location() }); });
     page.on("pageerror", (error) => consoleEvents.push({ type: "pageerror", text: error.message, location: {} }));
-    page.on("requestfailed", (request) => requestFailures.push({ url: request.url(), method: request.method(), failure: request.failure()?.errorText ?? "unknown" }));
+    page.on("requestfailed", (request) => isOwnerViewSidecar(request.url()) || requestFailures.push({ url: request.url(), method: request.method(), failure: request.failure()?.errorText ?? "unknown" }));
     const navigationUrl = `${baseUrl}${capture.view ? `#${capture.view}` : ""}`;
     const target = `${path.basename(html)}${capture.view ? `#${capture.view}` : ""}`;
     console.log(`QA capture ${capture.name}: ${navigationUrl}`);
