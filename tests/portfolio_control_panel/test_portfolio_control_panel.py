@@ -14059,7 +14059,7 @@ def test_panel_schema22_publication_records_input_report_version(
         assert provenance["sha256"] == selected_sha
 
 
-def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
+def test_renderer_accepts_panel_schema21_through_26_and_refuses_27(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     import textwrap
@@ -14079,7 +14079,7 @@ def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
     node, playwright_module, executable = require_browser_runtime(REPOSITORY_ROOT)
 
     pages: dict[int, Path] = {}
-    for version in (21, 22, 23, 24, 25, 26):
+    for version in (21, 22, 23, 24, 25, 26, 27):
         page_root = tmp_path / f"renderer-v{version}"
         shutil.copytree(candidate, page_root)
         data_path = page_root / "data" / "dashboard_data.json"
@@ -14107,7 +14107,7 @@ def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
         const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
         const results = [];
         try {
-          for (const version of [21, 22, 23, 24, 25, 26]) {
+          for (const version of [21, 22, 23, 24, 25, 26, 27]) {
             const page = await browser.newPage();
             const errors = [];
             page.on("pageerror", error => errors.push(String(error)));
@@ -14145,12 +14145,12 @@ def test_renderer_accepts_panel_schema21_through_25_and_refuses_26(
         env=env,
     )
     evidence = json.loads(result.stdout.strip().splitlines()[-1])
-    assert [item["version"] for item in evidence] == [21, 22, 23, 24, 25, 26]
-    for item in evidence[:5]:
+    assert [item["version"] for item in evidence] == [21, 22, 23, 24, 25, 26, 27]
+    for item in evidence[:6]:
         assert item["state"] == "ready" and not item["errorVisible"]
         assert item["kpis"]
         assert not item["errors"]
-    unsupported = evidence[5]
+    unsupported = evidence[6]
     assert unsupported["state"] == "error" and unsupported["errorVisible"]
     assert "local snapshot could not be loaded" in unsupported["errorText"].lower()
     assert any("missing or unsupported" in error for error in unsupported["errors"])

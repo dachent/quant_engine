@@ -162,6 +162,8 @@ CORE_BENCHMARK_COUNT: Final = 11
 # is version 25; every other panel is 24.  Versions 22 and 23 (the same split before
 # the position snapshot split and the governed HWM candidate) stay readable.
 CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION: Final = 25
+# A panel whose leverage disclosures carry the owner's account financing rows (#894) is 26.
+ACCOUNT_FINANCING_PANEL_SCHEMA_VERSION: Final = 26
 BUILDER_VERSION: Final = "2.13.0"
 CURRENT_REQUIRED_STRATEGY_IDS: Final = frozenset(
     {
@@ -10158,9 +10160,17 @@ def _alpha_window(row: Mapping[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def _panel_schema_version_for(report_schema_version: object) -> int:
-    """The panel version a report version selects: custody coverage reports are 25."""
+def _panel_schema_version_for(
+    report_schema_version: object, leverage_rows: object = None
+) -> int:
+    """The panel version a report selects: custody coverage reports are 25, and a report
+    that carries account financing rows (#894) is 26."""
 
+    if isinstance(leverage_rows, list) and any(
+        isinstance(row, dict) and row.get("data_class") == "ACCOUNT_FINANCING"
+        for row in leverage_rows
+    ):
+        return ACCOUNT_FINANCING_PANEL_SCHEMA_VERSION
     if report_schema_version in {3, 4, 5}:
         return CUSTODY_COVERAGE_PANEL_SCHEMA_VERSION
     return PANEL_SCHEMA_VERSION
@@ -11682,7 +11692,7 @@ def _panel_data(
             "weekly_returns_sha256": accepted_weekly_returns.get("source_sha256"),
         },
         "panel_schema_version": _panel_schema_version_for(
-            report.get("report_schema_version")
+            report.get("report_schema_version"), report.get("leverage_disclosures")
         ),
         "performance": normalized_performance,
         "position_snapshots": position_snapshots,

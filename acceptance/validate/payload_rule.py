@@ -66,7 +66,14 @@ class ContentAllowance:
     reason: str
 
 
-CONTENT_ALLOWANCES: tuple[ContentAllowance, ...] = ()
+CONTENT_ALLOWANCES: tuple[ContentAllowance, ...] = (
+    ContentAllowance(
+        block="leverage_disclosures",
+        schema_version=26,
+        extra_fraction=0.05,
+        reason="#894: account financing summary rows (state, cost, loan, gross exposure)",
+    ),
+)
 
 
 def active_allowances(

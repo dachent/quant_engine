@@ -3972,7 +3972,7 @@
   function init() {
     try {
       watchDenseCells();
-      if (!data || ![21, 22, 23, 24, 25].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
+      if (!data || ![21, 22, 23, 24, 25, 26].includes(data.panel_schema_version)) throw new Error("Embedded dashboard data is missing or unsupported");
       renderLimitations();
       $("#portfolio-as-of").textContent = formatDate(data.meta.portfolio_as_of);
       // Schema-4 freshness is judged at the catalog cutoff (N46/N54); the header says so.
