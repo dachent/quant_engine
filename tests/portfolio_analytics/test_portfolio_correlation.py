@@ -745,14 +745,27 @@ def test_performance_summary_compounds_and_fails_closed_on_invalid_returns() -> 
     summary = correlation._performance_summary(rows)
     assert float(cast(str, summary["cumulative_return"])) == pytest.approx(-0.01)
     assert float(cast(str, summary["maximum_drawdown"])) == pytest.approx(-0.1)
-    # live (no backtest) path of 365 days + the opening interval: ACT/365 geometric
-    summary = correlation._performance_summary(rows, 0)
+    # the rows themselves are BACKTEST: never annualised, whatever the caller says
+    assert summary["cagr"] is None
+    assert summary["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
+    assert correlation._performance_summary(rows, 0)["cagr"] is None
+    # a live path of 365 days + the opening interval: ACT/365 geometric
+    live = [
+        correlation.ReturnRow(date(2025, 1, 1), 0.1, "ACCOUNT_LIVE", "v1", "0.1"),
+        correlation.ReturnRow(date(2026, 1, 1), -0.1, "ACCOUNT_LIVE", "v1", "-0.1"),
+    ]
+    summary = correlation._performance_summary(live, 0)
     assert summary["window_days"] == 365 + 365
     assert round(float(cast(str, summary["cagr"])), 6) == round(
         0.99 ** (365 / 730) - 1, 6
     )
-    # the same path labelled as containing backtest observations is not annualised
-    assert correlation._performance_summary(rows, 1)["cagr"] is None
+    # an unknown composition fails closed
+    assert (
+        correlation._performance_summary(live, None)["annualization_status"]
+        == "SUPPRESSED_COMPOSITION_UNKNOWN"
+    )
+    assert correlation._backtest_observations({}) is None
+    assert correlation._backtest_observations(None) == 0
 
     with pytest.raises(correlation.CorrelationError, match="greater than -1"):
         correlation._performance_summary(

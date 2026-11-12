@@ -785,11 +785,14 @@ def _evidence_mode_returns(
     return modes, compositions
 
 
-def _backtest_observations(composition: Mapping[str, object] | None) -> int:
-    value = (
-        None if composition is None else composition.get("backtest_observations_used")
-    )
-    return value if isinstance(value, int) else 0
+def _backtest_observations(composition: Mapping[str, object] | None) -> int | None:
+    """Backtest observations a mode used; 0 without a composition (the rows decide),
+    None (fail closed) when a composition exists but does not state the count."""
+
+    if composition is None:
+        return 0
+    value = composition.get("backtest_observations_used")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _number(value: float | np.floating[Any] | None) -> str | None:
@@ -807,13 +810,18 @@ ANNUALIZATION_BASIS: Final = "ACT_365_FROM_OPENING_CLOSE"
 MINIMUM_ANNUALISATION_DAYS: Final = 365
 
 
-def _annualised_headline_status(window_days: int, backtest_observations: int) -> str:
+def _annualised_headline_status(
+    window_days: int, backtest_observations: int | None
+) -> str:
     """The one rule (#904 items 3 and 10) over a series' own composition.
 
     An annualised figure exists from 365 days and never on a series that contains
-    any hypothetical backtest observation, whatever the strategy is called.
+    any hypothetical backtest observation, whatever the strategy is called.  An
+    unknown composition fails closed.
     """
 
+    if backtest_observations is None:
+        return "SUPPRESSED_COMPOSITION_UNKNOWN"
     if backtest_observations > 0:
         return "SUPPRESSED_INCLUDES_BACKTEST"
     if window_days < MINIMUM_ANNUALISATION_DAYS:
@@ -822,7 +830,7 @@ def _annualised_headline_status(window_days: int, backtest_observations: int) ->
 
 
 def _performance_summary(
-    rows: Sequence[ReturnRow], backtest_observations: int = 0
+    rows: Sequence[ReturnRow], backtest_observations: int | None = 0
 ) -> dict[str, object]:
     """Compound one accepted evidence-mode path into reproducible statistics.
 
@@ -831,6 +839,13 @@ def _performance_summary(
     """
 
     accepted = sorted(rows, key=lambda item: item.day)
+    if backtest_observations is not None:
+        # the rows' own layer counts too: a path that still carries BACKTEST rows
+        # is hypothetical whatever the composition block says
+        backtest_observations = max(
+            backtest_observations,
+            sum(1 for item in accepted if item.evidence_layer == "BACKTEST"),
+        )
     if not accepted:
         return {
             "annualization_basis": ANNUALIZATION_BASIS,
