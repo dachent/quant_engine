@@ -344,3 +344,46 @@ def test_ledger_anchor_beats_a_manifest_link_and_a_later_anchor_is_ignored() -> 
     assert checks._strategy_opening_date(context, "alpha", date(2025, 9, 18)) == date(
         2025, 9, 16
     )
+
+
+def test_a_short_window_provider_comparison_without_its_label_blocks() -> None:
+    """#904 item 15: provider comparisons are linted like the benchmark ones."""
+
+    summary = {"strategy_id": "alpha"}
+    comparison = {
+        "strategy_id": "alpha",
+        "metrics": {
+            "observed_start": "2026-01-02",
+            "observed_end": "2026-02-20",
+            "tracking_error_annualized": "0.2405",
+        },
+    }
+    report = {
+        "report_schema_version": 5,
+        "strategy_summary": [summary],
+        "strategy_attribution": {"comparisons": [comparison]},
+    }
+    found = _short(list(checks.check_lint_returns(_context(report))))
+    assert [f.klass for f in found] == [checks.BLOCKER_INVARIANT]
+    assert list(found[0].observed) == ["provider.alpha.tracking_error_annualized"]
+    summary["provider_annualization"] = {"short_window": True}
+    found = _short(list(checks.check_lint_returns(_context(report))))
+    assert [f.klass for f in found] == [checks.WARNING]
+
+
+def test_a_published_sleeve_return_per_year_under_365_days_blocks() -> None:
+    row = {
+        "strategy_id": "alpha",
+        "return_levered_annualised": "0.0792",
+        "return_levered_window_days": 280,
+        "return_unlevered_annualised": None,
+        "return_unlevered_window_days": 280,
+    }
+    report = {"report_schema_version": 5, "strategy_summary": [row]}
+    found = _short(list(checks.check_lint_returns(_context(report))))
+    assert [f.klass for f in found] == [checks.BLOCKER_INVARIANT]
+    assert found[0].observed == {
+        "strategy_summary.return_levered_annualised:alpha": 280
+    }
+    row["return_levered_annualised"] = None
+    assert not _short(list(checks.check_lint_returns(_context(report))))

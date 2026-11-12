@@ -9175,6 +9175,44 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                     None,
                     summary.get("benchmark_annualization"),
                 )
+    # provider comparisons (#904 item 15): the same rule as the benchmark ones
+    provider_comparisons = node(ctx.report, "strategy_attribution", "comparisons")
+    for row in provider_comparisons if isinstance(provider_comparisons, list) else []:
+        metrics = row.get("metrics") if isinstance(row, dict) else None
+        if not isinstance(metrics, Mapping):
+            continue
+        days = _window_days(metrics.get("observed_start"), metrics.get("observed_end"))
+        for key, value in metrics.items():
+            amount = to_decimal(value)
+            if "annualized" not in key or amount is None:
+                continue
+            if days is not None and days < ONE_YEAR_DAYS:
+                summary = comparison_labels.get(str(row.get("strategy_id")), {})
+                short_window(
+                    f"provider.{row.get('strategy_id')}.{key}",
+                    days,
+                    summary,
+                    None,
+                    summary.get("provider_annualization"),
+                )
+    # the sleeve levered and unlevered "return per year": published only from 365 days
+    for row in rows(ctx.report, "strategy_summary"):
+        for kind in ("unlevered", "levered"):
+            annual = to_decimal(row.get(f"return_{kind}_annualised"))
+            window = row.get(f"return_{kind}_window_days")
+            if (
+                annual is not None
+                and isinstance(window, int)
+                and not isinstance(window, bool)
+                and window < ONE_YEAR_DAYS
+            ):
+                short_window(
+                    f"strategy_summary.return_{kind}_annualised:{row.get('strategy_id')}",
+                    window,
+                )
+                blocking[
+                    f"strategy_summary.return_{kind}_annualised:{row.get('strategy_id')}"
+                ] = window
     if extreme:
         yield _finding(
             "lint.extreme_cagr",
