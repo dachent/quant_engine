@@ -43,6 +43,7 @@ from quant_engine.portfolio_ledger import (
     HwmCoverageError,
     validate_admit_or_declare_receipt,
 )
+from quant_engine.portfolio_ledger.provider_admission import run_observation_identity
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
@@ -1206,6 +1207,34 @@ def _schwab_selected_point_positions(
     return expected if financial_observation_date <= requested_as_of else None
 
 
+def _observation_identity_matches(content: bytes, sha256: object) -> bool:
+    """The receipt's observation hash: the path-normalized identity (current receipts)
+    or the raw bytes' hash (receipts written before #907)."""
+
+    if hashlib.sha256(content).hexdigest() == sha256:
+        return True
+    try:
+        parsed = json.loads(content)
+    except ValueError:
+        return False
+    return isinstance(parsed, dict) and run_observation_identity(parsed)[0] == sha256
+
+
+def _observation_matching_receipt(
+    path: Path, sha256: object, size_bytes: object
+) -> dict[str, Any]:
+    content = path.read_bytes()
+    if not _observation_identity_matches(content, sha256):
+        raise MaterializationError("provider run observation identity differs")
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise MaterializationError("provider run observation must be an object")
+    raw = hashlib.sha256(content).hexdigest() == sha256 and len(content) == size_bytes
+    if not raw and run_observation_identity(parsed)[1] != size_bytes:
+        raise MaterializationError("provider run observation identity differs")
+    return parsed
+
+
 def _source_provenance(observation: object, generation: Path) -> Any:
     """The receipt's run observation for downstream stages.
 
@@ -1224,6 +1253,9 @@ def _source_provenance(observation: object, generation: Path) -> Any:
             None, generation, clone["path"], clone.get("sha256")
         )
         clone["path"] = str(located)
+        located_bytes = located.read_bytes()
+        clone["sha256"] = hashlib.sha256(located_bytes).hexdigest()
+        clone["size_bytes"] = len(located_bytes)
         original = json.loads(located.read_bytes()).get("providers", {})
         for row in clone.get("providers", []):
             ref = (original.get(row.get("provider_id")) or {}).get("finality_evidence")
@@ -1260,7 +1292,7 @@ def _locate_run_observation(
             if (
                 candidate.is_file()
                 and not candidate.is_symlink()
-                and hashlib.sha256(candidate.read_bytes()).hexdigest() == sha256
+                and _observation_identity_matches(candidate.read_bytes(), sha256)
             ):
                 return candidate
     raise MaterializationError("provider run observation file is not beside the world")
@@ -1412,11 +1444,10 @@ def _provider_admission_authority(
             observation_path = _locate_run_observation(
                 reader, generation, observation["path"], observation["sha256"]
             )
-            observed, digest, size = reader._verified_json(
-                observation_path,
-                observation["sha256"],
-                "provider run observation",
+            observed = _observation_matching_receipt(
+                observation_path, observation["sha256"], observation["size_bytes"]
             )
+            digest, size = observation["sha256"], observation["size_bytes"]
             if (
                 size != observation["size_bytes"]
                 or set(observed)

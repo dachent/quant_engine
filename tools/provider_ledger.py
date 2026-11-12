@@ -62,6 +62,7 @@ from quant_engine.portfolio_ledger import (
     validate_dataset_dispositions,
     validate_provider_authority,
 )
+from quant_engine.portfolio_ledger.provider_admission import run_observation_identity
 from quant_engine.portfolio_ledger.returns import (
     AVAILABLE,
     DATE_ONLY,
@@ -2688,8 +2689,11 @@ def _financial_mvp_authority(spec: Mapping[str, Any]) -> dict[str, Any]:
             )
         authority["run_observation"] = observation
         authority["run_observation_path"] = str(observation_path)
-        authority["run_observation_sha256"] = observation_sha256
-        authority["run_observation_size_bytes"] = observation_size
+        # The receipt records the path-normalized identity, never the raw bytes' hash.
+        identity_sha256, identity_size = run_observation_identity(observation)
+        authority["run_observation_sha256"] = identity_sha256
+        authority["run_observation_size_bytes"] = identity_size
+        authority["run_observation_raw_sha256"] = observation_sha256
     return authority
 
 

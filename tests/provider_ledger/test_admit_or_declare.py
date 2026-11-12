@@ -2924,3 +2924,44 @@ def test_p123_managed_returns_compound_to_the_reported_total_not_the_marker(
     assert wealth == Decimal(150) / Decimal(100)
     marker_wealth = (Decimal(1) + Decimal(3) / 100) * (Decimal(1) + Decimal(1) / 100)
     assert wealth != marker_wealth
+
+
+def test_the_run_observation_identity_ignores_roots_and_finality_directories() -> None:
+    """Kill test (#907 item 5): a real-shaped observation names each provider's absolute
+    root and finality-evidence path; the receipt's identity of it must not move with them."""
+
+    def observation(root: str, evidence_dir: str, evidence_sha: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "financial_cutoff": "2026-11-06",
+            "captured_at_utc": "2026-11-10T12:00:00Z",
+            "policy_contract_sha256": "c" * 64,
+            "providers": {
+                provider: {
+                    "root": f"{root}/{provider}",
+                    "generation_id": "a" * 64,
+                    "finality_evidence": {
+                        "path": f"{evidence_dir}\{provider}\finality.json",
+                        "sha256": evidence_sha,
+                        "size_bytes": 10,
+                    },
+                }
+                for provider in ("ibkr", "schwab")
+            },
+        }
+
+    from quant_engine.portfolio_ledger.provider_admission import (
+        run_observation_identity,
+    )
+
+    world_a = run_observation_identity(
+        observation("/world-F/c", "/world-F/finality", "e" * 64)
+    )
+    world_b = run_observation_identity(
+        observation("D:/other/world-proof/c", "D:/other/f", "e" * 64)
+    )
+    assert world_a == world_b
+    # the evidence content still binds: a different file hash is a different identity
+    assert world_a != run_observation_identity(
+        observation("/world-F/c", "/world-F/finality", "f" * 64)
+    )

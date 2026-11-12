@@ -797,6 +797,32 @@ def _exclusion_readiness_impact(
     )
 
 
+def run_observation_identity(observation: Mapping[str, Any]) -> tuple[str, int]:
+    """sha256 and size of a run observation with every world-specific locator removed.
+
+    The observation names each provider's absolute ``root`` and the absolute path of
+    its finality evidence, so its raw bytes depend on the directory the world was built
+    in.  The admit-or-declare receipt is a ledger artifact: it records this identity
+    (roots dropped, finality paths reduced to the file name, hashes kept), so the ledger
+    generation id is a function of the data and never of the world's directory name.
+    """
+
+    normalized: dict[str, Any] = json.loads(json.dumps(observation))
+    providers = normalized.get("providers")
+    if isinstance(providers, dict):
+        for row in providers.values():
+            if not isinstance(row, dict):
+                continue
+            row.pop("root", None)
+            evidence = row.get("finality_evidence")
+            if isinstance(evidence, dict) and isinstance(evidence.get("path"), str):
+                evidence["path"] = re.split(r"[\/]", evidence["path"])[-1]
+    content = json.dumps(
+        normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(content).hexdigest(), len(content)
+
+
 def validate_admit_or_declare_receipt(
     value: Mapping[str, object],
     *,
