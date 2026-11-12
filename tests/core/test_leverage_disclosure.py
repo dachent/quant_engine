@@ -181,3 +181,30 @@ def test_a_non_levered_account_is_an_explicit_row_and_a_denied_debit_is_a_confli
     assert denied["classification"] == "INCIDENTAL_DEBIT"
     assert denied["coverage_status"] == "OBSERVED_UNRECONCILED"
     assert "DECLARED_NO_FACILITY_BUT_DEBIT_INTEREST" in denied["coverage_reason"]
+
+
+def test_a_row_after_the_cutoff_does_not_move_the_state_and_unverified_is_visible() -> (
+    None
+):
+    catalog = _catalog(base_cash=True)
+    catalog["financing_cost_observations"].append(
+        {
+            "account_id": QUIET,
+            "provider_id": "ibkr",
+            "classification": "BROKER_DEBIT_INTEREST",
+            "measurement_basis": "CASH_POSTING",
+            "source_amount": _amt("-1"),
+            "mapping_status": "MAPPED",
+            "accounting_date": "2026-01-09",
+        }
+    )
+    declaration = _declaration()
+    declaration[QUIET] = af.Declared(
+        QUIET, "ACTIVE", "NO_MARGIN_FACILITY", False, "owner"
+    )
+    rows = ld.account_financing_rows(
+        declaration, catalog, cutoff=CUTOFF, generation_id=SHA, catalog_sha256=SHA
+    )
+    state = next(r for r in rows if r["account_id"] == QUIET)
+    assert state["classification"] == "NOT_LEVERED"
+    assert state["coverage_reason"].endswith("VERIFICATION=UNVERIFIED")

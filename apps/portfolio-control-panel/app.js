@@ -1329,7 +1329,7 @@
     const unavailable = rows.filter((row) => row.coverage_status !== "OBSERVED_ONLY" && row.coverage_status !== "DERIVED" && !String(row.coverage_status).startsWith("COMPLETE"));
     // F43: the badge says how many rows were observed and how many were not, never "observed only".
     const derivedBadge = `${covered.length ? ` / reconciled ${integer.format(covered.length)}` : ""}${derived.length ? ` / derived ${integer.format(derived.length)}` : ""}`;
-    status.textContent = unavailable.length ? `Observed ${integer.format(observed.length)}${derivedBadge} / unavailable ${integer.format(unavailable.length)}` : (derived.length ? `Observed ${integer.format(observed.length)}${derivedBadge}` : "Observed");
+    status.textContent = unavailable.length ? `Observed ${integer.format(observed.length)}${derivedBadge} / unavailable ${integer.format(unavailable.length)}` : ((derived.length || covered.length) ? `Observed ${integer.format(observed.length)}${derivedBadge}` : "Observed");
     status.className = unavailable.length ? "badge badge-warning" : "badge badge-positive";
     const classes = [...new Set(rows.map((row) => row.data_class))].sort();
     renderKpis("#leverage-kpis", [

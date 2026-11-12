@@ -79,6 +79,7 @@ def financing_cost_closure(
         by_currency.pop(BASE_LINE, None)  # the base line is the sum of the others
     unexplained: list[str] = []
     checked = 0
+    last_day = days[-1] if days else None
     for currency, series in sorted(by_currency.items()):
         observed = sorted(series)
         daily = [
@@ -103,6 +104,14 @@ def financing_cost_closure(
                 if abs(residual) > Decimal("0.01") + largest * missing:
                     unexplained.append(f"{currency}:{day}:RESIDUAL")
             previous = (day, entry["ACCRUAL_BALANCE"])
+        # days after the last observed row are allowed only when the accrual is closed out
+        if (
+            previous is not None
+            and last_day is not None
+            and previous[0] < last_day
+            and previous[1] != _ZERO
+        ):
+            unexplained.append(f"{currency}:{last_day}:TRAILING_UNOBSERVED")
     unmapped = [
         r
         for r in rows
@@ -158,6 +167,7 @@ def borrowed_principal(
         and str(r.get("as_of_date")) <= cutoff
     ]
     series: dict[str, Decimal] = {}
+    bad_days: set[str] = set()
     for row in base:
         value = _value(row, "amount")
         if (
@@ -165,13 +175,15 @@ def borrowed_principal(
             and (row.get("amount") or {}).get("currency") == account_currency
         ):
             series[str(row["as_of_date"])] = value
+        else:
+            bad_days.add(str(row["as_of_date"]))
     if not series:
         return Closure(
             "BORROWED_PRINCIPAL_BASE_CASH_SERIES", False, {"observations": 0}
         ), None
-    first = min(series)
+    first = min(set(series) | bad_days)
     expected = [d for d in sorted(set(statement_days)) if first <= d <= cutoff]
-    missing = [d for d in expected if d not in series]
+    missing = [d for d in expected if d not in series or d in bad_days]
     at_cutoff = series.get(cutoff)
     covered = not missing and at_cutoff is not None
     principal = max(_ZERO, -at_cutoff) if at_cutoff is not None else None

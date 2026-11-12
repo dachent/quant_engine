@@ -34,6 +34,20 @@ def _evidence_text(closure: leverage_closure.Closure) -> str:
     return f"{closure.check_id}:{';'.join(parts)}"
 
 
+def _until(rows: Sequence[Mapping[str, Any]], cutoff: str) -> list[Mapping[str, Any]]:
+    """Rows dated on or before the cutoff: a later catalog never moves the state."""
+
+    def day(row: Mapping[str, Any]) -> str:
+        return str(
+            row.get("as_of_date")
+            or row.get("accounting_date")
+            or row.get("event_date")
+            or ""
+        )
+
+    return [r for r in rows if day(r) <= cutoff]
+
+
 def _debit_evidence(
     liability: Sequence[Mapping[str, Any]],
     cost: Sequence[Mapping[str, Any]],
@@ -125,7 +139,9 @@ def account_financing_rows(
             if bucket is not None:
                 bucket[key].append(item)
     evidence = {
-        name: _debit_evidence(parts["liability"], parts["cost"])
+        name: _debit_evidence(
+            _until(parts["liability"], cutoff), _until(parts["cost"], cutoff)
+        )
         for name, parts in by_account.items()
     }
     states = account_financing.classify(declaration, evidence, names)
@@ -178,13 +194,14 @@ def account_financing_rows(
             )
 
         conflict_text = ",".join(state.conflicts)
+        unverified = "" if declaration[name].verified else ";VERIFICATION=UNVERIFIED"
         rows.append(
             make(
                 "ACCOUNT_FINANCING",
                 "ACCOUNT_FINANCING_STATE",
                 state.state,
                 NOT_COVERED if state.conflicts else DECLARED,
-                f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}",
+                f"{state.reason}{';CONFLICT=' + conflict_text if conflict_text else ''}{unverified}",
             )
         )
         if state.state == "NOT_LEVERED":

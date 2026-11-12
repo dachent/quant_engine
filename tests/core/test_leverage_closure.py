@@ -131,3 +131,22 @@ def test_gross_exposure_needs_one_mapped_value_and_one_nav() -> None:
     closure, gross, value = lc.gross_exposure(exposure, nav, DAYS[-1])
     assert closure.covered and gross == Decimal(120) and value == Decimal(100)
     assert not lc.gross_exposure([], nav, DAYS[-1])[0].covered
+
+
+def test_days_after_the_last_accrual_row_are_not_covered_while_the_balance_is_open() -> (
+    None
+):
+    """Review of #894: a trailing gap needs a closed-out accrual."""
+
+    rows = [r for r in _series(["-1", "-2", "-3", "-4"]) if r["period_end"] <= DAYS[1]]
+    assert not lc.financing_cost_closure(rows, DAYS, DAYS[-1], None).covered
+    closed = [r for r in _series(["-1", "0", "0", "0"]) if r["period_end"] <= DAYS[1]]
+    assert lc.financing_cost_closure(closed, DAYS, DAYS[-1], None).covered
+
+
+def test_an_unavailable_cash_day_counts_as_missing_not_as_absent_history() -> None:
+    rows = [_cash(d, "-10") for d in DAYS]
+    rows[0]["amount"] = {"currency": "USD", "status": "UNAVAILABLE", "value": None}
+    closure, _ = lc.borrowed_principal(rows, DAYS, DAYS[-1], "USD")
+    assert not closure.covered
+    assert closure.evidence["missing_days"] == 1

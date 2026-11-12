@@ -296,6 +296,9 @@ PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH: Final = "input/sleeve-account-facts.json"
 IMPLEMENTATION_SLEEVE_EVIDENCE_NAME: Final = "implementation-sleeve-basis.json"
 # The owner account financing declaration a candidate was built with (#894).
 ACCOUNT_FINANCING_EVIDENCE_NAME: Final = "account-financing-declaration.json"
+PUBLISHED_ACCOUNT_FINANCING_RELATIVE_PATH: Final = (
+    "input/account-financing-declaration.json"
+)
 PUBLISHED_IMPLEMENTATION_SLEEVE_RELATIVE_PATH: Final = (
     "input/implementation-sleeve-basis.json"
 )
@@ -18217,6 +18220,17 @@ def publish_report(
                 strategy_basis.DECLARATION_SCHEMA.rsplit("/", 1)[-1],
             )
         )
+    financing_declaration = candidate_dir / ACCOUNT_FINANCING_EVIDENCE_NAME
+    if financing_declaration.is_file() and not financing_declaration.is_symlink():
+        # the exact bytes the account financing rows were computed from (#894)
+        artifact_specs.append(
+            (
+                financing_declaration,
+                PUBLISHED_ACCOUNT_FINANCING_RELATIVE_PATH,
+                account_financing.ARTIFACT_ID,
+                "1",
+            )
+        )
     sleeve_facts_evidence = candidate_dir / SLEEVE_FACTS_EVIDENCE_NAME
     if sleeve_facts_evidence.is_file() and not sleeve_facts_evidence.is_symlink():
         # the exact bytes the margin liability line and the bridges were computed from
@@ -18559,6 +18573,7 @@ def publish_report(
     # disclosure), so no consumer needs the candidate directory.
     for evidence_name, published_relative in (
         (STRATEGY_BASIS_EVIDENCE_NAME, PUBLISHED_STRATEGY_BASIS_RELATIVE_PATH),
+        (ACCOUNT_FINANCING_EVIDENCE_NAME, PUBLISHED_ACCOUNT_FINANCING_RELATIVE_PATH),
         (SLEEVE_FACTS_EVIDENCE_NAME, PUBLISHED_SLEEVE_FACTS_RELATIVE_PATH),
         (
             IMPLEMENTATION_SLEEVE_EVIDENCE_NAME,
