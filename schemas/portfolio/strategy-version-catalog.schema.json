@@ -22,6 +22,8 @@
       "enum": [
         "ACCOUNT_LIVE",
         "PROVIDER_LIVE",
+        "MODEL_LIVE",
+        "COPY_RECORD",
         "OFFICIAL_VEHICLE",
         "PREDECESSOR",
         "SHADOW_OOS",

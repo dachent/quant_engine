@@ -214,9 +214,11 @@ def compare_strategy_evidence(
         EvidenceLayer.BACKTEST,
         EvidenceLayer.PREDECESSOR,
         EvidenceLayer.SHADOW_OOS,
+        EvidenceLayer.MODEL_LIVE,
     }
     live_layers = {
         EvidenceLayer.ACCOUNT_LIVE,
+        EvidenceLayer.COPY_RECORD,
         EvidenceLayer.OFFICIAL_VEHICLE,
         EvidenceLayer.PROVIDER_LIVE,
     }

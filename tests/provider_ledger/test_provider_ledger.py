@@ -990,12 +990,14 @@ def test_p123_provider_returns_verify_equity_curve_but_keep_it_reconciliation_on
         {"portfolio123": date(2026, 1, 6)},
     )
 
-    assert refreshed[0]["provider"]["cash_added_semantics"] == (
+    # The managed series is the owner's P123 copy: a COPY_RECORD, never provider live.
+    assert "provider" not in refreshed[0]
+    assert refreshed[0]["copy_record"]["cash_added_semantics"] == (
         "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA"
     )
-    assert (
-        ledger._admissions({}, refreshed)[0].disposition.value == "RECONCILIATION_ONLY"
-    )
+    assert refreshed[0]["copy_record"]["evidence_layer"] == "COPY_RECORD"
+    assert {row["evidence_layer"] for row in returned} == {"COPY_RECORD"}
+    assert ledger._admissions({}, refreshed)[0].disposition.value == "REFERENCE_ONLY"
 
     equity_path = (
         Path(provider_ref["root"])
@@ -10260,3 +10262,148 @@ def test_quantbase_dividend_attribution_ignores_orders_after_the_cutoff(
     # bounded at the cutoff only fund 107 had traded it.
     assert attributed(None) is None
     assert attributed(date(2026, 2, 1)) == "107"
+
+
+def _identity(manifest: GenerationManifest) -> dict[str, ProviderGenerationIdentity]:
+    return {
+        "portfolio123": ProviderGenerationIdentity(
+            provider_id="portfolio123",
+            generation_id=manifest.generation_id,
+            manifest_sha256="a" * 64,
+            catalog_sha256="b" * 64,
+            qualification=GenerationQualification.ACCEPTED_PARTIAL,
+        )
+    }
+
+
+def _model_and_copy(tmp_path: Path):
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": entity,
+                "Date": day,
+                "Total Equity": level,
+                "Cash Added": cash,
+            }
+            for entity, levels, cashes in (
+                ("exact-eu-model", ("100", "125", "100"), ("50", "60", "70")),
+                ("model-book", ("1000", "1100", "1210"), ("0", "0", "0")),
+            )
+            for day, level, cash in zip(
+                ("2026-01-02", "2026-01-05", "2026-01-06"),
+                levels,
+                cashes,
+                strict=True,
+            )
+        ],
+    )
+    evidence[0]["provider"]["model_entity_id"] = "model-book"
+    return provider_ref, manifest, evidence
+
+
+def test_p123_book_is_model_live_and_the_copy_is_a_copy_record(tmp_path: Path) -> None:
+    """The copy is never the model: two layers, two entities, no cross-over."""
+
+    provider_ref, manifest, evidence = _model_and_copy(tmp_path)
+    returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+    by_layer = {
+        layer: [r for r in returned if r["evidence_layer"] == layer]
+        for layer in ("MODEL_LIVE", "COPY_RECORD", "PROVIDER_LIVE")
+    }
+    assert by_layer["PROVIDER_LIVE"] == []
+    assert {r["entity_id"] for r in by_layer["COPY_RECORD"]} == {"exact-eu-model"}
+    assert {r["entity_id"] for r in by_layer["MODEL_LIVE"]} == {"model-book"}
+    assert [r["return"] for r in by_layer["MODEL_LIVE"]] == ["0.1", "0.1"]
+
+    refreshed = ledger._refresh_strategy_evidence(
+        returned,
+        evidence,
+        {"p123-eu": "P123 EU"},
+        _identity(manifest),
+        {"portfolio123": date(2026, 1, 6)},
+    )[0]
+    assert refreshed["provider"]["evidence_layer"] == "MODEL_LIVE"
+    assert refreshed["provider"]["entity_id"] == "model-book"
+    assert refreshed["copy_record"]["entity_id"] == "exact-eu-model"
+    assert refreshed["provider"]["cumulative_return"] == "0.21"
+    assert (
+        refreshed["provider"]["return_series_sha256"]
+        != refreshed["copy_record"]["return_series_sha256"]
+    )
+    layers = {a.evidence_layer.value for a in ledger._admissions({}, [refreshed])}
+    assert {"MODEL_LIVE", "COPY_RECORD"} <= layers
+
+
+def test_a_declared_model_book_missing_from_the_curve_is_refused(
+    tmp_path: Path,
+) -> None:
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": day,
+                "Total Equity": level,
+                "Cash Added": cash,
+            }
+            for day, level, cash in (
+                ("2026-01-02", "100", "50"),
+                ("2026-01-06", "100", "70"),
+            )
+        ],
+    )
+    evidence[0]["provider"]["model_entity_id"] = "model-book"
+    with pytest.raises(ledger.ProviderLedgerError, match="model live curve"):
+        ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+
+
+def test_a_carried_provider_block_keeps_its_own_generation_stamp(
+    tmp_path: Path,
+) -> None:
+    """No rows admitted: the prior block is carried but never re-stamped (D5)."""
+
+    _ref, manifest, _evidence = _model_and_copy(tmp_path)
+    prior = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "strategy_name": "Robuxio",
+            "provider_id": "matrixport",
+            "evidence_layer": "PROVIDER_LIVE",
+            "generation_id": "f" * 64,
+            "provider": {
+                "provider_id": "matrixport",
+                "generation_id": "f" * 64,
+                "generation_as_of_date": "2026-01-01",
+                "cumulative_return": "0.1",
+            },
+        }
+    ]
+    rows = [
+        {
+            "strategy_id": "robuxio-crypto",
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.01",
+            "component_account_ids": ["a"],
+        }
+    ]
+    identity = {
+        "matrixport": ProviderGenerationIdentity(
+            provider_id="matrixport",
+            generation_id=manifest.generation_id,
+            manifest_sha256="a" * 64,
+            catalog_sha256="b" * 64,
+            qualification=GenerationQualification.ACCEPTED_PARTIAL,
+        )
+    }
+    out = ledger._refresh_strategy_evidence(
+        rows,
+        prior,
+        {"robuxio-crypto": "Robuxio"},
+        identity,
+        {"matrixport": date(2026, 1, 6)},
+    )[0]
+    assert out["provider"]["generation_id"] == "f" * 64
+    assert out["provider"]["generation_as_of_date"] == "2026-01-01"
