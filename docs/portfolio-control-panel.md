@@ -553,3 +553,7 @@ waited on for visibility). Each step retries a bounded number of times
 (`STEP_ATTEMPTS`) with explicit waits; on exhaustion the result file is still written
 with `memory.failure = {step, message}` and the harness exits 4 (0 ok, 1 verdict over
 ratio, 2 harness error, 3 watchdog). The timing definition is unchanged.
+
+## Capital basis of the systematic total (#906)
+
+A strategy whose positions were bought with a margin loan is carried gross: the AI Factor sleeve's value is the sleeve NAV before the account's unallocated cash and margin bucket. The systematic total therefore counts that sleeve gross, so it overstates owned equity by the loan share. The Systematic capital headline prints, beside the total, the sleeve's gross value, the margin and unallocated cash line, and the equity (gross plus that line, which equals the sleeve's share of the account NAV), read from the strategy basis disclosure. Weights are shares of the systematic perimeter on that same gross basis; the owned-equity total is the systematic total plus the margin lines. Every other strategy is valued at its broker account NAV, net of any debit balance inside the account; the account financing rows (`ACCOUNT_FINANCING`, #894) state which accounts carry a loan at all.

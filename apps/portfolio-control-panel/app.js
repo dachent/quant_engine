@@ -703,6 +703,20 @@
     return available ? "SOURCE_DATA_AVAILABLE" : "SOURCE_DATA_UNAVAILABLE";
   };
 
+  // #906: a strategy counted gross (its positions bought with a margin loan) says so next to the headline.
+  function grossBasisNote() {
+    const block = data.strategy_basis_disclosure;
+    if (!block || !Array.isArray(block.strategies)) return "";
+    const parts = block.strategies
+      .filter((entry) => entry && entry.margin_liability && entry.margin_liability.gross_by_definition)
+      .map((entry) => {
+        const margin = entry.margin_liability;
+        const line = margin.liability_line || {};
+        return `${entry.strategy_name || entry.strategy_id} is counted gross: sleeve ${currencyExact(margin.gross_sleeve_nav_usd)}, margin and unallocated cash ${currencyExact(line.value_usd)}, equity ${currencyExact(margin.net_equivalent_usd)}`;
+      });
+    return parts.length ? ` · Capital basis: ${parts.join("; ")}` : "";
+  }
+
   function renderCommand() {
     $("#command-heading").textContent = performanceLineageMismatch ? "REPORT PERFORMANCE WITHHELD" : data.advisory.readiness.replaceAll("_", " ");
     $("#command-reason").textContent = performanceLineageMismatch
@@ -717,7 +731,7 @@
       ["Report coverage", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
     ] : [
       ["Total liquid", capitalAmount("total_liquid"), liquidNote],
-      ["Systematic capital", capitalAmount("systematic"), `Subject to the accepted HWM policy${capitalAsOf("systematic")}${capitalAggregateSuffix("systematic")}`],
+      ["Systematic capital", capitalAmount("systematic"), `Subject to the accepted HWM policy${capitalAsOf("systematic")}${capitalAggregateSuffix("systematic")}${grossBasisNote()}`],
       ["Reserve", capitalAmount("reserve"), reserveNote, "reserve"],
       ["Governed NAV coverage", pct(data.advisory.nav_coverage), `${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}; ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered. ${hwmExclusionNote()}`, "warning"],
     ]);
