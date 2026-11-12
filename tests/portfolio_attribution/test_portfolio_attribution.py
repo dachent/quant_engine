@@ -298,7 +298,11 @@ def test_exact_date_metrics_costs_and_legacy_baseline_are_explicit(
     assert comparison["metrics"]["cumulative_gap"] == "-0.02"
     assert comparison["legacy_baseline_disposition"] == "INDEPENDENTLY_REPRODUCED"
     assert catalog["costs"][0]["annual_external_cost_rate_pre_tax"] == "0.0718"
-    assert catalog["costs"][0]["after_tax_status"].startswith("UNAVAILABLE")
+    assert (
+        catalog["costs"][0]["after_tax_status"]
+        == attribution.AFTER_TAX_STATUS_NOT_APPLICABLE
+    )
+    assert catalog["costs"][0]["after_tax_annual_cost_rate"] is None
     assert len(catalog["benchmark_assignments"]) == 9
     benchmark = catalog["benchmark_comparisons"][0]
     assert benchmark["metrics"]["observations"] == 2
