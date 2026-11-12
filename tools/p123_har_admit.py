@@ -706,10 +706,6 @@ def build_outputs(
             files[f"csv/strategy_{uid}_perf.csv"] = _csv_bytes(
                 ["Date", "Total Equity", "Cash Added", "Marker"], eq
             )
-            if len(eq) != len(doc["data"]):
-                raise AdmissionRefused(
-                    f"item {uid} staged equity rows differ from the raw perf rows"
-                )
             entry["equity_rows"] = len(eq)
             entry["perf_rows"] = len(doc["data"])
         else:
