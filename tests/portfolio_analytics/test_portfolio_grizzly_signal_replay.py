@@ -312,3 +312,25 @@ def test_signal_times_are_converted_into_the_policy_zone(tmp_path: Path) -> None
     converted = replay_tool.load_signals(log.read_bytes(), utc)[0][0]
     assert local.hour == 8
     assert converted.hour == 13
+
+
+def test_replay_catalog_labels_the_derived_segment_as_a_hypothetical_replica(
+    tmp_path: Path,
+) -> None:
+    """The replay fills the gap after the vendor simulation: own label, not vendor."""
+    _, _, catalog = replay_tool.build(**_stage_arguments(tmp_path))
+    from series_label import ACCOUNT_LIVE, BACKTEST, label_from_dict
+
+    (raw,) = catalog["series_labels"]
+    label = label_from_dict(raw)
+    assert label.layer == BACKTEST and label.layer != ACCOUNT_LIVE
+    assert label.entity_role == "VENDOR_REPLICA"
+    assert label.leverage_factor == 3
+    assert (label.first, label.last, label.observations) == (
+        catalog["coverage"]["observed_start"],
+        catalog["coverage"]["observed_end"],
+        catalog["coverage"]["return_observations"],
+    )
+    assert label.return_basis.startswith("DERIVED_SIGNAL_REPLAY")
+    assert catalog["segment_role"] == "DERIVED_SIGNAL_REPLAY_NOT_VENDOR_PUBLISHED"
+    assert catalog["display_name"] == "3x SPXL replica (hypothetical)"

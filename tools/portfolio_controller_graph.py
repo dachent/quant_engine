@@ -469,6 +469,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             _RELEASE,
             "tools/portfolio_designer_model_curve.py",
             "tools/portfolio_strategy_history.py",
+            "tools/portfolio_layer_series.py",
             "tools/portfolio_strategy_backtests.py",
             "tools/portfolio_provider_track_record.py",
             "tools/account_strategy_manifest.py",
@@ -506,6 +507,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "id": "qsi-source-revision",
         "source_paths": (
             "tools/portfolio_strategy_history.py",
+            "tools/portfolio_layer_series.py",
             "tools/portfolio_strategy_backtests.py",
             _TARGET_SERIES,
         ),
