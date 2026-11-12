@@ -8828,14 +8828,38 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
     disclosures = rows(ctx.report, "leverage_disclosures")
     if disclosures:
         reference = universe(ctx)
-        applicable = sorted(
-            reference.active_accounts
-            if reference is not None
-            else {
-                str(row["account_id"])
+        # E8 scope (#894/#895): the check applies to levered accounts. An account is
+        # outside it only when the report itself states ACCOUNT_FINANCING_STATE rows for
+        # it and every one reads NOT_LEVERED; an account with no state row, a LEVERED or
+        # INCIDENTAL_DEBIT one, or an unreadable classification stays applicable, so a
+        # missing declaration never narrows the check.
+        not_levered = {
+            account
+            for account in {
+                str(row.get("account_id"))
                 for row in disclosures
-                if row.get("account_id") is not None
+                if row.get("data_class") == "ACCOUNT_FINANCING"
+                and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
             }
+            if all(
+                row.get("classification") == "NOT_LEVERED"
+                for row in disclosures
+                if str(row.get("account_id")) == account
+                and row.get("data_class") == "ACCOUNT_FINANCING"
+                and row.get("measurement_basis") == "ACCOUNT_FINANCING_STATE"
+            )
+        }
+        applicable = sorted(
+            (
+                reference.active_accounts
+                if reference is not None
+                else {
+                    str(row["account_id"])
+                    for row in disclosures
+                    if row.get("account_id") is not None
+                }
+            )
+            - not_levered
         )
         for measure, entity, basis in (
             (
@@ -8863,6 +8887,8 @@ def check_completeness(ctx: Context) -> Iterator[Finding]:
                     )
             if applicable:
                 gap = bool(state)
+            elif reference is not None and not_levered:
+                gap = False  # every active account states NOT_LEVERED: nothing to cover
             else:
                 gap = not any(
                     is_available(row.get("coverage_status")) for row in measured
