@@ -278,3 +278,49 @@ def test_a_reserve_derived_total_is_disclosed_without_any_derived_strategy() -> 
         "and total liquid"
     ) in text
     assert "strategy current" not in text
+
+
+def test_a_last_observation_before_the_cutoff_is_labelled_historical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """KILL (#905, Ruling C capital.as_of_cutoff): no AVAILABLE label on stale capital."""
+
+    catalog = {
+        "as_of_date": CUTOFF,
+        "accounts": [
+            {
+                "account_id": a,
+                "role": "INVESTMENT",
+                "provider": "P",
+                "base_currency": "USD",
+            }
+            for a in ("acct-old", "acct-now")
+        ],
+        "nav_observations": [
+            {
+                "account_id": a,
+                "as_of_date": day,
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "5"},
+            }
+            for a, day in (("acct-old", "2025-11-24"), ("acct-now", CUTOFF))
+        ],
+    }
+    monkeypatch.setattr(
+        reporter,
+        "_current_capital",
+        lambda _c: {
+            "reserve": {
+                "status": "NOT_READY_AT_CUTOFF",
+                "as_of_date": None,
+                "current_value": {
+                    "currency": "USD",
+                    "status": "UNAVAILABLE",
+                    "value": None,
+                },
+            }
+        },
+    )
+    rows = {r["account_id"]: r for r in reporter._accounts(catalog)}
+    assert rows["acct-old"]["status"] == "HISTORICAL_LAST_OBSERVATION"
+    assert rows["acct-old"]["as_of_date"] == "2025-11-24"
+    assert rows["acct-now"]["status"] == "AVAILABLE_LATEST_OBSERVATION"

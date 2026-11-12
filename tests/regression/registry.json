@@ -22,7 +22,9 @@
     },
     "matrixport_gap_days": {
       "defect": "Matrixport gap days not accounted for in the return chain.",
-      "status": "open"
+      "status": "covered",
+      "test": "tests/regression/test_matrixport_gap_days.py::test_matrixport_gap_days_are_bounded_or_unavailable",
+      "kill": "On the pre-fix code the numeric HWM is UNAVAILABLE for any span gap, so a bounded gap never assesses BOUNDED (module absent)."
     },
     "validator_fixture_values_no_builder_emits": {
       "defect": "Validator fixtures carry values no builder ever emits, so a check passes on fixtures and fails on real output.",
@@ -37,6 +39,18 @@
       "status": "covered",
       "test": "tests/regression/test_ci_reports_every_failure.py::test_pytest_has_no_maxfail",
       "kill": "pyproject addopts contains --maxfail=1 on the pre-fix tree, so the assertion fails."
+    },
+    "fx_coverage_asserted_not_derived": {
+      "defect": "FX fact status asserted PARTIAL whenever any non-USD record exists, never testing per-record coverage (E3).",
+      "status": "covered",
+      "test": "tests/regression/test_fx_coverage_asserted_not_derived.py::test_fx_status_follows_per_record_coverage",
+      "kill": "Pre-fix builder returns PARTIAL for a fully covered record, so the COMPLETE assertion fails."
+    },
+    "stale_capital_labelled_available": {
+      "defect": "Account capital dated before the cutoff labelled AVAILABLE_LATEST_OBSERVATION (capital.as_of_cutoff vs label).",
+      "status": "covered",
+      "test": "tests/regression/test_stale_capital_labelled_available.py::test_stale_last_observation_is_historical",
+      "kill": "Pre-fix builder emits AVAILABLE_LATEST_OBSERVATION for a 2025 observation at a 2026 cutoff."
     }
   },
   "tickets": {
@@ -68,6 +82,12 @@
     "903": {
       "cases": [
         "grizzlybears_3x_replica_scale"
+      ]
+    },
+    "905": {
+      "cases": [
+        "fx_coverage_asserted_not_derived",
+        "stale_capital_labelled_available"
       ]
     },
     "907": {

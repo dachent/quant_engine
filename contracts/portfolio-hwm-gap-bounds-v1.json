@@ -1,5 +1,12 @@
 {
   "derivation": "closure leave-one-out over the published daily NAV days; site daily NAV used as span splitter; see the release evidence record sprint-data-reserves",
+  "evidence_sha256": {
+    "derived_points_file": "dcdad991f4ec6b2a3a1b4ced4b996c8bce6fdabc9ebe9951f763311c76327ffa",
+    "gap_fill_input": "e778fbed3a8d8475e039d3b6a92a16cef6190ca844cb97fbef7578922d791381",
+    "matrixport_nav_daily_input": "f10253570d6a01adfe2033f27f7a8e7c479eb3685824e16349911d9f017ed18c",
+    "site_daily_gav_input": "8d2fdb481b54f68df6eaabb29a1a43d5d1d2b5b67a8acddd6f3faa1363eaf0b6",
+    "site_daily_nav_input": "2d466d656fec8e761ccb197f7a434fe30b23e4c3b036c6b5784d2882022c9879"
+  },
   "points": [
     {
       "date": "2026-01-27",
