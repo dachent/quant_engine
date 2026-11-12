@@ -139,3 +139,23 @@ def test_a_live_fit_under_a_year_is_not_a_headline() -> None:
     assert ctx["headline_status"] == "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
     assert ctx["lens_role"] == "SECONDARY"
     assert round(float(ctx["t_stat"]), 6) == round(0.20 / 0.05, 6)
+
+
+def test_the_layer_and_the_opening_close_decide_the_headline() -> None:
+    """Review findings: evidence_layer was never read; a daily year was 364 days."""
+
+    row = _row("0.20", "0.05", 0)
+    row["coverage"]["observed_start"] = "2025-11-07"  # 364 days to 2026-11-06
+    assert panel._alpha_context(row)["headline_status"] == "HEADLINE_ALLOWED"
+    row["coverage"]["observed_start"] = "2025-11-08"  # 363 days: still short
+    assert panel._alpha_context(row)["headline_status"] == (
+        "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
+    )
+    row["coverage"]["observed_start"] = "2025-01-02"
+    row["evidence_layer"] = "PROVIDER_LIVE"
+    assert panel._alpha_context(row)["headline_status"] == "HEADLINE_ALLOWED"
+    for layer in ("BACKTEST", "HYBRID", "SOMETHING_NEW"):
+        row["evidence_layer"] = layer
+        assert panel._alpha_context(row)["headline_status"] == (
+            "NOT_A_HEADLINE_UNDER_365_DAYS_OR_NOT_LIVE"
+        )

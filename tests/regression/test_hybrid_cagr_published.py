@@ -18,6 +18,6 @@ def test_hybrid_cagr_published() -> None:
         correlation.ReturnRow(date(2024, 1, 1), 0.1, "BACKTEST", "v1", "0.1"),
         correlation.ReturnRow(date(2026, 1, 1), 0.1, "ACCOUNT_LIVE", "v1", "0.1"),
     ]
-    summary = correlation._performance_summary(rows, 1)
+    summary = correlation._performance_summary(rows, 0)
     assert summary["cagr"] is None
     assert summary["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"

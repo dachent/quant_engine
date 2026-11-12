@@ -5536,12 +5536,17 @@ def _fit_segments(
 
     if not (isinstance(start, str) and isinstance(end, str)):
         return []
-    layers = row.get("evidence_layers")
-    model_only = (
-        isinstance(layers, list)
-        and "MODEL_LIVE" in layers
-        and "ACCOUNT_LIVE" not in layers
-    )
+    layer = row.get("evidence_layer")
+    if layer is None:
+        layer = "ACCOUNT_LIVE"  # composition already fails closed on backtest
+    if layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE"}:
+        return []  # BACKTEST, hybrid or unknown: never a live segment
+    model_only = layer == "PROVIDER_LIVE"
+    # the fit's window opens at the close before its first aligned return
+    try:
+        start = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
+    except ValueError:
+        return []
     try:
         return [
             series_label.SeriesLabel(

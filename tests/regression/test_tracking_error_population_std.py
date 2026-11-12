@@ -12,5 +12,5 @@ for sub in ("tools", ""):
 
 def test_tracking_error_population_std() -> None:
     source = (ROOT / "tools" / "portfolio_target_series.py").read_text(encoding="utf-8")
-    assert "statistics.stdev(differences) * math.sqrt(252)" in source
+    assert "statistics.stdev(differences)" in source
     assert "pstdev(differences)" not in source

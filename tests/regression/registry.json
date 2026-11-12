@@ -47,7 +47,7 @@
     "short_window_account_cagr": {
       "defect": "Account CAGR published for a window under 365 days (#904 items 2-3).",
       "status": "covered",
-      "kill": "Pre-fix _strategy_period_fields publishes account_live_cagr for 210 days; the status is not SUPPRESSED_UNDER_365D.",
+      "kill": "Pre-fix portfolio_report._strategies publishes account_live_cagr for windows under 365 days, so a row with a CAGR and no SUPPRESSED_UNDER_365D status breaks the window assertions (existing end-to-end report fixture).",
       "test": "tests/regression/test_short_window_account_cagr.py::test_short_window_account_cagr"
     },
     "sleeve_rate_short_window": {
@@ -83,7 +83,7 @@
     "dependence_summary_day_count": {
       "defect": "Dependence summary annualised on 365.25 days and one period short (#904 item 8).",
       "status": "covered",
-      "kill": "Pre-fix window is first-to-last row (365 days) and uses a 365.25 exponent, so window_days and cagr differ.",
+      "kill": "Pre-fix _performance_summary takes one argument (no backtest count) and windows first-to-last row on 365.25, so the test fails before reaching the 730-day window.",
       "test": "tests/regression/test_dependence_summary_day_count.py::test_dependence_summary_day_count"
     },
     "accepted_spans_omitted_from_dependence": {
