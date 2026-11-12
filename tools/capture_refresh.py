@@ -118,7 +118,9 @@ def cdp_window_state(
 def vault_ok(secret: str) -> bool:
     """The sanctioned reader only; its output is discarded, only the exit code is used."""
     kvget = Path("C:/Dev/bin/kvget.ps1")
-    if not kvget.exists() or secret.startswith("-"):
+    if not kvget.exists() or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", secret
+    ):
         return False
     try:
         r = subprocess.run(  # noqa: S603

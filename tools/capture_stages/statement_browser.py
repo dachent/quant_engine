@@ -212,7 +212,7 @@ def parse_composer_statement(text: str) -> dict[str, Any]:
             in_holdings = True
             continue
         if in_holdings:
-            if re.fullmatch(r"\d+", line.strip()):
+            if re.fullmatch(r"\d+", line.strip()) or line.startswith("Total"):
                 break
             amounts = re.findall(r"\$\s*(?:--|-?[\d,]+\.\d\d)", line)
             if line.startswith("*Cash") and len(amounts) >= 3:

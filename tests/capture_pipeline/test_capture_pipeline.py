@@ -1763,3 +1763,75 @@ def test_bridge_needs_a_material_receipt():
     assert cp.check_bridge_receipt(
         last_nav_before=5000.0, receipt_legs=[5000.0], receipt_total=5000.0, **kw
     ).ok
+
+
+def test_composer_holdings_scan_stops_at_a_total_line_and_walk_casefolds_trades():
+    text = COMPOSER.replace("3\nIncome", "Total 1 $10.00 $10.00\n3\nIncome")
+    assert sb.parse_composer_statement(text)["holdings_values"] == [
+        Decimal("3.00"),
+        Decimal("10.00"),
+    ]
+    tx = [
+        {
+            "kind": "buy",
+            "event_date": "2026-01-05",
+            "settle_date": "2026-01-09",
+            "amount": -50.0,
+        }
+    ]
+    w = sc.walk_cash(
+        ["2026-01-05", "2026-01-12"], tx, anchor_date="2026-01-12", anchor_cash=0.0
+    )
+    assert (
+        w["2026-01-08"] == 50.0 and w["2026-01-09"] == 0.0
+    )  # moved on the settlement date, not the event date
+
+
+def test_vault_and_http_probes_are_bounded_and_value_free(monkeypatch):
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = b"SECRET-VALUE"
+
+    def fake_run(cmd, **k):
+        calls.append((cmd, k))
+        return R()
+
+    monkeypatch.setattr(cr.subprocess, "run", fake_run)
+    monkeypatch.setattr(cr.Path, "exists", lambda self: True)
+    assert cr.vault_ok("ibkr-flex-token-x") is True
+    assert (
+        calls and calls[0][1]["capture_output"] is True
+    )  # output is captured and dropped; only the code is used
+    assert (
+        cr.vault_ok("-File") is False
+        and cr.vault_ok("a b") is False
+        and len(calls) == 1
+    )
+    assert cr.http_ok(src(probe_url=None)) is False
+
+    class Opener:
+        def __init__(self, exc=None):
+            self.exc = exc
+
+        def open(self, url, timeout):
+            if self.exc:
+                raise self.exc
+            import contextlib
+
+            return contextlib.nullcontext()
+
+    import urllib.error
+
+    p = src(probe_url="https://x.test/")
+    monkeypatch.setattr(cr, "_NO_PROXY", Opener())
+    assert cr.http_ok(p) is True
+    monkeypatch.setattr(
+        cr,
+        "_NO_PROXY",
+        Opener(urllib.error.HTTPError("https://x.test/", 404, "nf", None, None)),
+    )
+    assert cr.http_ok(p) is True  # an HTTP answer is reachability, not content
+    monkeypatch.setattr(cr, "_NO_PROXY", Opener(OSError("down")))
+    assert cr.http_ok(p) is False

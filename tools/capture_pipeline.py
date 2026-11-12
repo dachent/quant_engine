@@ -832,7 +832,7 @@ class _PinLock:
 
     def __enter__(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(600):
+        for _ in range(1200):
             try:
                 with self.path.open("x") as fh:
                     fh.write(f"{os.getpid()} {time.time()}")
