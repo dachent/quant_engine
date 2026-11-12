@@ -5510,7 +5510,7 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
     )
     se_text = alpha.get("annualized_standard_error") if alpha else None
     se = _alpha_decimal(se_text)
-    t_stat = net / se if net is not None and se is not None and se != 0 else None
+    t_stat = net / se if net is not None and se is not None and se > 0 else None
     backtest = composition.get("backtest_observations_used")
     live = composition.get("live_observations")
     used = composition.get("calculation_observations_used")
@@ -5546,8 +5546,22 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         inference = "NOT_DISTINGUISHABLE_FROM_ZERO"
     else:
         inference = "DISTINGUISHABLE_FROM_ZERO"
-    if share is not None and share > 0:
+    # the composition decides, and an unknown composition fails closed: a fit whose
+    # backtest count is absent or malformed is never a headline
+    layers = row.get("evidence_layers")
+    includes_backtest = (
+        isinstance(backtest, int)
+        and not isinstance(backtest, bool)
+        and backtest > 0
+        or (isinstance(layers, list) and "BACKTEST" in layers)
+    )
+    composition_known = isinstance(backtest, int) and not isinstance(backtest, bool)
+    if net is None and gross is None:
+        headline_status = "UNAVAILABLE_NO_ALPHA"
+    elif includes_backtest:
         headline_status = "NOT_A_HEADLINE_INCLUDES_BACKTEST"
+    elif not composition_known:
+        headline_status = "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
     elif t_stat is None:
         headline_status = "NOT_A_HEADLINE_NO_STANDARD_ERROR"
     else:

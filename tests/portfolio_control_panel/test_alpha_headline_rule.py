@@ -91,3 +91,36 @@ def test_a_fit_on_a_series_with_backtest_is_never_a_headline() -> None:
         panel._alpha_context(_row("0.8", "0.05", 1))["headline_status"]
         == "NOT_A_HEADLINE_INCLUDES_BACKTEST"
     )
+
+
+def test_an_unknown_or_malformed_composition_fails_closed() -> None:
+    """Review finding: a missing backtest count fell through to HEADLINE_ALLOWED."""
+
+    row = _row("0.8174", "0.05", 190)
+    row["series_composition"] = {}
+    assert panel._alpha_context(row)["headline_status"] == (
+        "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
+    )
+    row["series_composition"] = {"backtest_observations_used": "190"}
+    assert panel._alpha_context(row)["headline_status"] == (
+        "NOT_A_HEADLINE_COMPOSITION_UNKNOWN"
+    )
+    # the fit's own evidence layers count even when the composition says zero
+    row = _row("0.8174", "0.05", 0)
+    row["evidence_layers"] = ["ACCOUNT_LIVE", "BACKTEST"]
+    assert panel._alpha_context(row)["headline_status"] == (
+        "NOT_A_HEADLINE_INCLUDES_BACKTEST"
+    )
+
+
+def test_a_negative_standard_error_gives_no_t_statistic() -> None:
+    ctx = panel._alpha_context(_row("0.20", "-0.05", 0))
+    assert ctx["t_stat"] is None
+    assert ctx["headline_status"] == "NOT_A_HEADLINE_NO_STANDARD_ERROR"
+
+
+def test_no_alpha_at_all_is_its_own_status() -> None:
+    assert (
+        panel._alpha_context(_row(None, None, 0))["headline_status"]
+        == "UNAVAILABLE_NO_ALPHA"
+    )
