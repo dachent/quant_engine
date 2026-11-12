@@ -115,3 +115,57 @@ def test_spec_wiring_sets_status_from_the_derivation_and_names_unavailable(
     assert s2["cash_drag_status"] == "UNAVAILABLE"
     assert s2["cash_drag_reason"] == "no cash path for s2"
     assert out["comparisons"][0]["cash_drag_status"] == "EVIDENCED"
+
+
+def test_combine_never_nets_borrowing_against_other_accounts_cash(tmp_path) -> None:
+    import portfolio_cash_drag_spec as spec
+
+    (tmp_path / "a.csv").write_text(
+        "date,nav,cash\n2026-01-01,1000,-300\n2026-01-02,1000,-300\n", encoding="utf-8"
+    )
+    (tmp_path / "b.csv").write_text(
+        "date,nav,cash\n2026-01-01,1000,200\n2026-01-02,1000,200\n", encoding="utf-8"
+    )
+    nav, cash = spec.combine([tmp_path / "a.csv", tmp_path / "b.csv"])
+    assert nav["2026-01-01"] == "2000" and cash["2026-01-01"] == "200"
+
+
+def test_combine_treats_an_account_as_unfunded_before_its_first_day(tmp_path) -> None:
+    import portfolio_cash_drag_spec as spec
+
+    (tmp_path / "a.csv").write_text(
+        "date,nav,cash\n2026-01-01,1000,100\n2026-01-02,1000,100\n2026-01-03,1000,100\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.csv").write_text(
+        "date,nav,cash\n2026-01-02,500,50\n2026-01-03,500,50\n", encoding="utf-8"
+    )
+    nav, cash = spec.combine([tmp_path / "a.csv", tmp_path / "b.csv"])
+    assert nav["2026-01-01"] == "1000" and nav["2026-01-02"] == "1500"
+    # a gap after funding drops the day, so the derivation refuses on it
+    (tmp_path / "c.csv").write_text(
+        "date,nav,cash\n2026-01-01,500,50\n2026-01-03,500,50\n", encoding="utf-8"
+    )
+    nav, _ = spec.combine([tmp_path / "a.csv", tmp_path / "c.csv"])
+    assert "2026-01-02" not in nav
+
+
+def test_bil_returns_are_simple_close_to_close(tmp_path) -> None:
+    import json as _json
+
+    import portfolio_cash_drag_spec as spec
+
+    f = tmp_path / "s.json"
+    f.write_text(
+        _json.dumps(
+            {
+                "rows": [
+                    {"Ticker": "BIL", "Date": "2026-01-02T00:00:00", "Close": 100.0},
+                    {"Ticker": "BIL", "Date": "2026-01-05T00:00:00", "Close": 101.0},
+                    {"Ticker": "SPY", "Date": "2026-01-05T00:00:00", "Close": 5.0},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert spec.bil_returns(f) == {"2026-01-05": "0.01"}

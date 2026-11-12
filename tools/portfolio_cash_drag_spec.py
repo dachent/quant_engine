@@ -45,13 +45,41 @@ def read_balances(path: Path) -> tuple[dict[str, str], dict[str, str]]:
 
 
 def combine(paths: list[Path]) -> tuple[dict[str, str], dict[str, str]]:
-    """Per-day sum over accounts, on the days every account has a balance."""
+    """Per-day strategy NAV and positive cash, summed over its accounts.
+
+    Each account contributes ``max(cash, 0)``: a negative balance in one account is
+    borrowing there and is never netted against cash held in another.  An account
+    contributes nothing before its first balance day (not yet funded); after that it
+    must have a balance on every day or the day is dropped, and the derivation then
+    refuses on the missing observation.
+    """
 
     parts = [read_balances(path) for path in paths]
-    days = set.intersection(*(set(n) for n, _ in parts))
-    nav = {d: str(sum(Decimal(n[d]) for n, _ in parts)) for d in days}
-    cash = {d: str(sum(Decimal(c[d]) for _, c in parts)) for d in days}
+    firsts = [min(n) for n, _ in parts]
+    lasts = [max(n) for n, _ in parts]
+    days = {d for n, _ in parts for d in n}
+    nav: dict[str, str] = {}
+    cash: dict[str, str] = {}
+    for day in sorted(d for d in days if d <= min(lasts)):
+        if any(first <= day and day not in n for (n, _), first in zip(parts, firsts)):
+            continue
+        nav[day] = str(sum(Decimal(n[day]) for n, _ in parts if day in n))
+        cash[day] = str(
+            sum(max(Decimal(c[day]), Decimal(0)) for n, c in parts if day in n)
+        )
     return nav, cash
+
+
+def bil_returns(style_json: Path) -> dict[str, str]:
+    """BIL simple returns by ISO date from the pinned Yahoo adjusted-close capture."""
+
+    import json
+
+    rows = json.loads(style_json.read_text(encoding="utf-8"))["rows"]
+    closes = sorted(
+        (r["Date"][:10], Decimal(str(r["Close"]))) for r in rows if r["Ticker"] == "BIL"
+    )
+    return {d: str(c / p - 1) for (_, p), (d, c) in zip(closes, closes[1:])}
 
 
 def series(rows: list[dict[str, str]], series_id: str) -> dict[str, str]:
@@ -92,7 +120,7 @@ def derive_strategy(
         "status": STATUS_EVIDENCED,
         "reason": (
             f"cash drag {out['cash_drag']} cumulative, {out['reason']}; benchmark "
-            f"{reference_series_id}, cash yield BIL, positive cash only"
+            f"{reference_series_id}, cash yield BIL, positive cash per account only"
         ),
     }
 
@@ -123,3 +151,34 @@ def apply(
             row["cash_drag_status"] = results[strategy]["status"]
             row["cash_drag_reason"] = results[strategy]["reason"]
     return spec, results
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    import json
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--template", type=Path, required=True)
+    ap.add_argument("--returns", type=Path, required=True)
+    ap.add_argument("--style-json", type=Path, required=True)
+    ap.add_argument("--sources", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--report", type=Path, required=True)
+    a = ap.parse_args(argv)
+    with a.returns.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    spec, results = apply(
+        json.loads(a.template.read_text(encoding="utf-8")),
+        json.loads(a.sources.read_text(encoding="utf-8")),
+        rows,
+        bil_returns(a.style_json),
+    )
+    a.out.write_bytes((json.dumps(spec, indent=2) + "\n").encode())
+    a.report.write_bytes(
+        (json.dumps(results, indent=2, sort_keys=True) + "\n").encode()
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
