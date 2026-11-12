@@ -445,6 +445,13 @@ def account_basis_block(
         window_start = annualization.get("window_start", window_start)
         window_end = annualization.get("window_end", window_end)
         window_days = annualization.get("window_days")
+    elif isinstance(row.get("return_window_start"), str):
+        # a window under 365 days publishes no CAGR and so no annualization label
+        # (#904): the row's own return window is the same window, opened at the
+        # opening NAV date
+        window_start = row["return_window_start"]
+        window_end = row.get("return_close_date", window_end)
+        window_days = row.get("window_days")
     if window_start is None or window_end is None:
         raise DisclosureError(
             f"the account-basis series of {strategy_id} has no observed window"

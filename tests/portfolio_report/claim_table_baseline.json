@@ -668,13 +668,6 @@
   {
    "file": "apps/portfolio-control-panel/app.js",
    "kinds": [
-    "count"
-   ],
-   "text": "annualized RONC is simple under 365 days and geometric at 365 days or more (the PORT annualization kernel), with the span counted from the opening-capital date."
-  },
-  {
-   "file": "apps/portfolio-control-panel/app.js",
-   "kinds": [
     "universal"
    ],
    "text": "any one-industry match is labeled similarity rather than attribution."

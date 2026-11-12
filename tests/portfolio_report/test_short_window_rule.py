@@ -69,3 +69,26 @@ def test_the_sleeve_validator_derives_no_cagr_under_a_year_and_flags_a_published
     source = Path(sleeve_basis.__file__).read_text(encoding="utf-8")
     assert "if span >= 365 and index > 0:" in source
     assert "account_live_cagr is published for a window under 365 days" in source
+
+
+def test_the_account_basis_window_survives_a_suppressed_cagr() -> None:
+    """Review finding: with no CAGR label the account-basis window collapsed to a zero-day span."""
+
+    import strategy_basis_disclosure as disclosure
+
+    row = {
+        "account_live_cumulative_return": "0.04",
+        "account_live_cagr": None,
+        "account_live_cagr_annualization": None,
+        "account_live_observed_start": "2026-07-30",
+        "account_live_observed_end": "2026-07-30",
+        "return_window_start": "2026-07-02",
+        "return_close_date": "2026-07-30",
+        "window_days": 28,
+    }
+    block = disclosure.account_basis_block(
+        row, strategy_id="s", account_id="a", label="parent"
+    )
+    assert block["window"]["start"] == "2026-07-02"
+    assert block["window"]["end"] == "2026-07-30"
+    assert block["window"]["days"] == 28
