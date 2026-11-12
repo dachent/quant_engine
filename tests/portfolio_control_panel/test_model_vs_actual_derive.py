@@ -516,3 +516,18 @@ def test_run_dir_writes_audit_input_and_manifest(world: World) -> None:
     mva.parse_audit_input(raw, _sha(raw))
     man = json.loads((run / "audit-input.manifest.json").read_bytes())
     assert man["output"]["sha256"] == _sha(raw)
+
+
+def test_kill_non_finite_component_refused(world: World) -> None:
+    epoch = json.loads(world.files["epoch"])
+    epoch["e"]["components"][0]["pp"] = float("nan")
+    world.put("epoch", epoch)
+    with pytest.raises(derive.DeriveError, match="non-finite"):
+        world.run()
+
+
+def test_kill_extension_without_account_returns_refused(world: World) -> None:
+    world.recipe["strategies"][1]["ops"][0]["after"] = "2026-09-01"
+    world.recipe["strategies"][1]["ops"][0]["end"] = "2026-09-02"
+    with pytest.raises(derive.DeriveError, match="no account returns"):
+        world.run()
