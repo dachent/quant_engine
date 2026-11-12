@@ -42,7 +42,7 @@ JOBS: Mapping[str, tuple[str, str]] = {
 # Provisioning only: hosted runners need it, a warm local checkout may not.
 SETUP = re.compile(r"^(uv sync|npm ci|node apps/.*install chromium|node --input-type)")
 # Hosted-runner mechanics with no local meaning (they write GITHUB_* files).
-HOSTED_ONLY = re.compile(r"GITHUB_(OUTPUT|PATH)")
+HOSTED_ONLY = re.compile(r"GITHUB_(OUTPUT|PATH|ENV)")
 EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
 
 
