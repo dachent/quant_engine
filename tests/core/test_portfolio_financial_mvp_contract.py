@@ -3099,7 +3099,9 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("robuxio-crypto", "ACCOUNT_LIVE"),
         ("p123-ai-factor", "BACKTEST"),
         ("p123-eu", "BACKTEST"),
-        ("p123-eu", "PROVIDER_LIVE"),
+        ("p123-eu", "COPY_RECORD"),
+        ("p123-eu", "MODEL_LIVE"),
+        ("p123-ai-factor", "MODEL_LIVE"),
         ("p123-eu", "ACCOUNT_LIVE"),
         ("volatis-strategy", "BACKTEST"),
         ("volatis-strategy", "PROVIDER_LIVE"),
@@ -3268,7 +3270,9 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1"
         in p123_provider["disposition_reason"]
     )
-    assert "No provider-live return is admitted" in p123_provider["disposition_reason"]
+    assert (
+        "No copy-record return enters any series" in p123_provider["disposition_reason"]
+    )
 
     reordered = copy.deepcopy(contract)
     reordered["history_corrections"]["materialized_segment_identities"][0:2] = reversed(
