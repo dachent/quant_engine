@@ -143,7 +143,7 @@
   },
   {
    "file": "apps/portfolio-control-panel/app.js",
-   "pattern": "^[(]annualized, sample std . .252, [{][}] daily observations over [{][}] days[{][}][)]$",
+   "pattern": "^[(]annualized, sample std . .[(]the series' own periods a year[)], [{][}] daily observations over [{][}] days[{][}][)]$",
    "justification": "label of the reconciliation tracking error: the estimator and scaling are the producer's fixed method and the count and span are the row's own observations and dates, printed from the same fields (#904 item 13)"
   },
   {

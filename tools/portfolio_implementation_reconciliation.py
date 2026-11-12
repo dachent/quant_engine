@@ -524,6 +524,24 @@ def _relative_drawdown(model: Sequence[float], actual: Sequence[float]) -> float
     return drawdown
 
 
+def _periods_per_year(common: Sequence[date]) -> int:
+    """Periods a year the common dates carry (#904 item 7), the attribution rule.
+
+    365 when the dates include weekends (calendar-daily), otherwise the observed
+    trading dates a year, the exchange-calendar 252 kept within 2%; windows under
+    four weeks keep 252 (a calendar cannot be read from them).
+    """
+
+    span_days = (common[-1] - common[0]).days
+    if span_days < 28:
+        return 252
+    weekend = sum(1 for day in common if day.weekday() >= 5)
+    if weekend * 5 >= len(common):
+        return 365
+    observed = round((len(common) - 1) * 365 / span_days)
+    return 252 if abs(observed - 252) <= 252 * 0.02 else min(max(observed, 1), 366)
+
+
 def relative_metrics(
     model: Mapping[date, float],
     actual: Mapping[date, float],
@@ -543,9 +561,10 @@ def relative_metrics(
     ]
     model_cumulative = _compound(model_values)
     actual_cumulative = _compound(actual_values)
-    tracking_error = statistics.stdev(active) * math.sqrt(252)
+    periods = _periods_per_year(common)
+    tracking_error = statistics.stdev(active) * math.sqrt(periods)
     information_ratio = (
-        statistics.fmean(active) / statistics.stdev(active) * math.sqrt(252)
+        statistics.fmean(active) / statistics.stdev(active) * math.sqrt(periods)
         if statistics.stdev(active) > 0
         else None
     )
