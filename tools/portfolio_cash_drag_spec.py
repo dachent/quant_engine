@@ -28,7 +28,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from quant_engine.core.market_calendar import is_nyse_trading_day
+from quant_engine.core import is_nyse_trading_day
 
 from portfolio_cash_drag import STATUS_EVIDENCED, STATUS_UNAVAILABLE, derive_cash_drag
 

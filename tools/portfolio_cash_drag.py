@@ -23,7 +23,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Final
 
-from quant_engine.core.market_calendar import is_nyse_trading_day
+from quant_engine.core import is_nyse_trading_day
 
 STATUS_EVIDENCED: Final = "EVIDENCED"
 STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
