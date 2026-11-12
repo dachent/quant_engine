@@ -476,7 +476,7 @@ def write(OUT: Path) -> None:
                 "flag": "--expected",
                 "reason": "pass 26 read the expected baseline from the repository; R3 reads it from the "
                 "pinned release-inputs root, which the baseline spec stage also needs",
-            }
+            },
         ]
         + [
             {
