@@ -353,6 +353,7 @@ def p123_provider_return_policy(
     if _returns(
         ledger.get("provider_strategy_returns", []),
         strategy_id="p123-ai-factor",
+        exclude_layers=MODEL_EXCLUDED_LAYERS,
         accepted_as_of=accepted_as_of,
     ):
         return None

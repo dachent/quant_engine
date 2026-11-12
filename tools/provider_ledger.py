@@ -8041,10 +8041,35 @@ def _require_distinct_provider_live_blocks(
         )
 
 
-def _p123_copy_id(provider: Mapping[str, Any]) -> Any:
-    """The owner's copy id: a refreshed block names it, a declaration is the copy itself."""
+def _p123_declaration(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalise a strategy evidence row to (provider id, copy id, model id).
 
-    return provider.get("copy_entity_id") or provider.get("entity_id")
+    A first declaration names the owner's copy as the provider entity and the model
+    book as `model_entity_id`. A refreshed row holds the model's record in `provider`
+    (layer MODEL_LIVE) and the copy in `copy_record`; either may be the only block.
+    """
+
+    provider = item.get("provider")
+    copy = item.get("copy_record")
+    provider = provider if isinstance(provider, dict) else {}
+    copy = copy if isinstance(copy, dict) else {}
+    if not provider and not copy:
+        return None
+    if provider.get("evidence_layer") == "MODEL_LIVE":
+        copy_id = provider.get("copy_entity_id") or copy.get("entity_id")
+        model_id = provider.get("entity_id")
+    elif provider:
+        copy_id = provider.get("entity_id")
+        model_id = provider.get("model_entity_id")
+    else:
+        copy_id = copy.get("entity_id")
+        model_id = copy.get("model_entity_id")
+    provider_id = provider.get("provider_id") or copy.get("provider_id")
+    return {
+        "provider_id": provider_id or item.get("provider_id"),
+        "entity_id": copy_id,
+        "model_entity_id": model_id,
+    }
 
 
 def _portfolio123_provider_returns(
@@ -8053,15 +8078,15 @@ def _portfolio123_provider_returns(
     evidence_rows: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     p123_rows = [
-        item
+        {**item, "provider": declared}
         for item in evidence_rows
-        if isinstance(item.get("provider"), dict)
+        if (declared := _p123_declaration(item)) is not None
         and (
-            item["provider"].get("provider_id") == "portfolio123"
+            declared.get("provider_id") == "portfolio123"
             or item.get("provider_id") == "portfolio123"
         )
         and item.get("generation_id") == manifest.generation_id
-        and _p123_copy_id(item["provider"]) not in {None, ""}
+        and declared.get("entity_id") not in {None, ""}
     ]
     if not p123_rows:
         return []
@@ -8124,7 +8149,7 @@ def _portfolio123_provider_returns(
             "Portfolio123 managed performance is unreadable"
         ) from exc
     selected: dict[str, dict[str, str]] = {
-        _text(_p123_copy_id(item["provider"]), "Portfolio123 entity_id"): {}
+        _text(item["provider"].get("entity_id"), "Portfolio123 entity_id"): {}
         for item in p123_rows
     }
     model_entity_ids = {
@@ -8170,7 +8195,7 @@ def _portfolio123_provider_returns(
     result: list[dict[str, Any]] = []
     required_fields = {"data", "date", "dateLast", "panels"}
     for p123 in p123_rows:
-        entity_id = _text(_p123_copy_id(p123["provider"]), "Portfolio123 entity_id")
+        entity_id = _text(p123["provider"].get("entity_id"), "Portfolio123 entity_id")
         fields = selected[entity_id]
         if not required_fields <= set(fields):
             raise ProviderLedgerError(
@@ -10327,8 +10352,10 @@ def _dataset_disposition(
             if item.item_kind is DatasetItemKind.PRODUCT_DATA_CLASS
             else "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
         )
-    elif actual_layers and not actual_layers <= _SOURCE_LAYER_FAMILY.get(
-        evidence_layer, {evidence_layer}
+    elif actual_layers and not actual_layers <= (
+        _SOURCE_LAYER_FAMILY.get(evidence_layer, {evidence_layer})
+        if str(admission.get("transform") or "").startswith("P123_")
+        else {evidence_layer}
     ):
         reason = "MATERIALIZED_EVIDENCE_LAYER_DIFFERS_FROM_PRODUCT_AUTHORITY"
     required_admission_facts = {

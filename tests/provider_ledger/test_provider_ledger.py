@@ -1194,6 +1194,106 @@ def test_p123_managed_performance_artifact_owns_materialized_provider_returns(
     assert equity_disposition.materialized_record_count == 0
 
 
+def test_a_copy_only_refreshed_row_is_a_valid_next_declaration(tmp_path: Path) -> None:
+    """Kimi review: with no model record the row keeps only copy_record, and still derives."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": d,
+                "Total Equity": lv,
+                "Cash Added": c,
+            }
+            for d, lv, c in (
+                ("2026-01-02", "100", "50"),
+                ("2026-01-05", "125", "60"),
+                ("2026-01-06", "100", "70"),
+            )
+        ],
+    )
+    first = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+    refreshed = ledger._refresh_strategy_evidence(
+        first,
+        evidence,
+        {"p123-eu": "P123 EU"},
+        _identity(manifest),
+        {"portfolio123": date(2026, 1, 6)},
+    )[0]
+    assert "provider" not in refreshed and "copy_record" in refreshed
+    again = ledger._portfolio123_provider_returns(
+        provider_ref, manifest, [{**refreshed, "generation_id": manifest.generation_id}]
+    )
+    assert [(r["entity_id"], r["date"], r["return"]) for r in again] == [
+        (r["entity_id"], r["date"], r["return"]) for r in first
+    ]
+
+
+def test_the_p123_layer_family_does_not_open_other_providers(tmp_path: Path) -> None:
+    """Kimi review: MODEL_LIVE/COPY_RECORD rows are admitted only under the P123 transform."""
+
+    provider_ref, manifest, evidence = _model_and_copy(tmp_path)
+    returns = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+    managed = {a.artifact_id: a for a in manifest.artifacts}[
+        "tables/har_managed_performance.parquet"
+    ]
+    item = ProviderDatasetInventoryItem(
+        provider_id="portfolio123",
+        item_kind=DatasetItemKind.ARTIFACT,
+        item_id=managed.artifact_id,
+        sha256=managed.sha256,
+        size_bytes=managed.size_bytes,
+        schema_name=managed.schema_name,
+        schema_version=managed.schema_version,
+    )
+    policy = {
+        "authority_issue": 303,
+        "effective_end": None,
+        "effective_start": "2026-01-01",
+        "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
+        "policy_version": "1",
+    }
+
+    def _disposition(transform: str):
+        source = {
+            "admission": {
+                "facts": [
+                    "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE"
+                ],
+                "transform": transform,
+                "version": "1",
+            },
+            "consumers": ["REPORT"],
+            "evidence_layer": "PROVIDER_LIVE",
+            "invalidated_outputs": ["REPORT"],
+            "product_requirement": "REQUIRED",
+            "source_id": "portfolio123-model-generation",
+            "temporal": {"calendar": "BUSINESS_DAY", "timezone": "UTC"},
+            "units": {"currency": "USD", "measurement": "TOTAL_RETURN"},
+        }
+        return ledger._dataset_disposition(
+            item,
+            source,
+            policy,
+            date(2026, 1, 2),
+            date(2026, 1, 6),
+            {},
+            returns,
+            "c" * 64,
+        )
+
+    assert (
+        _disposition(
+            "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1"
+        ).action.value
+        == "ADMIT"
+    )
+    other = _disposition("OTHER_PROVIDER_TRANSFORM_V1")
+    assert other.action.value == "EXCLUDE"
+
+
 def test_matrixport_catalog_contract_accepts_observation_boundary_schema() -> None:
     assert ledger._PROVIDER_CATALOGS["matrixport"] == (
         "catalog.json",
