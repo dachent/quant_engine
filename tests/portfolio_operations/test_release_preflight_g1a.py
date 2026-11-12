@@ -79,7 +79,14 @@ def _rewrite(gworld: dict[str, Any], **values: str) -> None:
 def _failed(gworld: dict[str, Any]) -> dict[str, str]:
     run = driver.load_run(gworld["config"], gworld["graph"])
     receipt = pf.run_g1(run)
-    return {r["row"]: r["detail"] for r in receipt["rows"] if r["status"] == "FAIL"}
+    own = {
+        name for name, _ in pf.G1A_ROWS
+    }  # the g1b rows need their own config keys (test_release_preflight_g1b.py)
+    return {
+        r["row"]: r["detail"]
+        for r in receipt["rows"]
+        if r["status"] == "FAIL" and r["row"] in own
+    }
 
 
 def test_baseline_every_g1_row_passes_on_the_real_world(
@@ -238,7 +245,7 @@ def test_every_g1a_cause_has_a_named_kill_test_in_this_file() -> None:
     for match in re.finditer(r"def test_refusals?_(\d+(?:_\d+)*)_", source):
         named.update(int(n) for n in match.group(1).split("_"))
     for cause, where in pf.COVERAGE.items():
-        if where.startswith("G1:") and "(not built)" not in where:
+        if where.startswith("G1:") and where[3:] in {n for n, _ in pf.G1A_ROWS}:
             assert cause in named, (cause, where)
 
 
