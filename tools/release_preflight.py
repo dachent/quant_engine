@@ -34,6 +34,7 @@ from typing import Any
 
 import release_canary as canary_tool
 import release_driver as driver
+from release_preflight_g1a import G1A_ROWS
 
 GIB = 1 << 30
 RECEIPT_DIR = "preflight"
@@ -336,10 +337,14 @@ ROWS: tuple[tuple[str, Row], ...] = (
     ("authority:no-stale-prepared", row_no_stale_prepared),
 )
 
-# every row a stage may recheck: the G0 rows, the G3 spec-pair row and the two canary rows (not G0: the baseline
-# row writes a file and the commit row needs it)
+# G1 consumer-contract rows (run after the prep chain, before attended); other G1 parts append here
+G1_ROWS: tuple[tuple[str, Row], ...] = (*G1A_ROWS,)
+
+# every row a stage may recheck: the G0 rows, the G1 rows, the G3 spec-pair row and the two canary rows (not G0: the
+# baseline row writes a file and the commit row needs it)
 ROW_TABLE: dict[str, Row] = {
     **dict(ROWS),
+    **dict(G1_ROWS),
     "g3:spec-pair": row_spec_pair,
     "canary:baseline": row_canary_baseline,
     "canary:commit-path": row_canary_commit_path,
@@ -349,19 +354,19 @@ ROW_TABLE: dict[str, Row] = {
 # tests/portfolio_operations/test_release_preflight.py; "guard:<name>" is a tool guard with its own test;
 # everything else is named, not built, and a green G0 does not cover it.
 COVERAGE: dict[int, str] = {
-    1: "G1:ledger-spec finality validators (not built)",
-    2: "G1:ledger-spec finality validators (not built)",
-    3: "G1:ledger-spec provider header (not built)",
-    4: "G1:ledger-spec strategy evidence (not built)",
+    1: "G1:g1:ledger-spec",
+    2: "G1:g1:ledger-spec",
+    3: "G1:g1:ledger-spec",
+    4: "G1:g1:ledger-spec",
     5: "G0:config:paths",
     6: "G0:inputs:release-inputs",
-    7: "G1:attended identity validation (not built)",
-    8: "G1:sleeve-facts admission (not built)",
+    7: "G1:g1:attended-launch",
+    8: "G1:g1:sleeve-facts",
     9: "by design: the first calendar attempt",
     10: "G1:attribution contract (not built)",
     11: "G1:attribution contract (not built)",
     12: "G2:needs the build (not built)",
-    13: "G1:finality evidence reader (not built)",
+    13: "G1:g1:finality-evidence",
     14: "G0:freshness against the consumer's limit (not built)",
     15: "G0:authority:pointer-graph",
     16: "G0:inputs:release-inputs",
@@ -382,18 +387,23 @@ def config_sha256(run: driver.Run) -> str:
     ).hexdigest()
 
 
-def run_g0(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
+def run_gate(
+    run: driver.Run,
+    gate: str,
+    rows_to_run: Sequence[tuple[str, Row]],
+    env: Env | None = None,
+) -> dict[str, Any]:
     env = env or Env()
     rows = []
-    for row_id, fn in ROWS:
+    for row_id, fn in rows_to_run:
         try:
             fn(run, env)
             rows.append({"row": row_id, "status": "PASS", "detail": ""})
         except (driver.Refusal, OSError, ValueError, KeyError) as exc:
             rows.append({"row": row_id, "status": "FAIL", "detail": str(exc)[:400]})
     return {
-        "kind": "release-preflight-g0-v1",
-        "gate": "G0",
+        "kind": f"release-preflight-{gate.lower()}-v1",
+        "gate": gate,
         "config_sha256": config_sha256(run),
         "code_commit": run.values["code_commit"],
         "git_retries": list(run.git_retries),
@@ -401,6 +411,17 @@ def run_g0(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
         "status": "PASS" if all(r["status"] == "PASS" for r in rows) else "FAIL",
         "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+def run_g0(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
+    return run_gate(run, "G0", ROWS, env)
+
+
+def run_g1(run: driver.Run, env: Env | None = None) -> dict[str, Any]:
+    """The consumer-contract gate: after the prep chain, before ``attended`` (needs the ledger spec and the
+    preparation spec)."""
+
+    return run_gate(run, "G1", G1_ROWS, env)
 
 
 def recheck(run: driver.Run, row_ids: Sequence[str], env: Env | None = None) -> None:
@@ -440,7 +461,7 @@ def verify_receipt(run: driver.Run, gate: str) -> None:
     receipt = driver.read_json(path)
     rows = receipt.get("rows")
     if (
-        receipt.get("kind") != "release-preflight-g0-v1"
+        receipt.get("kind") != f"release-preflight-{gate.lower()}-v1"
         or not isinstance(rows, list)
         or not rows
     ):
@@ -518,9 +539,10 @@ def retire_release(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    g0 = sub.add_parser("g0")
-    g0.add_argument("--config", type=Path, required=True)
-    g0.add_argument("--graph", type=Path)
+    for name in ("g0", "g1"):
+        gate_parser = sub.add_parser(name)
+        gate_parser.add_argument("--config", type=Path, required=True)
+        gate_parser.add_argument("--graph", type=Path)
     retire = sub.add_parser("retire")
     retire.add_argument("--coordination-root", type=Path, required=True)
     retire.add_argument("--release-id", required=True)
@@ -538,11 +560,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"retired {args.release_id[:12]} to {moved}")
             return 0
         run = driver.load_run(args.config, args.graph)
-        receipt = run_g0(run)
+        receipt = (run_g0 if args.command == "g0" else run_g1)(run)
         path = write_receipt(run, receipt)
         for row in receipt["rows"]:
             print(f"{row['status']:4} {row['row']} {row['detail']}")
-        print(f"G0 {receipt['status']}: {path}")
+        print(f"{receipt['gate']} {receipt['status']}: {path}")
         return 0 if receipt["status"] == "PASS" else 1
     except driver.Refusal as refusal:
         print(f"refused: {refusal}", file=sys.stderr)

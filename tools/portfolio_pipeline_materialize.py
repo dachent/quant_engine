@@ -6469,6 +6469,21 @@ def _runtime_identity(python: Path, repo_root: Path) -> dict[str, object]:
     }
 
 
+def check_attended_launch(
+    python: Path, repo_root: Path, workspace_root: Path
+) -> dict[str, object]:
+    """The attended run's launch identity: repository, interpreter and workspace (also the release preflight's G1 row)."""
+
+    if repo_root != REPOSITORY_ROOT or not (repo_root / "tools").is_dir():
+        raise MaterializationError(
+            "attended repository root differs from this entrypoint"
+        )
+    runtime = _runtime_identity(python, repo_root)
+    if workspace_root.is_symlink() or not workspace_root.is_dir():
+        raise MaterializationError("attended workspace root is unavailable")
+    return runtime
+
+
 def _attended_stage_financial_inputs(
     args: argparse.Namespace, release: Any
 ) -> dict[str, Path]:
@@ -6855,13 +6870,7 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
     ):
         if root is not None:
             run_storage.refuse_synced_root(root, label)
-    if repo_root != REPOSITORY_ROOT or not (repo_root / "tools").is_dir():
-        raise MaterializationError(
-            "attended repository root differs from this entrypoint"
-        )
-    runtime = _runtime_identity(python, repo_root)
-    if workspace_root.is_symlink() or not workspace_root.is_dir():
-        raise MaterializationError("attended workspace root is unavailable")
+    runtime = check_attended_launch(python, repo_root, workspace_root)
     if retained_cache_base is None:
         if retained_cache_root.is_symlink() or not retained_cache_root.is_dir():
             raise MaterializationError("attended retained cache root is unavailable")
