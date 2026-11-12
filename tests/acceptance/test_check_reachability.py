@@ -68,9 +68,22 @@ def test_every_check_is_proven_or_registered() -> None:
     assert set(PROVEN) <= ids
 
 
-def test_proof_tests_exist() -> None:
-    for proof in set(PROVEN.values()):
-        assert (ROOT / "tests" / "acceptance" / proof).is_file()
+def test_proof_tests_exist_and_name_their_checks() -> None:
+    for check_id, proof in PROVEN.items():
+        path = ROOT / "tests" / "acceptance" / proof
+        assert check_id in path.read_text(encoding="utf-8"), (check_id, proof)
+
+
+CLOSE_BY_CEILING = date(2027, 3, 31)
+
+
+def test_close_by_dates_have_a_ceiling() -> None:
+    """Lengthening an entry past the ceiling needs a new ruling, not a one-line edit."""
+
+    late = [
+        e for e in _entries() if date.fromisoformat(e["close_by"]) > CLOSE_BY_CEILING
+    ]
+    assert late == []
 
 
 def test_no_register_entry_has_expired() -> None:

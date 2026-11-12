@@ -2171,9 +2171,21 @@ def _verification_defects(ctx: Context) -> dict[str, Any]:
         )
         return defects
     if profile == _REBUILD_PROFILE:
-        if record.get("status") != "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED":
-            defects["account_manifest_verification.status"] = record.get("status")
+        for field, wanted in (
+            ("status", "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED"),
+            (
+                "method",
+                "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND",
+            ),
+            ("publication_readiness", "READY"),
+        ):
+            if record.get(field) != wanted:
+                defects[f"account_manifest_verification.{field}"] = record.get(field)
         return defects
+    if record.get("method") != (
+        "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER"
+    ):
+        defects["account_manifest_verification.method"] = record.get("method")
     report = record.get("independent_report")
     report = report if isinstance(report, dict) else {}
     numeric = report.get("numeric_verification")
@@ -2182,6 +2194,9 @@ def _verification_defects(ctx: Context) -> dict[str, Any]:
         defects["account_manifest_verification.status"] = record.get("status")
     if report.get("status") != "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES":
         defects["independent_report.status"] = report.get("status")
+    for key in ("candidate_count", "comparison_count", "discrepancy_count"):
+        if type(numeric.get(key)) is not int or numeric[key] < 0:
+            defects[f"numeric_verification.{key}"] = numeric.get(key)
     if numeric.get("discrepancy_count") != 0:
         defects["numeric_verification.discrepancy_count"] = numeric.get(
             "discrepancy_count"
@@ -2196,7 +2211,7 @@ def _verification_defects(ctx: Context) -> dict[str, Any]:
         if isinstance(rows, list)
         else None
     )
-    if numeric.get("candidate_count") != ok_rows:
+    if ok_rows is None or numeric.get("candidate_count") != ok_rows:
         defects["numeric_verification.candidate_count"] = {
             "recorded": numeric.get("candidate_count"),
             "recomputed_ok_rows": ok_rows,
@@ -2209,11 +2224,42 @@ def _verification_defects(ctx: Context) -> dict[str, Any]:
     if numeric.get("disposition") != expected_disposition:
         defects["numeric_verification.disposition"] = numeric.get("disposition")
     source_sha = node(record, "epoch_manifest_source", "artifact", "sha256")
-    if source_sha != meta.get("account_manifest_sha256"):
+    if (
+        not isinstance(source_sha, str)
+        or not _RELEASE_DIGEST.fullmatch(source_sha)
+        or source_sha != meta.get("account_manifest_sha256")
+    ):
         defects["epoch_manifest_source.artifact.sha256"] = source_sha
-    report_sha = report.get("sha256")
-    if not isinstance(report_sha, str) or not _RELEASE_DIGEST.fullmatch(report_sha):
-        defects["independent_report.sha256"] = report_sha
+    if record.get("publication_readiness") != "NOT_READY":
+        defects["account_manifest_verification.publication_readiness"] = record.get(
+            "publication_readiness"
+        )
+    if not isinstance(record.get("producer_readiness"), dict):
+        defects["account_manifest_verification.producer_readiness"] = record.get(
+            "producer_readiness"
+        )
+    for where, value in (
+        ("independent_report.sha256", report.get("sha256")),
+        (
+            "independent_report.subjects_semantic_sha256",
+            report.get("subjects_semantic_sha256"),
+        ),
+        (
+            "epoch_manifest_source.generation_id",
+            node(record, "epoch_manifest_source", "generation_id"),
+        ),
+        (
+            "epoch_manifest_source.generation_manifest_sha256",
+            node(record, "epoch_manifest_source", "generation_manifest_sha256"),
+        ),
+    ):
+        if not isinstance(value, str) or not _RELEASE_DIGEST.fullmatch(value):
+            defects[where] = value
+    if report.get("artifact_id") != "verification/independent-verification.json":
+        defects["independent_report.artifact_id"] = report.get("artifact_id")
+    size = report.get("size_bytes")
+    if type(size) is not int or size < 1:
+        defects["independent_report.size_bytes"] = size
     return defects
 
 
@@ -2226,8 +2272,8 @@ def check_publication_state(ctx: Context) -> Iterator[Finding]:
 
     evidence = _release_evidence_finding(ctx, "identity.publication_state", "D8")
     if evidence is not None:
+        # An unreadable release record must not hide a bad verification record.
         yield evidence
-        return
     defects = _verification_defects(ctx)
     if defects:
         published, where = _is_published(ctx)

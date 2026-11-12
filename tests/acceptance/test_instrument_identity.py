@@ -189,6 +189,19 @@ D8_BAD = {
     ),
     "manifest_sha": _both(("epoch_manifest_source", "artifact", "sha256"), "0" * 64),
     "report_sha": _both(("independent_report", "sha256"), "not-hex"),
+    "method": _both(("method",), "NONE"),
+    "report_artifact_id": _both(("independent_report", "artifact_id"), "other.json"),
+    "report_size": _both(("independent_report", "size_bytes"), 0),
+    "subjects_digest": _both(("independent_report", "subjects_semantic_sha256"), "x"),
+    "source_generation_id": _both(("epoch_manifest_source", "generation_id"), "ab"),
+    "bool_count": _both(
+        ("independent_report", "numeric_verification", "discrepancy_count"), False
+    ),
+    "float_count": _both(
+        ("independent_report", "numeric_verification", "comparison_count"), 3.0
+    ),
+    "ready_flag": _both(("publication_readiness",), "READY"),
+    "no_source": _both(("epoch_manifest_source", "artifact", "sha256"), "not-a-hash"),
     "profile": Spec(
         candidate=[
             _set(
@@ -218,6 +231,9 @@ def test_d8_a_record_that_does_not_certify_the_panel_blocks(
     findings = _only(run(gen_dir), PUBLICATION)
     assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY], name
     assert findings[0].defect_ids == ("D8",)
+    # kill: the old check named the build-time constants; the new one names the defect.
+    assert "candidate.state" not in findings[0].observed, name
+    assert findings[0].observed, name
 
 
 def test_d8_blocks_before_the_commit_too(tmp_path: Path) -> None:
@@ -347,3 +363,49 @@ def test_v4_no_release_pointer_is_still_not_ready(tmp_path: Path) -> None:
     gen_dir = build(tmp_path, Spec(post_write=[_drop_release]))
     findings = _only(run(gen_dir), RELEASE_PINNED)
     assert [f.klass for f in findings] == [checks.NOT_READY]
+
+
+def test_d8_a_bad_record_is_not_masked_by_an_unreadable_release(tmp_path: Path) -> None:
+    """Kill test (Fable review): the evidence row used to return before Part A."""
+
+    bad = D8_BAD["discrepancy"]
+    gen_dir = build(
+        tmp_path,
+        Spec(candidate=bad.candidate, panel=bad.panel, post_write=[_drop_release]),
+    )
+    findings = _only(run(gen_dir), PUBLICATION)
+    assert checks.BLOCKER_AUTHORITY in {f.klass for f in findings}
+
+
+def test_d8_zero_counts_with_no_manifest_rows_do_not_pass_as_none_equals_none(
+    tmp_path: Path,
+) -> None:
+    def wipe(doc: dict[str, Any]) -> None:
+        doc["account_manifest"] = None
+
+    findings = _only(run(build(tmp_path, Spec(panel=[wipe]))), PUBLICATION)
+    assert [f.klass for f in findings] == [checks.BLOCKER_AUTHORITY]
+
+
+def test_hardcoded_status_literal_needs_no_readiness_field(tmp_path: Path) -> None:
+    """Kill test: the shell check was armed by the readiness constants; now it is not."""
+
+    from test_validate_generation import BAD_APP_STATUS
+
+    def strip(doc: dict[str, Any]) -> None:
+        doc["account_manifest"].pop("authority_readiness", None)
+
+    spec = Spec(
+        app_js=BAD_APP_STATUS,
+        panel=[strip],
+        candidate=[
+            lambda c: c.pop("state", None),
+            lambda c: c.pop("account_manifest_verification", None),
+        ],
+    )
+    findings = [
+        f
+        for f in run(build(tmp_path, spec))
+        if f.check_id == "code.hardcoded_status_literal"
+    ]
+    assert findings and {f.klass for f in findings} == {checks.BLOCKER_AUTHORITY}
