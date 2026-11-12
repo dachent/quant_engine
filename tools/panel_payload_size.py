@@ -17,8 +17,6 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from acceptance.validate import payload_rule
-
 BUDGET_PATH = (
     Path(__file__).resolve().parents[1]
     / "apps"
@@ -133,23 +131,12 @@ def raise_budgets(
     return result
 
 
-def _as_of(generation: Path) -> Any:
-    candidate = json.loads((generation / "candidate.json").read_bytes())
-    return candidate.get("portfolio_as_of")
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("generation", type=Path)
     parser.add_argument("--budget", type=Path, default=BUDGET_PATH)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--no-check", action="store_true")
-    parser.add_argument(
-        "--previous",
-        type=Path,
-        help="the previous committed generation: check against the relative rule of "
-        "#893 (limits computed from its measured sizes) instead of the file limits",
-    )
     parser.add_argument(
         "--raise-block",
         action="append",
@@ -175,31 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     sizes = physical(args.generation)
     report: dict[str, Any] = {"physical": sizes, "blocks": blocks}
     findings: list[str] = []
-    previous_data = (
-        json.loads((args.previous / "data" / "dashboard_data.json").read_bytes())
-        if args.previous is not None
-        else None
-    )
-
-    def effective(file_budget: dict[str, Any]) -> dict[str, Any]:
-        """The file budget, recomputed from the previous release when one is given."""
-
-        if previous_data is None:
-            return file_budget
-        return payload_rule.derive_budget(
-            file_budget,
-            block_sizes(previous_data),
-            physical(args.previous),
-            payload_rule.added_days(_as_of(args.previous), _as_of(args.generation)),
-            allowances=payload_rule.active_allowances(
-                previous_data.get("panel_schema_version"),
-                data.get("panel_schema_version"),
-            ),
-        )
-
     if not args.no_check:
-        budget = json.loads(args.budget.read_bytes())
-        findings = check(blocks, sizes, effective(budget))
+        findings = check(blocks, sizes, json.loads(args.budget.read_bytes()))
         report["findings"] = findings
     if args.raise_all:
         args.raise_block = sorted(set(args.raise_block) | set(blocks))
@@ -223,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         args.budget.write_bytes(
             (json.dumps(raised, indent=2) + chr(10)).encode("utf-8")
         )
-        findings = check(blocks, sizes, effective(raised))
+        findings = check(blocks, sizes, raised)
         report["findings"] = findings
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.out:

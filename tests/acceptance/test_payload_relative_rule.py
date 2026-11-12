@@ -377,39 +377,3 @@ def test_the_ceiling_never_sits_below_a_reviewed_floor() -> None:
 def test_the_ceiling_binds_a_declared_content_change_too() -> None:
     derived = derive({"grow": 1_400_000}, 0, allowances={"grow": 5.0})
     assert derived["blocks"]["grow"] == payload_rule.ceiling(990_000)
-
-
-def test_the_script_keeps_the_relative_budget_after_raising_another_block(
-    tmp_path: Path,
-) -> None:
-    import panel_payload_size as script
-
-    def gen(name: str, as_of: str, grow: int) -> Path:
-        path = tmp_path / name
-        (path / "data").mkdir(parents=True)
-        (path / "data" / "dashboard_data.json").write_bytes(
-            json.dumps({"grow": "x" * grow, "other": "y"}).encode()
-        )
-        (path / "candidate.json").write_bytes(
-            json.dumps({"portfolio_as_of": as_of}).encode()
-        )
-        return path
-
-    previous = gen("prev", "2026-09-17", 1_000_000)
-    candidate = gen(
-        "cand", "2026-09-24", 1_044_000
-    )  # +4.4 %: inside 7 days of allowance
-    budget = dict(BUDGET)
-    budget["blocks"] = {"grow": 1_002_000, "other": 5_000}
-    budget["physical"] = {}
-    budget_file = tmp_path / "budget.json"
-    budget_file.write_text(json.dumps(budget))
-    argv = [str(candidate), "--budget", str(budget_file), "--previous", str(previous)]
-    assert script.main([*argv, "--out", str(tmp_path / "r.json")]) == 0
-    # raising an unrelated block must not drop the relative rule for "grow"
-    assert (
-        script.main(
-            [*argv, "--raise-block", "other", "--out", str(tmp_path / "r.json")]
-        )
-        == 0
-    )
