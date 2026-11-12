@@ -9073,7 +9073,14 @@ def check_lint_returns(ctx: Context) -> Iterator[Finding]:
                     "cagr": cagr,
                     "cumulative_return": cumulative,
                 }
-            days = _window_days(perf.get("observed_start"), perf.get("observed_end"))
+            # the producer's own window (it opens one interval before the first
+            # return), so the two agree at exactly 365 days
+            published_days = perf.get("window_days")
+            days = (
+                published_days
+                if isinstance(published_days, int)
+                else _window_days(perf.get("observed_start"), perf.get("observed_end"))
+            )
             if cagr is not None and days is not None and days < ONE_YEAR_DAYS:
                 short[f"dependence.{mode}:{series}"] = days
     for row in rows(ctx.report, "strategy_summary"):

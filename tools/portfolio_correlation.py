@@ -37,7 +37,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
 
 
-BUILDER_VERSION: Final = "1.7.0"
+BUILDER_VERSION: Final = "1.6.0"
 TRADING_OBSERVATION_HORIZONS: Final = (5, 21, 22, 63, 126, 130, 252, 260)
 RETURN_HEADERS: Final = ("series_id", "date", "return", "evidence_layer")
 RETURN_HEADERS_V2: Final = (*RETURN_HEADERS, "strategy_version")
@@ -807,6 +807,18 @@ def _number(value: float | np.floating[Any] | None) -> str | None:
 
 
 ANNUALIZATION_BASIS: Final = "ACT_365_FROM_OPENING_CLOSE"
+# layers whose rows are a realised record; anything else (BACKTEST, SHADOW_OOS,
+# PREDECESSOR, CONCEPTUAL_STRESS) is hypothetical or out of sample and never
+# annualised.  The mode-derived labels carry their backtest count in the composition.
+_ANNUALISABLE_LAYERS: Final = frozenset(
+    {
+        "ACCOUNT_LIVE",
+        "PROVIDER_LIVE",
+        "OFFICIAL_VEHICLE",
+        "LIVE_ONLY",
+        "LIVE_PLUS_OPTIONAL_BACKTEST",
+    }
+)
 MINIMUM_ANNUALISATION_DAYS: Final = 365
 
 
@@ -844,7 +856,11 @@ def _performance_summary(
         # is hypothetical whatever the composition block says
         backtest_observations = max(
             backtest_observations,
-            sum(1 for item in accepted if item.evidence_layer == "BACKTEST"),
+            sum(
+                1
+                for item in accepted
+                if item.evidence_layer not in _ANNUALISABLE_LAYERS
+            ),
         )
     if not accepted:
         return {

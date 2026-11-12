@@ -814,3 +814,34 @@ def test_combined_mode_ignores_unmatched_backtest_and_rejects_duplicate_layer_da
     )
     with pytest.raises(correlation.CorrelationError, match="within an evidence layer"):
         correlation.build_correlation(duplicate_spec, duplicate_root)
+
+
+def test_every_hypothetical_layer_blocks_the_annualised_figure() -> None:
+    """Review finding: only the literal BACKTEST layer suppressed."""
+
+    for layer in ("BACKTEST", "SHADOW_OOS", "PREDECESSOR", "CONCEPTUAL_STRESS"):
+        rows = [
+            correlation.ReturnRow(date(2025, 1, 1), 0.1, layer, "v1", "0.1"),
+            correlation.ReturnRow(date(2026, 1, 1), -0.1, layer, "v1", "-0.1"),
+        ]
+        summary = correlation._performance_summary(rows, 0)
+        assert summary["cagr"] is None, layer
+        assert summary["annualization_status"] == "SUPPRESSED_INCLUDES_BACKTEST"
+
+
+def test_the_window_is_365_days_for_a_full_year_of_daily_returns() -> None:
+    from datetime import timedelta
+
+    rows = [
+        correlation.ReturnRow(
+            date(2025, 1, 6) + timedelta(days=offset),
+            0.001,
+            "ACCOUNT_LIVE",
+            "v1",
+            "0.001",
+        )
+        for offset in range(365)
+    ]
+    summary = correlation._performance_summary(rows, 0)
+    assert summary["window_days"] == 365
+    assert summary["annualization_status"] == "AVAILABLE"
