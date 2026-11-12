@@ -189,7 +189,9 @@ def _close_blend(member: dict[str, Any], content: bytes) -> list[dict[str, str]]
             raise AttributionReturnsError(f"{series_id}: {ticker} repeats {day}")
         number = _decimal(value, series_id)
         if number <= 0:
-            raise AttributionReturnsError(f"{series_id}: {ticker} close is not positive")
+            raise AttributionReturnsError(
+                f"{series_id}: {ticker} close is not positive"
+            )
         closes[ticker][day] = number
     returns: dict[str, dict[date, Decimal]] = {}
     for ticker, series in closes.items():
