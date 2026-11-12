@@ -5628,6 +5628,11 @@ def _alpha_context(row: Mapping[str, Any]) -> dict[str, Any]:
         "status": "AVAILABLE" if available else "UNAVAILABLE",
         "inference": inference,
         "headline_status": headline_status,
+        # one headline alpha per strategy: the fit on the accepted live return series
+        # with a standard error and t-statistic; every other fit is secondary
+        "lens_role": "HEADLINE"
+        if headline_status == "HEADLINE_ALLOWED"
+        else "SECONDARY",
         "unavailable_reason": unavailable_reason,
         "window_start": start,
         "window_end": end,

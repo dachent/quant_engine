@@ -2350,6 +2350,7 @@
     const inferenceText = ctx.inference === "NOT_DISTINGUISHABLE_FROM_ZERO" ? "not distinguishable from zero (|t| < 2)" : ctx.inference === "NO_STANDARD_ERROR" ? "no standard error: not a headline" : "";
     const visibleBasis = `annualized ${number(ctx.periods_per_year) == null ? "" : `×${integer.format(ctx.periods_per_year)} periods `}over ${integer.format(ctx.window_days)} days${ctx.annualisation_basis === "ANNUALISED_FROM_DAYS" ? " (under 1 year)" : ""}`;
     const lines = [
+      ctx.lens_role === "HEADLINE" ? "headline alpha (accepted live series, with standard error)" : "secondary lens, not the headline alpha",
       ctx.basis_label || humanStatus(basisStatus),
       `${integer.format(ctx.window_days)} days ${formatDate(ctx.window_start)} to ${formatDate(ctx.window_end)} · n ${integer.format(ctx.n_obs)} · ${share}`,
       inferenceText ? `${tText} · ${inferenceText}` : tText,

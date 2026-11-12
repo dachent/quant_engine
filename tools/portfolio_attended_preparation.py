@@ -683,7 +683,10 @@ def _selected_dependence_handoff(
         "provider_admission_receipt_path",
         "portfolio123_version_evidence_path",
     }
-    if set(selected) != required or selected.get("schema_version") != 1:
+    if (
+        set(selected) - {"accepted_return_spans_path"} != required
+        or selected.get("schema_version") != 1
+    ):
         raise AttendedPreparationError("dependence selection schema differs")
     if authorities["financial_input_contract_path"] != contract.resolve():
         raise AttendedPreparationError("selected financial input contract differs")
@@ -700,6 +703,16 @@ def _selected_dependence_handoff(
         ),
         "portfolio123_version_evidence_path": str(
             authorities["portfolio123_version_evidence_path"].resolve()
+        ),
+        # optional (#904 item 9): the accepted multi-day return spans receipt
+        **(
+            {
+                "accepted_return_spans_path": str(
+                    Path(str(selected["accepted_return_spans_path"])).resolve()
+                )
+            }
+            if "accepted_return_spans_path" in selected
+            else {}
         ),
     }
 

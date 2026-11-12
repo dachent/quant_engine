@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -78,11 +78,22 @@ class ReturnRow:
 
 
 @dataclass(frozen=True)
+class AcceptedSpan:
+    """One accepted multi-day return over a gap with no daily rows (never a daily row)."""
+
+    start_date: date
+    end_date: date
+    value: float
+    canonical_value: str
+
+
+@dataclass(frozen=True)
 class EvidenceModeSeries:
     series_id: str
     live_evidence_layer: str
     strategy_version: str
     live_version_ref: str | None = None
+    accepted_spans: tuple[AcceptedSpan, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -346,10 +357,11 @@ def _evidence_mode_definition(
     name = f"evidence_mode_series[{index}]"
     actual_keys = set(value)
     required = {"live_evidence_layer", "series_id", "strategy_version"}
-    if not required <= actual_keys <= required | {"live_version_ref"}:
+    optional = {"live_version_ref", "accepted_spans"}
+    if not required <= actual_keys <= required | optional:
         raise CorrelationError(
             f"{name} keys differ: missing={sorted(required - actual_keys)}, "
-            f"unexpected={sorted(actual_keys - required - {'live_version_ref'})}"
+            f"unexpected={sorted(actual_keys - required - optional)}"
         )
     live_layer = _text(value["live_evidence_layer"], f"{name}.live_evidence_layer")
     if live_layer not in {"ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE"}:
@@ -359,11 +371,36 @@ def _evidence_mode_definition(
     live_version_ref = value.get("live_version_ref")
     if live_version_ref is not None:
         live_version_ref = _text(live_version_ref, f"{name}.live_version_ref")
+    spans: list[AcceptedSpan] = []
+    for position, raw in enumerate(
+        _objects(value.get("accepted_spans", []), f"{name}.accepted_spans")
+    ):
+        span_name = f"{name}.accepted_spans[{position}]"
+        _strict_keys(raw, {"end_date", "return", "start_date"}, span_name)
+        start = _day(raw["start_date"], f"{span_name}.start_date")
+        end = _day(raw["end_date"], f"{span_name}.end_date")
+        if (end - start).days < 2:
+            raise CorrelationError(f"{span_name} does not span a gap")
+        if spans and start < spans[-1].end_date:
+            raise CorrelationError(f"{name}.accepted_spans overlap or are unordered")
+        text = _text(raw["return"], f"{span_name}.return")
+        span_value = _finite(text, f"{span_name}.return")
+        if span_value <= -1.0:
+            raise CorrelationError(f"{span_name}.return must be greater than -1")
+        spans.append(
+            AcceptedSpan(
+                start,
+                end,
+                span_value,
+                _canonical_decimal(text, f"{span_name}.return"),
+            )
+        )
     return EvidenceModeSeries(
         series_id=_text(value["series_id"], f"{name}.series_id"),
         live_evidence_layer=live_layer,
         strategy_version=_text(value["strategy_version"], f"{name}.strategy_version"),
         live_version_ref=live_version_ref,
+        accepted_spans=tuple(spans),
     )
 
 
@@ -471,6 +508,10 @@ def _load_spec(path: Path) -> Specification:
             _objects(root.get("evidence_mode_series", []), "evidence_mode_series")
         )
     )
+    as_of = _day(root["as_of_date"], "as_of_date")
+    for definition in evidence_mode_series:
+        if any(span.end_date > as_of for span in definition.accepted_spans):
+            raise CorrelationError("an accepted span ends after as_of_date")
     if schema_version == 2:
         if len({item.series_id for item in evidence_mode_series}) != len(
             evidence_mode_series
@@ -842,12 +883,18 @@ def _annualised_headline_status(
 
 
 def _performance_summary(
-    rows: Sequence[ReturnRow], backtest_observations: int | None = 0
+    rows: Sequence[ReturnRow],
+    backtest_observations: int | None = 0,
+    spans: Sequence[AcceptedSpan] = (),
 ) -> dict[str, object]:
     """Compound one accepted evidence-mode path into reproducible statistics.
 
     The window opens at the close before the first return (one median interval
     earlier), ACT/365, geometric: the same convention as every other CAGR.
+    ``spans`` are the accepted multi-day returns over gaps the daily rows do not
+    cover (#904 item 9); each compounds once at its end date, so the cumulative
+    return is the accepted one, not the daily rows alone.  They are never daily
+    rows and never enter the correlations.
     """
 
     accepted = sorted(rows, key=lambda item: item.day)
@@ -877,17 +924,34 @@ def _performance_summary(
     wealth = 1.0
     peak = 1.0
     maximum_drawdown = 0.0
-    for row in accepted:
-        if row.value <= -1.0:
+    for span in spans:
+        if span.start_date < accepted[0].day:
+            raise CorrelationError("an accepted span starts before the first daily row")
+        if any(span.start_date < item.day <= span.end_date for item in accepted):
+            # a span replaces a gap; a daily row inside it would count the same days twice
+            raise CorrelationError("an accepted span covers a day that has a daily row")
+    steps = sorted(
+        [(item.day, item.value) for item in accepted]
+        + [(span.end_date, span.value) for span in spans],
+        key=lambda step: step[0],
+    )
+    for _day_of_step, value in steps:
+        if value <= -1.0:
             raise CorrelationError("period return must be greater than -1")
-        wealth *= 1.0 + row.value
+        wealth *= 1.0 + value
         peak = max(peak, wealth)
         maximum_drawdown = min(maximum_drawdown, wealth / peak - 1.0)
     gaps = sorted(
         (later.day - earlier.day).days for earlier, later in zip(accepted, accepted[1:])
     )
     opening_gap = max(gaps[len(gaps) // 2], 1) if gaps else 1
-    elapsed_days = (accepted[-1].day - accepted[0].day).days + opening_gap
+    window_start = accepted[0].day - timedelta(days=opening_gap)
+    if spans:
+        window_start = min(window_start, spans[0].start_date)
+    window_end = (
+        max(accepted[-1].day, spans[-1].end_date) if spans else accepted[-1].day
+    )
+    elapsed_days = (window_end - window_start).days
     annualisation = _annualised_headline_status(elapsed_days, backtest_observations)
     cagr = (
         math.pow(wealth, 365.0 / elapsed_days) - 1.0
@@ -897,12 +961,13 @@ def _performance_summary(
     return {
         "annualization_basis": ANNUALIZATION_BASIS,
         "annualization_status": annualisation,
+        "accepted_spans": len(spans),
         "backtest_observations": backtest_observations,
         "window_days": elapsed_days,
         "cagr": _number(cagr),
         "cumulative_return": _number(wealth - 1.0),
         "maximum_drawdown": _number(maximum_drawdown),
-        "observed_end": accepted[-1].day.isoformat(),
+        "observed_end": window_end.isoformat(),
         "observed_start": accepted[0].day.isoformat(),
         "return_observations": len(accepted),
         "status": "AVAILABLE",
@@ -1485,6 +1550,9 @@ def _dependence_payload(
 
     posterior = _nearest_correlation(posterior_pre, spec.eigenvalue_floor)
     stress = _nearest_correlation(stress_pre, spec.eigenvalue_floor)
+    span_index = {
+        item.series_id: item.accepted_spans for item in spec.evidence_mode_series
+    }
     performance = {
         series_id: _performance_summary(
             returns.get(series_id, []),
@@ -1493,6 +1561,7 @@ def _dependence_payload(
                 if series_composition is None
                 else series_composition.get(series_id)
             ),
+            span_index.get(series_id, ()),
         )
         for series_id in spec.series_ids
     }

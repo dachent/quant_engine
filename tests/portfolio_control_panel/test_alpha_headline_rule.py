@@ -122,3 +122,9 @@ def test_no_alpha_at_all_is_its_own_status() -> None:
         panel._alpha_context(_row(None, None, 0))["headline_status"]
         == "UNAVAILABLE_NO_ALPHA"
     )
+
+
+def test_only_the_allowed_fit_is_the_headline_lens() -> None:
+    assert panel._alpha_context(_row("0.2", "0.05", 0))["lens_role"] == "HEADLINE"
+    assert panel._alpha_context(_row("0.2", None, 0))["lens_role"] == "SECONDARY"
+    assert panel._alpha_context(_row("0.2", "0.05", 5))["lens_role"] == "SECONDARY"
