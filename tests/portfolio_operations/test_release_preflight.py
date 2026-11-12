@@ -392,7 +392,7 @@ def test_the_shipped_graph_gates_attended_and_rechecks_the_moving_facts() -> Non
     assert stages["attended"]["needs_gate"] == ["g0"]
     for stage_id in ("lane-real", "lane-replica", "commit"):
         assert "repo:frozen" in stages[stage_id]["recheck"]
-    table = dict(pf.ROWS)
+    table = pf.ROW_TABLE
     for stage in stages.values():
         for row in stage.get("recheck", []):
             assert row in table, row
@@ -552,3 +552,52 @@ def test_only_identity_reads_are_retried(
     with pytest.raises(driver.Refusal):
         run._git("log", "-1")
     assert len(calls) == 1
+
+
+# -- G3: the spec pair ---------------------------------------------------------------------------
+
+
+def _pair_spec(base: Path, **kw: Any) -> Any:
+    from types import SimpleNamespace
+
+    nodes = kw.get("nodes", ("n1", "n2"))
+    commit = kw.get("commit", "c" * 40)
+    spec = SimpleNamespace(
+        code_commit=commit,
+        nodes=tuple(
+            SimpleNamespace(node_id=n, declared_writes=(base / "out",)) for n in nodes
+        ),
+        release_generations={"root-a": "a" * 64},
+        coordination_root=base / "coord",
+        state_root=base / "state",
+        roots={"root-a": base / "root-a"},
+    )
+    spec.to_dict = lambda: {
+        "created_at": str(base),
+        "code_commit": commit,
+        "args": f"{kw.get('args', '--x')} {base.as_posix()}/data",
+        "nodes": list(nodes),
+    }
+    return spec
+
+
+def test_refusal_19_the_spec_pair_row_is_the_replica_gates_own_topology(
+    tmp_path: Path,
+) -> None:
+    from quant_engine.core import replica_gate as gate
+
+    real_base, replica_base = tmp_path / "real", tmp_path / "replica"
+    replica_base.mkdir()
+    (replica_base / gate.REPLICA_MARKER_NAME).write_text(
+        json.dumps({"kind": gate.REPLICA_MARKER_KIND, "schema_version": 1}),
+        encoding="utf-8",
+    )
+    real = _pair_spec(real_base)
+    # paths differ by design and normalize away; the same release passes
+    assert pf.spec_pair_mismatch(real, _pair_spec(replica_base), real_base) is None
+    # a different DAG or arguments is the topology refusal R3 met 2 h 46 min in
+    for other in ({"nodes": ("n1",)}, {"args": "--y"}, {"commit": "d" * 40}):
+        assert "different topology" in (
+            pf.spec_pair_mismatch(real, _pair_spec(replica_base, **other), real_base)
+            or ""
+        ), other
