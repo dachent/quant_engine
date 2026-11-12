@@ -101,8 +101,9 @@ def _entry_errors(position: int, entry: Any) -> list[str]:
     for key in ("where", "number_affected", "proof_check"):
         if key in block and not _text(block[key]):
             errors.append(f"{label}: owner_view.{key} must be non-blank text")
-    if "entity_match" in block and not isinstance(block["entity_match"], str):
-        errors.append(f"{label}: entity_match must be a string")
+    for key in ("entity_match", "finding_entity_match", "finding_check_id"):
+        if key in block and not isinstance(block[key], str):
+            errors.append(f"{label}: {key} must be a string")
     when = block.get("when", {})
     if not isinstance(when, Mapping) or not all(isinstance(k, str) for k in when):
         errors.append(f"{label}: when must be an object with string keys")
@@ -142,14 +143,11 @@ def _entry_errors(position: int, entry: Any) -> list[str]:
             f"{label}: scope 'row' needs row_scope_reason (why every entity of the "
             "row is in the same state)"
         )
-    try:
-        re.compile(
-            block["entity_match"]
-            if isinstance(block.get("entity_match"), str)
-            else ".*"
-        )
-    except re.error as exc:
-        errors.append(f"{label}: entity_match is not a regex: {exc}")
+    for key in ("entity_match", "finding_entity_match"):
+        try:
+            re.compile(block[key] if isinstance(block.get(key), str) else ".*")
+        except re.error as exc:
+            errors.append(f"{label}: {key} is not a regex: {exc}")
     return errors
 
 
@@ -216,7 +214,14 @@ def _matches(
     facts: Mapping[str, Any],
     row: bool = False,
 ) -> bool:
-    if entry.get("check_id") != finding.get("check_id"):
+    block = entry["owner_view"]
+    # the register is keyed by the validator's check id; a check that emits rows under
+    # derived ids (expected.not_derivable) names them in finding_check_id
+    if block.get("finding_check_id", entry.get("check_id")) != finding.get("check_id"):
+        return False
+    if not re.fullmatch(
+        block.get("finding_entity_match", ".*"), str(finding.get("entity"))
+    ):
         return False
     wanted = str(entry.get("defect"))
     have = sorted(set(finding.get("defect_ids") or []))
@@ -226,7 +231,6 @@ def _matches(
         have and sorted(p.strip() for p in wanted.split(",")) != have
     ):
         return False
-    block = entry["owner_view"]
     if (block.get("scope") == "row") != row:
         return False
     if not re.fullmatch(block.get("entity_match", ".*"), entity):

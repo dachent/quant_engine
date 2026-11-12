@@ -565,3 +565,22 @@ def test_cli_also_findings_join_the_owner_view_not_findings_json(
     )
     assert view["source_findings"] == len(own) + 1
     assert ov.verdict(view).startswith("STOP")
+
+
+def test_derived_check_id_and_finding_entity_scope() -> None:
+    e = entry(
+        ov.NOT_APPLICABLE,
+        block={"finding_check_id": "c.derived", "finding_entity_match": r"^x\..*"},
+    )
+    e["check_id"] = "c.base"
+    hit = finding("c.derived", entity="x.one", defects=("E1",))
+    miss_entity = finding("c.derived", entity="y.one", defects=("E1",))
+    miss_check = finding("c.base", entity="x.one", defects=("E1",))
+    view = ov.build_owner_view(
+        doc(hit, miss_entity, miss_check), register=[e], today=TODAY
+    )
+    assert sorted(i["class"] for i in view["items"]) == [
+        ov.NOT_APPLICABLE,
+        ov.UNCLASSIFIED,
+        ov.UNCLASSIFIED,
+    ]
