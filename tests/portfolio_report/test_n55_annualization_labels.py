@@ -453,7 +453,9 @@ def test_cagr_and_mwr_carry_their_basis_and_window_at_version_four(
         cagr = row["account_live_cagr_annualization"]
         if row["account_live_cagr"] is None:
             assert cagr is None
-            suppressed += int(row["account_live_cagr_status"] == "SUPPRESSED_UNDER_365D")
+            suppressed += int(
+                row["account_live_cagr_status"] == "SUPPRESSED_UNDER_365D"
+            )
         else:
             labelled += 1
             assert cagr["basis"] == "CALENDAR_DAYS_COMPOUNDED_OVER_365"
@@ -627,7 +629,9 @@ def test_the_schema_admits_the_labels_at_four_only_and_closes_their_shape(
         # CAGR is suppressed under a year (#904), so no fixture row carries a CAGR
         # label; the shape under test is the label's, which the MWR label shares
         target = next(r for r in copy if r["mwr_annualization"])
-        target["account_live_cagr_annualization"] = deepcopy(target["mwr_annualization"])
+        target["account_live_cagr_annualization"] = deepcopy(
+            target["mwr_annualization"]
+        )
         return target
 
     forged = _schema_rows(report)

@@ -4779,9 +4779,7 @@ def test_annualized_return_on_net_capital_uses_governed_piecewise_policy(
             manifest_module.Decimal(current) - manifest_module.Decimal("100")
         ) / manifest_module.Decimal("100")
         # #904: geometric ACT/365 at every window length (no linear branch)
-        expected = (
-            manifest_module.Decimal(1) + simple_return
-        ) ** (
+        expected = (manifest_module.Decimal(1) + simple_return) ** (
             manifest_module.Decimal("365") / manifest_module.Decimal(span_days)
         ) - manifest_module.Decimal(1)
     assert stats["annualized_return_on_net_capital"] == expected
