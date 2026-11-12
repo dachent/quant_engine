@@ -57,7 +57,11 @@ def test_the_three_states_follow_declaration_and_evidence() -> None:
     assert states[B].state == "INCIDENTAL_DEBIT"
     assert states[C].state == "INCIDENTAL_DEBIT"
     assert states[D].state == "NOT_LEVERED"
+    assert states[D].reason == "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE"
     assert states[D].conflicts == ()
+    # an unused facility is not "no margin"
+    unused = af.classify(_load(), {}, [C])[C]
+    assert unused.reason == "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE"
 
 
 def test_evidence_overrides_a_denied_facility_upward_and_is_a_conflict() -> None:
@@ -86,6 +90,10 @@ def _set(key: str, value: Any) -> Callable[[dict[str, Any]], None]:
         _set("facility", "MAYBE"),
         _set("account_id", "account-short"),
         _set("extra", 1),
+        _set("scope", []),
+        _set("evidence_ref", 5),
+        lambda d: d.__setitem__("as_of_date", "not-a-date"),
+        lambda d: d.__setitem__("as_of_date", {}),
         lambda d: d["accounts"].append(dict(d["accounts"][0])),
     ],
 )

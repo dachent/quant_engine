@@ -28,6 +28,7 @@ FACILITIES: Final = frozenset(
 STATES: Final = ("LEVERED", "INCIDENTAL_DEBIT", "NOT_LEVERED")
 _ACCOUNT_ID = re.compile(r"^account-[0-9a-f]{16}$")
 _KEYS = {"account_id", "scope", "facility", "verification", "evidence_ref"}
+_DAY = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
 
 
 class FinancingDeclarationError(ValueError):
@@ -70,6 +71,8 @@ def load_declaration(raw: bytes) -> dict[str, Declared]:
         or set(top) != {"schema_version", "artifact_id", "as_of_date", "accounts"}
         or top["schema_version"] != 1
         or top["artifact_id"] != ARTIFACT_ID
+        or not isinstance(top["as_of_date"], str)
+        or not _DAY.fullmatch(top["as_of_date"])
         or not isinstance(top["accounts"], list)
         or not top["accounts"]
     ):
@@ -82,10 +85,13 @@ def load_declaration(raw: bytes) -> dict[str, Declared]:
         if (
             not isinstance(account, str)
             or not _ACCOUNT_ID.fullmatch(account)
+            or not all(
+                isinstance(row[key], str)
+                for key in ("scope", "facility", "verification", "evidence_ref")
+            )
             or row["scope"] not in {"ACTIVE", "RESERVE"}
             or row["facility"] not in FACILITIES
             or row["verification"] not in {"VERIFIED", "UNVERIFIED"}
-            or not isinstance(row["evidence_ref"], str)
             or not row["evidence_ref"].strip()
         ):
             raise FinancingDeclarationError(f"account row is invalid: {account!r}")
@@ -131,6 +137,8 @@ def classify(
             state, reason = "INCIDENTAL_DEBIT", "DEBIT_EVIDENCE_WITHOUT_BORROWING"
             if row.facility == "NO_MARGIN_FACILITY" and seen.debit_interest_postings:
                 conflicts.append("DECLARED_NO_FACILITY_BUT_DEBIT_INTEREST")
+        elif row.facility == "MARGIN_AVAILABLE_UNUSED":
+            state, reason = "NOT_LEVERED", "MARGIN_AVAILABLE_UNUSED_NO_DEBIT_EVIDENCE"
         else:
             state, reason = "NOT_LEVERED", "DECLARED_NO_MARGIN_AND_NO_DEBIT_EVIDENCE"
         result[account] = AccountState(account, state, reason, tuple(conflicts))
