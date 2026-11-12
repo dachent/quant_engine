@@ -71,6 +71,10 @@ from quant_engine.portfolio_ledger import (
     validate_hwm_inputs_envelope,
     validate_as_held_hwm_receipt_generation_binding,
 )
+from quant_engine.portfolio_ledger.hwm_gap_bounds import (
+    assess_gap_bounds_document,
+    numerical_from_governed_proof,
+)
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
@@ -221,6 +225,11 @@ ACCOUNT_MANIFEST_INDEPENDENT_VERIFICATION_SCHEMA = (
 )
 HWM_POLICY = (
     Path(__file__).resolve().parents[1] / "contracts" / "portfolio-hwm-policy-v3.json"
+)
+_HWM_GAP_BOUNDS = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-hwm-gap-bounds-v1.json"
 )
 DEPENDENCE_POLICY = (
     Path(__file__).resolve().parents[1]
@@ -4908,6 +4917,8 @@ def _compute_panel_numerical_hwm(
     *,
     membership_starts: Mapping[str, date] | None = None,
     endpoint_exempt: frozenset[str] = frozenset(),
+    governed_proof: Mapping[str, Any] | None = None,
+    gap_bounds_path: Path | None = None,
 ) -> dict[str, Any]:
     """Recompute the numerical full-systematic HWM from the governed
     baseline catalog so the panel can reconcile it against the report.
@@ -4932,16 +4943,32 @@ def _compute_panel_numerical_hwm(
         else catalog.get("epoch_hpr_receipts", []),
         "epoch_hpr_receipts",
     )
-    if any(
-        _objects(
+    spans_by_strategy = {
+        _text(receipt.get("strategy_id"), "epoch HPR strategy_id"): _objects(
             _object(receipt.get("receipt"), "epoch HPR receipt").get(
                 "span_return_receipts"
             ),
             "epoch HPR spans",
         )
         for receipt in hpr_receipts
-    ):
-        return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+    }
+    if any(spans_by_strategy.values()):
+        # Mirrors the report: a gap set bounded away from a new peak publishes the
+        # numeric HWM from the governed path (#899); anything else stays UNAVAILABLE.
+        bounds_path = gap_bounds_path or _HWM_GAP_BOUNDS
+        try:
+            assessment = assess_gap_bounds_document(
+                spans_by_strategy,
+                _load_json(bounds_path, "HWM gap bounds"),
+                hash_file(bounds_path)[0],
+            )
+        except ValueError as exc:
+            raise ControlPanelValidationError(str(exc)) from exc
+        if assessment["status"] != "BOUNDED":
+            return _unavailable("MISSING_DAILY_POINT_CAN_HIDE_PEAK")
+        if governed_proof is None or governed_proof.get("status") != "AVAILABLE":
+            return _unavailable("GOVERNED_PATH_ABSENT_FOR_BOUNDED_GAPS")
+        return numerical_from_governed_proof(governed_proof, assessment)
 
     def _panel_decimal(value: object, field_name: str) -> Decimal:
         if not isinstance(value, str):
@@ -11052,6 +11079,7 @@ def _panel_data(
         epoch_hpr_receipts,
         membership_starts=hwm_starts,
         endpoint_exempt=hwm_exempt,
+        governed_proof=governed_hwm_proof,
     )
     # The coverage rows inherit the current cutoff values and weights of the strategy
     # rows; the summary says which weight set it shows (the report says the same).
