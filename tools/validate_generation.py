@@ -215,12 +215,29 @@ def _history(out: Path) -> list[tuple[str, dict[str, Any]]]:
     return [(label, doc) for _, label, doc in sorted(found, key=lambda t: (t[0], t[1]))]
 
 
+def _also(paths: Sequence[Path]) -> list[dict[str, Any]]:
+    extra: list[dict[str, Any]] = []
+    for path in paths:
+        value, _ = _read_json(path, "--also-findings document")
+        rows = value.get("findings") if isinstance(value, dict) else None
+        if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+            raise ContractError(f"--also-findings {path} has no findings list")
+        label = path.parent.name[:12] or path.stem
+        extra += [{**r, "entity": f"{label}:{r.get('entity')}"} for r in rows]
+    return extra
+
+
 def make_owner_view(
-    out: Path, document: dict[str, Any], findings: Sequence[Finding]
+    out: Path,
+    document: dict[str, Any],
+    findings: Sequence[Finding],
+    also: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
+    # derived target findings join the owner view only; findings.json stays the panel's own
+    combined = {**document, "findings": [*document["findings"], *also]}
     return owner_view.build.build_owner_view(
-        document,
-        messages=[f.message for f in findings],
+        combined,
+        messages=[*(f.message for f in findings), *("" for _ in also)],
         register=_register_entries(),
         history=_history(out),
     )
@@ -273,6 +290,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected", type=Path, help="expected-baseline JSON")
     parser.add_argument("--out", type=Path, help="findings document path")
     parser.add_argument("--details-out", type=Path, help="findings with messages")
+    parser.add_argument(
+        "--also-findings",
+        type=Path,
+        action="append",
+        default=[],
+        help="a derived qe-release-findings/1 document (one per target) whose findings "
+        "are added to the owner view; never to findings.json",
+    )
     parser.add_argument("--cutoff", help="declared financial cutoff (YYYY-MM-DD)")
     parser.add_argument("--crosswalk", type=Path, help="account/strategy crosswalk")
     parser.add_argument("--release-pointer", type=Path, help="CURRENT_RELEASE.json")
@@ -450,7 +475,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         findings=findings,
     )
     try:
-        view = make_owner_view(out, document, findings)  # before any file is written
+        view = make_owner_view(  # before any file is written
+            out, document, findings, _also(args.also_findings)
+        )
         _write_json(out, document)
         write_owner_view(out, view)
         if args.details_out is not None:

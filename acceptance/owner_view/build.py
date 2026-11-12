@@ -106,6 +106,10 @@ def _entry_errors(position: int, entry: Any) -> list[str]:
     when = block.get("when", {})
     if not isinstance(when, Mapping) or not all(isinstance(k, str) for k in when):
         errors.append(f"{label}: when must be an object with string keys")
+    if "decision" in block and klass != NEEDS_OWNER_DECISION:
+        errors.append(f"{label}: only a NEEDS_OWNER_DECISION entry carries a decision")
+    if "owner_record" in block and not _text(block["owner_record"]):
+        errors.append(f"{label}: owner_record must be non-blank text")
     if klass == NEEDS_OWNER_DECISION:
         decision = block.get("decision")
         decision = decision if isinstance(decision, Mapping) else {}
@@ -326,11 +330,16 @@ def build_owner_view(
     entries = _usable(register)
     first_seen: dict[tuple[Any, Any], str] = {}
     for label, doc in history:
-        for old in doc.get("findings") or []:
+        if not isinstance(doc, Mapping) or not isinstance(doc.get("findings"), list):
+            continue  # a malformed retained document never blocks the current run
+        for old in doc["findings"]:
+            if not isinstance(old, Mapping):
+                continue
             first_seen.setdefault((old.get("check_id"), old.get("entity")), label)
             for sub, _ in expand(old):
                 first_seen.setdefault((old.get("check_id"), sub), label)
     items: list[dict[str, Any]] = []
+    overlaps: list[str] = []
     for index, finding in enumerate(findings):
         message = messages[index] if index < len(messages) else ""
         since = first_seen.get((finding.get("check_id"), finding.get("entity")))
@@ -374,8 +383,16 @@ def build_owner_view(
                 if entity == finding.get("entity")
                 else first_seen.get((finding.get("check_id"), entity))
             )
-            matched = [e for e in entries if _matches(e, finding, entity, facts)][:1]
-            for entry in matched:  # first match wins
+            hits = [e for e in entries if _matches(e, finding, entity, facts)]
+            if len({e["owner_view"]["owner_class"] for e in hits}) > 1:
+                # overlapping entries disagree: the most real class wins, never the
+                # harmless one, and the conflict is reported on the page
+                overlaps.append(
+                    f"{finding.get('check_id')} {entity}: entries disagree on the class"
+                )
+                hits.sort(key=lambda e: ORDER.index(e["owner_view"]["owner_class"]))
+            matched = hits[:1]
+            for entry in matched:
                 klass = entry["owner_view"]["owner_class"]
                 items.append(
                     _item(
@@ -428,7 +445,7 @@ def build_owner_view(
         "counts": counts,
         "real_items": sum(1 for i in items if i["real_or_checker"] == "real"),
         "overdue_items": sum(1 for i in items if i["overdue"]),
-        "registry_errors": registry_errors(register),
+        "registry_errors": registry_errors(register) + sorted(set(overlaps)),
         "findings": [
             {
                 "index": n,
@@ -478,6 +495,7 @@ def _group(items: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
             item["overdue"],
             item.get("owner_record"),
             item["since"],
+            json.dumps(item.get("decision"), sort_keys=True),
         )
         groups.setdefault(key, []).append(item)
     return list(groups.values())
