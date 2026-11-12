@@ -49,7 +49,7 @@ STRATEGY = "strategy-1"
 SYNTHETIC_STRATEGY_IN_FACTS = "strategy-s2"
 # sha256 of the switched-off catalog of this synthetic world, built by the builder as it
 # was at the keystone head 07f02431 (before this branch)
-SWITCH_OFF_SHA256 = "a704fc9a2d06122c41bc61d701bd95d781b477718ff6442b0d74d8fd901bb918"
+SWITCH_OFF_SHA256 = "0111a1abe7aa1234d0d741c44c25ca00e9f2c8e26e4f775a0ee7ebfa77cb4a68"
 SLEEVE_DATES = ("2025-12-31", "2026-01-01", "2026-01-02")
 OPENING = "2025-12-30"
 

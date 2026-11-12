@@ -2331,7 +2331,7 @@ CASES: dict[str, tuple[str, str, Spec]] = {
     "payload_block_over_budget": (
         "lint.payload_size",
         checks.BLOCKER_REGRESSION,
-        Spec(panel=[_set(("positions",), "x" * 400000)]),
+        Spec(panel=[_set(("positions",), "x" * 600000)]),
     ),
     "payload_unbudgeted_block_over_maximum": (
         "lint.payload_size",
@@ -2466,6 +2466,18 @@ CASES: dict[str, tuple[str, str, Spec]] = {
             report=[
                 _set(
                     ("strategy_summary", 0, "benchmark_evidence_status"), "UNAVAILABLE"
+                )
+            ]
+        ),
+    ),
+    "completeness_after_tax_unavailable": (
+        "completeness.required_outputs",
+        checks.NOT_READY,
+        Spec(
+            report=[
+                _set(
+                    ("strategy_summary", 0, "after_tax_status"),
+                    "UNAVAILABLE_TAX_LOT_RATE_AND_REALIZATION_EVIDENCE_INCOMPLETE",
                 )
             ]
         ),
@@ -2633,6 +2645,47 @@ def test_bad_fixture_fires_and_good_does_not(tmp_path: Path, case: str) -> None:
     bad = run(build(tmp_path / "bad", spec))
     fired = [f for f in bad if f.check_id == check_id and f.klass == klass]
     assert fired, [(f.check_id, f.klass, f.entity) for f in bad]
+
+
+def test_the_owner_declared_pre_tax_scope_satisfies_after_tax_and_nothing_else_does(
+    tmp_path: Path,
+) -> None:
+    """E6 after-tax: only the declared status (producer constant) is accepted."""
+
+    import portfolio_attribution
+
+    assert (
+        checks.AFTER_TAX_NOT_APPLICABLE
+        == portfolio_attribution.AFTER_TAX_STATUS_NOT_APPLICABLE
+    )
+
+    def after_tax(value: str, sub: str) -> list[checks.Finding]:
+        spec = Spec(report=[_set(("strategy_summary", 0, "after_tax_status"), value)])
+        return [
+            f
+            for f in run(build(tmp_path / sub, spec))
+            if f.check_id == "completeness.required_outputs"
+            and f.entity == "strategy_summary.after_tax_status"
+        ]
+
+    assert not after_tax(checks.AFTER_TAX_NOT_APPLICABLE, "declared")
+    assert after_tax("NOT_APPLICABLE_SOMETHING_ELSE", "other")
+    assert after_tax("UNAVAILABLE", "unavailable")
+    # the exemption is for after-tax only: the same value fails the cost field
+    spec = Spec(
+        report=[
+            _set(
+                ("strategy_summary", 0, "cost_evidence_status"),
+                checks.AFTER_TAX_NOT_APPLICABLE,
+            )
+        ]
+    )
+    cost = [
+        f
+        for f in run(build(tmp_path / "cost", spec))
+        if f.entity == "strategy_summary.cost_evidence_status"
+    ]
+    assert cost
 
 
 def _unproven_flow_path(disclosed: str | None) -> Mutator:
