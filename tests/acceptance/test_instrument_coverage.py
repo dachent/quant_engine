@@ -25,9 +25,11 @@ CAPITAL_AS_OF = "capital.as_of_cutoff"
 
 def _only(findings: list[checks.Finding], check_id: str) -> list[checks.Finding]:
     # capital.as_of_cutoff was split in two ids (duplicate ids made the row-diff ambiguous)
-    ids = {check_id} | (
-        {"capital.current_capital_as_of"} if check_id == CAPITAL_AS_OF else set()
-    )
+    split = {
+        CAPITAL_AS_OF: "capital.current_capital_as_of",
+        SECTION: "dates.account_live_window",
+    }
+    ids = {check_id} | ({split[check_id]} if check_id in split else set())
     return [f for f in findings if f.check_id in ids]
 
 
