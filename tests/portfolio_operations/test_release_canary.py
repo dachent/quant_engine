@@ -160,3 +160,33 @@ def test_cli_exit_codes(tmp_path: Path) -> None:
         )
         == 3
     )
+
+
+def test_cleanup_failure_fails(tmp_path: Path) -> None:
+    class Fs(canary_module.RealFs):
+        def rmtree(self, path: Path) -> None:
+            raise PermissionError(13, "locked")
+
+    receipt = _run(tmp_path, fs=Fs())
+    assert receipt["status"] == "FAIL"
+    detail = next(
+        c["detail"] for c in receipt["checks"] if c["id"].startswith("fs_ops")
+    )  # type: ignore[index, union-attr]
+    assert "cleanup" in detail
+
+
+def test_prior_receipt_is_a_usable_baseline(tmp_path: Path) -> None:
+    ticks = iter(range(0, 10_000, 5))
+    root = tmp_path / "root"
+    root.mkdir()
+    steps = ("create", "write", "replace", "lock", "rename", "delete")
+    prior = {"timings": {"x": {n: 1.0 for n in steps}}}
+    receipt = canary_module.canary(
+        [root], None, baseline=prior, now=lambda: float(next(ticks)), fingerprint_fn=_fp
+    )
+    assert _status(receipt, "fs_ops") == "PASS"
+
+
+def test_no_roots_is_a_usage_error() -> None:
+    with pytest.raises(canary_module.CanaryError):
+        canary_module.canary([], None, fingerprint_fn=_fp)

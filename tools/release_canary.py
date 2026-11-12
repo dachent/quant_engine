@@ -54,7 +54,7 @@ class RealFs:
     """The filesystem operations the canary uses; a test substitutes a subclass."""
 
     def attributes(self, path: Path) -> int:
-        return int(getattr(path.stat(), "st_file_attributes", 0))
+        return int(getattr(path.lstat(), "st_file_attributes", 0))
 
     def mkdir(self, path: Path) -> None:
         path.mkdir()
@@ -130,8 +130,17 @@ def check_bound_files(files: Sequence[Path], fs: RealFs) -> dict[str, str]:
     return _check("bound_files_local", "PASS", f"{len(files)} bound file(s) local")
 
 
+def _recorded(baseline: Mapping[str, Any] | None, step: str) -> float:
+    """Seconds recorded for a step: a ``{"fs_ops": {step: s}}`` file or a prior receipt's ``timings``."""
+
+    found = [float((baseline or {}).get("fs_ops", {}).get(step, 0.0))]
+    for steps in (baseline or {}).get("timings", {}).values():
+        found.append(float(steps.get(step, 0.0)))
+    return max(found)
+
+
 def _limit(baseline: Mapping[str, Any] | None, step: str, factor: float) -> float:
-    recorded = float((baseline or {}).get("fs_ops", {}).get(step, 0.0))
+    recorded = _recorded(baseline, step)
     return max(ABSOLUTE_FLOOR_SECONDS, recorded * factor)
 
 
@@ -149,12 +158,16 @@ def check_fs_ops(
     timings: dict[str, float] = {}
     step = "create"
     label = _hash_text(str(root))
+    result: tuple[dict[str, str], dict[str, float]]
     try:
         t0 = clock()
         fs.mkdir(scratch)
         first, second = scratch / "pointer.tmp", scratch / "CURRENT.json"
         payload = (b"{}" * POINTER_BYTES)[:POINTER_BYTES]
         fs.write(first, b"")
+        fs.write(
+            second, b"{}"
+        )  # the replace overwrites an existing pointer, as a commit does
         timings["create"] = clock() - t0
         steps: list[tuple[str, Callable[[], None]]] = [
             ("write", lambda: fs.write(first, payload)),
@@ -173,25 +186,43 @@ def check_fs_ops(
             if seconds > _limit(baseline, name, factor)
         ]
         if slow:
-            return _check(
-                f"fs_ops:{label}", "FAIL", "timing outside baseline: " + "; ".join(slow)
-            ), timings
-        return _check(f"fs_ops:{label}", "PASS", f"{len(timings)} steps ok"), timings
+            result = (
+                _check(
+                    f"fs_ops:{label}",
+                    "FAIL",
+                    "timing outside baseline: " + "; ".join(slow),
+                ),
+                timings,
+            )
+        else:
+            result = (
+                _check(f"fs_ops:{label}", "PASS", f"{len(timings)} steps ok"),
+                timings,
+            )
+    except Exception as exc:  # any failure still reaches the cleanup below
+        result = (
+            _check(
+                f"fs_ops:{label}",
+                "FAIL",
+                f"step {step} failed: {type(exc).__name__}: {getattr(exc, 'strerror', None) or exc}",
+            ),
+            timings,
+        )
+    try:
+        if fs.exists(scratch):
+            fs.rmtree(scratch)
+        if fs.exists(scratch):
+            raise OSError("scratch directory still present")
     except OSError as exc:
         return (
             _check(
                 f"fs_ops:{label}",
                 "FAIL",
-                f"step {step} failed: {type(exc).__name__}: {exc.strerror or exc}",
+                f"scratch cleanup failed: {type(exc).__name__}",
             ),
             timings,
         )
-    finally:
-        try:
-            if fs.exists(scratch):
-                fs.rmtree(scratch)
-        except OSError:
-            pass
+    return result
 
 
 def check_handles(
@@ -318,6 +349,8 @@ def canary(
 ) -> dict[str, Any]:
     """The receipt: ``status`` is PASS only when no check is FAIL (SKIPPED_NOT_AVAILABLE does not fail)."""
 
+    if not roots:
+        raise CanaryError("no root to test")
     fs = fs or RealFs()
     started = now()
     checks = [check_bound_files(list(bound_files or []), fs)]
@@ -382,7 +415,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             baseline=baseline,
             require_handles=args.require_handles,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, CanaryError) as exc:
         print(f"release-canary: {exc}", file=sys.stderr)
         return 3
     text = json.dumps(receipt, indent=1, sort_keys=True) + "\n"
