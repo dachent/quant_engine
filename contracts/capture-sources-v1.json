@@ -202,10 +202,9 @@
    "credential_ref": null,
    "cdp_port": null,
    "capture_stage": {
-    "mode": "NEW_STAGE_REQUIRED",
-    "tool": null,
-    "derivation": "tools/capture_stages/adapters.py",
-    "blocked_on": "recorder owned by the price-pull work (sprint-data-bridge): no TQQQ/SHV close exists in the hashed archive; the verify adapter (governed_price: two independent pulls, coverage + stability) is declared here"
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/capture_governed_price.py",
+    "derivation": "tools/capture_stages/adapters.py"
    },
    "login_stop": false,
    "freshness": {
@@ -216,7 +215,8 @@
     "stability"
    ],
    "admits": [],
-   "owner_declared_ok": false
+   "owner_declared_ok": false,
+   "probe_url": "https://query1.finance.yahoo.com/v8/finance/chart/TQQQ?range=5d&interval=1d"
   },
   {
    "source_id": "p123_model_live",
@@ -295,10 +295,9 @@
    "credential_ref": null,
    "cdp_port": null,
    "capture_stage": {
-    "mode": "NEW_STAGE_REQUIRED",
-    "tool": null,
-    "derivation": "tools/capture_stages/adapters.py",
-    "blocked_on": "the audit-bridges builder (pulls, windows, components with O/D/I origin tags) is owned by sprint-data-bridge; the reader seam is the REAL parse_audit_input (closure check reader_parses) and the reader config key is model_vs_actual_input"
+    "mode": "EXISTING_RECORDER",
+    "tool": "tools/portfolio_model_vs_actual_derive.py",
+    "derivation": "tools/capture_stages/adapters.py"
    },
    "login_stop": false,
    "freshness": {

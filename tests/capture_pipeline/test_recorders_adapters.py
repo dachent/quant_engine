@@ -445,8 +445,16 @@ def test_contract_lists_the_recorders_honestly():
         )
     assert "bcomplete.com" in s["john_hancock_nav"].window_hosts
     assert s["schwab_daily_cash"].stage_mode == "EXISTING_RECORDER"
+    price = s["governed_price_tqqq_shv"]
     assert (
-        "sprint-data-bridge" in s["governed_price_tqqq_shv"].capture_stage["blocked_on"]
+        price.stage_tool == "tools/capture_governed_price.py"
+        and price.admits == ()
+        and price.probe_url
+    )
+    audit = s["model_vs_actual_audit_input"]
+    assert (
+        audit.stage_tool == "tools/portfolio_model_vs_actual_derive.py"
+        and audit.stage_mode == "EXISTING_RECORDER"
     )
     json.dumps(dict(s["ibkr_flex_history"].capture_stage))  # serialisable
 
@@ -617,7 +625,7 @@ def test_derived_sources_lint_and_preflight():
         cp.preflight(
             audit, window_state=lambda _s: "OK", vault_ok=lambda _r: True
         ).status
-        == "BLOCKED_NOT_WIRED"
+        == "READY"
     )
     wired = cp.Source(
         **{
