@@ -58,6 +58,11 @@ COST_EVIDENCE_KEYS: Final = (
 )
 # Present only on a percent-based cost row (documented rates, no dollar amount).
 COST_RATE_KEYS: Final = ("fee_rates",)
+# After-tax cost is outside this engine's pre-tax reporting scope (owner record
+# OR-901-AFTER-TAX, evidence/releases/.../records/sprint-cost): no tax shield is claimed
+# on a subscription or a fund fee, and no tax-lot, tax-rate or realization input is
+# declared. The status says so; it is never a label for evidence that failed to arrive.
+AFTER_TAX_STATUS_NOT_APPLICABLE: Final = "NOT_APPLICABLE_PRE_TAX_REPORTING_SCOPE"
 BUILDER_VERSION: Final = "1.2.1"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
@@ -1479,7 +1484,7 @@ def build_catalog(
         accepted_costs.append(
             {
                 "after_tax_annual_cost_rate": None,
-                "after_tax_status": "UNAVAILABLE_TAX_LOT_RATE_AND_REALIZATION_EVIDENCE_INCOMPLETE",
+                "after_tax_status": AFTER_TAX_STATUS_NOT_APPLICABLE,
                 "annual_external_cost_rate_pre_tax": (
                     None
                     if annual_cost is None or current_value == 0
