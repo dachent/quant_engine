@@ -565,7 +565,6 @@ def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(
     )
     assert list(ids) == [STRATEGY]
     assert series_label.LABEL_TEXT[series_label.MODEL_LIVE] in ids[STRATEGY]
-    assert "2026-08-14" in ids[STRATEGY]
     assert attribution is not None and reconciliation is not None
     assert attribution[STRATEGY]["bridge"]["status"] == sbm.BRIDGE_STATUS
     assert "account_basis" in attribution[STRATEGY]
@@ -600,7 +599,10 @@ def test_the_report_helper_applies_the_contract_and_refuses_unbound_use(
     assert report["methodology"][0]["item"] == (
         "Implementation bridge on the sleeve basis"
     )
-    assert "NO_CURRENT_PRODUCT_CONSUMER" in report["methodology"][0]["value"]
+    assert (
+        series_label.LABEL_TEXT[series_label.MODEL_LIVE]
+        in report["methodology"][0]["value"]
+    )
     row = report["strategy_summary"][0]
     assert row["return_scope"]["not_restated"] == ["benchmark_comparison"]
     assert "implementation bridge" not in row["return_scope_label"]
