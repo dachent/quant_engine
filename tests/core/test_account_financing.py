@@ -104,3 +104,64 @@ def test_a_malformed_declaration_is_refused(
     mutate(doc)
     with pytest.raises(af.FinancingDeclarationError):
         af.load_declaration(json.dumps(doc).encode())
+
+
+def _with_roles(roles: list[dict[str, object]]) -> bytes:
+    import json as _json
+
+    acct = "account-" + "a" * 16
+    return _json.dumps(
+        {
+            "schema_version": 1,
+            "artifact_id": "account-financing-declaration",
+            "as_of_date": "2026-01-02",
+            "accounts": [
+                {
+                    "account_id": acct,
+                    "scope": "RESERVE",
+                    "facility": "NO_MARGIN_FACILITY",
+                    "verification": "VERIFIED",
+                    "evidence_ref": "e",
+                }
+            ],
+            "sleeve_roles": roles,
+        }
+    ).encode()
+
+
+def _role(**over: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "sleeve_alias": "r-01",
+        "role": "RESERVE",
+        "ledger_account_id": None,
+        "nav_authority": "STATEMENT",
+        "admit_windows": [
+            {"start": "2026-01-01", "end": "2026-01-02", "basis": "STATEMENT_POINTS"}
+        ],
+        "evidence_ref": "e",
+    }
+    row.update(over)
+    return row
+
+
+def test_sleeve_roles_load_with_and_without_a_ledger_account() -> None:
+    raw = _with_roles(
+        [_role(), _role(sleeve_alias="r-02", ledger_account_id="account-" + "a" * 16)]
+    )
+    roles = af.load_sleeve_roles(raw)
+    assert roles["r-01"].ledger_account_id is None
+    assert roles["r-02"].admit_windows[0][2] == "STATEMENT_POINTS"
+
+
+def test_a_sleeve_role_naming_an_undeclared_ledger_account_or_no_window_is_refused() -> (
+    None
+):
+    import pytest
+
+    for bad in (
+        _role(ledger_account_id="account-" + "b" * 16),
+        _role(admit_windows=[]),
+        _role(role="LIVE"),
+    ):
+        with pytest.raises(af.FinancingDeclarationError):
+            af.load_sleeve_roles(_with_roles([bad]))
