@@ -3988,17 +3988,27 @@
 // validator after this generation is sealed) is shown first.  Text only, never HTML.
 (function ownerView() {
   "use strict";
+  // a harness without this page's elements (shell harness, fixtures) has nothing to render into
+  if (typeof document === "undefined" || typeof document.getElementById !== "function"
+    || !document.getElementById("owner-view-items")) return;
+  const NOT_GENERATED = "Owner view not generated for this release: treat every gap as real.";
+  const setVerdict = (text) => {
+    const verdict = document.getElementById("owner-view-verdict");
+    if (verdict) verdict.textContent = text;
+  };
   const render = () => {
     const view = window.PORTFOLIO_OWNER_VIEW;
-    const verdict = document.getElementById("owner-view-verdict");
     const host = document.getElementById("owner-view-items");
-    if (!view || !verdict || !host) return;
-    verdict.textContent = view.verdict;
+    if (!view || !Array.isArray(view.items) || !host) { setVerdict(NOT_GENERATED); return; }
+    setVerdict(view.verdict);
     host.textContent = "";
     const checker = new Set(["CHECKER_BUG", "NOT_APPLICABLE"]);
     const groups = new Map();
     for (const item of view.items) {
-      const key = [item.class, item.what, item.fix, item.number_affected].join("");
+      // same grouping key as the markdown page: rows that differ in any shown field stay apart
+      const key = JSON.stringify([item.class, item.what, item.fix, item.number_affected, item.who,
+        item.how_long, item.overdue, item.owner_record ?? null, item.since ?? null,
+        item.decision ?? null]);
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(item);
     }
@@ -4009,10 +4019,12 @@
       const head = document.createElement(checker.has(first.class) ? "summary" : "strong");
       head.textContent = `${first.word}: ${first.what}`;
       box.appendChild(head);
+      const ref = first.ref || {};
       const lines = [
         `Where: ${[...new Set(rows.map((r) => r.where))].join(", ")}`,
         `Number affected: ${first.number_affected}`,
-        `Fix: ${first.fix} (${first.who}; ${first.how_long})${first.overdue ? " PAST ITS FIX DATE" : ""}`,
+        `${first.real_or_checker === "real" ? "Real" : first.real_or_checker === "checker" ? "Checker" : "Accepted"}. Fix: ${first.fix} (${first.who}; ${first.how_long})${first.overdue ? " PAST ITS FIX DATE" : ""}`,
+        `Since: ${first.since ?? "not known"}. Ref: ${ref.check_id ?? ""} ${(ref.defect_ids || []).join(",")}`,
       ];
       if (first.decision) lines.push(`Decision: ${first.decision.question} ${first.decision.options.join(" / ")}`);
       if (first.owner_record) lines.push(`Owner record: ${first.owner_record}`);
@@ -4023,15 +4035,17 @@
       }
       host.appendChild(box);
     }
+    for (const error of view.registry_errors || []) {
+      const p = document.createElement("p");
+      p.textContent = `Register error (entry ignored): ${error}`;
+      host.appendChild(p);
+    }
   };
-  const match = /\/generations\/([0-9a-f]{64})\//.exec(window.location.pathname);
-  if (!match) return;
+  const match = /\/generations\/([0-9a-f]{64})\//.exec(window.location?.pathname ?? "");
+  if (!match) { setVerdict(NOT_GENERATED); return; }
   const script = document.createElement("script");
   script.src = `../../validation/${match[1]}/owner-view.js`;
   script.onload = render;
-  script.onerror = () => {
-    const verdict = document.getElementById("owner-view-verdict");
-    if (verdict) verdict.textContent = "Owner view not generated for this release: treat every gap as real.";
-  };
+  script.onerror = () => setVerdict(NOT_GENERATED);
   document.head.appendChild(script);
 })();

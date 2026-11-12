@@ -117,3 +117,37 @@ def test_page_has_no_static_verdict_and_an_owner_view_slot() -> None:
     assert 'id="owner-view"' in html and html.index('id="owner-view"') < html.index(
         'id="command-heading"'
     )
+
+
+def test_rows_that_differ_in_overdue_or_record_stay_apart() -> None:
+    a = _item("ACCEPTED_BY_DESIGN", "same", "accepted", "a1")
+    b = _item("ACCEPTED_BY_DESIGN", "same", "accepted", "a2")
+    a["overdue"], b["overdue"] = False, True
+    a["owner_record"], b["owner_record"] = "ruling-A", "ruling-B"
+    out = _run(
+        {"verdict": "v", "items": [a, b]}, pathname=f"/c/generations/{GEN}/index.html"
+    )
+    text = " ".join(" ".join(i["text"]) for i in out["items"])
+    assert len(out["items"]) == 2
+    assert (
+        "ruling-A" in text
+        and "ruling-B" in text
+        and text.count("PAST ITS FIX DATE") == 1
+    )
+
+
+def test_a_path_outside_generations_says_not_generated() -> None:
+    out = _run({"verdict": "", "items": []}, pathname="/c/candidates/x/index.html")
+    assert out.get("src") is None and "treat every gap as real" in out["verdict"]
+
+
+def test_a_view_without_an_items_array_says_not_generated() -> None:
+    out = _run({"verdict": "x"}, pathname=f"/c/generations/{GEN}/index.html")
+    assert "treat every gap as real" in out["verdict"]
+
+
+def test_qa_scripts_tolerate_only_the_missing_owner_view_sidecar() -> None:
+    # the validator writes owner-view.js after the QA stages: its absence there is expected
+    for name in ("browser_qa.mjs", "interaction_qa.mjs"):
+        text = (PANEL / name).read_bytes().decode("utf-8")
+        assert "owner-view" in text and "[0-9a-f]{64}" in text, name
