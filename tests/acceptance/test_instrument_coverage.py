@@ -24,7 +24,11 @@ CAPITAL_AS_OF = "capital.as_of_cutoff"
 
 
 def _only(findings: list[checks.Finding], check_id: str) -> list[checks.Finding]:
-    return [f for f in findings if f.check_id == check_id]
+    # capital.as_of_cutoff was split in two ids (duplicate ids made the row-diff ambiguous)
+    ids = {check_id} | (
+        {"capital.current_capital_as_of"} if check_id == CAPITAL_AS_OF else set()
+    )
+    return [f for f in findings if f.check_id in ids]
 
 
 def _generation_findings(tmp_path: Path, spec: Spec, check_id: str):

@@ -1,0 +1,573 @@
+{
+  "schema": "validator-unreachable-register-v1",
+  "note": "A check id absent from tests/acceptance/test_check_reachability.PROVEN must be listed here with an issue, an owner and a close_by date; an expired entry fails the test. Never lengthen close_by without a new ruling.",
+  "entries": [
+    {
+      "check_id": "completeness.required_outputs",
+      "defect": "E2",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "TWO_COMPONENTS_DISAGREE",
+      "close_by": "2026-12-15",
+      "reason": "hwm_summary reads PORT-HWM-3 forced UNAVAILABLE by code-literal Matrixport receipts while hwm_governed_proof is AVAILABLE (F8; owner ruling on bridge vs fill)"
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "defect": "E3",
+      "issue": 905,
+      "owner": "sprint-fx",
+      "class": "BUILDER_NOT_WIRED",
+      "close_by": "2026-12-15",
+      "reason": "portfolio_baseline fx gap clause fires whenever any non-USD record exists, never testing coverage (F7)"
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "defect": "E5",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED",
+      "close_by": "2026-12-15",
+      "reason": "benchmark slot of the provenance version catalog is a dead UNAVAILABLE placeholder (F6)"
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "defect": "E6",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED_AND_DATA_GAP",
+      "close_by": "2026-12-31",
+      "reason": "after-tax is a literal (no tax-lot, rate or realization input exists), cash-drag and cost slots are unwired (F6, F10)"
+    },
+    {
+      "check_id": "completeness.required_outputs",
+      "defect": "E8",
+      "issue": 894,
+      "owner": "sprint-leverage",
+      "class": "NEVER_SATISFIABLE",
+      "close_by": "2026-12-15",
+      "reason": "leverage rows are literal OBSERVED_ONLY/UNAVAILABLE and scoped to all active accounts (F3-F5)"
+    },
+    {
+      "check_id": "dates.section_as_of_vs_cutoff",
+      "defect": "C3",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_SCOPE_TOO_WIDE",
+      "close_by": "2026-12-15",
+      "reason": "French lenses publish monthly with a 45-day lag (F2)"
+    },
+    {
+      "check_id": "dates.section_as_of_vs_cutoff",
+      "defect": "C5",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_SCOPE_TOO_WIDE",
+      "close_by": "2026-12-15",
+      "reason": "source clock judges finite-boundary providers with no active account or strategy (F2)"
+    },
+    {
+      "check_id": "expected",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_SCOPE_TOO_WIDE",
+      "close_by": "2026-12-15",
+      "reason": "policy-inapplicable fund-scoped oracle rows and owner-excluded account dates (F2); remaining rows are data gaps (F10)"
+    },
+    {
+      "check_id": "expected.capital.strategy_cash.coverage_end",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_SCOPE_TOO_WIDE",
+      "close_by": "2026-12-15",
+      "reason": "fund-scoped strategies (F2)"
+    },
+    {
+      "check_id": "preservation.report_to_panel",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_BUG",
+      "close_by": "2026-12-15",
+      "reason": "portfolio-hwm-policy provenance row appended by both builders (F9)"
+    },
+    {
+      "check_id": "universe.inactive_accounts_in_current",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_IGNORES_LABEL",
+      "close_by": "2026-12-15",
+      "reason": "HISTORY_ONLY_NO_CURRENT_ASSIGNMENT role label is never read (F2)"
+    },
+    {
+      "check_id": "lint.payload_size",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_SCOPE_TOO_WIDE",
+      "close_by": "2026-12-15",
+      "reason": "50 MB literal contradicts the committed payload budget (F2)"
+    },
+    {
+      "check_id": "lint.internal_tokens_displayed",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BUILDER_NOT_WIRED",
+      "close_by": "2026-12-15",
+      "reason": "known_gap tokens are not humanised (F9)"
+    },
+    {
+      "check_id": "lint.invested_capital_vs_contributions",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "RULE_COMPARES_DIFFERENT_QUANTITIES",
+      "close_by": "2026-12-15",
+      "reason": "owner contributions vs epoch opening NAV (F2, M10)"
+    },
+    {
+      "check_id": "lint.extreme_alpha",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "BY_DESIGN",
+      "close_by": "2026-12-31",
+      "reason": "plausibility lint on spliced vendor backtests; 'or provenance' path not coded (M9)"
+    },
+    {
+      "check_id": "capital.account_identity",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.allocation_sum",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.as_of_cutoff",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.coverage_bound",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.current_capital_as_of",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.derived_cash_evidence",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.liquid_identity",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.reconciliation_recompute",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "capital.strategy_vs_cutoff_accounts",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "code.data_deref_before_guard",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "code.hardcoded_status_literal",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "code.stress_callout",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "code.unescaped_date_fallback",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "correction.unresolved",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "dates.account_live_window",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "dates.evaluation_clock",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "dates.freshness_vs_cutoff",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "dates.value_basis_bound",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "dates.weekly_current_week",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "flows.admission_consistency",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.absolute_local_paths",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.artifact_hashes",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.blocked_admission_census",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.cutoff_consistency",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.embedded_ids",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.embedded_payload_copies",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.generation_id",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.manifest_coverage_claim",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.nested_generation_id",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "identity.required_sections",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "lint.daily_move_near_flow",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "lint.returns",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "period_returns.recomputation",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "preservation.capital_summary",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "preservation.counts",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.allocation_weight_sets",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.benchmark_account_return",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.epoch_hpr_receipts_verified",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.flow_lists_agree",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.implementation_account_legs",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.implied_unrecorded_flows",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.mwr_opening_matches_first_flow",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.sleeve_basis",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.sleeve_leverage",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.strategy_return_views_agree",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "returns.twr_views_agree",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "status.backtest_vs_hybrid",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "status.gate_note_contradiction",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "status.inference_version_unresolved",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "status.methodology_vs_data",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "status.required_not_ready_displayed_available",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "universe.active_set_consistent",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "universe.authority_missing",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "universe.hardcoded_count_text",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    },
+    {
+      "check_id": "universe.retired_strategies_in_current",
+      "issue": 895,
+      "owner": "sprint-qc-validator",
+      "class": "UNPROVEN_NO_BUILDER_FIXTURE",
+      "close_by": "2026-12-31",
+      "reason": "no test passes real builder output through this check yet (Ruling C reachability control)"
+    }
+  ]
+}

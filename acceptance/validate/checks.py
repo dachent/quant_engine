@@ -2007,42 +2007,6 @@ def check_embedded_payload_copies(ctx: Context) -> Iterator[Finding]:
             )
 
 
-def _readiness(ctx: Context) -> dict[str, Any]:
-    values: dict[str, Any] = {}
-    for label, value in (
-        ("candidate.state", ctx.gen.candidate.get("state")),
-        (
-            "candidate.account_manifest_verification.publication_readiness",
-            node(
-                ctx.gen.candidate,
-                "account_manifest_verification",
-                "publication_readiness",
-            ),
-        ),
-        (
-            "panel.account_manifest.authority_readiness.publication_readiness",
-            node(
-                ctx.panel,
-                "account_manifest",
-                "authority_readiness",
-                "publication_readiness",
-            ),
-        ),
-        (
-            "panel.account_manifest.authority_readiness.independent_authority_verification",
-            node(
-                ctx.panel,
-                "account_manifest",
-                "authority_readiness",
-                "independent_authority_verification",
-            ),
-        ),
-    ):
-        if value is not None:
-            values[label] = value
-    return values
-
-
 # The panel's root in a coordinated release (packages/core pipeline: ``portfolio-panel``).
 PANEL_ROOT_ID = "portfolio-panel"
 _RELEASE_ROOT_ID = re.compile(r"[a-z][a-z0-9-]*")
@@ -2169,34 +2133,119 @@ def _is_published(ctx: Context) -> tuple[bool, str | None]:
     return True, found[0][1]
 
 
+_RELEASABLE_MANIFEST_PROFILES = (
+    "INDEPENDENT_EXACT_REBUILD",
+    "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES",
+)
+_VERIFIED_BUNDLE_PROFILE = "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+_REBUILD_PROFILE = "INDEPENDENT_EXACT_REBUILD"
+
+
+def _verification_defects(ctx: Context) -> dict[str, Any]:
+    """Why the bound manifest-verification record does not certify the panel.
+
+    D8 (Rulings D8-3a, T0-c, F): ``candidate.state`` and the manifest authority
+    readiness fields are build-time constants (STAGED, NOT_READY, NOT_PERFORMED) that
+    the publisher itself requires; they are not release state.  What a published panel
+    must carry is a record, bound by hash and written before the commit, that code
+    other than the manifest producer recomputed the manifest with no discrepancy.
+    """
+
+    candidate = ctx.gen.candidate
+    meta = node(ctx.panel, "meta")
+    meta = meta if isinstance(meta, dict) else {}
+    profile = candidate.get("account_manifest_authority_profile")
+    record = candidate.get("account_manifest_verification")
+    panel_record = meta.get("account_manifest_verification")
+    defects: dict[str, Any] = {}
+    if profile not in _RELEASABLE_MANIFEST_PROFILES:
+        defects["candidate.account_manifest_authority_profile"] = profile
+        return defects
+    if meta.get("account_manifest_authority_profile") != profile:
+        defects["panel.meta.account_manifest_authority_profile"] = meta.get(
+            "account_manifest_authority_profile"
+        )
+    if not isinstance(record, dict) or record != panel_record:
+        defects["candidate.account_manifest_verification"] = (
+            "absent or differs from panel.meta.account_manifest_verification"
+        )
+        return defects
+    if profile == _REBUILD_PROFILE:
+        if record.get("status") != "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED":
+            defects["account_manifest_verification.status"] = record.get("status")
+        return defects
+    report = record.get("independent_report")
+    report = report if isinstance(report, dict) else {}
+    numeric = report.get("numeric_verification")
+    numeric = numeric if isinstance(numeric, dict) else {}
+    if record.get("status") != "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES":
+        defects["account_manifest_verification.status"] = record.get("status")
+    if report.get("status") != "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES":
+        defects["independent_report.status"] = report.get("status")
+    if numeric.get("discrepancy_count") != 0:
+        defects["numeric_verification.discrepancy_count"] = numeric.get(
+            "discrepancy_count"
+        )
+    if numeric.get("comparison_count") != numeric.get("candidate_count"):
+        defects["numeric_verification.comparison_count"] = numeric.get(
+            "comparison_count"
+        )
+    rows = node(ctx.panel, "account_manifest", "rows")
+    ok_rows = (
+        sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "OK")
+        if isinstance(rows, list)
+        else None
+    )
+    if numeric.get("candidate_count") != ok_rows:
+        defects["numeric_verification.candidate_count"] = {
+            "recorded": numeric.get("candidate_count"),
+            "recomputed_ok_rows": ok_rows,
+        }
+    expected_disposition = (
+        "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+        if ok_rows
+        else "NOT_APPLICABLE_NO_CANDIDATES"
+    )
+    if numeric.get("disposition") != expected_disposition:
+        defects["numeric_verification.disposition"] = numeric.get("disposition")
+    source_sha = node(record, "epoch_manifest_source", "artifact", "sha256")
+    if source_sha != meta.get("account_manifest_sha256"):
+        defects["epoch_manifest_source.artifact.sha256"] = source_sha
+    report_sha = report.get("sha256")
+    if not isinstance(report_sha, str) or not _RELEASE_DIGEST.fullmatch(report_sha):
+        defects["independent_report.sha256"] = report_sha
+    return defects
+
+
 def check_publication_state(ctx: Context) -> Iterator[Finding]:
-    """D8: a published generation cannot declare itself not ready / unverified."""
+    """D8: the panel binds a clean independent manifest verification (any time).
+
+    Evaluated before and after the commit; it reads the bound verification record,
+    never the build-time readiness constants or ``candidate.state`` (sealed facts).
+    """
 
     evidence = _release_evidence_finding(ctx, "identity.publication_state", "D8")
     if evidence is not None:
         yield evidence
         return
-    published, where = _is_published(ctx)
-    if not published:
-        return
-    readiness = _readiness(ctx)
-    contradictions = {
-        key: value
-        for key, value in readiness.items()
-        if value in ("STAGED", "NOT_READY", "NOT_PERFORMED", "REQUIRED_NOT_READY")
-    }
-    if contradictions:
+    defects = _verification_defects(ctx)
+    if defects:
+        published, where = _is_published(ctx)
         yield _finding(
             "identity.publication_state",
             BLOCKER_AUTHORITY,
             "generation",
-            contradictions,
-            {"state": "PUBLISHED", "readiness": "READY/VERIFIED"},
+            defects,
+            {
+                "account_manifest_verification": "releasable profile, clean "
+                "independent report, zero discrepancies, matching hashes"
+            },
             CANDIDATE,
-            "$.state",
+            "$.account_manifest_verification",
             ("D8",),
-            f"generation is PUBLISHED ({where}) while its own records say not "
-            "ready or not independently verified",
+            "the panel does not bind a clean independent verification of its "
+            "account manifest"
+            + (f" (generation is PUBLISHED: {where})" if published else ""),
         )
 
 
@@ -8825,14 +8874,6 @@ def check_hardcoded_status(ctx: Context) -> Iterator[Finding]:
     template interpolation — contradicts a payload that says NOT_READY/NOT_PERFORMED.
     """
 
-    readiness = _readiness(ctx)
-    not_ready = {
-        k: v
-        for k, v in readiness.items()
-        if v in ("NOT_READY", "NOT_PERFORMED", "REQUIRED_NOT_READY", "STAGED")
-    }
-    if not not_ready:
-        return
     literals = []
     if ctx.gen.app_js:
         literals += shell.hard_coded_statuses(APP, ctx.gen.app_js)
@@ -8843,12 +8884,13 @@ def check_hardcoded_status(ctx: Context) -> Iterator[Finding]:
             "code.hardcoded_status_literal",
             BLOCKER_AUTHORITY,
             f"{item.file}:line {item.line}",
-            {"literal": item.literal, "context": item.context, "payload": not_ready},
-            "status rendered from the readiness payload",
+            {"literal": item.literal, "context": item.context},
+            "status rendered from the payload, never from a literal",
             item.file,
             f"line {item.line}",
             ("D8",),
-            "shell renders a literal positive status while the payload says not ready",
+            "shell renders a literal positive status; a sealed shell may never state "
+            "release status (the release record does)",
         )
 
 
@@ -11298,7 +11340,7 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
         end = _canonical_iso_day(raw)
         if end is None:
             yield _finding(
-                "dates.section_as_of_vs_cutoff",
+                "dates.account_live_window",
                 BLOCKER_AUTHORITY,
                 entity,
                 {"as_of": raw, "status": status},
@@ -11318,7 +11360,7 @@ def check_account_live_window(ctx: Context) -> Iterator[Finding]:
             else None
         )
         yield _finding(
-            "dates.section_as_of_vs_cutoff",
+            "dates.account_live_window",
             NOT_READY if bound is not None else BLOCKER_AUTHORITY,
             entity,
             {"as_of": raw, "status": status},
@@ -11394,7 +11436,7 @@ def check_current_capital_as_of(ctx: Context) -> Iterator[Finding]:
     ) -> None:
         findings.append(
             _finding(
-                "capital.as_of_cutoff",
+                "capital.current_capital_as_of",
                 klass,
                 entity,
                 observed,
@@ -12001,8 +12043,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("status.gate_note_contradiction", check_gate_notes),
     ("dates.freshness_vs_cutoff", check_freshness),
     ("dates.section_as_of_vs_cutoff", check_section_dates),
-    ("dates.section_as_of_vs_cutoff", check_account_live_window),
-    ("capital.as_of_cutoff", check_current_capital_as_of),
+    ("dates.account_live_window", check_account_live_window),
+    ("capital.current_capital_as_of", check_current_capital_as_of),
     (CASH_EVIDENCE_CHECK, check_derived_cash_evidence),
     ("dates.evaluation_clock", check_evaluation_clock),
     (BOUNDS_CHECK, check_value_basis_bound),
