@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import contextvars
 import hashlib
 import json
 import os
@@ -49,6 +50,10 @@ from quant_engine.core import stage_timing
 
 RECEIPT_SCHEMA = 2
 MODE_ENV = "QE_VERIFICATION_RECEIPTS"
+# Read-only entry points (plan, status) must not write: they turn persistence off.
+PERSIST: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "verification_receipt_persist", default=True
+)
 RECEIPT_DIRECTORY = "verification-receipts"
 SUPPORTED_PYTHON = (3, 11)
 
@@ -436,10 +441,18 @@ _memory: dict[str, dict[str, object]] = {}
 _memory_lock = threading.Lock()
 
 
+def receipt_directory(state_root: Path) -> Path:
+    """Beside the state root, not inside it: a node's declared create-only outputs may
+    live under the state root, and a receipt written there before the node runs would
+    look like output that predates its pipeline receipt."""
+
+    return state_root.parent / f"{state_root.name}.{RECEIPT_DIRECTORY}"
+
+
 def _receipt_path(state_root: Path | None, name: str, key: str) -> Path | None:
     if state_root is None:
         return None
-    return state_root / RECEIPT_DIRECTORY / f"{name}-{key[:32]}.json"
+    return receipt_directory(state_root) / f"{name}-{key[:32]}.json"
 
 
 def _read_stored(
@@ -543,9 +556,14 @@ def _build_body(
         ):
             return None, f"directory changed during verification: {path}"
     probes: dict[str, list[object]] = {}
+    created = tuple(
+        root + os.sep for root in (*recorder.writes, *exclude) if root
+    )  # directories the verifier itself brought into being (mkdir of its own output)
     for path, observed_probe in recorder.probes.items():
         if _excluded(path, code_roots, exclude) or path in recorder.writes:
             continue
+        if any(prefix.startswith(path + os.sep) for prefix in created):
+            continue  # an ancestor of its own output: the written file's digest covers it
         if _probe(path) != observed_probe:
             return None, f"probed path changed during verification: {path}"
         probes[path] = observed_probe
@@ -587,7 +605,7 @@ def _store(
         "receipt_sha256": _sha(body),
     }
     path = _receipt_path(state_root, name, key)
-    if path is not None:
+    if path is not None and PERSIST.get():
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.is_symlink():

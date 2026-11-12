@@ -94,13 +94,13 @@ def test_receipt_survives_a_new_process_through_the_state_root(world):
     vr.clear_memory_receipts()  # a different process has no memory
     assert v.run()["total"] == 3
     assert v.live == 1 and len(v.reused) == 1
-    assert list((world["state"] / vr.RECEIPT_DIRECTORY).glob("toy-*.json"))
+    assert list((vr.receipt_directory(world["state"])).glob("toy-*.json"))
 
 
 def test_a_tampered_stored_receipt_is_ignored(world):
     v = Verifier(world)
     v.run()
-    (path,) = (world["state"] / vr.RECEIPT_DIRECTORY).glob("toy-*.json")
+    (path,) = (vr.receipt_directory(world["state"])).glob("toy-*.json")
     document = json.loads(path.read_text(encoding="utf-8"))
     document["body"]["result"] = json.dumps({"status": "PASS", "total": 0})
     path.write_text(json.dumps(document), encoding="utf-8")
@@ -171,7 +171,7 @@ def test_a_file_that_changes_while_the_verifier_reads_it_voids_the_receipt(world
     vr.run_with_receipt(
         "race", {}, repo_root=world["repo"], state_root=world["state"], compute=compute
     )
-    assert not list((world["state"] / vr.RECEIPT_DIRECTORY).glob("race-*.json"))
+    assert not list((vr.receipt_directory(world["state"])).glob("race-*.json"))
 
 
 def test_failures_are_never_cached(world):
@@ -205,7 +205,7 @@ def test_off_mode_always_runs_live_and_refresh_detects_disagreement(
     v.run()  # runs live, agrees with the stored receipt
     assert v.live == 3
     # a verifier that now answers differently for identical inputs is caught
-    (path,) = (world["state"] / vr.RECEIPT_DIRECTORY).glob("toy-*.json")
+    (path,) = (vr.receipt_directory(world["state"])).glob("toy-*.json")
     vr.clear_memory_receipts()
     document = json.loads(path.read_text(encoding="utf-8"))
     document["body"]["result"] = json.dumps({"status": "PASS", "total": 0})
@@ -375,7 +375,7 @@ def test_refresh_does_not_cry_wolf_when_an_input_legitimately_changed(
 def test_a_deleted_receipt_file_is_not_served_from_memory(world):
     v = Verifier(world)
     v.run()
-    for path in (world["state"] / vr.RECEIPT_DIRECTORY).glob("toy-*.json"):
+    for path in (vr.receipt_directory(world["state"])).glob("toy-*.json"):
         path.unlink()
     v.run()
     assert v.live == 2

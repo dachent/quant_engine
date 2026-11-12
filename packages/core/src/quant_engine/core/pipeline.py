@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import functools
 from datetime import date, datetime
 from enum import StrEnum
 import hashlib
@@ -18,7 +19,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
+from typing import Any, BinaryIO, Callable, Final, Mapping, Self, TypeVar, cast
 
 from quant_engine.core import parallel_hash, stage_timing, verification_receipt
 from quant_engine.core.authority import FreshnessPolicy
@@ -56,6 +57,7 @@ from quant_engine.core.release import (
 )
 
 
+T = TypeVar("T")
 _SCHEMA_VERSION: Final = 1
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1283,11 +1285,30 @@ def _provider_admission_validator() -> Callable[..., None]:
             sys.modules[module_name] = previous
 
 
-def _receipt_identity(spec: PipelineSpec) -> dict[str, object]:
-    return {
-        "spec_sha256": spec.spec_sha256,
-        "state_root": str(spec.state_root.resolve()),
-    }
+def _receipt_identity(spec: PipelineSpec) -> dict[str, object] | None:
+    """The spec binding of a receipt, or None for anything that is not a real spec."""
+
+    digest = getattr(spec, "spec_sha256", None)
+    state_root = getattr(spec, "state_root", None)
+    if not isinstance(digest, str) or not isinstance(state_root, Path):
+        return None
+    return {"spec_sha256": digest, "state_root": str(state_root.resolve())}
+
+
+def _read_only_receipts(
+    function: Callable[[PipelineSpec], T],
+) -> Callable[[PipelineSpec], T]:
+    """Plan and status never write: verification receipts stay in memory for them."""
+
+    @functools.wraps(function)
+    def wrapper(spec: PipelineSpec) -> T:
+        token = verification_receipt.PERSIST.set(False)
+        try:
+            return function(spec)
+        finally:
+            verification_receipt.PERSIST.reset(token)
+
+    return wrapper
 
 
 def _receipt_bookkeeping_roots(spec: PipelineSpec) -> tuple[Path, ...]:
@@ -1295,7 +1316,7 @@ def _receipt_bookkeeping_roots(spec: PipelineSpec) -> tuple[Path, ...]:
 
     return (
         spec.state_root / "financial-verification-ledger",
-        spec.state_root / verification_receipt.RECEIPT_DIRECTORY,
+        verification_receipt.receipt_directory(spec.state_root),
     )
 
 
@@ -1308,6 +1329,9 @@ def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any
     """
 
     repo_root = Path(__file__).resolve().parents[5]
+    identity = _receipt_identity(spec)
+    if identity is None:
+        return _verify_financial_outcomes_live(spec, caller)
 
     def reused(receipt_sha256: str) -> None:
         module = _load_financial_outcomes_module()
@@ -1315,7 +1339,7 @@ def _verify_financial_outcomes(spec: PipelineSpec, caller: str) -> dict[str, Any
 
     return verification_receipt.run_with_receipt(
         "financial_outcomes",
-        _receipt_identity(spec),
+        identity,
         repo_root=repo_root,
         state_root=spec.state_root,
         compute=lambda: _verify_financial_outcomes_live(spec, caller),
@@ -1906,9 +1930,12 @@ def _expected_hwm_input_authority(
 @stage_timing.timed("product_authority")
 def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | None:
     repo_root = Path(__file__).resolve().parents[5]
+    identity = _receipt_identity(spec)
+    if identity is None:
+        return _financial_mvp_product_authority_live(spec)
     return verification_receipt.run_with_receipt(
         "product_authority",
-        _receipt_identity(spec),
+        identity,
         repo_root=repo_root,
         state_root=spec.state_root,
         compute=lambda: _financial_mvp_product_authority_live(spec),
@@ -4167,6 +4194,7 @@ def _production_hwm_available(authority: Mapping[str, Any] | None) -> bool:
     return isinstance(hwm, Mapping) and hwm.get("state") == "AVAILABLE"
 
 
+@_read_only_receipts
 def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     """Return the exact non-mutating execution and release plan."""
 
@@ -5031,6 +5059,7 @@ def execute_pipeline(
     }
 
 
+@_read_only_receipts
 def pipeline_status(spec: PipelineSpec) -> dict[str, object]:
     _validate_portfolio_orchestration(spec, verify_runtime=False)
     product_authority = _financial_mvp_product_authority(spec)

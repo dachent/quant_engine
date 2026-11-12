@@ -115,6 +115,9 @@ _PATH_STAGES = {
     # The one strict decoder for authority bytes (duplicate members, nonfinite values): it can
     # accept or refuse any stage's inputs, so it carries every stage's impact.
     "packages/core/src/quant_engine/core/strict_json.py": list(_STAGE_ORDER),
+    # The hash-bound receipt that decides whether a verifier runs again: it can accept or refuse
+    # any stage's inputs, so it carries every stage's impact.
+    "packages/core/src/quant_engine/core/verification_receipt.py": list(_STAGE_ORDER),
     "packages/core/src/quant_engine/core/parallel_hash.py": [],
     # The regular NYSE closures: the implementation builders hold a model's expected end to its last
     # trading day, so it can refuse the reconciliation and attribution that the report and panel read.
