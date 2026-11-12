@@ -151,3 +151,25 @@ def test_the_validator_accepts_exactly_the_values_the_producer_emits_when_eviden
         reporter.benchmark_evidence_status_for("UNAVAILABLE", None),
     }
     assert not any(validate_checks.is_available(value) for value in unavailable)
+
+
+def test_unknown_labels_are_never_admitted_and_the_allowlist_equals_the_producers() -> (
+    None
+):
+    """Kill test: prefix matching admitted any DESCRIPTIVE*/EVIDENCED* string."""
+
+    import portfolio_attribution
+
+    assert reporter._ADMITTED_BENCHMARK_COMPARISONS == frozenset(  # noqa: SLF001
+        portfolio_attribution.AVAILABLE_STATUSES
+    )
+    assert (
+        reporter.benchmark_evidence_status_for("EVIDENCED", "DESCRIPTIVE_NO_METRICS")
+        == "UNAVAILABLE_COMPARISON_NOT_ADMITTED"
+    )
+    assert (
+        reporter.benchmark_evidence_status_for(
+            "EVIDENCED_BUT_NOT", "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE"
+        )
+        == "UNAVAILABLE"
+    )

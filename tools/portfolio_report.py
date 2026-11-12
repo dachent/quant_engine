@@ -1733,6 +1733,14 @@ COST_STATUS_TIER_UNSETTLED: Final = "documented_rate_tier_unsettled"
 # The evidence statuses of a strategy row, read from the evidence the report holds
 # for the same row (its fees label and its benchmark assignment and comparison),
 # never from a placeholder slot of the version catalog.
+# The comparison statuses the attribution producer emits for an admitted comparison
+# (portfolio_attribution.AVAILABLE_STATUSES); an unknown label is never admitted.
+_ADMITTED_BENCHMARK_COMPARISONS: Final = frozenset(
+    {
+        "DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE",
+        "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+    }
+)
 EVIDENCE_STATUS_EVIDENCED: Final = "EVIDENCED"
 EVIDENCE_STATUS_RATE_ONLY: Final = "EVIDENCED_DOCUMENTED_RATE_NOT_DOLLAR"
 EVIDENCE_STATUS_UNAVAILABLE: Final = "UNAVAILABLE"
@@ -1761,9 +1769,9 @@ def benchmark_evidence_status_for(
 ) -> str:
     """Benchmark evidence: an evidenced assignment and an admitted comparison."""
 
-    if not str(assignment_status or "").startswith("EVIDENCED"):
+    if assignment_status != "EVIDENCED":
         return EVIDENCE_STATUS_UNAVAILABLE
-    if not str(comparison_status or "").startswith("DESCRIPTIVE"):
+    if comparison_status not in _ADMITTED_BENCHMARK_COMPARISONS:
         return EVIDENCE_STATUS_COMPARISON_MISSING
     return EVIDENCE_STATUS_EVIDENCED
 
