@@ -155,17 +155,17 @@ def test_an_unheld_untagged_trade_uses_the_declared_fallback_else_the_residual()
     ]
 
 
-def test_the_account_position_reconciles_scale_close_and_residual() -> None:
+def test_the_account_position_reconciles_scale_and_residual() -> None:
     positions, marks = _book(
         {
             "d1": (
                 {"A": "10", "B": "5", "C": "3", "D": "2"},
                 {"A": "10", "B": "10", "C": "10", "D": "10"},
             ),
-            # A doubles (a split), B is gone, C grows by a third (a corporate
-            # action on the same sign), D is held by the account only.
+            # A doubles (a split), C grows by a third (a corporate action on
+            # the same sign), D is held by the account only.
             "d2": (
-                {"A": "20", "C": "4", "D": "2"},
+                {"A": "20", "B": "5", "C": "4", "D": "2"},
                 {"A": "5", "B": "10", "C": "10", "D": "10"},
             ),
         }
@@ -183,12 +183,11 @@ def test_the_account_position_reconciles_scale_close_and_residual() -> None:
         _POLICY,
     )
     s1 = _row(ledger, "d2", "s1")
-    assert round(s1.value, 6) == D("140")  # A scaled, B closed, C scaled
+    assert round(s1.value, 6) == D("190")  # A scaled, B carried, C scaled
     assert _row(ledger, "d2", "other").value == D("20")  # D, nobody's position
     assert [(g[0], g[1], g[3]) for g in ledger.reconciliation_gaps] == [
         ("d1", "D", D("2")),
         ("d2", "A", D("20")),
-        ("d2", "B", D("0")),
         ("d2", "C", D("4")),
     ]
     scalings = {
@@ -199,6 +198,41 @@ def test_the_account_position_reconciles_scale_close_and_residual() -> None:
     # A's split (mark halves) books nothing; C's extra third at an unchanged
     # mark is a gain of 4 * (10 - 10 / (4/3)) = 10, exactly as the audit books it.
     assert round(s1.price_pnl, 6) == D("10")
+
+
+def test_a_sleeve_position_vanishing_with_no_execution_is_refused() -> None:
+    """Kill test (#907): an undeclared reverse split drops the old security id.
+
+    The account's old id disappears with no sale and a new id appears; closing
+    the old quantity silently would put the sleeve's value into the residual.
+    """
+
+    positions, marks = _book(
+        {
+            "d1": ({"OLD": "40"}, {"OLD": "1"}),
+            "d2": ({"NEW": "1"}, {"OLD": "1", "NEW": "40"}),
+        }
+    )
+    with pytest.raises(SleeveLedgerError, match="OLD.*vanished.*d2"):
+        sl.derive_sleeve_ledger(
+            [_trade("d1", "OLD", "40", "1", "t1")],
+            positions,
+            marks,
+            [],
+            _resolve,
+            _POLICY,
+        )
+    # Declared, the same inputs derive: the holding follows the alias.
+    ledger = sl.derive_sleeve_ledger(
+        [_trade("d1", "OLD", "40", "1", "t1")],
+        positions,
+        marks,
+        [],
+        _resolve,
+        SleevePolicy(("s1", "s2"), "other", {"OLD": "NEW"}, "d2"),
+    )
+    assert _row(ledger, "d2", "s1").value == D("40")
+    assert _row(ledger, "d2", "other").value == D("0")
 
 
 def test_a_renamed_symbol_keeps_its_holding_and_its_previous_mark() -> None:

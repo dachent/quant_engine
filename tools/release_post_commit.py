@@ -127,6 +127,36 @@ def check_commit_result(path: Path, spec_file: Path) -> str:
     return release_id
 
 
+def committed_predecessor(spec: dict[str, Any], release_id: str) -> str:
+    """The release this one succeeded, read from its committed release manifest.
+
+    The cycle manifest names the predecessor it was planned against, which a
+    corrective release (R3c after R3) makes stale; the committed manifest's
+    ``previous_authority`` is what the commit actually recorded.
+    """
+
+    coordination = Path(spec["coordination_root"])
+    current = _read_object(coordination / "CURRENT_RELEASE.json", "CURRENT_RELEASE")
+    path = coordination / "releases" / release_id / "release.json"
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise Refusal("the committed release manifest is unreadable") from exc
+    if _sha(raw) != current.get("release_manifest_sha256"):
+        raise Refusal("the release manifest is not the one CURRENT_RELEASE names")
+    # parse the bytes that were hashed, never a second read of the file
+    try:
+        manifest = json.loads(raw)
+    except ValueError as exc:
+        raise Refusal("the committed release manifest is not JSON") from exc
+    if not isinstance(manifest, dict):
+        raise Refusal("the committed release manifest is not a JSON object")
+    previous = manifest.get("previous_authority")
+    if manifest.get("release_id") != release_id or not isinstance(previous, dict):
+        raise Refusal("the committed release manifest names no previous authority")
+    return _hex(previous.get("release_id"), _HEX64, "previous_authority release_id")
+
+
 def check_pointers(
     spec: dict[str, Any],
     before: dict[str, Any],
@@ -285,9 +315,8 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             )
     before = _read_object(Path(args.pre_pointers), "pre-commit pointer snapshot")
     after = release_driver.pointer_snapshot(spec_file)
-    moved = check_pointers(
-        spec, before, after, release_id, cycle["predecessor"]["release_id"]
-    )
+    predecessor_id = committed_predecessor(spec, release_id)
+    moved = check_pointers(spec, before, after, release_id, predecessor_id)
     # the text mode json.dump of the hand-run snapshot, with LF line endings
     _create_only(
         Path(args.post_pointers),
@@ -366,7 +395,7 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
         "harness_code_commit": commit,
         "moved_pointers": moved,
         "post_release_receipt_id": post_receipt_id,
-        "predecessor_release_id": cycle["predecessor"]["release_id"],
+        "predecessor_release_id": predecessor_id,
         "release_id": release_id,
         "spec_sha256": _sha(spec_file.read_bytes()),
         "steps": steps,

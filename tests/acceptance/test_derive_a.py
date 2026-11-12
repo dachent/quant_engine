@@ -1353,7 +1353,9 @@ def test_cli_inputs_manifest_end_to_end(
     assert code == 0
     assert "0 metrics" in capsys.readouterr().out
     document = json.loads(out.read_text(encoding="utf-8"))
-    assert document["inputs_manifest"]["path"] == manifest_path.as_posix()
+    # path-independent provenance (#907): the file name, never the location
+    assert document["inputs_manifest"]["path"] == manifest_path.name
+    assert str(manifest_path.parent.as_posix()) not in out.read_text(encoding="utf-8")
     assert document["inputs_manifest"]["not_read"] == [
         "m/account-strategy-manifest.json"
     ]

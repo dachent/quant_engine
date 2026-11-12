@@ -83,7 +83,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 data = args.inputs.read_bytes()
             except OSError as exc:
                 raise InputError(f"cannot read inputs manifest {args.inputs}") from exc
-            manifest = load_inputs_manifest(data, args.inputs.as_posix())
+            manifest = load_inputs_manifest(data, args.inputs.name)
         document = derive(
             args.qe_root,
             REPO_ROOT,
